@@ -91,9 +91,11 @@ DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
 DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
+DEPLOY_OLD_IMAGE_ID=''
 DEPLOY_OLD_REVISION=''
 DEPLOY_OLD_RELEASE_SHA=unknown
 DEPLOY_OLD_RUNNER_RELEASE_SHA=unknown
+DEPLOY_ROLLBACK_ELIGIBLE=false
 DEPLOY_LEDGER_BEFORE=''
 DEPLOY_RUNNER_UPDATED=false
 DEPLOY_RUNNER_PROBE_SUCCEEDED=false
@@ -155,6 +157,10 @@ source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 
 restore_stopped_services() {
   local restored=false
+  if [[ "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
+    log_error "Previous runtime was not proven rollback-eligible; leaving services stopped for forward recovery."
+    return 1
+  fi
   log_warn "Restoring existing services because migration has not started"
   # The API container is deliberately removed after it stops so a delayed
   # listener cannot retain port 3000.  `compose start` cannot recreate that
@@ -163,7 +169,7 @@ restore_stopped_services() {
   if [[ -n "${DEPLOY_OLD_IMAGE:-}" ]]; then
     if restore_runtime_services \
       "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
-      "$DEPLOY_OLD_MEDIA_PRESENT"; then
+      "$DEPLOY_OLD_MEDIA_PRESENT" "$DEPLOY_OLD_IMAGE_ID"; then
       restored=true
     else
       log_error "Last-known-healthy services could not be restored; manual recovery is required."
@@ -195,8 +201,9 @@ deploy() {
         if ! restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
           "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
-          "$DEPLOY_OLD_MEDIA_PRESENT"; then
-          log_error "Migration changed or obscured the ledger; leaving services stopped for forward recovery."
+          "$DEPLOY_OLD_MEDIA_PRESENT" "$DEPLOY_ROLLBACK_ELIGIBLE" \
+          "$DEPLOY_OLD_IMAGE_ID"; then
+          log_error "Rollback eligibility or migration ledger proof failed; leaving the deployment in forward recovery."
         fi
       elif [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true ]]; then
         restore_stopped_services || true
@@ -221,14 +228,28 @@ deploy() {
     log_error "Compose runtime pool budget or worker inventory check failed; services were not stopped."
     exit 1
   fi
-  DEPLOY_OLD_REVISION=$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || printf '')
   DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat \
     /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
   DEPLOY_OLD_RUNNER_RELEASE_SHA=${DEPLOY_OLD_RUNNER_RELEASE_SHA:-unknown}
   old_container=$(compose ps -aq api | head -n 1)
   if [[ -n "$old_container" ]]; then
+    # Capture the image ID and release identity from the serving container
+    # before a local build can retag `letletme-data:local`. Never use the
+    # current checkout as the rollback revision: callers commonly check out
+    # the target commit before invoking this helper.
     DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$old_container")
-    DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_image "$DEPLOY_OLD_IMAGE")
+    DEPLOY_OLD_IMAGE_ID=$(docker inspect --format '{{.Image}}' "$old_container")
+    DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_container "$old_container")
+    DEPLOY_OLD_REVISION=''
+    if [[ "$DEPLOY_OLD_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+      resolved_old_revision=$(git -C "${PROJECT_DIR}" rev-parse \
+        --verify "${DEPLOY_OLD_RELEASE_SHA}^{commit}" 2>/dev/null || true)
+      if [[ "$resolved_old_revision" = "$DEPLOY_OLD_RELEASE_SHA" ]]; then
+        DEPLOY_OLD_REVISION=$resolved_old_revision
+      else
+        log_warn "Serving release ${DEPLOY_OLD_RELEASE_SHA} is not available in the local checkout; rollback is ineligible"
+      fi
+    fi
   fi
   old_media_container=$(compose ps -aq media-worker 2>/dev/null | head -n 1)
   if [[ -n "$old_media_container" ]]; then DEPLOY_OLD_MEDIA_PRESENT=true; fi
@@ -312,6 +333,12 @@ deploy() {
     exit 1
   fi
   log_info "Migration plan and queue quiescence passed before stopping services"
+  DEPLOY_ROLLBACK_ELIGIBLE=false
+  if rollback_runtime_is_eligible \
+    "$old_container" "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_REVISION" \
+    "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
+    DEPLOY_ROLLBACK_ELIGIBLE=true
+  fi
   log_info "Stopping services and waiting for workers to settle"
   DEPLOY_SERVICES_STOPPED=true
   if ! compose stop -t 45 api worker; then
