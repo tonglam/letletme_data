@@ -1566,6 +1566,21 @@ export async function readLivePublicationV2ActiveRaw(
   return (await redis.get(liveV2Key(scope, 'active'))) ?? '';
 }
 
+/**
+ * Read only the active manifest identity.  Unlike readLivePublicationV2 this
+ * deliberately does not fall back to previous or validate immutable siblings;
+ * recovery tooling uses it as a source/state fence when the active payload is
+ * damaged but the manifest bytes are still readable.
+ */
+export async function readLivePublicationV2ActiveManifest(
+  scope: LiveScope,
+  redisClient?: Redis,
+): Promise<LivePublicationV2 | null> {
+  assertSeasonEvent(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  return parseLiveManifest(await redis.get(liveV2Key(scope, 'active')), scope);
+}
+
 /** Read one pointer for diagnostics and protected repair tooling. */
 export async function readLivePublicationV2Pointer(
   scope: LiveScope,

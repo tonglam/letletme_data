@@ -11,7 +11,9 @@ CREATE TABLE competition.live_points_publication_seed_claims (
   candidate_source_checked_at timestamptz NOT NULL,
   candidate_event_live_sha256 text NOT NULL,
   candidate_fixtures_sha256 text NOT NULL,
-  claimed_at timestamptz NOT NULL DEFAULT now(),
+  -- This is an ownership lease, so transaction-start time is unsafe: a
+  -- claim that waited on the scope lock could be born already expired.
+  claimed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT live_points_publication_seed_claims_pkey
     PRIMARY KEY (season_id, event_id),
   CONSTRAINT live_points_publication_seed_claims_event_fk

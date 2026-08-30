@@ -20,6 +20,8 @@ import {
   restoreLivePublicationV2Checkpoint,
   readLivePublicationV2,
   readLivePublicationV2ActiveRaw,
+  readLivePublicationV2ActiveManifest,
+  readLivePublicationV2Pointer,
   setEntryCheckpointDesiredV2,
   setLiveCheckpointDesiredV2,
   type EntryLiveInputV2,
@@ -2289,8 +2291,9 @@ async function seedLivePublication(
     candidateEventLiveSha256: contentHash(seed.eventLives),
     candidateFixturesSha256: contentHash(seed.fixtures),
   } as const;
-  const [current, existingClaim] = await Promise.all([
-    readLivePublicationV2(scope, redis),
+  const [current, activeManifest, existingClaim] = await Promise.all([
+    readLivePublicationV2Pointer(scope, 'active', redis),
+    readLivePublicationV2ActiveManifest(scope, redis),
     readLivePublicationV2SeedClaim(seed.season, seed.source.event_id),
   ]);
   const currentMatchesExistingClaim = Boolean(
@@ -2346,10 +2349,33 @@ async function seedLivePublication(
       seed.source.event_id,
       existingClaim.claimId,
     );
-    if (!released) throw new Error('V2 cache seed recovery claim changed during release');
+    if (!released) {
+      // The prior owner may have checkpointed and deleted this exact claim
+      // between our read and the release lock. Re-read the durable winner and
+      // claim row before treating the race as a failure.
+      const [afterClaim, afterDurable] = await Promise.all([
+        readLivePublicationV2SeedClaim(seed.season, seed.source.event_id),
+        readLivePublicationV2Checkpoint(seed.season, seed.source.event_id),
+      ]);
+      if (afterDurable) {
+        const restored = await restoreLivePublicationV2Checkpoint({
+          checkpoint: afterDurable,
+          redis,
+        });
+        return {
+          status: restored.published ? 'restored' : 'stale',
+          checkpoint: restored.published ? 'already-checkpointed' : 'blocked',
+          generation: restored.publication.generation,
+          publicationId: restored.publication.publicationId,
+        };
+      }
+      if (!afterClaim) return seedLivePublication(seed, redis, false);
+      throw new Error('V2 cache seed recovery claim changed during release');
+    }
     return seedLivePublication(seed, redis, false);
   }
-  if (current) {
+  const recoveryCurrent = current?.publication ?? activeManifest;
+  if (recoveryCurrent) {
     // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
     // Once a durable V2 publication exists, a legacy snapshot must never
     // replace it on a later deploy. A complete but uncheckpointed Redis
@@ -2357,7 +2383,7 @@ async function seedLivePublication(
     // fully validated candidate at the same or a newer source fence may create
     // the next generation while preserving that orphan as previous.
     const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
-    if (!durable && canSupersedeUncheckpointedSeedCurrent(current.publication, seed)) {
+    if (!durable && canSupersedeUncheckpointedSeedCurrent(recoveryCurrent, seed)) {
       const acquired = await acquireLivePublicationV2SeedClaim(
         seed.season,
         seed.source.event_id,
@@ -2386,7 +2412,7 @@ async function seedLivePublication(
         contentUpdatedAt: seed.contentUpdatedAt,
         eventLives: seed.eventLives,
         fixtures: seed.fixtures,
-        previous: current.publication,
+        previous: recoveryCurrent,
         expectedCurrentRaw: activeRaw,
         promotionMode: 'seed-recovery',
         redis,
@@ -2414,6 +2440,23 @@ async function seedLivePublication(
         generation: promoted.publication.generation,
         publicationId: promoted.publication.publicationId,
       };
+    }
+    if (!current) {
+      if (durable) {
+        const restored = await restoreLivePublicationV2Checkpoint({
+          checkpoint: durable,
+          redis,
+        });
+        return {
+          status: restored.published ? 'restored' : 'stale',
+          checkpoint: restored.published ? 'already-checkpointed' : 'blocked',
+          generation: restored.publication.generation,
+          publicationId: restored.publication.publicationId,
+        };
+      }
+      throw new Error(
+        'V2 cache seed candidate is older than or incompatible with the raw active manifest',
+      );
     }
     if (existingClaim) {
       await releaseLivePublicationV2SeedClaim(

@@ -832,7 +832,10 @@ export const livePointsPublicationSeedClaimsInCompetition = competition.table(
     }).notNull(),
     candidateEventLiveSha256: text('candidate_event_live_sha256').notNull(),
     candidateFixturesSha256: text('candidate_fixtures_sha256').notNull(),
-    claimedAt: timestamp('claimed_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    // Lease age must use post-lock wall-clock time, not transaction-start now().
+    claimedAt: timestamp('claimed_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
   },
   (table) => [
     primaryKey({
