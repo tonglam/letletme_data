@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertLegacyEvidenceMatchesEventLives,
-  assertLegacyFixturesMatchCanonicalFence,
   assertLivePointsV2SeedDatabaseTarget,
   buildSeedHead,
   buildSeedInput,
@@ -10,6 +9,7 @@ import {
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
   parseSeedArguments,
+  rebaseLegacyFixturesAtCanonicalFence,
   resolveLivePointsV2SeedDatabaseUrl,
   resolveSeedObservationCheckedAt,
   type ExistingPickRow,
@@ -96,7 +96,7 @@ describe('Live Points V2 entry-pick seed', () => {
     );
   });
 
-  test('requires field-exact canonical fixtures before reusing a newer event fence', () => {
+  test('rebases the fixture sibling from canonical rows at a newer event fence', () => {
     const fixture = {
       id: 16,
       code: 2442288,
@@ -136,17 +136,35 @@ describe('Live Points V2 entry-pick seed', () => {
       team_h_difficulty: fixture.teamHDifficulty,
       team_a_difficulty: fixture.teamADifficulty,
       pulse_id: fixture.pulseId,
+      created_at: new Date('2026-08-29T10:00:00.000Z'),
+      updated_at: new Date('2026-08-30T15:31:08.555Z'),
     };
     const seed = {
+      source: { event_id: 2 },
       sourceCheckedAt: new Date('2026-08-30T15:30:08.402Z'),
       observationCheckedAt: new Date('2026-08-30T15:31:08.555Z'),
       fixtures: [fixture],
     };
 
-    expect(() => assertLegacyFixturesMatchCanonicalFence(seed, [canonical])).not.toThrow();
-    expect(() =>
-      assertLegacyFixturesMatchCanonicalFence(seed, [{ ...canonical, finished: true }]),
-    ).toThrow('Canonical fixture disagrees with legacy publication at newer event fence');
+    const rebased = rebaseLegacyFixturesAtCanonicalFence(seed, [
+      {
+        ...canonical,
+        finished_provisional: true,
+        minutes: 90,
+        team_a_score: 2,
+        team_h_score: 5,
+      },
+    ]);
+    expect(rebased[0]).toMatchObject({
+      id: 16,
+      finishedProvisional: true,
+      minutes: 90,
+      teamAScore: 2,
+      teamHScore: 5,
+    });
+    expect(() => rebaseLegacyFixturesAtCanonicalFence(seed, [])).toThrow(
+      'Canonical fixtures do not prove the newer event fence',
+    );
   });
 
   test('recognises only zero-contribution out-of-scope fixture rows as no-op evidence', () => {
