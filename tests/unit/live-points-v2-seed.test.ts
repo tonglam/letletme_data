@@ -257,6 +257,20 @@ describe('Live Points V2 entry-pick seed', () => {
       sourceCheckedAt: '2026-08-30T15:30:08.402Z',
       checkpointedAt: null,
     });
+
+    const damagedGeneration = JSON.stringify({
+      ...JSON.parse(raw),
+      generation: 'corrupt',
+    });
+    expect(parseLivePublicationV2OrderingFence(damagedGeneration, scope)).toEqual({
+      contractVersion: 'live-points-v2',
+      generation: null,
+      season: '2627',
+      eventId: 2,
+      state: 'FINALIZED',
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      checkpointedAt: null,
+    });
   });
 
   test('does not weaken a complete manifest claim mismatch to its ordering fence', () => {

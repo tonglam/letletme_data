@@ -2220,10 +2220,11 @@ async function releaseSeedClaimAfterPromotionFailure(
  * owns the scope and legacy data must not manufacture another generation.
  */
 export function canSupersedeUncheckpointedSeedCurrent(
-  current: Pick<
-    Awaited<ReturnType<typeof publishLivePublicationV2>>['publication'],
-    'checkpointedAt' | 'sourceCheckedAt' | 'state'
-  >,
+  current: {
+    readonly checkpointedAt: string | null | undefined;
+    readonly sourceCheckedAt: string;
+    readonly state: LivePublicationState;
+  },
   seed: Pick<ValidatedLiveSeed, 'sourceCheckedAt' | 'observationCheckedAt' | 'state'>,
 ): boolean {
   if (current.checkpointedAt !== null) return false;
@@ -2496,12 +2497,15 @@ async function seedLivePublication(
     return seedLivePublication(seed, redis, false);
   }
   // Parse ordering independently from revision/item descriptors. A damaged
-  // active publication is unreadable, but its source/state/generation remain a
-  // hard fence alongside the last complete previous publication.
+  // active publication is unreadable, but its source/state remain a hard fence
+  // even when generation cannot provide an allocation floor.
   const recoveryBase = activeManifest ?? previous?.publication ?? null;
   const recoveryFences = [activeOrderingFence, previous?.publication ?? null].filter(
     (value): value is LivePublicationV2OrderingFence => value !== null,
   );
+  const recoveryGenerationFloors = recoveryFences
+    .map((fence) => fence.generation)
+    .filter((generation): generation is number => generation !== null);
   if (recoveryFences.length > 0) {
     // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
     // Once a durable V2 publication exists, a legacy snapshot must never
@@ -2547,7 +2551,9 @@ async function seedLivePublication(
           previous: recoveryBase,
           expectedCurrentRaw: activeRaw,
           promotionMode: 'seed-recovery',
-          generationFloor: Math.max(...recoveryFences.map((fence) => fence.generation)),
+          ...(recoveryGenerationFloors.length > 0
+            ? { generationFloor: Math.max(...recoveryGenerationFloors) }
+            : {}),
           redis,
         });
       } catch (error) {

@@ -255,8 +255,9 @@ export async function acquireLivePublicationV2SeedClaim(
       // A retry may arrive after the previous owner abandoned the same claim.
       // Rotate the ownership token and renew the lease using PostgreSQL time;
       // an old owner can no longer checkpoint after this transaction commits.
-      // An unexpired retry keeps the existing token so concurrent executions
-      // of the exact candidate do not invalidate an owner still promoting it.
+      // Never share an unexpired token between executions: otherwise one
+      // retry can release it after a failed Redis CAS while the original owner
+      // is concurrently promoting the claimed candidate.
       const renewedClaimId = randomUUID();
       const renewed = (
         await tx
@@ -275,15 +276,14 @@ export async function acquireLivePublicationV2SeedClaim(
           )
           .returning({ claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt })
       )[0];
+      if (!renewed) return { status: 'blocked', claim: null } as const;
       return {
         status: 'claimed',
-        claim: renewed
-          ? {
-              ...normalizedPrior,
-              claimId: renewedClaimId,
-              claimedAt: renewed.claimedAt.toISOString(),
-            }
-          : normalizedPrior,
+        claim: {
+          ...normalizedPrior,
+          claimId: renewedClaimId,
+          claimedAt: renewed.claimedAt.toISOString(),
+        },
       } as const;
     }
 

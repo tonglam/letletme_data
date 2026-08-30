@@ -71,16 +71,17 @@ export interface LivePublicationV2 {
   };
 }
 
-export type LivePublicationV2OrderingFence = Pick<
-  LivePublicationV2,
-  | 'contractVersion'
-  | 'generation'
-  | 'season'
-  | 'eventId'
-  | 'state'
-  | 'sourceCheckedAt'
-  | 'checkpointedAt'
->;
+export type LivePublicationV2OrderingFence = {
+  readonly contractVersion: typeof LIVE_POINTS_CONTRACT_VERSION;
+  /** A damaged generation cannot provide an allocation floor. */
+  readonly generation: number | null;
+  readonly season: string;
+  readonly eventId: number;
+  readonly state: LivePublicationState;
+  readonly sourceCheckedAt: string;
+  /** Undefined means the durable marker is corrupt/unknown and must fail closed. */
+  readonly checkpointedAt: string | null | undefined;
+};
 
 export interface LivePublicationRead {
   readonly publication: LivePublicationV2;
@@ -431,25 +432,33 @@ export function parseLivePublicationV2OrderingFence(
     if (
       !isRecord(value) ||
       value.contractVersion !== LIVE_POINTS_CONTRACT_VERSION ||
-      typeof value.generation !== 'number' ||
-      !Number.isSafeInteger(value.generation) ||
-      value.generation <= 0 ||
       value.season !== scope.season ||
       value.eventId !== scope.eventId ||
       !validLivePublicationState(value.state) ||
-      !validIso(value.sourceCheckedAt) ||
-      (value.checkpointedAt !== null && !validIso(value.checkpointedAt))
+      !validIso(value.sourceCheckedAt)
     ) {
       return null;
     }
+    const generation =
+      typeof value.generation === 'number' &&
+      Number.isSafeInteger(value.generation) &&
+      value.generation > 0
+        ? value.generation
+        : null;
+    const checkpointedAt =
+      value.checkpointedAt === null
+        ? null
+        : validIso(value.checkpointedAt)
+          ? value.checkpointedAt
+          : undefined;
     return {
       contractVersion: LIVE_POINTS_CONTRACT_VERSION,
-      generation: value.generation,
+      generation,
       season: scope.season,
       eventId: scope.eventId,
       state: value.state,
       sourceCheckedAt: value.sourceCheckedAt,
-      checkpointedAt: value.checkpointedAt,
+      checkpointedAt,
     };
   } catch {
     return null;
