@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertLegacyEvidenceMatchesEventLives,
+  assertLegacyFixturesMatchCanonicalFence,
   assertLivePointsV2SeedDatabaseTarget,
   buildSeedHead,
   buildSeedInput,
@@ -14,6 +15,7 @@ import {
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
+  type LegacyFixtureFactRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
 
@@ -92,6 +94,59 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(() => resolveSeedObservationCheckedAt(new Date('invalid'), null)).toThrow(
       'seed source timestamp is invalid',
     );
+  });
+
+  test('requires field-exact canonical fixtures before reusing a newer event fence', () => {
+    const fixture = {
+      id: 16,
+      code: 2442288,
+      event: 2,
+      finished: false,
+      finishedProvisional: false,
+      kickoffTime: new Date('2026-08-30T13:00:00.000Z'),
+      minutes: 45,
+      provisionalStartTime: false,
+      started: true,
+      teamA: 1,
+      teamAScore: 0,
+      teamH: 2,
+      teamHScore: 1,
+      stats: [],
+      teamHDifficulty: 3,
+      teamADifficulty: 4,
+      pulseId: 1234,
+      createdAt: null,
+      updatedAt: null,
+    };
+    const canonical: LegacyFixtureFactRow = {
+      fixture_id: fixture.id,
+      code: fixture.code,
+      event_id: fixture.event,
+      finished: fixture.finished,
+      finished_provisional: fixture.finishedProvisional,
+      kickoff_time: fixture.kickoffTime,
+      minutes: fixture.minutes,
+      provisional_start_time: fixture.provisionalStartTime,
+      started: fixture.started,
+      team_a_id: fixture.teamA,
+      team_a_score: fixture.teamAScore,
+      team_h_id: fixture.teamH,
+      team_h_score: fixture.teamHScore,
+      stats: fixture.stats,
+      team_h_difficulty: fixture.teamHDifficulty,
+      team_a_difficulty: fixture.teamADifficulty,
+      pulse_id: fixture.pulseId,
+    };
+    const seed = {
+      sourceCheckedAt: new Date('2026-08-30T15:30:08.402Z'),
+      observationCheckedAt: new Date('2026-08-30T15:31:08.555Z'),
+      fixtures: [fixture],
+    };
+
+    expect(() => assertLegacyFixturesMatchCanonicalFence(seed, [canonical])).not.toThrow();
+    expect(() =>
+      assertLegacyFixturesMatchCanonicalFence(seed, [{ ...canonical, finished: true }]),
+    ).toThrow('Canonical fixture disagrees with legacy publication at newer event fence');
   });
 
   test('recognises only zero-contribution out-of-scope fixture rows as no-op evidence', () => {

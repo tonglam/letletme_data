@@ -218,6 +218,26 @@ type LegacyEventLiveFactRow = {
   defensive_contribution: number;
 };
 
+export type LegacyFixtureFactRow = {
+  fixture_id: number;
+  code: number;
+  event_id: number | null;
+  finished: boolean;
+  finished_provisional: boolean;
+  kickoff_time: TimestampValue | null;
+  minutes: number;
+  provisional_start_time: boolean;
+  started: boolean;
+  team_a_id: number | null;
+  team_a_score: number | null;
+  team_h_id: number | null;
+  team_h_score: number | null;
+  stats: unknown;
+  team_h_difficulty: number | null;
+  team_a_difficulty: number | null;
+  pulse_id: number;
+};
+
 type LegacyScoringFactRow = {
   event_id: number;
   element_id: number;
@@ -861,6 +881,81 @@ function sameLegacyFact(left: unknown, right: unknown): boolean {
   return left === right || String(left) === String(right);
 }
 
+function fixtureWriteShape(fixture: Fixture): Record<string, unknown> {
+  return {
+    id: fixture.id,
+    code: fixture.code,
+    event: fixture.event,
+    finished: fixture.finished,
+    finishedProvisional: fixture.finishedProvisional,
+    kickoffTime: fixture.kickoffTime,
+    minutes: fixture.minutes,
+    provisionalStartTime: fixture.provisionalStartTime,
+    started: fixture.started ?? false,
+    teamA: fixture.teamA,
+    teamAScore: fixture.teamAScore,
+    teamH: fixture.teamH,
+    teamHScore: fixture.teamHScore,
+    stats: fixture.stats,
+    teamHDifficulty: fixture.teamHDifficulty,
+    teamADifficulty: fixture.teamADifficulty,
+    pulseId: fixture.pulseId,
+  };
+}
+
+function canonicalFixtureWriteShape(row: LegacyFixtureFactRow): Record<string, unknown> {
+  return {
+    id: row.fixture_id,
+    code: row.code,
+    event: row.event_id,
+    finished: row.finished,
+    finishedProvisional: row.finished_provisional,
+    kickoffTime: nullableDateValue(row.kickoff_time),
+    minutes: row.minutes,
+    provisionalStartTime: row.provisional_start_time,
+    started: row.started,
+    teamA: row.team_a_id,
+    teamAScore: row.team_a_score,
+    teamH: row.team_h_id,
+    teamHScore: row.team_h_score,
+    stats: jsonValue(row.stats),
+    teamHDifficulty: row.team_h_difficulty,
+    teamADifficulty: row.team_a_difficulty,
+    pulseId: row.pulse_id,
+  };
+}
+
+/**
+ * A newer event fence means Core may already own a more recent fixture state.
+ * The cutover seed may reuse that fence only when every field it would write is
+ * already identical in PostgreSQL. This turns the lifted timestamp into proof
+ * of a no-op instead of a way to bypass the source-order guard.
+ */
+export function assertLegacyFixturesMatchCanonicalFence(
+  seed: Pick<ValidatedLiveSeed, 'sourceCheckedAt' | 'observationCheckedAt' | 'fixtures'>,
+  rows: readonly LegacyFixtureFactRow[],
+): void {
+  if (seed.observationCheckedAt.getTime() <= seed.sourceCheckedAt.getTime()) return;
+
+  const byId = new Map(rows.map((row) => [row.fixture_id, row] as const));
+  if (rows.length !== seed.fixtures.length || byId.size !== seed.fixtures.length) {
+    throw new Error(
+      `Canonical fixtures do not prove the newer event fence: expected ${seed.fixtures.length}, got ${rows.length}`,
+    );
+  }
+  for (const fixture of seed.fixtures) {
+    const row = byId.get(fixture.id);
+    if (
+      !row ||
+      canonicalJson(fixtureWriteShape(fixture)) !== canonicalJson(canonicalFixtureWriteShape(row))
+    ) {
+      throw new Error(
+        `Canonical fixture disagrees with legacy publication at newer event fence: fixture=${fixture.id}`,
+      );
+    }
+  }
+}
+
 function assertLegacyEventLiveFacts(
   seed: ValidatedLiveSeed,
   rows: readonly LegacyEventLiveFactRow[],
@@ -1159,7 +1254,9 @@ async function loadLegacyLiveFacts(
     }
     embeddedError = error;
   }
-  if (embedded) return embedded;
+  const requiresCanonicalFenceProof =
+    seed.observationCheckedAt.getTime() > seed.sourceCheckedAt.getTime();
+  if (embedded && !requiresCanonicalFenceProof) return embedded;
 
   const persistedAt = nullableDateValue(seed.source.event_live_facts_persisted_at);
   // The publication may be read after the facts transaction commits. The
@@ -1170,7 +1267,7 @@ async function loadLegacyLiveFacts(
     throw embeddedError ?? new Error('LEGACY_RELATIONAL_FACTS_NOT_PROVEN_FOR_PUBLICATION');
   }
 
-  const [eventLiveRows, scoringRows, evidenceRows] = await Promise.all([
+  const [eventLiveRows, scoringRows, evidenceRows, fixtureRows] = await Promise.all([
     database.unsafe<LegacyEventLiveFactRow[]>(
       `
         SELECT event_id, element_id, minutes, goals_scored, assists, clean_sheets,
@@ -1203,10 +1300,23 @@ async function loadLegacyLiveFacts(
       `,
       [seed.season.seasonId, seed.source.event_id],
     ),
+    database.unsafe<LegacyFixtureFactRow[]>(
+      `
+        SELECT fixture_id, code, event_id, finished, finished_provisional,
+               kickoff_time, minutes, provisional_start_time, started,
+               team_a_id, team_a_score, team_h_id, team_h_score, stats,
+               team_h_difficulty, team_a_difficulty, pulse_id
+        FROM fpl.fixtures
+        WHERE season_id = $1 AND event_id = $2
+        ORDER BY fixture_id
+      `,
+      [seed.season.seasonId, seed.source.event_id],
+    ),
   ]);
   assertLegacyEventLiveFacts(seed, eventLiveRows);
   assertLegacyEvidenceMatchesEventLives(seed, evidenceRows);
   assertLegacyScoringPointsMatchBreakdown(seed.eventLives, scoringRows);
+  assertLegacyFixturesMatchCanonicalFence(seed, fixtureRows);
 
   const explainByElement = new Map(
     seed.eventLives.map(
