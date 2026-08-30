@@ -14,13 +14,13 @@ import {
   clearLiveCheckpointDesiredV2,
   entryLiveInputFromFplPicks,
   markLivePublicationCheckpointedV2,
+  parseLivePublicationV2Manifest,
   publishEntryLiveInputV2,
   publishLivePublicationV2,
   readEntryLiveInputV2,
   restoreLivePublicationV2Checkpoint,
   readLivePublicationV2,
   readLivePublicationV2ActiveRaw,
-  readLivePublicationV2ActiveManifest,
   readLivePublicationV2Pointer,
   setEntryCheckpointDesiredV2,
   setLiveCheckpointDesiredV2,
@@ -2291,9 +2291,10 @@ async function seedLivePublication(
     candidateEventLiveSha256: contentHash(seed.eventLives),
     candidateFixturesSha256: contentHash(seed.fixtures),
   } as const;
-  const [current, activeManifest, existingClaim] = await Promise.all([
+  const activeManifest = parseLivePublicationV2Manifest(activeRaw, scope);
+  const [current, previous, existingClaim] = await Promise.all([
     readLivePublicationV2Pointer(scope, 'active', redis),
-    readLivePublicationV2ActiveManifest(scope, redis),
+    readLivePublicationV2Pointer(scope, 'previous', redis),
     readLivePublicationV2SeedClaim(seed.season, seed.source.event_id),
   ]);
   const currentMatchesExistingClaim = Boolean(
@@ -2330,6 +2331,23 @@ async function seedLivePublication(
       claimCandidate,
     );
     if (!reclaimed) {
+      const [afterClaim, afterDurable] = await Promise.all([
+        readLivePublicationV2SeedClaim(seed.season, seed.source.event_id),
+        readLivePublicationV2Checkpoint(seed.season, seed.source.event_id),
+      ]);
+      if (afterDurable) {
+        const restored = await restoreLivePublicationV2Checkpoint({
+          checkpoint: afterDurable,
+          redis,
+        });
+        return {
+          status: restored.published ? 'restored' : 'stale',
+          checkpoint: restored.published ? 'already-checkpointed' : 'blocked',
+          generation: restored.publication.generation,
+          publicationId: restored.publication.publicationId,
+        };
+      }
+      if (!afterClaim) return seedLivePublication(seed, redis, false);
       throw new Error(
         `V2 cache seed recovery claim ${existingClaim.claimId} is still owned until its bounded promotion lease expires`,
       );
@@ -2374,7 +2392,12 @@ async function seedLivePublication(
     }
     return seedLivePublication(seed, redis, false);
   }
-  const recoveryCurrent = current?.publication ?? activeManifest;
+  // A syntactically valid active manifest remains the primary source/state
+  // fence even if one immutable sibling is damaged. If the active pointer is
+  // absent or malformed, the last complete previous publication is still an
+  // ordering fence: recovery may replace it, but never with an older source or
+  // a provisional downgrade of FINALIZED data.
+  const recoveryCurrent = activeManifest ?? previous?.publication;
   if (recoveryCurrent) {
     // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
     // Once a durable V2 publication exists, a legacy snapshot must never
@@ -2455,7 +2478,7 @@ async function seedLivePublication(
         };
       }
       throw new Error(
-        'V2 cache seed candidate is older than or incompatible with the raw active manifest',
+        'V2 cache seed candidate is older than or incompatible with the active/previous publication fence',
       );
     }
     if (existingClaim) {

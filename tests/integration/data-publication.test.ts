@@ -20,6 +20,7 @@ import {
   entryLiveInputFromFplPicks,
   entryLiveV2Key,
   markLivePublicationCheckpointedV2,
+  parseLivePublicationV2Manifest,
   publishEntryLiveFinalResultV2,
   publishEntryLiveInputV2,
   publishLivePublicationV2,
@@ -271,8 +272,14 @@ describe('immutable Redis publication', () => {
     await redis.set(second.publication.items.eventLive.key, JSON.stringify([{ broken: true }]));
 
     const recovered = await readLivePublicationV2(LIVE_SCOPE, redis);
+    const activeManifest = parseLivePublicationV2Manifest(
+      await readLivePublicationV2ActiveRaw(LIVE_SCOPE, redis),
+      LIVE_SCOPE,
+    );
     expect(recovered?.servedFrom).toBe('REDIS_PREVIOUS');
     expect(recovered?.publication.publicationId).toBe(first.publication.publicationId);
+    expect(activeManifest?.publicationId).toBe(second.publication.publicationId);
+    expect(activeManifest?.sourceCheckedAt).toBe(second.publication.sourceCheckedAt);
   });
 
   test('a corrupt current pointer does not block the next complete publication', async () => {
