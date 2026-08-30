@@ -415,6 +415,35 @@ describe('immutable Redis publication', () => {
     });
   });
 
+  test('a newer complete FINALIZED candidate repairs a corrupt final pointer', async () => {
+    const finalized = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    await redis.set(finalized.publication.items.eventLive.key, '{"corrupt":true}');
+
+    const repaired = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: finalized.publication,
+      redis,
+    });
+
+    expect(repaired.published).toBe(true);
+    expect(repaired.publication.generation).toBeGreaterThan(finalized.publication.generation);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication).toMatchObject({
+      publicationId: repaired.publication.publicationId,
+      state: 'FINALIZED',
+    });
+  });
+
   test('finalized manifest retention survives heartbeat and checkpoint CAS updates', async () => {
     const finalized = await publishLivePublicationV2({
       ...LIVE_SCOPE,

@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, ne, or, sql } from 'drizzle-orm';
 
 import {
   eventsInFpl,
@@ -147,6 +147,40 @@ export async function readLivePublicationV2Checkpoint(
     fixtures,
     servedFrom: 'POSTGRES_CHECKPOINT',
   };
+}
+
+/**
+ * Return every terminal event whose V2 checkpoint is absent or not FINALIZED.
+ * This is one set-based query so a scheduler restart can catch up an older
+ * event without issuing one checkpoint lookup per historical gameweek.
+ */
+export async function findLivePublicationV2FinalizationTargets(
+  season: FplSeasonRef,
+): Promise<number[]> {
+  const db = await getDb();
+  const rows = await db
+    .select({ eventId: eventsInFpl.eventId })
+    .from(eventsInFpl)
+    .leftJoin(
+      livePointsPublicationCheckpointsInCompetition,
+      and(
+        eq(livePointsPublicationCheckpointsInCompetition.seasonId, eventsInFpl.seasonId),
+        eq(livePointsPublicationCheckpointsInCompetition.eventId, eventsInFpl.eventId),
+      ),
+    )
+    .where(
+      and(
+        eq(eventsInFpl.seasonId, season.seasonId),
+        eq(eventsInFpl.finished, true),
+        eq(eventsInFpl.dataChecked, true),
+        or(
+          isNull(livePointsPublicationCheckpointsInCompetition.eventId),
+          ne(livePointsPublicationCheckpointsInCompetition.state, 'FINALIZED'),
+        ),
+      ),
+    )
+    .orderBy(eventsInFpl.eventId);
+  return rows.map((row) => row.eventId);
 }
 
 /**

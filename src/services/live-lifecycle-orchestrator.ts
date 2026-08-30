@@ -640,10 +640,11 @@ export async function runPicksProbeAndSync(
   const pending = await findMissingEntryLiveInputIds(season, eventId, entryIds);
   const pendingCheckpoints = await findPendingEntryLiveCheckpointIds(season, eventId, entryIds);
   if (pending.length === 0) {
-    const nextProbeAt =
-      pendingCheckpoints.length > 0
-        ? nowMs + PICKS_PROBE_POLL_MS
-        : nowMs + COORDINATOR_STATE_TTL_SECONDS * 1_000;
+    // A complete input is never refetched from FPL, but the coordinator still
+    // performs a bounded Redis/DB coverage scan while the event can affect
+    // live projections. This repairs an evicted entry key or a delayed
+    // checkpoint without reopening the provider fan-out for readable inputs.
+    const nextProbeAt = nowMs + PICKS_PROBE_POLL_MS;
     await writePicksCoordinatorState(season.seasonCode, eventId, {
       attempts: state.attempts,
       nextProbeAt,

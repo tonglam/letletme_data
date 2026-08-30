@@ -7,6 +7,7 @@ import {
   officialH2HDefinition,
   resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
+  resolveLiveFinalizationCatchupPlans,
   resolvePostMatchResultPlans,
   playerPricesDefinition,
   schedulerQueueLaneOverride,
@@ -919,6 +920,47 @@ describe('standalone scheduler registry', () => {
     expect(plans.map((plan) => plan.periodKey)).toEqual(['event-2-final', 'event-1-final']);
     expect(plans[0]).toMatchObject({ dueAt: checkedAt, source: 'catchup' });
     expect(fixtureLoads).toBe(0);
+  });
+
+  test('keeps V2 finalization catch-up independent from the current event', () => {
+    const checkedAt = new Date('2026-08-22T22:00:00.000Z');
+    const plans = resolveLiveFinalizationCatchupPlans(
+      {
+        season: TEST_SEASON,
+        now: new Date('2026-08-25T12:00:00.000Z'),
+        currentEventId: 4,
+        events: [
+          {
+            id: 2,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: checkedAt,
+          },
+          {
+            id: 4,
+            deadlineTime: new Date('2026-08-25T17:30:00.000Z'),
+            finished: false,
+            dataChecked: false,
+            dataCheckedAt: null,
+          },
+        ],
+      },
+      new Set([2]),
+    );
+
+    expect(plans).toEqual([
+      expect.objectContaining({
+        eventId: 2,
+        dueAt: checkedAt,
+        source: 'catchup',
+        periodKey: `live-final-catchup-2-${checkedAt.getTime()}`,
+        evidence: expect.objectContaining({
+          finalization: 'missing-v2-checkpoint',
+          finalizeEvent: true,
+        }),
+      }),
+    ]);
   });
 
   test('resolves picks and transfers to the same event checkpoint window', async () => {

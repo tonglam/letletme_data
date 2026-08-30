@@ -568,11 +568,17 @@ if current_raw then
   if ok and decoded.contractVersion == 'live-points-v2' then
     if decoded.season ~= candidate.season or decoded.eventId ~= candidate.eventId then
       current_scope_mismatch = true
-    elseif type(decoded.generation) == 'number' and decoded.generation > 0 then
-      current_generation = decoded.generation
-      current_publication_id = decoded.publicationId
-      current_scope_valid = true
+    elseif decoded.season == candidate.season and decoded.eventId == candidate.eventId then
+      -- Preserve the terminal marker even when the generation or one of the
+      -- immutable siblings is damaged.  A corrupt FINAL must still fence a
+      -- provisional candidate, while a newer complete FINAL remains a valid
+      -- recovery path when no durable checkpoint is available.
       current_state = decoded.state
+      if type(decoded.generation) == 'number' and decoded.generation > 0 then
+        current_generation = decoded.generation
+        current_publication_id = decoded.publicationId
+        current_scope_valid = true
+      end
     end
   end
   if ok and decoded.items and decoded.contractVersion == 'live-points-v2' then
@@ -599,7 +605,12 @@ local restoring_final = candidate.state == 'FINALIZED' and restoring
 if current_generation and not restoring_final then
   if current_generation > candidate.generation or (current_generation == candidate.generation and not same_identity) then return {'stale', current_raw} end
 end
-if current_state == 'FINALIZED' and not same_identity and not restoring_final then return {'stale', current_raw} end
+if current_state == 'FINALIZED' and not same_identity and not restoring_final then
+  -- A valid FINAL is immutable.  If its manifest/items fail validation, allow
+  -- only a newer complete FINAL to replace the poisoned pointer; never let a
+  -- provisional heartbeat downgrade the terminal scope.
+  if candidate.state ~= 'FINALIZED' or current ~= nil then return {'stale', current_raw} end
+end
 for index, name in ipairs({'eventLive', 'fixtures'}) do
   local item = candidate.items[name]
   if not item or not item.key or item.type ~= 'string' then return {'invalid_item'} end

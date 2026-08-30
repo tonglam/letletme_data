@@ -7,6 +7,8 @@ import {
 } from '../src/cache/live-publication-v2';
 import { redisSingleton } from '../src/cache/singleton';
 import { databaseSingleton } from '../src/db/singleton';
+import type { Event } from '../src/types';
+import { eventRepository } from '../src/repositories/events';
 import { seasonRepository } from '../src/repositories/seasons';
 import { readLivePublicationV2Checkpoint } from '../src/services/live-publication-v2-checkpoint.service';
 import { syncLiveSnapshotV2 } from '../src/services/live-snapshot-v2.service';
@@ -19,6 +21,22 @@ export type LivePointsV2RepairArguments = {
   readonly eventId: number;
   readonly reason: string | null;
 };
+
+/**
+ * A replay must preserve the relational event's terminal boundary.  A
+ * data-checked event without its exact timestamp is not safe to replay as a
+ * FINALIZED publication, because downstream final readers use that boundary
+ * as their evidence fence.
+ */
+export function resolveRepairFinalization(
+  event: Pick<Event, 'finished' | 'dataChecked' | 'dataCheckedAt'>,
+): boolean {
+  if (!event.finished || !event.dataChecked) return false;
+  if (event.dataCheckedAt === null) {
+    throw new Error('cannot replay finalized event without exact data_checked timestamp');
+  }
+  return true;
+}
 
 function usage(): never {
   throw new Error(
@@ -157,8 +175,11 @@ async function runRepair(args: LivePointsV2RepairArguments) {
     // explain and fixture-evidence facts captured by a coherent source read.
     // Re-run the bounded repair sync instead; it fetches and validates the
     // complete fact set before checkpointLivePublicationV2 can commit it.
+    const event = await eventRepository.findById(season, args.eventId);
+    if (!event) throw new Error(`event ${args.eventId} does not exist in the selected season`);
     const result = await syncLiveSnapshotV2(season, args.eventId, {
       trigger: 'reconcile',
+      finalizeEvent: resolveRepairFinalization(event),
     });
     return {
       contractVersion: 'live-points-v2',
