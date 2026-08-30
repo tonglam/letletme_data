@@ -200,6 +200,7 @@ export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTrans
               awayGoalsScored: sql`excluded.away_goals_scored`,
               awayGoalsConceded: sql`excluded.away_goals_conceded`,
               matchWinner: sql`excluded.match_winner`,
+              sourceCheckedAt: sql`COALESCE(excluded.source_checked_at, ${tournamentKnockoutResultsInCompetition.sourceCheckedAt})`,
               updatedAt: new Date(),
             },
           });

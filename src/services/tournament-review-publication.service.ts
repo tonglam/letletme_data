@@ -485,17 +485,20 @@ async function buildPointsPayload(
 type BattleSourceRow = {
   group_id: number;
   event_id: number;
+  home_index: number;
   home_entry_id: number | null;
   home_net_points: number | null;
   home_rank: number | null;
   home_match_points: number | null;
   away_entry_id: number | null;
+  away_index: number;
   away_net_points: number | null;
   away_rank: number | null;
   away_match_points: number | null;
   home_is_average: boolean;
   away_is_average: boolean;
   is_bye: boolean;
+  source_order: number | null;
   event_data_checked_at?: Date | string | null;
   event_finished?: boolean;
   event_data_checked?: boolean;
@@ -574,15 +577,20 @@ async function buildH2HPayload(
   sourceTimes: Array<Date | string | null>;
 }> {
   const matches = await tx<BattleSourceRow[]>`
-    SELECT group_id, event_id, home_entry_id, home_net_points, home_rank,
+    SELECT group_id, event_id, home_index, home_entry_id, home_net_points, home_rank,
            home_match_points, away_entry_id, away_net_points, away_rank,
-           away_match_points, home_is_average, away_is_average, is_bye,
+           away_match_points, away_index, home_is_average, away_is_average, is_bye,
+           source_order,
            source_checked_at, updated_at
     FROM competition.tournament_battle_group_results
     WHERE season_id = ${seasonId}
       AND tournament_id = ${tournament.tournament_id}
       AND event_id = ${event.event_id}
-    ORDER BY group_id, COALESCE(home_rank, 2147483647), COALESCE(away_rank, 2147483647)
+    ORDER BY group_id,
+             COALESCE(source_order, home_index),
+             home_index,
+             away_index,
+             source_result_id
   `;
   if (matches.length === 0) {
     throw new TournamentReviewSourceNotReadyError('H2H match rows are missing');
@@ -729,10 +737,12 @@ async function buildH2HPayload(
   }
 
   const history = await tx<BattleSourceRow[]>`
-    SELECT battle.group_id, battle.event_id, battle.home_entry_id, battle.home_net_points,
+    SELECT battle.group_id, battle.event_id, battle.home_index, battle.home_entry_id,
+           battle.home_net_points,
            battle.home_rank, battle.home_match_points, battle.away_entry_id,
            battle.away_net_points, battle.away_rank,
-           battle.away_match_points, battle.home_is_average, battle.away_is_average, battle.is_bye,
+           battle.away_match_points, battle.away_index, battle.home_is_average,
+           battle.away_is_average, battle.is_bye, battle.source_order,
            battle.source_checked_at, battle.updated_at,
            event.finished AS event_finished,
            event.data_checked AS event_data_checked,
@@ -745,7 +755,12 @@ async function buildH2HPayload(
       AND battle.tournament_id = ${tournament.tournament_id}
       AND battle.event_id >= COALESCE(${tournament.group_started_event_id}, 1)
       AND battle.event_id <= ${event.event_id}
-    ORDER BY battle.event_id, battle.group_id
+    ORDER BY battle.event_id,
+             battle.group_id,
+             COALESCE(battle.source_order, battle.home_index),
+             battle.home_index,
+             battle.away_index,
+             battle.source_result_id
   `;
   const expectedHistoryEvents = await tx<Array<{ event_id: number }>>`
     SELECT event.event_id
@@ -957,6 +972,7 @@ type KnockoutSourceRow = {
   away_goals_scored: number | null;
   away_goals_conceded: number | null;
   match_winner: number | null;
+  official_match_id: number | null;
   source_checked_at: Date | string | null;
   updated_at: Date | string;
 };
@@ -1037,6 +1053,7 @@ async function buildKnockoutPayload(
            result.away_goals_scored,
            result.away_goals_conceded,
            result.match_winner,
+           result.official_match_id,
            result.source_checked_at,
            result.updated_at
     FROM competition.tournament_knockout_results result
@@ -1097,19 +1114,23 @@ async function buildKnockoutPayload(
       throw new TournamentReviewSourceNotReadyError('knockout away score is incomplete');
     }
     if (
-      (match.home_entry_id !== null &&
+      match.official_match_id === null &&
+      ((match.home_entry_id !== null &&
         (match.home_goals_scored === null || match.home_goals_conceded === null)) ||
-      (match.away_entry_id !== null &&
-        (match.away_goals_scored === null || match.away_goals_conceded === null))
+        (match.away_entry_id !== null &&
+          (match.away_goals_scored === null || match.away_goals_conceded === null)))
     ) {
       throw new TournamentReviewSourceNotReadyError('knockout goal fields are incomplete');
     }
-    if (!asDate(match.source_checked_at)) {
+    const sourceCheckedAt =
+      asDate(match.source_checked_at) ??
+      (match.official_match_id === null ? asDate(match.updated_at) : null);
+    if (!sourceCheckedAt) {
       throw new TournamentReviewSourceNotReadyError('knockout match source timestamp is missing');
     }
     // Keep both timestamps in the freshness span. A present but stale
     // source_checked_at must not be hidden by a newer row updated_at.
-    sourceTimes.push(match.source_checked_at, match.updated_at);
+    sourceTimes.push(sourceCheckedAt, match.updated_at);
     const home = match.home_entry_id === null ? null : scores.get(match.home_entry_id);
     const away = match.away_entry_id === null ? null : scores.get(match.away_entry_id);
     if (!home && !away) {
@@ -1405,7 +1426,7 @@ export async function reconcileTournamentReviewObligations(
 ): Promise<number> {
   const db = await getDbClient();
   const rows = await db<Array<{ tournament_id: number; event_id: number }>>`
-    WITH candidates AS (
+    WITH candidate_formats AS (
       SELECT tournament.tournament_id,
              event.event_id,
              CASE
@@ -1430,7 +1451,7 @@ export async function reconcileTournamentReviewObligations(
                COALESCE(tournament.setup_finished_at, '-infinity'::timestamptz),
                COALESCE(tournament.standings_ready_at, '-infinity'::timestamptz),
                COALESCE(tournament.updated_at, '-infinity'::timestamptz)
-             ) AS eligible_at
+             ) AS base_eligible_at
       FROM competition.tournaments tournament
       JOIN fpl.events event ON event.season_id = tournament.season_id
       WHERE tournament.season_id = ${season.seasonId}
@@ -1438,6 +1459,90 @@ export async function reconcileTournamentReviewObligations(
         AND event.finished = true
         AND event.data_checked = true
         AND event.data_checked_at IS NOT NULL
+    ), candidates AS (
+      SELECT candidate.tournament_id,
+             candidate.event_id,
+             candidate.format,
+             GREATEST(
+               candidate.base_eligible_at,
+               CASE candidate.format
+                 WHEN 'POINTS' THEN COALESCE((
+                   SELECT max(source_updated_at)
+                   FROM (
+                     SELECT GREATEST(
+                              result.updated_at,
+                              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                            ) AS source_updated_at
+                     FROM competition.entry_event_results result
+                     JOIN competition.tournament_entries roster
+                       ON roster.season_id = result.season_id
+                      AND roster.entry_id = result.entry_id
+                      AND roster.tournament_id = candidate.tournament_id
+                     WHERE result.season_id = ${season.seasonId}
+                       AND result.event_id <= candidate.event_id
+                     UNION ALL
+                     SELECT points.updated_at AS source_updated_at
+                     FROM competition.tournament_points_group_results points
+                     WHERE points.season_id = ${season.seasonId}
+                       AND points.tournament_id = candidate.tournament_id
+                       AND points.event_id <= candidate.event_id
+                   ) point_sources
+                 ), '-infinity'::timestamptz)
+                 WHEN 'H2H' THEN COALESCE((
+                   SELECT max(source_updated_at)
+                   FROM (
+                     SELECT GREATEST(
+                              result.updated_at,
+                              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                            ) AS source_updated_at
+                     FROM competition.entry_event_results result
+                     JOIN competition.tournament_entries roster
+                       ON roster.season_id = result.season_id
+                      AND roster.entry_id = result.entry_id
+                      AND roster.tournament_id = candidate.tournament_id
+                     WHERE result.season_id = ${season.seasonId}
+                       AND result.event_id <= candidate.event_id
+                     UNION ALL
+                     SELECT battle.updated_at AS source_updated_at
+                     FROM competition.tournament_battle_group_results battle
+                     WHERE battle.season_id = ${season.seasonId}
+                       AND battle.tournament_id = candidate.tournament_id
+                       AND battle.event_id <= candidate.event_id
+                   ) h2h_sources
+                 ), '-infinity'::timestamptz)
+                 WHEN 'KNOCKOUT' THEN COALESCE((
+                   SELECT max(source_updated_at)
+                   FROM (
+                     SELECT GREATEST(
+                              result.updated_at,
+                              COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
+                            ) AS source_updated_at
+                     FROM competition.entry_event_results result
+                     JOIN competition.tournament_entries roster
+                       ON roster.season_id = result.season_id
+                      AND roster.entry_id = result.entry_id
+                      AND roster.tournament_id = candidate.tournament_id
+                     WHERE result.season_id = ${season.seasonId}
+                       AND result.event_id <= candidate.event_id
+                     UNION ALL
+                     SELECT knockout.updated_at AS source_updated_at
+                     FROM competition.tournament_knockout_results knockout
+                     WHERE knockout.season_id = ${season.seasonId}
+                       AND knockout.tournament_id = candidate.tournament_id
+                       AND knockout.event_id <= candidate.event_id
+                     UNION ALL
+                     SELECT bracket.updated_at AS source_updated_at
+                     FROM competition.tournament_knockouts bracket
+                     WHERE bracket.season_id = ${season.seasonId}
+                       AND bracket.tournament_id = candidate.tournament_id
+                       AND bracket.started_event_id <= candidate.event_id
+                       AND (bracket.ended_event_id IS NULL OR bracket.ended_event_id >= candidate.event_id)
+                   ) knockout_sources
+                 ), '-infinity'::timestamptz)
+                 ELSE '-infinity'::timestamptz
+               END
+             ) AS eligible_at
+      FROM candidate_formats candidate
     )
     INSERT INTO competition.tournament_review_obligations
       (season_id, tournament_id, event_id, format, state, eligible_at, next_attempt_at)
