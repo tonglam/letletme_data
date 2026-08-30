@@ -88,6 +88,8 @@ consulted_keys=(
   YOUTUBE_DATA_API_KEY
   SUPADATA_API_KEY
   CONTENT_SUPADATA_DAILY_CREDIT_LIMIT
+  CONTENT_X_ACCOUNT_PROVIDER
+  TIKHUB_API_KEY
 )
 
 for key in "${consulted_keys[@]}"; do
@@ -123,6 +125,20 @@ if nonempty_setting YOUTUBE_DATA_API_KEY \
   youtube_native_ready=true
 fi
 
+x_account_provider=$(read_setting CONTENT_X_ACCOUNT_PROVIDER)
+x_account_provider=${x_account_provider:-GROK_BUILD}
+case "$x_account_provider" in
+  GROK_BUILD | TIKHUB) ;;
+  *)
+    echo 'briefing rollout refused: CONTENT_X_ACCOUNT_PROVIDER must be GROK_BUILD or TIKHUB' >&2
+    exit 1
+    ;;
+esac
+tikhub_ready=false
+if [[ "$x_account_provider" == TIKHUB ]] && nonempty_setting TIKHUB_API_KEY; then
+  tikhub_ready=true
+fi
+
 changed=false
 if [[ "$mode" != status ]]; then
   publication_enabled=$(boolean_setting CONTENT_PUBLICATION_ENABLED)
@@ -137,6 +153,10 @@ if [[ "$mode" != status ]]; then
     backstop_enabled=false
     if [[ "$mode" == host-shadow ]]; then
       backstop_enabled=$(boolean_setting CONTENT_X_BACKSTOP_ENABLED)
+      if [[ "$x_account_provider" == TIKHUB && "$tikhub_ready" != true ]]; then
+        echo 'briefing rollout refused: TikHub X provider requires TIKHUB_API_KEY' >&2
+        exit 1
+      fi
     fi
     settings=(
       CONTENT_PIPELINE_ENABLED=true
@@ -199,13 +219,15 @@ if [[ "$mode" != status ]]; then
   trap - EXIT
 fi
 
-printf '{"event":"briefing_acquisition_config","mode":"%s","changed":%s,"pipeline":%s,"shadow":%s,"x":%s,"xBackstop":%s,"http":%s,"podcast":%s,"youtubeDiscovery":%s,"youtubeNative":%s,"youtubeGenerated":%s,"publication":%s,"public":%s,"hermesReady":%s,"youtubeNativeReady":%s,"secretValueExposed":false}\n' \
+printf '{"event":"briefing_acquisition_config","mode":"%s","changed":%s,"pipeline":%s,"shadow":%s,"x":%s,"xBackstop":%s,"xAccountProvider":"%s","tikhubReady":%s,"http":%s,"podcast":%s,"youtubeDiscovery":%s,"youtubeNative":%s,"youtubeGenerated":%s,"publication":%s,"public":%s,"hermesReady":%s,"youtubeNativeReady":%s,"secretValueExposed":false}\n' \
   "$mode" \
   "$changed" \
   "$(boolean_setting CONTENT_PIPELINE_ENABLED)" \
   "$(boolean_setting CONTENT_ACQUISITION_SHADOW_MODE)" \
   "$(boolean_setting CONTENT_X_SCAN_ENABLED)" \
   "$(boolean_setting CONTENT_X_BACKSTOP_ENABLED)" \
+  "$x_account_provider" \
+  "$tikhub_ready" \
   "$(boolean_setting CONTENT_HTTP_ACQUISITION_ENABLED)" \
   "$(boolean_setting CONTENT_PODCAST_TRANSCRIPT_ENABLED)" \
   "$(boolean_setting CONTENT_YOUTUBE_DISCOVERY_ENABLED)" \

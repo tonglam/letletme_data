@@ -6,7 +6,11 @@ import {
   type XAcquisitionLane,
 } from '../acquisition/acquisition-profiles';
 import { sha256CanonicalJson } from '../acquisition/canonicalization';
-import { acquisitionJobV1Schema, type AcquisitionJobV1 } from '../acquisition/formal-run-contract';
+import {
+  acquisitionJobV1Schema,
+  type AcquisitionJobV1,
+  type XScanRunRequestV1,
+} from '../acquisition/formal-run-contract';
 import {
   beginFormalRun,
   deferFormalRunForCapacity,
@@ -25,9 +29,16 @@ import { resolveSemanticXAuthors } from '../acquisition/semantic-author-resolver
 import {
   adaptGrokBuildPosts,
   adaptGrokBuildSemanticPosts,
+  adaptTikHubTimelinePosts,
   prevalidateGrokBuildPostsForAuthorResolution,
   XPostQualityError,
 } from '../acquisition/x-post-adapter';
+import {
+  TikHubXTimelineError,
+  type TikHubXFailureEvidence,
+  type TikHubXTimelineExecutionResult,
+  type TikHubXExecutionHooks,
+} from '../acquisition/tikhub-x-timeline-client';
 import { failXIdentityRun, persistXIdentityResult } from '../acquisition/x-identity-repository';
 import {
   releaseOneXRunBudgetUnit,
@@ -68,15 +79,22 @@ export type GrokBuildExecutorLike = Readonly<{
   ) => Promise<GrokBuildExecutionResult>;
 }>;
 
+export type TikHubXTimelineExecutorLike = Readonly<{
+  execute: (
+    request: XScanRunRequestV1,
+    hooks?: TikHubXExecutionHooks,
+  ) => Promise<TikHubXTimelineExecutionResult>;
+}>;
+
 function errorFacts(error: unknown): {
   failureClass: string;
   summary: string;
-  evidence: GrokBuildFailureEvidence | null;
+  evidence: GrokBuildFailureEvidence | TikHubXFailureEvidence | null;
 } {
   const candidate = error as {
     failureClass?: unknown;
     message?: unknown;
-    evidence?: GrokBuildFailureEvidence | null;
+    evidence?: GrokBuildFailureEvidence | TikHubXFailureEvidence | null;
   };
   return {
     failureClass:
@@ -155,6 +173,56 @@ function failureProviderEvidence(
   };
 }
 
+function tikhubFailureProviderEvidence(
+  evidence: TikHubXFailureEvidence,
+  failureClass: string,
+): FormalRunProviderEvidence {
+  return {
+    provider: 'tikhub',
+    operation: evidence.operation,
+    requestMetadataHash: evidence.requestMetadataHash,
+    responseMetadataHash: evidence.responseMetadataHash,
+    providerJobIdHash: evidence.providerJobIdHash,
+    providerUnits: evidence.providerUnits,
+    terminalState: `FAILED:${failureClass}`.slice(0, 200),
+    runMetrics: {
+      durationMs: Math.round(evidence.durationMs),
+      responseBytes: evidence.responseBytes,
+      httpStatus: evidence.httpStatus,
+      estimatedCostUsd: evidence.estimatedCostUsd,
+      pricingRevision: evidence.pricingRevision,
+      providerRoute: 'TIKHUB_TIMELINE',
+    },
+  };
+}
+
+function tikhubExecutionProviderEvidence(
+  execution: TikHubXTimelineExecutionResult,
+  terminalState: string,
+): FormalRunProviderEvidence {
+  return {
+    provider: 'tikhub',
+    operation: execution.operation,
+    requestMetadataHash: execution.requestMetadataHash,
+    responseMetadataHash: execution.responseMetadataHash,
+    providerJobIdHash: execution.providerJobIdHash,
+    providerUnits: execution.providerUnits,
+    terminalState,
+    runMetrics: {
+      durationMs: Math.round(execution.durationMs),
+      responseBytes: execution.responseBytes,
+      rawReturned: execution.rawReturnedCount,
+      excludedRetweets: execution.excludedRetweets,
+      excludedOutsideWindow: execution.excludedOutsideWindow,
+      duplicatePosts: execution.duplicatePosts,
+      estimatedCostUsd: execution.estimatedCostUsd,
+      pricingRevision: execution.pricingRevision,
+      memberMetrics: execution.memberMetrics,
+      providerRoute: 'TIKHUB_TIMELINE',
+    },
+  };
+}
+
 async function databaseNow(db: DbHandle): Promise<Date> {
   const rows = await db.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
   const value = rows[0]?.dbNow;
@@ -168,6 +236,7 @@ export async function runFormalXWorker(
   dependencies?: Readonly<{
     flags?: ContentRuntimeFlags;
     executor?: GrokBuildExecutorLike;
+    tikhubExecutor?: TikHubXTimelineExecutorLike;
     xBudgetPolicy?: XBudgetPolicy;
     db?: DbHandle;
   }>,
@@ -185,6 +254,7 @@ export async function runFormalXWorker(
   let releaseProbeBudget: (() => Promise<void>) | null = null;
   let identityExecution: GrokBuildExecutionResult | null = null;
   let scanExecution: GrokBuildExecutionResult | null = null;
+  let tikhubExecution: TikHubXTimelineExecutionResult | null = null;
   let activeRun: Awaited<ReturnType<typeof beginFormalRun>> | null = null;
   let scanAccounting: Readonly<{
     returned: number;
@@ -289,9 +359,39 @@ export async function runFormalXWorker(
       });
       probeReservationIds = null;
     };
-    const executor = dependencies?.executor;
-    if (!executor) throw new Error('Host Grok runner executor is not configured');
+    const reserveAdditionalXCallBudget = async (callIndex: number): Promise<void> => {
+      // The recurring scheduler already reserved the first provider call.
+      if (callIndex === 0) return;
+      if (!dependencies?.xBudgetPolicy) {
+        throw new TikHubXTimelineError(
+          'TIKHUB_BUDGET_UNAVAILABLE',
+          'TikHub pagination requires an explicit X budget policy',
+        );
+      }
+      const budget = await db.transaction(async (tx) => {
+        const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+        const dbNow = new Date(clockRows[0]?.dbNow ?? Number.NaN);
+        if (!Number.isFinite(dbNow.getTime())) throw new Error('Database clock is invalid');
+        return reserveXRunBudgets({
+          tx,
+          runId: job.runId,
+          phase: run.request.phase,
+          lane: budgetLane,
+          dbNow,
+          policy: dependencies.xBudgetPolicy!,
+          units: 1,
+        });
+      });
+      if (!budget.reserved) {
+        throw new TikHubXTimelineError(
+          'TIKHUB_BUDGET_UNAVAILABLE',
+          `TikHub pagination budget is unavailable (${budget.deferredScope ?? 'unknown scope'})`,
+        );
+      }
+    };
     if (run.request.jobKind === 'X_IDENTITY') {
+      const executor = dependencies?.executor;
+      if (!executor) throw new Error('Host Grok runner executor is not configured');
       const execution = await executor.execute(run.request.toolRequest, executionHooks);
       identityExecution = execution;
       const identity = await persistXIdentityResult({
@@ -321,31 +421,144 @@ export async function runFormalXWorker(
     ) {
       throw new Error('Persisted X scan job and tool request do not agree');
     }
-    const execution = await executor.execute(scanRequest.toolRequest, executionHooks);
-    scanExecution = execution;
-    const checkedAt = await databaseNow(db);
-    const semanticAuthors =
-      scanRequest.jobKind === 'X_SEMANTIC_SCAN'
-        ? await resolveSemanticXAuthors({
-            posts: prevalidateGrokBuildPostsForAuthorResolution({
-              request: scanRequest,
-              execution,
-            }),
-            db,
+    const providerTraceStart = run.providerTraceSequence;
+    let semanticAuthors: Awaited<ReturnType<typeof resolveSemanticXAuthors>> | null = null;
+    let adapted: ReturnType<typeof adaptGrokBuildPosts>;
+    let providerTraces: Array<{
+      sequence: number;
+      provider: string;
+      operation: string;
+      requestMetadataHash: string;
+      responseMetadataHash: string | null;
+      providerJobIdHash: string | null;
+      providerUnits: number;
+      terminalState: string;
+    }>;
+    let providerResult: { provider: string; providerUnits: number };
+    let providerRunMetrics: Readonly<Record<string, unknown>>;
+    if (scanRequest.providerRoute === 'TIKHUB_TIMELINE') {
+      const tikhubExecutor = dependencies?.tikhubExecutor;
+      if (!tikhubExecutor) {
+        throw new TikHubXTimelineError(
+          'TIKHUB_DISABLED',
+          'TikHub timeline executor is not configured',
+        );
+      }
+      const execution = await tikhubExecutor.execute(scanRequest, {
+        beforeProviderCall: reserveAdditionalXCallBudget,
+        onProviderCallStart: () => {
+          providerProcessStarted = true;
+        },
+      });
+      tikhubExecution = execution;
+      const checkedAt = await databaseNow(db);
+      adapted = adaptTikHubTimelinePosts({ request: scanRequest, execution, checkedAt });
+      providerTraces = [
+        {
+          sequence: providerTraceStart,
+          provider: 'tikhub',
+          operation: execution.operation,
+          requestMetadataHash: execution.requestMetadataHash,
+          responseMetadataHash: execution.responseMetadataHash,
+          providerJobIdHash: execution.providerJobIdHash,
+          providerUnits: execution.providerUnits,
+          terminalState: 'HTTP_VALIDATED',
+        },
+      ];
+      providerResult = {
+        provider: 'tikhub',
+        providerUnits: run.providerUnits + execution.providerUnits,
+      };
+      providerRunMetrics = {
+        durationMs: Math.round(execution.durationMs),
+        providerRoute: scanRequest.providerRoute,
+        providerCalls: execution.providerUnits,
+        responseBytes: execution.responseBytes,
+        rawReturned: execution.rawReturnedCount,
+        excludedRetweets: execution.excludedRetweets,
+        excludedOutsideWindow: execution.excludedOutsideWindow,
+        duplicatePosts: execution.duplicatePosts,
+        estimatedCostUsd: execution.estimatedCostUsd,
+        pricingRevision: execution.pricingRevision,
+        memberMetrics: execution.memberMetrics,
+      };
+    } else {
+      const executor = dependencies?.executor;
+      if (!executor) throw new Error('Host Grok runner executor is not configured');
+      const execution = await executor.execute(scanRequest.toolRequest, executionHooks);
+      scanExecution = execution;
+      const checkedAt = await databaseNow(db);
+      semanticAuthors =
+        scanRequest.jobKind === 'X_SEMANTIC_SCAN'
+          ? await resolveSemanticXAuthors({
+              posts: prevalidateGrokBuildPostsForAuthorResolution({
+                request: scanRequest,
+                execution,
+              }),
+              db,
+            })
+          : null;
+      adapted = semanticAuthors
+        ? adaptGrokBuildSemanticPosts({
+            request: scanRequest,
+            execution,
+            checkedAt,
+            authors: semanticAuthors,
           })
-        : null;
-    const adapted = semanticAuthors
-      ? adaptGrokBuildSemanticPosts({
-          request: scanRequest,
-          execution,
-          checkedAt,
-          authors: semanticAuthors,
-        })
-      : adaptGrokBuildPosts({
-          request: scanRequest,
-          execution,
-          checkedAt,
-        });
+        : adaptGrokBuildPosts({
+            request: scanRequest,
+            execution,
+            checkedAt,
+          });
+      providerTraces = [
+        ...(probeProcessStarted
+          ? [
+              {
+                sequence: providerTraceStart,
+                provider: 'grok-build',
+                operation: 'x_user_search',
+                requestMetadataHash: HOST_X_PROBE_REQUEST_METADATA_HASH,
+                responseMetadataHash: null,
+                providerJobIdHash: null,
+                providerUnits: 1,
+                terminalState: 'CONTROL_PLANE_PROBE',
+              },
+            ]
+          : []),
+        {
+          sequence: providerTraceStart + (probeProcessStarted ? 1 : 0),
+          provider: 'grok-build',
+          operation: execution.toolName,
+          requestMetadataHash: execution.requestMetadataHash,
+          responseMetadataHash: execution.responseMetadataHash,
+          providerJobIdHash: execution.toolCallIdHash,
+          providerUnits: 1,
+          terminalState: 'ATTESTED_FINAL',
+        },
+      ];
+      providerResult = {
+        provider: 'grok-build',
+        providerUnits: run.providerUnits + 1 + (probeProcessStarted ? 1 : 0),
+      };
+      providerRunMetrics = {
+        durationMs: Math.round(execution.durationMs),
+        eventCount: execution.eventCount,
+        inputTokens: execution.inputTokens,
+        outputTokens: execution.outputTokens,
+        totalCostUsd: execution.totalCostUsd,
+        executionLocation: execution.executionLocation,
+        runnerReleaseSha: execution.runnerReleaseSha,
+        grokVersion: execution.grokVersion,
+        runnerBinaryHash: execution.runnerBinaryHash,
+        probeCallCount: probeProcessStarted ? 1 : 0,
+        rawPostEvidenceAvailable: execution.rawPostEvidenceAvailable,
+        traceHash: execution.traceHash,
+        outputContractRevision: execution.outputContractRevision,
+        ignoredOutputKeyCount: execution.ignoredOutputKeyCount,
+        ignoredOutputKeysHash: execution.ignoredOutputKeysHash,
+        providerRoute: scanRequest.providerRoute,
+      };
+    }
     scanAccounting = {
       returned: adapted.returnedCount,
       accepted: adapted.acceptedCount,
@@ -371,7 +584,18 @@ export async function runFormalXWorker(
     const hasEarlierWindow =
       earlierWindowEnd !== null &&
       earlierWindowEnd.getTime() >= Date.parse(scanRequest.windowStart);
-    if (adapted.saturated && scanRequest.jobKind === 'X_SEMANTIC_SCAN') {
+    if (adapted.saturated && scanRequest.providerRoute === 'TIKHUB_TIMELINE') {
+      state = 'GAP';
+      acquisitionGap = {
+        windowStart: scanRequest.windowStart,
+        windowEnd: scanRequest.windowEnd,
+        reason: 'TIKHUB_TIMELINE_PAGE_CAP',
+        detailsHash: sha256CanonicalJson({
+          providerUnits: tikhubExecution?.providerUnits ?? 0,
+          memberMetrics: [...(tikhubExecution?.memberMetrics ?? [])],
+        }),
+      };
+    } else if (adapted.saturated && scanRequest.jobKind === 'X_SEMANTIC_SCAN') {
       acquisitionGap = {
         windowStart: scanRequest.windowStart,
         windowEnd: scanRequest.windowEnd,
@@ -396,6 +620,7 @@ export async function runFormalXWorker(
     }
     const followUpCandidate =
       adapted.saturated &&
+      scanRequest.providerRoute === 'GROK_BUILD' &&
       scanRequest.jobKind === 'X_KEYWORD_SCAN' &&
       !run.parentRunId &&
       hasEarlierWindow
@@ -422,9 +647,11 @@ export async function runFormalXWorker(
     if (!X_ACQUISITION_LANES.includes(profile.lane as XAcquisitionLane)) {
       throw new Error('Persisted X profile has no valid budget lane');
     }
-    const checkpointComplete = run.scheduleId !== null && state !== 'PARTIAL' && state !== 'GAP';
-    const providerTraceStart = run.providerTraceSequence;
-    const totalProviderUnits = run.providerUnits + 1 + (probeProcessStarted ? 1 : 0);
+    const checkpointComplete =
+      run.scheduleId !== null &&
+      state !== 'PARTIAL' &&
+      (state !== 'GAP' || scanRequest.providerRoute === 'TIKHUB_TIMELINE');
+    const completedAt = await databaseNow(db);
     const persisted = await persistAcquisitionResult({
       runId: job.runId,
       state,
@@ -441,7 +668,7 @@ export async function runFormalXWorker(
       checkpointComplete,
       checkpoint: checkpointComplete
         ? {
-            checkedAt: checkedAt.toISOString(),
+            checkedAt: completedAt.toISOString(),
             windowEnd: scanRequest.windowEnd,
             newestPostId: adapted.newestPostId,
           }
@@ -450,8 +677,8 @@ export async function runFormalXWorker(
         run.scheduleId === null
           ? undefined
           : scanRequest.coverageMode === 'BACKSTOP'
-            ? nextBackstopDueAt(checkedAt, run.scheduleKey ?? run.scheduleId)
-            : new Date(checkedAt.getTime() + profile.cadenceMinutes[run.request.phase] * 60_000),
+            ? nextBackstopDueAt(completedAt, run.scheduleKey ?? run.scheduleId)
+            : new Date(completedAt.getTime() + profile.cadenceMinutes[run.request.phase] * 60_000),
       triggeredJobs: followUpRequest
         ? [
             {
@@ -469,56 +696,14 @@ export async function runFormalXWorker(
             }
           : undefined,
       acquisitionGap,
-      providerTraces: [
-        ...(probeProcessStarted
-          ? [
-              {
-                sequence: providerTraceStart,
-                provider: 'grok-build',
-                operation: 'x_user_search',
-                requestMetadataHash: HOST_X_PROBE_REQUEST_METADATA_HASH,
-                responseMetadataHash: null,
-                providerJobIdHash: null,
-                providerUnits: 1,
-                terminalState: 'CONTROL_PLANE_PROBE',
-              },
-            ]
-          : []),
-        {
-          sequence: providerTraceStart + (probeProcessStarted ? 1 : 0),
-          provider: 'grok-build',
-          operation: execution.toolName,
-          requestMetadataHash: execution.requestMetadataHash,
-          responseMetadataHash: execution.responseMetadataHash,
-          providerJobIdHash: execution.toolCallIdHash,
-          providerUnits: 1,
-          terminalState: 'ATTESTED_FINAL',
-        },
-      ],
-      providerResult: {
-        provider: 'grok-build',
-        providerUnits: totalProviderUnits,
-      },
+      providerTraces,
+      providerResult,
       runMetrics: {
-        durationMs: Math.round(execution.durationMs),
-        eventCount: execution.eventCount,
-        inputTokens: execution.inputTokens,
-        outputTokens: execution.outputTokens,
-        totalCostUsd: execution.totalCostUsd,
-        executionLocation: execution.executionLocation,
-        runnerReleaseSha: execution.runnerReleaseSha,
-        grokVersion: execution.grokVersion,
-        runnerBinaryHash: execution.runnerBinaryHash,
+        ...providerRunMetrics,
         returned: adapted.returnedCount,
         accepted: adapted.acceptedCount,
         rejected: adapted.rejections.length,
         saturated: adapted.saturated,
-        probeCallCount: probeProcessStarted ? 1 : 0,
-        rawPostEvidenceAvailable: execution.rawPostEvidenceAvailable,
-        traceHash: execution.traceHash,
-        outputContractRevision: execution.outputContractRevision,
-        ignoredOutputKeyCount: execution.ignoredOutputKeyCount,
-        ignoredOutputKeysHash: execution.ignoredOutputKeysHash,
       },
       db,
     });
@@ -599,42 +784,54 @@ export async function runFormalXWorker(
           outputContractFailure: ['GROK_FINAL_INVALID', 'GROK_FINAL_SCHEMA_INVALID'].includes(
             failure.failureClass,
           ),
-          providerEvidence: scanExecution
-            ? {
-                provider: 'grok-build',
-                operation: scanExecution.toolName,
-                requestMetadataHash: scanExecution.requestMetadataHash,
-                responseMetadataHash: scanExecution.responseMetadataHash,
-                providerJobIdHash: scanExecution.toolCallIdHash,
-                providerUnits: 1,
-                terminalState:
-                  failure.failureClass === 'X_ALL_POSTS_REJECTED'
-                    ? 'ATTESTED_ALL_POSTS_REJECTED'
-                    : 'ATTESTED_PROCESSING_FAILED',
-                runMetrics: {
-                  durationMs: Math.round(scanExecution.durationMs),
-                  eventCount: scanExecution.eventCount,
-                  inputTokens: scanExecution.inputTokens,
-                  outputTokens: scanExecution.outputTokens,
-                  totalCostUsd: scanExecution.totalCostUsd,
-                  executionLocation: scanExecution.executionLocation,
-                  runnerReleaseSha: scanExecution.runnerReleaseSha,
-                  grokVersion: scanExecution.grokVersion,
-                  runnerBinaryHash: scanExecution.runnerBinaryHash,
-                  returned: scanExecution.posts.length,
-                  ...(scanAccounting ?? {}),
-                  rejected: rejections?.length ?? scanAccounting?.rejected ?? 0,
-                  probeCallCount: probeProcessStarted ? 1 : 0,
-                  rawPostEvidenceAvailable: scanExecution.rawPostEvidenceAvailable,
-                  traceHash: scanExecution.traceHash,
-                },
-              }
-            : failure.evidence &&
-                activeRun &&
-                activeRun.request.jobKind !== 'X_IDENTITY' &&
-                'toolRequest' in activeRun.request
-              ? failureProviderEvidence(activeRun.request.toolRequest, failure.evidence)
-              : undefined,
+          providerEvidence: tikhubExecution
+            ? tikhubExecutionProviderEvidence(
+                tikhubExecution,
+                failure.failureClass === 'X_ALL_POSTS_REJECTED'
+                  ? 'HTTP_ALL_POSTS_REJECTED'
+                  : 'HTTP_PROCESSING_FAILED',
+              )
+            : scanExecution
+              ? {
+                  provider: 'grok-build',
+                  operation: scanExecution.toolName,
+                  requestMetadataHash: scanExecution.requestMetadataHash,
+                  responseMetadataHash: scanExecution.responseMetadataHash,
+                  providerJobIdHash: scanExecution.toolCallIdHash,
+                  providerUnits: 1,
+                  terminalState:
+                    failure.failureClass === 'X_ALL_POSTS_REJECTED'
+                      ? 'ATTESTED_ALL_POSTS_REJECTED'
+                      : 'ATTESTED_PROCESSING_FAILED',
+                  runMetrics: {
+                    durationMs: Math.round(scanExecution.durationMs),
+                    eventCount: scanExecution.eventCount,
+                    inputTokens: scanExecution.inputTokens,
+                    outputTokens: scanExecution.outputTokens,
+                    totalCostUsd: scanExecution.totalCostUsd,
+                    executionLocation: scanExecution.executionLocation,
+                    runnerReleaseSha: scanExecution.runnerReleaseSha,
+                    grokVersion: scanExecution.grokVersion,
+                    runnerBinaryHash: scanExecution.runnerBinaryHash,
+                    returned: scanExecution.posts.length,
+                    ...(scanAccounting ?? {}),
+                    rejected: rejections?.length ?? scanAccounting?.rejected ?? 0,
+                    probeCallCount: probeProcessStarted ? 1 : 0,
+                    rawPostEvidenceAvailable: scanExecution.rawPostEvidenceAvailable,
+                    traceHash: scanExecution.traceHash,
+                  },
+                }
+              : failure.evidence &&
+                  activeRun &&
+                  activeRun.request.jobKind !== 'X_IDENTITY' &&
+                  'toolRequest' in activeRun.request
+                ? 'provider' in failure.evidence && failure.evidence.provider === 'tikhub'
+                  ? tikhubFailureProviderEvidence(failure.evidence, failure.failureClass)
+                  : failureProviderEvidence(
+                      activeRun.request.toolRequest,
+                      failure.evidence as GrokBuildFailureEvidence,
+                    )
+                : undefined,
           rejections,
           providerProcessStarted: mainProviderProcessStarted,
           probeEvidence,

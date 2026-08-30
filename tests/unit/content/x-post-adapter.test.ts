@@ -14,6 +14,7 @@ const request: XScanRunRequestV1 = {
   schemaVersion: 1,
   jobKind: 'X_KEYWORD_SCAN',
   adapterKind: 'X_ACCOUNT',
+  providerRoute: 'GROK_BUILD',
   coverageMode: 'PRIMARY',
   phase: 'NORMAL',
   profileKey: 'x-official-core-v1',
