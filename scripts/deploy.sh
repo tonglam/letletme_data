@@ -427,7 +427,8 @@ deploy() {
     -e "DATABASE_URL=${migration_database_url}" api \
     bun run verify:live-points-v2 -- \
     --season "$LIVE_POINTS_V2_SEED_SEASON" \
-    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
+    --all-finalized; then
     log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
     exit 1
   fi

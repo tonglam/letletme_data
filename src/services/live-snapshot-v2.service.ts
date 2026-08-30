@@ -222,20 +222,40 @@ export async function syncLiveSnapshotV2(
   const sourceCheckedAt = new Date();
   const state = publicationState(prepared, options.finalizeEvent === true);
   // Redis is the serving authority, but a rebuilt Redis sequence must not be
-  // allowed to fence an older durable checkpoint forever. A provisional Redis
-  // publication must also compare against the durable floor: a finalized DB
-  // checkpoint is an immutable boundary even if Redis still contains a
-  // checkpointed provisional pointer from before finalization.
-  const durableFloor =
-    current === null ||
-    current.servedFrom === 'REDIS_PREVIOUS' ||
-    current.publication.checkpointedAt === null ||
-    current.publication.state !== 'FINALIZED'
-      ? await (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
-          season,
-          eventId,
-        ).catch(() => null)
-      : null;
+  // allowed to fence an older durable checkpoint forever. Read the durable
+  // row on every sync so a conflicting Redis FINAL can be detected and
+  // repaired; if that proof is temporarily unavailable, retain a FINAL Redis
+  // publication instead of allocating a newer provisional generation above it.
+  let durableFloor: LivePublicationRead | null = null;
+  let durableReadFailed = false;
+  try {
+    durableFloor = await (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
+      season,
+      eventId,
+    );
+  } catch (error) {
+    durableReadFailed = true;
+    logError('Live Points V2 durable checkpoint read failed', error, {
+      season: season.seasonCode,
+      eventId,
+    });
+  }
+  if (current?.publication.state === 'FINALIZED' && (durableReadFailed || !durableFloor)) {
+    return {
+      eventId,
+      changed: false,
+      stale: true,
+      published: false,
+      generation: current.publication.generation,
+      publicationId: current.publication.publicationId,
+      sourceCheckedAt: current.publication.sourceCheckedAt,
+      state: 'FINALIZED',
+      eventLiveCount: current.eventLives.length,
+      fixtureCount: current.fixtures.length,
+      checkpointScheduled: false,
+      checkpointed: current.publication.checkpointedAt !== null,
+    };
+  }
   const generationFloor = Math.max(
     current?.publication.generation ?? 0,
     durableFloor?.publication.generation ?? 0,
