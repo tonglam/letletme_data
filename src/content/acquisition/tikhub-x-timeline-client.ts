@@ -59,11 +59,17 @@ export type TikHubXTimelineFetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+export type TikHubXProviderCallAdmission = Readonly<{
+  releaseIfUnused: () => Promise<void> | void;
+}>;
+
 export type TikHubXExecutionHooks = Readonly<{
   /** Local-clock deadline derived from the persisted PostgreSQL run lease. */
   runDeadlineAtMs?: number;
-  beforeProviderCall?: (callIndex: number) => Promise<void> | void;
-  onProviderCallStart?: (callIndex: number) => Promise<void> | void;
+  beforeProviderCall?: (
+    callIndex: number,
+  ) => Promise<TikHubXProviderCallAdmission | void> | TikHubXProviderCallAdmission | void;
+  onProviderCallStart?: (callIndex: number) => void;
 }>;
 
 export type TikHubXMemberMetrics = Readonly<{
@@ -420,15 +426,6 @@ export class TikHubXTimelineClient {
               'TikHub timeline run exceeded its bounded execution time',
             );
           }
-          const callIndex = attempt.providerUnits;
-          await hooks.beforeProviderCall?.(callIndex);
-          const remainingRunMs = runDeadlineAt - Date.now();
-          if (remainingRunMs <= 0) {
-            throw new TikHubXTimelineError(
-              'TIKHUB_RUN_TIMEOUT',
-              'TikHub timeline run exceeded its bounded execution time',
-            );
-          }
           const url = new URL(this.endpointUrl);
           url.searchParams.set(identity.key, identity.value);
           if (cursor) url.searchParams.set('cursor', cursor);
@@ -439,9 +436,25 @@ export class TikHubXTimelineClient {
             identityHash: createHash('sha256').update(identity.value, 'utf8').digest('hex'),
             cursorHash: cursor ? createHash('sha256').update(cursor, 'utf8').digest('hex') : null,
           };
-          attempt.requestHashes.push(sha256CanonicalJson(requestMetadata));
+          const requestMetadataHash = sha256CanonicalJson(requestMetadata);
+          const callIndex = attempt.providerUnits;
+          const admission = await hooks.beforeProviderCall?.(callIndex);
+          const remainingRunMs = runDeadlineAt - Date.now();
+          if (remainingRunMs <= 0) {
+            await admission?.releaseIfUnused();
+            throw new TikHubXTimelineError(
+              'TIKHUB_RUN_TIMEOUT',
+              'TikHub timeline run exceeded its bounded execution time',
+            );
+          }
+          attempt.requestHashes.push(requestMetadataHash);
+          try {
+            hooks.onProviderCallStart?.(callIndex);
+          } catch (error) {
+            await admission?.releaseIfUnused();
+            throw error;
+          }
           attempt.providerUnits += 1;
-          await hooks.onProviderCallStart?.(callIndex);
           const controller = new AbortController();
           const runDeadlineLimitsCall = remainingRunMs <= this.timeoutMs;
           const timeoutFailure = runDeadlineLimitsCall

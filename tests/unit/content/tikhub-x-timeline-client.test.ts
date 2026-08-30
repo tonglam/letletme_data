@@ -547,4 +547,64 @@ describe('TikHub fixed-account timeline client', () => {
       expect(Date.now() - startedAt).toBeLessThan(2_500);
     }
   });
+
+  test('releases pagination admission when budget work consumes the run deadline', async () => {
+    let fetchCalls = 0;
+    let releasedAdmissions = 0;
+    const startedCalls: number[] = [];
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 5_000,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 2,
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return response({
+          code: 200,
+          request_id: 'first-page-before-deadline',
+          data: {
+            user: { rest_id: '123456789', screen_name: 'FPLFocal' },
+            next_cursor: 'page-2',
+            timeline: [],
+          },
+        });
+      },
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    try {
+      await client.execute(
+        {
+          ...request,
+          partition: { ...request.partition, members: [request.partition.members[0]!] },
+        },
+        {
+          runDeadlineAtMs: Date.now() + 200,
+          beforeProviderCall: async (index) => {
+            if (index === 0) return;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            return {
+              releaseIfUnused: () => {
+                releasedAdmissions += 1;
+              },
+            };
+          },
+          onProviderCallStart: (index) => {
+            startedCalls.push(index);
+          },
+        },
+      );
+      throw new Error('Expected TikHub run timeout before provider dispatch');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_RUN_TIMEOUT',
+        evidence: { providerUnits: 1 },
+      });
+    }
+
+    expect(fetchCalls).toBe(1);
+    expect(startedCalls).toEqual([0]);
+    expect(releasedAdmissions).toBe(1);
+  });
 });
