@@ -328,7 +328,7 @@ async function buildPointsPayload(
              WHERE previous.season_id = roster.season_id
                AND previous.tournament_id = roster.tournament_id
                AND previous.entry_id = roster.entry_id
-               AND previous.event_id = ${Math.max(1, event.event_id - 1)}
+               AND previous.event_id = ${event.event_id - 1}
              LIMIT 1
            ) AS previous_group_rank,
            (
@@ -604,6 +604,7 @@ async function buildH2HPayload(
   requireFreshEntryScores(eligible, eventDataCheckedAt, 'H2H');
   const covered = new Set<number>();
   const seenCurrentEntries = new Set<number>();
+  const entryGroupIds = new Map<number, number>();
   const currentEligibleIds = new Set(eligible.map((row) => row.entry_id));
   let currentAverageSides = 0;
   const sourceTimes: Array<Date | string | null> = eligible.map((row) => row.rich_synced_at);
@@ -644,6 +645,11 @@ async function buildH2HPayload(
           'H2H match participant is outside the roster',
         );
       }
+      const existingGroupId = entryGroupIds.get(entryId);
+      if (existingGroupId !== undefined && existingGroupId !== match.group_id) {
+        throw new TournamentReviewSourceNotReadyError('H2H entry changed groups');
+      }
+      entryGroupIds.set(entryId, match.group_id);
       seenCurrentEntries.add(entryId);
     }
     if (
@@ -784,6 +790,11 @@ async function buildH2HPayload(
             'H2H history participant coverage is invalid',
           );
         }
+        const existingGroupId = entryGroupIds.get(entryId);
+        if (existingGroupId !== undefined && existingGroupId !== match.group_id) {
+          throw new TournamentReviewSourceNotReadyError('H2H history entry changed groups');
+        }
+        entryGroupIds.set(entryId, match.group_id);
         seenEntries.add(entryId);
       }
     }
@@ -797,25 +808,26 @@ async function buildH2HPayload(
       );
     }
   }
-  const standings = new Map<
-    number,
-    {
-      entryId: number;
-      entryName: string;
-      played: number;
-      won: number;
-      drawn: number;
-      lost: number;
-      matchPoints: number;
-      pointsFor: number;
-      pointsAgainst: number;
-    }
-  >();
-  const ensureStanding = (entryId: number) => {
-    const existing = standings.get(entryId);
+  type H2HStanding = {
+    groupId: number;
+    entryId: number;
+    entryName: string;
+    played: number;
+    won: number;
+    drawn: number;
+    lost: number;
+    matchPoints: number;
+    pointsFor: number;
+    pointsAgainst: number;
+  };
+  const standingsByGroup = new Map<number, Map<number, H2HStanding>>();
+  const ensureStanding = (groupId: number, entryId: number) => {
+    const groupStandings = standingsByGroup.get(groupId) ?? new Map<number, H2HStanding>();
+    const existing = groupStandings.get(entryId);
     if (existing) return existing;
     const score = scores.get(entryId);
     const value = {
+      groupId,
       entryId,
       entryName: score?.entry_name ?? `Entry ${entryId}`,
       played: 0,
@@ -826,10 +838,11 @@ async function buildH2HPayload(
       pointsFor: 0,
       pointsAgainst: 0,
     };
-    standings.set(entryId, value);
+    groupStandings.set(entryId, value);
+    standingsByGroup.set(groupId, groupStandings);
     return value;
   };
-  for (const score of eligible) ensureStanding(score.entry_id);
+  for (const [entryId, groupId] of entryGroupIds) ensureStanding(groupId, entryId);
   for (const match of history) {
     const historyCheckpoint = asDate(match.event_data_checked_at);
     if (!historyCheckpoint || match.event_finished !== true || match.event_data_checked !== true) {
@@ -881,8 +894,10 @@ async function buildH2HPayload(
       throw new TournamentReviewSourceNotReadyError('H2H history score is incomplete');
     }
 
-    const home = match.home_entry_id === null ? null : ensureStanding(match.home_entry_id);
-    const away = match.away_entry_id === null ? null : ensureStanding(match.away_entry_id);
+    const home =
+      match.home_entry_id === null ? null : ensureStanding(match.group_id, match.home_entry_id);
+    const away =
+      match.away_entry_id === null ? null : ensureStanding(match.group_id, match.away_entry_id);
     if (home) {
       home.played += 1;
       home.pointsFor += match.home_net_points;
@@ -902,9 +917,18 @@ async function buildH2HPayload(
       else away.drawn += 1;
     }
   }
-  const standingRows = [...standings.values()]
-    .sort((left, right) => right.matchPoints - left.matchPoints || right.pointsFor - left.pointsFor)
-    .map((row, index) => ({ ...row, rank: index + 1 }));
+  const standingRows = [...standingsByGroup.entries()]
+    .sort(([leftGroupId], [rightGroupId]) => leftGroupId - rightGroupId)
+    .flatMap(([, groupStandings]) =>
+      [...groupStandings.values()]
+        .sort(
+          (left, right) =>
+            right.matchPoints - left.matchPoints ||
+            right.pointsFor - left.pointsFor ||
+            left.entryId - right.entryId,
+        )
+        .map((row, index) => ({ ...row, rank: index + 1 })),
+    );
   return {
     payload: {
       ...header,
