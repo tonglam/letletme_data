@@ -2186,11 +2186,15 @@ async function checkpointSeededLive(
   seed: ValidatedLiveSeed,
   publication: Awaited<ReturnType<typeof publishLivePublicationV2>>['publication'],
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
-  payload: Pick<
-    ValidatedLiveSeed,
-    'eventLives' | 'fixtures' | 'explains' | 'fixtureEvidence'
-  > = seed,
+  options: {
+    readonly payload?: Pick<
+      ValidatedLiveSeed,
+      'eventLives' | 'fixtures' | 'explains' | 'fixtureEvidence'
+    >;
+    readonly requireMissingCheckpoint?: boolean;
+  } = {},
 ): Promise<'checkpointed' | 'already-checkpointed' | 'blocked'> {
+  const payload = options.payload ?? seed;
   // Redis metadata is not durable proof.  A rebuilt Redis can retain a
   // checkpointedAt value after the PostgreSQL checkpoint row was lost, so
   // verify the durable identity before declaring an existing publication
@@ -2230,6 +2234,7 @@ async function checkpointSeededLive(
     explains: payload.explains,
     fixtureEvidence: payload.fixtureEvidence,
     observationCheckedAt: seed.observationCheckedAt,
+    requireMissingCheckpoint: options.requireMissingCheckpoint,
   });
   if (!checkpointed) {
     // A seed candidate may lose to a newer or FINALIZED durable head. Never
@@ -2290,6 +2295,7 @@ async function seedLivePublication(
         eventLives: seed.eventLives,
         fixtures: seed.fixtures,
         previous: current.publication,
+        expectedCurrent: current.publication,
         redis,
       });
       if (!promoted.published) {
@@ -2300,7 +2306,9 @@ async function seedLivePublication(
           publicationId: promoted.publication.publicationId,
         };
       }
-      const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis);
+      const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis, {
+        requireMissingCheckpoint: true,
+      });
       return {
         status: 'published',
         checkpoint,
@@ -2309,8 +2317,10 @@ async function seedLivePublication(
       };
     }
     const checkpoint = await checkpointSeededLive(seed, current.publication, redis, {
-      eventLives: current.eventLives,
-      fixtures: current.fixtures,
+      payload: {
+        eventLives: current.eventLives,
+        fixtures: current.fixtures,
+      },
     });
     return {
       status: 'skipped-existing',
@@ -2352,6 +2362,7 @@ async function seedLivePublication(
     eventLives: seed.eventLives,
     fixtures: seed.fixtures,
     previous: null,
+    expectedCurrent: null,
     redis,
   });
   if (!promoted.published) {
@@ -2362,7 +2373,9 @@ async function seedLivePublication(
       publicationId: promoted.publication.publicationId,
     };
   }
-  const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis);
+  const checkpoint = await checkpointSeededLive(seed, promoted.publication, redis, {
+    requireMissingCheckpoint: true,
+  });
   return {
     status: 'published',
     checkpoint,

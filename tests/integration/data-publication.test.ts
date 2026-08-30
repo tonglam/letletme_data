@@ -302,6 +302,42 @@ describe('immutable Redis publication', () => {
     );
   });
 
+  test('seed promotion rejects a current publication changed after its eligibility read', async () => {
+    const inspected = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const winner = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:30.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: inspected.publication,
+      redis,
+    });
+
+    await expect(
+      publishLivePublicationV2({
+        ...LIVE_SCOPE,
+        state: 'LIVE_ACTIVE',
+        sourceCheckedAt: new Date('2026-08-09T04:01:00.000Z'),
+        eventLives: [],
+        fixtures: [],
+        previous: inspected.publication,
+        expectedCurrent: inspected.publication,
+        redis,
+      }),
+    ).rejects.toMatchObject({ code: 'LIVE_V2_PROMOTE_CHANGED' });
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication.publicationId).toBe(
+      winner.publication.publicationId,
+    );
+  });
+
   test('rebuild-current restores a corrupted current item at the checkpoint generation', async () => {
     const published = await publishLivePublicationV2({
       ...LIVE_SCOPE,

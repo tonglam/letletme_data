@@ -42,6 +42,12 @@ export type LivePublicationV2CheckpointRequest = {
    * proves the facts were observed after the current relational authority.
    */
   readonly observationCheckedAt?: Date | string;
+  /**
+   * Seed recovery uses an absent durable head as part of its eligibility
+   * proof. Enforce that proof only after taking the scope advisory lock so a
+   * concurrent normal checkpoint cannot commit between the check and insert.
+   */
+  readonly requireMissingCheckpoint?: boolean;
 };
 
 const LIVE_PUBLICATION_STATES: readonly LivePublicationState[] = [
@@ -307,6 +313,9 @@ export async function checkpointLivePublicationV2(
         .for('update')
         .limit(1);
       const winner = existing[0];
+      if (request.requireMissingCheckpoint && winner) {
+        return false;
+      }
       if (
         winner &&
         winner.publicationId !== publication.publicationId &&

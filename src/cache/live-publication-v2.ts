@@ -1113,6 +1113,13 @@ export async function publishLivePublicationV2(input: {
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
   readonly previous?: LivePublicationV2 | null;
+  /**
+   * Optional caller-owned CAS base. Seed/recovery callers use this to bind a
+   * decision made from an earlier validated read to the exact active manifest
+   * observed by the promotion script. `null` means the active pointer must
+   * still be absent; `undefined` keeps the normal producer behavior.
+   */
+  readonly expectedCurrent?: LivePublicationV2 | null;
   readonly generationFloor?: number;
   readonly redis?: Redis;
 }): Promise<{
@@ -1158,6 +1165,20 @@ export async function publishLivePublicationV2(input: {
   };
   await stage(redis, [liveItem, fixtureItem]);
   const currentProof = await readLivePromotionProof(redis, scope);
+  if (input.expectedCurrent !== undefined) {
+    const observedCurrent = parseLiveManifest(currentProof.pointerRaw || null, scope);
+    const expectedCurrentMatches =
+      input.expectedCurrent === null
+        ? currentProof.pointerRaw === ''
+        : observedCurrent !== null &&
+          canonicalJson(observedCurrent) === canonicalJson(input.expectedCurrent);
+    if (!expectedCurrentMatches) {
+      throw new CacheError(
+        'V2 promotion no longer observes the expected current publication',
+        'LIVE_V2_PROMOTE_CHANGED',
+      );
+    }
+  }
   const [status, detail] = promotionResult(
     await redis.eval(
       PROMOTE_LIVE_SCRIPT,
