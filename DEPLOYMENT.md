@@ -112,8 +112,8 @@ docker compose run --rm -T migration bun run db:verify-runtime-logins
 ```
 
 `/health/live` proves process liveness. `/health/ready` is capability readiness for the hot path: it
-requires cache Redis and exactly one current `fpl.seasons` row, while PostgreSQL or queue-worker
-degradation does not remove an already-servable Redis publication. `/health/deploy` is the strict
+requires cache Redis and exactly one current `fpl.seasons` row, while PostgreSQL, queue Redis, or
+worker degradation does not remove an already-servable Redis publication. `/health/deploy` is the strict
 release gate and checks PostgreSQL, both Redis dependencies, the active season, runtime worker
 heartbeats, publication consistency, and configured screenshot retention. Publication integrity is
 verified independently by the deploy workflow and the season-readiness procedure in
