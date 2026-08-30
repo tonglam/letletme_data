@@ -337,6 +337,8 @@ export async function reclaimAbandonedLivePublicationV2SeedClaim(
             observedActiveSha256,
           ),
           sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
+          sql`${livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt} <= ${candidateSourceCheckedAt.toISOString()}::timestamptz`,
+          sql`(${livePointsPublicationSeedClaimsInCompetition.candidateState} <> 'FINALIZED' OR ${candidate.candidateState} = 'FINALIZED')`,
           or(
             ne(
               livePointsPublicationSeedClaimsInCompetition.candidateState,
