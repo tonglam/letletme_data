@@ -371,6 +371,15 @@ describe('immutable Redis publication', () => {
       generation: durableFinal.publication.generation,
       state: 'FINALIZED',
     });
+
+    // If the restored active payload is damaged, the rejected Redis FINAL
+    // must not reappear through the previous fallback pointer.
+    await redis.del(durableFinal.publication.items.eventLive.key);
+    const afterRestoreDamage = await readLivePublicationV2(LIVE_SCOPE, redis);
+    expect(afterRestoreDamage).toBeNull();
+    expect(afterRestoreDamage?.publication.publicationId).not.toBe(
+      conflictingFinal.publication.publicationId,
+    );
   });
 
   test('a finalized publication cannot be superseded by a provisional candidate, even if an item is corrupt', async () => {

@@ -613,15 +613,20 @@ for index, name in ipairs({'eventLive', 'fixtures'}) do
     if redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'wrong_stage_metadata', item.key} end
   end
 end
-if current then
-  if not same_identity then
-    redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
-    for _, name in ipairs({'eventLive', 'fixtures'}) do
-      local item = current.items[name]
-      if redis.call('EXISTS', item.key) == 1 then
-        redis.call('PEXPIRE', item.key, ARGV[2])
-        redis.call('PEXPIRE', item.key .. ':meta', ARGV[2])
-      end
+if restoring and candidate.state == 'FINALIZED' then
+  -- A durable FINAL is the canonical recovery boundary. Never retain the
+  -- rejected Redis FINAL as previous: if the restored active items are later
+  -- damaged, that pointer must not make the reader serve the rejected sibling.
+  -- Point previous at the same durable candidate so both fallback positions
+  -- remain coherent and use the candidate item keys.
+  redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+elseif current and not same_identity then
+  redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
+  for _, name in ipairs({'eventLive', 'fixtures'}) do
+    local item = current.items[name]
+    if redis.call('EXISTS', item.key) == 1 then
+      redis.call('PEXPIRE', item.key, ARGV[2])
+      redis.call('PEXPIRE', item.key .. ':meta', ARGV[2])
     end
   end
 end

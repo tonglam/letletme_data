@@ -199,48 +199,28 @@ export async function syncLiveSnapshotV2(
   if (!Number.isSafeInteger(eventId) || eventId <= 0)
     throw new Error(`Invalid live event ID: ${eventId}`);
   const dependencies = options.dependencies ?? defaultDependencies;
-  const [liveResponse, rawFixtures, expectedFixtureIds, referenceData, current] = await Promise.all(
-    [
-      dependencies.getEventLive(eventId),
-      dependencies.getFixtures(eventId),
-      dependencies.getExpectedFixtureIds(season, eventId),
-      dependencies.getReferenceData(season),
-      dependencies.readPublished(season.seasonCode, eventId),
-    ],
-  );
-  const prepared = prepareCoherentLiveSnapshot(
-    eventId,
-    liveResponse,
-    rawFixtures,
-    referenceData,
-    expectedFixtureIds,
-    current?.eventLives.map((row) => row.elementId),
-  );
-  // This timestamp is evidence that the coherent fetch and all completeness
-  // checks finished successfully.  Starting the clock before upstream work
-  // would make a slow/partially failed observation look fresher than it is.
-  const sourceCheckedAt = new Date();
-  const state = publicationState(prepared, options.finalizeEvent === true);
   // Redis is the serving authority, but a rebuilt Redis sequence must not be
-  // allowed to fence an older durable checkpoint forever. Read the durable
-  // row on every sync so a conflicting Redis FINAL can be detected and
-  // repaired; if that proof is temporarily unavailable, retain a FINAL Redis
-  // publication instead of allocating a newer provisional generation above it.
-  let durableFloor: LivePublicationRead | null = null;
-  let durableReadFailed = false;
-  try {
-    durableFloor = await (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
-      season,
-      eventId,
-    );
-  } catch (error) {
-    durableReadFailed = true;
-    logError('Live Points V2 durable checkpoint read failed', error, {
-      season: season.seasonCode,
-      eventId,
+  // allowed to fence an older durable checkpoint forever. Read Redis and the
+  // durable row before touching FPL so a recovered FINAL can be restored even
+  // while the provider or reference data is unavailable.
+  const durableReadPromise = (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
+    season,
+    eventId,
+  )
+    .then((value) => ({ value, failed: false as const }))
+    .catch((error) => {
+      logError('Live Points V2 durable checkpoint read failed', error, {
+        season: season.seasonCode,
+        eventId,
+      });
+      return { value: null, failed: true as const };
     });
-  }
-  if (current?.publication.state === 'FINALIZED' && (durableReadFailed || !durableFloor)) {
+  const [current, durableRead] = await Promise.all([
+    dependencies.readPublished(season.seasonCode, eventId),
+    durableReadPromise,
+  ]);
+  const durableFloor = durableRead.value;
+  if (current?.publication.state === 'FINALIZED' && (durableRead.failed || !durableFloor)) {
     return {
       eventId,
       changed: false,
@@ -256,32 +236,19 @@ export async function syncLiveSnapshotV2(
       checkpointed: current.publication.checkpointedAt !== null,
     };
   }
-  const generationFloor = Math.max(
-    current?.publication.generation ?? 0,
-    durableFloor?.publication.generation ?? 0,
-  );
-  const durableGenerationConflict = Boolean(
-    current &&
-      durableFloor &&
-      (durableFloor.publication.generation > current.publication.generation ||
-        (durableFloor.publication.generation === current.publication.generation &&
-          durableFloor.publication.publicationId !== current.publication.publicationId)),
-  );
-  const durableFinalNeedsRestore = Boolean(
+  if (
     durableFloor?.publication.state === 'FINALIZED' &&
-      !(
-        current?.servedFrom === 'REDIS_CURRENT' &&
-        current.publication.publicationId === durableFloor.publication.publicationId &&
-        current.publication.generation === durableFloor.publication.generation
-      ),
-  );
-  if (durableFinalNeedsRestore) {
-    // FINALIZED is an immutable durable boundary. If Redis lost its active
-    // pointer (or only retained an older previous pointer), restore that exact
-    // checkpoint before considering the newly fetched provisional candidate;
+    !(
+      current?.servedFrom === 'REDIS_CURRENT' &&
+      current.publication.publicationId === durableFloor.publication.publicationId &&
+      current.publication.generation === durableFloor.publication.generation
+    )
+  ) {
+    // FINALIZED is an immutable durable boundary. Restore that exact
+    // checkpoint before considering any newly fetched provisional candidate;
     // otherwise a fresh generation could supersede final data.
     const restored = await restoreLivePublicationV2Checkpoint({
-      checkpoint: durableFloor!,
+      checkpoint: durableFloor,
     });
     // A stale response is not proof that the durable FINAL is serving. Even
     // an equal identity must be rejected here: the active pointer or its
@@ -289,7 +256,7 @@ export async function syncLiveSnapshotV2(
     // the next sync retrying the same ineffective restore forever.
     if (!restored.published) {
       throw new CacheError(
-        `Live Points V2 durable FINAL restore did not publish ${durableFloor!.publication.publicationId} for ${season.seasonCode}:${eventId}`,
+        `Live Points V2 durable FINAL restore did not publish ${durableFloor.publication.publicationId} for ${season.seasonCode}:${eventId}`,
         'LIVE_V2_CHECKPOINT_RESTORE_FAILED',
       );
     }
@@ -310,12 +277,43 @@ export async function syncLiveSnapshotV2(
       publicationId: restored.publication.publicationId,
       sourceCheckedAt: restored.publication.sourceCheckedAt,
       state: 'FINALIZED',
-      eventLiveCount: durableFloor!.eventLives.length,
-      fixtureCount: durableFloor!.fixtures.length,
+      eventLiveCount: durableFloor.eventLives.length,
+      fixtureCount: durableFloor.fixtures.length,
       checkpointScheduled: false,
       checkpointed: true,
     };
   }
+
+  const [liveResponse, rawFixtures, expectedFixtureIds, referenceData] = await Promise.all([
+    dependencies.getEventLive(eventId),
+    dependencies.getFixtures(eventId),
+    dependencies.getExpectedFixtureIds(season, eventId),
+    dependencies.getReferenceData(season),
+  ]);
+  const prepared = prepareCoherentLiveSnapshot(
+    eventId,
+    liveResponse,
+    rawFixtures,
+    referenceData,
+    expectedFixtureIds,
+    current?.eventLives.map((row) => row.elementId),
+  );
+  // This timestamp is evidence that the coherent fetch and all completeness
+  // checks finished successfully. Starting the clock before upstream work
+  // would make a slow/partially failed observation look fresher than it is.
+  const sourceCheckedAt = new Date();
+  const state = publicationState(prepared, options.finalizeEvent === true);
+  const generationFloor = Math.max(
+    current?.publication.generation ?? 0,
+    durableFloor?.publication.generation ?? 0,
+  );
+  const durableGenerationConflict = Boolean(
+    current &&
+      durableFloor &&
+      (durableFloor.publication.generation > current.publication.generation ||
+        (durableFloor.publication.generation === current.publication.generation &&
+          durableFloor.publication.publicationId !== current.publication.publicationId)),
+  );
   if (
     samePayload(current, prepared, state) &&
     current?.servedFrom === 'REDIS_CURRENT' &&

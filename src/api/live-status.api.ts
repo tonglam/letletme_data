@@ -49,9 +49,15 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       })(),
     ]);
     const cachedPublication = redisRead.value;
-    const checkpointRead = cachedPublication
-      ? null
-      : await readLivePublicationV2Checkpoint(season, event.id).catch(() => null);
+    const checkpointProbe = cachedPublication
+      ? { value: null, error: null }
+      : await readLivePublicationV2Checkpoint(season, event.id)
+          .then((value) => ({ value, error: null }))
+          .catch((error) => ({
+            value: null,
+            error: error instanceof Error ? error.name : 'UNKNOWN',
+          }));
+    const checkpointRead = checkpointProbe.value;
     const selectedPublication =
       cachedPublication?.publication ?? checkpointRead?.publication ?? null;
     const selectedSource = cachedPublication?.servedFrom ?? checkpointRead?.servedFrom ?? null;
@@ -95,12 +101,22 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         : null,
       coverage: {
         fixtures: { finished: finishedFixtures, total: fixtures.length },
-        publication: selectedPublication ? 'AVAILABLE' : 'NO_NEW_REVISION',
+        publication: selectedPublication
+          ? 'AVAILABLE'
+          : checkpointProbe.error
+            ? 'UNAVAILABLE'
+            : 'NO_NEW_REVISION',
         fallback: {
           redis: redisRead.error ? 'UNAVAILABLE' : cachedPublication ? 'AVAILABLE' : 'EMPTY',
           // Avoid an extra PostgreSQL probe on the healthy Redis path, but do
           // not misreport that unprobed fallback as an empty checkpoint.
-          postgres: cachedPublication ? 'NOT_CHECKED' : checkpointRead ? 'AVAILABLE' : 'EMPTY',
+          postgres: cachedPublication
+            ? 'NOT_CHECKED'
+            : checkpointRead
+              ? 'AVAILABLE'
+              : checkpointProbe.error
+                ? 'UNAVAILABLE'
+                : 'EMPTY',
           selected: selectedSource ?? 'NONE',
         },
       },
