@@ -123,8 +123,9 @@ export const mismatchSinceForPublication = (
   now = Date.now(),
 ): number => {
   const safeNow = Number.isFinite(now) ? now : Date.now();
-  const anchor =
-    Number.isFinite(durableAnchor) ? Math.min(durableAnchor as number, safeNow) : safeNow;
+  const anchor = Number.isFinite(durableAnchor)
+    ? Math.min(durableAnchor as number, safeNow)
+    : safeNow;
   return Number.isFinite(existingSince) ? Math.min(existingSince as number, anchor) : anchor;
 };
 

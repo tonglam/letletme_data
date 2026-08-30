@@ -55,6 +55,8 @@ export interface LiveSnapshotV2Dependencies {
     readonly publication: LivePublicationRead['publication'];
     readonly eventLives: PreparedLiveSnapshot['eventLives']['eventLives'];
     readonly fixtures: PreparedLiveSnapshot['fixtures'];
+    readonly explains: PreparedLiveSnapshot['eventLives']['explains'];
+    readonly fixtureEvidence: PreparedLiveSnapshot['eventLives']['fixtureEvidence'];
   }) => Promise<boolean>;
 }
 
@@ -166,6 +168,8 @@ async function checkpoint(
       publication,
       eventLives: prepared.eventLives.eventLives,
       fixtures: prepared.fixtures,
+      explains: prepared.eventLives.explains,
+      fixtureEvidence: prepared.eventLives.fixtureEvidence,
     });
     if (!checkpointed) return false;
     const marked = await markLivePublicationCheckpointedV2(publication, new Date());
@@ -194,15 +198,13 @@ export async function syncLiveSnapshotV2(
   if (!Number.isSafeInteger(eventId) || eventId <= 0)
     throw new Error(`Invalid live event ID: ${eventId}`);
   const dependencies = options.dependencies ?? defaultDependencies;
-  const [liveResponse, rawFixtures, expectedFixtureIds, referenceData, current] = await Promise.all(
-    [
-      dependencies.getEventLive(eventId),
-      dependencies.getFixtures(eventId),
-      dependencies.getExpectedFixtureIds(season, eventId),
-      dependencies.getReferenceData(season),
-      dependencies.readPublished(season.seasonCode, eventId),
-    ],
-  );
+  const [liveResponse, rawFixtures, expectedFixtureIds, referenceData, current] = await Promise.all([
+    dependencies.getEventLive(eventId),
+    dependencies.getFixtures(eventId),
+    dependencies.getExpectedFixtureIds(season, eventId),
+    dependencies.getReferenceData(season),
+    dependencies.readPublished(season.seasonCode, eventId),
+  ]);
   const prepared = prepareCoherentLiveSnapshot(
     eventId,
     liveResponse,
@@ -217,13 +219,15 @@ export async function syncLiveSnapshotV2(
   const sourceCheckedAt = new Date();
   const state = publicationState(prepared, options.finalizeEvent === true);
   // Redis is the serving authority, but a rebuilt Redis sequence must not be
-  // allowed to fence an older durable checkpoint forever. Read the durable
-  // floor before taking the heartbeat fast path whenever the current pointer
-  // is absent, came from previous, or has not been checkpointed yet.
+  // allowed to fence an older durable checkpoint forever. A provisional Redis
+  // publication must also compare against the durable floor: a finalized DB
+  // checkpoint is an immutable boundary even if Redis still contains a
+  // checkpointed provisional pointer from before finalization.
   const durableFloor =
     current === null ||
     current.servedFrom === 'REDIS_PREVIOUS' ||
-    current.publication.checkpointedAt === null
+    current.publication.checkpointedAt === null ||
+    current.publication.state !== 'FINALIZED'
       ? await (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
           season,
           eventId,
@@ -246,8 +250,7 @@ export async function syncLiveSnapshotV2(
         current?.servedFrom === 'REDIS_CURRENT' &&
         current.publication.publicationId === durableFloor.publication.publicationId &&
         current.publication.generation === durableFloor.publication.generation
-      ) &&
-      !(current?.servedFrom === 'REDIS_CURRENT' && current.publication.state === 'FINALIZED'),
+      ),
   );
   if (durableFinalNeedsRestore) {
     // FINALIZED is an immutable durable boundary. If Redis lost its active

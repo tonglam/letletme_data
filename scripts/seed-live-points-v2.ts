@@ -77,6 +77,8 @@ export type InvalidPickScope = {
 export type SeedArguments = {
   readonly execute: boolean;
   readonly seedCache: boolean;
+  /** Include every already-finalized event in addition to the requested live scope. */
+  readonly allFinalized: boolean;
   readonly season: string | null;
   readonly eventId: number | null;
 };
@@ -335,13 +337,14 @@ type SqlExecutor = postgres.Sql | postgres.TransactionSql;
 
 function usage(): never {
   throw new Error(
-    'usage: bun scripts/seed-live-points-v2.ts [--execute] [--cache] [--season YYYY] [--event-id N]',
+    'usage: bun scripts/seed-live-points-v2.ts [--execute] [--cache] [--all-finalized] [--season YYYY] [--event-id N]',
   );
 }
 
 export function parseSeedArguments(argv: readonly string[]): SeedArguments {
   let execute = false;
   let seedCache = false;
+  let allFinalized = false;
   let season: string | null = null;
   let eventId: number | null = null;
   for (let index = 0; index < argv.length; index += 1) {
@@ -354,6 +357,11 @@ export function parseSeedArguments(argv: readonly string[]): SeedArguments {
     if (token === '--cache') {
       if (seedCache) usage();
       seedCache = true;
+      continue;
+    }
+    if (token === '--all-finalized') {
+      if (allFinalized) usage();
+      allFinalized = true;
       continue;
     }
     if (token === '--season') {
@@ -373,7 +381,10 @@ export function parseSeedArguments(argv: readonly string[]): SeedArguments {
   if (seedCache && season === null) {
     throw new Error('--cache requires an explicit --season scope');
   }
-  return { execute, seedCache, season, eventId };
+  if (allFinalized && season === null) {
+    throw new Error('--all-finalized requires an explicit --season scope');
+  }
+  return { execute, seedCache, allFinalized, season, eventId };
 }
 
 function asDate(value: TimestampValue): Date | null {
@@ -747,7 +758,20 @@ async function loadLegacyLivePublications(
   }
   if (args.eventId !== null) {
     parameters.push(args.eventId);
-    predicates.push(`publication.event_id = $${parameters.length}`);
+    predicates.push(
+      args.allFinalized
+        ? `(publication.event_id = $${parameters.length}
+            OR (event.finished = TRUE
+                AND event.data_checked = TRUE
+                AND event.live_snapshot_finalized_at IS NOT NULL))`
+        : `publication.event_id = $${parameters.length}`,
+    );
+  } else if (args.allFinalized) {
+    predicates.push(
+      `event.finished = TRUE
+       AND event.data_checked = TRUE
+       AND event.live_snapshot_finalized_at IS NOT NULL`,
+    );
   }
   return database.unsafe<LegacyLivePublicationRow[]>(
     `
@@ -784,6 +808,42 @@ async function loadLegacyLivePublications(
     `,
     parameters,
   );
+}
+
+async function loadFinalizedEventIds(
+  database: postgres.Sql,
+  season: FplSeasonRef,
+): Promise<number[]> {
+  const rows = await database.unsafe<{ event_id: number }[]>(
+    `
+      SELECT event_id
+      FROM fpl.events
+      WHERE season_id = $1
+        AND finished = TRUE
+        AND data_checked = TRUE
+        AND live_snapshot_finalized_at IS NOT NULL
+      ORDER BY event_id
+    `,
+    [season.seasonId],
+  );
+  return rows.map((row) => row.event_id);
+}
+
+async function loadExistingV2EventIds(
+  database: postgres.Sql,
+  season: FplSeasonRef,
+): Promise<Set<number>> {
+  const rows = await database.unsafe<{ event_id: number }[]>(
+    `
+      SELECT event_id
+      FROM competition.live_points_publication_checkpoints
+      WHERE season_id = $1
+        AND state = 'FINALIZED'
+      ORDER BY event_id
+    `,
+    [season.seasonId],
+  );
+  return new Set(rows.map((row) => row.event_id));
 }
 
 async function hasExistingV2LiveCheckpoint(
@@ -838,7 +898,9 @@ async function loadPreviousTotals(
         AND result.event_id >= COALESCE(entry.started_event, 1)
         AND event.finished = TRUE
         AND event.data_checked = TRUE
+        AND event.data_checked_at IS NOT NULL
         AND result.rich_synced_at IS NOT NULL
+        AND result.rich_synced_at >= event.data_checked_at
       ORDER BY result.entry_id, result.event_id DESC
     `,
     [season.seasonId, eventId],
@@ -1001,6 +1063,7 @@ async function checkpointSeededLive(
   seed: ValidatedLiveSeed,
   publication: Awaited<ReturnType<typeof publishLivePublicationV2>>['publication'],
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  payload: Pick<ValidatedLiveSeed, 'eventLives' | 'fixtures'> = seed,
 ): Promise<'checkpointed' | 'already-checkpointed' | 'blocked'> {
   if (publication.checkpointedAt !== null) return 'already-checkpointed';
   const desired = await setLiveCheckpointDesiredV2(publication, new Date(), redis);
@@ -1008,8 +1071,8 @@ async function checkpointSeededLive(
     season: seed.season,
     eventId: seed.source.event_id,
     publication,
-    eventLives: seed.eventLives,
-    fixtures: seed.fixtures,
+    eventLives: payload.eventLives,
+    fixtures: payload.fixtures,
   });
   if (!checkpointed) {
     // A seed candidate may lose to a newer or FINALIZED durable head. Never
@@ -1060,9 +1123,13 @@ async function seedLivePublication(
     // A deploy seed is a cutover/bootstrap operation, not a periodic writer.
     // Once any V2 publication is readable (including a previous fallback), a
     // legacy snapshot must never replace the live generation on a later deploy.
+    const checkpoint = await checkpointSeededLive(seed, current.publication, redis, {
+      eventLives: current.eventLives,
+      fixtures: current.fixtures,
+    });
     return {
       status: 'skipped-existing',
-      checkpoint: 'not-required',
+      checkpoint,
       generation: current.publication.generation,
       publicationId: current.publication.publicationId,
     };
@@ -1193,6 +1260,26 @@ async function seedEntryInput(
       final: input.finalResult !== null,
     };
   }
+  if (current) {
+    // Any readable V2 entry input is authoritative after cutover. Never
+    // replace it with a legacy seed merely because the legacy content differs;
+    // repair/checkpoint the retained V2 input instead.
+    await setEntryCheckpointDesiredV2(current.publication, new Date(), redis);
+    const result = await checkpointEntryLiveInputV2(season, first.event_id, first.entry_id);
+    return {
+      status: 'unchanged',
+      checkpoint:
+        result === 'checkpointed'
+          ? 'checkpointed'
+          : current.publication.checkpointedAt !== null
+            ? 'already-checkpointed'
+            : 'blocked',
+      entryId: first.entry_id,
+      generation: current.publication.generation,
+      publicationId: current.publication.publicationId,
+      final: current.publication.state === 'FINAL',
+    };
+  }
   const generationFloor = await readEntryGenerationFloor(
     database,
     season,
@@ -1280,6 +1367,26 @@ async function main(): Promise<void> {
           `V2 cache seed refused because ${cacheInvalid.length} legacy live publication scope(s) failed validation`,
         );
       }
+      if (args.execute && args.allFinalized) {
+        const season = explicitSeasonRef(args.season!);
+        const [finalizedEventIds, existingV2EventIds] = await Promise.all([
+          loadFinalizedEventIds(database, season),
+          loadExistingV2EventIds(database, season),
+        ]);
+        const candidateEventIds = new Set(
+          cacheCandidates
+            .filter((candidate) => candidate.state === 'FINALIZED')
+            .map((candidate) => candidate.source.event_id),
+        );
+        const missingEventIds = finalizedEventIds.filter(
+          (eventId) => !candidateEventIds.has(eventId) && !existingV2EventIds.has(eventId),
+        );
+        if (missingEventIds.length > 0) {
+          throw new Error(
+            `V2 cache seed refused because finalized event scopes are missing: ${missingEventIds.join(',')}`,
+          );
+        }
+      }
       if (
         args.execute &&
         cacheCandidates.length === 0 &&
@@ -1354,6 +1461,7 @@ async function main(): Promise<void> {
           operation: 'seed-live-points-v2',
           executed: args.execute,
           seedCache: args.seedCache,
+          allFinalized: args.allFinalized,
           season: args.season,
           eventId: args.eventId,
           sourceRows: rows.length,

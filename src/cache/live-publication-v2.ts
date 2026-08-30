@@ -554,6 +554,7 @@ return {tostring(value), tostring(now[1]), tostring(now[2])}
 
 const PROMOTE_LIVE_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
+local restoring = ARGV[4] == 'restore'
 local current_raw = redis.call('GET', KEYS[1])
 local current_generation = nil
 local current_publication_id = nil
@@ -597,14 +598,19 @@ if current_generation and not restoring_final then
   if current_generation > candidate.generation or (current_generation == candidate.generation and not same_identity) then return {'stale', current_raw} end
 end
 if current_state == 'FINALIZED' and not same_identity and not restoring_final then return {'stale', current_raw} end
-for _, name in ipairs({'eventLive', 'fixtures'}) do
+for index, name in ipairs({'eventLive', 'fixtures'}) do
   local item = candidate.items[name]
   if not item or not item.key or item.type ~= 'string' then return {'invalid_item'} end
-  if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
-  local type_result = redis.call('TYPE', item.key)
-  local actual_type = type(type_result) == 'table' and type_result['ok'] or type_result
-  if actual_type ~= 'string' then return {'wrong_stage_type', item.key} end
-  if redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'wrong_stage_metadata', item.key} end
+  if restoring then
+    local payload = ARGV[index + 4]
+    if not payload or string.len(payload) ~= item.bytes then return {'invalid_restore_payload', item.key} end
+  else
+    if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
+    local type_result = redis.call('TYPE', item.key)
+    local actual_type = type(type_result) == 'table' and type_result['ok'] or type_result
+    if actual_type ~= 'string' then return {'wrong_stage_type', item.key} end
+    if redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'wrong_stage_metadata', item.key} end
+  end
 end
 if current then
   if not same_identity then
@@ -616,6 +622,18 @@ if current then
         redis.call('PEXPIRE', item.key .. ':meta', ARGV[2])
       end
     end
+  end
+end
+if restoring then
+  for index, name in ipairs({'eventLive', 'fixtures'}) do
+    local item = candidate.items[name]
+    local payload = ARGV[index + 4]
+    -- The restore payload was validated against PostgreSQL's durable hash in
+    -- the caller.  Write it only after all identity/finalization fences above
+    -- have passed; a conflicting same-generation publication can therefore
+    -- never be corrupted by a pre-CAS overwrite.
+    redis.call('SET', item.key, payload)
+    redis.call('SET', item.key .. ':meta', tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256)
   end
 end
 for _, name in ipairs({'eventLive', 'fixtures'}) do
@@ -1175,11 +1193,10 @@ export async function restoreLivePublicationV2Checkpoint(input: {
     );
   }
   const redis = input.redis ?? (await redisSingleton.getClient());
-  // This is the protected exact-checkpoint repair path.  The payload has
-  // already been validated against PostgreSQL's durable proof, so it may
-  // replace an item key that was corrupted at the same generation.  Ordinary
-  // publication continues to use NX staging and never overwrites a staged key.
-  await stage(redis, [eventLiveItem, fixtureItem], true);
+  // Pass restores directly to the promotion script. The payload has already
+  // been validated against PostgreSQL's durable proof; writing it inside the
+  // same Lua CAS means a conflicting same-generation publication cannot be
+  // corrupted by a pre-CAS overwrite of the shared generation keys.
   const [status, detail] = promotionResult(
     await redis.eval(
       PROMOTE_LIVE_SCRIPT,
@@ -1190,6 +1207,9 @@ export async function restoreLivePublicationV2Checkpoint(input: {
       JSON.stringify(publication),
       String(LIVE_PUBLICATION_PREVIOUS_TTL_MS),
       String(publication.state === 'FINALIZED' ? LIVE_PUBLICATION_FINAL_TTL_MS : 0),
+      'restore',
+      eventLiveItem.payload,
+      fixtureItem.payload,
     ),
   );
   if (status === 'stale') {

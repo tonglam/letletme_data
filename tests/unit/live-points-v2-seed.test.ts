@@ -104,16 +104,22 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(parseSeedArguments(['--execute', '--season', '2627', '--event-id', '2'])).toEqual({
       execute: true,
       seedCache: false,
+      allFinalized: false,
       season: '2627',
       eventId: 2,
     });
     expect(parseSeedArguments(['--cache', '--season', '2627'])).toEqual({
       execute: false,
       seedCache: true,
+      allFinalized: false,
       season: '2627',
       eventId: null,
     });
+    expect(
+      parseSeedArguments(['--cache', '--all-finalized', '--season', '2627', '--event-id', '2']),
+    ).toMatchObject({ allFinalized: true, season: '2627', eventId: 2 });
     expect(() => parseSeedArguments(['--cache'])).toThrow();
+    expect(() => parseSeedArguments(['--all-finalized'])).toThrow();
     expect(() => parseSeedArguments(['--season', '2627', '--season', '2627'])).toThrow();
     expect(() => parseSeedArguments(['--event-id', '0'])).toThrow();
   });

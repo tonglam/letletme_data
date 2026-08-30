@@ -417,7 +417,7 @@ deploy() {
   if ! compose run --rm -T --interactive=false \
     -e "DATABASE_URL=${migration_database_url}" \
     -e LIVE_POINTS_SEED_CONFIRM=YES api \
-    bun run db:cutover-seed-live-points-v2 -- --execute --cache \
+    bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
     --season "$LIVE_POINTS_V2_SEED_SEASON" \
     --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
     log_error "Live Points V2 seed failed; services remain stopped for a forward fix."

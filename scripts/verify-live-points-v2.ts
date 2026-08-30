@@ -93,6 +93,24 @@ function entrySummary(read: EntryLivePublicationRead | null) {
   };
 }
 
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  operation: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await operation(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
 async function main(): Promise<void> {
   const args = parseVerifyArguments(process.argv.slice(2));
   const season = await seasonRepository.requireByCode(args.season);
@@ -100,94 +118,105 @@ async function main(): Promise<void> {
   const scope = { season: args.season, eventId: args.eventId } as const;
 
   try {
-    const entryId =
-      args.entryId ??
-      (
-        await db
-          .select({ entryId: entryEventPickHeadsInCompetition.entryId })
-          .from(entryEventPickHeadsInCompetition)
-          .where(
-            and(
-              eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
-              eq(entryEventPickHeadsInCompetition.eventId, args.eventId),
-              eq(entryEventPickHeadsInCompetition.state, 'COMPLETE'),
-            ),
-          )
-          .orderBy(entryEventPickHeadsInCompetition.entryId)
-          .limit(1)
-      )[0]?.entryId ??
-      null;
-    if (entryId === null) throw new Error('No complete V2 entry pick head exists for this scope');
-    const entryScope = { ...scope, entryId } as const;
-    const [active, previous, entry, checkpoint, headRows] = await Promise.all([
+    const headRows = await db
+      .select({
+        entryId: entryEventPickHeadsInCompetition.entryId,
+        publicationId: entryEventPickHeadsInCompetition.publicationId,
+        generation: entryEventPickHeadsInCompetition.generation,
+        picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+        contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+        rowCount: entryEventPickHeadsInCompetition.rowCount,
+        state: entryEventPickHeadsInCompetition.state,
+      })
+      .from(entryEventPickHeadsInCompetition)
+      .where(
+        and(
+          eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+          eq(entryEventPickHeadsInCompetition.eventId, args.eventId),
+        ),
+      )
+      .orderBy(entryEventPickHeadsInCompetition.entryId);
+    const headByEntry = new Map(headRows.map((head) => [head.entryId, head] as const));
+    const completeEntryIds = headRows
+      .filter((head) => head.rowCount === 15 && head.state === 'COMPLETE')
+      .map((head) => head.entryId);
+    const entryIds = args.entryId === null ? completeEntryIds : [args.entryId];
+    if (entryIds.length === 0)
+      throw new Error('No complete V2 entry pick head exists for this scope');
+
+    const [active, previous, checkpoint, entryResults] = await Promise.all([
       readLivePublicationV2Pointer(scope, 'active', redis),
       readLivePublicationV2Pointer(scope, 'previous', redis),
-      readEntryLiveInputV2(entryScope, redis),
       readLivePublicationV2Checkpoint(season, args.eventId),
-      db
-        .select({
-          publicationId: entryEventPickHeadsInCompetition.publicationId,
-          generation: entryEventPickHeadsInCompetition.generation,
-          picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
-          contentSha256: entryEventPickHeadsInCompetition.contentSha256,
-          rowCount: entryEventPickHeadsInCompetition.rowCount,
-          state: entryEventPickHeadsInCompetition.state,
-        })
-        .from(entryEventPickHeadsInCompetition)
-        .where(
-          and(
-            eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
-            eq(entryEventPickHeadsInCompetition.entryId, entryId),
-            eq(entryEventPickHeadsInCompetition.eventId, args.eventId),
-          ),
-        )
-        .limit(1),
-    ]);
-    const head = headRows[0] ?? null;
-    const failures: string[] = [];
+      mapWithConcurrency(entryIds, 32, async (entryId) => {
+        const entry = await readEntryLiveInputV2({ ...scope, entryId }, redis);
+        const head = headByEntry.get(entryId) ?? null;
+        const failures: string[] = [];
 
-    if (!active) failures.push('REDIS_GLOBAL_CURRENT_MISSING_OR_INVALID');
-    if (!entry) failures.push('REDIS_ENTRY_INPUT_MISSING_OR_INVALID');
-    if (entry && entry.servedFrom !== 'REDIS_CURRENT')
-      failures.push('REDIS_ENTRY_INPUT_NOT_CURRENT');
-    if (entry && entry.input.picksBase.picks.length !== 15)
-      failures.push('REDIS_ENTRY_INPUT_NOT_EXACTLY_15');
-    if (entry && new Set(entry.input.picksBase.picks.map((pick) => pick.element)).size !== 15)
-      failures.push('REDIS_ENTRY_INPUT_ELEMENTS_NOT_UNIQUE');
-    if (!head) failures.push('POSTGRES_ENTRY_PICK_HEAD_MISSING');
-    if (head && (head.rowCount !== 15 || head.state !== 'COMPLETE'))
-      failures.push('POSTGRES_ENTRY_PICK_HEAD_INCOMPLETE');
-    if (entry && head && head.publicationId !== entry.publication.publicationId)
-      failures.push('POSTGRES_ENTRY_HEAD_PUBLICATION_MISMATCH');
-    if (entry && head && head.generation !== entry.publication.generation)
-      failures.push('POSTGRES_ENTRY_HEAD_GENERATION_MISMATCH');
-    if (entry && head && head.picksBaseRevision !== entry.input.picksBase.revision)
-      failures.push('POSTGRES_ENTRY_HEAD_REVISION_MISMATCH');
-    if (!checkpoint) failures.push('POSTGRES_GLOBAL_CHECKPOINT_MISSING_OR_INVALID');
+        if (!entry) failures.push('REDIS_ENTRY_INPUT_MISSING_OR_INVALID');
+        if (entry && entry.servedFrom !== 'REDIS_CURRENT')
+          failures.push('REDIS_ENTRY_INPUT_NOT_CURRENT');
+        if (entry && entry.input.picksBase.picks.length !== 15)
+          failures.push('REDIS_ENTRY_INPUT_NOT_EXACTLY_15');
+        if (entry && new Set(entry.input.picksBase.picks.map((pick) => pick.element)).size !== 15)
+          failures.push('REDIS_ENTRY_INPUT_ELEMENTS_NOT_UNIQUE');
+        if (!head) failures.push('POSTGRES_ENTRY_PICK_HEAD_MISSING');
+        if (head && (head.rowCount !== 15 || head.state !== 'COMPLETE'))
+          failures.push('POSTGRES_ENTRY_PICK_HEAD_INCOMPLETE');
+        if (entry && head && head.publicationId !== entry.publication.publicationId)
+          failures.push('POSTGRES_ENTRY_HEAD_PUBLICATION_MISMATCH');
+        if (entry && head && head.generation !== entry.publication.generation)
+          failures.push('POSTGRES_ENTRY_HEAD_GENERATION_MISMATCH');
+        if (entry && head && head.picksBaseRevision !== entry.input.picksBase.revision)
+          failures.push('POSTGRES_ENTRY_HEAD_REVISION_MISMATCH');
+
+        return {
+          entryId,
+          failures,
+          redis: { entryInput: entrySummary(entry) },
+          postgres: { entryPickHead: head },
+        };
+      }),
+    ]);
+
+    const globalFailures: string[] = [];
+
+    if (!active) globalFailures.push('REDIS_GLOBAL_CURRENT_MISSING_OR_INVALID');
+    if (!checkpoint) globalFailures.push('POSTGRES_GLOBAL_CHECKPOINT_MISSING_OR_INVALID');
     if (active && checkpoint) {
       if (checkpoint.publication.publicationId !== active.publication.publicationId)
-        failures.push('POSTGRES_GLOBAL_CHECKPOINT_PUBLICATION_MISMATCH');
+        globalFailures.push('POSTGRES_GLOBAL_CHECKPOINT_PUBLICATION_MISMATCH');
       if (checkpoint.publication.generation !== active.publication.generation)
-        failures.push('POSTGRES_GLOBAL_CHECKPOINT_GENERATION_MISMATCH');
+        globalFailures.push('POSTGRES_GLOBAL_CHECKPOINT_GENERATION_MISMATCH');
     }
+    const failures = [
+      ...globalFailures,
+      ...entryResults.flatMap((entryResult) =>
+        entryResult.failures.map((failure) => `ENTRY_${entryResult.entryId}:${failure}`),
+      ),
+    ];
+    const failedEntryIds = entryResults
+      .filter((entryResult) => entryResult.failures.length > 0)
+      .map((entryResult) => entryResult.entryId);
 
     const result = {
       operation: 'verify-live-points-v2',
       write: false,
       season: args.season,
       eventId: args.eventId,
-      entryId,
+      entryId: args.entryId,
+      entryCount: entryIds.length,
       ok: failures.length === 0,
       failures,
+      failedEntryIds,
       redis: {
         globalCurrent: publicationSummary(active),
         globalPrevious: publicationSummary(previous),
-        entryInput: entrySummary(entry),
       },
       postgres: {
         globalCheckpoint: publicationSummary(checkpoint),
-        entryPickHead: head,
       },
+      entryResults,
     };
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (failures.length > 0) process.exitCode = 1;
