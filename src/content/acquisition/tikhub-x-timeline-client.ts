@@ -175,6 +175,7 @@ function withEvidence(error: unknown, attempt: AttemptEvidence): TikHubXTimeline
 async function boundedJson(
   response: Response,
   maximumBytes: number,
+  signal: AbortSignal,
 ): Promise<{ decoded: unknown; bytes: number; bodyHash: string }> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isSafeInteger(declared) && declared > maximumBytes) {
@@ -189,7 +190,29 @@ async function boundedJson(
   let total = 0;
   if (reader) {
     while (true) {
-      const { done, value } = await reader.read();
+      if (signal.aborted) {
+        await reader.cancel('TikHub response timed out').catch(() => undefined);
+        throw new TikHubXTimelineError('TIKHUB_TIMEOUT', 'TikHub timeline request timed out');
+      }
+      let abortListener: (() => void) | null = null;
+      let abortHandled = false;
+      const abortPromise = new Promise<never>((_, reject) => {
+        abortListener = () => {
+          if (abortHandled) return;
+          abortHandled = true;
+          void reader.cancel('TikHub response timed out').catch(() => undefined);
+          reject(new TikHubXTimelineError('TIKHUB_TIMEOUT', 'TikHub timeline request timed out'));
+        };
+        signal.addEventListener('abort', abortListener, { once: true });
+        if (signal.aborted) abortListener();
+      });
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await Promise.race([reader.read(), abortPromise]);
+      } finally {
+        if (abortListener) signal.removeEventListener('abort', abortListener);
+      }
+      const { done, value } = chunk;
       if (done) break;
       total += value.byteLength;
       if (total > maximumBytes) {
@@ -207,6 +230,9 @@ async function boundedJson(
   for (const chunk of chunks) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
+  }
+  if (signal.aborted) {
+    throw new TikHubXTimelineError('TIKHUB_TIMEOUT', 'TikHub timeline request timed out');
   }
   let text: string;
   try {
@@ -385,29 +411,36 @@ export class TikHubXTimelineClient {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), this.timeoutMs);
           let response: Response;
+          let body: { decoded: unknown; bytes: number; bodyHash: string };
           try {
-            response = await this.fetchImpl(url, {
-              method: 'GET',
-              headers: {
-                accept: 'application/json',
-                authorization: `Bearer ${this.apiKey}`,
-              },
-              redirect: 'error',
-              signal: controller.signal,
-            });
-          } catch {
-            if (controller.signal.aborted) {
-              throw new TikHubXTimelineError('TIKHUB_TIMEOUT', 'TikHub timeline request timed out');
+            try {
+              response = await this.fetchImpl(url, {
+                method: 'GET',
+                headers: {
+                  accept: 'application/json',
+                  authorization: `Bearer ${this.apiKey}`,
+                },
+                redirect: 'error',
+                signal: controller.signal,
+              });
+              attempt.httpStatus = response.status;
+              body = await boundedJson(response, this.maximumResponseBytes, controller.signal);
+            } catch (error) {
+              if (error instanceof TikHubXTimelineError) throw error;
+              if (controller.signal.aborted) {
+                throw new TikHubXTimelineError(
+                  'TIKHUB_TIMEOUT',
+                  'TikHub timeline request timed out',
+                );
+              }
+              throw new TikHubXTimelineError(
+                'TIKHUB_TRANSPORT_FAILED',
+                'TikHub timeline transport failed',
+              );
             }
-            throw new TikHubXTimelineError(
-              'TIKHUB_TRANSPORT_FAILED',
-              'TikHub timeline transport failed',
-            );
           } finally {
             clearTimeout(timer);
           }
-          attempt.httpStatus = response.status;
-          const body = await boundedJson(response, this.maximumResponseBytes);
           attempt.responseBytes += body.bytes;
           attempt.responseHashes.push(
             sha256CanonicalJson({

@@ -256,10 +256,8 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   }
   if (
     flags.xAccountProvider === 'TIKHUB' &&
-    (!flags.pipelineEnabled ||
-      !flags.xScanEnabled ||
-      !flags.realGrokEnabled ||
-      !flags.tikhubApiKeyPresent)
+    flags.xScanEnabled &&
+    (!flags.pipelineEnabled || !flags.realGrokEnabled || !flags.tikhubApiKeyPresent)
   ) {
     throw new Error(
       'CONTENT_X_ACCOUNT_PROVIDER=TIKHUB requires pipeline/X scanning, Grok semantic support and TIKHUB_API_KEY',
