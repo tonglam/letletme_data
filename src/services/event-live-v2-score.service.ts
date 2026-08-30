@@ -333,9 +333,6 @@ async function loadEventLiveScoreBatch(
       activeChip: row.activeChip,
     })) satisfies EventLiveManagerPick[];
     const previousTotal = inputRead.input.previousTotals?.totalPoints ?? (eventId === 1 ? 0 : null);
-    const previousTotalsRevision =
-      inputRead.input.previousTotals?.revision ??
-      contentHash({ throughEventId: eventId - 1, total: null });
     const inputRevisionData = buildScoreInputRevision({
       algorithmVersion,
       authorityRevision,
@@ -374,7 +371,7 @@ async function loadEventLiveScoreBatch(
       revision,
       inputRevision: inputRevisionData.inputRevision,
       picksRevision: inputRevisionData.picksRevision,
-      previousTotalsRevision,
+      previousTotalsRevision: inputRevisionData.previousTotalsRevision,
       ...(options.includeEffectiveLineup ? { effectiveLineup: projected.effectiveLineup } : {}),
     });
   }
