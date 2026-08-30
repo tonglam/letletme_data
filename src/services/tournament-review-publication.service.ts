@@ -603,7 +603,10 @@ async function buildH2HPayload(
   }
   requireFreshEntryScores(eligible, eventDataCheckedAt, 'H2H');
   const covered = new Set<number>();
-  const sourceTimes: Array<Date | string | null> = [];
+  const seenCurrentEntries = new Set<number>();
+  const currentEligibleIds = new Set(eligible.map((row) => row.entry_id));
+  let currentAverageSides = 0;
+  const sourceTimes: Array<Date | string | null> = eligible.map((row) => row.rich_synced_at);
   const matchRows = matches.map((match, index) => {
     if (
       (match.home_entry_id === null) !== match.home_is_average ||
@@ -628,6 +631,21 @@ async function buildH2HPayload(
     }
     if (match.home_entry_id !== null && !match.home_is_average) covered.add(match.home_entry_id);
     if (match.away_entry_id !== null && !match.away_is_average) covered.add(match.away_entry_id);
+    for (const [entryId, isAverage] of [
+      [match.home_entry_id, match.home_is_average],
+      [match.away_entry_id, match.away_is_average],
+    ] as const) {
+      if (isAverage) {
+        currentAverageSides += 1;
+        continue;
+      }
+      if (entryId === null || !currentEligibleIds.has(entryId) || seenCurrentEntries.has(entryId)) {
+        throw new TournamentReviewSourceNotReadyError(
+          'H2H match participant is outside the roster',
+        );
+      }
+      seenCurrentEntries.add(entryId);
+    }
     if (
       !match.is_bye &&
       (match.home_net_points === null ||
@@ -695,13 +713,19 @@ async function buildH2HPayload(
       isBye: match.is_bye,
     };
   });
-  if (eligible.some((row) => !covered.has(row.entry_id))) {
+  if (
+    matches.length !== Math.ceil(eligible.length / 2) ||
+    covered.size !== eligible.length ||
+    currentAverageSides !== eligible.length % 2 ||
+    eligible.some((row) => !covered.has(row.entry_id))
+  ) {
     throw new TournamentReviewSourceNotReadyError('H2H roster coverage is incomplete');
   }
 
   const history = await tx<BattleSourceRow[]>`
-    SELECT battle.group_id, battle.event_id, battle.home_entry_id, battle.home_net_points, battle.home_rank,
-           battle.home_match_points, battle.away_entry_id, battle.away_net_points, battle.away_rank,
+    SELECT battle.group_id, battle.event_id, battle.home_entry_id, battle.home_net_points,
+           battle.home_rank, battle.home_match_points, battle.away_entry_id,
+           battle.away_net_points, battle.away_rank,
            battle.away_match_points, battle.home_is_average, battle.away_is_average, battle.is_bye,
            battle.source_checked_at, battle.updated_at,
            event.finished AS event_finished,
@@ -731,6 +755,47 @@ async function buildH2HPayload(
   const historyEventIds = new Set(history.map((match) => match.event_id));
   if (expectedHistoryEvents.some((row) => !historyEventIds.has(row.event_id))) {
     throw new TournamentReviewSourceNotReadyError('H2H history event coverage is incomplete');
+  }
+  const historyByEvent = new Map<number, BattleSourceRow[]>();
+  for (const match of history) {
+    const eventMatches = historyByEvent.get(match.event_id) ?? [];
+    eventMatches.push(match);
+    historyByEvent.set(match.event_id, eventMatches);
+  }
+  for (const expectedEvent of expectedHistoryEvents) {
+    const eventMatches = historyByEvent.get(expectedEvent.event_id) ?? [];
+    const eventEligible = eligible.filter(
+      (row) => row.started_event === null || row.started_event <= expectedEvent.event_id,
+    );
+    const eventEligibleIds = new Set(eventEligible.map((row) => row.entry_id));
+    const seenEntries = new Set<number>();
+    let averageSides = 0;
+    for (const match of eventMatches) {
+      for (const [entryId, isAverage] of [
+        [match.home_entry_id, match.home_is_average],
+        [match.away_entry_id, match.away_is_average],
+      ] as const) {
+        if (isAverage) {
+          averageSides += 1;
+          continue;
+        }
+        if (entryId === null || !eventEligibleIds.has(entryId) || seenEntries.has(entryId)) {
+          throw new TournamentReviewSourceNotReadyError(
+            'H2H history participant coverage is invalid',
+          );
+        }
+        seenEntries.add(entryId);
+      }
+    }
+    if (
+      eventMatches.length !== Math.ceil(eventEligible.length / 2) ||
+      seenEntries.size !== eventEligible.length ||
+      averageSides !== eventEligible.length % 2
+    ) {
+      throw new TournamentReviewSourceNotReadyError(
+        'H2H history participant coverage is incomplete',
+      );
+    }
   }
   const standings = new Map<
     number,
@@ -872,6 +937,15 @@ type KnockoutSourceRow = {
   updated_at: Date | string;
 };
 
+type KnockoutBracketSourceRow = {
+  match_id: number;
+  round: number;
+  started_event_id: number;
+  ended_event_id: number | null;
+  home_entry_id: number | null;
+  away_entry_id: number | null;
+};
+
 async function buildKnockoutPayload(
   tx: postgres.TransactionSql,
   seasonId: number,
@@ -886,6 +960,44 @@ async function buildKnockoutPayload(
   notApplicableSubjectCount: number;
   sourceTimes: Array<Date | string | null>;
 }> {
+  const brackets = await tx<KnockoutBracketSourceRow[]>`
+    SELECT match_id,
+           round,
+           started_event_id,
+           ended_event_id,
+           home_entry_id,
+           away_entry_id
+    FROM competition.tournament_knockouts
+    WHERE season_id = ${seasonId}
+      AND tournament_id = ${tournament.tournament_id}
+      AND started_event_id IS NOT NULL
+      AND started_event_id <= ${event.event_id}
+      AND (ended_event_id IS NULL OR ended_event_id >= ${event.event_id})
+    ORDER BY round, match_id
+  `;
+  if (brackets.length === 0) {
+    throw new TournamentReviewSourceNotReadyError('knockout bracket rows are missing');
+  }
+  const expectedByKey = new Map<
+    string,
+    {
+      round: number;
+      homeEntryId: number | null;
+      awayEntryId: number | null;
+    }
+  >();
+  for (const bracket of brackets) {
+    const playAgainstId = event.event_id - bracket.started_event_id + 1;
+    if (playAgainstId < 1) {
+      throw new TournamentReviewSourceNotReadyError('knockout bracket event coverage is invalid');
+    }
+    const swap = playAgainstId % 2 === 0;
+    expectedByKey.set(`${bracket.match_id}:${playAgainstId}`, {
+      round: bracket.round,
+      homeEntryId: swap ? bracket.away_entry_id : bracket.home_entry_id,
+      awayEntryId: swap ? bracket.home_entry_id : bracket.away_entry_id,
+    });
+  }
   const matches = await tx<KnockoutSourceRow[]>`
     SELECT result.event_id,
            result.match_id,
@@ -931,8 +1043,29 @@ async function buildKnockoutPayload(
     throw new TournamentReviewSourceNotReadyError('knockout event data_checked_at is missing');
   }
   requireFreshEntryScores(eligible, eventDataCheckedAt, 'knockout');
-  const sourceTimes: Array<Date | string | null> = [];
+  const sourceTimes: Array<Date | string | null> = eligible.map((row) => row.rich_synced_at);
+  const actualKeys = new Set<string>();
+  if (matches.length !== expectedByKey.size) {
+    throw new TournamentReviewSourceNotReadyError('knockout result coverage is incomplete');
+  }
   const matchRows = matches.map((match) => {
+    const key = `${match.match_id}:${match.play_against_id}`;
+    const expected = expectedByKey.get(key);
+    if (!expected || actualKeys.has(key)) {
+      throw new TournamentReviewSourceNotReadyError('knockout result coverage is invalid');
+    }
+    actualKeys.add(key);
+    if (
+      match.home_entry_id !== expected.homeEntryId ||
+      match.away_entry_id !== expected.awayEntryId
+    ) {
+      throw new TournamentReviewSourceNotReadyError(
+        'knockout result participants are inconsistent',
+      );
+    }
+    if (match.match_winner === null) {
+      throw new TournamentReviewSourceNotReadyError('knockout result winner is missing');
+    }
     if (match.home_entry_id !== null && match.home_net_points === null) {
       throw new TournamentReviewSourceNotReadyError('knockout home score is incomplete');
     }
@@ -972,7 +1105,7 @@ async function buildKnockoutPayload(
       throw new TournamentReviewSourceNotReadyError('knockout winner is outside the match');
     }
     return {
-      round: match.round,
+      round: expected.round,
       name: match.knockout_name,
       matchId: match.match_id,
       playAgainstId: match.play_against_id,
@@ -1290,23 +1423,97 @@ export async function reconcileTournamentReviewObligations(
     WHERE format IS NOT NULL
     ON CONFLICT (season_id, tournament_id, event_id) DO UPDATE
     SET format = EXCLUDED.format,
+        state = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN 'PENDING'
+          ELSE competition.tournament_review_obligations.state
+        END,
         eligible_at = GREATEST(
           competition.tournament_review_obligations.eligible_at,
           EXCLUDED.eligible_at
         ),
         next_attempt_at = CASE
-          WHEN competition.tournament_review_obligations.state = 'READY' THEN NULL
-          WHEN competition.tournament_review_obligations.state = 'PROCESSING'
-            THEN competition.tournament_review_obligations.next_attempt_at
-          WHEN competition.tournament_review_obligations.state = 'DEGRADED'
-            AND competition.tournament_review_obligations.eligible_at + INTERVAL '24 hours' <= ${now.toISOString()}::timestamptz
-            THEN NULL
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN GREATEST(EXCLUDED.eligible_at, ${now.toISOString()}::timestamptz)
           ELSE COALESCE(
             competition.tournament_review_obligations.next_attempt_at,
             EXCLUDED.next_attempt_at
           )
         END,
+        execution_attempts = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN 0
+          ELSE competition.tournament_review_obligations.execution_attempts
+        END,
+        source_rechecks = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN 0
+          ELSE competition.tournament_review_obligations.source_rechecks
+        END,
+        lease_owner = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.lease_owner
+        END,
+        lease_expires_at = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.lease_expires_at
+        END,
+        first_attempt_at = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.first_attempt_at
+        END,
+        last_attempt_at = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.last_attempt_at
+        END,
+        ready_at = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.ready_at
+        END,
+        degraded_at = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.degraded_at
+        END,
+        ready_revision = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.ready_revision
+        END,
+        last_error_code = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.last_error_code
+        END,
+        last_failure_fingerprint = CASE
+          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            THEN NULL
+          ELSE competition.tournament_review_obligations.last_failure_fingerprint
+        END,
         updated_at = clock_timestamp()
+    WHERE competition.tournament_review_obligations.state <> 'PROCESSING'
+      AND (
+        competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+        OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+      )
     RETURNING tournament_id, event_id
   `;
   return rows.length;
@@ -1572,7 +1779,7 @@ export async function getTournamentReviewV2OperationalStatus(
                  )
              )::integer AS ready_incoherent_count,
              min(eligible_at) FILTER (WHERE state <> 'READY') AS oldest_pending_eligible_at,
-             max(updated_at) AS latest_updated_at
+             max(obligation.updated_at) AS latest_updated_at
       FROM competition.tournament_review_obligations obligation
       LEFT JOIN competition.tournament_review_heads head
         ON head.season_id = obligation.season_id
