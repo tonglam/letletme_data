@@ -49,15 +49,18 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
       })(),
     ]);
     const cachedPublication = redisRead.value;
-    const checkpointProbe = cachedPublication
-      ? { value: null, error: null }
-      : await readLivePublicationV2Checkpoint(season, event.id)
-          .then((value) => ({ value, error: null }))
-          .catch((error) => ({
-            value: null,
-            error: error instanceof Error ? error.name : 'UNKNOWN',
-          }));
-    const checkpointRead = checkpointProbe.value;
+    let checkpointRead: Awaited<ReturnType<typeof readLivePublicationV2Checkpoint>> = null;
+    let checkpointProbeError: string | null = null;
+    if (!cachedPublication) {
+      try {
+        checkpointRead = await readLivePublicationV2Checkpoint(season, event.id);
+      } catch (error) {
+        // Keep a dependency failure distinct from an empty checkpoint. The
+        // operational response is used to decide whether the PostgreSQL
+        // fallback is unavailable or simply has no durable revision.
+        checkpointProbeError = error instanceof Error ? error.name : 'UNKNOWN';
+      }
+    }
     const selectedPublication =
       cachedPublication?.publication ?? checkpointRead?.publication ?? null;
     const selectedSource = cachedPublication?.servedFrom ?? checkpointRead?.servedFrom ?? null;
@@ -103,7 +106,7 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
         fixtures: { finished: finishedFixtures, total: fixtures.length },
         publication: selectedPublication
           ? 'AVAILABLE'
-          : checkpointProbe.error
+          : checkpointProbeError
             ? 'UNAVAILABLE'
             : 'NO_NEW_REVISION',
         fallback: {
@@ -114,7 +117,7 @@ export const liveStatusAPI = new Elysia({ prefix: '/internal/live' }).get(
             ? 'NOT_CHECKED'
             : checkpointRead
               ? 'AVAILABLE'
-              : checkpointProbe.error
+              : checkpointProbeError
                 ? 'UNAVAILABLE'
                 : 'EMPTY',
           selected: selectedSource ?? 'NONE',

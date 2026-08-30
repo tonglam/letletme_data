@@ -371,6 +371,10 @@ describe('immutable Redis publication', () => {
       generation: durableFinal.publication.generation,
       state: 'FINALIZED',
     });
+    expect(await redis.exists(conflictingFinal.publication.items.eventLive.key)).toBe(0);
+    expect(await redis.exists(`${conflictingFinal.publication.items.eventLive.key}:meta`)).toBe(0);
+    expect(await redis.exists(conflictingFinal.publication.items.fixtures.key)).toBe(0);
+    expect(await redis.exists(`${conflictingFinal.publication.items.fixtures.key}:meta`)).toBe(0);
 
     // If the restored active payload is damaged, the rejected Redis FINAL
     // must not reappear through the previous fallback pointer.

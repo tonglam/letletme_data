@@ -215,10 +215,18 @@ export async function syncLiveSnapshotV2(
       });
       return { value: null, failed: true as const };
     });
-  const [current, durableRead] = await Promise.all([
-    dependencies.readPublished(season.seasonCode, eventId),
-    durableReadPromise,
-  ]);
+  const currentReadPromise = dependencies
+    .readPublished(season.seasonCode, eventId)
+    .catch((error) => {
+      // A Redis read outage must not prevent a durable FINAL checkpoint from
+      // repairing the serving pointer before any upstream fetch is attempted.
+      logError('Live Points V2 current publication read failed', error, {
+        season: season.seasonCode,
+        eventId,
+      });
+      return null;
+    });
+  const [current, durableRead] = await Promise.all([currentReadPromise, durableReadPromise]);
   const durableFloor = durableRead.value;
   if (current?.publication.state === 'FINALIZED' && (durableRead.failed || !durableFloor)) {
     return {

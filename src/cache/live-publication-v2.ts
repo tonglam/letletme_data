@@ -613,6 +613,7 @@ for index, name in ipairs({'eventLive', 'fixtures'}) do
     if redis.call('STRLEN', item.key) ~= item.bytes or redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'wrong_stage_metadata', item.key} end
   end
 end
+local previous_result = current_raw or ''
 if restoring and candidate.state == 'FINALIZED' then
   -- A durable FINAL is the canonical recovery boundary. Never retain the
   -- rejected Redis FINAL as previous: if the restored active items are later
@@ -620,6 +621,19 @@ if restoring and candidate.state == 'FINALIZED' then
   -- Point previous at the same durable candidate so both fallback positions
   -- remain coherent and use the candidate item keys.
   redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+  previous_result = ARGV[1]
+  if current and not same_identity then
+    -- The replaced manifest is no longer reachable through either pointer.
+    -- Remove its immutable siblings as well, but never delete a key reused by
+    -- the durable candidate in a same-generation identity conflict.
+    for index, name in ipairs({'eventLive', 'fixtures'}) do
+      local old_item = current.items[name]
+      local new_item = candidate.items[name]
+      if old_item and old_item.key and (not new_item or old_item.key ~= new_item.key) then
+        redis.call('DEL', old_item.key, old_item.key .. ':meta')
+      end
+    end
+  end
 elseif current and not same_identity then
   redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
   for _, name in ipairs({'eventLive', 'fixtures'}) do
@@ -659,7 +673,7 @@ else
 end
 local sequence = tonumber(redis.call('GET', KEYS[3]) or '0')
 if sequence < candidate.generation then redis.call('SET', KEYS[3], tostring(candidate.generation)) end
-return {'published', current_raw or ''}
+return {'published', previous_result}
 `;
 
 const PROMOTE_ENTRY_SCRIPT = `
