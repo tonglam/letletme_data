@@ -238,6 +238,34 @@ export const dataContractRegistry = [
     visibility: 'public',
   },
   {
+    contractKey: 'my-tournament-review-v2',
+    dataset: 'competition:my-tournament-review-v2',
+    lifecycleStages: ['active', 'review', 'finished', 'idle'],
+    eligibility: 'finished + data_checked event and setup-ready tournament phase',
+    queueLane: myFplOrchestrationQueueName,
+    schedulerJobs: ['tournament-review-v2'],
+    // The review job shares the My FPL orchestration lane. Keep the lane's
+    // established dispatch budget stable; its five-minute scheduler cadence
+    // is independent from the queue deadline used for backlog classification.
+    dispatchWithinMs: 15 * 60_000,
+    executionBudgetMs: 15 * 60_000,
+    freshnessEvidence: 'checkpoint',
+    freshnessJobs: ['tournament-review-v2'],
+    integrity:
+      'one immutable publication and head per season/tournament/event; typed format counts and source watermark agree',
+    publicationEvidence: ['tournament_review_publications', 'tournament_review_heads'],
+    consumerEvidence: publicConsumers(
+      'myTournamentReviewCatalog/myTournamentGameweekReview/myTournamentSeasonReview/myTournamentReviewStatus',
+      'My Tournament Review V2 pages',
+    ),
+    retry: {
+      maxGenerations: 3,
+      policy: 'source recheck 60/180/600s, then 15-minute degraded repair for 24h',
+    },
+    compensator: 'scoped obligation reconcile and idempotent revision rebuild',
+    visibility: 'public',
+  },
+  {
     contractKey: 'official-h2h',
     dataset: 'competition:official-h2h',
     lifecycleStages: ['active', 'review', 'finished'],
@@ -489,6 +517,7 @@ export function queueLaneForSchedulerJob(jobName: string): string | undefined {
     'my-fpl-snapshot': myFplOrchestrationQueueName,
     'my-fpl-finalization': myFplOrchestrationQueueName,
     'post-match-consolidation': myFplOrchestrationQueueName,
+    'tournament-review-v2': myFplOrchestrationQueueName,
     'my-fpl-snapshot-outbox': publicationOutboxQueueName,
     'entry-onboarding': entryOnboardingQueueName,
     'tournament-trends-repair': dataRepairQueueName,

@@ -6,6 +6,7 @@ import { purgeClientSignalRetention } from '../services/client-signals.service';
 import { repairPlayerSeasonSummaries } from '../services/player-season-summaries.service';
 import { runPlayerMarketFreshnessWatchdog } from '../jobs/player-market-freshness.jobs';
 import { repairTournamentTrendScopes } from '../jobs/tournament-trends-repair.jobs';
+import { processTournamentReviewObligations } from '../services/tournament-review-publication.service';
 import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { reconcileUnderstatOrphanedRuns } from '../services/understat-recovery.service';
@@ -280,6 +281,10 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           return runLaunchMonitor({ source: 'cron' });
         case MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION:
           return runPostMatchConsolidation();
+        case MAINTENANCE_JOBS.TOURNAMENT_REVIEW: {
+          const season = await requireCurrentSeasonForJob(job.data);
+          return processTournamentReviewObligations(season, { limit: 20 });
+        }
         case MAINTENANCE_JOBS.UNDERSTAT_ORPHAN_RECONCILER:
           return reconcileUnderstatOrphanedRuns();
         case MAINTENANCE_JOBS.ENTRY_ONBOARDING: {

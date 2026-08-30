@@ -167,6 +167,15 @@ llm:gql:security:rate:<scope>:<subject>
 Data never scans, removes, or writes GraphQL keys during normal operation.
 Query invalidation follows the dataset revision and the GraphQL TTL policy.
 
+For My Tournament Review V2, the cache dataset revision is the active
+`competition.tournament_review_heads.revision` for one
+`(season, tournament, event)` scope. Every catalog, gameweek, season, and
+status response key also includes the query arguments and has a finite TTL
+(60s for catalog, 300s for review/status reads). The cache is a read-through
+optimization only: PostgreSQL publication rows and the active head remain the
+authority, and a missing/corrupt/expired cache entry is discarded and rebuilt
+from that coherent head.
+
 ## BullMQ and coordination on queue Redis
 
 `src/queues/names.ts` is the only queue inventory. It contains 23 names: 20
