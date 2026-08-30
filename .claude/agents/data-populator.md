@@ -20,7 +20,7 @@ FPL API → transformer (Zod validate + camelCase) → service (upsert to DB + c
 ```
 
 Syncing is performed via:
-1. **Direct API endpoint calls** — HTTP calls to the running Elysia server (default: `http://localhost:3000`)
+1. **Direct API endpoint calls** — HTTP calls to the running Elysia server (set `API_BASE_URL` for the local endpoint)
 2. **BullMQ job enqueueing** — Jobs placed into queues (`data-sync`, `entry-sync`, `live-data`, `league-sync`, `tournament-sync`) are processed by the worker process
 3. **Redis cache** — Uses keys like `Entity:season` (e.g., `Event:2526`) with TTL `-1` (no expiration, refreshed on write)
 
@@ -28,7 +28,7 @@ Syncing is performed via:
 
 ### Step 1: Environment Verification
 Before calling any endpoints, verify the environment is running:
-- Check that the API server is up: `curl http://localhost:3000/health` or equivalent
+- Check that the API server is up: `curl "$API_BASE_URL/health"` or equivalent
 - Confirm worker process is running (needed for job processing)
 - If services are not running, advise the user to start them with `bun run dev` and `bun run worker:dev`
 
@@ -62,14 +62,14 @@ The project exposes sync endpoints under the API. Common patterns to call:
 
 ```bash
 # Trigger a data sync job (adjust endpoint paths based on actual routes in src/api/)
-curl -X POST http://localhost:3000/api/sync/events
-curl -X POST http://localhost:3000/api/sync/teams
-curl -X POST http://localhost:3000/api/sync/players
-curl -X POST http://localhost:3000/api/sync/fixtures
+curl -X POST "$API_BASE_URL/api/sync/events"
+curl -X POST "$API_BASE_URL/api/sync/teams"
+curl -X POST "$API_BASE_URL/api/sync/players"
+curl -X POST "$API_BASE_URL/api/sync/fixtures"
 
 # Read-back verification
-curl http://localhost:3000/api/events
-curl http://localhost:3000/api/teams
+curl "$API_BASE_URL/api/events"
+curl "$API_BASE_URL/api/teams"
 ```
 
 If direct sync endpoints are not available, use the BullMQ job system by calling job-enqueueing endpoints or inspecting `src/jobs/` to understand how to manually trigger them.

@@ -42,7 +42,7 @@ This project uses Redis for two purposes:
 ### Step 3: Execute the Operation
 - Use `ioredis` (the project's Redis client, already a dependency) via a short script executed with `bun run` or `bun -e`, OR use the `redis-cli` command if available.
 - Prefer writing minimal inline Bun scripts that import from the project's existing Redis configuration when possible (check `src/cache/` for existing client setup).
-- Execute targeted operations: `GET`, `HGET`, `HGETALL`, `KEYS` (with a specific pattern), `TYPE`, `TTL`, `PTTL`, `LRANGE`, `ZRANGE`, `SCAN` (preferred over KEYS for large datasets), `SET`, `HSET`, `DEL` (single key or explicit list), `EXPIRE`, `PERSIST`.
+- Execute targeted operations: `GET`, `HGET`, `HGETALL`, `TYPE`, `TTL`, `PTTL`, `LRANGE`, `ZRANGE`, `SCAN`, `SET`, `HSET`, `DEL` (single key or explicit list), `EXPIRE`, `PERSIST`.
 
 ### Step 4: Report Results
 - Present results in a clear, structured format.
