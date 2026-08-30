@@ -424,6 +424,43 @@ describe('TikHub fixed-account timeline client', () => {
     }
   });
 
+  test('counts malformed timeline items before the item schema gate', async () => {
+    const client = new TikHubXTimelineClient({
+      apiKey: 'fixture-secret',
+      timeoutMs: 5_000,
+      maximumResponseBytes: 1_000_000,
+      maximumPagesPerMember: 1,
+      fetchImpl: async () =>
+        response({
+          code: 200,
+          request_id: 'malformed-item',
+          data: {
+            user: { rest_id: '123456789', screen_name: 'FPLFocal' },
+            next_cursor: null,
+            timeline: [{ tweet_id: 'missing-created-at' }],
+          },
+        }),
+      endpointUrl: 'https://fixture.invalid/timeline',
+    });
+
+    try {
+      await client.execute({
+        ...request,
+        partition: { ...request.partition, members: [request.partition.members[0]!] },
+      });
+      throw new Error('Expected TikHub post schema rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TikHubXTimelineError);
+      expect(error).toMatchObject({
+        failureClass: 'TIKHUB_POST_SCHEMA_INVALID',
+        evidence: {
+          rawReturnedCount: 1,
+          memberMetrics: [expect.objectContaining({ pages: 1, rawPosts: 1 })],
+        },
+      });
+    }
+  });
+
   test('rejects a wrong top-level user even when a handle timeline is empty', async () => {
     const client = new TikHubXTimelineClient({
       apiKey: 'fixture-secret',
