@@ -9,6 +9,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { EventLive } from '../domain/event-lives';
 import type { EventLiveExplain } from '../domain/event-live-explains';
 import type { FplPlayerFixtureEvidence } from '../domain/fpl-player-fixture-stats';
+import { validateSerializedFixtures } from '../domain/fixtures';
 import type { Fixture } from '../types';
 import { createFixtureRepository } from '../repositories/fixtures';
 import { createEventLiveRepository } from '../repositories/event-lives';
@@ -99,6 +100,16 @@ export async function readLivePublicationV2Checkpoint(
   )
     return null;
 
+  let fixtures: Fixture[];
+  try {
+    // PostgreSQL JSONB has the same wire shape as Redis JSON. Rehydrate the
+    // date-bearing fixture fields before a checkpoint is handed to writers or
+    // projection code.
+    fixtures = validateSerializedFixtures(row.fixtures);
+  } catch {
+    return null;
+  }
+
   const publication: LivePublicationV2 = {
     contractVersion: 'live-points-v2',
     publicationId: row.publicationId,
@@ -133,7 +144,7 @@ export async function readLivePublicationV2Checkpoint(
   return {
     publication,
     eventLives: row.eventLive as LivePublicationRead['eventLives'],
-    fixtures: row.fixtures as LivePublicationRead['fixtures'],
+    fixtures,
     servedFrom: 'POSTGRES_CHECKPOINT',
   };
 }

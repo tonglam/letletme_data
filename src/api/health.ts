@@ -167,8 +167,21 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       currentEvent?.deadlineTimeEpoch !== undefined &&
       currentEvent.deadlineTimeEpoch * 1000 > Date.now(),
   );
+  const currentLiveKey =
+    currentEvent && !currentEventBeforeDeadline
+      ? `live-points-v2:${season.seasonCode}:${currentEvent.id}`
+      : null;
+  // This map is process-local diagnostic state. Remove old event scopes before
+  // evaluating the grace window so a previous GW cannot keep deploy readiness
+  // degraded after the current event has moved on.
+  const liveKeyPrefix = `live-points-v2:${season.seasonCode}:`;
+  for (const key of publicationMismatchSince.keys()) {
+    if (key.startsWith(liveKeyPrefix) && key !== currentLiveKey) {
+      publicationMismatchSince.delete(key);
+    }
+  }
   if (currentEvent && !currentEventBeforeDeadline) {
-    const liveKey = `live-points-v2:${season.seasonCode}:${currentEvent.id}`;
+    const liveKey = currentLiveKey as string;
     const [redisLive, checkpointLive, desiredLive] = await Promise.all([
       readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(
         () => null,

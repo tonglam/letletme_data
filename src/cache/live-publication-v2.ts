@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type Redis from 'ioredis';
 
 import type { EventLive } from '../domain/event-lives';
+import { validateSerializedFixtures } from '../domain/fixtures';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
 import { canonicalJson, contentHash } from '../utils/content-hash';
@@ -1322,12 +1323,12 @@ async function readLiveCandidate(
     return null;
   try {
     const eventLives = JSON.parse(eventLivePayload) as unknown;
-    const fixtures = JSON.parse(fixturePayload) as unknown;
+    const parsedFixtures = JSON.parse(fixturePayload) as unknown;
     if (
       !Array.isArray(eventLives) ||
-      !Array.isArray(fixtures) ||
+      !Array.isArray(parsedFixtures) ||
       itemCount(eventLives) !== publication.items.eventLive.count ||
-      itemCount(fixtures) !== publication.items.fixtures.count ||
+      itemCount(parsedFixtures) !== publication.items.fixtures.count ||
       !eventLives.every(
         (row) =>
           row !== null &&
@@ -1340,7 +1341,7 @@ async function readLiveCandidate(
       ) ||
       new Set(eventLives.map((row) => (row as { elementId: number }).elementId)).size !==
         eventLives.length ||
-      !fixtures.every(
+      !parsedFixtures.every(
         (fixture) =>
           fixture !== null &&
           typeof fixture === 'object' &&
@@ -1351,13 +1352,19 @@ async function readLiveCandidate(
           ((fixture as { event?: unknown }).event === null ||
             (fixture as { event?: unknown }).event === scope.eventId),
       ) ||
-      new Set(fixtures.map((fixture) => (fixture as { id: number }).id)).size !== fixtures.length
+      new Set(parsedFixtures.map((fixture) => (fixture as { id: number }).id)).size !==
+        parsedFixtures.length
     )
       return null;
+    // Redis stores JSON, so Date fields arrive as strings. Rehydrate and
+    // validate the domain object before returning it; otherwise a cold
+    // checkpoint replay can pass the manifest checks but fail when the
+    // fixture repository binds kickoffTime/createdAt/updatedAt as dates.
+    const fixtures = validateSerializedFixtures(parsedFixtures);
     return {
       publication,
       eventLives: eventLives as EventLive[],
-      fixtures: fixtures as Fixture[],
+      fixtures,
       servedFrom: pointer === 'active' ? 'REDIS_CURRENT' : 'REDIS_PREVIOUS',
     };
   } catch {

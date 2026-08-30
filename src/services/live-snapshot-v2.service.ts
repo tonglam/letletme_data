@@ -124,14 +124,18 @@ function shouldCheckpoint(
   if (finalizeEvent || !current) return true;
   if (current.publication.state !== state) return true;
   // Fixture identity and display-only changes are cheap, semantically useful
-  // checkpoints.  Score-core changes remain Redis-first and are coalesced to
-  // at most one PostgreSQL write per ten minutes during LIVE_ACTIVE.
-  if (
+  // checkpoints.  A display revision normally moves with score core (minutes,
+  // points, and starts), so it must not bypass the ten-minute score checkpoint
+  // coalescing window.  Only a display-only revision can checkpoint immediately.
+  const fixtureIdentityChanged =
     current.publication.revisions.fixtureIdentity.revision !==
-      promoted.revisions.fixtureIdentity.revision ||
-    current.publication.revisions.displayStats.revision !== promoted.revisions.displayStats.revision
-  )
-    return true;
+    promoted.revisions.fixtureIdentity.revision;
+  const scoreCoreChanged =
+    current.publication.revisions.scoreCore.revision !== promoted.revisions.scoreCore.revision;
+  const displayStatsChanged =
+    current.publication.revisions.displayStats.revision !==
+    promoted.revisions.displayStats.revision;
+  if (fixtureIdentityChanged || (displayStatsChanged && !scoreCoreChanged)) return true;
   // A missing checkpoint is an outstanding durability obligation. The first
   // obligation is repaired immediately, but a deliberately coalesced score
   // generation must honor its recent desired-request timestamp rather than

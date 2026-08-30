@@ -142,6 +142,21 @@ export async function checkpointEntryLiveInputV2(
       },
     );
   });
+  // The repository deliberately reports no-op writes as successful at the
+  // transaction boundary. Re-read the durable head after commit and fence the
+  // Redis checkpoint marker on the exact publication identity; otherwise a
+  // rejected stale/conflicting write could be advertised as checkpointed.
+  const durableHead = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  if (
+    durableHead === null ||
+    durableHead.rowCount !== 15 ||
+    durableHead.state !== 'COMPLETE' ||
+    durableHead.publicationId !== candidate.publication.publicationId ||
+    durableHead.generation !== candidate.publication.generation ||
+    durableHead.picksBaseRevision !== candidate.input.picksBase.revision
+  ) {
+    return 'missing';
+  }
   const marked = await markEntryPublicationCheckpointedV2(candidate.publication, checkpointedAt);
   if (marked === null) return 'missing';
   await clearEntryCheckpointDesiredV2(desired);
