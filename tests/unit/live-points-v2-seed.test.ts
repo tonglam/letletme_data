@@ -5,20 +5,33 @@ import {
   assertLivePointsV2SeedDatabaseTarget,
   buildSeedHead,
   buildSeedInput,
+  canSupersedeUncheckpointedSeedCurrent,
   canUseLegacyRelationalFacts,
   findMissingPickScopes,
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
+  liveSeedActivePointerSha256,
   parseSeedArguments,
   rebaseLegacyFixturesAtCanonicalFence,
   resolveLivePointsV2SeedDatabaseUrl,
   resolveSeedObservationCheckedAt,
+  seedClaimMatchesActiveFence,
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
   type LegacyFixtureFactRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
+import {
+  parseLivePublicationV2Manifest,
+  parseLivePublicationV2OrderingFence,
+  type LivePublicationV2,
+} from '../../src/cache/live-publication-v2';
+import {
+  livePublicationSeedClaimAllowsCheckpoint,
+  livePublicationSeedClaimMatchesCandidate,
+  livePublicationSeedClaimMatchesPublication,
+} from '../../src/services/live-publication-v2-checkpoint.service';
 
 function rows(overrides: Partial<ExistingPickRow> = {}): ExistingPickRow[] {
   return Array.from({ length: 15 }, (_, index) => ({
@@ -106,6 +119,221 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(canUseLegacyRelationalFacts('FINALIZED', sourceCheckedAt, laterBackfill)).toBe(true);
     expect(canUseLegacyRelationalFacts('GW_REVIEW', sourceCheckedAt, laterBackfill)).toBe(false);
     expect(canUseLegacyRelationalFacts('FINALIZED', sourceCheckedAt, null)).toBe(false);
+  });
+
+  test('supersedes only a non-durable cutover orphan at a proven source fence', () => {
+    const current = {
+      checkpointedAt: null,
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      state: 'LIVE_ACTIVE' as const,
+    };
+    const seed = {
+      sourceCheckedAt: new Date('2026-08-30T15:30:08.402Z'),
+      observationCheckedAt: new Date('2026-08-30T15:31:08.555Z'),
+      state: 'LIVE_ACTIVE' as const,
+    };
+
+    expect(canSupersedeUncheckpointedSeedCurrent(current, seed)).toBe(true);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(
+        { ...current, checkpointedAt: '2026-08-30T15:32:00.000Z' },
+        seed,
+      ),
+    ).toBe(false);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(current, {
+        ...seed,
+        sourceCheckedAt: new Date('2026-08-30T15:29:59.999Z'),
+      }),
+    ).toBe(false);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(
+        { ...current, state: 'FINALIZED' },
+        { ...seed, state: 'GW_REVIEW' },
+      ),
+    ).toBe(false);
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(
+        { ...current, state: 'FINALIZED' },
+        { ...seed, state: 'FINALIZED' },
+      ),
+    ).toBe(true);
+  });
+
+  test('binds checkpoint permission to the exact durable seed claim', () => {
+    const claimId = '00000000-0000-4000-8000-000000000001';
+    expect(livePublicationSeedClaimAllowsCheckpoint(null, undefined)).toBe(true);
+    expect(livePublicationSeedClaimAllowsCheckpoint(null, claimId)).toBe(false);
+    expect(livePublicationSeedClaimAllowsCheckpoint(claimId, undefined)).toBe(false);
+    expect(livePublicationSeedClaimAllowsCheckpoint(claimId, claimId)).toBe(true);
+    expect(
+      livePublicationSeedClaimAllowsCheckpoint(claimId, '00000000-0000-4000-8000-000000000002'),
+    ).toBe(false);
+    expect(liveSeedActivePointerSha256('')).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    );
+  });
+
+  test('binds a durable seed claim to the exact promoted candidate', () => {
+    const sourceCheckedAt = '2026-08-30T15:30:08.402Z';
+    const eventLiveSha256 = 'a'.repeat(64);
+    const fixturesSha256 = 'b'.repeat(64);
+    const publication = {
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt,
+      items: {
+        eventLive: { sha256: eventLiveSha256 },
+        fixtures: { sha256: fixturesSha256 },
+      },
+    } as LivePublicationV2;
+    const claim = {
+      claimId: '00000000-0000-4000-8000-000000000001',
+      expectedActiveSha256: 'c'.repeat(64),
+      candidateState: 'LIVE_ACTIVE' as const,
+      candidateSourceCheckedAt: sourceCheckedAt,
+      candidateEventLiveSha256: eventLiveSha256,
+      candidateFixturesSha256: fixturesSha256,
+      claimedAt: '2026-08-30T15:30:07.402Z',
+    };
+
+    expect(livePublicationSeedClaimMatchesPublication(claim, publication)).toBe(true);
+    expect(
+      livePublicationSeedClaimMatchesPublication(claim, {
+        ...publication,
+        sourceCheckedAt: '2026-08-30T15:30:09.402Z',
+      }),
+    ).toBe(false);
+    expect(
+      livePublicationSeedClaimMatchesPublication(claim, {
+        ...publication,
+        items: {
+          ...publication.items,
+          fixtures: { ...publication.items.fixtures, sha256: 'd'.repeat(64) },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      livePublicationSeedClaimMatchesCandidate(claim, {
+        candidateState: 'LIVE_ACTIVE',
+        candidateSourceCheckedAt: sourceCheckedAt,
+        candidateEventLiveSha256: eventLiveSha256,
+        candidateFixturesSha256: fixturesSha256,
+      }),
+    ).toBe(true);
+    expect(
+      livePublicationSeedClaimMatchesCandidate(claim, {
+        candidateState: 'LIVE_ACTIVE',
+        candidateSourceCheckedAt: sourceCheckedAt,
+        candidateEventLiveSha256: 'e'.repeat(64),
+        candidateFixturesSha256: fixturesSha256,
+      }),
+    ).toBe(false);
+  });
+
+  test('retains ordering fences when revision or item metadata is corrupt', () => {
+    const scope = { season: '2627', eventId: 2 } as const;
+    const raw = JSON.stringify({
+      contractVersion: 'live-points-v2',
+      publicationId: 'corrupt-publication-identity',
+      generation: 7,
+      season: scope.season,
+      eventId: scope.eventId,
+      state: 'FINALIZED',
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      publishedAt: '2026-08-30T15:30:09.402Z',
+      checkpointedAt: null,
+      expectedNextCheckAt: null,
+      revisions: { corrupt: true },
+      items: { corrupt: true },
+    });
+
+    expect(parseLivePublicationV2Manifest(raw, scope)).toBeNull();
+    expect(parseLivePublicationV2OrderingFence(raw, scope)).toEqual({
+      contractVersion: 'live-points-v2',
+      generation: 7,
+      season: '2627',
+      eventId: 2,
+      state: 'FINALIZED',
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      checkpointedAt: null,
+    });
+
+    const damagedGeneration = JSON.stringify({
+      ...JSON.parse(raw),
+      generation: 'corrupt',
+    });
+    expect(parseLivePublicationV2OrderingFence(damagedGeneration, scope)).toEqual({
+      contractVersion: 'live-points-v2',
+      generation: null,
+      season: '2627',
+      eventId: 2,
+      state: 'FINALIZED',
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      checkpointedAt: null,
+    });
+
+    for (const generation of [Number.MAX_SAFE_INTEGER + 1, 0, -1, 1.5]) {
+      const fence = parseLivePublicationV2OrderingFence(
+        JSON.stringify({ ...JSON.parse(raw), generation }),
+        scope,
+      );
+      expect(fence).toMatchObject({
+        generation: null,
+        state: 'FINALIZED',
+        sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      });
+    }
+
+    const damagedState = parseLivePublicationV2OrderingFence(
+      JSON.stringify({ ...JSON.parse(raw), state: 'CORRUPT' }),
+      scope,
+    );
+    expect(damagedState).toMatchObject({
+      generation: 7,
+      state: null,
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      checkpointedAt: null,
+    });
+    expect(damagedState).not.toBeNull();
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(damagedState!, {
+        sourceCheckedAt: new Date('2026-08-30T15:31:08.402Z'),
+        observationCheckedAt: new Date('2026-08-30T15:31:08.402Z'),
+        state: 'FINALIZED',
+      }),
+    ).toBe(false);
+  });
+
+  test('does not weaken a complete manifest claim mismatch to its ordering fence', () => {
+    const claim = {
+      claimId: '00000000-0000-4000-8000-000000000001',
+      expectedActiveSha256: 'c'.repeat(64),
+      candidateState: 'LIVE_ACTIVE' as const,
+      candidateSourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      candidateEventLiveSha256: 'a'.repeat(64),
+      candidateFixturesSha256: 'b'.repeat(64),
+      claimedAt: '2026-08-30T15:30:07.402Z',
+    };
+    const manifest = {
+      state: claim.candidateState,
+      sourceCheckedAt: claim.candidateSourceCheckedAt,
+      items: {
+        eventLive: { sha256: 'd'.repeat(64) },
+        fixtures: { sha256: claim.candidateFixturesSha256 },
+      },
+    } as LivePublicationV2;
+    const orderingFence = {
+      contractVersion: 'live-points-v2' as const,
+      generation: 7,
+      season: '2627',
+      eventId: 2,
+      state: claim.candidateState,
+      sourceCheckedAt: claim.candidateSourceCheckedAt,
+      checkpointedAt: null,
+    };
+
+    expect(seedClaimMatchesActiveFence(claim, manifest, orderingFence)).toBe(false);
+    expect(seedClaimMatchesActiveFence(claim, null, orderingFence)).toBe(true);
   });
 
   test('rebases the fixture sibling from canonical rows at a newer event fence', () => {
