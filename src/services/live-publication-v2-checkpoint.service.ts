@@ -56,6 +56,18 @@ const LIVE_PUBLICATION_STATES: readonly LivePublicationState[] = [
   'FINALIZED',
 ];
 
+/**
+ * Drizzle raw SQL fragments are bound by postgres-js without the timestamp
+ * encoder used for typed table values. Bind a canonical ISO string instead of
+ * a Date whenever a timestamp is interpolated into sql``.
+ */
+export function postgresTimestampParameter(value: Date): string {
+  if (!Number.isFinite(value.getTime())) {
+    throw new Error('PostgreSQL timestamp parameter is invalid');
+  }
+  return value.toISOString();
+}
+
 function isLivePublicationState(value: unknown): value is LivePublicationState {
   return (
     typeof value === 'string' && LIVE_PUBLICATION_STATES.includes(value as LivePublicationState)
@@ -251,6 +263,8 @@ export async function checkpointLivePublicationV2(
       if (!Number.isFinite(checkpointedAt.getTime())) {
         throw new Error('PostgreSQL did not return a valid checkpoint clock timestamp');
       }
+      const observationCheckedAtParameter = postgresTimestampParameter(observationCheckedAt);
+      const checkpointedAtParameter = postgresTimestampParameter(checkpointedAt);
       // Core publication writes use this same lock before touching events or
       // fixtures. Taking it first gives live checkpoint upserts the identical
       // ordering and prevents a newer core observation from racing between the
@@ -369,8 +383,8 @@ export async function checkpointLivePublicationV2(
         .set({
           liveSnapshotCheckedAt: sql`
           GREATEST(
-            COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAt}),
-            ${observationCheckedAt}
+            COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+            ${observationCheckedAtParameter}::timestamptz
           )
         `,
           liveFactsPersistedAt: checkpointedAt,
@@ -386,9 +400,9 @@ export async function checkpointLivePublicationV2(
           .set({
             liveSnapshotFinalizedAt: sql`
             GREATEST(
-              COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAt}),
-              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAt}),
-              ${observationCheckedAt}
+              COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAtParameter}::timestamptz),
+              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+              ${observationCheckedAtParameter}::timestamptz
             )
           `,
             updatedAt: checkpointedAt,
