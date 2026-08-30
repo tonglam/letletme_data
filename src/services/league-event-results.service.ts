@@ -459,6 +459,24 @@ export async function syncLeagueEventResultsByTournament(
       failedUnits: 0,
     };
   }
+  const finalCheckpoint = finalizationCutoff
+    ? await readLivePublicationV2Checkpoint(season, eventId)
+    : null;
+  if (finalizationCutoff && finalCheckpoint?.publication.state !== 'FINALIZED') {
+    const summary = summarizeMissingLeagueEventLiveData(
+      tournamentId,
+      eventId,
+      entryIds.length,
+      0,
+    );
+    throw new IncompleteDataSyncError(
+      'League final results require a FINALIZED Live Points V2 checkpoint',
+      summary.requiredUnits,
+      summary.reusedUnits,
+      summary.succeededUnits,
+      summary.failedUnits,
+    );
+  }
   // Active rows are ordered by their paired official source timestamp, not by
   // the database-clock token captured before the source reads. Rebuild them on
   // every scheduled attempt; the guarded upsert will retain a concurrently
@@ -494,9 +512,6 @@ export async function syncLeagueEventResultsByTournament(
   const eventLiveAuthority = finalizationCutoff
     ? null
     : await loadFreshEventLiveAuthoritySnapshot(season, eventId);
-  const finalCheckpoint = finalizationCutoff
-    ? await readLivePublicationV2Checkpoint(season, eventId)
-    : null;
   const eventLives = finalizationCutoff
     ? (finalCheckpoint?.eventLives ?? [])
     : (eventLiveAuthority?.eventLives ?? []);

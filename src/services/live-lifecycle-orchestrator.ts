@@ -302,8 +302,15 @@ export async function markLivePicksEntryComplete(
   eventId: number,
   entryId: number,
 ): Promise<boolean> {
-  const input = await readEntryLiveInputV2({ season: seasonCode, eventId, entryId });
-  if (!input) return false;
+  const scope = { season: seasonCode, eventId, entryId } as const;
+  const [input, desired] = await Promise.all([
+    readEntryLiveInputV2(scope),
+    readEntryCheckpointDesiredV2(scope),
+  ]);
+  // The cohort marker is a durable-completion marker, not a source-fetch
+  // marker. A Redis input with an outstanding desired pointer is still
+  // pending even when the provider child itself completed successfully.
+  if (!input || input.publication.checkpointedAt === null || desired !== null) return false;
   const redis = await redisSingleton.getClient();
   const pendingKey = liveV2PicksPendingKey({ season: seasonCode, eventId });
   await redis.srem(pendingKey, String(entryId));

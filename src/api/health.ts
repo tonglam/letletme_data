@@ -24,6 +24,8 @@ export type ReadinessResult = {
     queueWorker?: boolean;
     contentWorker?: boolean;
     mediaWorker?: boolean;
+    livePicksWorker?: boolean;
+    officialH2HWorker?: boolean;
     publicationConsistency?: boolean;
   };
 };
@@ -103,6 +105,8 @@ const schedulerProbe: DependencyProbe = () => checkRuntimeHeartbeat('scheduler')
 const queueWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('queueWorker');
 const contentWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('contentWorker');
 const mediaWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('mediaWorker');
+const livePicksWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('livePicksWorker');
+const officialH2HWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('officialH2HWorker');
 
 const PUBLICATION_MISMATCH_GRACE_MS = 120_000;
 const publicationMismatchSince = new Map<string, number>();
@@ -161,11 +165,13 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
     // its merged checkpoint obligation is pending.  Once Redis marks a
     // publication checkpointed, however, both authorities must identify the
     // same immutable generation.
-    const publicationTimes = [redisLive?.publication.publishedAt, desiredLive?.requestedAt]
-      .map((value) => (value ? Date.parse(value) : Number.NaN))
-      .filter(Number.isFinite);
-    const pendingCheckpointStartedAt =
-      publicationTimes.length > 0 ? Math.max(...publicationTimes) : Number.NaN;
+    // The desired pointer preserves the first outstanding obligation time.
+    // Use it as the grace anchor so a new heartbeat/publication cannot keep a
+    // broken checkpoint path green indefinitely. If the obligation pointer was
+    // itself unavailable, the current publication is the only bounded anchor.
+    const pendingCheckpointStartedAt = Date.parse(
+      desiredLive?.requestedAt ?? redisLive?.publication.publishedAt ?? '',
+    );
     const pendingCheckpointWithinGrace =
       Number.isFinite(pendingCheckpointStartedAt) &&
       Date.now() - pendingCheckpointStartedAt <= PUBLICATION_MISMATCH_GRACE_MS;
@@ -221,6 +227,8 @@ export async function checkReadiness(
     queueWorker: DependencyProbe;
     contentWorker: DependencyProbe;
     mediaWorker: DependencyProbe;
+    livePicksWorker: DependencyProbe;
+    officialH2HWorker: DependencyProbe;
     publicationConsistency: DependencyProbe;
     includeRuntimeDependencies: boolean;
     strict: boolean;
@@ -239,6 +247,8 @@ export async function checkReadiness(
     queueWorker: queueWorkerProbe,
     contentWorker: contentWorkerProbe,
     mediaWorker: mediaWorkerProbe,
+    livePicksWorker: livePicksWorkerProbe,
+    officialH2HWorker: officialH2HWorkerProbe,
     publicationConsistency: publicationConsistencyProbe,
     ...probes,
   };
@@ -266,12 +276,22 @@ export async function checkReadiness(
       dependencies: baseDependencies,
     };
   }
-  const [scheduler, queueWorker, contentWorker, mediaWorker, publicationConsistency] =
+  const [
+    scheduler,
+    queueWorker,
+    contentWorker,
+    mediaWorker,
+    livePicksWorker,
+    officialH2HWorker,
+    publicationConsistency,
+  ] =
     await Promise.all([
       safeProbe(configured.scheduler, probeTimeoutMs),
       safeProbe(configured.queueWorker, probeTimeoutMs),
       safeProbe(configured.contentWorker, probeTimeoutMs),
       safeProbe(configured.mediaWorker, probeTimeoutMs),
+      safeProbe(configured.livePicksWorker, probeTimeoutMs),
+      safeProbe(configured.officialH2HWorker, probeTimeoutMs),
       safeProbe(configured.publicationConsistency, probeTimeoutMs),
     ]);
   return {
@@ -285,6 +305,8 @@ export async function checkReadiness(
         queueWorker &&
         contentWorker &&
         mediaWorker &&
+        livePicksWorker &&
+        officialH2HWorker &&
         publicationConsistency
       : cacheRedis && activeSeason,
     dependencies: {
@@ -293,6 +315,8 @@ export async function checkReadiness(
       queueWorker,
       contentWorker,
       mediaWorker,
+      livePicksWorker,
+      officialH2HWorker,
       publicationConsistency,
     },
   };

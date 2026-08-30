@@ -14,6 +14,7 @@ import {
   publishEntryLiveInputV2,
   publishLivePublicationV2,
   readEntryLiveInputV2,
+  restoreLivePublicationV2Checkpoint,
   readLivePublicationV2,
   setEntryCheckpointDesiredV2,
   setLiveCheckpointDesiredV2,
@@ -25,7 +26,10 @@ import {
 import { redisSingleton } from '../src/cache/singleton';
 import { databaseSingleton } from '../src/db/singleton';
 import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
-import { checkpointLivePublicationV2 } from '../src/services/live-publication-v2-checkpoint.service';
+import {
+  checkpointLivePublicationV2,
+  readLivePublicationV2Checkpoint,
+} from '../src/services/live-publication-v2-checkpoint.service';
 import { checkpointEntryLiveInputV2 } from '../src/services/entries.service';
 import { canonicalJson, contentHash, postgresJsonbContentHash } from '../src/utils/content-hash';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../src/types';
@@ -1007,10 +1011,27 @@ async function checkpointSeededLive(
     eventLives: seed.eventLives,
     fixtures: seed.fixtures,
   });
+  if (!checkpointed) {
+    // A seed candidate may lose to a newer or FINALIZED durable head. Never
+    // mark that rejected candidate durable; restore the accepted checkpoint so
+    // the seed cannot leave Redis serving an older publication.
+    const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+    if (!durable) return 'blocked';
+    const restored = await restoreLivePublicationV2Checkpoint({ checkpoint: durable, redis });
+    if (
+      !restored.published &&
+      (restored.publication.publicationId !== durable.publication.publicationId ||
+        restored.publication.generation !== durable.publication.generation)
+    ) {
+      return 'blocked';
+    }
+    await clearLiveCheckpointDesiredV2(desired, redis);
+    return 'already-checkpointed';
+  }
   const marked = await markLivePublicationCheckpointedV2(publication, new Date(), redis);
   if (marked) {
     await clearLiveCheckpointDesiredV2(desired, redis);
-    return checkpointed ? 'checkpointed' : 'already-checkpointed';
+    return 'checkpointed';
   }
   return 'blocked';
 }
