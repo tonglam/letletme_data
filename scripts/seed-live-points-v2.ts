@@ -2223,11 +2223,12 @@ export function canSupersedeUncheckpointedSeedCurrent(
   current: {
     readonly checkpointedAt: string | null | undefined;
     readonly sourceCheckedAt: string;
-    readonly state: LivePublicationState;
+    readonly state: LivePublicationState | null;
   },
   seed: Pick<ValidatedLiveSeed, 'sourceCheckedAt' | 'observationCheckedAt' | 'state'>,
 ): boolean {
   if (current.checkpointedAt !== null) return false;
+  if (current.state === null) return false;
   const currentSourceCheckedAt = new Date(current.sourceCheckedAt);
   if (!Number.isFinite(currentSourceCheckedAt.getTime())) return false;
   if (current.state === 'FINALIZED' && seed.state !== 'FINALIZED') return false;

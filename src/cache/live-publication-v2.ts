@@ -77,7 +77,8 @@ export type LivePublicationV2OrderingFence = {
   readonly generation: number | null;
   readonly season: string;
   readonly eventId: number;
-  readonly state: LivePublicationState;
+  /** A damaged state preserves source ordering but cannot authorize promotion. */
+  readonly state: LivePublicationState | null;
   readonly sourceCheckedAt: string;
   /** Undefined means the durable marker is corrupt/unknown and must fail closed. */
   readonly checkpointedAt: string | null | undefined;
@@ -434,7 +435,6 @@ export function parseLivePublicationV2OrderingFence(
       value.contractVersion !== LIVE_POINTS_CONTRACT_VERSION ||
       value.season !== scope.season ||
       value.eventId !== scope.eventId ||
-      !validLivePublicationState(value.state) ||
       !validIso(value.sourceCheckedAt)
     ) {
       return null;
@@ -445,6 +445,7 @@ export function parseLivePublicationV2OrderingFence(
       value.generation > 0
         ? value.generation
         : null;
+    const state = validLivePublicationState(value.state) ? value.state : null;
     const checkpointedAt =
       value.checkpointedAt === null
         ? null
@@ -456,7 +457,7 @@ export function parseLivePublicationV2OrderingFence(
       generation,
       season: scope.season,
       eventId: scope.eventId,
-      state: value.state,
+      state,
       sourceCheckedAt: value.sourceCheckedAt,
       checkpointedAt,
     };
@@ -631,6 +632,12 @@ return {tostring(value), tostring(now[1]), tostring(now[2])}
 
 const PROMOTE_LIVE_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
+local function valid_generation(value)
+  return type(value) == 'number' and value > 0 and value <= 9007199254740991 and value == math.floor(value)
+end
+local function valid_live_state(value)
+  return value == 'PRE_DEADLINE' or value == 'PICKS_WAIT' or value == 'PICKS_PROBE' or value == 'PICKS_SYNC' or value == 'LIVE_ACTIVE' or value == 'BETWEEN_FIXTURES' or value == 'DAY_SETTLING' or value == 'GW_REVIEW' or value == 'FINALIZED'
+end
 local restoring = ARGV[4] == 'restore'
 local seed_recovery = ARGV[4] == 'seed-recovery'
 local observed_current_raw = ARGV[5] or ''
@@ -642,6 +649,7 @@ local current_publication_id = nil
 local current_scope_valid = false
 local current_scope_mismatch = false
 local current_state = nil
+local current_state_unknown = false
 local current = nil
 if current_raw then
   local ok, decoded = pcall(cjson.decode, current_raw)
@@ -653,8 +661,12 @@ if current_raw then
       -- immutable siblings is damaged.  A corrupt FINAL must still fence a
       -- provisional candidate, while a newer complete FINAL remains a valid
       -- recovery path when no durable checkpoint is available.
-      current_state = decoded.state
-      if type(decoded.generation) == 'number' and decoded.generation > 0 then
+      if valid_live_state(decoded.state) then
+        current_state = decoded.state
+      else
+        current_state_unknown = true
+      end
+      if valid_generation(decoded.generation) then
         current_generation = decoded.generation
         current_publication_id = decoded.publicationId
         current_scope_valid = true
@@ -677,6 +689,7 @@ if current_raw then
 end
 if candidate.contractVersion ~= 'live-points-v2' or not candidate.items then return {'invalid_candidate'} end
 if current_scope_mismatch then return {'scope_mismatch'} end
+if current_state_unknown and not restoring then return {'invalid_current_state'} end
 local same_identity = current_generation ~= nil and current_generation == candidate.generation and current_publication_id == candidate.publicationId
 -- A PostgreSQL durable FINAL checkpoint is the canonical recovery proof.  A
 -- conflicting Redis FINAL may be a stale/rebuilt pointer, so an explicit
@@ -774,6 +787,9 @@ return {'published', previous_result}
 
 const PROMOTE_ENTRY_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
+local function valid_generation(value)
+  return type(value) == 'number' and value > 0 and value <= 9007199254740991 and value == math.floor(value)
+end
 local observed_current_raw = ARGV[4] or ''
 local current_raw = redis.call('GET', KEYS[1]) or ''
 if current_raw ~= observed_current_raw then return {'changed', current_raw} end
@@ -788,7 +804,7 @@ if current_raw then
   if ok and decoded.contractVersion == 'live-points-v2' then
     if decoded.season ~= candidate.season or decoded.eventId ~= candidate.eventId or decoded.entryId ~= candidate.entryId then
       current_scope_mismatch = true
-    elseif type(decoded.generation) == 'number' and decoded.generation > 0 then
+    elseif valid_generation(decoded.generation) then
       current_generation = decoded.generation
       current_scope_valid = true
       current_state = decoded.state

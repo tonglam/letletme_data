@@ -271,6 +271,37 @@ describe('Live Points V2 entry-pick seed', () => {
       sourceCheckedAt: '2026-08-30T15:30:08.402Z',
       checkpointedAt: null,
     });
+
+    for (const generation of [Number.MAX_SAFE_INTEGER + 1, 0, -1, 1.5]) {
+      const fence = parseLivePublicationV2OrderingFence(
+        JSON.stringify({ ...JSON.parse(raw), generation }),
+        scope,
+      );
+      expect(fence).toMatchObject({
+        generation: null,
+        state: 'FINALIZED',
+        sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      });
+    }
+
+    const damagedState = parseLivePublicationV2OrderingFence(
+      JSON.stringify({ ...JSON.parse(raw), state: 'CORRUPT' }),
+      scope,
+    );
+    expect(damagedState).toMatchObject({
+      generation: 7,
+      state: null,
+      sourceCheckedAt: '2026-08-30T15:30:08.402Z',
+      checkpointedAt: null,
+    });
+    expect(damagedState).not.toBeNull();
+    expect(
+      canSupersedeUncheckpointedSeedCurrent(damagedState!, {
+        sourceCheckedAt: new Date('2026-08-30T15:31:08.402Z'),
+        observationCheckedAt: new Date('2026-08-30T15:31:08.402Z'),
+        state: 'FINALIZED',
+      }),
+    ).toBe(false);
   });
 
   test('does not weaken a complete manifest claim mismatch to its ordering fence', () => {

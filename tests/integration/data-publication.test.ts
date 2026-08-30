@@ -350,6 +350,68 @@ describe('immutable Redis publication', () => {
     );
   });
 
+  test('an unsafe current generation cannot block a claimed complete seed', async () => {
+    const first = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const corruptRaw = JSON.stringify({
+      ...first.publication,
+      generation: Number.MAX_SAFE_INTEGER + 1,
+    });
+    await redis.set(liveV2Key(LIVE_SCOPE, 'active'), corruptRaw);
+
+    const recovered = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:01:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      previous: first.publication,
+      expectedCurrentRaw: corruptRaw,
+      promotionMode: 'seed-recovery',
+      redis,
+    });
+
+    expect(recovered.published).toBe(true);
+    expect(Number.isSafeInteger(recovered.publication.generation)).toBe(true);
+    expect((await readLivePublicationV2(LIVE_SCOPE, redis))?.publication.publicationId).toBe(
+      recovered.publication.publicationId,
+    );
+  });
+
+  test('a corrupt current state fails closed without replacing the current pointer', async () => {
+    const first = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'LIVE_ACTIVE',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const corruptRaw = JSON.stringify({ ...first.publication, state: 'CORRUPT' });
+    await redis.set(liveV2Key(LIVE_SCOPE, 'active'), corruptRaw);
+
+    await expect(
+      publishLivePublicationV2({
+        ...LIVE_SCOPE,
+        state: 'FINALIZED',
+        sourceCheckedAt: new Date('2026-08-09T04:01:00.000Z'),
+        eventLives: [],
+        fixtures: [],
+        previous: first.publication,
+        expectedCurrentRaw: corruptRaw,
+        promotionMode: 'seed-recovery',
+        redis,
+      }),
+    ).rejects.toMatchObject({ code: 'LIVE_V2_PROMOTE_FAILED' });
+    expect(await readLivePublicationV2ActiveRaw(LIVE_SCOPE, redis)).toBe(corruptRaw);
+  });
+
   test('claimed seed recovery can replace a valid finalized orphan with a newer final', async () => {
     const orphan = await publishLivePublicationV2({
       ...LIVE_SCOPE,
