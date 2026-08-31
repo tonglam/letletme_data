@@ -543,6 +543,43 @@ async function buildPointsPayload(
   ) {
     throw new TournamentReviewSourceNotReadyError('points group assignment is stale');
   }
+  const canonicalGroupByEntry = new Map(
+    canonicalGroupRows.map((row) => [row.entry_id, row.group_id]),
+  );
+  const historicalGroupRows = await tx<Array<{ entry_id: number; group_id: number | null }>>`
+    SELECT history.entry_id, history.group_id
+    FROM competition.tournament_points_group_results history
+    JOIN competition.tournament_entries roster
+      ON roster.season_id = history.season_id
+     AND roster.tournament_id = history.tournament_id
+     AND roster.entry_id = history.entry_id
+    JOIN competition.entries entry
+      ON entry.season_id = history.season_id
+     AND entry.entry_id = history.entry_id
+    JOIN fpl.events history_event
+      ON history_event.season_id = history.season_id
+     AND history_event.event_id = history.event_id
+    JOIN competition.tournaments history_tournament
+      ON history_tournament.season_id = history.season_id
+     AND history_tournament.tournament_id = history.tournament_id
+    WHERE history.season_id = ${seasonId}
+      AND history.tournament_id = ${tournament.tournament_id}
+      AND history.event_id >= GREATEST(
+        COALESCE(history_tournament.group_started_event_id, 1),
+        COALESCE(entry.started_event, 1)
+      )
+      AND history.event_id <= ${event.event_id}
+      AND history_event.finished = true
+      AND history_event.data_checked = true
+      AND history_event.data_checked_at IS NOT NULL
+  `;
+  if (
+    historicalGroupRows.some(
+      (row) => row.group_id === null || canonicalGroupByEntry.get(row.entry_id) !== row.group_id,
+    )
+  ) {
+    throw new TournamentReviewSourceNotReadyError('historical points group assignment is stale');
+  }
   const notApplicable = rows.filter(
     (row) => !isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
@@ -844,9 +881,14 @@ export function hasCanonicalTournamentReviewGroupAssignment(input: {
 }
 
 export function rankTournamentReviewH2HStandings<
-  T extends { entryId: number; matchPoints: number; pointsFor: number },
->(rows: readonly T[]): Array<T & { rank: number }> {
-  const ordered = [...rows].sort(
+  T extends { entryId: number; matchPoints: number; pointsFor: number; applicable?: boolean },
+>(rows: readonly T[]): Array<T & { rank: number | null }> {
+  // A late-joining entry is retained in the review roster with an explicit
+  // `applicable: false`, but it must not participate in historical standings
+  // or consume a competition-rank position. Keep it visible and unranked so
+  // consumers can explain the roster count without treating it as a result.
+  const applicableRows = rows.filter((row) => row.applicable !== false);
+  const ordered = applicableRows.sort(
     (left, right) =>
       right.matchPoints - left.matchPoints ||
       right.pointsFor - left.pointsFor ||
@@ -854,12 +896,17 @@ export function rankTournamentReviewH2HStandings<
   );
   let previousKey: string | null = null;
   let rank = 0;
-  return ordered.map((row, index) => {
+  const ranked = ordered.map((row, index) => {
     const key = `${row.matchPoints}:${row.pointsFor}`;
     if (key !== previousKey) rank = index + 1;
     previousKey = key;
     return { ...row, rank };
   });
+  const unranked = rows
+    .filter((row) => row.applicable === false)
+    .sort((left, right) => left.entryId - right.entryId)
+    .map((row) => ({ ...row, rank: null }));
+  return [...ranked, ...unranked];
 }
 
 export function isTournamentReviewEntryApplicable(
@@ -2181,28 +2228,53 @@ export async function reconcileTournamentReviewObligations(
       }>
     >`
     WITH entry_metadata AS MATERIALIZED (
-      SELECT tournament_entry.season_id,
-             tournament_entry.tournament_id,
-             jsonb_agg(
-               jsonb_build_object(
-                 'entryId', entry.entry_id,
-                 'entryName', entry.entry_name,
-                 'playerName', entry.player_name,
-                 'startedEvent', entry.started_event
-               )
-               ORDER BY entry.entry_id
+      SELECT tournament.season_id,
+             tournament.tournament_id,
+             COALESCE(
+               jsonb_agg(
+                 jsonb_build_object(
+                   'entryId', entry.entry_id,
+                   'entryName', entry.entry_name,
+                   'playerName', entry.player_name,
+                   'startedEvent', entry.started_event
+                 )
+                 ORDER BY entry.entry_id
+               ) FILTER (WHERE entry.entry_id IS NOT NULL),
+               '[]'::jsonb
              ) AS entry_metadata_payload,
-             max(GREATEST(entry.updated_at, tournament_entry.created_at)) AS entry_metadata_updated_at
-      FROM competition.tournament_entries tournament_entry
-      JOIN competition.entries entry
+             max(GREATEST(entry.updated_at, tournament_entry.created_at))
+               FILTER (WHERE entry.entry_id IS NOT NULL) AS entry_metadata_updated_at
+      FROM competition.tournaments tournament
+      LEFT JOIN competition.tournament_entries tournament_entry
+        ON tournament_entry.season_id = tournament.season_id
+       AND tournament_entry.tournament_id = tournament.tournament_id
+      LEFT JOIN competition.entries entry
         ON entry.season_id = tournament_entry.season_id
        AND entry.entry_id = tournament_entry.entry_id
-      JOIN competition.tournaments tournament
-        ON tournament.season_id = tournament_entry.season_id
-       AND tournament.tournament_id = tournament_entry.tournament_id
-      WHERE tournament_entry.season_id = ${season.seasonId}
+      WHERE tournament.season_id = ${season.seasonId}
         AND tournament.setup_status = 'ready'
-      GROUP BY tournament_entry.season_id, tournament_entry.tournament_id
+      GROUP BY tournament.season_id, tournament.tournament_id
+    ), canonical_group_assignments AS MATERIALIZED (
+      SELECT tournament.season_id,
+             tournament.tournament_id,
+             jsonb_build_object(
+               'count', count(group_row.entry_id)::integer,
+               'assignments', COALESCE(
+                 jsonb_object_agg(
+                   group_row.entry_id::text,
+                   to_jsonb(group_row.group_id)
+                   ORDER BY group_row.entry_id
+                 ) FILTER (WHERE group_row.entry_id IS NOT NULL),
+                 '{}'::jsonb
+               )
+             ) AS group_assignment_payload
+      FROM competition.tournaments tournament
+      LEFT JOIN competition.tournament_groups group_row
+        ON group_row.season_id = tournament.season_id
+       AND group_row.tournament_id = tournament.tournament_id
+      WHERE tournament.season_id = ${season.seasonId}
+        AND tournament.setup_status = 'ready'
+      GROUP BY tournament.season_id, tournament.tournament_id
     ), candidate_formats AS (
       SELECT tournament.tournament_id,
              event.event_id,
@@ -2215,6 +2287,7 @@ export async function reconcileTournamentReviewObligations(
              tournament.group_started_event_id,
              entry_metadata.entry_metadata_payload,
              entry_metadata.entry_metadata_updated_at,
+             canonical_group_assignments.group_assignment_payload,
              jsonb_build_object(
                'id', tournament.tournament_id,
                'name', tournament.name,
@@ -2252,6 +2325,9 @@ export async function reconcileTournamentReviewObligations(
       LEFT JOIN entry_metadata
         ON entry_metadata.season_id = tournament.season_id
        AND entry_metadata.tournament_id = tournament.tournament_id
+      LEFT JOIN canonical_group_assignments
+        ON canonical_group_assignments.season_id = tournament.season_id
+       AND canonical_group_assignments.tournament_id = tournament.tournament_id
       WHERE tournament.season_id = ${season.seasonId}
         AND tournament.setup_status = 'ready'
         AND event.finished = true
@@ -2269,6 +2345,7 @@ export async function reconcileTournamentReviewObligations(
              candidate.group_started_event_id,
              candidate.entry_metadata_payload,
              candidate.entry_metadata_updated_at,
+             candidate.group_assignment_payload,
              candidate.tournament_payload,
              candidate.format,
              existing.eligible_at AS existing_eligible_at,
@@ -2291,7 +2368,48 @@ export async function reconcileTournamentReviewObligations(
                    COALESCE(existing.eligible_at, '-infinity'::timestamptz) + interval '1 microsecond'
                  )
                ELSE '-infinity'::timestamptz
-             END AS entry_metadata_eligible_at
+             END AS entry_metadata_eligible_at,
+             CASE
+               WHEN previous.payload IS NOT NULL
+                AND candidate.format IN ('POINTS', 'H2H')
+                AND (
+                  SELECT jsonb_build_object(
+                    'count', count(*)::integer,
+                    'assignments', COALESCE(
+                      jsonb_object_agg(
+                        payload_row->>'entryId',
+                        payload_row->'groupId'
+                      ) FILTER (WHERE payload_row->>'entryId' IS NOT NULL),
+                      '{}'::jsonb
+                    )
+                  )
+                  FROM jsonb_array_elements(
+                    CASE candidate.format
+                      WHEN 'POINTS' THEN
+                        CASE
+                          WHEN jsonb_typeof(previous.payload #> '{points,rows}') = 'array'
+                            THEN previous.payload #> '{points,rows}'
+                          ELSE '[]'::jsonb
+                        END
+                      WHEN 'H2H' THEN
+                        CASE
+                          WHEN jsonb_typeof(previous.payload #> '{h2h,standings}') = 'array'
+                            THEN previous.payload #> '{h2h,standings}'
+                          ELSE '[]'::jsonb
+                        END
+                      ELSE '[]'::jsonb
+                    END
+                  ) payload_row
+                ) IS DISTINCT FROM COALESCE(
+                  candidate.group_assignment_payload,
+                  jsonb_build_object('count', 0, 'assignments', '{}'::jsonb)
+                )
+                 THEN GREATEST(
+                   COALESCE(candidate.tournament_updated_at, clock_timestamp()),
+                   COALESCE(existing.eligible_at, '-infinity'::timestamptz) + interval '1 microsecond'
+                 )
+               ELSE '-infinity'::timestamptz
+             END AS group_assignment_eligible_at
       FROM candidate_formats candidate
       LEFT JOIN competition.tournament_review_obligations existing
         ON existing.season_id = ${season.seasonId}
@@ -2322,6 +2440,7 @@ export async function reconcileTournamentReviewObligations(
                COALESCE(state.standings_ready_at, '-infinity'::timestamptz),
                COALESCE(state.tournament_metadata_eligible_at, '-infinity'::timestamptz),
                COALESCE(state.entry_metadata_eligible_at, '-infinity'::timestamptz),
+               COALESCE(state.group_assignment_eligible_at, '-infinity'::timestamptz),
                COALESCE(source.max_source_updated_at, '-infinity'::timestamptz)
              ) AS eligible_at
       FROM candidate_states state

@@ -21,6 +21,7 @@ const publicationSource = readFileSync(
   'src/services/tournament-review-publication.service.ts',
   'utf8',
 );
+const entryEventResultsSource = readFileSync('src/repositories/entry-event-results.ts', 'utf8');
 
 describe('My Tournament Review V2 format and retry policy', () => {
   test('uses one mutually-exclusive format per finalized event', () => {
@@ -169,6 +170,18 @@ describe('My Tournament Review V2 format and retry policy', () => {
     ]);
   });
 
+  test('keeps late-joining H2H participants visible but unranked', () => {
+    expect(
+      rankTournamentReviewH2HStandings([
+        { entryId: 2, matchPoints: 0, pointsFor: -5, applicable: true },
+        { entryId: 1, matchPoints: 0, pointsFor: 0, applicable: false },
+      ]).map(({ entryId, rank }) => ({ entryId, rank })),
+    ).toEqual([
+      { entryId: 2, rank: 1 },
+      { entryId: 1, rank: null },
+    ]);
+  });
+
   test('accepts only score-derived H2H match points', () => {
     expect(h2hMatchPointsMatchScore(70, 55, 3, 0)).toBe(true);
     expect(h2hMatchPointsMatchScore(70, 55, 1, 1)).toBe(false);
@@ -254,6 +267,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('metadata_payload = EXCLUDED.metadata_payload');
     expect(publicationSource).toContain('entry_metadata_payload = COALESCE');
     expect(publicationSource).toContain('entry_metadata_eligible_at');
+    expect(publicationSource).toContain('canonical_group_assignments AS MATERIALIZED');
+    expect(publicationSource).toContain('group_assignment_eligible_at');
+    expect(publicationSource).toContain('jsonb_object_agg(');
+    expect(publicationSource).toMatch(/jsonb_typeof\(previous\.payload #> '\{points,rows\}'\)/);
+    expect(publicationSource).toMatch(/jsonb_typeof\(previous\.payload #> '\{h2h,standings\}'\)/);
+    expect(publicationSource).toMatch(/'\[\]'::jsonb/);
     expect(publicationSource).toMatch(/'startedEvent', entry\.started_event/);
     expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
     expect(publicationSource).toContain('state.format <> \x27KNOCKOUT\x27');
@@ -266,6 +285,8 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('event.finished = true');
     expect(publicationSource).toContain('event.data_checked = true');
     expect(publicationSource).toContain('history_group_mismatch_count');
+    expect(publicationSource).toContain('historical points group assignment is stale');
+    expect(publicationSource).toContain('history.event_id >= GREATEST(');
     expect(publicationSource).toContain(
       'history_group.event_points IS DISTINCT FROM history_result.event_points',
     );
@@ -298,6 +319,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
       'sourceTimes.push(...brackets.map((bracket) => bracket.updated_at))',
     );
     expect(publicationSource).toContain('knockout match source is stale');
+    expect(entryEventResultsSource).toContain('isNotNull(eventsInFpl.dataCheckedAt)');
   });
 
   test('preserves source checkpoints for unchanged official facts', () => {
