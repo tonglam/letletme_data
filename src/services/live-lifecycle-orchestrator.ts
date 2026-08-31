@@ -253,6 +253,7 @@ export function resolveLivePicksProbeBackoffResult(canarySucceeded: boolean) {
     pending: 0,
     sourceReady: canarySucceeded,
     scanComplete: false,
+    ...(canarySucceeded ? { outcome: 'accepted-backoff' as const } : {}),
   } as const;
 }
 
@@ -615,6 +616,8 @@ export async function runPicksProbeAndSync(
   canaryCount: number;
   synced: number;
   pending: number;
+  /** The scheduler may settle this root as skipped after an accepted backoff. */
+  outcome?: 'accepted-backoff';
   /** The source canary was accepted for this event window. */
   sourceReady: boolean;
   /** The complete eligible-entry sweep reached its semantic finalizer. */

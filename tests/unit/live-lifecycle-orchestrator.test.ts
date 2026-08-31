@@ -21,6 +21,7 @@ describe('live lifecycle decisions', () => {
       pending: 0,
       sourceReady: true,
       scanComplete: false,
+      outcome: 'accepted-backoff',
     });
     expect(resolveLivePicksProbeBackoffResult(false)).toEqual({
       canaryCount: 0,
