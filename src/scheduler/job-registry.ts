@@ -39,6 +39,7 @@ import {
   enqueueMyFplSnapshot,
   enqueueMyFplSnapshotOutbox,
   enqueueTournamentTrendsRepair,
+  enqueueTournamentReview,
 } from '../jobs/maintenance.jobs';
 import { enqueueUnderstatPlayerSync, enqueueUnderstatTeamSync } from '../jobs/understat-enqueue';
 import { enqueueUnderstatOrphanReconciler } from '../jobs/understat-recovery.jobs';
@@ -1517,6 +1518,22 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       successPredicate: 'active tournament public trend scopes are published',
       enqueue: async ({ context, obligationId, generation }) => {
         const job = await enqueueTournamentTrendsRepair(context.season, 'catchup', {
+          jobId: `scheduler-${obligationId}-g${generation}`,
+          obligationId,
+          obligationGeneration: generation,
+        });
+        return { bullJobId: job.id, runId: job.data.runId };
+      },
+    }),
+    periodicMaintenanceDefinition({
+      name: MAINTENANCE_JOBS.TOURNAMENT_REVIEW,
+      cadence: 'every five minutes; finalized scopes only',
+      periodMs: 5 * 60_000,
+      criticality: 'critical',
+      successPredicate:
+        'finalized My Tournament Review V2 scopes are published or retained in bounded repair',
+      enqueue: async ({ context, obligationId, generation }) => {
+        const job = await enqueueTournamentReview(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,

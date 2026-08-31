@@ -292,6 +292,7 @@ export async function syncKnockoutForTournament(
     requiredElementIds.push(...pickElements(picks, entryResult.eventChip ?? null));
   }
   const liveMap = await loadFinalizedKnockoutLiveMap(eventId, season, requiredElementIds);
+  const sourceCheckedAt = new Date();
 
   const updatedResults = knockoutResults.map((result) => {
     const homeEntryId = result.homeEntryId ?? null;
@@ -326,6 +327,7 @@ export async function syncKnockoutForTournament(
       awayGoalsScored: awayGoals.scored,
       awayGoalsConceded: awayGoals.conceded,
       matchWinner,
+      sourceCheckedAt,
     };
   });
 

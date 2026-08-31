@@ -73,6 +73,7 @@ export async function rebuildTournamentStructure(
     homeEntryId: row.home_entry_id,
     awayEntryId: row.away_entry_id,
   }));
+  const localResultSourceCheckedAt = new Date();
   const knockoutResults: DbTournamentKnockoutResultInsert[] = knockoutRows.results.map((row) => ({
     tournamentId: row.tournament_id,
     eventId: row.event_id,
@@ -80,6 +81,10 @@ export async function rebuildTournamentStructure(
     playAgainstId: row.play_against_id,
     homeEntryId: row.home_entry_id,
     awayEntryId: row.away_entry_id,
+    // These rows are locally computed fixtures. Keep a durable computation
+    // timestamp from the moment the structure is materialised; the result
+    // sync refreshes it after finalized event inputs are available.
+    sourceCheckedAt: localResultSourceCheckedAt,
   }));
   const publishedKnockoutResults = isOfficialH2HTournament(tournament) ? [] : knockoutResults;
 

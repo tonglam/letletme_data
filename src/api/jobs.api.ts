@@ -37,7 +37,10 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         return { success: false, error: failure.error };
       }
       const window = query.window ?? '1h';
-      return { success: true, ...(await getJobsStatus(window)) };
+      return {
+        success: true,
+        ...(await getJobsStatus(window, query.tournamentId)),
+      };
     },
     {
       query: t.Object({
@@ -52,6 +55,7 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
             t.Literal('28d'),
           ]),
         ),
+        tournamentId: t.Optional(t.Number({ minimum: 1, multipleOf: 1 })),
       }),
     },
   )

@@ -39,6 +39,7 @@ bug-report-screenshot-retention
 client-signal-retention
 player-season-summary-repair
 tournament-trends-repair
+tournament-review-v2
 launch-monitor
 post-match-consolidation
 my-fpl-snapshot
@@ -241,6 +242,29 @@ since that same job began and fetches only the remaining entry/event units.
 | Job | Cadence | Gate / behavior |
 |---|---|---|
 | `tournament-info-sync` | daily obligation | `isFPLSeason` |
+
+## My Tournament Review V2
+
+| Job | Cadence | Gate / behavior |
+|---|---|---|
+| `tournament-review-v2` | every five minutes | Reconciles finalized, setup-ready `(season, tournament, event)` obligations and processes at most 20 due scopes per run on the `my-fpl-orchestration` lane. |
+
+The worker is downstream of finalization. It will not publish an event until
+`finished = true`, `data_checked = true`, `data_checked_at` is present, and the
+selected format's source rows are complete and fresh through that timestamp. A
+source-not-ready result increments `source_rechecks` without consuming an
+execution attempt; source delays retry at 60s/180s/600s. Execution failures
+retry at 60s/300s/900s. After those bounded attempts the obligation is
+`DEGRADED` and is repaired every 15 minutes for up to 24 hours from
+eligibility.
+
+Success evidence is the committed immutable publication plus the matching
+atomic head and `READY` obligation. A BullMQ completion record alone is not
+success evidence. The publication transaction uses repeatable-read plus a
+scope advisory lock, content hashes the JSON payload, reuses identical content,
+and advances only that tournament/event head. Custom tournaments use this same
+backfill after `setup_status = 'ready'`; no second creation-time scheduler is
+required.
 
 ## Gate definitions
 

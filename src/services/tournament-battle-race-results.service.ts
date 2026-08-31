@@ -181,6 +181,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
   // are excluded from the upsert; they can be scored later once results arrive.
   let skipped = 0;
   const scoredBattleResults = [];
+  const sourceCheckedAt = new Date();
   for (const result of battleResults) {
     if (
       result.officialMatchId != null ||
@@ -232,6 +233,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
       awayNetPoints: awayNet,
       awayRank: awayResult.eventRank ?? null,
       awayMatchPoints: matchPoints(awayNet, homeNet),
+      sourceCheckedAt,
     });
   }
 

@@ -40,6 +40,14 @@ so unchanged fixture detail is reused instead of rewritten.
 GraphQL owns its own bounded `llm:gql:*` query and security cache policy. Data
 does not scan or delete those keys.
 
+My Tournament Review V2 is intentionally PostgreSQL-publication-backed rather
+than a second Data Redis business cache. The immutable rows in
+`competition.tournament_review_publications` are addressed by the atomic head
+in `competition.tournament_review_heads`; GraphQL may cache a response for
+300 seconds using the head revision and request arguments. A cache miss,
+expiry, or Redis outage falls back to the same PostgreSQL head and never
+changes the publication state.
+
 ## Queue Redis (`QUEUE_REDIS_*`)
 
 | Key family | Retention/lifecycle |

@@ -46,6 +46,7 @@ export const MAINTENANCE_JOB_LANES = {
   [MAINTENANCE_JOBS.CLIENT_SIGNAL_RETENTION]: 'housekeeping',
   [MAINTENANCE_JOBS.LAUNCH_MONITOR]: 'housekeeping',
   [MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION]: 'my-fpl-orchestration',
+  [MAINTENANCE_JOBS.TOURNAMENT_REVIEW]: 'my-fpl-orchestration',
   [MAINTENANCE_JOBS.ENTRY_ONBOARDING]: 'entry-onboarding',
   [MAINTENANCE_JOBS.MY_FPL_SNAPSHOT]: 'my-fpl-orchestration',
   [MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX]: 'publication-outbox',
@@ -189,6 +190,17 @@ export const enqueuePostMatchConsolidation = (
   source: MaintenanceJobSource,
   options?: MaintenanceEnqueueOptions,
 ) => enqueueMaintenanceJob(season, MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION, source, options);
+
+export const enqueueTournamentReview = (
+  season: FplSeasonRef,
+  source: MaintenanceJobSource,
+  options?: MaintenanceEnqueueOptions,
+) =>
+  enqueueMaintenanceJob(season, MAINTENANCE_JOBS.TOURNAMENT_REVIEW, source, {
+    ...options,
+    attempts: options?.attempts ?? 3,
+    backoffDelayMs: options?.backoffDelayMs ?? 60_000,
+  });
 
 export const enqueueEntryOnboarding = (
   season: FplSeasonRef,

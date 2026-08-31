@@ -37,6 +37,7 @@ export const MAINTENANCE_JOBS = {
   CLIENT_SIGNAL_RETENTION: 'client-signal-retention',
   LAUNCH_MONITOR: 'launch-monitor',
   POST_MATCH_CONSOLIDATION: 'post-match-consolidation',
+  TOURNAMENT_REVIEW: 'tournament-review-v2',
   ENTRY_ONBOARDING: 'entry-onboarding',
   MY_FPL_SNAPSHOT: 'my-fpl-snapshot',
   MY_FPL_SNAPSHOT_OUTBOX: 'my-fpl-snapshot-outbox',
