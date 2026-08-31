@@ -9,6 +9,32 @@ import type { RawFPLFixture } from '../../src/types';
 const season = { seasonId: 2026, seasonCode: '2627' } as const;
 
 describe('Live Points and Live Matches shared observation', () => {
+  test('consumes a supplied fixtures observation without refetching the provider', async () => {
+    let fixtureCalls = 0;
+    const sync = syncLiveSnapshotV2(season, 2, {
+      observedFixtures: [],
+      dependencies: {
+        getEventLive: async () => {
+          throw new Error('event-live unavailable');
+        },
+        getFixtures: async () => {
+          fixtureCalls += 1;
+          throw new Error('unexpected second fixtures observation');
+        },
+        getExpectedFixtureIds: async () => [],
+        getReferenceData: async () => {
+          throw new Error('reference data unavailable');
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => null,
+        checkpointPublication: async () => false,
+      },
+    });
+
+    await expect(sync).rejects.toThrow();
+    expect(fixtureCalls).toBe(0);
+  });
+
   test('starts provider observation before the durable Live Points read completes', async () => {
     let resolveDurable!: (value: LivePublicationRead | null) => void;
     const durable = new Promise<LivePublicationRead | null>((resolve) => {

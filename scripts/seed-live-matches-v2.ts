@@ -118,13 +118,14 @@ async function seedOne(seasonCode: string, eventId: number) {
   const event = await eventRepository.findById(season, eventId);
   if (!event) throw new Error(`event ${eventId} does not exist in season ${seasonCode}`);
 
-  // This is a deployment-only source fence. syncLiveSnapshotV2 performs the
-  // coherent observation itself; this small preflight decides whether that
-  // observation may request the immutable FINAL path without trusting only
-  // event-level flags.
+  // This is the deployment-only fixtures observation used by both the
+  // finalization fence and syncLiveSnapshotV2. Passing the exact response into
+  // sync prevents a second provider read from changing the facts underneath
+  // the immutable FINAL decision.
   const observedFixtures = await fplClient.getFixtures(eventId);
   const finalized = canFinalizeLiveMatchSeed(event, observedFixtures);
   const result = await syncLiveSnapshotV2(season, eventId, {
+    observedFixtures,
     trigger: 'catchup',
     finalizeEvent: finalized,
     lifecycleState: finalized ? 'FINALIZED' : undefined,

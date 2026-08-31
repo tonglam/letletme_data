@@ -42,6 +42,13 @@ import { CacheError } from '../utils/errors';
 const SCORE_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
 export interface LiveSnapshotV2SyncOptions {
+  /**
+   * A caller that already completed the coherent fixtures observation may pass
+   * it through so finalization is decided from the same response that is
+   * consumed by the sync. This is intentionally an observation value, not a
+   * cache or a second source of truth.
+   */
+  readonly observedFixtures?: readonly RawFPLFixture[];
   readonly finalizeEvent?: boolean;
   readonly lifecycleState?: MatchLifecycleState;
   readonly trigger?: 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
@@ -403,7 +410,9 @@ export async function syncLiveSnapshotV2(
       throw error;
     });
   const eventLivePromise = dependencies.getEventLive(eventId);
-  const fixturesPromise = dependencies.getFixtures(eventId);
+  const fixturesPromise = options.observedFixtures
+    ? Promise.resolve([...options.observedFixtures])
+    : dependencies.getFixtures(eventId);
   const referenceDataPromise = dependencies.getReferenceData(
     season,
     options.finalizeEvent === true || current?.publication.state === 'FINALIZED'

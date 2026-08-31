@@ -92,4 +92,14 @@ describe('live match V2 cutover seed arguments', () => {
       'allowFinalizedReplacementForCutover: active.publication.finalized === true',
     );
   });
+
+  it('uses one synchronized fixtures observation for finalization and sync', () => {
+    const source = readFileSync(
+      new URL('../../scripts/seed-live-matches-v2.ts', import.meta.url),
+      'utf8',
+    );
+    expect(source).toMatch(
+      /const observedFixtures = await fplClient\.getFixtures\(eventId\);[\s\S]*syncLiveSnapshotV2\([\s\S]*observedFixtures,/,
+    );
+  });
 });
