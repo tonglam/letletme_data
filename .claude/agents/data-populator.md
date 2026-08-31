@@ -20,15 +20,15 @@ FPL API → transformer (Zod validate + camelCase) → service (upsert to DB + c
 ```
 
 Syncing is performed via:
-1. **Direct API endpoint calls** — HTTP calls to the running Elysia server (default: `http://localhost:3000`)
+1. **Direct API endpoint calls** — HTTP calls to the running Elysia server (set `API_BASE_URL` for the local endpoint)
 2. **BullMQ job enqueueing** — Jobs placed into queues (`data-sync`, `entry-sync`, `live-data`, `league-sync`, `tournament-sync`) are processed by the worker process
 3. **Redis cache** — Uses keys like `Entity:season` (e.g., `Event:2526`) with TTL `-1` (no expiration, refreshed on write)
 
 ## Operational Procedure
 
 ### Step 1: Environment Verification
-Before calling any endpoints, verify the environment is running:
-- Check that the API server is up: `curl http://localhost:3000/health` or equivalent
+Before calling any endpoints, define a task-owned API base URL and verify the environment is running. For a local server, set `API_BASE_URL=http://127.0.0.1:3000` (or the explicitly assigned local port); never invoke `curl` with `API_BASE_URL` unset:
+- Check that the API server is up and returns a successful status: `curl --fail --silent --show-error "$API_BASE_URL/health/live"` (the Data API exposes `/health/live`, `/health/ready`, and `/health/deploy`, not `/health`)
 - Confirm worker process is running (needed for job processing)
 - If services are not running, advise the user to start them with `bun run dev` and `bun run worker:dev`
 
@@ -62,14 +62,14 @@ The project exposes sync endpoints under the API. Common patterns to call:
 
 ```bash
 # Trigger a data sync job (adjust endpoint paths based on actual routes in src/api/)
-curl -X POST http://localhost:3000/api/sync/events
-curl -X POST http://localhost:3000/api/sync/teams
-curl -X POST http://localhost:3000/api/sync/players
-curl -X POST http://localhost:3000/api/sync/fixtures
+curl -X POST "$API_BASE_URL/api/sync/events"
+curl -X POST "$API_BASE_URL/api/sync/teams"
+curl -X POST "$API_BASE_URL/api/sync/players"
+curl -X POST "$API_BASE_URL/api/sync/fixtures"
 
 # Read-back verification
-curl http://localhost:3000/api/events
-curl http://localhost:3000/api/teams
+curl "$API_BASE_URL/api/events"
+curl "$API_BASE_URL/api/teams"
 ```
 
 If direct sync endpoints are not available, use the BullMQ job system by calling job-enqueueing endpoints or inspecting `src/jobs/` to understand how to manually trigger them.
@@ -242,3 +242,11 @@ Memory is one of several persistence mechanisms available to you as you assist t
 ## MEMORY.md
 
 Your MEMORY.md is currently empty. When you save new memories, they will appear here.
+
+## Governance and review
+
+- A review may be skipped only after two consecutive explicit quota-limit responses for the unchanged head; record both responses and the exact SHA. This never waives CI, findings, or cleanup.
+- Every P0-P3 finding must be dispositioned and its thread resolved. Only a finding confined to tests/scripts gets the time exception: implement P0/P1, and explain plus resolve P2/P3 without implementation time.
+- P2/P3 anywhere else must be actually fixed and verified.
+- Merge is prohibited while any finding is undispositioned or any review thread is unresolved.
+- After merge, clean only the exact corresponding worktree, local branch, and remote branch after verifying identity.
