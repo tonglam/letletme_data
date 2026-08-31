@@ -246,6 +246,16 @@ export function resolveLivePicksEntryDeduplicationId(
   return `live-picks-entry:${seasonCode}:event-${eventId}:entry-${entryId}`;
 }
 
+export function resolveLivePicksProbeBackoffResult(canarySucceeded: boolean) {
+  return {
+    canaryCount: 0,
+    synced: 0,
+    pending: 0,
+    sourceReady: canarySucceeded,
+    scanComplete: false,
+  } as const;
+}
+
 /**
  * The scheduler asks the shared coordinator before creating a root probe.
  * This keeps the retry schedule in one durable Redis state machine instead of
@@ -618,13 +628,13 @@ export async function runPicksProbeAndSync(
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
   };
   if (now.getTime() < state.nextProbeAt) {
-    return {
-      canaryCount: 0,
-      synced: 0,
-      pending: 0,
-      sourceReady: false,
-      scanComplete: false,
-    };
+    // The scheduler can resolve an obligation just before the coordinator
+    // writes its next-probe fence. Once the source canary has already been
+    // accepted, this is a successful no-op rather than a provider failure;
+    // returning sourceReady=false would make BullMQ retry a stale obligation
+    // and emit a misleading SOURCE_NOT_READY error. Keep scanComplete false
+    // so an outstanding checkpoint/repair is not marked complete early.
+    return resolveLivePicksProbeBackoffResult(state.canarySucceeded);
   }
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
   if (entryIds.length === 0) {
