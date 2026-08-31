@@ -257,6 +257,7 @@ type PointsSourceRow = {
   history_source_min_checked_at: Date | string | null;
   history_source_max_checked_at: Date | string | null;
   previous_group_rank: number | null;
+  previous_group_updated_at: Date | string | null;
   history_group_mismatch_count: number | string | null;
 };
 
@@ -347,12 +348,35 @@ async function buildPointsPayload(
            (
              SELECT previous.event_group_rank
              FROM competition.tournament_points_group_results previous
+             JOIN fpl.events previous_event
+               ON previous_event.season_id = previous.season_id
+              AND previous_event.event_id = previous.event_id
              WHERE previous.season_id = roster.season_id
                AND previous.tournament_id = roster.tournament_id
                AND previous.entry_id = roster.entry_id
-               AND previous.event_id = ${event.event_id - 1}
+               AND previous.event_id < ${event.event_id}
+               AND previous_event.finished = true
+               AND previous_event.data_checked = true
+               AND previous_event.data_checked_at IS NOT NULL
+             ORDER BY previous.event_id DESC
              LIMIT 1
            ) AS previous_group_rank,
+           (
+             SELECT previous.updated_at
+             FROM competition.tournament_points_group_results previous
+             JOIN fpl.events previous_event
+               ON previous_event.season_id = previous.season_id
+              AND previous_event.event_id = previous.event_id
+             WHERE previous.season_id = roster.season_id
+               AND previous.tournament_id = roster.tournament_id
+               AND previous.entry_id = roster.entry_id
+               AND previous.event_id < ${event.event_id}
+               AND previous_event.finished = true
+               AND previous_event.data_checked = true
+               AND previous_event.data_checked_at IS NOT NULL
+             ORDER BY previous.event_id DESC
+             LIMIT 1
+           ) AS previous_group_updated_at,
            (
              SELECT COALESCE(sum(history.event_net_points), 0)::integer
              FROM competition.tournament_points_group_results history
@@ -543,6 +567,7 @@ async function buildPointsPayload(
       row.group_updated_at,
       row.history_source_min_checked_at,
       row.history_source_max_checked_at,
+      row.previous_group_updated_at,
     ]),
   );
   const rankFallback = new Map<number, number>();
@@ -837,6 +862,39 @@ export function tournamentReviewScoreMatchesEntryResult(
     Number.isFinite(resultWatermark) &&
     matchWatermark >= resultWatermark
   );
+}
+
+/**
+ * Custom knockout rows carry the same deterministic winner contract as the
+ * producer: net points first, then goals scored, then goals conceded, and
+ * finally the lower entry id. Keeping this calculation in the publication
+ * validator prevents a repaired row from smuggling an arbitrary winner into
+ * an immutable review snapshot.
+ */
+function resolveTournamentReviewKnockoutWinner(input: {
+  homeEntryId: number | null;
+  awayEntryId: number | null;
+  homeNetPoints: number;
+  awayNetPoints: number;
+  homeGoalsScored: number;
+  awayGoalsScored: number;
+  homeGoalsConceded: number;
+  awayGoalsConceded: number;
+}): number | null {
+  if (input.homeEntryId === null) return input.awayEntryId;
+  if (input.awayEntryId === null) return input.homeEntryId;
+  if (input.homeNetPoints !== input.awayNetPoints) {
+    return input.homeNetPoints > input.awayNetPoints ? input.homeEntryId : input.awayEntryId;
+  }
+  if (input.homeGoalsScored !== input.awayGoalsScored) {
+    return input.homeGoalsScored > input.awayGoalsScored ? input.homeEntryId : input.awayEntryId;
+  }
+  if (input.homeGoalsConceded !== input.awayGoalsConceded) {
+    return input.homeGoalsConceded < input.awayGoalsConceded
+      ? input.homeEntryId
+      : input.awayEntryId;
+  }
+  return Math.min(input.homeEntryId, input.awayEntryId);
 }
 
 async function buildH2HPayload(
@@ -1486,17 +1544,25 @@ async function buildKnockoutPayload(
   const notApplicable = [...scores.values()].filter(
     (row) => !isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
+  const activeParticipantIds = new Set<number>();
+  for (const bracket of brackets) {
+    if (bracket.home_entry_id !== null) activeParticipantIds.add(bracket.home_entry_id);
+    if (bracket.away_entry_id !== null) activeParticipantIds.add(bracket.away_entry_id);
+  }
+  const activeEligible = eligible.filter((row) => activeParticipantIds.has(row.entry_id));
   const eventDataCheckedAt = asDate(event.data_checked_at);
   if (!eventDataCheckedAt) {
     throw new TournamentReviewSourceNotReadyError('knockout event data_checked_at is missing');
   }
-  requireFreshEntryScores(eligible, eventDataCheckedAt, 'knockout');
-  const sourceTimes: Array<Date | string | null> = [...scores.values()].flatMap((row) => [
-    row.entry_updated_at,
-    row.roster_created_at,
-  ]);
+  // Later rounds retain eliminated teams in the tournament roster. Only the
+  // entries present in the active bracket can affect this event's payload and
+  // therefore need a finalized score checkpoint.
+  requireFreshEntryScores(activeEligible, eventDataCheckedAt, 'knockout');
+  const sourceTimes: Array<Date | string | null> = [...scores.values()]
+    .filter((row) => activeParticipantIds.has(row.entry_id))
+    .flatMap((row) => [row.entry_updated_at, row.roster_created_at]);
   sourceTimes.push(...brackets.map((bracket) => bracket.updated_at));
-  sourceTimes.push(...eligible.map((row) => row.rich_synced_at));
+  sourceTimes.push(...activeEligible.map((row) => row.rich_synced_at));
   const actualKeys = new Set<string>();
   if (matches.length !== expectedByKey.size) {
     throw new TournamentReviewSourceNotReadyError('knockout result coverage is incomplete');
@@ -1595,6 +1661,23 @@ async function buildKnockoutPayload(
         (match.match_winner !== match.home_entry_id && match.match_winner !== match.away_entry_id))
     ) {
       throw new TournamentReviewSourceNotReadyError('knockout winner is outside the match');
+    }
+    if (match.official_match_id === null) {
+      const expectedWinner = resolveTournamentReviewKnockoutWinner({
+        homeEntryId: match.home_entry_id,
+        awayEntryId: match.away_entry_id,
+        homeNetPoints: match.home_net_points ?? 0,
+        awayNetPoints: match.away_net_points ?? 0,
+        homeGoalsScored: match.home_goals_scored ?? 0,
+        awayGoalsScored: match.away_goals_scored ?? 0,
+        homeGoalsConceded: match.home_goals_conceded ?? 0,
+        awayGoalsConceded: match.away_goals_conceded ?? 0,
+      });
+      if (expectedWinner !== match.match_winner) {
+        throw new TournamentReviewSourceNotReadyError(
+          'knockout winner is inconsistent with match totals',
+        );
+      }
     }
     return {
       round: expected.round,
@@ -2155,9 +2238,15 @@ export async function reconcileTournamentReviewObligations(
             ON roster.season_id = result.season_id
            AND roster.entry_id = result.entry_id
            AND roster.tournament_id = state.tournament_id
+          JOIN fpl.events result_event
+            ON result_event.season_id = result.season_id
+           AND result_event.event_id = result.event_id
           WHERE state.format IN ('POINTS', 'H2H')
             AND result.season_id = ${season.seasonId}
             AND result.event_id <= state.event_id
+            AND result_event.finished = true
+            AND result_event.data_checked = true
+            AND result_event.data_checked_at IS NOT NULL
             AND GREATEST(
               result.updated_at,
               COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
@@ -2674,6 +2763,7 @@ export type TournamentReviewV2OperationalStatus = Readonly<{
         eligibleAt: string;
         nextAttemptAt: string | null;
         revision: number | null;
+        readyRevision: number | null;
         publishedAt: string | null;
         eventDataCheckedAt: string | null;
         sourceMaxCheckedAt: string | null;
@@ -2705,6 +2795,7 @@ type TournamentReviewOperationalWatchRow = {
   eligible_at: Date | string;
   next_attempt_at: Date | string | null;
   ready_revision: number | string | null;
+  active_revision: number | string | null;
   published_at: Date | string | null;
   event_data_checked_at: Date | string | null;
   source_max_checked_at: Date | string | null;
@@ -2772,17 +2863,22 @@ export async function getTournamentReviewV2OperationalStatus(
                obligation.eligible_at,
                obligation.next_attempt_at,
                obligation.ready_revision,
+               head.revision AS active_revision,
                publication.published_at,
                publication.event_data_checked_at,
                publication.source_max_checked_at,
                obligation.updated_at,
                obligation.last_error_code
         FROM competition.tournament_review_obligations obligation
+        LEFT JOIN competition.tournament_review_heads head
+          ON head.season_id = obligation.season_id
+         AND head.tournament_id = obligation.tournament_id
+         AND head.event_id = obligation.event_id
         LEFT JOIN competition.tournament_review_publications publication
           ON publication.season_id = obligation.season_id
          AND publication.tournament_id = obligation.tournament_id
          AND publication.event_id = obligation.event_id
-         AND publication.revision = obligation.ready_revision
+         AND publication.revision = head.revision
         WHERE obligation.season_id = ${season.seasonId}
           AND obligation.tournament_id = ${normalizedWatchTournamentId}
         ORDER BY obligation.event_id DESC
@@ -2803,7 +2899,8 @@ export async function getTournamentReviewV2OperationalStatus(
           state: row.state,
           eligibleAt: dateIso(row.eligible_at) ?? now.toISOString(),
           nextAttemptAt: dateIso(row.next_attempt_at),
-          revision: integerOrNull(row.ready_revision),
+          revision: integerOrNull(row.active_revision),
+          readyRevision: integerOrNull(row.ready_revision),
           publishedAt: dateIso(row.published_at),
           eventDataCheckedAt: dateIso(row.event_data_checked_at),
           sourceMaxCheckedAt: dateIso(row.source_max_checked_at),
