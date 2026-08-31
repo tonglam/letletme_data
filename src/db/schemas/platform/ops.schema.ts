@@ -86,7 +86,7 @@ export const syncRunsInOps = ops.table(
     skippedItems: integer('skipped_items').default(0).notNull(),
     dataChanged: boolean('data_changed').default(false).notNull(),
     // This lazy reference breaks the sync_runs <-> dataset_publications declaration cycle.
-    // Migration 0079 owns the stable database constraint name sync_runs_publication_fk.
+    // Migration 0080 owns the stable database constraint name sync_runs_publication_fk.
     publicationId: uuid('publication_id').references(
       (): AnyPgColumn => datasetPublicationsInOps.publicationId,
     ),
@@ -167,7 +167,7 @@ export const datasetPublicationsInOps = ops.table(
       table.seasonId.asc().nullsLast(),
       table.eventId.asc().nullsLast(),
     ),
-    // PostgreSQL migration 0079 also sets NULLS NOT DISTINCT. Drizzle ORM 0.43 cannot
+    // PostgreSQL migration 0080 also sets NULLS NOT DISTINCT. Drizzle ORM 0.43 cannot
     // express that option on a partial unique index, so the SQL migration remains authoritative.
     uniqueIndex('dataset_publications_one_active_scope_idx')
       .using(

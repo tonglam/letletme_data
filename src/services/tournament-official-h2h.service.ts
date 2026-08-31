@@ -1294,6 +1294,7 @@ export async function syncOfficialH2HTournament(
     checkedAt,
     lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
     groupRows,
+    fetchedOfficialMatchIds: fetched.matches.map((match) => match.id),
     pageManifests: snapshot.pageManifests,
     fullReconcile: options.forceFull === true,
   });
