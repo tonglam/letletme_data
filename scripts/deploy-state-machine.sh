@@ -11,14 +11,14 @@ CONTENT_WORKER_CONSUMER_QUEUE_NAMES=(
   content-http-acquisition
   content-media-transcript
 )
-DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}
-DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=${DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED:-false}
+DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES=${DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES:-}
+DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES=${DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED=${DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED:-false}
 DEPLOY_CONTENT_WORKER_PAUSED_QUEUES=${DEPLOY_CONTENT_WORKER_PAUSED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES=${DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
 DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS:-10}
-DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS:-10}
+DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS:-10}
 # The Redis pause-owner marker expires after one hour.  Refresh well inside
 # that window so backup, migration, seed, and recovery stages can be longer
 # than the original control operation without losing release ownership.
@@ -27,6 +27,9 @@ DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PI
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID:-}
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP:-}
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE:-false}
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID:-}
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE:-false}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -92,17 +95,23 @@ wait_for_port_3000_free() {
   assert_port_3000_free
 }
 
-set_content_x_scan_admission() {
-  local mode=${1:-}
+set_content_worker_queue_admission() {
+  local queue_name=${1:-}
+  local mode=${2:-}
   local output_file output
+  if [[ "$queue_name" != content-x-scan && "$queue_name" != content-http-acquisition &&
+    "$queue_name" != content-media-transcript ]]; then
+    echo "deploy preflight: invalid content worker admission queue=$queue_name" >&2
+    return 1
+  fi
   if [[ "$mode" != DRAIN_ONLY && "$mode" != OPEN ]]; then
-    echo "deploy preflight: invalid content-x-scan admission mode=$mode" >&2
+    echo "deploy preflight: invalid content worker admission mode=$mode" >&2
     return 1
   fi
   output_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-admission-control.XXXXXX")
   if ! run_bounded_deploy_probe \
-    "$output_file" "$DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS" \
-    admission '' "$mode"; then
+    "$output_file" "$DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS" \
+    admission "$queue_name" "$mode"; then
     cat "$output_file" >&2 || true
     rm -f "$output_file"
     return 1
@@ -110,70 +119,146 @@ set_content_x_scan_admission() {
   output=$(cat "$output_file")
   rm -f "$output_file"
   printf '%s\n' "$output"
+  if ! printf '%s\n' "$output" | grep -F '"contractVersion":"queue-admission-v2"' >/dev/null ||
+    ! printf '%s\n' "$output" | grep -F '"queueName":"'"$queue_name"'"' >/dev/null ||
+    ! printf '%s\n' "$output" | grep -F '"mode":"'"$mode"'"' >/dev/null; then
+    echo "deploy preflight: $queue_name admission result did not match the requested queue/mode" >&2
+    return 1
+  fi
 }
 
-drain_content_x_scan_for_deploy() {
-  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]]; then return 0; fi
+content_worker_admission_queue_is_listed() {
+  local queue_name=${1:-}
+  local queue_list=${2:-}
+  [[ " $queue_list " == *" $queue_name "* ]]
+}
+
+append_content_worker_admission_queue() {
+  local queue_name=${1:-}
+  if ! content_worker_admission_queue_is_listed "$queue_name" \
+    "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES"; then
+    DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES="${DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES:+$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES }$queue_name"
+  fi
+}
+
+append_content_worker_admission_owned_queue() {
+  local queue_name=${1:-}
+  if ! content_worker_admission_queue_is_listed "$queue_name" \
+    "$DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES"; then
+    DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES="${DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES:+$DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES }$queue_name"
+  fi
+}
+
+remove_content_worker_admission_queue() {
+  local queue_name=${1:-}
+  local remaining=()
+  local item
+  for item in $DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES; do
+    [[ "$item" = "$queue_name" ]] || remaining+=("$item")
+  done
+  DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES="${remaining[*]:-}"
+  remaining=()
+  for item in $DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES; do
+    [[ "$item" = "$queue_name" ]] || remaining+=("$item")
+  done
+  DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES="${remaining[*]:-}"
+}
+
+drain_content_worker_queue_for_deploy() {
+  local queue_name=${1:-}
+  if content_worker_admission_queue_is_listed "$queue_name" \
+    "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES"; then return 0; fi
   # Mark the attempt before Redis is touched.  The EXIT handler can then
   # safely ask the command to restore only a gate owned by this deployment,
   # even if the one-shot command dies after changing Redis but before it
   # prints its result.
-  DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+  append_content_worker_admission_queue "$queue_name"
   local output
-  if ! output=$(set_content_x_scan_admission DRAIN_ONLY); then
+  if ! output=$(set_content_worker_queue_admission "$queue_name" DRAIN_ONLY); then
     printf '%s\n' "$output" >&2
     return 1
   fi
   printf '%s\n' "$output"
   if printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
-    echo 'deploy preflight: content-x-scan admission is drain-only; waiting for active work to finish'
+    append_content_worker_admission_owned_queue "$queue_name"
+    echo "deploy preflight: $queue_name admission is drain-only; waiting for active work to finish"
   elif printf '%s\n' "$output" | grep -F '"changed":false' >/dev/null; then
-    echo 'deploy preflight: content-x-scan was already drain-only; preserving its existing operator gate'
+    echo "deploy preflight: $queue_name was already drain-only; preserving its existing operator gate"
   else
-    echo 'deploy preflight: content-x-scan admission result was not machine-readable' >&2
+    echo "deploy preflight: $queue_name admission result was not machine-readable" >&2
     return 1
   fi
 }
 
-renew_content_x_scan_admission() {
-  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" != true ]]; then return 0; fi
+drain_content_worker_queues_for_deploy() {
+  local queue_name
+  for queue_name in "${CONTENT_WORKER_CONSUMER_QUEUE_NAMES[@]}"; do
+    drain_content_worker_queue_for_deploy "$queue_name" || return 1
+  done
+}
+
+prepare_content_worker_paused_runs_for_deploy() {
+  # Use the runtime-configured API service so the short lease transition sees
+  # the same Queue Redis endpoint as the pause probes.  The migration service
+  # intentionally receives only the migration database credentials.
+  APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+    bun scripts/assert-queue-quiescence.ts --prepare-paused-content-runs
+}
+
+renew_content_worker_queue_admission() {
+  local queue_name=${1:-}
+  if ! content_worker_admission_queue_is_listed "$queue_name" \
+    "$DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES"; then return 0; fi
   local output
-  if ! output=$(set_content_x_scan_admission DRAIN_ONLY); then
+  if ! output=$(set_content_worker_queue_admission "$queue_name" DRAIN_ONLY); then
     printf '%s\n' "$output" >&2
-    echo 'deploy admission: failed to renew content-x-scan drain-only gate' >&2
+    echo "deploy admission: failed to renew $queue_name drain-only gate" >&2
     return 1
   fi
   printf '%s\n' "$output"
   if printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
-    echo 'deploy admission: content-x-scan drain-only gate renewed'
+    echo "deploy admission: $queue_name drain-only gate renewed"
   elif printf '%s\n' "$output" | grep -F '"changed":false' >/dev/null; then
-    echo 'deploy admission: external content-x-scan drain-only gate remains in force'
+    remove_content_worker_admission_queue "$queue_name"
+    echo "deploy admission: external $queue_name drain-only gate remains in force"
   else
-    echo 'deploy admission: content-x-scan renewal result was not machine-readable' >&2
+    echo "deploy admission: $queue_name renewal result was not machine-readable" >&2
     return 1
   fi
 }
 
-restore_content_x_scan_admission() {
-  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" != true ]]; then return 0; fi
+renew_content_worker_admission() {
+  local queue_name
+  for queue_name in $DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES; do
+    renew_content_worker_queue_admission "$queue_name" || return 1
+  done
+}
+
+restore_content_worker_queue_admission() {
+  local queue_name=${1:-}
+  if ! content_worker_admission_queue_is_listed "$queue_name" \
+    "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES"; then
+    remove_content_worker_admission_queue "$queue_name"
+    return 0
+  fi
   local output
-  if ! output=$(set_content_x_scan_admission OPEN); then
+  if ! output=$(set_content_worker_queue_admission "$queue_name" OPEN); then
     printf '%s\n' "$output" >&2
-    echo 'deploy admission: failed to restore content-x-scan admission; its bounded gate remains in force' >&2
+    echo "deploy admission: failed to restore $queue_name admission; its bounded gate remains in force" >&2
     return 1
   fi
   printf '%s\n' "$output"
   if printf '%s\n' "$output" | grep -F '"changed":false' >/dev/null; then
-    DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=false
-    echo 'deploy admission: preserved an externally-owned content-x-scan drain-only gate'
+    remove_content_worker_admission_queue "$queue_name"
+    echo "deploy admission: preserved an externally-owned $queue_name drain-only gate"
     return 0
   fi
   if ! printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
-    echo 'deploy admission: restore result was not machine-readable; leaving the gate state tracked' >&2
+    echo "deploy admission: $queue_name restore result was not machine-readable; leaving the gate state tracked" >&2
     return 1
   fi
-  DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=false
-  echo 'deploy admission: content-x-scan admission restored'
+  remove_content_worker_admission_queue "$queue_name"
+  echo "deploy admission: $queue_name admission restored"
 }
 
 content_worker_queue_is_listed() {
@@ -244,13 +329,34 @@ renew_content_worker_pause_ownership() {
       renewal_failed=true
     fi
   done
+  if ! renew_content_worker_admission; then
+    renewal_failed=true
+  fi
   if [[ "$renewal_failed" = true ]]; then return 1; fi
   return 0
 }
 
+content_worker_pause_renewal_term_handler() {
+  local stage_pid=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID:-}
+  local failure_file=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}
+  local renewal_failed=false
+  if [[ -s "$failure_file" ]]; then renewal_failed=true; fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+  if [[ -n "$stage_pid" ]]; then
+    terminate_scoped_queue_probe "$stage_pid" '' 2 true || true
+  fi
+  # The renewal child is still alive when it signals this shell. Stop it
+  # explicitly before exiting; otherwise it can continue issuing probes after
+  # the deployment shell has left and may outlive the deployment lock.
+  stop_content_worker_pause_renewal
+  if [[ "$renewal_failed" = true ]]; then exit 1; fi
+  exit 143
+}
+
 start_content_worker_pause_renewal() {
   if [[ -n "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID" ]]; then return 0; fi
-  if [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]; then return 0; fi
+  if [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" &&
+    -z "$DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES" ]]; then return 0; fi
   if ! [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
     (( DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS > 900 )); then
     echo 'deploy admission: pause ownership renewal interval must be a positive value no greater than 15 minutes' >&2
@@ -258,14 +364,20 @@ start_content_worker_pause_renewal() {
   fi
   if [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE" != true ]]; then
     DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP=$(trap -p TERM || true)
-    trap 'exit 1' TERM
+    trap 'content_worker_pause_renewal_term_handler' TERM
     DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE=true
   fi
+  local failure_file
+  failure_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-pause-renewal.XXXXXX")
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE=$failure_file
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID=$$
   (
     renewal_stop_requested=false
     trap 'renewal_stop_requested=true; exit 0' TERM INT
-    trap 'if [[ "$renewal_stop_requested" != true ]]; then kill -TERM "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID" 2>/dev/null || true; fi' EXIT
+    trap 'if [[ "$renewal_stop_requested" != true ]]; then
+      printf "%s\\n" pause-renewal-failed >"$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE"
+      kill -TERM "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID" 2>/dev/null || true
+    fi' EXIT
     while :; do
       if ! sleep "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS"; then
         [[ "$renewal_stop_requested" = true ]] && exit 0
@@ -277,6 +389,8 @@ start_content_worker_pause_renewal() {
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=$!
   if ! kill -0 "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID" 2>/dev/null; then
     DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=''
+    rm -f "$failure_file"
+    DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE=''
     echo 'deploy admission: could not start pause ownership renewal' >&2
     return 1
   fi
@@ -285,10 +399,14 @@ start_content_worker_pause_renewal() {
 
 stop_content_worker_pause_renewal() {
   local renewal_pid=$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID
+  local failure_file=$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=''
   if [[ -n "$renewal_pid" ]]; then
     terminate_scoped_queue_probe "$renewal_pid" '' 2 true
   fi
+  if [[ -n "$failure_file" ]]; then rm -f "$failure_file"; fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE=''
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
   if [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE" = true ]]; then
     if [[ -n "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP" ]]; then
       eval "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP"
@@ -393,10 +511,6 @@ pause_content_worker_consumers_for_deploy() {
       return 1
     fi
   done
-  if ! start_content_worker_pause_renewal; then
-    echo 'deploy preflight: could not start content-worker pause ownership renewal' >&2
-    return 1
-  fi
   echo 'deploy preflight: content-worker consumers paused; active work can drain without new claims'
 }
 
@@ -471,16 +585,19 @@ restore_content_deploy_controls() {
   # Stop ownership renewal before changing either control. Resume consumers
   # while producer admission is still closed; if a resume fails, no producer
   # can add work to the remaining paused queues.
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
   stop_content_worker_pause_renewal
   if ! resume_content_worker_consumers_for_deploy; then
     echo 'deploy admission: deployment-owned content-worker consumers remain paused for forward recovery' >&2
     return 1
   fi
-  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]] &&
-    ! restore_content_x_scan_admission; then
-    echo 'deploy admission: content-x-scan producer admission remains closed for forward recovery' >&2
-    return 1
-  fi
+  local queue_name
+  for queue_name in $DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES; do
+    if ! restore_content_worker_queue_admission "$queue_name"; then
+      echo "deploy admission: $queue_name producer admission remains closed for forward recovery" >&2
+      return 1
+    fi
+  done
 }
 
 run_deploy_probe_command() {
@@ -497,8 +614,12 @@ run_deploy_probe_command() {
         --consumer-queue "${DEPLOY_PROBE_QUEUE:-}"
       ;;
     admission)
+      local admission_args=(--admission-mode "${DEPLOY_PROBE_MODE:-}")
+      if [[ -n "${DEPLOY_PROBE_QUEUE:-}" ]]; then
+        admission_args+=(--admission-queue "${DEPLOY_PROBE_QUEUE}")
+      fi
       APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false api \
-        bun scripts/assert-queue-quiescence.ts --admission-mode "${DEPLOY_PROBE_MODE:-}"
+        bun scripts/assert-queue-quiescence.ts "${admission_args[@]}"
       ;;
     *)
       echo "deploy preflight: invalid probe kind=${DEPLOY_PROBE_KIND:-}" >&2
@@ -557,7 +678,8 @@ run_bounded_deploy_probe() {
       # It owns restoration and lock release for the parent deployment and
       # must never race a short-lived Compose/Redis check.
       trap - EXIT
-      export -f compose run_deploy_probe_command 2>/dev/null || true
+      export -f compose compose_direct run_deploy_probe_command run_deploy_command_with_pause_renewal 2>/dev/null || true
+      export DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
       export DEPLOY_PROBE_PROJECT_DIR="$probe_project_dir"
       export DEPLOY_PROBE_COMPOSE_FILE="$probe_compose_file"
       export DEPLOY_PROBE_COMPOSE_BIN="$probe_compose_bin"
@@ -588,6 +710,7 @@ run_bounded_deploy_probe() {
       # Match the setsid branch: a probe child must not inherit deployment
       # cleanup, queue restoration, or lock-release traps.
       trap - EXIT
+      DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
       export DEPLOY_PROBE_KIND="$probe_kind"
       export DEPLOY_PROBE_QUEUE="$probe_queue"
       export DEPLOY_PROBE_MODE="$probe_mode"
@@ -702,6 +825,40 @@ terminate_scoped_queue_probe() {
     sleep 0.1
   done
   wait "$probe_pid" 2>/dev/null || true
+}
+
+run_deploy_command_with_pause_renewal() {
+  if [[ "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE:-false}" != true ||
+    -z "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID:-}" ||
+    -z "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}" ]]; then
+    if "$@"; then
+      return 0
+    else
+      return $?
+    fi
+  fi
+
+  local stage_pid status
+  "$@" &
+  stage_pid=$!
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=$stage_pid
+  while scoped_queue_probe_is_alive "$stage_pid"; do
+    if [[ -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then
+      terminate_scoped_queue_probe "$stage_pid" '' 2 true || true
+      wait "$stage_pid" 2>/dev/null || true
+      DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+      return 1
+    fi
+    sleep 0.1
+  done
+  if wait "$stage_pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+  if [[ -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then return 1; fi
+  return "$status"
 }
 
 wait_for_scoped_queue_quiescence() {

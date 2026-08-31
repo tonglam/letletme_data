@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 import {
-  parseContentXScanAdmissionArguments,
+  parseContentWorkerAdmissionArguments,
   parseContentConsumerModeArguments,
   parseAllowedPausedQueueNames,
   CONTENT_X_SCAN_QUEUE,
@@ -13,7 +13,7 @@ import {
 } from '../../scripts/assert-queue-quiescence';
 import { COMPARE_AND_SET_QUEUE_ADMISSION_LUA } from '../../src/services/queue-governance.service';
 
-describe('content X deployment admission command', () => {
+describe('content-worker deployment admission command', () => {
   function runQueueProbeShell(
     composeBody: string,
     environment: Record<string, string> = {},
@@ -76,7 +76,8 @@ REASSERT_AFTER_PAUSE_QUEUE=''
 FAIL_PAUSE_AFTER_MARKER_QUEUE=''
 FAIL_RESUME_QUEUE=''
 FAIL_STATUS_QUEUE=''
-export event_file pause_dir owner_dir status_failure_file FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE FAIL_PAUSE_AFTER_MARKER_QUEUE FAIL_RESUME_QUEUE FAIL_STATUS_QUEUE
+FAIL_DRAIN_QUEUE=''
+export event_file pause_dir owner_dir status_failure_file FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE FAIL_PAUSE_AFTER_MARKER_QUEUE FAIL_RESUME_QUEUE FAIL_STATUS_QUEUE FAIL_DRAIN_QUEUE
 trap 'rm -f "$event_file" "$status_failure_file"; rm -rf "$pause_dir" "$owner_dir"' EXIT
 source scripts/deploy-state-machine.sh
 compose() {
@@ -145,10 +146,21 @@ compose() {
     printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":true,"paused":false,"changed":true,"owner":"NONE","owned":true,"released":true}\n' "$queue_name"
     return 0
   fi
-  if [[ "$args" == *"--admission-mode OPEN"* ]]; then
+  if [[ "$args" == *"--admission-mode DRAIN_ONLY"* || "$args" == *"--admission-mode OPEN"* ]]; then
     [[ "$FAIL_OPEN" = true ]] && return 1
-    printf 'OPEN\n' >>"$event_file"
-    printf '%s\n' '{"contractVersion":"queue-admission-v2","changed":true}'
+    local admission_mode='DRAIN_ONLY'
+    [[ "$args" == *"--admission-mode OPEN"* ]] && admission_mode=OPEN
+    local admission_queue=''
+    admission_queue=$(awk '{ for (i = 1; i <= NF; i += 1) if ($i == "--admission-queue") print $(i + 1) }' <<<"$args")
+    if [[ -z "$admission_queue" ]]; then
+      admission_queue=content-x-scan
+    fi
+    if [[ "$admission_mode" = DRAIN_ONLY && "$admission_queue" = "$FAIL_DRAIN_QUEUE" ]]; then
+      printf 'DRAIN-FAILED:%s\n' "$admission_queue" >>"$event_file"
+      return 1
+    fi
+    printf '%s:%s\n' "$admission_mode" "$admission_queue" >>"$event_file"
+    printf '%s\n' "{\"contractVersion\":\"queue-admission-v2\",\"queueName\":\"$admission_queue\",\"mode\":\"$admission_mode\",\"changed\":true}"
     return 0
   fi
   return 1
@@ -180,12 +192,33 @@ cat "$event_file"
   });
 
   test('parses both supported admission modes', () => {
-    expect(parseContentXScanAdmissionArguments(['--admission-mode', 'DRAIN_ONLY'])).toEqual({
+    expect(parseContentWorkerAdmissionArguments(['--admission-mode', 'DRAIN_ONLY'])).toEqual({
       mode: 'DRAIN_ONLY',
+      queueName: 'content-x-scan',
     });
-    expect(parseContentXScanAdmissionArguments(['--admission-mode=OPEN'])).toEqual({
+    expect(parseContentWorkerAdmissionArguments(['--admission-mode=OPEN'])).toEqual({
       mode: 'OPEN',
+      queueName: 'content-x-scan',
     });
+  });
+
+  test('parses a specific content-worker admission queue', () => {
+    expect(
+      parseContentWorkerAdmissionArguments([
+        '--admission-mode',
+        'DRAIN_ONLY',
+        '--admission-queue',
+        'content-media-transcript',
+      ]),
+    ).toEqual({ mode: 'DRAIN_ONLY', queueName: 'content-media-transcript' });
+    expect(() =>
+      parseContentWorkerAdmissionArguments([
+        '--admission-mode',
+        'OPEN',
+        '--admission-queue',
+        'unknown',
+      ]),
+    ).toThrow();
   });
 
   test('parses the explicit consumer pause protocol', () => {
@@ -243,7 +276,7 @@ cat "$event_file"
   test('restores owned consumer pauses before opening admission', () => {
     const result = runConsumerControlShell(String.raw`
 pause_content_worker_consumers_for_deploy
-DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+drain_content_worker_queues_for_deploy
     restore_content_deploy_controls
 [[ ! -e "$pause_dir/content-x-scan" ]]
 [[ ! -e "$pause_dir/content-http-acquisition" ]]
@@ -261,19 +294,21 @@ DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
     expect(stdout).toContain('PAUSE:content-http-acquisition');
     expect(stdout).toContain('STATUS:content-media-transcript');
     expect(stdout).toContain('PAUSE:content-media-transcript');
-    expect(stdout).toContain('OPEN');
+    expect(stdout).toContain('OPEN:content-x-scan');
     expect(stdout).toContain('RESUME:content-x-scan');
     expect(stdout).toContain('RESUME:content-http-acquisition');
     expect(stdout).toContain('RESUME:content-media-transcript');
     expect(stdout.lastIndexOf('RESUME:content-media-transcript')).toBeLessThan(
-      stdout.indexOf('OPEN'),
+      stdout.indexOf('OPEN:content-x-scan'),
     );
   });
 
-  test('renews each deployment-owned consumer pause before long stages', () => {
+  test('renews each deployment-owned control before long stages', () => {
     const result = runConsumerControlShell(String.raw`
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=1
 pause_content_worker_consumers_for_deploy
+drain_content_worker_queues_for_deploy
+start_content_worker_pause_renewal
 sleep 2
 restore_content_deploy_controls
 [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]
@@ -284,7 +319,29 @@ restore_content_deploy_controls
       expect(stdout.match(new RegExp(`STATUS:${queueName}`, 'g'))?.length).toBeGreaterThanOrEqual(
         2,
       );
+      expect(
+        stdout.match(new RegExp(`DRAIN_ONLY:${queueName}`, 'g'))?.length,
+      ).toBeGreaterThanOrEqual(2);
     }
+  });
+
+  test('restores partial control mutations before services stop', () => {
+    const result = runConsumerControlShell(String.raw`
+FAIL_DRAIN_QUEUE=content-http-acquisition
+export FAIL_DRAIN_QUEUE
+pause_content_worker_consumers_for_deploy
+if drain_content_worker_queues_for_deploy; then exit 1; fi
+restore_content_deploy_controls
+[[ ! -e "$pause_dir/content-x-scan" ]]
+[[ ! -e "$pause_dir/content-http-acquisition" ]]
+[[ ! -e "$pause_dir/content-media-transcript" ]]
+[[ -z "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES" ]]
+`);
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout?.toString() ?? '';
+    expect(stdout).toContain('DRAIN-FAILED:content-http-acquisition');
+    expect(stdout).toContain('OPEN:content-x-scan');
+    expect(stdout).not.toContain('OPEN:content-media-transcript');
   });
 
   test('fails closed when pause ownership renewal fails', () => {
@@ -293,6 +350,7 @@ DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=1
 FAIL_STATUS_QUEUE=content-x-scan
 export FAIL_STATUS_QUEUE
 pause_content_worker_consumers_for_deploy
+start_content_worker_pause_renewal
 touch "$status_failure_file"
 sleep 3
 `);
@@ -300,6 +358,32 @@ sleep 3
       result.exitCode,
       `${result.stderr?.toString() ?? ''}\n${result.stdout?.toString() ?? ''}`,
     ).toBe(1);
+  });
+
+  test('interrupts a long deployment stage when renewal fails', () => {
+    const startedAt = Date.now();
+    const script = String.raw`
+set -euo pipefail
+source scripts/deploy-state-machine.sh
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=1
+DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES=content-x-scan
+renew_content_worker_pause_ownership() { return 1; }
+compose_direct() {
+  trap ':' TERM
+  while :; do sleep 1; done
+}
+start_content_worker_pause_renewal
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=true
+run_deploy_command_with_pause_renewal compose_direct
+`;
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: process.env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const elapsedMs = Date.now() - startedAt;
+    expect(result.exitCode, result.stderr?.toString() ?? '').toBe(1);
+    expect(elapsedMs).toBeLessThan(5_000);
   });
 
   test('preserves an externally paused consumer', () => {
@@ -360,7 +444,7 @@ restore_content_deploy_controls
   test('keeps producer admission closed when admission restoration fails', () => {
     const result = runConsumerControlShell(String.raw`
 pause_content_worker_consumers_for_deploy
-DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+drain_content_worker_queues_for_deploy
 export FAIL_OPEN=true
 if restore_content_deploy_controls; then exit 1; fi
 [[ ! -e "$pause_dir/content-x-scan" ]]
@@ -375,7 +459,7 @@ if restore_content_deploy_controls; then exit 1; fi
   test('keeps producer admission closed when consumer restoration fails', () => {
     const result = runConsumerControlShell(String.raw`
 pause_content_worker_consumers_for_deploy
-DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+drain_content_worker_queues_for_deploy
 FAIL_RESUME_QUEUE=content-x-scan
 export FAIL_RESUME_QUEUE
 if restore_content_deploy_controls; then exit 1; fi
@@ -398,7 +482,7 @@ if restore_content_deploy_controls; then exit 1; fi
       ['--admission-mode', 'drain-only'],
       ['--admission-mode=DRAIN_ONLY', 'extra'],
     ]) {
-      expect(() => parseContentXScanAdmissionArguments(argv)).toThrow();
+      expect(() => parseContentWorkerAdmissionArguments(argv)).toThrow();
     }
   });
 
@@ -466,7 +550,7 @@ compose() {
   sleep 30
 }
 set +e
-set_content_x_scan_admission DRAIN_ONLY
+set_content_worker_queue_admission content-x-scan DRAIN_ONLY
 result=$?
 set -e
 printf 'result=%s\n' "$result"
@@ -474,7 +558,7 @@ printf 'result=%s\n' "$result"
     const result = Bun.spawnSync(['bash', '-c', script], {
       env: {
         ...process.env,
-        DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS: '1',
+        DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS: '1',
       },
       stdout: 'pipe',
       stderr: 'pipe',

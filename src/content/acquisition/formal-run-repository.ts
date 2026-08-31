@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, max, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, isNotNull, lte, max, or, sql } from 'drizzle-orm';
 
 import {
   contentAcquisitionGaps,
@@ -1645,6 +1645,106 @@ export async function deferFormalRunForBudget(input: {
       )
       .returning({ runId: contentAcquisitionRuns.runId });
     return updated.length === 1;
+  });
+}
+
+/**
+ * Prepare confirmed BullMQ jobs while every content queue is paused and the
+ * content worker is stopped. A queued triggered run has no recurring schedule,
+ * so it stays PENDING and only loses its short execution lease. A scheduled
+ * run is deferred and its schedule lease is released together; otherwise a
+ * restarted scheduler could reclaim the schedule and mark the still-queued
+ * run LEASE_EXPIRED before the original job is allowed to start.
+ */
+export async function prepareQueuedFormalRunsForDeployment(
+  input: {
+    db?: DbHandle;
+  } = {},
+): Promise<number> {
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+    const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+    const dbNow = dateValue(clockRows[0]?.dbNow);
+    if (!dbNow) throw new Error('Database clock is invalid');
+    const rows = await tx
+      .select({
+        runId: contentAcquisitionRuns.runId,
+        scheduleId: contentAcquisitionRuns.scheduleId,
+      })
+      .from(contentAcquisitionRuns)
+      .where(
+        and(
+          eq(contentAcquisitionRuns.status, 'PENDING'),
+          isNotNull(contentAcquisitionRuns.leaseExpiresAt),
+          isNotNull(contentAcquisitionRuns.enqueueConfirmedAt),
+        ),
+      )
+      .for('update');
+    const deploymentDeferralMetrics = { deferredReason: 'DEPLOYMENT_QUEUE_QUIESCENCE' };
+    const deploymentDeferralHash = sha256CanonicalJson(deploymentDeferralMetrics);
+    let prepared = 0;
+
+    for (const run of rows) {
+      if (run.scheduleId) {
+        const schedule = await tx
+          .update(contentSourceSchedules)
+          .set({
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            nextDueAt: new Date(dbNow.getTime() + 60_000),
+            updatedAt: dbNow,
+          })
+          .where(
+            and(
+              eq(contentSourceSchedules.scheduleId, run.scheduleId),
+              eq(contentSourceSchedules.leaseOwner, run.runId),
+            ),
+          )
+          .returning({ scheduleId: contentSourceSchedules.scheduleId });
+        if (schedule.length !== 1) {
+          throw new Error(`Formal acquisition schedule lease is not owned by run: ${run.runId}`);
+        }
+        await releaseXRunBudgets({ tx, runId: run.runId, dbNow });
+        const deferred = await tx
+          .update(contentAcquisitionRuns)
+          .set({
+            status: 'BUDGET_DEFERRED',
+            failureClass: 'QUEUE_ADMISSION_CLOSED',
+            failureDetailsHash: deploymentDeferralHash,
+            errorSummary:
+              'Formal acquisition deferred while content queues were paused for deployment',
+            runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(deploymentDeferralMetrics)}::jsonb`,
+            completedAt: dbNow,
+            leaseExpiresAt: null,
+            checkpointAdvanced: false,
+          })
+          .where(
+            and(
+              eq(contentAcquisitionRuns.runId, run.runId),
+              eq(contentAcquisitionRuns.status, 'PENDING'),
+            ),
+          )
+          .returning({ runId: contentAcquisitionRuns.runId });
+        if (deferred.length !== 1)
+          throw new Error(`Formal acquisition deferral was lost: ${run.runId}`);
+      } else {
+        const released = await tx
+          .update(contentAcquisitionRuns)
+          .set({ leaseExpiresAt: null })
+          .where(
+            and(
+              eq(contentAcquisitionRuns.runId, run.runId),
+              eq(contentAcquisitionRuns.status, 'PENDING'),
+            ),
+          )
+          .returning({ runId: contentAcquisitionRuns.runId });
+        if (released.length !== 1)
+          throw new Error(`Formal acquisition lease release was lost: ${run.runId}`);
+      }
+      prepared += 1;
+    }
+    return prepared;
   });
 }
 

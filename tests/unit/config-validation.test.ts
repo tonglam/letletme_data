@@ -199,7 +199,7 @@ describe('production environment preflight', () => {
     const identityContract = workflow.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
     const stopServices = workflow.indexOf(
-      'APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker',
+      'APP_IMAGE="$IMAGE_REF" compose stop -t 45 api worker',
       identityContract,
     );
     const databaseQuiescence = workflow.indexOf(
@@ -244,8 +244,9 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('deployment_started=true');
     expect(workflow).toContain('services_stopped=false');
     expect(workflow).toContain('services_stopped=true');
-    expect(workflow).toContain('drain_content_x_scan_for_deploy');
-    expect(workflow).toContain('renew_content_x_scan_admission');
+    expect(workflow).toContain('drain_content_worker_queues_for_deploy');
+    expect(workflow).toContain('prepare_content_worker_paused_runs_for_deploy');
+    expect(workflow).toContain('renew_content_worker_admission');
     expect(workflow).toContain('restore_content_deploy_controls');
     expect(workflow).not.toContain('restore_before_migration');
     expect(workflow).not.toContain('/usr/local/libexec/vps-maintenance');
@@ -321,12 +322,14 @@ describe('production environment preflight', () => {
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(deployScript).not.toContain('db:provision-runtime-logins');
     expect(deployScript).not.toContain('sleep 60');
-    expect(deployScript).toContain('drain_content_x_scan_for_deploy');
-    expect(deployScript).toContain('renew_content_x_scan_admission');
+    expect(deployScript).toContain('drain_content_worker_queues_for_deploy');
+    expect(deployScript).toContain('prepare_content_worker_paused_runs_for_deploy');
+    expect(deployScript).toContain('renew_content_worker_admission');
     expect(deployScript).toContain('restore_content_deploy_controls');
     expect(deployScript).toContain('wait_for_scoped_queue_quiescence 150 2');
     expect(stateMachine).toContain('wait_for_scoped_queue_quiescence()');
-    expect(stateMachine).toContain('assert-queue-quiescence.ts --admission-mode');
+    expect(stateMachine).toContain('--admission-mode');
+    expect(stateMachine).toContain('--admission-queue');
     expect(stateMachine).not.toContain('set-content-x-scan-admission.ts');
     expect(stateMachine).toContain('assert-queue-quiescence.ts --redis-only --scoped');
     expect(deployScript).toContain(
@@ -346,7 +349,6 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=false');
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=true');
     expect(deployScript).toContain('"$DEPLOY_COMMITTED" = false &&');
-    expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED');
     expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
     expect(deployScript).toContain('run-briefing-control-probe.sh');

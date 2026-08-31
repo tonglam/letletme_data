@@ -225,7 +225,10 @@ jobs:
               trap - EXIT
               set +e
               controls_restored=true
-              if ! restore_content_deploy_controls; then controls_restored=false; fi
+              if [ "${DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED:-false}" = true ] || \
+                [ -n "${DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES:-}" ]; then
+                controls_restored=false
+              fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_committed" = false ] && [ "$runner_updated" = true ]; then
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 scripts/rollback-host-grok-runner.sh \
@@ -238,31 +241,59 @@ jobs:
                   APP_IMAGE="$IMAGE_REF" docker compose ps || true
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
-                if [ "$migration_started" = false ] && [ "$controls_restored" = true ]; then
+                if [ "$migration_started" = false ]; then
                   if { [ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]; } && \
                     [ "$old_runtime_rollback_eligible" = true ]; then
                     if [ -n "$old_revision" ]; then
                       git reset --hard "$old_revision" || true
                     fi
                     echo "Data deployment failed before migration; restoring previous API and worker image" >&2
-                    restore_runtime_services \
+                    if restore_runtime_services \
                       "$old_image" "$old_release_sha" "$old_runner_release_sha" \
-                      "$old_media_present" "$old_image_id" || true
+                      "$old_media_present" "$old_image_id" && \
+                      run_deploy_command_with_pause_renewal env \
+                      HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
+                      PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
+                      scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
+                      controls_restored=true
+                      content_worker_fenced=false
+                      services_stopped=false
+                    else
+                      echo "Data deployment recovery did not reach a healthy runtime; controls remain closed" >&2
+                    fi
                   elif [ "$services_stopped" = true ]; then
                     echo "Data deployment failed with no eligible rollback target; leaving services stopped for forward recovery" >&2
                   elif [ "$content_worker_fenced" = true ]; then
                     echo "Data deployment failed after fencing content-worker with no eligible rollback target; leaving the deployment in forward recovery" >&2
+                  elif [ "$controls_restored" != true ]; then
+                    if restore_content_deploy_controls; then
+                      controls_restored=true
+                    else
+                      echo "Data deployment controls could not be restored while the existing runtime remained in place" >&2
+                    fi
                   fi
-                elif [ "$migration_started" = true ] && [ "$controls_restored" = true ]; then
-                  if ! restore_last_known_healthy_if_ledger_unchanged \
+                elif [ "$migration_started" = true ]; then
+                  if restore_last_known_healthy_if_ledger_unchanged \
                     "$old_image" "$ledger_before" "$old_revision" "$old_release_sha" \
                     "$old_runner_release_sha" "$old_media_present" \
-                    "$old_runtime_rollback_eligible" "$old_image_id"; then
-                    echo "Data deployment failed without an eligible, ledger-safe rollback target; leaving the deployment in forward recovery" >&2
+                    "$old_runtime_rollback_eligible" "$old_image_id" && \
+                    run_deploy_command_with_pause_renewal env \
+                    HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
+                    PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
+                    scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
+                    controls_restored=true
+                    content_worker_fenced=false
+                    services_stopped=false
+                  else
+                    echo "Data deployment failed without an eligible, ledger-safe rollback target; controls remain closed for forward recovery" >&2
                   fi
                 elif [ "$controls_restored" != true ]; then
-                  echo "Data deployment controls remain closed; skipping runtime restoration until forward recovery releases them" >&2
+                  echo "Data deployment controls remain closed; runtime restoration is deferred until controls can be safely released" >&2
                 fi
+              fi
+              DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
+              if declare -F stop_content_worker_pause_renewal >/dev/null 2>&1; then
+                stop_content_worker_pause_renewal || true
               fi
               if [ "$original_status" -ne 0 ] && [ "$image_pull_attempted" = true ]; then
                 cleanup_failed_image "${IMAGE_REF:-}"
@@ -378,7 +409,15 @@ jobs:
             if [ -n "$old_media_container" ]; then old_media_present=true; fi
 
             export APP_IMAGE="$IMAGE_REF"
-            compose() { docker compose "$@"; }
+            compose_direct() { docker compose "$@"; }
+            compose() {
+              if [ "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE:-false}" = true ] && \
+                [ -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID:-}" ]; then
+                run_deploy_command_with_pause_renewal compose_direct "$@"
+              else
+                compose_direct "$@"
+              fi
+            }
             source scripts/deploy-state-machine.sh
             old_release_sha=$(release_sha_for_container "$old_container")
             if ! [[ "$old_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
@@ -432,21 +471,32 @@ jobs:
               exit 1
             fi
             finish_stage
+            # Any failure after the first control mutation must enter the EXIT
+            # recovery path, including a partial pause/drain before services
+            # have stopped.
+            deployment_started=true
+            migration_started=false
             if ! pause_content_worker_consumers_for_deploy; then
               echo 'deploy preflight: could not pause the content-worker consumers before queue quiescence; services were not stopped' >&2
               exit 1
             fi
-
-            deployment_started=true
-            migration_started=false
+            if ! drain_content_worker_queues_for_deploy; then
+              echo 'deploy preflight: could not place every content-worker producer into drain-only mode; services were not stopped' >&2
+              exit 1
+            fi
+            if ! start_content_worker_pause_renewal; then
+              echo 'deploy preflight: could not start content-worker control renewal after producer fencing' >&2
+              exit 1
+            fi
+            export DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=true
 
             start_stage quiescence
             echo "deploy preflight: validating migration plan and queue quiescence before stopping services"
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
             ledger_before=$(APP_IMAGE="$IMAGE_REF" migration_ledger_fingerprint)
             test -n "$ledger_before"
             echo "deploy preflight: migration_ledger_before=$ledger_before"
-            if ! APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
+            if ! APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration \
               bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
               echo "deploy preflight: database work is not quiescent; services were not stopped" >&2
               exit 1
@@ -468,12 +518,12 @@ jobs:
             fi
             content_worker_fenced=true
             echo "deploy preflight: stopping content-worker after active content work drained"
-            if ! docker compose stop -t 45 content-worker; then
+            if ! compose stop -t 45 content-worker; then
               echo "deploy preflight: content-worker did not stop cleanly after queue drain; services were not stopped" >&2
               exit 1
             fi
-            if ! drain_content_x_scan_for_deploy; then
-              echo "deploy preflight: could not place content-x-scan into drain-only mode after stopping the producer; migration was not started" >&2
+            if ! prepare_content_worker_paused_runs_for_deploy; then
+              echo 'deploy preflight: could not prepare the paused content-worker formal runs; migration was not started' >&2
               exit 1
             fi
             echo "deploy preflight: migration plan and queue quiescence passed before stopping services"
@@ -485,14 +535,14 @@ jobs:
             services_stopped=true
             # Keep the API/worker gate explicit: API bind recovery must never
             # stop a healthy worker.  (The scheduler is stopped separately.)
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
+            APP_IMAGE="$IMAGE_REF" compose stop -t 45 api worker
             # content-worker was drained and stopped before the final
             # database/Redis quiescence probes below; no old producer remains.
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler media-worker
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 live-picks-worker official-h2h-worker
+            APP_IMAGE="$IMAGE_REF" compose stop -t 45 scheduler media-worker
+            APP_IMAGE="$IMAGE_REF" compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
             wait_for_port_3000_free 30 2
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration \
               bun scripts/assert-queue-quiescence.ts --database-only --scoped
             final_queue_probe_output=$(mktemp "${TMPDIR:-/tmp}/letletme-data-final-queue-quiescence.XXXXXX")
             if ! run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10; then
@@ -503,7 +553,7 @@ jobs:
             fi
             cat "$final_queue_probe_output"
             rm -f "$final_queue_probe_output"
-            APP_IMAGE="$IMAGE_REF" docker compose --profile migration run --rm -T --interactive=false backup
+            APP_IMAGE="$IMAGE_REF" compose --profile migration run --rm -T --interactive=false backup
             finish_stage
 
             x_scan_setting=$(read_env_setting CONTENT_X_SCAN_ENABLED "$env_file" | tr '[:upper:]' '[:lower:]' || true)
@@ -517,10 +567,10 @@ jobs:
               runner_previous_release=${runner_previous_release:-unknown}
               test -x scripts/deploy-host-grok-runner.sh
               runner_updated=true
-              scripts/deploy-host-grok-runner.sh "$IMAGE_REF" "$DEPLOY_SHA" \
-                "$runner_root"
+              run_deploy_command_with_pause_renewal \
+                scripts/deploy-host-grok-runner.sh "$IMAGE_REF" "$DEPLOY_SHA" "$runner_root"
               test -x scripts/run-briefing-control-probe.sh
-              if scripts/run-briefing-control-probe.sh \
+              if run_deploy_command_with_pause_renewal scripts/run-briefing-control-probe.sh \
                 "$env_file" "$migration_env_file" "$DEPLOY_SHA"; then
                 runner_probe_succeeded=true
                 finish_stage
@@ -528,7 +578,7 @@ jobs:
                 runner_probe_status=$?
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 test -x scripts/rollback-host-grok-runner.sh
-                scripts/rollback-host-grok-runner.sh \
+                run_deploy_command_with_pause_renewal scripts/rollback-host-grok-runner.sh \
                   "$runner_root" "$runner_previous_target" "$runner_previous_release"
                 runner_updated=false
                 printf '{"event":"briefing_control_probe","outcome":"degraded","exitCode":%s,"runnerRestored":true,"dataDeploymentContinues":true}\n' \
@@ -541,12 +591,12 @@ jobs:
 
             migration_started=true
             start_stage migration
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun run db:migrate
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun run db:migrate:status
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration bun run db:migration-contract
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migrate:status
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migration-contract
             finish_stage
             start_stage roleVerify
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration \
               bun run db:verify-runtime-logins
             finish_stage
             start_stage v2Seed
@@ -563,30 +613,30 @@ jobs:
             # host process listings while the one-shot container is running.
             LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url" \
               LIVE_POINTS_SEED_CONFIRM=YES \
-              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false \
               -e LIVE_POINTS_V2_SEED_DATABASE_URL \
               -e LIVE_POINTS_SEED_CONFIRM \
               api bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false \
               api bun run verify:live-points-v2 -- \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
               --all-finalized
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false \
               api bun run db:cutover-seed-live-match-v2 -- --execute --all-finalized \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
             finish_stage
             start_stage cachePublish
             DATABASE_URL="$data_runtime_database_url" \
-              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false \
               -e DATABASE_URL api \
               bun run cache:publish-core -- --execute --allow-empty
             finish_stage
-            if ! renew_content_x_scan_admission; then
-              echo 'deploy admission: content-x-scan admission could not be renewed before service start' >&2
+            if ! renew_content_worker_admission; then
+              echo 'deploy admission: content-worker producer admission could not be renewed before service start' >&2
               exit 1
             fi
             start_stage serviceReady
@@ -601,7 +651,8 @@ jobs:
             # (`docker compose up -d ...`) and preserves healthy workers on a
             # first API bind failure.
             APP_IMAGE="$IMAGE_REF" start_runtime_services
-            HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
+            run_deploy_command_with_pause_renewal env \
+              HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
               PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
               scripts/verify-runtime-health.sh
 
@@ -610,7 +661,8 @@ jobs:
               [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]] &&
               [ "$runner_probe_succeeded" = true ]; then
               test -x scripts/rearm-briefing-x-after-probe.sh
-              scripts/rearm-briefing-x-after-probe.sh "$env_file" "$migration_env_file"
+              run_deploy_command_with_pause_renewal scripts/rearm-briefing-x-after-probe.sh \
+                "$env_file" "$migration_env_file"
             elif [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
               [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
               printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'

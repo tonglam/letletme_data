@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { Queue, type JobType } from 'bullmq';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import Redis from 'ioredis';
 import postgres from 'postgres';
 
@@ -10,6 +11,7 @@ import {
   findUnsettledCascades,
   type RunnableQueueCounts,
 } from './queue-quiescence-gate';
+import { prepareQueuedFormalRunsForDeployment } from '../src/content/acquisition/formal-run-repository';
 import { allQueueNames, contentQueueNames, contentXScanQueueName } from '../src/queues/names';
 import {
   beginQueueConsumerPauseRelease,
@@ -31,6 +33,7 @@ import {
   QUEUE_CONSUMER_PAUSE_OPERATOR,
 } from '../src/services/queue-governance.service';
 import { queueRedisSingleton } from '../src/queues/redis';
+import * as schema from '../src/db/schemas/index.schema';
 import { getConfig, resolveQueueRedisConfig } from '../src/utils/config';
 import { getQueueConnection } from '../src/utils/queue';
 
@@ -43,6 +46,7 @@ const RUNNABLE_JOB_TYPES = [
   'paused',
 ] as const satisfies readonly JobType[];
 const CASCADE_PATTERN = 'llm:queue:coordination:tournament-cascade:*';
+const DEPLOYMENT_PREPARE_PAUSED_CONTENT_RUNS = '--prepare-paused-content-runs';
 
 export const CONTENT_X_SCAN_QUEUE = contentXScanQueueName;
 export const CONTENT_CONSUMER_QUEUE_NAMES = contentQueueNames;
@@ -61,12 +65,15 @@ export type ContentConsumerModeArguments = Readonly<{
   queueName: ContentConsumerQueueName;
 }>;
 
-export type ContentXScanAdmissionArguments = Readonly<{
+export type ContentWorkerAdmissionArguments = Readonly<{
   mode: QueueAdmissionMode;
+  queueName: ContentConsumerQueueName;
 }>;
 
 function admissionUsage(): never {
-  throw new Error('usage: bun scripts/assert-queue-quiescence.ts --admission-mode DRAIN_ONLY|OPEN');
+  throw new Error(
+    'usage: bun scripts/assert-queue-quiescence.ts --admission-mode DRAIN_ONLY|OPEN [--admission-queue CONTENT_QUEUE]',
+  );
 }
 
 function consumerUsage(): never {
@@ -75,9 +82,9 @@ function consumerUsage(): never {
   );
 }
 
-export function parseContentXScanAdmissionArguments(
+export function parseContentWorkerAdmissionArguments(
   argv: readonly string[],
-): ContentXScanAdmissionArguments {
+): ContentWorkerAdmissionArguments {
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -85,13 +92,20 @@ export function parseContentXScanAdmissionArguments(
     const separator = token.indexOf('=');
     if (separator > 2) {
       const key = token.slice(2, separator);
-      if (key !== 'admission-mode' || values.has(key)) admissionUsage();
+      if ((key !== 'admission-mode' && key !== 'admission-queue') || values.has(key)) {
+        admissionUsage();
+      }
       values.set(key, token.slice(separator + 1));
       continue;
     }
     const key = token.slice(2);
     const value = argv[index + 1];
-    if (key !== 'admission-mode' || !value || value.startsWith('--') || values.has(key)) {
+    if (
+      (key !== 'admission-mode' && key !== 'admission-queue') ||
+      !value ||
+      value.startsWith('--') ||
+      values.has(key)
+    ) {
       admissionUsage();
     }
     values.set(key, value);
@@ -100,7 +114,9 @@ export function parseContentXScanAdmissionArguments(
 
   const mode = values.get('admission-mode');
   if (mode !== 'DRAIN_ONLY' && mode !== 'OPEN') admissionUsage();
-  return { mode };
+  const queueName = values.get('admission-queue') ?? CONTENT_X_SCAN_QUEUE;
+  if (!isContentConsumerQueueName(queueName)) admissionUsage();
+  return { mode, queueName };
 }
 
 function isContentConsumerQueueName(value: string): value is ContentConsumerQueueName {
@@ -183,13 +199,14 @@ function isDeploymentAdmission(admission: QueueAdmission | null): boolean {
 
 function admissionSummary(input: {
   mode: QueueAdmissionMode;
+  queueName: ContentConsumerQueueName;
   changed: boolean;
   admission: QueueAdmission | null;
   previousMode: QueueAdmissionMode | null;
 }) {
   return {
     contractVersion: 'queue-admission-v2',
-    queueName: CONTENT_X_SCAN_QUEUE,
+    queueName: input.queueName,
     mode: input.mode,
     changed: input.changed,
     previousMode: input.previousMode,
@@ -204,14 +221,15 @@ function admissionSummary(input: {
   };
 }
 
-async function applyContentXScanAdmission(args: ContentXScanAdmissionArguments) {
-  let expected = await readQueueAdmission(CONTENT_X_SCAN_QUEUE);
+async function applyContentWorkerAdmission(args: ContentWorkerAdmissionArguments) {
+  let expected = await readQueueAdmission(args.queueName);
   const previousMode = expected?.mode ?? null;
 
   for (let attempt = 0; attempt < DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS; attempt += 1) {
     if (expected?.mode === 'DRAIN_ONLY' && !isDeploymentAdmission(expected)) {
       return admissionSummary({
         mode: args.mode,
+        queueName: args.queueName,
         changed: false,
         admission: expected,
         previousMode,
@@ -219,7 +237,7 @@ async function applyContentXScanAdmission(args: ContentXScanAdmissionArguments) 
     }
 
     const result = await compareAndSetQueueAdmission({
-      queueName: CONTENT_X_SCAN_QUEUE,
+      queueName: args.queueName,
       expected,
       mode: args.mode,
       ttlSeconds: DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
@@ -230,6 +248,7 @@ async function applyContentXScanAdmission(args: ContentXScanAdmissionArguments) 
       if (!result.admission) throw new Error('Queue admission CAS returned no replacement');
       return admissionSummary({
         mode: args.mode,
+        queueName: args.queueName,
         changed: true,
         admission: result.admission,
         previousMode,
@@ -394,6 +413,19 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
       });
     }
     if (!ownerToken && owner && owner !== QUEUE_CONSUMER_PAUSE_OPERATOR && !canRelease) {
+      if (owner.startsWith('acquiring:')) {
+        // An operator RESUME cannot take ownership from an in-flight deployment
+        // pause.  Returning the unchanged state lets the deployment finish its
+        // BullMQ transition; converting it to an operator pause would allow a
+        // later operator release to erase the deployment's ownership marker.
+        return resultSummary({
+          mode: args.mode,
+          previousPaused,
+          paused: previousPaused,
+          owner,
+          owned: false,
+        });
+      }
       // An explicit operator resume may recover a queue left in an interrupted
       // release. Keep the exact releasing owner so completion can delete only
       // that marker after the observed BullMQ state reaches OPEN.
@@ -448,12 +480,44 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
   }
 }
 
-function hasContentXScanAdmissionArguments(argv: readonly string[]): boolean {
+function hasContentWorkerAdmissionArguments(argv: readonly string[]): boolean {
   return argv.some((arg) => arg === '--admission-mode' || arg.startsWith('--admission-mode='));
 }
 
 function hasContentConsumerModeArguments(argv: readonly string[]): boolean {
   return argv.some((arg) => arg === '--consumer-mode' || arg.startsWith('--consumer-mode='));
+}
+
+function hasDeploymentPrepareArguments(argv: readonly string[]): boolean {
+  return argv.some((arg) => arg === DEPLOYMENT_PREPARE_PAUSED_CONTENT_RUNS);
+}
+
+async function preparePausedContentRunsForDeployment(argv: readonly string[]): Promise<void> {
+  if (argv.length !== 1 || argv[0] !== DEPLOYMENT_PREPARE_PAUSED_CONTENT_RUNS) {
+    throw new Error(`Queue quiescence check does not accept arguments: ${argv.join(' ')}`);
+  }
+  const config = getConfig();
+  const queueConnection = resolveQueueRedisConfig(config);
+  const queues = contentQueueNames.map((name) => new Queue(name, { connection: queueConnection }));
+  const databaseClient = postgres(config.DATABASE_URL, { max: 1, prepare: false });
+  try {
+    const pauseStates = await Promise.all(
+      queues.map(async (queue) => ({ queueName: queue.name, paused: await queue.isPaused() })),
+    );
+    const unpaused = pauseStates.filter((state) => !state.paused).map((state) => state.queueName);
+    if (unpaused.length > 0) {
+      throw new Error(
+        `Deployment formal-run deferral requires every content queue to remain paused: ${unpaused.join(', ')}`,
+      );
+    }
+    const db = drizzle(databaseClient, { schema });
+    const prepared = await prepareQueuedFormalRunsForDeployment({ db });
+    process.stdout.write(
+      `${JSON.stringify({ status: 'paused_content_runs_prepared', prepared })}\n`,
+    );
+  } finally {
+    await Promise.allSettled([...queues.map((queue) => queue.close()), databaseClient.end()]);
+  }
 }
 
 async function scan(redis: Redis, pattern: string): Promise<string[]> {
@@ -521,11 +585,15 @@ async function readDatabaseQuiescenceState(database: postgres.Sql): Promise<{
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (hasContentXScanAdmissionArguments(args)) {
-    const admissionArguments = parseContentXScanAdmissionArguments(args);
+  if (hasDeploymentPrepareArguments(args)) {
+    await preparePausedContentRunsForDeployment(args);
+    return;
+  }
+  if (hasContentWorkerAdmissionArguments(args)) {
+    const admissionArguments = parseContentWorkerAdmissionArguments(args);
     try {
       process.stdout.write(
-        `${JSON.stringify(await applyContentXScanAdmission(admissionArguments))}\n`,
+        `${JSON.stringify(await applyContentWorkerAdmission(admissionArguments))}\n`,
       );
     } finally {
       await queueRedisSingleton.disconnect();

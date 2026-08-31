@@ -127,7 +127,8 @@ describe('release workflow gates', () => {
     expect(formalScheduler).toContain('xSchedulingPaused');
     expect(formalScheduler).toContain('if (error instanceof QueueDrainOnlyError)');
     expect(formalScheduler).toContain('deferFormalRunForAdmission');
-    expect(deployStateMachine).toContain('assert-queue-quiescence.ts --admission-mode');
+    expect(deployStateMachine).toContain('--admission-mode');
+    expect(deployStateMachine).toContain('--admission-queue');
     expect(deployStateMachine).toContain('deadline_seconds=${3:-300}');
     expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
   });
@@ -161,28 +162,37 @@ describe('release workflow gates', () => {
     expect(workflow).toContain('restore_content_deploy_controls');
 
     const localPause = deployScript.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
+    const localAdmission = deployScript.indexOf(
+      'if ! drain_content_worker_queues_for_deploy; then',
+    );
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
-    const localAdmission = deployScript.indexOf('if ! drain_content_x_scan_for_deploy; then');
-    const localRenew = deployScript.indexOf('if ! renew_content_x_scan_admission; then');
+    const localPrepare = deployScript.indexOf(
+      'if ! prepare_content_worker_paused_runs_for_deploy; then',
+    );
+    const localRenew = deployScript.indexOf('if ! renew_content_worker_admission; then');
     expect(localPause).toBeGreaterThan(-1);
-    expect(localPause).toBeLessThan(localProbe);
+    expect(localPause).toBeLessThan(localAdmission);
+    expect(localAdmission).toBeLessThan(localProbe);
     expect(localProbe).toBeLessThan(localStop);
-    expect(localStop).toBeLessThan(localAdmission);
-    expect(localAdmission).toBeLessThan(localRenew);
-    expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true');
-    expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED');
+    expect(localStop).toBeLessThan(localPrepare);
+    expect(localPrepare).toBeLessThan(localRenew);
+    expect(deployScript).toContain('DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES');
 
     const workflowPause = workflow.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
     const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
-    const workflowStop = workflow.indexOf('if ! docker compose stop -t 45 content-worker; then');
-    const workflowAdmission = workflow.indexOf('if ! drain_content_x_scan_for_deploy; then');
-    const workflowRenew = workflow.indexOf('if ! renew_content_x_scan_admission; then');
+    const workflowStop = workflow.indexOf('if ! compose stop -t 45 content-worker; then');
+    const workflowAdmission = workflow.indexOf('if ! drain_content_worker_queues_for_deploy; then');
+    const workflowPrepare = workflow.indexOf(
+      'if ! prepare_content_worker_paused_runs_for_deploy; then',
+    );
+    const workflowRenew = workflow.indexOf('if ! renew_content_worker_admission; then');
     expect(workflowPause).toBeGreaterThan(-1);
-    expect(workflowPause).toBeLessThan(workflowProbe);
+    expect(workflowPause).toBeLessThan(workflowAdmission);
+    expect(workflowAdmission).toBeLessThan(workflowProbe);
     expect(workflowProbe).toBeLessThan(workflowStop);
-    expect(workflowStop).toBeLessThan(workflowAdmission);
-    expect(workflowAdmission).toBeLessThan(workflowRenew);
+    expect(workflowStop).toBeLessThan(workflowPrepare);
+    expect(workflowPrepare).toBeLessThan(workflowRenew);
     expect(workflow).toContain('content_worker_fenced=true');
     expect(workflow).toContain(
       '[ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]',
@@ -250,9 +260,9 @@ describe('release workflow gates', () => {
       'HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300',
     );
     expect(workflow).toContain('timeout: 20m');
-    expect(workflow).toContain('docker compose stop -t 45 content-worker');
-    expect(workflow).toContain('docker compose stop -t 45 scheduler media-worker');
-    expect(workflow).toContain('"$old_media_present" "$old_image_id" || true');
+    expect(workflow).toContain('compose stop -t 45 content-worker');
+    expect(workflow).toContain('compose stop -t 45 scheduler media-worker');
+    expect(workflow).toContain('"$old_media_present" "$old_image_id" && \\');
     expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployStateMachine).toContain(
@@ -509,13 +519,17 @@ describe('release workflow gates', () => {
 
   test('does not roll back Data when the optional Briefing provider probe is degraded', () => {
     expect(workflow).toContain('runner_probe_succeeded=false');
-    expect(workflow).toContain('if scripts/run-briefing-control-probe.sh');
+    expect(workflow).toContain(
+      'if run_deploy_command_with_pause_renewal scripts/run-briefing-control-probe.sh',
+    );
     expect(workflow).toContain('dataDeploymentContinues');
     expect(workflow).toContain('[ "$runner_probe_succeeded" = true ]');
     expect(workflow).toContain('finish_stage degraded');
 
     expect(deployScript).toContain('DEPLOY_RUNNER_PROBE_SUCCEEDED=false');
-    expect(deployScript).toContain('if "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"');
+    expect(deployScript).toContain(
+      'if run_deploy_command_with_pause_renewal "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"',
+    );
     expect(deployScript).toContain('dataDeploymentContinues');
     expect(deployScript).toContain('[[ "$DEPLOY_RUNNER_PROBE_SUCCEEDED" = true ]]');
     expect(deployScript).toContain('finish_stage degraded');
