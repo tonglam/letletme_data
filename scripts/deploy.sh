@@ -462,6 +462,14 @@ deploy() {
     log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
     exit 1
   fi
+  if ! compose run --rm -T --interactive=false \
+    api \
+    bun run db:cutover-seed-live-match-v2 -- --execute --all-finalized \
+    --season "$LIVE_POINTS_V2_SEED_SEASON" \
+    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+    log_error "Live Matches V2 seed failed; services remain stopped for a forward fix."
+    exit 1
+  fi
   finish_stage
   start_stage cachePublish
   log_info "Publishing and verifying the canonical core cache"

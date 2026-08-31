@@ -11,7 +11,10 @@ import {
   readLiveMatchDetailPointerV2,
   setLiveMatchCheckpointDesiredV2,
 } from '../src/cache/live-match-publication-v2';
-import { syncLiveSnapshotV2 } from '../src/services/live-snapshot-v2.service';
+import {
+  syncLiveSnapshotV2,
+  type LiveSnapshotV2SyncResult,
+} from '../src/services/live-snapshot-v2.service';
 import { databaseSingleton } from '../src/db/singleton';
 import { redisSingleton } from '../src/cache/singleton';
 
@@ -71,6 +74,12 @@ function hasCanonicalPrices(
   );
 }
 
+export function canSkipMissingDetailDuringSeed(
+  result: Pick<LiveSnapshotV2SyncResult, 'fixtureCount' | 'state'>,
+): boolean {
+  return result.fixtureCount === 0 || result.state === 'PRE_DEADLINE';
+}
+
 async function seedOne(seasonCode: string, eventId: number) {
   const season = explicitSeasonRef(seasonCode);
   const event = await eventRepository.findById(season, eventId);
@@ -85,10 +94,11 @@ async function seedOne(seasonCode: string, eventId: number) {
 
   const active = await readLiveMatchDetailPointerV2({ season: seasonCode, eventId }, 'active');
   if (!active) {
-    // Before kickoff the match detail stream is intentionally absent. There
-    // is no player payload to migrate; the first started observation will
-    // publish the price-bearing V2 detail atomically.
-    if (result.fixtureCount === 0 || !finalized) {
+    // A blank gameweek or a genuinely pre-deadline event has no player payload
+    // to migrate. Once the coherent observer says the event is active or
+    // settling, missing detail is a failed cutover prerequisite rather than a
+    // successful no-op.
+    if (canSkipMissingDetailDuringSeed(result)) {
       return {
         season: seasonCode,
         eventId,
@@ -117,6 +127,7 @@ async function seedOne(seasonCode: string, eventId: number) {
     season,
     eventId,
     kind: 'detail',
+    allowFinalizedReplacementForCutover: true,
   });
   if (!checkpoint.checkpointed) {
     throw new Error(`event ${eventId} detail checkpoint did not converge`);
