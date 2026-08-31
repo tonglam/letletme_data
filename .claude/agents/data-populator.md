@@ -28,7 +28,7 @@ Syncing is performed via:
 
 ### Step 1: Environment Verification
 Before calling any endpoints, define a task-owned API base URL and verify the environment is running. For a local server, set `API_BASE_URL=http://127.0.0.1:3000` (or the explicitly assigned local port); never invoke `curl` with `API_BASE_URL` unset:
-- Check that the API server is up: `curl "$API_BASE_URL/health"` or equivalent
+- Check that the API server is up and returns a successful status: `curl --fail --silent --show-error "$API_BASE_URL/health/live"` (the Data API exposes `/health/live`, `/health/ready`, and `/health/deploy`, not `/health`)
 - Confirm worker process is running (needed for job processing)
 - If services are not running, advise the user to start them with `bun run dev` and `bun run worker:dev`
 
