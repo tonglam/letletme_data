@@ -1960,32 +1960,33 @@ async function loadExistingV2EventIds(
   return new Set(rows.map((row) => row.event_id));
 }
 
-async function hasExistingV2LiveCheckpoint(
+async function loadExistingV2CheckpointEventIds(
   database: postgres.Sql,
-  args: SeedArguments,
-): Promise<boolean> {
-  const parameters: Array<string | number> = [];
-  const predicates = ['TRUE'];
-  if (args.season !== null) {
-    parameters.push(args.season);
-    predicates.push(`season.season_code = $${parameters.length}`);
-  }
-  if (args.eventId !== null) {
-    parameters.push(args.eventId);
-    predicates.push(`checkpoint.event_id = $${parameters.length}`);
-  }
-  const [row] = await database.unsafe<{ exists: boolean }[]>(
+  season: FplSeasonRef,
+): Promise<Set<number>> {
+  const rows = await database.unsafe<{ event_id: number }[]>(
     `
-      SELECT EXISTS (
-        SELECT 1
-        FROM competition.live_points_publication_checkpoints checkpoint
-        JOIN fpl.seasons season ON season.season_id = checkpoint.season_id
-        WHERE ${predicates.join(' AND ')}
-      ) AS exists
+      SELECT event_id
+      FROM competition.live_points_publication_checkpoints
+      WHERE season_id = $1
+      ORDER BY event_id
     `,
-    parameters,
+    [season.seasonId],
   );
-  return row?.exists === true;
+  return new Set(rows.map((row) => row.event_id));
+}
+
+/**
+ * A durable V2 checkpoint is authoritative for the whole event scope. A
+ * legacy publication for the same event must not be allowed to block an
+ * idempotent cache restore just because its older payload shape fails legacy
+ * validation.
+ */
+export function shouldSkipLegacyLivePublication(
+  eventId: number,
+  existingV2CheckpointEventIds: ReadonlySet<number>,
+): boolean {
+  return existingV2CheckpointEventIds.has(eventId);
 }
 
 async function loadPreviousTotals(
@@ -2927,9 +2928,14 @@ async function main(): Promise<void> {
     const cacheCandidates: ValidatedLiveSeed[] = [];
     const cacheInvalid: InvalidLiveSeedScope[] = [];
     const existingV2EventIds = new Set<number>();
+    let skippedLegacyForExistingV2 = 0;
     let requestedV2Checkpoint = false;
     if (args.seedCache) {
       const seedSeason = explicitSeasonRef(args.season!);
+      const existingV2CheckpointEventIds = await loadExistingV2CheckpointEventIds(
+        database,
+        seedSeason,
+      );
       const finalizedEventIds = args.allFinalized
         ? await loadFinalizedEventIds(database, seedSeason)
         : args.eventId === null
@@ -2946,6 +2952,15 @@ async function main(): Promise<void> {
 
       const legacyPublications = await loadLegacyLivePublications(database, args);
       for (const legacyPublication of legacyPublications) {
+        // A durable V2 checkpoint is already the canonical source for this
+        // scope. Do not let a legacy payload (which may be incomplete or
+        // structurally different) prevent an idempotent checkpoint restore.
+        if (
+          shouldSkipLegacyLivePublication(legacyPublication.event_id, existingV2CheckpointEventIds)
+        ) {
+          skippedLegacyForExistingV2 += 1;
+          continue;
+        }
         const validated = validateLegacyLiveSeed(legacyPublication);
         if (validated.ok) {
           try {
@@ -3009,7 +3024,7 @@ async function main(): Promise<void> {
         }
       }
       if (args.execute && args.eventId !== null) {
-        requestedV2Checkpoint = await hasExistingV2LiveCheckpoint(database, args);
+        requestedV2Checkpoint = existingV2CheckpointEventIds.has(args.eventId);
         const requestedCandidate = cacheCandidates.some(
           (candidate) => candidate.source.event_id === args.eventId,
         );
@@ -3035,7 +3050,7 @@ async function main(): Promise<void> {
       if (
         args.execute &&
         cacheCandidates.length === 0 &&
-        !(requestedV2Checkpoint || (await hasExistingV2LiveCheckpoint(database, args)))
+        !(requestedV2Checkpoint || existingV2CheckpointEventIds.size > 0)
       ) {
         throw new Error(
           'V2 cache seed refused because no complete legacy live publication was found',
@@ -3164,6 +3179,7 @@ async function main(): Promise<void> {
           cacheCandidates: cacheCandidates.length,
           cacheInvalid: cacheInvalid.length,
           cacheInvalidSample: cacheInvalid.slice(0, 20),
+          skippedLegacyForExistingV2,
           cacheResults,
           entryResults: entryResults.slice(0, 20),
           entryResultCount: entryResults.length,
