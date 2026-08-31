@@ -471,7 +471,12 @@ export async function syncLiveMatchesV2FromObservation(
     detailUnavailableReason = 'PLAYER_IDENTITY_UNAVAILABLE';
   } else {
     try {
-      const detailReferenceData = await resolveLiveReferenceDataForDetail(input.referenceData);
+      const detailReferenceData = await resolveLiveReferenceDataForDetail(input.referenceData, {
+        requireEventPinnedIdentity: finalizationRequested && preparedDesk.fixtures.length > 0,
+      });
+      if (!detailReferenceData) {
+        throw new Error('Live Match final detail requires event-pinned player identity');
+      }
       const preparedDetail = prepareLiveMatchDetail({
         eventId: input.eventId,
         rawElements: input.rawEventLive.elements,

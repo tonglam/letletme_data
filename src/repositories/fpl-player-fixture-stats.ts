@@ -7,7 +7,7 @@ import {
   teamsInFpl,
   type DbPlayerFixtureStatInsert,
 } from '../db/schemas/index.schema';
-import { getDb, type DbOrTransaction } from '../db/singleton';
+import { getDb, getDbClient, type DbOrTransaction } from '../db/singleton';
 import type {
   FplPlayerFixtureEvidence,
   FplPlayerFixtureStat,
@@ -26,6 +26,10 @@ export interface FplPlayerFixtureIdentity {
   readonly webName: string;
 }
 
+const EVENT_IDENTITY_QUERY_TIMEOUT_MS = 2_000;
+
+type EventIdentityRow = FplPlayerFixtureIdentity;
+
 export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
@@ -35,6 +39,31 @@ export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransacti
       eventId: number,
     ): Promise<FplPlayerFixtureIdentity[]> => {
       try {
+        if (!dbInstance) {
+          const client = await getDbClient();
+          const query = client<EventIdentityRow[]>`
+            SELECT
+              player_fixture_stats.fixture_id AS "fixtureId",
+              player_fixture_stats.element_id AS "elementId",
+              player_fixture_stats.team_id AS "teamId",
+              player_fixture_stats.element_type AS "elementType",
+              players.price AS "price",
+              players.web_name AS "webName"
+            FROM fpl.player_fixture_stats AS player_fixture_stats
+            INNER JOIN fpl.players AS players
+              ON players.season_id = player_fixture_stats.season_id
+             AND players.element_id = player_fixture_stats.element_id
+            WHERE player_fixture_stats.season_id = ${season.seasonId}
+              AND player_fixture_stats.event_id = ${eventId}
+          `;
+          const timeout = setTimeout(() => query.cancel(), EVENT_IDENTITY_QUERY_TIMEOUT_MS);
+          try {
+            return [...(await query)];
+          } finally {
+            clearTimeout(timeout);
+          }
+        }
+
         const db = await getDbInstance();
         return await db
           .select({

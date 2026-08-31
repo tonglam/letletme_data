@@ -194,13 +194,19 @@ function resolveWithinBudget<T>(promise: Promise<T>, budgetMs: number): Promise<
  */
 export async function resolveLiveReferenceDataForDetail(
   referenceData: LiveSnapshotReferenceData,
-): Promise<LiveSnapshotReferenceData> {
-  if (!referenceData.eventPinnedIdentities) return referenceData;
+  options: { readonly requireEventPinnedIdentity?: boolean } = {},
+): Promise<LiveSnapshotReferenceData | null> {
+  const requireEventPinnedIdentity = options.requireEventPinnedIdentity === true;
+  if (!referenceData.eventPinnedIdentities) {
+    return requireEventPinnedIdentity && !referenceData.playerByFixtureAndId ? null : referenceData;
+  }
   const eventPinnedIdentities = await resolveWithinBudget(
     referenceData.eventPinnedIdentities,
     LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS,
   );
-  if (!eventPinnedIdentities || eventPinnedIdentities.length === 0) return referenceData;
+  if (!eventPinnedIdentities || eventPinnedIdentities.length === 0) {
+    return requireEventPinnedIdentity ? null : referenceData;
+  }
   try {
     return addEventPinnedIdentities(referenceData, eventPinnedIdentities);
   } catch (error) {
@@ -208,7 +214,7 @@ export async function resolveLiveReferenceDataForDetail(
       season: referenceData.season,
       error: error instanceof Error ? error.message : String(error),
     });
-    return referenceData;
+    return requireEventPinnedIdentity ? null : referenceData;
   }
 }
 

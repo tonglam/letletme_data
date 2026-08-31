@@ -327,8 +327,21 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       ),
     ]);
 
+    if (!resolved) throw new Error('pending event identity unexpectedly returned no baseline');
     expect(resolved.playerById).toEqual(reference.playerById);
     expect(resolved.playerByFixtureAndId).toBeUndefined();
+  });
+
+  test('does not use the Core roster as the final identity fallback', async () => {
+    const resolved = await resolveLiveReferenceDataForDetail(
+      {
+        ...referenceData(),
+        eventPinnedIdentities: Promise.resolve(null),
+      },
+      { requireEventPinnedIdentity: true },
+    );
+
+    expect(resolved).toBeNull();
   });
 
   test('derives active and settled lifecycle from current fixtures on a stale job retry', () => {
