@@ -6,6 +6,7 @@ import {
   PICKS_FIRST_PROBE_OFFSET_MS,
   resolveLivePicksCoordinatorDeduplicationId,
   resolveLivePicksEntryDeduplicationId,
+  resolveLivePicksProbeBackoffResult,
   resolveLivePicksRefreshFanout,
   resolveLiveLifecycleDelay,
   shouldPersistLiveLifecycleStatus,
@@ -13,6 +14,39 @@ import {
 } from '../../src/services/live-lifecycle-orchestrator';
 
 describe('live lifecycle decisions', () => {
+  test('settles only fenced backoff roots and retries unfenced repairs', () => {
+    expect(
+      resolveLivePicksProbeBackoffResult(true, {
+        schedulerFenced: true,
+      }),
+    ).toEqual({
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: true,
+      scanComplete: false,
+      outcome: 'accepted-backoff',
+    });
+    expect(
+      resolveLivePicksProbeBackoffResult(true, {
+        retryableRepair: true,
+      }),
+    ).toEqual({
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: false,
+      scanComplete: false,
+    });
+    expect(resolveLivePicksProbeBackoffResult(false)).toEqual({
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: false,
+      scanComplete: false,
+    });
+  });
+
   test('does not write a PostgreSQL heartbeat for every live publication', () => {
     const base = {
       state: 'LIVE_ACTIVE' as const,

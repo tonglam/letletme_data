@@ -66,6 +66,18 @@ function checkpointCompleteness(evidence: Record<string, unknown>): 'COMPLETE' |
   return failedUnits !== undefined && failedUnits > 0 ? 'INCOMPLETE' : 'COMPLETE';
 }
 
+const LIVE_PICKS_ACCEPTED_BACKOFF_REASON = 'live-picks-probe-backoff-accepted';
+
+function isAcceptedLivePicksBackoff(input: CompletionEvidence): boolean {
+  return (
+    input.jobName === 'live-picks-refresh' &&
+    input.evidence !== null &&
+    typeof input.evidence === 'object' &&
+    !Array.isArray(input.evidence) &&
+    input.evidence.reason === LIVE_PICKS_ACCEPTED_BACKOFF_REASON
+  );
+}
+
 export function createSchedulerObligationLifecycle(
   overrides: Partial<SchedulerObligationLifecycleDependencies> = {},
 ) {
@@ -134,6 +146,11 @@ export function createSchedulerObligationLifecycle(
 
   const recordCompletion = async (obligation: SchedulerObligation | null): Promise<void> => {
     if (!obligation) return;
+    // The repository completes accepted backoff and retires its freshness
+    // windows in one transaction. Do not issue a second, best-effort write
+    // here: the obligation is terminal and cannot be retried if that write
+    // fails after the worker has already returned success.
+    if (isAcceptedLivePicksBackoff(obligation)) return;
     await recordCheckpointFreshnessEvidence(obligation);
   };
 

@@ -12,6 +12,8 @@ export type LivePicksRefreshResult = Readonly<{
   canaryCount: number;
   synced: number;
   pending: number;
+  /** The scheduler may settle this root as skipped after an accepted backoff. */
+  outcome?: 'accepted-backoff';
   sourceReady: boolean;
   scanComplete: boolean;
 }>;
