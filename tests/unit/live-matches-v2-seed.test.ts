@@ -135,4 +135,15 @@ describe('live match V2 cutover seed arguments', () => {
       /const observedFixtures = await fplClient\.getFixtures\(eventId\);[\s\S]*syncLiveSnapshotV2\([\s\S]*observedFixtures,/,
     );
   });
+
+  it('bounds resource cleanup and exits the one-shot seed on every outcome', () => {
+    const source = readFileSync(
+      new URL('../../scripts/seed-live-matches-v2.ts', import.meta.url),
+      'utf8',
+    );
+    expect(source).toContain('const SEED_CLEANUP_TIMEOUT_MS = 5_000;');
+    expect(source).toContain('await closeSeedResources();');
+    expect(source).toContain('closeLiveDataQueue()');
+    expect(source).toContain('process.exit(exitCode);');
+  });
 });
