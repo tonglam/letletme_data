@@ -37,6 +37,7 @@ const IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-00000000001
 const ACCEPTED_BACKOFF_OBLIGATION_ID = '30000000-0000-4000-8000-000000000011';
 const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
 const ACCEPTED_BACKOFF_SCOPE_KEY = 'integration:event:accepted-backoff';
+const ACCEPTED_BACKOFF_CASE_FINGERPRINT = 'integration:live-picks-backoff:breach';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -71,6 +72,10 @@ async function cleanup(): Promise<void> {
     DELETE FROM ops.freshness_slo_windows
     WHERE slo_key = ${ACCEPTED_BACKOFF_SLO_KEY}
       AND scope_key = ${ACCEPTED_BACKOFF_SCOPE_KEY}
+  `;
+  await sql`
+    DELETE FROM ops.data_governance_cases
+    WHERE fingerprint = ${ACCEPTED_BACKOFF_CASE_FINGERPRINT}
   `;
 }
 
@@ -113,6 +118,36 @@ describe('scheduler obligation generation fencing', () => {
         )
       )
     `;
+    await sql`
+      UPDATE ops.freshness_slo_windows
+      SET
+        status = 'BREACHED',
+        completeness_status = 'INCOMPLETE',
+        breach_code = 'DEADLINE_OR_INCOMPLETE'
+      WHERE window_id = ${windowId}
+    `;
+    await sql`
+      INSERT INTO ops.data_governance_cases (
+        case_kind, contract_key, lane, obligation_id, slo_window_id,
+        scope_key, error_class, error_code, fingerprint, evidence,
+        repair_target, compensator, status
+      )
+      VALUES (
+        'freshness-breach',
+        'my-fpl',
+        'my-fpl',
+        ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid,
+        ${windowId}::bigint,
+        ${ACCEPTED_BACKOFF_SCOPE_KEY},
+        'DATA_INCOMPLETE',
+        'FRESHNESS_DEADLINE_OR_INCOMPLETE',
+        ${ACCEPTED_BACKOFF_CASE_FINGERPRINT},
+        '{}'::jsonb,
+        jsonb_build_object('windowId', ${windowId}::bigint),
+        'integration test',
+        'OPEN'
+      )
+    `;
 
     expect(
       await completeSchedulerObligation({
@@ -123,7 +158,7 @@ describe('scheduler obligation generation fencing', () => {
       }),
     ).toBe(true);
 
-    const [obligation, window] = await Promise.all([
+    const [obligation, window, governanceCase] = await Promise.all([
       sql<Array<{ status: string }>>`
         SELECT status
         FROM ops.scheduler_obligations
@@ -147,6 +182,14 @@ describe('scheduler obligation generation fencing', () => {
         FROM ops.freshness_slo_windows
         WHERE window_id = ${windowId}
       `,
+      sql<Array<{ status: string; reason: string; scheduler_obligation_id: string }>>`
+        SELECT
+          status,
+          evidence->>'reason' AS reason,
+          evidence->>'schedulerObligationId' AS scheduler_obligation_id
+        FROM ops.data_governance_cases
+        WHERE fingerprint = ${ACCEPTED_BACKOFF_CASE_FINGERPRINT}
+      `,
     ]);
     expect(obligation[0]?.status).toBe('skipped');
     expect(window[0]).toEqual({
@@ -155,6 +198,11 @@ describe('scheduler obligation generation fencing', () => {
       job_name: 'live-picks-refresh',
       reason: 'LIVE_PICKS_BACKOFF_ACCEPTED',
       not_applicable_reason: 'LIVE_PICKS_BACKOFF_ACCEPTED',
+    });
+    expect(governanceCase[0]).toEqual({
+      status: 'DISMISSED',
+      reason: 'LIVE_PICKS_BACKOFF_ACCEPTED',
+      scheduler_obligation_id: ACCEPTED_BACKOFF_OBLIGATION_ID,
     });
   });
 

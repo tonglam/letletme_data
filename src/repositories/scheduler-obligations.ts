@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 
-import { freshnessSloWindowsInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
+import {
+  dataGovernanceCasesInOps,
+  freshnessSloWindowsInOps,
+  schedulerObligationsInOps,
+} from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
 import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
@@ -88,27 +92,50 @@ function isAcceptedLivePicksBackoff(status: SchedulerObligationStatus, evidence:
 
 async function retireAcceptedLivePicksBackoffWindows(
   db: DbOrTransaction,
+  obligationId: string,
   evidence: unknown,
 ): Promise<void> {
   const windowIds = freshnessWindowIdsFromEvidence(evidence);
   if (windowIds.length === 0) return;
+  const retirementEvidence = JSON.stringify({
+    jobName: 'live-picks-refresh',
+    reason: LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON,
+    notApplicableReason: LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON,
+    schedulerObligationId: obligationId,
+  });
   await db
     .update(freshnessSloWindowsInOps)
     .set({
       status: 'NOT_APPLICABLE',
       completenessStatus: 'NOT_APPLICABLE',
       breachCode: null,
-      evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
-        jobName: 'live-picks-refresh',
-        reason: LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON,
-        notApplicableReason: LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON,
-      })}::jsonb`,
+      evidence: sql`${freshnessSloWindowsInOps.evidence} || ${retirementEvidence}::jsonb`,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
       and(
         inArray(freshnessSloWindowsInOps.windowId, windowIds),
-        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'NOT_APPLICABLE']),
+        // An accepted backoff is explicit evidence that this scheduled
+        // window was intentionally not applicable. If the bounded observer
+        // raced and recorded a breach first, reconcile only these exact
+        // attached windows; ordinary breach history remains immutable.
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'NOT_APPLICABLE', 'BREACHED']),
+      ),
+    );
+  await db
+    .update(dataGovernanceCasesInOps)
+    .set({
+      status: 'DISMISSED',
+      lastError: null,
+      repairJobId: null,
+      repairDeadlineAt: null,
+      evidence: sql`${dataGovernanceCasesInOps.evidence} || ${retirementEvidence}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        inArray(dataGovernanceCasesInOps.sloWindowId, windowIds),
+        inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
       ),
     );
 }
@@ -1449,8 +1476,9 @@ export async function completeSchedulerObligation(input: {
         runId: schedulerObligationsInOps.runId,
       });
     if (updated.length !== 1) return false;
+    const completed = updated[0]!;
     if (isAcceptedLivePicksBackoff(input.status, input.evidence)) {
-      await retireAcceptedLivePicksBackoffWindows(tx, updated[0]?.evidence);
+      await retireAcceptedLivePicksBackoffWindows(tx, completed.obligationId, completed.evidence);
     }
     return true;
   });
@@ -1537,8 +1565,9 @@ export async function completeSchedulerObligationByBullJobId(input: {
         runId: schedulerObligationsInOps.runId,
       });
     if (updated.length !== 1) return false;
+    const completed = updated[0]!;
     if (isAcceptedLivePicksBackoff(status, input.evidence)) {
-      await retireAcceptedLivePicksBackoffWindows(tx, updated[0]?.evidence);
+      await retireAcceptedLivePicksBackoffWindows(tx, completed.obligationId, completed.evidence);
     }
     return true;
   });
