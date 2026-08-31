@@ -374,6 +374,58 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     ).toThrow('missing player identity');
   });
 
+  test('ignores zero-valued transferred explain placeholders before fixture identity checks', () => {
+    const fixtures = [
+      rawFixture({
+        id: 401,
+        teamH: 10,
+        teamA: 20,
+        homeScore: 1,
+        awayScore: 0,
+        bpsElement: 101,
+        bps: 30,
+      }),
+    ];
+    const desk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: fixtures,
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+    });
+    const visibleElement = cloneRawElement(rawExplainElementsFixture[0]!);
+    visibleElement.explain = [(visibleElement.explain as RawFPLEventExplainFixture[])[0]!];
+    const zeroElement = cloneRawElement(rawExplainElementsFixture[0]!);
+    zeroElement.id = 103;
+    zeroElement.stats.minutes = 0;
+    zeroElement.stats.total_points = 0;
+    zeroElement.explain = [
+      {
+        fixture: 401,
+        stats: [{ identifier: 'minutes', value: 0, points: 0, points_modification: 0 }],
+      },
+    ];
+    const baseReference = referenceData();
+    const playerById = new Map(baseReference.playerById);
+    playerById.set(103, {
+      id: 103,
+      type: 3,
+      teamId: 30,
+      price: 50,
+      webName: 'Transferred Placeholder',
+    });
+
+    const detail = prepareLiveMatchDetail({
+      eventId: 2,
+      rawElements: [visibleElement, zeroElement],
+      rawFixtures: fixtures,
+      deskFixtures: desk.fixtures,
+      referenceData: { ...baseReference, playerById },
+      publishedLiveElementIds: [101, 103],
+    });
+
+    expect(detail.fixtures[0]?.players.map((player) => player.id)).toEqual([101]);
+  });
+
   test('rejects partial and duplicate event-live player identity', () => {
     const fixtures = [
       rawFixture({

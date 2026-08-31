@@ -318,6 +318,15 @@ function buildDetailPlayer(input: {
   readonly referenceData: LiveSnapshotReferenceData;
   readonly fixtureTeamIds: ReadonlySet<number>;
 }): MatchDetailPlayer | null {
+  const stats = [...input.stats].sort(statSort);
+  // FPL includes zero-valued explain placeholders for players whose event
+  // identity can no longer be associated with the fixture (for example a
+  // transferred player retained in the event-live response). These rows are
+  // intentionally not published, so they must not make the complete detail
+  // candidate fail its event-time identity validation. Any visible row still
+  // passes every identity, price and fixture-team check below.
+  if (!statsHaveVisibleValue(stats)) return null;
+
   const player =
     input.referenceData.playerByFixtureAndId?.get(`${input.fixtureId}:${input.elementId}`) ??
     input.referenceData.playerById?.get(input.elementId);
@@ -341,8 +350,6 @@ function buildDetailPlayer(input: {
       `Live Match detail has no event-time team identity for fixture ${input.fixtureId} element ${input.elementId}`,
     );
   }
-  const stats = [...input.stats].sort(statSort);
-  if (!statsHaveVisibleValue(stats)) return null;
   const totalPoints = stats.reduce(
     (sum, stat) => sum + stat.points + (stat.pointsModification ?? 0),
     0,
