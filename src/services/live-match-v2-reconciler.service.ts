@@ -14,6 +14,10 @@ import {
   type MatchDeskPublication,
   type MatchDetailPublication,
 } from '../cache/live-match-publication-v2';
+import {
+  readLiveMatchDeskCheckpointV2,
+  readLiveMatchDetailCheckpointV2,
+} from './live-match-v2-checkpoint.service';
 import { redisSingleton } from '../cache/singleton';
 import {
   liveMatchDeskCheckpointsInFpl,
@@ -55,6 +59,12 @@ export type LiveMatchCheckpointReconcilerDependencies = Readonly<{
   readHeads: (season: FplSeasonRef) => Promise<ReadonlyMap<string, LiveMatchCheckpointHead>>;
   readCurrent: (
     season: string,
+    eventId: number,
+    kind: MatchCheckpointKind,
+  ) => Promise<LiveMatchCurrent | null>;
+  /** Full manifest/payload validation; identity-only heads are not durable proof. */
+  readCheckpoint: (
+    season: FplSeasonRef,
     eventId: number,
     kind: MatchCheckpointKind,
   ) => Promise<LiveMatchCurrent | null>;
@@ -193,6 +203,13 @@ const defaultDependencies: LiveMatchCheckpointReconcilerDependencies = {
         : await readLiveMatchDetailV2({ season, eventId });
     return current?.servedFrom === 'REDIS_CURRENT' ? { publication: current.publication } : null;
   },
+  readCheckpoint: async (season, eventId, kind) => {
+    const checkpoint =
+      kind === 'desk'
+        ? await readLiveMatchDeskCheckpointV2(season, eventId)
+        : await readLiveMatchDetailCheckpointV2(season, eventId);
+    return checkpoint ? { publication: checkpoint.publication } : null;
+  },
   readDesired: (season, eventId, kind) =>
     readLiveMatchCheckpointDesiredV2({ season, eventId, kind }),
   setDesired: (kind, publication) =>
@@ -259,6 +276,23 @@ export async function reconcileLiveMatchCheckpointObligationsV2(
       }
       const head = heads.get(scopeKey(scope.eventId, scope.kind));
       if (head && sameIdentity(head, publication)) {
+        const durable = await dependencies.readCheckpoint(season, scope.eventId, scope.kind);
+        if (!durable || !sameIdentity(durable.publication, publication)) {
+          await dependencies.enqueue(
+            season,
+            scope.eventId,
+            scope.kind,
+            desired.publicationId,
+            desired.generation,
+          );
+          results.push({
+            ...scope,
+            status: 'enqueued',
+            publicationId: desired.publicationId,
+            generation: desired.generation,
+          });
+          continue;
+        }
         if (publication.checkpointedAt === null) {
           const marked = await dependencies.markCheckpointed(
             scope.kind,

@@ -73,6 +73,7 @@ function dependencies(input: {
   head?: LiveMatchCheckpointHead;
   enqueue?: LiveMatchCheckpointReconcilerDependencies['enqueue'];
   setDesired?: LiveMatchCheckpointReconcilerDependencies['setDesired'];
+  readCheckpoint?: LiveMatchCheckpointReconcilerDependencies['readCheckpoint'];
   markCheckpointed?: LiveMatchCheckpointReconcilerDependencies['markCheckpointed'];
   clearDesired?: LiveMatchCheckpointReconcilerDependencies['clearDesired'];
 }): LiveMatchCheckpointReconcilerDependencies {
@@ -80,6 +81,7 @@ function dependencies(input: {
     listScopes: async () => [{ eventId: 2, kind: 'desk' }],
     readHeads: async () => new Map(input.head ? [['2:desk', input.head] as const] : []),
     readCurrent: async () => ({ publication: input.current }),
+    readCheckpoint: input.readCheckpoint ?? (async () => ({ publication: input.current })),
     readDesired: async () => input.desired,
     setDesired: input.setDesired ?? (async () => desired(input.current)),
     markCheckpointed:
@@ -179,5 +181,37 @@ describe('Live Matches V2 checkpoint reconciler', () => {
 
     expect(result[0]?.status).toBe('matched');
     expect(order).toEqual([`mark:${checkpointedAt.toISOString()}`, 'clear']);
+  });
+
+  test('does not close an identity-only head when the self-contained checkpoint is invalid', async () => {
+    const current = publication();
+    const retained = desired(current);
+    let enqueued = 0;
+    const deps = dependencies({
+      current,
+      desired: retained,
+      head: {
+        publicationId: current.publicationId,
+        generation: current.generation,
+        checkpointedAt: new Date('2026-08-31T10:00:05.000Z'),
+      },
+      readCheckpoint: async () => null,
+      enqueue: async () => {
+        enqueued += 1;
+      },
+    });
+
+    const result = await reconcileLiveMatchCheckpointObligationsV2(season, deps);
+
+    expect(result).toEqual([
+      {
+        eventId: 2,
+        kind: 'desk',
+        status: 'enqueued',
+        publicationId: current.publicationId,
+        generation: current.generation,
+      },
+    ]);
+    expect(enqueued).toBe(1);
   });
 });

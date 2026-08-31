@@ -15,7 +15,9 @@ import {
 } from '../cache/live-publication-v2';
 import {
   readLiveMatchDeskFenceV2,
+  readLiveMatchDetailFenceV2,
   type MatchDeskActiveFence,
+  type MatchDetailActiveFence,
 } from '../cache/live-match-publication-v2';
 import {
   loadLiveReferenceData,
@@ -60,6 +62,7 @@ export interface LiveSnapshotV2Dependencies {
     eventId?: number,
   ) => Promise<LiveSnapshotReferenceData>;
   readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2;
+  readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV2;
   readonly syncLiveMatches?: typeof syncLiveMatchesV2FromObservation;
   readonly readPublished: (season: string, eventId: number) => Promise<LivePublicationRead | null>;
   readonly readCheckpointed?: (
@@ -109,6 +112,7 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
       .map((fixture) => fixture.id);
   },
   readObservedMatchDesk: (input) => readLiveMatchDeskFenceV2(input),
+  readObservedMatchDetail: (input) => readLiveMatchDetailFenceV2(input),
   getReferenceData: (season, eventId) => loadLiveReferenceData(season, eventId),
   syncLiveMatches: syncLiveMatchesV2FromObservation,
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
@@ -241,20 +245,32 @@ type AcceptedMatchObservation = Readonly<{
   expectedFixtureIds: readonly number[];
 }>;
 
-function publishedDeskFromMatchResult(
+async function publishedDeskFromMatchResult(
   result: LiveMatchObservationResult,
-): NonNullable<Parameters<typeof syncLiveMatchesV2FromObservation>[0]['publishedDesk']> {
-  const observedActive: MatchDeskActiveFence = {
-    // Desk promotion writes this exact JSON string as the Redis active pointer.
-    // Carrying it into finalization makes the second promotion a CAS against
-    // the provisional desk, rather than a fresh read after the provider wait.
-    observed: JSON.stringify(result.desk),
-    read: {
-      publication: result.desk,
-      fixtures: result.deskFixtures,
-      servedFrom: 'REDIS_CURRENT',
-    },
-  };
+  readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2,
+): Promise<NonNullable<Parameters<typeof syncLiveMatchesV2FromObservation>[0]['publishedDesk']>> {
+  const observedActive: MatchDeskActiveFence = readObservedMatchDesk
+    ? await readObservedMatchDesk({ season: result.season, eventId: result.eventId })
+    : {
+        // Test-only direct callers may not provide the production Redis fence
+        // dependency. The production scheduler always does, so finalization
+        // uses the exact active-pointer bytes returned by Redis below.
+        observed: JSON.stringify(result.desk),
+        read: {
+          publication: result.desk,
+          fixtures: result.deskFixtures,
+          servedFrom: 'REDIS_CURRENT',
+        },
+      };
+  if (
+    observedActive.read?.publication?.publicationId !== result.desk?.publicationId ||
+    observedActive.read?.publication?.generation !== result.desk?.generation
+  ) {
+    throw new CacheError(
+      `Live Match provisional desk changed before finalization for event ${result.eventId}`,
+      'LIVE_MATCH_PROMOTE_CHANGED',
+    );
+  }
   return {
     publication: result.desk,
     fixtures: result.deskFixtures,
@@ -262,6 +278,28 @@ function publishedDeskFromMatchResult(
     checkpointScheduled: result.deskCheckpointScheduled,
     observedActive,
   };
+}
+
+async function detailFenceForFinalization(
+  result: LiveMatchObservationResult,
+  readObservedMatchDetail?: typeof readLiveMatchDetailFenceV2,
+): Promise<MatchDetailActiveFence | undefined> {
+  if (!readObservedMatchDetail) return undefined;
+  const observed = await readObservedMatchDetail({
+    season: result.season,
+    eventId: result.eventId,
+  });
+  if (
+    result.detail &&
+    (observed.read?.publication?.publicationId !== result.detail.publicationId ||
+      observed.read?.publication?.generation !== result.detail.generation)
+  ) {
+    throw new CacheError(
+      `Live Match provisional detail changed before finalization for event ${result.eventId}`,
+      'LIVE_MATCH_PROMOTE_CHANGED',
+    );
+  }
+  return observed;
 }
 
 /**
@@ -347,6 +385,9 @@ export async function syncLiveSnapshotV2(
   const observedMatchDeskPromise = dependencies.readObservedMatchDesk
     ? dependencies.readObservedMatchDesk({ season: season.seasonCode, eventId })
     : Promise.resolve(undefined);
+  const observedMatchDetailPromise = dependencies.readObservedMatchDetail
+    ? dependencies.readObservedMatchDetail({ season: season.seasonCode, eventId })
+    : Promise.resolve(undefined);
   const expectedFixtureIdsPromise = dependencies
     .getExpectedFixtureIds(season, eventId)
     .catch((error) => {
@@ -389,6 +430,7 @@ export async function syncLiveSnapshotV2(
     .then(async ([fixturesResult, expectedFixtureIdsResult]) => {
       if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
       const observedDesk = await observedMatchDeskPromise;
+      const observedDetail = await observedMatchDetailPromise;
       return (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
         season,
         eventId,
@@ -402,6 +444,7 @@ export async function syncLiveSnapshotV2(
         lifecycleState: nonFinalMatchLifecycleState,
         expectedNextCheckAt: options.expectedNextCheckAt,
         observedDesk,
+        observedDetail,
       });
     })
     .then((result) => ({ result, error: null as unknown }))
@@ -412,6 +455,7 @@ export async function syncLiveSnapshotV2(
       const early = await earlyMatchDeskOutcome;
       const rawFixtures = fixturesResult.value;
       const observedDesk = await observedMatchDeskPromise;
+      const observedDetail = await observedMatchDetailPromise;
       const expectedFixtureIds =
         expectedFixtureIdsResult.status === 'fulfilled'
           ? expectedFixtureIdsResult.value
@@ -433,8 +477,14 @@ export async function syncLiveSnapshotV2(
           lifecycleState: nonFinalMatchLifecycleState,
           expectedNextCheckAt: options.expectedNextCheckAt,
           observedDesk,
+          observedDetail,
           publishedDesk:
-            early.result === null ? undefined : publishedDeskFromMatchResult(early.result),
+            early.result === null
+              ? undefined
+              : await publishedDeskFromMatchResult(
+                  early.result,
+                  dependencies.readObservedMatchDesk,
+                ),
         });
         if (options.finalizeEvent && liveResult.status === 'rejected') throw liveResult.reason;
         return { result, error: null as unknown };
@@ -498,6 +548,12 @@ export async function syncLiveSnapshotV2(
   const finalizeAcceptedMatch = async (observation: AcceptedMatchObservation): Promise<void> => {
     if (!options.finalizeEvent) return;
     const outcome = await matchPublicationOutcome;
+    const publishedDesk = outcome.result
+      ? await publishedDeskFromMatchResult(outcome.result, dependencies.readObservedMatchDesk)
+      : undefined;
+    const observedDetail = outcome.result
+      ? await detailFenceForFinalization(outcome.result, dependencies.readObservedMatchDetail)
+      : undefined;
     const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
       season,
       eventId,
@@ -509,7 +565,8 @@ export async function syncLiveSnapshotV2(
       finalizeEvent: true,
       lifecycleState: 'FINALIZED',
       expectedNextCheckAt: options.expectedNextCheckAt,
-      publishedDesk: outcome.result ? publishedDeskFromMatchResult(outcome.result) : undefined,
+      observedDetail,
+      publishedDesk,
     });
     if (result.desk.state !== 'FINALIZED' || result.detail?.finalized !== true) {
       throw new Error(

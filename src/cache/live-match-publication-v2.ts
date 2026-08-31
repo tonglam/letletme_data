@@ -111,6 +111,17 @@ export type MatchDetailRead = Readonly<{
   servedFrom: 'REDIS_CURRENT' | 'REDIS_PREVIOUS' | 'POSTGRES_CHECKPOINT';
 }>;
 
+/**
+ * An active detail pointer and the fully validated value observed with it.
+ * The raw pointer bytes are the ordering fence; promotion and heartbeat touch
+ * must compare them in Lua so an older provider response cannot overwrite a
+ * detail publication that won while that response was in flight.
+ */
+export type MatchDetailActiveFence = Readonly<{
+  observed: string;
+  read: MatchDetailRead | null;
+}>;
+
 export type MatchCheckpointDesired = Readonly<{
   contractVersion: typeof LIVE_MATCHES_CONTRACT_VERSION;
   kind: 'desk' | 'detail';
@@ -509,6 +520,7 @@ const TOUCH_DETAIL_LUA = `
 local raw = redis.call('GET', KEYS[1])
 local manifestRaw = redis.call('GET', KEYS[2])
 if not raw or not manifestRaw then return {'missing'} end
+if raw ~= (ARGV[6] or '') then return {'changed'} end
 local ok, value = pcall(cjson.decode, raw)
 local manifestOk, manifest = pcall(cjson.decode, manifestRaw)
 if not ok or not manifestOk or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) or manifest.publicationId ~= value.publicationId or manifest.generation ~= value.generation then return {'changed'} end
@@ -1130,12 +1142,12 @@ async function stableDeskActiveForPromotion(
 async function stableDetailActiveForPromotion(
   redis: Redis,
   scope: MatchScope,
-): Promise<{ observed: string; validated: MatchDetailRead | null }> {
+): Promise<MatchDetailActiveFence> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const before = (await redis.get(liveMatchDetailKey(scope, 'active'))) ?? '';
     const validated = await readDetailPointer(redis, scope, 'active');
     const after = (await redis.get(liveMatchDetailKey(scope, 'active'))) ?? '';
-    if (before === after) return { observed: after, validated };
+    if (before === after) return { observed: after, read: validated };
   }
   throw new CacheError(
     'Live Match detail current changed during validation',
@@ -1209,6 +1221,18 @@ export async function readLiveMatchDetailPointerV2(
   assertScope(scope);
   const redis = input.redis ?? (await redisSingleton.getClient());
   return readDetailPointer(redis, scope, pointer);
+}
+
+/** Capture the active detail pointer before a provider observation begins. */
+export async function readLiveMatchDetailFenceV2(input: {
+  readonly season: string;
+  readonly eventId: number;
+  readonly redis?: Redis;
+}): Promise<MatchDetailActiveFence> {
+  const scope = { season: input.season, eventId: input.eventId } as const;
+  assertScope(scope);
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  return stableDetailActiveForPromotion(redis, scope);
 }
 
 export async function setLiveMatchActiveEventV2(input: {
@@ -1380,6 +1404,8 @@ export async function publishLiveMatchDetailV2(input: {
   readonly expectedNextCheckAt?: Date | string | null;
   readonly staleAt?: Date | string | null;
   readonly previous?: MatchDetailRead | null;
+  /** Exact active detail pointer captured before the upstream observation. */
+  readonly observedActive?: MatchDetailActiveFence;
   readonly generationFloor?: number;
   readonly finalized?: boolean;
   readonly redis?: Redis;
@@ -1471,7 +1497,9 @@ export async function publishLiveMatchDetailV2(input: {
         value.key !== undefined && value.item !== undefined && !previousByKey.has(value.key),
     );
   await stage(redis, values);
-  const promotionActive = await stableDetailActiveForPromotion(redis, scope);
+  const promotionActive = input.observedActive
+    ? { observed: input.observedActive.observed, read: input.observedActive.read }
+    : await stableDetailActiveForPromotion(redis, scope);
   const [status, currentRaw] = promotionResult(
     await redis.eval(
       PROMOTE_DETAIL_LUA,
@@ -1485,8 +1513,8 @@ export async function publishLiveMatchDetailV2(input: {
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
       input.finalized === true ? '1' : '0',
       String(LIVE_MATCH_FINAL_TTL_MS),
-      promotionActive.validated ? promotionActive.validated.publication.publicationId : '',
-      promotionActive.validated ? String(promotionActive.validated.publication.generation) : '',
+      promotionActive.read ? promotionActive.read.publication.publicationId : '',
+      promotionActive.read ? String(promotionActive.read.publication.generation) : '',
     ),
   );
   if (status === 'stale') {
@@ -1507,7 +1535,7 @@ export async function publishLiveMatchDetailV2(input: {
     );
   return {
     publication,
-    previous: promotionActive.validated
+    previous: promotionActive.read
       ? parseDetailPublication(currentRaw ?? null, scope)
       : (input.previous?.publication ?? null),
     published: true,
@@ -1662,8 +1690,8 @@ export async function restoreLiveMatchDetailCheckpointV2(input: {
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
       publication.finalized ? '1' : '0',
       String(LIVE_MATCH_FINAL_TTL_MS),
-      active.validated?.publication.publicationId ?? '',
-      active.validated ? String(active.validated.publication.generation) : '',
+      active.read?.publication.publicationId ?? '',
+      active.read ? String(active.read.publication.generation) : '',
       'restore',
     ),
   );
@@ -1753,8 +1781,8 @@ export async function promotePreviousLiveMatchV2(input: {
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
       previous.publication.finalized ? '1' : '0',
       String(LIVE_MATCH_FINAL_TTL_MS),
-      active.validated?.publication.publicationId ?? '',
-      active.validated ? String(active.validated.publication.generation) : '',
+      active.read?.publication.publicationId ?? '',
+      active.read ? String(active.read.publication.generation) : '',
       'rollback',
     ),
   );
@@ -1804,10 +1832,14 @@ export async function touchLiveMatchDetailV2(input: {
   readonly sourceCheckedAt: Date | string;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly staleAt?: Date | string | null;
+  /** Exact active detail pointer captured before the upstream observation. */
+  readonly observedActive?: MatchDetailActiveFence;
   readonly redis?: Redis;
 }): Promise<MatchDetailPublication | null> {
   const scope = { season: input.publication.season, eventId: input.publication.eventId } as const;
   const redis = input.redis ?? (await redisSingleton.getClient());
+  const observedActive =
+    input.observedActive ?? (await stableDetailActiveForPromotion(redis, scope));
   const [status, raw] = promotionResult(
     await redis.eval(
       TOUCH_DETAIL_LUA,
@@ -1819,6 +1851,7 @@ export async function touchLiveMatchDetailV2(input: {
       sourceDate(input.sourceCheckedAt),
       input.expectedNextCheckAt == null ? '' : sourceDate(input.expectedNextCheckAt),
       input.staleAt == null ? '' : sourceDate(input.staleAt),
+      observedActive.observed,
     ),
   );
   if (status !== 'touched') return null;

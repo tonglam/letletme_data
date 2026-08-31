@@ -16,6 +16,7 @@ import {
   touchLiveMatchDeskV2,
   touchLiveMatchDetailV2,
   type MatchDeskRead,
+  type MatchDetailActiveFence,
   type MatchDetailRead,
   type MatchDeskPublication,
   type MatchDetailPublication,
@@ -66,6 +67,8 @@ export interface LiveMatchObservation {
   readonly observedAt?: Date | string;
   /** Active desk pointer captured before the provider observation began. */
   readonly observedDesk?: MatchDeskActiveFence;
+  /** Active detail pointer captured before the provider observation began. */
+  readonly observedDetail?: MatchDetailActiveFence;
   /**
    * Desk already published from the fixture-only phase of this exact provider
    * observation. The complete phase may reuse it without another Redis read,
@@ -442,6 +445,7 @@ export async function syncLiveMatchesV2FromObservation(
           desk.state === 'FINALIZED',
         ) &&
         currentDetail?.publication.finalized !== true &&
+        currentDetail?.publication.observedDeskGeneration === desk.generation &&
         currentDetail?.servedFrom === 'REDIS_CURRENT'
       ) {
         detail = await touchLiveMatchDetailV2({
@@ -449,6 +453,7 @@ export async function syncLiveMatchesV2FromObservation(
           sourceCheckedAt: observedAt,
           expectedNextCheckAt: input.expectedNextCheckAt,
           staleAt,
+          observedActive: input.observedDetail,
           redis: input.redis,
         });
       }
@@ -468,6 +473,7 @@ export async function syncLiveMatchesV2FromObservation(
           expectedNextCheckAt: input.expectedNextCheckAt,
           staleAt,
           previous: currentDetail,
+          observedActive: input.observedDetail,
           generationFloor: currentDetail?.publication.generation ?? 0,
           finalized: preparedDesk.state === 'FINALIZED',
           redis: input.redis,
@@ -478,7 +484,8 @@ export async function syncLiveMatchesV2FromObservation(
       if (
         !detail &&
         currentDetail?.publication.fixtureIdentityRevision ===
-          desk.revisions.fixtureIdentity.revision
+          desk.revisions.fixtureIdentity.revision &&
+        currentDetail.publication.observedDeskGeneration === desk.generation
       ) {
         detail = currentDetail.publication;
       }
@@ -506,7 +513,8 @@ export async function syncLiveMatchesV2FromObservation(
       const currentDetail = await readDetailSafely(input).catch(() => null);
       if (
         currentDetail?.publication.fixtureIdentityRevision ===
-        desk.revisions.fixtureIdentity.revision
+          desk.revisions.fixtureIdentity.revision &&
+        currentDetail.publication.observedDeskGeneration === desk.generation
       ) {
         detail = currentDetail.publication;
       }

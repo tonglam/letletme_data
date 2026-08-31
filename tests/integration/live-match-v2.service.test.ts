@@ -12,6 +12,7 @@ import {
   liveMatchDeskKey,
   readLiveMatchDeskFenceV2,
   readLiveMatchDeskV2,
+  readLiveMatchDetailFenceV2,
   readLiveMatchDetailV2,
 } from '../../src/cache/live-match-publication-v2';
 import {
@@ -448,6 +449,92 @@ describe('Live Matches V2 observation publication', () => {
       redis,
     });
     expect(persistedDetail?.fixtures[0]?.players[0]?.stats).toEqual(
+      expect.arrayContaining([
+        { identifier: 'bps', value: 35, points: 0, pointsModification: null },
+      ]),
+    );
+  });
+
+  test('republishes unchanged detail when the desk generation advances', async () => {
+    const first = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      rawEventLive: { elements: eventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const advanced = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [{ ...fixture(30), team_h_score: 2 }],
+      rawEventLive: { elements: eventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:30.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+
+    expect(advanced.desk.generation).toBeGreaterThan(first.desk.generation);
+    expect(advanced.detailChanged).toBe(true);
+    expect(advanced.detail?.generation).toBeGreaterThan(first.detail?.generation ?? 0);
+    expect(advanced.detail?.observedDeskGeneration).toBe(advanced.desk.generation);
+    expect(advanced.detail?.detail.revision).toBe(first.detail?.detail.revision);
+  });
+
+  test('rejects a stale detail-only observation captured before a newer detail wins', async () => {
+    await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      rawEventLive: { elements: eventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const observedDetail = await readLiveMatchDetailFenceV2({
+      season: season.seasonCode,
+      eventId,
+      redis,
+    });
+    expect(observedDetail.read).not.toBeNull();
+
+    const newer = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(35)],
+      rawEventLive: { elements: eventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:30.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const stale = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      rawEventLive: { elements: eventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:15.000Z',
+      observedDetail,
+      redis,
+      enqueueCheckpoint,
+    });
+
+    expect(stale.detailChanged).toBe(false);
+    expect(stale.detail?.publicationId).toBe(newer.detail?.publicationId);
+    expect(
+      (await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0]
+        ?.players[0]?.stats,
+    ).toEqual(
       expect.arrayContaining([
         { identifier: 'bps', value: 35, points: 0, pointsModification: null },
       ]),
