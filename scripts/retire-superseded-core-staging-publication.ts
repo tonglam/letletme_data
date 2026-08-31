@@ -43,6 +43,13 @@ type CoreStagingRow = Readonly<{
   expiresAt: Date | null;
 }>;
 
+type CoreItemRow = Readonly<{
+  itemName: string;
+  payload: unknown;
+  itemCount: number;
+  checksum: string;
+}>;
+
 function usage(): never {
   throw new Error(
     'usage: bun scripts/retire-superseded-core-staging-publication.ts --action inspect|retire --publication-id UUID --season-id N --expected-active-publication-id UUID --expected-active-revision N [--reason text]',
@@ -148,6 +155,38 @@ export function parseDatabaseClockEpoch(value: unknown): Date | null {
   return isDate(parsed) ? parsed : null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactFields(
+  value: Record<string, unknown>,
+  expectedFields: readonly string[],
+): boolean {
+  const actualFields = Object.keys(value).sort();
+  const sortedExpectedFields = [...expectedFields].sort();
+  return (
+    actualFields.length === sortedExpectedFields.length &&
+    actualFields.every((field, index) => field === sortedExpectedFields[index])
+  );
+}
+
+export function isCoreStagingManifest(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasExactFields(value, ['sourceCheckedAt', 'state']) &&
+    value.state === 'staging' &&
+    typeof value.sourceCheckedAt === 'string' &&
+    Number.isFinite(new Date(value.sourceCheckedAt).getTime())
+  );
+}
+
+function itemCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === 'object') return Object.keys(value).length;
+  return value === null || value === undefined ? 0 : 1;
+}
+
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
@@ -190,25 +229,30 @@ function createRepairDatabase(environment: NodeJS.ProcessEnv): {
 function validateCoreManifest(
   row: CoreStagingRow,
   args: RetireCoreStagingArguments,
-): NonNullable<ReturnType<typeof parseDataPublicationManifest>> {
+): NonNullable<ReturnType<typeof parseDataPublicationManifest>> | null {
   const manifest = parseDataPublicationManifest(JSON.stringify(row.manifest));
-  if (
-    !manifest ||
-    manifest.dataset !== 'fpl:core' ||
-    manifest.eventId !== null ||
-    manifest.revision !== row.revision ||
-    manifest.publicationId !== row.publicationId
-  ) {
-    throw new Error('target has an invalid or scope-mismatched core publication manifest');
-  }
   if (row.seasonId !== args.seasonId) {
     throw new Error('target season does not match --season-id');
   }
-  const manifestItemNames = manifest.items.map((item) => item.name);
-  if (!isSupportedCoreItemSet(manifestItemNames)) {
-    throw new Error('target manifest is not a complete six- or seven-item core publication');
+  if (manifest) {
+    if (
+      manifest.dataset !== 'fpl:core' ||
+      manifest.eventId !== null ||
+      manifest.revision !== row.revision ||
+      manifest.publicationId !== row.publicationId
+    ) {
+      throw new Error('target has an invalid or scope-mismatched core publication manifest');
+    }
+    const manifestItemNames = manifest.items.map((item) => item.name);
+    if (!isSupportedCoreItemSet(manifestItemNames)) {
+      throw new Error('target manifest is not a complete six- or seven-item core publication');
+    }
+    return manifest;
   }
-  return manifest;
+  if (!isCoreStagingManifest(row.manifest)) {
+    throw new Error('target has an invalid or scope-mismatched core staging manifest');
+  }
+  return null;
 }
 
 async function validateTarget(
@@ -331,7 +375,7 @@ async function validateTarget(
       );
     }
 
-    const itemRows = await tx
+    const itemRows = (await tx
       .select({
         itemName: datasetPublicationItemsInOps.itemName,
         payload: datasetPublicationItemsInOps.payload,
@@ -339,23 +383,42 @@ async function validateTarget(
         checksum: datasetPublicationItemsInOps.checksum,
       })
       .from(datasetPublicationItemsInOps)
-      .where(eq(datasetPublicationItemsInOps.publicationId, target.publicationId));
-    if (itemRows.length !== manifest.items.length) {
+      .where(
+        eq(datasetPublicationItemsInOps.publicationId, target.publicationId),
+      )) as CoreItemRow[];
+    const itemNames = itemRows.map((item) => item.itemName);
+    const expectedItemNames = manifest?.items.map((item) => item.name) ?? itemNames;
+    if (
+      !isSupportedCoreItemSet(itemNames) ||
+      itemRows.length !== expectedItemNames.length ||
+      itemNames.some((itemName) => !expectedItemNames.includes(itemName))
+    ) {
       throw new Error(
-        `target does not contain exactly ${manifest.items.length} immutable core items`,
+        'target does not contain a complete six- or seven-item immutable core item set',
       );
     }
-    for (const itemManifest of manifest.items) {
-      const item = itemRows.find((candidate) => candidate.itemName === itemManifest.name);
-      if (!item) throw new Error(`target is missing core item ${itemManifest.name}`);
-      const valid = serializedPayloadCandidates(item.payload).some(
-        (serialized) =>
-          Buffer.byteLength(serialized, 'utf8') === itemManifest.bytes &&
-          sha256(serialized) === itemManifest.sha256 &&
-          item.checksum === itemManifest.sha256 &&
-          item.itemCount === itemManifest.count,
-      );
-      if (!valid) throw new Error(`target has invalid proof for core item ${itemManifest.name}`);
+    for (const item of itemRows) {
+      const itemManifest = manifest?.items.find((candidate) => candidate.name === item.itemName);
+      const valid = (() => {
+        try {
+          return serializedPayloadCandidates(item.payload).some((serialized) => {
+            if (itemManifest) {
+              return (
+                Buffer.byteLength(serialized, 'utf8') === itemManifest.bytes &&
+                sha256(serialized) === itemManifest.sha256 &&
+                item.checksum === itemManifest.sha256 &&
+                item.itemCount === itemManifest.count
+              );
+            }
+            return (
+              sha256(serialized) === item.checksum && item.itemCount === itemCount(item.payload)
+            );
+          });
+        } catch {
+          return false;
+        }
+      })();
+      if (!valid) throw new Error(`target has invalid proof for core item ${item.itemName}`);
     }
 
     const outboxRows = await tx

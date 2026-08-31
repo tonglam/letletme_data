@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertRetireAuthorization,
+  isCoreStagingManifest,
   parseDatabaseClockEpoch,
   isSupportedCoreItemSet,
   parseRetireCoreStagingArguments,
@@ -11,6 +12,23 @@ const PUBLICATION_ID = '0257fd66-864f-4637-8565-e8108317b648';
 const ACTIVE_PUBLICATION_ID = '91a5e72f-2b69-416f-a4c9-36a8627a35aa';
 
 describe('superseded core staging repair command', () => {
+  test('accepts the database staging manifest envelope only', () => {
+    expect(
+      isCoreStagingManifest({
+        state: 'staging',
+        sourceCheckedAt: '2026-08-31T09:40:42.074Z',
+      }),
+    ).toBe(true);
+    expect(isCoreStagingManifest({ state: 'staging', sourceCheckedAt: 'invalid' })).toBe(false);
+    expect(
+      isCoreStagingManifest({
+        state: 'staging',
+        sourceCheckedAt: '2026-08-31T09:40:42.074Z',
+        dataset: 'fpl:core',
+      }),
+    ).toBe(false);
+  });
+
   test('parses the database epoch without accepting invalid clock values', () => {
     const parsed = parseDatabaseClockEpoch('1777593600000');
     expect(parsed?.toISOString()).toBe('2026-05-01T00:00:00.000Z');
