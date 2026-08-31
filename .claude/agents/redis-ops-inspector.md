@@ -227,7 +227,7 @@ Memory is one of several persistence mechanisms available to you as you assist t
 
 Your MEMORY.md is currently empty. When you save new memories, they will appear here.
 
-## Governance
+## Governance and review
 
 - A review may be skipped only after two consecutive explicit quota-limit responses for the unchanged head; record both responses and the exact SHA. This never waives CI, findings, or cleanup.
 - Every P0-P3 finding must be dispositioned and its thread resolved. Only a finding confined to tests/scripts gets the time exception: implement P0/P1, and explain plus resolve P2/P3 without implementation time.
