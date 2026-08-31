@@ -695,9 +695,11 @@ type BattleSourceRow = {
   event_finished?: boolean;
   event_data_checked?: boolean;
   home_result_net_points?: number | null;
+  home_result_event_rank?: number | null;
   home_result_updated_at?: Date | string | null;
   home_result_rich_synced_at?: Date | string | null;
   away_result_net_points?: number | null;
+  away_result_event_rank?: number | null;
   away_result_updated_at?: Date | string | null;
   away_result_rich_synced_at?: Date | string | null;
   source_checked_at: Date | string | null;
@@ -714,6 +716,7 @@ type EntryScoreRow = {
   event_points: number | null;
   event_transfers_cost: number | null;
   event_net_points: number | null;
+  event_rank: number | null;
   result_updated_at: Date | string | null;
   rich_synced_at: Date | string | null;
 };
@@ -734,6 +737,7 @@ async function loadEntryScores(
            result.event_points,
            result.event_transfers_cost,
            result.event_net_points,
+           result.event_rank,
            result.updated_at AS result_updated_at,
            result.rich_synced_at
     FROM competition.tournament_entries roster
@@ -1035,6 +1039,15 @@ async function buildH2HPayload(
         );
       }
       if (
+        match.source_order === null &&
+        ((home && match.home_rank !== home.event_rank) ||
+          (away && match.away_rank !== away.event_rank))
+      ) {
+        throw new TournamentReviewSourceNotReadyError(
+          'Local H2H match ranks do not match entry event results',
+        );
+      }
+      if (
         (match.home_entry_id !== null &&
           !match.home_is_average &&
           !tournamentReviewScoreMatchesEntryResult(
@@ -1160,9 +1173,11 @@ async function buildH2HPayload(
            event.data_checked AS event_data_checked,
            event.data_checked_at AS event_data_checked_at,
            home_result.event_net_points AS home_result_net_points,
+           home_result.event_rank AS home_result_event_rank,
            home_result.updated_at AS home_result_updated_at,
            home_result.rich_synced_at AS home_result_rich_synced_at,
            away_result.event_net_points AS away_result_net_points,
+           away_result.event_rank AS away_result_event_rank,
            away_result.updated_at AS away_result_updated_at,
            away_result.rich_synced_at AS away_result_rich_synced_at
     FROM competition.tournament_battle_group_results battle
@@ -1333,6 +1348,27 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError('H2H history side contract is invalid');
     }
+
+    // Backfilled zero-score rows before a late entry joined the tournament
+    // remain useful for roster coverage, but they are not played matches.
+    // Exclude the whole matchup so the opponent is not awarded a phantom
+    // result either, and do not require pre-entry score/rank evidence.
+    const homeApplicable =
+      match.home_entry_id === null ||
+      match.home_is_average ||
+      isTournamentReviewEntryApplicable(
+        scores.get(match.home_entry_id)?.started_event ?? null,
+        match.event_id,
+      );
+    const awayApplicable =
+      match.away_entry_id === null ||
+      match.away_is_average ||
+      isTournamentReviewEntryApplicable(
+        scores.get(match.away_entry_id)?.started_event ?? null,
+        match.event_id,
+      );
+    if (!homeApplicable || !awayApplicable) continue;
+
     if (
       match.is_bye ||
       match.home_net_points === null ||
@@ -1353,6 +1389,19 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError(
         'H2H history match points are inconsistent with scores',
+      );
+    }
+    if (
+      match.source_order === null &&
+      ((match.home_entry_id !== null &&
+        !match.home_is_average &&
+        match.home_rank !== match.home_result_event_rank) ||
+        (match.away_entry_id !== null &&
+          !match.away_is_average &&
+          match.away_rank !== match.away_result_event_rank))
+    ) {
+      throw new TournamentReviewSourceNotReadyError(
+        'Local H2H history ranks do not match entry event results',
       );
     }
     if (
@@ -2074,6 +2123,7 @@ export async function reconcileTournamentReviewObligations(
              tournament.setup_finished_at,
              tournament.standings_ready_at,
              tournament.updated_at AS tournament_updated_at,
+             tournament.group_started_event_id,
              jsonb_build_object(
                'id', tournament.tournament_id,
                'name', tournament.name,
@@ -2122,13 +2172,17 @@ export async function reconcileTournamentReviewObligations(
              candidate.setup_finished_at,
              candidate.standings_ready_at,
              candidate.tournament_updated_at,
+             candidate.group_started_event_id,
              candidate.tournament_payload,
              candidate.format,
              existing.eligible_at AS existing_eligible_at,
              previous.payload AS existing_payload,
              CASE
                WHEN previous.payload IS NULL
-                 OR previous.payload #> '{tournament}' IS DISTINCT FROM candidate.tournament_payload
+                AND existing.eligible_at IS NULL
+                 THEN candidate.tournament_updated_at
+               WHEN previous.payload IS NOT NULL
+                AND previous.payload #> '{tournament}' IS DISTINCT FROM candidate.tournament_payload
                  THEN candidate.tournament_updated_at
                ELSE '-infinity'::timestamptz
              END AS tournament_metadata_eligible_at
@@ -2178,6 +2232,24 @@ export async function reconcileTournamentReviewObligations(
             AND GREATEST(entry.updated_at, roster.created_at) > COALESCE(
               state.existing_eligible_at,
               '-infinity'::timestamptz
+            )
+            AND (
+              state.format <> 'KNOCKOUT'
+              OR EXISTS (
+                SELECT 1
+                FROM competition.tournament_knockouts active_bracket
+                WHERE active_bracket.season_id = roster.season_id
+                  AND active_bracket.tournament_id = state.tournament_id
+                  AND active_bracket.started_event_id <= state.event_id
+                  AND (
+                    active_bracket.ended_event_id IS NULL
+                    OR active_bracket.ended_event_id >= state.event_id
+                  )
+                  AND (
+                    active_bracket.home_entry_id = entry.entry_id
+                    OR active_bracket.away_entry_id = entry.entry_id
+                  )
+              )
             )
             AND (
               state.existing_eligible_at IS NULL
@@ -2255,6 +2327,7 @@ export async function reconcileTournamentReviewObligations(
           WHERE state.format IN ('POINTS', 'H2H')
             AND result.season_id = ${season.seasonId}
             AND result.event_id <= state.event_id
+            AND result.event_id >= COALESCE(state.group_started_event_id, 1)
             AND result_event.finished = true
             AND result_event.data_checked = true
             AND result_event.data_checked_at IS NOT NULL

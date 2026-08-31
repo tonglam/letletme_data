@@ -241,6 +241,24 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
 
       try {
         const db = await getDbInstance();
+        const knockoutPayloadUnchanged = sql`
+          ${tournamentKnockoutsInCompetition.round} IS NOT DISTINCT FROM excluded.round
+          AND ${tournamentKnockoutsInCompetition.startedEventId} IS NOT DISTINCT FROM excluded.started_event_id
+          AND ${tournamentKnockoutsInCompetition.endedEventId} IS NOT DISTINCT FROM excluded.ended_event_id
+          AND ${tournamentKnockoutsInCompetition.nextMatchId} IS NOT DISTINCT FROM excluded.next_match_id
+          AND ${tournamentKnockoutsInCompetition.homeEntryId} IS NOT DISTINCT FROM excluded.home_entry_id
+          AND ${tournamentKnockoutsInCompetition.homeNetPoints} IS NOT DISTINCT FROM excluded.home_net_points
+          AND ${tournamentKnockoutsInCompetition.homeGoalsScored} IS NOT DISTINCT FROM excluded.home_goals_scored
+          AND ${tournamentKnockoutsInCompetition.homeGoalsConceded} IS NOT DISTINCT FROM excluded.home_goals_conceded
+          AND ${tournamentKnockoutsInCompetition.homeWins} IS NOT DISTINCT FROM excluded.home_wins
+          AND ${tournamentKnockoutsInCompetition.awayEntryId} IS NOT DISTINCT FROM excluded.away_entry_id
+          AND ${tournamentKnockoutsInCompetition.awayNetPoints} IS NOT DISTINCT FROM excluded.away_net_points
+          AND ${tournamentKnockoutsInCompetition.awayGoalsScored} IS NOT DISTINCT FROM excluded.away_goals_scored
+          AND ${tournamentKnockoutsInCompetition.awayGoalsConceded} IS NOT DISTINCT FROM excluded.away_goals_conceded
+          AND ${tournamentKnockoutsInCompetition.awayWins} IS NOT DISTINCT FROM excluded.away_wins
+          AND ${tournamentKnockoutsInCompetition.roundWinner} IS NOT DISTINCT FROM excluded.round_winner
+        `;
+        const changedAt = new Date();
         await db
           .insert(tournamentKnockoutsInCompetition)
           .values(
@@ -248,7 +266,11 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
               const { id: _id, ...value } = record as DbTournamentKnockoutInsert & {
                 id?: number;
               };
-              return { ...value, seasonId: season.seasonId };
+              return {
+                ...value,
+                seasonId: season.seasonId,
+                updatedAt: record.updatedAt ?? changedAt,
+              };
             }),
           )
           .onConflictDoUpdate({
@@ -268,7 +290,11 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
               awayGoalsConceded: sql`excluded.away_goals_conceded`,
               awayWins: sql`excluded.away_wins`,
               roundWinner: sql`excluded.round_winner`,
-              updatedAt: new Date(),
+              updatedAt: sql`CASE
+                WHEN ${knockoutPayloadUnchanged}
+                  THEN ${tournamentKnockoutsInCompetition.updatedAt}
+                ELSE excluded.updated_at
+              END`,
             },
           });
 

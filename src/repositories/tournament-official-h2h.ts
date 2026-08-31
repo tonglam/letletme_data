@@ -43,6 +43,10 @@ function previousLockedAt(
   return previous?.lockedAt ?? (publication.lockSchedule ? publication.checkedAt : null);
 }
 
+function sameNullable<T>(left: T | null | undefined, right: T | null | undefined): boolean {
+  return (left ?? null) === (right ?? null);
+}
+
 export const tournamentOfficialH2HRepository = {
   /** Rehydrate the last complete schedule so a locked minute refresh can
    * replace only the page containing the current event. Scores are refreshed
@@ -245,12 +249,31 @@ export const tournamentOfficialH2HRepository = {
         }
 
         if (publication.battleRows.length > 0) {
+          const battlePayloadUnchanged = sql`
+            ${tournamentBattleGroupResultsInCompetition.groupId} IS NOT DISTINCT FROM excluded.group_id
+            AND ${tournamentBattleGroupResultsInCompetition.eventId} IS NOT DISTINCT FROM excluded.event_id
+            AND ${tournamentBattleGroupResultsInCompetition.homeIndex} IS NOT DISTINCT FROM excluded.home_index
+            AND ${tournamentBattleGroupResultsInCompetition.homeEntryId} IS NOT DISTINCT FROM excluded.home_entry_id
+            AND ${tournamentBattleGroupResultsInCompetition.homeNetPoints} IS NOT DISTINCT FROM excluded.home_net_points
+            AND ${tournamentBattleGroupResultsInCompetition.homeRank} IS NOT DISTINCT FROM excluded.home_rank
+            AND ${tournamentBattleGroupResultsInCompetition.homeMatchPoints} IS NOT DISTINCT FROM excluded.home_match_points
+            AND ${tournamentBattleGroupResultsInCompetition.awayIndex} IS NOT DISTINCT FROM excluded.away_index
+            AND ${tournamentBattleGroupResultsInCompetition.awayEntryId} IS NOT DISTINCT FROM excluded.away_entry_id
+            AND ${tournamentBattleGroupResultsInCompetition.awayNetPoints} IS NOT DISTINCT FROM excluded.away_net_points
+            AND ${tournamentBattleGroupResultsInCompetition.awayRank} IS NOT DISTINCT FROM excluded.away_rank
+            AND ${tournamentBattleGroupResultsInCompetition.awayMatchPoints} IS NOT DISTINCT FROM excluded.away_match_points
+            AND ${tournamentBattleGroupResultsInCompetition.sourceOrder} IS NOT DISTINCT FROM excluded.source_order
+            AND ${tournamentBattleGroupResultsInCompetition.homeIsAverage} IS NOT DISTINCT FROM excluded.home_is_average
+            AND ${tournamentBattleGroupResultsInCompetition.awayIsAverage} IS NOT DISTINCT FROM excluded.away_is_average
+            AND ${tournamentBattleGroupResultsInCompetition.isBye} IS NOT DISTINCT FROM excluded.is_bye
+          `;
           await tx
             .insert(tournamentBattleGroupResultsInCompetition)
             .values(
               publication.battleRows.map((row) => ({
                 ...row,
                 seasonId: season.seasonId,
+                updatedAt: publication.checkedAt,
               })),
             )
             .onConflictDoUpdate({
@@ -276,8 +299,17 @@ export const tournamentOfficialH2HRepository = {
                 homeIsAverage: sql`excluded.home_is_average`,
                 awayIsAverage: sql`excluded.away_is_average`,
                 isBye: sql`excluded.is_bye`,
-                sourceCheckedAt: sql`excluded.source_checked_at`,
-                updatedAt: publication.checkedAt,
+                sourceCheckedAt: sql`CASE
+                  WHEN ${battlePayloadUnchanged}
+                   AND ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt} IS NOT NULL
+                    THEN ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}
+                  ELSE excluded.source_checked_at
+                END`,
+                updatedAt: sql`CASE
+                  WHEN ${battlePayloadUnchanged}
+                    THEN ${tournamentBattleGroupResultsInCompetition.updatedAt}
+                  ELSE excluded.updated_at
+                END`,
               },
             });
         }
@@ -324,10 +356,10 @@ export const tournamentOfficialH2HRepository = {
               existing.eventId !== incoming.eventId ||
               existing.matchId !== incoming.matchId ||
               existing.playAgainstId !== incoming.playAgainstId ||
-              existing.sourceOrder !== incoming.sourceOrder ||
-              (existing.homeEntryId !== null && existing.homeEntryId !== incoming.homeEntryId) ||
-              (existing.awayEntryId !== null && existing.awayEntryId !== incoming.awayEntryId) ||
-              (existing.knockoutName !== null && existing.knockoutName !== incoming.knockoutName);
+              !sameNullable(existing.sourceOrder, incoming.sourceOrder) ||
+              !sameNullable(existing.homeEntryId, incoming.homeEntryId) ||
+              !sameNullable(existing.awayEntryId, incoming.awayEntryId) ||
+              !sameNullable(existing.knockoutName, incoming.knockoutName);
             if (changed) {
               throw new ConflictError(
                 `Official H2H knockout match ${existing.officialMatchId} changed after import.`,
@@ -335,12 +367,30 @@ export const tournamentOfficialH2HRepository = {
               );
             }
           }
+          const knockoutPayloadUnchanged = sql`
+            ${tournamentKnockoutResultsInCompetition.eventId} IS NOT DISTINCT FROM excluded.event_id
+            AND ${tournamentKnockoutResultsInCompetition.matchId} IS NOT DISTINCT FROM excluded.match_id
+            AND ${tournamentKnockoutResultsInCompetition.playAgainstId} IS NOT DISTINCT FROM excluded.play_against_id
+            AND ${tournamentKnockoutResultsInCompetition.homeEntryId} IS NOT DISTINCT FROM excluded.home_entry_id
+            AND ${tournamentKnockoutResultsInCompetition.homeNetPoints} IS NOT DISTINCT FROM excluded.home_net_points
+            AND ${tournamentKnockoutResultsInCompetition.homeGoalsScored} IS NOT DISTINCT FROM excluded.home_goals_scored
+            AND ${tournamentKnockoutResultsInCompetition.homeGoalsConceded} IS NOT DISTINCT FROM excluded.home_goals_conceded
+            AND ${tournamentKnockoutResultsInCompetition.awayEntryId} IS NOT DISTINCT FROM excluded.away_entry_id
+            AND ${tournamentKnockoutResultsInCompetition.awayNetPoints} IS NOT DISTINCT FROM excluded.away_net_points
+            AND ${tournamentKnockoutResultsInCompetition.awayGoalsScored} IS NOT DISTINCT FROM excluded.away_goals_scored
+            AND ${tournamentKnockoutResultsInCompetition.awayGoalsConceded} IS NOT DISTINCT FROM excluded.away_goals_conceded
+            AND ${tournamentKnockoutResultsInCompetition.matchWinner} IS NOT DISTINCT FROM excluded.match_winner
+            AND ${tournamentKnockoutResultsInCompetition.sourceOrder} IS NOT DISTINCT FROM excluded.source_order
+            AND ${tournamentKnockoutResultsInCompetition.knockoutName} IS NOT DISTINCT FROM excluded.knockout_name
+            AND ${tournamentKnockoutResultsInCompetition.tiebreak} IS NOT DISTINCT FROM excluded.tiebreak
+          `;
           await tx
             .insert(tournamentKnockoutResultsInCompetition)
             .values(
               publication.knockoutRows.map((row) => ({
                 ...row,
                 seasonId: season.seasonId,
+                updatedAt: publication.checkedAt,
               })),
             )
             .onConflictDoUpdate({
@@ -361,8 +411,17 @@ export const tournamentOfficialH2HRepository = {
                 sourceOrder: sql`excluded.source_order`,
                 knockoutName: sql`excluded.knockout_name`,
                 tiebreak: sql`excluded.tiebreak`,
-                sourceCheckedAt: sql`excluded.source_checked_at`,
-                updatedAt: publication.checkedAt,
+                sourceCheckedAt: sql`CASE
+                  WHEN ${knockoutPayloadUnchanged}
+                   AND ${tournamentKnockoutResultsInCompetition.sourceCheckedAt} IS NOT NULL
+                    THEN ${tournamentKnockoutResultsInCompetition.sourceCheckedAt}
+                  ELSE excluded.source_checked_at
+                END`,
+                updatedAt: sql`CASE
+                  WHEN ${knockoutPayloadUnchanged}
+                    THEN ${tournamentKnockoutResultsInCompetition.updatedAt}
+                  ELSE excluded.updated_at
+                END`,
               },
             });
         }
