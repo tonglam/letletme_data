@@ -47,6 +47,7 @@ describe('My Tournament Review V2 migration', () => {
   test('persists a payload-level baseline for headless obligations', () => {
     expect(metadataMigration).toContain('ALTER TABLE competition.tournament_review_obligations');
     expect(metadataMigration).toContain('ADD COLUMN metadata_payload jsonb');
+    expect(metadataMigration).toContain('SET metadata_payload = publication.payload #>');
     expect(metadataMigration).toContain('tournament_review_obligations_metadata_payload_check');
   });
 });

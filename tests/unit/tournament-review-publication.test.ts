@@ -192,6 +192,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain(
       'existing.metadata_payload IS DISTINCT FROM candidate.tournament_payload',
     );
+    expect(publicationSource).toMatch(/\+ interval '1 microsecond'/);
     expect(publicationSource).toContain('metadata_payload = EXCLUDED.metadata_payload');
     expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
     expect(publicationSource).toContain('state.format <> \x27KNOCKOUT\x27');

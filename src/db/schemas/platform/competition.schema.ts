@@ -2105,13 +2105,13 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     readyRevision: bigint('ready_revision', { mode: 'number' }),
     lastErrorCode: text('last_error_code'),
     lastFailureFingerprint: text('last_failure_fingerprint'),
-    metadataPayload: jsonb('metadata_payload'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
+    metadataPayload: jsonb('metadata_payload'),
   },
   (table) => [
     primaryKey({

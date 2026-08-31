@@ -2179,9 +2179,12 @@ export async function reconcileTournamentReviewObligations(
              existing.metadata_payload AS existing_metadata_payload,
              previous.payload AS existing_payload,
              CASE
-               WHEN existing.metadata_payload IS NULL
-                OR existing.metadata_payload IS DISTINCT FROM candidate.tournament_payload
-                 THEN candidate.tournament_updated_at
+               WHEN existing.metadata_payload IS NOT NULL
+                AND existing.metadata_payload IS DISTINCT FROM candidate.tournament_payload
+                 THEN GREATEST(
+                   candidate.tournament_updated_at,
+                   COALESCE(existing.eligible_at, '-infinity'::timestamptz) + interval '1 microsecond'
+                 )
                ELSE '-infinity'::timestamptz
              END AS tournament_metadata_eligible_at
       FROM candidate_formats candidate
