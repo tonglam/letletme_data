@@ -71,7 +71,7 @@ const referenceData = (): LiveSnapshotReferenceData => ({
   ]),
   positionById: new Map(),
   playerTeamById: new Map([[101, 10]]),
-  playerById: new Map([[101, { id: 101, type: 3, teamId: 10, webName: 'Player One' }]]),
+  playerById: new Map([[101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }]]),
 });
 
 const eventLive = (): RawFPLEventLiveElement[] => {
@@ -563,8 +563,8 @@ describe('Live Matches V2 observation publication', () => {
         [102, 20],
       ]),
       playerById: new Map([
-        [101, { id: 101, type: 3, teamId: 10, webName: 'Player One' }],
-        [102, { id: 102, type: 2, teamId: 20, webName: 'Player Two' }],
+        [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+        [102, { id: 102, type: 2, teamId: 20, price: 60, webName: 'Player Two' }],
       ]),
     };
     const second = await syncLiveMatchesV2FromObservation({

@@ -11,6 +11,7 @@ import type {
   MatchFixtureDetail,
   MatchLifecycleState,
 } from '../services/live-match-v2';
+import { isCanonicalPlayerPrice } from '../domain/players';
 
 export const LIVE_MATCHES_CONTRACT_VERSION = 'live-matches-v2' as const;
 export const LIVE_MATCHES_REDIS_PREFIX = 'llm:data:v2:fpl:live-match' as const;
@@ -616,32 +617,49 @@ return {'checkpointed', encoded}
 const SET_DESIRED_LUA = `
 local currentRaw = redis.call('GET', KEYS[1])
 local candidate = cjson.decode(ARGV[1])
+local replacingFinalized = false
 if currentRaw then
   local ok, current = pcall(cjson.decode, currentRaw)
   if ok and type(current.generation) == 'number' then
-    if current.final == true then return {'kept', currentRaw} end
-    if current.generation > candidate.generation then
-      -- Never replace a newer publication with an older checkpoint target, but
-      -- do carry a boundary's urgency onto that newer target.  Otherwise a
-      -- lifecycle/identity boundary can be silently coalesced for ten minutes
-      -- simply because a newer score publication won the desired-pointer race.
-      if candidate.force == true and current.force ~= true then
-        current.force = true
-        local encoded = cjson.encode(current)
+    if current.final == true then
+      -- A finalized desired marker is immutable during normal operation. The
+      -- only exception is the destructive cutover seed, which must prove both
+      -- the exact marker it observed and a finalized, forced candidate. This
+      -- fenced CAS prevents a concurrent final marker from being overwritten.
+      local allowReplacement = ARGV[3] == '1'
+      local expectedGeneration = tonumber(ARGV[5])
+      if allowReplacement and candidate.final == true and candidate.force == true and
+         current.publicationId == ARGV[4] and current.generation == expectedGeneration and
+         candidate.generation >= current.generation then
+        replacingFinalized = true
+      else
+        return {'kept', currentRaw}
+      end
+    end
+    if not replacingFinalized then
+      if current.generation > candidate.generation then
+        -- Never replace a newer publication with an older checkpoint target, but
+        -- do carry a boundary's urgency onto that newer target.  Otherwise a
+        -- lifecycle/identity boundary can be silently coalesced for ten minutes
+        -- simply because a newer score publication won the desired-pointer race.
+        if candidate.force == true and current.force ~= true then
+          current.force = true
+          local encoded = cjson.encode(current)
+          redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
+          return {'set', encoded}
+        end
+        return {'kept', currentRaw}
+      end
+      if current.generation == candidate.generation and current.publicationId ~= candidate.publicationId then return {'kept', currentRaw} end
+      if current.generation == candidate.generation and current.publicationId == candidate.publicationId then
+        candidate.force = current.force == true or candidate.force == true
+        if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
+        local encoded = cjson.encode(candidate)
         redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
         return {'set', encoded}
       end
-      return {'kept', currentRaw}
-    end
-    if current.generation == candidate.generation and current.publicationId ~= candidate.publicationId then return {'kept', currentRaw} end
-    if current.generation == candidate.generation and current.publicationId == candidate.publicationId then
-      candidate.force = current.force == true or candidate.force == true
       if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
-      local encoded = cjson.encode(candidate)
-      redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
-      return {'set', encoded}
     end
-    if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
   end
 end
 local encoded = cjson.encode(candidate)
@@ -855,6 +873,7 @@ function validDetailPlayer(value: unknown): value is MatchDetailPlayer {
   const id = safeInteger(value.id);
   const position = safeInteger(value.position);
   const teamId = safeInteger(value.teamId);
+  const price = safeInteger(value.price);
   const totalPoints = safeInteger(value.totalPoints);
   return (
     id !== null &&
@@ -866,6 +885,8 @@ function validDetailPlayer(value: unknown): value is MatchDetailPlayer {
     position <= 4 &&
     teamId !== null &&
     teamId > 0 &&
+    price !== null &&
+    isCanonicalPlayerPrice(price) &&
     totalPoints !== null &&
     Array.isArray(value.stats) &&
     value.stats.length <= LIVE_MATCH_MAX_STATS_PER_PLAYER &&
@@ -1976,6 +1997,15 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
   readonly requestedAt?: Date | string;
   readonly finalized?: boolean;
   readonly force?: boolean;
+  /**
+   * Seed-only fenced CAS for replacing a stale finalized desired marker. The
+   * candidate must itself be finalized and forced; normal workers never pass
+   * this field.
+   */
+  readonly replaceFinalizedForCutover?: Readonly<{
+    readonly expectedPublicationId: string;
+    readonly expectedGeneration: number;
+  }>;
   readonly redis?: Redis;
 }): Promise<MatchCheckpointDesired> {
   const scope = { season: input.publication.season, eventId: input.publication.eventId } as const;
@@ -1996,6 +2026,23 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
         input.publication.state === 'FINALIZED'),
     force: input.force === true,
   };
+  const replacement = input.replaceFinalizedForCutover;
+  if (replacement !== undefined) {
+    if (
+      input.kind !== 'detail' ||
+      desired.final !== true ||
+      desired.force !== true ||
+      typeof replacement.expectedPublicationId !== 'string' ||
+      replacement.expectedPublicationId.length === 0 ||
+      !Number.isSafeInteger(replacement.expectedGeneration) ||
+      replacement.expectedGeneration <= 0
+    ) {
+      throw new CacheError(
+        'Invalid finalized Live Matches cutover replacement fence',
+        'LIVE_MATCH_CHECKPOINT_DESIRED_INVALID',
+      );
+    }
+  }
   const [status, raw] = promotionResult(
     await redis.eval(
       SET_DESIRED_LUA,
@@ -2003,6 +2050,9 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
       liveMatchCheckpointKey(scope, input.kind),
       JSON.stringify(desired),
       '86400',
+      replacement === undefined ? '0' : '1',
+      replacement?.expectedPublicationId ?? '',
+      replacement === undefined ? '' : String(replacement.expectedGeneration),
     ),
   );
   if (status !== 'set' && status !== 'kept') {

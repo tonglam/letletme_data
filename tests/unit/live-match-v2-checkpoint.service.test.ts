@@ -23,6 +23,8 @@ describe('Live Matches V2 final checkpoint fence', () => {
       'utf8',
     );
     expect(source).toMatch(/SET LOCAL statement_timeout = '5s'/);
+    expect(source).toMatch(/allowFinalizedReplacementForCutover/);
+    expect(source).toMatch(/excluded\.state = 'FINALIZED'/);
   });
 
   test('accepts only the exact final desk/detail revision vector', () => {

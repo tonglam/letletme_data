@@ -22,6 +22,7 @@ export interface FplPlayerFixtureIdentity {
   readonly elementId: number;
   readonly teamId: number;
   readonly elementType: number;
+  readonly price: number;
   readonly webName: string;
 }
 
@@ -41,6 +42,7 @@ export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransacti
             elementId: playerFixtureStatsInFpl.elementId,
             teamId: playerFixtureStatsInFpl.teamId,
             elementType: playerFixtureStatsInFpl.elementType,
+            price: playersInFpl.price,
             webName: playersInFpl.webName,
           })
           .from(playerFixtureStatsInFpl)

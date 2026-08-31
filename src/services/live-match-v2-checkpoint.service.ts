@@ -140,13 +140,20 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly publication: MatchDetailPublication;
   readonly fixtures: readonly MatchFixtureDetail[];
   readonly finalized?: boolean;
+  /** Destructive seed-only fence for replacing a price-less old final row. */
+  readonly allowFinalizedReplacementForCutover?: boolean;
 }
 
 export async function checkpointLiveMatchScopeV2(input: {
   readonly season: FplSeasonRef;
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
+  /** Only the source-backed destructive V2 cutover may replace an old final row. */
+  readonly allowFinalizedReplacementForCutover?: boolean;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
+  if (input.allowFinalizedReplacementForCutover === true && input.kind !== 'detail') {
+    throw new Error('Finalized Live Matches replacement is only valid for detail cutover seed');
+  }
   const desired = await readLiveMatchCheckpointDesiredV2({
     kind: input.kind,
     season: input.season.seasonCode,
@@ -216,6 +223,7 @@ export async function checkpointLiveMatchScopeV2(input: {
     publication: current.publication,
     fixtures: current.fixtures,
     finalized: desired.final,
+    allowFinalizedReplacementForCutover: input.allowFinalizedReplacementForCutover,
   });
   if (!result.checkpointed || !result.checkpointedAt)
     return { checkpointed: false, skipped: false };
@@ -324,6 +332,10 @@ export async function checkpointLiveMatchDetailV2(
   if (publication.finalized !== finalized) {
     throw new Error('Live Matches detail checkpoint finalization does not match publication');
   }
+  const allowFinalizedReplacementForCutover = request.allowFinalizedReplacementForCutover === true;
+  if (allowFinalizedReplacementForCutover && !finalized) {
+    throw new Error('Finalized Live Matches replacement requires a finalized candidate');
+  }
   const bytes = assertDetailPayload(publication, fixtures);
   if (
     !Number.isSafeInteger(publication.observedDeskGeneration) ||
@@ -390,6 +402,12 @@ export async function checkpointLiveMatchDetailV2(
           OR (
             ${liveMatchDetailCheckpointsInFpl.state} <> 'FINALIZED'
             AND ${liveMatchDetailCheckpointsInFpl.generation} < excluded.generation
+          )
+          OR (
+            ${allowFinalizedReplacementForCutover}
+            AND ${liveMatchDetailCheckpointsInFpl.state} = 'FINALIZED'
+            AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDetailCheckpointsInFpl.publicationId} <> excluded.publication_id
           )
         `,
       })

@@ -1,4 +1,5 @@
 import type { RawFPLEventLiveElement, RawFPLFixture } from '../types';
+import { isCanonicalPlayerPrice } from '../domain/players';
 import { prepareEventLives } from './event-lives.service';
 import { validateLiveElementIdentity, type LiveSnapshotReferenceData } from './live-coherent-fetch';
 import { transformFixtures } from '../transformers/fixtures';
@@ -63,6 +64,7 @@ export interface MatchDetailPlayer {
   readonly webName: string;
   readonly position: number;
   readonly teamId: number;
+  readonly price: number;
   readonly totalPoints: number;
   readonly stats: readonly MatchDetailStat[];
 }
@@ -331,6 +333,9 @@ function buildDetailPlayer(input: {
   if (player.teamId <= 0) {
     throw new Error(`Live Match detail has invalid player team for element ${input.elementId}`);
   }
+  if (!isCanonicalPlayerPrice(player.price)) {
+    throw new Error(`Live Match detail has invalid player price for element ${input.elementId}`);
+  }
   if (!input.fixtureTeamIds.has(player.teamId)) {
     throw new Error(
       `Live Match detail has no event-time team identity for fixture ${input.fixtureId} element ${input.elementId}`,
@@ -352,6 +357,7 @@ function buildDetailPlayer(input: {
     webName: player.webName,
     position: player.type,
     teamId: player.teamId,
+    price: player.price,
     totalPoints,
     stats,
   };
