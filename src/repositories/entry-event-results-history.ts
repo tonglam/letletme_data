@@ -61,6 +61,33 @@ export function chunkCoreHistoryRows(
 }
 
 export function buildCoreHistoryConflictSet() {
+  const coreHistoryUnchanged = sql`
+    ${entryEventResultsInCompetition.eventPoints} IS NOT DISTINCT FROM excluded.event_points
+    AND ${entryEventResultsInCompetition.eventTransfers} IS NOT DISTINCT FROM excluded.event_transfers
+    AND ${entryEventResultsInCompetition.eventTransfersCost} IS NOT DISTINCT FROM excluded.event_transfers_cost
+    AND ${entryEventResultsInCompetition.eventNetPoints} IS NOT DISTINCT FROM excluded.event_net_points
+    AND ${entryEventResultsInCompetition.eventBenchPoints} IS NOT DISTINCT FROM COALESCE(
+      excluded.event_bench_points,
+      ${entryEventResultsInCompetition.eventBenchPoints}
+    )
+    AND ${entryEventResultsInCompetition.eventRank} IS NOT DISTINCT FROM COALESCE(
+      excluded.event_rank,
+      ${entryEventResultsInCompetition.eventRank}
+    )
+    AND ${entryEventResultsInCompetition.overallPoints} IS NOT DISTINCT FROM excluded.overall_points
+    AND ${entryEventResultsInCompetition.overallRank} IS NOT DISTINCT FROM CASE
+      WHEN excluded.overall_rank = 0 THEN ${entryEventResultsInCompetition.overallRank}
+      ELSE excluded.overall_rank
+    END
+    AND ${entryEventResultsInCompetition.teamValue} IS NOT DISTINCT FROM COALESCE(
+      excluded.team_value,
+      ${entryEventResultsInCompetition.teamValue}
+    )
+    AND ${entryEventResultsInCompetition.bank} IS NOT DISTINCT FROM COALESCE(
+      excluded.bank,
+      ${entryEventResultsInCompetition.bank}
+    )
+  `;
   return {
     eventPoints: sql`excluded.event_points`,
     eventTransfers: sql`excluded.event_transfers`,
@@ -78,6 +105,10 @@ export function buildCoreHistoryConflictSet() {
     END`,
     teamValue: sql`COALESCE(excluded.team_value, ${entryEventResultsInCompetition.teamValue})`,
     bank: sql`COALESCE(excluded.bank, ${entryEventResultsInCompetition.bank})`,
-    updatedAt: new Date(),
+    updatedAt: sql`CASE
+      WHEN ${coreHistoryUnchanged}
+        THEN ${entryEventResultsInCompetition.updatedAt}
+      ELSE clock_timestamp()
+    END`,
   };
 }

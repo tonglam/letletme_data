@@ -31,6 +31,8 @@ export type OfficialH2HPublication = {
   knockoutRows: DbTournamentKnockoutResultInsert[];
   bracketRows: DbTournamentKnockoutInsert[];
   groupRows: DbTournamentGroupInsert[];
+  /** Provider match IDs returned by this fetch. Undefined means a full fetch. */
+  fetchedOfficialMatchIds?: readonly number[];
   pageManifests?: readonly OfficialH2HPageManifest[];
   /** A guarded full fetch must prove that no previously locked page vanished. */
   fullReconcile?: boolean;
@@ -248,6 +250,19 @@ export const tournamentOfficialH2HRepository = {
             });
         }
 
+        const fetchedOfficialMatchIds = publication.fetchedOfficialMatchIds?.filter(
+          (matchId): matchId is number => Number.isSafeInteger(matchId) && matchId > 0,
+        );
+        const officialMatchWasFetched =
+          fetchedOfficialMatchIds === undefined
+            ? sql`TRUE`
+            : fetchedOfficialMatchIds.length === 0
+              ? sql`FALSE`
+              : sql`excluded.official_match_id IN (${sql.join(
+                  fetchedOfficialMatchIds.map((matchId) => sql`${matchId}`),
+                  sql`, `,
+                )})`;
+
         if (publication.battleRows.length > 0) {
           const battlePayloadUnchanged = sql`
             ${tournamentBattleGroupResultsInCompetition.groupId} IS NOT DISTINCT FROM excluded.group_id
@@ -300,12 +315,16 @@ export const tournamentOfficialH2HRepository = {
                 awayIsAverage: sql`excluded.away_is_average`,
                 isBye: sql`excluded.is_bye`,
                 sourceCheckedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.source_checked_at
                   WHEN ${battlePayloadUnchanged}
                    AND ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt} IS NOT NULL
                     THEN ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}
                   ELSE excluded.source_checked_at
                 END`,
                 updatedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.updated_at
                   WHEN ${battlePayloadUnchanged}
                     THEN ${tournamentBattleGroupResultsInCompetition.updatedAt}
                   ELSE excluded.updated_at
@@ -357,9 +376,15 @@ export const tournamentOfficialH2HRepository = {
               existing.matchId !== incoming.matchId ||
               existing.playAgainstId !== incoming.playAgainstId ||
               !sameNullable(existing.sourceOrder, incoming.sourceOrder) ||
-              !sameNullable(existing.homeEntryId, incoming.homeEntryId) ||
-              !sameNullable(existing.awayEntryId, incoming.awayEntryId) ||
-              !sameNullable(existing.knockoutName, incoming.knockoutName);
+              (existing.homeEntryId !== null &&
+                incoming.homeEntryId !== null &&
+                existing.homeEntryId !== incoming.homeEntryId) ||
+              (existing.awayEntryId !== null &&
+                incoming.awayEntryId !== null &&
+                existing.awayEntryId !== incoming.awayEntryId) ||
+              (existing.knockoutName !== null &&
+                incoming.knockoutName !== null &&
+                existing.knockoutName !== incoming.knockoutName);
             if (changed) {
               throw new ConflictError(
                 `Official H2H knockout match ${existing.officialMatchId} changed after import.`,
@@ -412,12 +437,16 @@ export const tournamentOfficialH2HRepository = {
                 knockoutName: sql`excluded.knockout_name`,
                 tiebreak: sql`excluded.tiebreak`,
                 sourceCheckedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.source_checked_at
                   WHEN ${knockoutPayloadUnchanged}
                    AND ${tournamentKnockoutResultsInCompetition.sourceCheckedAt} IS NOT NULL
                     THEN ${tournamentKnockoutResultsInCompetition.sourceCheckedAt}
                   ELSE excluded.source_checked_at
                 END`,
                 updatedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.updated_at
                   WHEN ${knockoutPayloadUnchanged}
                     THEN ${tournamentKnockoutResultsInCompetition.updatedAt}
                   ELSE excluded.updated_at
@@ -429,7 +458,22 @@ export const tournamentOfficialH2HRepository = {
         const groups = createTournamentGroupRepository(tx);
         const knockouts = createTournamentKnockoutsRepository(tx);
         const groupCount = await groups.upsertBatch(season, publication.groupRows);
-        await knockouts.upsertBatch(season, publication.bracketRows);
+        const fetchedOfficialMatchIdSet =
+          fetchedOfficialMatchIds === undefined ? null : new Set(fetchedOfficialMatchIds);
+        const fetchedBracketMatchIds =
+          fetchedOfficialMatchIdSet === null
+            ? undefined
+            : publication.knockoutRows
+                .filter(
+                  (row) =>
+                    typeof row.officialMatchId === 'number' &&
+                    fetchedOfficialMatchIdSet.has(row.officialMatchId),
+                )
+                .map((row) => row.matchId);
+        await knockouts.upsertBatch(season, publication.bracketRows, {
+          fetchedMatchIds: fetchedBracketMatchIds,
+          checkedAt: publication.checkedAt,
+        });
 
         const updateRows = await tx
           .update(tournamentsInCompetition)

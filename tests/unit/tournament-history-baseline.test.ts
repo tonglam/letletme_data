@@ -52,5 +52,16 @@ describe('tournament history baseline upsert', () => {
     expect(conflictSet).not.toHaveProperty('eventPlayedCaptain');
     expect(conflictSet).not.toHaveProperty('eventChip');
     expect(conflictSet).not.toHaveProperty('eventAutoSub');
+    expect(conflictSet.updatedAt).toBeDefined();
+    const updatedAtChunks = (
+      conflictSet.updatedAt as unknown as {
+        queryChunks?: Array<{ value?: string[] }>;
+      }
+    ).queryChunks;
+    expect(
+      updatedAtChunks?.some((chunk) =>
+        chunk.value?.some((value) => value.includes('clock_timestamp()')),
+      ),
+    ).toBe(true);
   });
 });

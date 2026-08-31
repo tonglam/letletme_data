@@ -188,8 +188,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('tournament.updated_at AS tournament_updated_at');
     expect(publicationSource).toContain('tournamentMetadataChanged');
     expect(publicationSource).toContain('tournament_metadata_eligible_at');
-    expect(publicationSource).toMatch(/previous\.payload #> '\{tournament\}' IS DISTINCT FROM/);
-    expect(publicationSource).toContain('existing.eligible_at IS NULL');
+    expect(publicationSource).toContain('existing.metadata_payload AS existing_metadata_payload');
+    expect(publicationSource).toContain(
+      'existing.metadata_payload IS DISTINCT FROM candidate.tournament_payload',
+    );
+    expect(publicationSource).toContain('metadata_payload = EXCLUDED.metadata_payload');
+    expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
     expect(publicationSource).toContain('state.format <> \x27KNOCKOUT\x27');
     expect(publicationSource).toContain('state.group_started_event_id');
     expect(publicationSource).toContain('renewReviewObligationLease');
@@ -208,7 +212,6 @@ describe('My Tournament Review V2 format and retry policy', () => {
     );
     expect(publicationSource).toContain('points group ranks are inconsistent');
     expect(publicationSource).toContain('payload_row->>\x27applicable\x27');
-    expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
     expect(publicationSource).toContain('state.existing_payload IS NOT NULL');
     expect(publicationSource).toMatch(/state\.existing_payload->'points'->'rows'/);
     expect(publicationSource).toMatch(/state\.existing_payload->'h2h'->'standings'/);
@@ -240,6 +243,9 @@ describe('My Tournament Review V2 format and retry policy', () => {
     const knockoutSource = readFileSync('src/repositories/tournament-knockouts.ts', 'utf8');
     expect(officialH2HSource).toContain('battlePayloadUnchanged');
     expect(officialH2HSource).toContain('knockoutPayloadUnchanged');
+    expect(officialH2HSource).toContain('fetchedOfficialMatchIds');
+    expect(officialH2HSource).toContain('officialMatchWasFetched');
+    expect(officialH2HSource).toContain('WHEN ${officialMatchWasFetched}');
     expect(officialH2HSource).toContain(
       'THEN ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}',
     );
@@ -247,6 +253,9 @@ describe('My Tournament Review V2 format and retry policy', () => {
       'THEN ${tournamentKnockoutResultsInCompetition.sourceCheckedAt}',
     );
     expect(knockoutSource).toContain('knockoutPayloadUnchanged');
+    expect(knockoutSource).toContain('fetchedMatchIds');
+    expect(knockoutSource).toContain('bracketMatchWasFetched');
+    expect(knockoutSource).toContain('WHEN ${bracketMatchWasFetched}');
     expect(knockoutSource).toContain('THEN ${tournamentKnockoutsInCompetition.updatedAt}');
   });
 });

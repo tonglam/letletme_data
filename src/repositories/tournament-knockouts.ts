@@ -11,6 +11,13 @@ import type { SeedPair } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
+type TournamentKnockoutUpsertOptions = {
+  /** Local bracket match IDs returned by the provider in this fetch. */
+  fetchedMatchIds?: readonly number[];
+  /** Checkpoint to use for bracket rows returned by the provider. */
+  checkedAt?: Date;
+};
+
 export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
   const mapKnockout = (
@@ -234,6 +241,7 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
     upsertBatch: async (
       season: FplSeasonRef,
       records: DbTournamentKnockoutInsert[],
+      options: TournamentKnockoutUpsertOptions = {},
     ): Promise<number> => {
       if (records.length === 0) {
         return 0;
@@ -241,6 +249,18 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
 
       try {
         const db = await getDbInstance();
+        const fetchedMatchIds = options.fetchedMatchIds?.filter(
+          (matchId): matchId is number => Number.isSafeInteger(matchId) && matchId > 0,
+        );
+        const bracketMatchWasFetched =
+          fetchedMatchIds === undefined
+            ? sql`TRUE`
+            : fetchedMatchIds.length === 0
+              ? sql`FALSE`
+              : sql`excluded.match_id IN (${sql.join(
+                  fetchedMatchIds.map((matchId) => sql`${matchId}`),
+                  sql`, `,
+                )})`;
         const knockoutPayloadUnchanged = sql`
           ${tournamentKnockoutsInCompetition.round} IS NOT DISTINCT FROM excluded.round
           AND ${tournamentKnockoutsInCompetition.startedEventId} IS NOT DISTINCT FROM excluded.started_event_id
@@ -258,7 +278,7 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
           AND ${tournamentKnockoutsInCompetition.awayWins} IS NOT DISTINCT FROM excluded.away_wins
           AND ${tournamentKnockoutsInCompetition.roundWinner} IS NOT DISTINCT FROM excluded.round_winner
         `;
-        const changedAt = new Date();
+        const changedAt = options.checkedAt ?? new Date();
         await db
           .insert(tournamentKnockoutsInCompetition)
           .values(
@@ -291,6 +311,8 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
               awayWins: sql`excluded.away_wins`,
               roundWinner: sql`excluded.round_winner`,
               updatedAt: sql`CASE
+                WHEN ${bracketMatchWasFetched}
+                  THEN excluded.updated_at
                 WHEN ${knockoutPayloadUnchanged}
                   THEN ${tournamentKnockoutsInCompetition.updatedAt}
                 ELSE excluded.updated_at

@@ -2,6 +2,10 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const migration = readFileSync('migrations/0076_tournament_review_v2_publications.sql', 'utf8');
+const metadataMigration = readFileSync(
+  'migrations/0078_tournament_review_obligation_metadata_baseline.sql',
+  'utf8',
+);
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
@@ -38,5 +42,11 @@ describe('My Tournament Review V2 migration', () => {
     expect(migration).toContain(
       'ALTER TABLE competition.tournament_review_publications ENABLE ROW LEVEL SECURITY',
     );
+  });
+
+  test('persists a payload-level baseline for headless obligations', () => {
+    expect(metadataMigration).toContain('ALTER TABLE competition.tournament_review_obligations');
+    expect(metadataMigration).toContain('ADD COLUMN metadata_payload jsonb');
+    expect(metadataMigration).toContain('tournament_review_obligations_metadata_payload_check');
   });
 });

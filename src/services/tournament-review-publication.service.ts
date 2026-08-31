@@ -2176,13 +2176,11 @@ export async function reconcileTournamentReviewObligations(
              candidate.tournament_payload,
              candidate.format,
              existing.eligible_at AS existing_eligible_at,
+             existing.metadata_payload AS existing_metadata_payload,
              previous.payload AS existing_payload,
              CASE
-               WHEN previous.payload IS NULL
-                AND existing.eligible_at IS NULL
-                 THEN candidate.tournament_updated_at
-               WHEN previous.payload IS NOT NULL
-                AND previous.payload #> '{tournament}' IS DISTINCT FROM candidate.tournament_payload
+               WHEN existing.metadata_payload IS NULL
+                OR existing.metadata_payload IS DISTINCT FROM candidate.tournament_payload
                  THEN candidate.tournament_updated_at
                ELSE '-infinity'::timestamptz
              END AS tournament_metadata_eligible_at
@@ -2208,6 +2206,7 @@ export async function reconcileTournamentReviewObligations(
       SELECT state.tournament_id,
              state.event_id,
              state.format,
+             state.tournament_payload,
              GREATEST(
                state.event_data_checked_at,
                COALESCE(state.setup_finished_at, '-infinity'::timestamptz),
@@ -2321,13 +2320,19 @@ export async function reconcileTournamentReviewObligations(
             ON roster.season_id = result.season_id
            AND roster.entry_id = result.entry_id
            AND roster.tournament_id = state.tournament_id
+          JOIN competition.entries entry
+            ON entry.season_id = result.season_id
+           AND entry.entry_id = result.entry_id
           JOIN fpl.events result_event
             ON result_event.season_id = result.season_id
            AND result_event.event_id = result.event_id
           WHERE state.format IN ('POINTS', 'H2H')
             AND result.season_id = ${season.seasonId}
             AND result.event_id <= state.event_id
-            AND result.event_id >= COALESCE(state.group_started_event_id, 1)
+            AND result.event_id >= GREATEST(
+              COALESCE(state.group_started_event_id, 1),
+              COALESCE(entry.started_event, 1)
+            )
             AND result_event.finished = true
             AND result_event.data_checked = true
             AND result_event.data_checked_at IS NOT NULL
@@ -2413,7 +2418,7 @@ export async function reconcileTournamentReviewObligations(
       ) source ON true
       WHERE state.format IS NOT NULL
     ), valid_candidates AS (
-      SELECT tournament_id, event_id, format, eligible_at
+      SELECT tournament_id, event_id, format, eligible_at, tournament_payload
       FROM candidates
     ), stored_scopes AS (
       SELECT tournament_id, event_id
@@ -2456,12 +2461,14 @@ export async function reconcileTournamentReviewObligations(
       RETURNING obligation.tournament_id, obligation.event_id
     ), upserted AS (
     INSERT INTO competition.tournament_review_obligations
-      (season_id, tournament_id, event_id, format, state, eligible_at, next_attempt_at)
+      (season_id, tournament_id, event_id, format, state, eligible_at, next_attempt_at, metadata_payload)
     SELECT ${season.seasonId}, tournament_id, event_id, format, 'PENDING', eligible_at,
-           GREATEST(eligible_at, ${now.toISOString()}::timestamptz)
+           GREATEST(eligible_at, ${now.toISOString()}::timestamptz),
+           tournament_payload
     FROM valid_candidates
     ON CONFLICT (season_id, tournament_id, event_id) DO UPDATE
     SET format = EXCLUDED.format,
+        metadata_payload = EXCLUDED.metadata_payload,
         state = CASE
           WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
             OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
@@ -2550,7 +2557,8 @@ export async function reconcileTournamentReviewObligations(
         updated_at = clock_timestamp()
     WHERE competition.tournament_review_obligations.state <> 'PROCESSING'
       AND (
-        competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+        competition.tournament_review_obligations.metadata_payload IS NULL
+        OR competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
         OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
       )
     RETURNING tournament_id, event_id
