@@ -530,23 +530,32 @@ export function resolveLiveFinalizationCatchupPlans(
   context: SchedulerContext,
   targetEventIds: ReadonlySet<number>,
 ): readonly SchedulerObligationPlan[] {
-  return context.events
-    .filter((event) => targetEventIds.has(event.id))
-    .map((event) => {
-      const dueAt = event.dataCheckedAt ?? event.updatedAt ?? event.deadlineTime ?? context.now;
-      return {
-        scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-        periodKey: `live-final-catchup-${event.id}-${dueAt.getTime()}`,
-        dueAt,
-        eventId: event.id,
-        source: 'catchup' as const,
-        evidence: {
-          finalization: 'missing-v2-checkpoint',
-          finalizeEvent: true,
-          dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
-        },
-      };
-    });
+  return context.events.flatMap((event) => {
+    if (!targetEventIds.has(event.id) || event.dataCheckedAt == null) return [];
+
+    const dueAt = event.dataCheckedAt;
+    const resultAuthorityAtMs = (
+      event.updatedAt ??
+      event.dataCheckedAt ??
+      event.deadlineTime ??
+      dueAt
+    ).getTime();
+    return {
+      scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+      periodKey: `live-final-catchup-${event.id}-${dueAt.getTime()}`,
+      dueAt,
+      eventId: event.id,
+      source: 'catchup' as const,
+      evidence: {
+        finalization: 'missing-v2-checkpoint',
+        resultSlot: 'final-checkpoint',
+        resultAuthorityAtMs,
+        resultScheduleAnchorMs: dueAt.getTime(),
+        finalizeEvent: true,
+        dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
+      },
+    };
+  });
 }
 
 const postMatchPlanCache = new WeakMap<

@@ -994,9 +994,16 @@ describe('standalone scheduler registry', () => {
             dataChecked: false,
             dataCheckedAt: null,
           },
+          {
+            id: 3,
+            deadlineTime: new Date('2026-08-24T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: null,
+          },
         ],
       },
-      new Set([2]),
+      new Set([2, 3]),
     );
 
     expect(plans).toEqual([
@@ -1007,6 +1014,9 @@ describe('standalone scheduler registry', () => {
         periodKey: `live-final-catchup-2-${checkedAt.getTime()}`,
         evidence: expect.objectContaining({
           finalization: 'missing-v2-checkpoint',
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: checkedAt.getTime(),
+          resultScheduleAnchorMs: checkedAt.getTime(),
           finalizeEvent: true,
         }),
       }),
