@@ -156,7 +156,15 @@ async function readDeskSafely(input: LiveMatchObservation): Promise<MatchDeskRea
     eventId: input.eventId,
     redis: input.redis,
   });
-  if (cached?.servedFrom === 'REDIS_CURRENT') return cached;
+  const finalizationRequested =
+    input.finalizeEvent === true || input.lifecycleState === 'FINALIZED';
+  const cachedFinalIsCheckpointed =
+    cached?.publication.state === 'FINALIZED' && cached.publication.checkpointedAt !== null;
+  if (
+    cached?.servedFrom === 'REDIS_CURRENT' &&
+    (!finalizationRequested || cachedFinalIsCheckpointed)
+  )
+    return cached;
 
   // A missing current pointer is a recovery boundary. Use the self-contained
   // PostgreSQL checkpoint as a generation fence so a restored Redis sequence
@@ -200,7 +208,15 @@ async function readDetailSafely(input: LiveMatchObservation): Promise<MatchDetai
     eventId: input.eventId,
     redis: input.redis,
   });
-  if (cached?.servedFrom === 'REDIS_CURRENT') return cached;
+  const finalizationRequested =
+    input.finalizeEvent === true || input.lifecycleState === 'FINALIZED';
+  const cachedFinalIsCheckpointed =
+    cached?.publication.finalized === true && cached.publication.checkpointedAt !== null;
+  if (
+    cached?.servedFrom === 'REDIS_CURRENT' &&
+    (!finalizationRequested || cachedFinalIsCheckpointed)
+  )
+    return cached;
 
   try {
     const checkpoint = await readLiveMatchDetailCheckpointV2(input.season, input.eventId);
@@ -238,6 +254,21 @@ function detailIsStarted(fixtures: readonly RawFPLFixture[]): boolean {
       fixture.finished ||
       fixture.finished_provisional,
   );
+}
+
+function detailHasRequiredCoverage(
+  deskFixtures: readonly MatchDeskFixture[],
+  detail: readonly MatchFixtureDetail[],
+  finalized: boolean,
+): boolean {
+  const detailByFixture = new Map(detail.map((fixture) => [fixture.fixtureId, fixture]));
+  return deskFixtures.every((fixture) => {
+    const detailFixture = detailByFixture.get(fixture.fixtureId);
+    const started =
+      fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0;
+    if (!detailFixture) return false;
+    return !(started || finalized) || detailFixture.players.length > 0;
+  });
 }
 
 async function scheduleCheckpoint(
@@ -312,6 +343,8 @@ async function scheduleCheckpoint(
 export async function syncLiveMatchesV2FromObservation(
   input: LiveMatchObservation,
 ): Promise<LiveMatchObservationResult> {
+  const finalizationRequested =
+    input.finalizeEvent === true || input.lifecycleState === 'FINALIZED';
   if (
     input.publishedDesk &&
     (input.publishedDesk.publication.season !== input.season.seasonCode ||
@@ -319,15 +352,16 @@ export async function syncLiveMatchesV2FromObservation(
   ) {
     throw new Error('Live Match published desk scope does not match observation');
   }
-  const currentDesk: MatchDeskRead | null = input.publishedDesk
-    ? {
-        publication: input.publishedDesk.publication,
-        fixtures: input.publishedDesk.fixtures,
-        servedFrom: 'REDIS_CURRENT',
-      }
-    : input.observedDesk !== undefined
-      ? input.observedDesk.read
-      : await readDeskSafely(input);
+  const currentDesk: MatchDeskRead | null =
+    !finalizationRequested && input.publishedDesk
+      ? {
+          publication: input.publishedDesk.publication,
+          fixtures: input.publishedDesk.fixtures,
+          servedFrom: 'REDIS_CURRENT',
+        }
+      : !finalizationRequested && input.observedDesk !== undefined
+        ? input.observedDesk.read
+        : await readDeskSafely(input);
   const deskIsFinal = currentDesk?.publication.state === 'FINALIZED';
   const expectedFixtureIds =
     input.expectedFixtureIds ?? currentDesk?.fixtures.map((fixture) => fixture.fixtureId);
@@ -354,7 +388,11 @@ export async function syncLiveMatchesV2FromObservation(
     input.expectedNextCheckAt,
   );
   const reusesPublishedDesk = Boolean(
-    input.publishedDesk && sameDesk(currentDesk, preparedDesk.fixtures, preparedDesk.state),
+    !finalizationRequested &&
+      input.publishedDesk &&
+      currentDesk?.publication.publicationId === input.publishedDesk.publication.publicationId &&
+      currentDesk.publication.generation === input.publishedDesk.publication.generation &&
+      sameDesk(currentDesk, preparedDesk.fixtures, preparedDesk.state),
   );
   let desk = deskIsFinal || reusesPublishedDesk ? (currentDesk?.publication ?? null) : null;
   let deskChanged = reusesPublishedDesk ? (input.publishedDesk?.changed ?? false) : false;
@@ -436,50 +474,71 @@ export async function syncLiveMatchesV2FromObservation(
         referenceData: input.referenceData,
         publishedLiveElementIds: input.publishedLiveElementIds,
       });
-      const currentDetail = await readDetailSafely(input);
-      if (
-        sameDetail(
-          currentDetail,
-          preparedDetail.fixtures,
-          desk.revisions.fixtureIdentity.revision,
-          desk.state === 'FINALIZED',
-        ) &&
-        currentDetail?.publication.finalized !== true &&
-        currentDetail?.publication.observedDeskGeneration === desk.generation &&
-        currentDetail?.servedFrom === 'REDIS_CURRENT'
-      ) {
-        detail = await touchLiveMatchDetailV2({
-          publication: currentDetail.publication,
-          sourceCheckedAt: observedAt,
-          expectedNextCheckAt: input.expectedNextCheckAt,
-          staleAt,
-          observedActive: input.observedDetail,
-          redis: input.redis,
-        });
-      }
-      if (
-        !detail &&
-        (detailIsStarted(input.rawFixtures) ||
-          hasStartedLiveMatchDetail(preparedDesk.fixtures, preparedDetail) ||
-          preparedDesk.state === 'FINALIZED')
-      ) {
-        const published = await publishLiveMatchDetailV2({
-          season: input.season.seasonCode,
-          eventId: input.eventId,
-          observedDeskGeneration: desk.generation,
-          fixtureIdentityRevision: desk.revisions.fixtureIdentity.revision,
-          fixtures: preparedDetail.fixtures,
-          sourceCheckedAt: observedAt,
-          expectedNextCheckAt: input.expectedNextCheckAt,
-          staleAt,
-          previous: currentDetail,
-          observedActive: input.observedDetail,
-          generationFloor: currentDetail?.publication.generation ?? 0,
-          finalized: preparedDesk.state === 'FINALIZED',
-          redis: input.redis,
-        });
-        detail = published.publication;
-        detailChanged = published.published;
+      const preparedDetailComplete = detailHasRequiredCoverage(
+        preparedDesk.fixtures,
+        preparedDetail.fixtures,
+        preparedDesk.state === 'FINALIZED',
+      );
+      const loadedDetail = await readDetailSafely(input);
+      const currentDetail =
+        loadedDetail &&
+        detailHasRequiredCoverage(
+          preparedDesk.fixtures,
+          loadedDetail.fixtures,
+          loadedDetail.publication.finalized,
+        )
+          ? loadedDetail
+          : null;
+      if (!preparedDetailComplete) {
+        // Empty explain/BPS evidence is a transient provider regression, not a
+        // valid new detail publication. Keep the complete same-fixture LKG and
+        // wait for a candidate with the required player coverage.
+        detailUnavailableReason = 'DETAIL_EVIDENCE_INCOMPLETE';
+      } else {
+        if (
+          sameDetail(
+            currentDetail,
+            preparedDetail.fixtures,
+            desk.revisions.fixtureIdentity.revision,
+            desk.state === 'FINALIZED',
+          ) &&
+          currentDetail?.publication.finalized !== true &&
+          currentDetail?.publication.observedDeskGeneration === desk.generation &&
+          currentDetail?.servedFrom === 'REDIS_CURRENT'
+        ) {
+          detail = await touchLiveMatchDetailV2({
+            publication: currentDetail.publication,
+            sourceCheckedAt: observedAt,
+            expectedNextCheckAt: input.expectedNextCheckAt,
+            staleAt,
+            observedActive: input.observedDetail,
+            redis: input.redis,
+          });
+        }
+        if (
+          !detail &&
+          (detailIsStarted(input.rawFixtures) ||
+            hasStartedLiveMatchDetail(preparedDesk.fixtures, preparedDetail) ||
+            preparedDesk.state === 'FINALIZED')
+        ) {
+          const published = await publishLiveMatchDetailV2({
+            season: input.season.seasonCode,
+            eventId: input.eventId,
+            observedDeskGeneration: desk.generation,
+            fixtureIdentityRevision: desk.revisions.fixtureIdentity.revision,
+            fixtures: preparedDetail.fixtures,
+            sourceCheckedAt: observedAt,
+            expectedNextCheckAt: input.expectedNextCheckAt,
+            staleAt,
+            previous: currentDetail,
+            observedActive: input.observedDetail,
+            generationFloor: currentDetail?.publication.generation ?? 0,
+            finalized: preparedDesk.state === 'FINALIZED',
+            redis: input.redis,
+          });
+          detail = published.publication;
+          detailChanged = published.published;
+        }
       }
       if (
         !detail &&
@@ -502,7 +561,7 @@ export async function syncLiveMatchesV2FromObservation(
           detail,
           input.redis,
           input.season,
-          desk.state === 'FINALIZED',
+          detail.finalized,
           !currentDetail ||
             currentDetail.publication.fixtureIdentityRevision !== detail.fixtureIdentityRevision,
           input.enqueueCheckpoint,
@@ -517,7 +576,12 @@ export async function syncLiveMatchesV2FromObservation(
       const currentDetail = await readDetailSafely(input).catch(() => null);
       if (
         currentDetail?.publication.fixtureIdentityRevision ===
-        desk.revisions.fixtureIdentity.revision
+          desk.revisions.fixtureIdentity.revision &&
+        detailHasRequiredCoverage(
+          preparedDesk.fixtures,
+          currentDetail.fixtures,
+          currentDetail.publication.finalized,
+        )
       ) {
         detail = currentDetail.publication;
       }

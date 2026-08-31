@@ -32,6 +32,61 @@ import {
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logError } from '../utils/logger';
 
+const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
+
+type FinalCheckpointValidationIdentity = Readonly<{
+  deskPublicationId: string | null;
+  deskGeneration: number | null;
+  deskPayloadSha256: string | null;
+  deskRowCount: number | null;
+  deskPayloadBytes: number | null;
+  deskCheckpointedAt: string | null;
+  detailPublicationId: string | null;
+  detailGeneration: number | null;
+  detailObservedDeskGeneration: number | null;
+  detailFixtureIdentityRevision: string | null;
+  detailPayloadSha256: string | null;
+  detailRowCount: number | null;
+  detailPayloadBytes: number | null;
+  detailCheckpointedAt: string | null;
+}>;
+
+const finalCheckpointValidationCache = new Map<string, FinalCheckpointValidationIdentity>();
+
+const checkpointDateIdentity = (value: Date | null): string | null => value?.toISOString() ?? null;
+
+const sameFinalCheckpointValidationIdentity = (
+  left: FinalCheckpointValidationIdentity,
+  right: FinalCheckpointValidationIdentity,
+): boolean =>
+  left.deskPublicationId === right.deskPublicationId &&
+  left.deskGeneration === right.deskGeneration &&
+  left.deskPayloadSha256 === right.deskPayloadSha256 &&
+  left.deskRowCount === right.deskRowCount &&
+  left.deskPayloadBytes === right.deskPayloadBytes &&
+  left.deskCheckpointedAt === right.deskCheckpointedAt &&
+  left.detailPublicationId === right.detailPublicationId &&
+  left.detailGeneration === right.detailGeneration &&
+  left.detailObservedDeskGeneration === right.detailObservedDeskGeneration &&
+  left.detailFixtureIdentityRevision === right.detailFixtureIdentityRevision &&
+  left.detailPayloadSha256 === right.detailPayloadSha256 &&
+  left.detailRowCount === right.detailRowCount &&
+  left.detailPayloadBytes === right.detailPayloadBytes &&
+  left.detailCheckpointedAt === right.detailCheckpointedAt;
+
+const rememberFinalCheckpointValidation = (
+  key: string,
+  identity: FinalCheckpointValidationIdentity,
+): void => {
+  finalCheckpointValidationCache.delete(key);
+  finalCheckpointValidationCache.set(key, identity);
+  while (finalCheckpointValidationCache.size > LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT) {
+    const oldest = finalCheckpointValidationCache.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    finalCheckpointValidationCache.delete(oldest);
+  }
+};
+
 export type LivePublicationV2CheckpointRequest = {
   readonly season: FplSeasonRef;
   readonly eventId: number;
@@ -553,7 +608,21 @@ export async function findLivePublicationV2FinalizationTargets(
       eventId: eventsInFpl.eventId,
       livePointsState: livePointsPublicationCheckpointsInCompetition.state,
       deskState: liveMatchDeskCheckpointsInFpl.state,
+      deskPublicationId: liveMatchDeskCheckpointsInFpl.publicationId,
+      deskGeneration: liveMatchDeskCheckpointsInFpl.generation,
+      deskPayloadSha256: liveMatchDeskCheckpointsInFpl.payloadSha256,
+      deskRowCount: liveMatchDeskCheckpointsInFpl.rowCount,
+      deskPayloadBytes: liveMatchDeskCheckpointsInFpl.payloadBytes,
+      deskCheckpointedAt: liveMatchDeskCheckpointsInFpl.checkpointedAt,
       detailState: liveMatchDetailCheckpointsInFpl.state,
+      detailPublicationId: liveMatchDetailCheckpointsInFpl.publicationId,
+      detailGeneration: liveMatchDetailCheckpointsInFpl.generation,
+      detailObservedDeskGeneration: liveMatchDetailCheckpointsInFpl.observedDeskGeneration,
+      detailFixtureIdentityRevision: liveMatchDetailCheckpointsInFpl.fixtureIdentityRevision,
+      detailPayloadSha256: liveMatchDetailCheckpointsInFpl.payloadSha256,
+      detailRowCount: liveMatchDetailCheckpointsInFpl.rowCount,
+      detailPayloadBytes: liveMatchDetailCheckpointsInFpl.payloadBytes,
+      detailCheckpointedAt: liveMatchDetailCheckpointsInFpl.checkpointedAt,
     })
     .from(eventsInFpl)
     .leftJoin(
@@ -592,12 +661,39 @@ export async function findLivePublicationV2FinalizationTargets(
       row.deskState !== 'FINALIZED' ||
       row.detailState !== 'FINALIZED'
     ) {
+      finalCheckpointValidationCache.delete(`${season.seasonId}:${row.eventId}`);
       targets.push(row.eventId);
       continue;
     }
-    if (!(await hasFinalLiveMatchCheckpointsV2(season, row.eventId))) {
-      targets.push(row.eventId);
+    const key = `${season.seasonId}:${row.eventId}`;
+    const identity: FinalCheckpointValidationIdentity = {
+      deskPublicationId: row.deskPublicationId ?? null,
+      deskGeneration: row.deskGeneration ?? null,
+      deskPayloadSha256: row.deskPayloadSha256 ?? null,
+      deskRowCount: row.deskRowCount ?? null,
+      deskPayloadBytes: row.deskPayloadBytes ?? null,
+      deskCheckpointedAt: checkpointDateIdentity(row.deskCheckpointedAt ?? null),
+      detailPublicationId: row.detailPublicationId ?? null,
+      detailGeneration: row.detailGeneration ?? null,
+      detailObservedDeskGeneration: row.detailObservedDeskGeneration ?? null,
+      detailFixtureIdentityRevision: row.detailFixtureIdentityRevision ?? null,
+      detailPayloadSha256: row.detailPayloadSha256 ?? null,
+      detailRowCount: row.detailRowCount ?? null,
+      detailPayloadBytes: row.detailPayloadBytes ?? null,
+      detailCheckpointedAt: checkpointDateIdentity(row.detailCheckpointedAt ?? null),
+    };
+    if (
+      finalCheckpointValidationCache.get(key) &&
+      sameFinalCheckpointValidationIdentity(finalCheckpointValidationCache.get(key)!, identity)
+    ) {
+      continue;
     }
+    if (!(await hasFinalLiveMatchCheckpointsV2(season, row.eventId))) {
+      finalCheckpointValidationCache.delete(key);
+      targets.push(row.eventId);
+      continue;
+    }
+    rememberFinalCheckpointValidation(key, identity);
   }
   return targets;
 }

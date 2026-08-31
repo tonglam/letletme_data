@@ -477,7 +477,10 @@ export function hasStartedLiveMatchDetail(
 ): boolean {
   const startedFixtureIds = new Set(
     fixtures
-      .filter((fixture) => fixture.started || fixture.finished || fixture.minutes > 0)
+      .filter(
+        (fixture) =>
+          fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0,
+      )
       .map((fixture) => fixture.fixtureId),
   );
   return detail.fixtures.some((fixture) => startedFixtureIds.has(fixture.fixtureId));

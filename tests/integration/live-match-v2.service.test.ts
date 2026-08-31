@@ -82,6 +82,9 @@ const eventLive = (): RawFPLEventLiveElement[] => {
   return [{ ...source, explain: [explain] }];
 };
 
+const emptyDetailEventLive = (): RawFPLEventLiveElement[] =>
+  eventLive().map((element) => ({ ...element, explain: [] }));
+
 async function clean(): Promise<void> {
   const keys: string[] = [];
   let cursor = '0';
@@ -580,5 +583,40 @@ describe('Live Matches V2 observation publication', () => {
     expect(second.detailChanged).toBe(false);
     expect(second.detail?.generation).toBe(first.detail?.generation);
     expect(second.detailUnavailableReason).toBe('DETAIL_CANDIDATE_INVALID');
+  });
+
+  test('retains complete detail when provider explain and BPS evidence becomes empty', async () => {
+    const first = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      rawEventLive: { elements: eventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const second = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [{ ...fixture(30), stats: [] }],
+      rawEventLive: { elements: emptyDetailEventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:30.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+
+    expect(first.detail).not.toBeNull();
+    expect(first.detail?.finalized).toBe(false);
+    expect(second.detailChanged).toBe(false);
+    expect(second.detail?.publicationId).toBe(first.detail?.publicationId);
+    expect(second.detailUnavailableReason).toBe('DETAIL_EVIDENCE_INCOMPLETE');
+    expect(
+      (await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0]
+        ?.players.length,
+    ).toBeGreaterThan(0);
   });
 });
