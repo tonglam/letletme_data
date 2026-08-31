@@ -484,9 +484,13 @@ export async function syncLiveMatchesV2FromObservation(
       if (
         !detail &&
         currentDetail?.publication.fixtureIdentityRevision ===
-          desk.revisions.fixtureIdentity.revision &&
-        currentDetail.publication.observedDeskGeneration === desk.generation
+          desk.revisions.fixtureIdentity.revision
       ) {
+        // A failed detail candidate must not erase a complete same-fixture
+        // LKG merely because the desk advanced. New detail publications are
+        // still fenced to the current desk generation above; this fallback
+        // intentionally serves the older detail with its own generation so
+        // consumers can surface its independent staleness.
         detail = currentDetail.publication;
       }
       if (!detail && !detailIsStarted(input.rawFixtures)) detailUnavailableReason = 'PRE_KICKOFF';
@@ -513,8 +517,7 @@ export async function syncLiveMatchesV2FromObservation(
       const currentDetail = await readDetailSafely(input).catch(() => null);
       if (
         currentDetail?.publication.fixtureIdentityRevision ===
-          desk.revisions.fixtureIdentity.revision &&
-        currentDetail.publication.observedDeskGeneration === desk.generation
+        desk.revisions.fixtureIdentity.revision
       ) {
         detail = currentDetail.publication;
       }
