@@ -80,7 +80,6 @@ import {
   PRICE_CHANGE_WATCH_LEAD_MS,
   PRICE_CHANGE_WATCH_MAX_WINDOW_MS,
 } from '../domain/price-change-watch-policy';
-import { isTournamentCascadeFinalizedEvent } from '../domain/tournament-event-results';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -523,35 +522,6 @@ export async function resolvePostMatchResultPlans(
   ];
 }
 
-/**
- * Tournament derived reports must wait for FPL's exact finished/data_checked
- * fence. Keep the general result planner provisional-capable for entry and
- * league consumers, but never schedule a tournament cascade from a
- * provisional result slot.
- */
-export async function resolveFinalizedPostMatchResultPlans(
-  context: SchedulerContext,
-  loadFixtures: PostMatchFixturesLoader = (_season, eventId) =>
-    loadSchedulerFixtures(context, eventId),
-): Promise<readonly SchedulerObligationPlan[]> {
-  return filterFinalizedPostMatchPlans(
-    context,
-    await resolvePostMatchResultPlans(context, loadFixtures),
-  );
-}
-
-function filterFinalizedPostMatchPlans(
-  context: SchedulerContext,
-  plans: readonly SchedulerObligationPlan[],
-): readonly SchedulerObligationPlan[] {
-  const finalizedEventIds = new Set(
-    context.events
-      .filter((event) => isTournamentCascadeFinalizedEvent(event))
-      .map((event) => event.id),
-  );
-  return plans.filter((plan) => plan.eventId !== undefined && finalizedEventIds.has(plan.eventId));
-}
-
 export function resolveLiveFinalizationCatchupPlans(
   context: SchedulerContext,
   targetEventIds: ReadonlySet<number>,
@@ -582,7 +552,6 @@ const postMatchPlanCache = new WeakMap<
 
 function resultEventDefinition(
   input: Omit<ScheduledJobDefinition, 'timezone' | 'resolve'>,
-  options: { finalizedOnly?: boolean } = {},
 ): ScheduledJobDefinition {
   return {
     ...input,
@@ -591,9 +560,6 @@ function resultEventDefinition(
       const cached = postMatchPlanCache.get(context);
       const plans = cached ?? resolvePostMatchResultPlans(context);
       if (!cached) postMatchPlanCache.set(context, plans);
-      if (options.finalizedOnly) {
-        return plans.then((resolved) => filterFinalizedPostMatchPlans(context, resolved));
-      }
       return plans;
     },
   };
@@ -1753,33 +1719,30 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
-    resultEventDefinition(
-      {
-        name: 'tournament-event-results',
-        cadence: 'hourly after final fixture plus permanent final checkpoint',
-        catchUpPolicy: 'event-checkpoint',
-        criticality: 'critical',
-        queueName: 'tournament-sync',
-        successPredicate:
-          'tournament result and cascade jobs enqueue; persistent barrier owns downstream completion',
-        recoveryCompletionMode: 'tournament-cascade-finalizer',
-        executionLanes: ['queue:tournament-sync', 'post-match-results'],
-        claimPriority: 30,
-        enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
-          const eventId = plan.eventId ?? context.currentEventId;
-          if (!eventId) throw new Error('Tournament results obligation has no event checkpoint');
-          const job = await enqueueTournamentEventResults(context.season, eventId, 'reconcile', {
-            freshAfter: plan.dueAt.toISOString(),
-            jobId: `scheduler-${obligationId}-g${generation}`,
-            obligationId,
-            obligationGeneration: generation,
-            freshnessWindowId,
-          });
-          return { bullJobId: job.id, runId: job.data.runId };
-        },
+    resultEventDefinition({
+      name: 'tournament-event-results',
+      cadence: 'hourly after final fixture plus permanent final checkpoint',
+      catchUpPolicy: 'event-checkpoint',
+      criticality: 'critical',
+      queueName: 'tournament-sync',
+      successPredicate:
+        'tournament result and cascade jobs enqueue; persistent barrier owns downstream completion',
+      recoveryCompletionMode: 'tournament-cascade-finalizer',
+      executionLanes: ['queue:tournament-sync', 'post-match-results'],
+      claimPriority: 30,
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+        const eventId = plan.eventId ?? context.currentEventId;
+        if (!eventId) throw new Error('Tournament results obligation has no event checkpoint');
+        const job = await enqueueTournamentEventResults(context.season, eventId, 'reconcile', {
+          freshAfter: plan.dueAt.toISOString(),
+          jobId: `scheduler-${obligationId}-g${generation}`,
+          obligationId,
+          obligationGeneration: generation,
+          freshnessWindowId,
+        });
+        return { bullJobId: job.id, runId: job.data.runId };
       },
-      { finalizedOnly: true },
-    ),
+    }),
     eventDefinition({
       name: 'tournament-event-picks',
       cadence: 'post-deadline event checkpoint',

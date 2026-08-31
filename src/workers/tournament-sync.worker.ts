@@ -33,12 +33,12 @@ import { syncTournamentInfo } from '../services/tournament-info.service';
 import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
 import { syncTournamentSelectionStats } from '../services/tournament-selection-stats.service';
 import { eventRepository } from '../repositories/events';
-import { eventLiveRepository } from '../repositories/event-lives';
 import {
   finishTournamentsThroughEvent,
   reconcileOfficialTournamentRosters,
   reconcileTournamentRoster,
 } from '../services/tournament-roster.service';
+import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { IncompleteDataSyncError } from '../utils/errors';
@@ -500,13 +500,19 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             } else if (!finalized) {
               await completeTournamentCascadeObligation(job, 'provisional-results');
             } else {
-              const finalizedEventLives = await eventLiveRepository.findFinalizedByEventId(
-                season,
-                eventId,
-              );
-              if (finalizedEventLives.length === 0) {
+              // The V2 checkpoint is the durable final authority. Do not use
+              // the legacy row timestamp fence here: checkpoint rows can be
+              // written with PostgreSQL transaction timestamps while the
+              // finalization marker uses a later wall-clock timestamp, which
+              // would make a valid final checkpoint look empty forever.
+              const finalizedCheckpoint = await readLivePublicationV2Checkpoint(season, eventId);
+              if (
+                finalizedCheckpoint?.publication.state !== 'FINALIZED' ||
+                finalizedCheckpoint.eventLives.length === 0 ||
+                finalizedCheckpoint.fixtures.length === 0
+              ) {
                 throw new IncompleteDataSyncError(
-                  `Tournament cascade is waiting for finalized event-live data in event ${eventId}`,
+                  `Tournament cascade is waiting for finalized V2 checkpoint in event ${eventId}`,
                   1,
                   0,
                   0,

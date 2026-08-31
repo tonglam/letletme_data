@@ -8,7 +8,6 @@ import {
   resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
   resolveLiveFinalizationCatchupPlans,
-  resolveFinalizedPostMatchResultPlans,
   resolvePostMatchResultPlans,
   playerPricesDefinition,
   schedulerQueueLaneOverride,
@@ -861,9 +860,9 @@ describe('standalone scheduler registry', () => {
     ]);
   });
 
-  test('excludes provisional and incomplete-final result slots from tournament plans', async () => {
+  test('keeps provisional and incomplete-final result slots in the base planner', async () => {
     const checkedAt = new Date('2026-08-22T22:00:00.000Z');
-    const plans = await resolveFinalizedPostMatchResultPlans(
+    const plans = await resolvePostMatchResultPlans(
       {
         season: TEST_SEASON,
         now: new Date('2026-08-23T12:00:00.000Z'),
@@ -904,7 +903,11 @@ describe('standalone scheduler registry', () => {
       },
     );
 
-    expect(plans.map((plan) => plan.periodKey)).toEqual(['event-1-final']);
+    expect(plans.map((plan) => plan.periodKey)).toEqual([
+      'event-1-final',
+      'event-2-final',
+      'event-3-provisional-16',
+    ]);
   });
 
   test('bounds hourly result slots to 24 hours', async () => {
