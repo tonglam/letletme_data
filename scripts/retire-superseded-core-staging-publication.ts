@@ -179,6 +179,7 @@ async function validateTarget(
   target: CoreStagingRow;
   active: { publicationId: string; revision: number };
   sourceRunId: string;
+  sourcePublicationId: string;
   itemCount: number;
   outboxCount: number;
   retiredAt: Date | null;
@@ -256,8 +257,37 @@ async function validateTarget(
       .where(eq(syncRunsInOps.runId, target.sourceRunId))
       .limit(1);
     const sourceRun = sourceRows[0];
-    if (sourceRun?.status !== 'published' || sourceRun.publicationId !== target.publicationId) {
-      throw new Error('target source run is not a terminal published run for this publication');
+    const sourcePublication = sourceRun?.publicationId
+      ? (
+          await tx
+            .select({
+              publicationId: datasetPublicationsInOps.publicationId,
+              dataset: datasetPublicationsInOps.dataset,
+              seasonId: datasetPublicationsInOps.seasonId,
+              eventId: datasetPublicationsInOps.eventId,
+              revision: datasetPublicationsInOps.revision,
+              status: datasetPublicationsInOps.status,
+              sourceRunId: datasetPublicationsInOps.sourceRunId,
+            })
+            .from(datasetPublicationsInOps)
+            .where(eq(datasetPublicationsInOps.publicationId, sourceRun.publicationId))
+            .limit(1)
+            .for('update')
+        )[0]
+      : undefined;
+    if (
+      sourceRun?.status !== 'published' ||
+      !sourcePublication ||
+      sourcePublication.dataset !== 'fpl:core' ||
+      sourcePublication.seasonId !== args.seasonId ||
+      sourcePublication.eventId !== null ||
+      sourcePublication.status !== 'retired' ||
+      sourcePublication.sourceRunId !== target.sourceRunId ||
+      sourcePublication.revision >= active.revision
+    ) {
+      throw new Error(
+        'target source run is not a terminal published run for a superseded same-scope core publication',
+      );
     }
 
     const itemRows = await tx
@@ -318,6 +348,7 @@ async function validateTarget(
       target,
       active,
       sourceRunId: target.sourceRunId,
+      sourcePublicationId: sourcePublication.publicationId,
       itemCount: itemRows.length,
       outboxCount: outboxRows.length,
       retiredAt,
@@ -338,6 +369,7 @@ export async function runRetireCoreStagingPublication(
     seasonId: args.seasonId,
     publicationId: result.target.publicationId,
     sourceRunId: result.sourceRunId,
+    sourcePublicationId: result.sourcePublicationId,
     targetRevision: result.target.revision,
     expectedActivePublicationId: result.active.publicationId,
     expectedActiveRevision: result.active.revision,
