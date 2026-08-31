@@ -10,6 +10,23 @@ export type PostMatchResultsCheckpoint = Readonly<{
   dueAt: Date;
 }>;
 
+export type PostMatchResultsFinalizationState = Readonly<{
+  finished?: boolean;
+  dataChecked?: boolean;
+  dataCheckedAt?: Date | null;
+}>;
+
+/**
+ * FPL's boolean flags can briefly lead the timestamp that makes final data
+ * authoritative.  Treat only the complete three-field tuple as final so a
+ * provisional BullMQ job cannot occupy the deterministic final job ID.
+ */
+export function hasCompletePostMatchFinalization(
+  event: PostMatchResultsFinalizationState | null | undefined,
+): boolean {
+  return event?.finished === true && event.dataChecked === true && event.dataCheckedAt != null;
+}
+
 /**
  * Resolve the bounded, idempotent post-match result slot for an event.
  *
@@ -58,4 +75,24 @@ export function getPostMatchResultsSlot(
   date = new Date(),
 ): string | null {
   return getPostMatchResultsCheckpoint(event, fixtures, date)?.slot ?? null;
+}
+
+export function getFinalizationAwarePostMatchResultsCheckpoint(
+  event: PostMatchResultsFinalizationState,
+  fixtures: readonly Fixture[],
+  date = new Date(),
+): PostMatchResultsCheckpoint | null {
+  return getPostMatchResultsCheckpoint(
+    { dataChecked: hasCompletePostMatchFinalization(event) },
+    fixtures,
+    date,
+  );
+}
+
+export function getFinalizationAwarePostMatchResultsSlot(
+  event: PostMatchResultsFinalizationState,
+  fixtures: readonly Fixture[],
+  date = new Date(),
+): string | null {
+  return getFinalizationAwarePostMatchResultsCheckpoint(event, fixtures, date)?.slot ?? null;
 }

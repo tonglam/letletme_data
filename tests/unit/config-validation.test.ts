@@ -264,8 +264,10 @@ describe('production environment preflight', () => {
       expect(workflow).toContain(`start_stage ${stage}`);
     }
     expect(workflow).toMatch(
-      /DATABASE_URL=\$data_runtime_database_url[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
+      /DATABASE_URL="?\$data_runtime_database_url"?[\s\S]*?\n\s+-e DATABASE_URL api[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
     );
+    expect(workflow).not.toContain('-e "DATABASE_URL=$data_runtime_database_url"');
+    expect(workflow).not.toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=$migration_database_url"');
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
     expect(workflow).toContain('read_env_setting DATABASE_BACKUP_DIR "$env_file"');
     expect(workflow).toContain('export DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}');

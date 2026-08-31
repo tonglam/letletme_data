@@ -860,6 +860,56 @@ describe('standalone scheduler registry', () => {
     ]);
   });
 
+  test('keeps provisional and incomplete-final result slots in the base planner', async () => {
+    const checkedAt = new Date('2026-08-22T22:00:00.000Z');
+    const plans = await resolvePostMatchResultPlans(
+      {
+        season: TEST_SEASON,
+        now: new Date('2026-08-23T12:00:00.000Z'),
+        events: [
+          {
+            id: 1,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: checkedAt,
+          },
+          {
+            id: 2,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: null,
+          },
+          {
+            id: 3,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: false,
+            dataChecked: false,
+            dataCheckedAt: null,
+          },
+        ],
+      },
+      async (season, eventId) => {
+        expect(season).toEqual(TEST_SEASON);
+        expect([2, 3]).toContain(eventId);
+        return [
+          {
+            ...mockFixture1,
+            event: eventId,
+            kickoffTime: new Date('2026-08-22T18:00:00.000Z'),
+          },
+        ];
+      },
+    );
+
+    expect(plans.map((plan) => plan.periodKey)).toEqual([
+      'event-1-final',
+      'event-2-provisional-16',
+      'event-3-provisional-16',
+    ]);
+  });
+
   test('bounds hourly result slots to 24 hours', async () => {
     const fixtures = [{ ...mockFixture1, kickoffTime: new Date('2026-08-22T18:00:00.000Z') }];
     const context = {
@@ -944,9 +994,16 @@ describe('standalone scheduler registry', () => {
             dataChecked: false,
             dataCheckedAt: null,
           },
+          {
+            id: 3,
+            deadlineTime: new Date('2026-08-24T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: null,
+          },
         ],
       },
-      new Set([2]),
+      new Set([2, 3]),
     );
 
     expect(plans).toEqual([
@@ -957,6 +1014,9 @@ describe('standalone scheduler registry', () => {
         periodKey: `live-final-catchup-2-${checkedAt.getTime()}`,
         evidence: expect.objectContaining({
           finalization: 'missing-v2-checkpoint',
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: checkedAt.getTime(),
+          resultScheduleAnchorMs: checkedAt.getTime(),
           finalizeEvent: true,
         }),
       }),

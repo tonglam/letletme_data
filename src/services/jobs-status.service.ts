@@ -24,6 +24,7 @@ import {
 import { getSchedulerLaneTargets, listSchedulerLanes } from '../repositories/scheduler-lanes';
 import { schedulerQueueLaneOverride, schedulerRegistry } from '../scheduler/job-registry';
 import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
+import { getTournamentReviewV2OperationalStatus } from './tournament-review-publication.service';
 import { readSchedulerProgress, isSchedulerProgressHealthy } from '../scheduler/scheduler-progress';
 import { readQueueAdmission, readQueueHealthSnapshot } from './queue-governance.service';
 import {
@@ -175,6 +176,7 @@ export type JobsStatusWindow = '15m' | '1h' | '6h' | '24h' | '3d' | '7d' | '28d'
 
 export async function getJobsStatus(
   window: JobsStatusWindow = '1h',
+  watchTournamentId?: number,
 ): Promise<Record<string, unknown>> {
   const season = await seasonRepository.findCurrent();
   const windowMs: Record<JobsStatusWindow, number> = {
@@ -205,6 +207,7 @@ export async function getJobsStatus(
     livePicksWorkerHeartbeat,
     officialH2HWorkerHeartbeat,
     myFplSnapshots,
+    tournamentReviewV2,
     schedulerProgress,
     freshnessWindows,
     governanceCases,
@@ -221,6 +224,19 @@ export async function getJobsStatus(
     readRuntimeHeartbeat('livePicksWorker'),
     readRuntimeHeartbeat('officialH2HWorker'),
     getMyFplSnapshotOperationalStatus(season),
+    getTournamentReviewV2OperationalStatus(season, watchTournamentId).catch(() => ({
+      schemaVersion: 'my-tournament-review-v2' as const,
+      metricVersion: 'unavailable',
+      season: season.seasonCode,
+      checkedAt: new Date().toISOString(),
+      eligibleCount: 0,
+      stateCounts: { pending: 0, waitingSource: 0, processing: 0, ready: 0, degraded: 0 },
+      publication: { readyWithCoherentHead: 0, readyWithIncoherentHead: 0 },
+      oldestPendingEligibleAt: null,
+      latestUpdatedAt: null,
+      watch: null,
+      unavailable: true,
+    })),
     readSchedulerProgress(),
     // Query the requested SLO window at the database boundary. The table is
     // ordered by due time; fetching the first 500 rows without a lower bound
@@ -671,6 +687,7 @@ export async function getJobsStatus(
     },
     obligations,
     myFplSnapshots,
+    tournamentReviewV2,
     publicationConsistency,
     fplAdmission,
     priceChanges,

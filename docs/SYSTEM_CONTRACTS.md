@@ -44,6 +44,12 @@ cannot replace or remove the last accepted complete publication.
 5. Product clients read through GraphQL; Web remains the identity/mutation
    boundary.
 
+The My Tournament Review V2 producer checkpoint is exposed only through the
+service-authenticated `GET /jobs/status` response under `tournamentReviewV2`.
+Operators may add `tournamentId=6953` for a bounded watch list; this reports
+state/count/head-parity/freshness evidence, never raw provider errors or
+payloads.
+
 The scheduler reserves a durable obligation before dispatching a BullMQ job.
 BullMQ is a delivery mechanism and retained history, not the source of
 schedule truth or business completion. `GET /jobs` is generated from the
@@ -125,7 +131,41 @@ See [redis-contract.md](redis-contract.md) and
   current-pointer swap, retain a previous complete version, and checkpoint
   PostgreSQL asynchronously. My FPL deletion writes the invalidation outbox in the
   same PostgreSQL transaction as deletion and uses revision-aware Redis CAS.
+- Live Matches V2 consumes that same coherent fixtures/event-live observation but
+  publishes an independent compact desk and fixture-grain detail stream. Desk
+  availability does not depend on detail, detail may lag but never lead the
+  selected desk generation, and the warm page path does not call FPL, Data API,
+  PostgreSQL, or a queue.
+- Live Matches repair is exact-scope only through
+  `POST /ops/live-matches-v2/repair`. Inspect is read-only; any pointer
+  promotion, PostgreSQL rebuild, or merged checkpoint replay requires season,
+  event, desk/detail kind, a reason, and
+  `confirmation: "LIVE_MATCHES_V2_REPAIR"`. The endpoint cannot select all
+  events, delete a namespace, or refetch FPL.
 - Tournament and league finalization remain eligible in the bounded post-match
   window, including after GW38.
 - Live Points V2 has one reader/writer contract: no dual-write, dual-read,
   compatibility namespace, legacy parser, or mixed-version deployment.
+
+## My LetLetMe Tournament Review V2
+
+My Tournament Review is a finalized-snapshot read model, not a live score
+surface. For each `(season, tournament, event)` the Data worker validates the
+settled FPL event, the tournament setup window, roster cardinality, and the
+format-specific source rows before publishing an immutable PostgreSQL payload.
+The active revision is an atomic row in
+`competition.tournament_review_heads`; the durable retry state is in
+`competition.tournament_review_obligations`.
+
+The format is mutually exclusive for an event: `POINTS`, `H2H`, or
+`KNOCKOUT`. POINTS exposes gross event points as the headline and keeps
+transfer cost/net points separate. H2H exposes matchups and cumulative
+standings. KNOCKOUT exposes bracket matches and winners. An unfinished or
+source-stale event is never promoted into this model; clients use Live until
+the event is finalized.
+
+Custom tournaments use the same path after `setup_status = 'ready'`; the
+five-minute reconcile job backfills every eligible finalized event, so a
+creation-time race cannot lose the first review obligation. Scope is limited
+to the current season and each tournament/event independently, which keeps a
+single delayed league from invalidating other review snapshots.

@@ -7,7 +7,7 @@ import {
   teamsInFpl,
   type DbPlayerFixtureStatInsert,
 } from '../db/schemas/index.schema';
-import { getDb, type DbOrTransaction } from '../db/singleton';
+import { getDb, getDbClient, type DbOrTransaction } from '../db/singleton';
 import type {
   FplPlayerFixtureEvidence,
   FplPlayerFixtureStat,
@@ -17,10 +17,90 @@ import { contentHash } from '../utils/content-hash';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
+export interface FplPlayerFixtureIdentity {
+  readonly fixtureId: number;
+  readonly elementId: number;
+  readonly teamId: number;
+  readonly elementType: number;
+  readonly price: number;
+  readonly webName: string;
+}
+
+const EVENT_IDENTITY_QUERY_TIMEOUT_MS = 2_000;
+
+type EventIdentityRow = FplPlayerFixtureIdentity;
+
 export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
+    findIdentityByEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<FplPlayerFixtureIdentity[]> => {
+      try {
+        if (!dbInstance) {
+          const client = await getDbClient();
+          const query = client<EventIdentityRow[]>`
+            SELECT
+              player_fixture_stats.fixture_id AS "fixtureId",
+              player_fixture_stats.element_id AS "elementId",
+              player_fixture_stats.team_id AS "teamId",
+              player_fixture_stats.element_type AS "elementType",
+              players.price AS "price",
+              players.web_name AS "webName"
+            FROM fpl.player_fixture_stats AS player_fixture_stats
+            INNER JOIN fpl.players AS players
+              ON players.season_id = player_fixture_stats.season_id
+             AND players.element_id = player_fixture_stats.element_id
+            WHERE player_fixture_stats.season_id = ${season.seasonId}
+              AND player_fixture_stats.event_id = ${eventId}
+          `;
+          const timeout = setTimeout(() => query.cancel(), EVENT_IDENTITY_QUERY_TIMEOUT_MS);
+          try {
+            return [...(await query)];
+          } finally {
+            clearTimeout(timeout);
+          }
+        }
+
+        const db = await getDbInstance();
+        return await db
+          .select({
+            fixtureId: playerFixtureStatsInFpl.fixtureId,
+            elementId: playerFixtureStatsInFpl.elementId,
+            teamId: playerFixtureStatsInFpl.teamId,
+            elementType: playerFixtureStatsInFpl.elementType,
+            price: playersInFpl.price,
+            webName: playersInFpl.webName,
+          })
+          .from(playerFixtureStatsInFpl)
+          .innerJoin(
+            playersInFpl,
+            and(
+              eq(playerFixtureStatsInFpl.seasonId, playersInFpl.seasonId),
+              eq(playerFixtureStatsInFpl.elementId, playersInFpl.elementId),
+            ),
+          )
+          .where(
+            and(
+              eq(playerFixtureStatsInFpl.seasonId, season.seasonId),
+              eq(playerFixtureStatsInFpl.eventId, eventId),
+            ),
+          );
+      } catch (error) {
+        logError('Failed to retrieve event-pinned player fixture identity', error, {
+          season: season.seasonCode,
+          eventId,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve event-pinned player fixture identity',
+          'FIND_PLAYER_FIXTURE_IDENTITY_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertEvidence: async (
       season: FplSeasonRef,
       evidence: readonly FplPlayerFixtureEvidence[],

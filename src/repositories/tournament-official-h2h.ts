@@ -31,6 +31,8 @@ export type OfficialH2HPublication = {
   knockoutRows: DbTournamentKnockoutResultInsert[];
   bracketRows: DbTournamentKnockoutInsert[];
   groupRows: DbTournamentGroupInsert[];
+  /** Provider match IDs returned by this fetch. Undefined means a full fetch. */
+  fetchedOfficialMatchIds?: readonly number[];
   pageManifests?: readonly OfficialH2HPageManifest[];
   /** A guarded full fetch must prove that no previously locked page vanished. */
   fullReconcile?: boolean;
@@ -41,6 +43,10 @@ function previousLockedAt(
   publication: Pick<OfficialH2HPublication, 'lockSchedule' | 'checkedAt'>,
 ): Date | null {
   return previous?.lockedAt ?? (publication.lockSchedule ? publication.checkedAt : null);
+}
+
+function sameNullable<T>(left: T | null | undefined, right: T | null | undefined): boolean {
+  return (left ?? null) === (right ?? null);
 }
 
 export const tournamentOfficialH2HRepository = {
@@ -244,13 +250,45 @@ export const tournamentOfficialH2HRepository = {
             });
         }
 
+        const fetchedOfficialMatchIds = publication.fetchedOfficialMatchIds?.filter(
+          (matchId): matchId is number => Number.isSafeInteger(matchId) && matchId > 0,
+        );
+        const officialMatchWasFetched =
+          fetchedOfficialMatchIds === undefined
+            ? sql`TRUE`
+            : fetchedOfficialMatchIds.length === 0
+              ? sql`FALSE`
+              : sql`excluded.official_match_id IN (${sql.join(
+                  fetchedOfficialMatchIds.map((matchId) => sql`${matchId}`),
+                  sql`, `,
+                )})`;
+
         if (publication.battleRows.length > 0) {
+          const battlePayloadUnchanged = sql`
+            ${tournamentBattleGroupResultsInCompetition.groupId} IS NOT DISTINCT FROM excluded.group_id
+            AND ${tournamentBattleGroupResultsInCompetition.eventId} IS NOT DISTINCT FROM excluded.event_id
+            AND ${tournamentBattleGroupResultsInCompetition.homeIndex} IS NOT DISTINCT FROM excluded.home_index
+            AND ${tournamentBattleGroupResultsInCompetition.homeEntryId} IS NOT DISTINCT FROM excluded.home_entry_id
+            AND ${tournamentBattleGroupResultsInCompetition.homeNetPoints} IS NOT DISTINCT FROM excluded.home_net_points
+            AND ${tournamentBattleGroupResultsInCompetition.homeRank} IS NOT DISTINCT FROM excluded.home_rank
+            AND ${tournamentBattleGroupResultsInCompetition.homeMatchPoints} IS NOT DISTINCT FROM excluded.home_match_points
+            AND ${tournamentBattleGroupResultsInCompetition.awayIndex} IS NOT DISTINCT FROM excluded.away_index
+            AND ${tournamentBattleGroupResultsInCompetition.awayEntryId} IS NOT DISTINCT FROM excluded.away_entry_id
+            AND ${tournamentBattleGroupResultsInCompetition.awayNetPoints} IS NOT DISTINCT FROM excluded.away_net_points
+            AND ${tournamentBattleGroupResultsInCompetition.awayRank} IS NOT DISTINCT FROM excluded.away_rank
+            AND ${tournamentBattleGroupResultsInCompetition.awayMatchPoints} IS NOT DISTINCT FROM excluded.away_match_points
+            AND ${tournamentBattleGroupResultsInCompetition.sourceOrder} IS NOT DISTINCT FROM excluded.source_order
+            AND ${tournamentBattleGroupResultsInCompetition.homeIsAverage} IS NOT DISTINCT FROM excluded.home_is_average
+            AND ${tournamentBattleGroupResultsInCompetition.awayIsAverage} IS NOT DISTINCT FROM excluded.away_is_average
+            AND ${tournamentBattleGroupResultsInCompetition.isBye} IS NOT DISTINCT FROM excluded.is_bye
+          `;
           await tx
             .insert(tournamentBattleGroupResultsInCompetition)
             .values(
               publication.battleRows.map((row) => ({
                 ...row,
                 seasonId: season.seasonId,
+                updatedAt: publication.checkedAt,
               })),
             )
             .onConflictDoUpdate({
@@ -276,8 +314,21 @@ export const tournamentOfficialH2HRepository = {
                 homeIsAverage: sql`excluded.home_is_average`,
                 awayIsAverage: sql`excluded.away_is_average`,
                 isBye: sql`excluded.is_bye`,
-                sourceCheckedAt: sql`excluded.source_checked_at`,
-                updatedAt: publication.checkedAt,
+                sourceCheckedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.source_checked_at
+                  WHEN ${battlePayloadUnchanged}
+                   AND ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt} IS NOT NULL
+                    THEN ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}
+                  ELSE excluded.source_checked_at
+                END`,
+                updatedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.updated_at
+                  WHEN ${battlePayloadUnchanged}
+                    THEN ${tournamentBattleGroupResultsInCompetition.updatedAt}
+                  ELSE excluded.updated_at
+                END`,
               },
             });
         }
@@ -324,7 +375,7 @@ export const tournamentOfficialH2HRepository = {
               existing.eventId !== incoming.eventId ||
               existing.matchId !== incoming.matchId ||
               existing.playAgainstId !== incoming.playAgainstId ||
-              existing.sourceOrder !== incoming.sourceOrder ||
+              !sameNullable(existing.sourceOrder, incoming.sourceOrder) ||
               (existing.homeEntryId !== null && existing.homeEntryId !== incoming.homeEntryId) ||
               (existing.awayEntryId !== null && existing.awayEntryId !== incoming.awayEntryId) ||
               (existing.knockoutName !== null && existing.knockoutName !== incoming.knockoutName);
@@ -335,12 +386,30 @@ export const tournamentOfficialH2HRepository = {
               );
             }
           }
+          const knockoutPayloadUnchanged = sql`
+            ${tournamentKnockoutResultsInCompetition.eventId} IS NOT DISTINCT FROM excluded.event_id
+            AND ${tournamentKnockoutResultsInCompetition.matchId} IS NOT DISTINCT FROM excluded.match_id
+            AND ${tournamentKnockoutResultsInCompetition.playAgainstId} IS NOT DISTINCT FROM excluded.play_against_id
+            AND ${tournamentKnockoutResultsInCompetition.homeEntryId} IS NOT DISTINCT FROM excluded.home_entry_id
+            AND ${tournamentKnockoutResultsInCompetition.homeNetPoints} IS NOT DISTINCT FROM excluded.home_net_points
+            AND ${tournamentKnockoutResultsInCompetition.homeGoalsScored} IS NOT DISTINCT FROM excluded.home_goals_scored
+            AND ${tournamentKnockoutResultsInCompetition.homeGoalsConceded} IS NOT DISTINCT FROM excluded.home_goals_conceded
+            AND ${tournamentKnockoutResultsInCompetition.awayEntryId} IS NOT DISTINCT FROM excluded.away_entry_id
+            AND ${tournamentKnockoutResultsInCompetition.awayNetPoints} IS NOT DISTINCT FROM excluded.away_net_points
+            AND ${tournamentKnockoutResultsInCompetition.awayGoalsScored} IS NOT DISTINCT FROM excluded.away_goals_scored
+            AND ${tournamentKnockoutResultsInCompetition.awayGoalsConceded} IS NOT DISTINCT FROM excluded.away_goals_conceded
+            AND ${tournamentKnockoutResultsInCompetition.matchWinner} IS NOT DISTINCT FROM excluded.match_winner
+            AND ${tournamentKnockoutResultsInCompetition.sourceOrder} IS NOT DISTINCT FROM excluded.source_order
+            AND ${tournamentKnockoutResultsInCompetition.knockoutName} IS NOT DISTINCT FROM excluded.knockout_name
+            AND ${tournamentKnockoutResultsInCompetition.tiebreak} IS NOT DISTINCT FROM excluded.tiebreak
+          `;
           await tx
             .insert(tournamentKnockoutResultsInCompetition)
             .values(
               publication.knockoutRows.map((row) => ({
                 ...row,
                 seasonId: season.seasonId,
+                updatedAt: publication.checkedAt,
               })),
             )
             .onConflictDoUpdate({
@@ -361,8 +430,21 @@ export const tournamentOfficialH2HRepository = {
                 sourceOrder: sql`excluded.source_order`,
                 knockoutName: sql`excluded.knockout_name`,
                 tiebreak: sql`excluded.tiebreak`,
-                sourceCheckedAt: sql`excluded.source_checked_at`,
-                updatedAt: publication.checkedAt,
+                sourceCheckedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.source_checked_at
+                  WHEN ${knockoutPayloadUnchanged}
+                   AND ${tournamentKnockoutResultsInCompetition.sourceCheckedAt} IS NOT NULL
+                    THEN ${tournamentKnockoutResultsInCompetition.sourceCheckedAt}
+                  ELSE excluded.source_checked_at
+                END`,
+                updatedAt: sql`CASE
+                  WHEN ${officialMatchWasFetched}
+                    THEN excluded.updated_at
+                  WHEN ${knockoutPayloadUnchanged}
+                    THEN ${tournamentKnockoutResultsInCompetition.updatedAt}
+                  ELSE excluded.updated_at
+                END`,
               },
             });
         }
@@ -370,7 +452,22 @@ export const tournamentOfficialH2HRepository = {
         const groups = createTournamentGroupRepository(tx);
         const knockouts = createTournamentKnockoutsRepository(tx);
         const groupCount = await groups.upsertBatch(season, publication.groupRows);
-        await knockouts.upsertBatch(season, publication.bracketRows);
+        const fetchedOfficialMatchIdSet =
+          fetchedOfficialMatchIds === undefined ? null : new Set(fetchedOfficialMatchIds);
+        const fetchedBracketMatchIds =
+          fetchedOfficialMatchIdSet === null
+            ? undefined
+            : publication.knockoutRows
+                .filter(
+                  (row) =>
+                    typeof row.officialMatchId === 'number' &&
+                    fetchedOfficialMatchIdSet.has(row.officialMatchId),
+                )
+                .map((row) => row.matchId);
+        await knockouts.upsertBatch(season, publication.bracketRows, {
+          fetchedMatchIds: fetchedBracketMatchIds,
+          checkedAt: publication.checkedAt,
+        });
 
         const updateRows = await tx
           .update(tournamentsInCompetition)

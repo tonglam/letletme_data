@@ -283,10 +283,8 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                     eq(eventsInFpl.finished, true),
                     eq(eventsInFpl.dataChecked, true),
                     isNotNull(entryEventResultsInCompetition.richSyncedAt),
-                    or(
-                      isNull(eventsInFpl.dataCheckedAt),
-                      gte(entryEventResultsInCompetition.richSyncedAt, eventsInFpl.dataCheckedAt),
-                    ),
+                    isNotNull(eventsInFpl.dataCheckedAt),
+                    gte(entryEventResultsInCompetition.richSyncedAt, eventsInFpl.dataCheckedAt),
                   ),
                 )
                 .groupBy(entryEventResultsInCompetition.entryId)

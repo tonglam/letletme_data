@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, eq, ne, or, sql } from 'drizzle-orm';
 
 import {
   eventsInFpl,
+  liveMatchDeskCheckpointsInFpl,
+  liveMatchDetailCheckpointsInFpl,
   livePointsPublicationCheckpointsInCompetition,
   livePointsPublicationSeedClaimsInCompetition,
 } from '../db/schemas/index.schema';
@@ -19,6 +21,7 @@ import { createEventLiveRepository } from '../repositories/event-lives';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
 import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
 import { CORE_SNAPSHOT_WRITE_LOCK_KEY } from './core-snapshot-persistence.service';
+import { hasFinalLiveMatchCheckpointsV2 } from './live-match-v2-checkpoint.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import {
   liveV2ItemKey,
@@ -28,6 +31,67 @@ import {
 } from '../cache/live-publication-v2';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logError } from '../utils/logger';
+
+const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
+const LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS = 5 * 60_000;
+
+type FinalCheckpointValidationIdentity = Readonly<{
+  deskPublicationId: string | null;
+  deskGeneration: number | null;
+  deskPayloadSha256: string | null;
+  deskRowCount: number | null;
+  deskPayloadBytes: number | null;
+  deskCheckpointedAt: string | null;
+  detailPublicationId: string | null;
+  detailGeneration: number | null;
+  detailObservedDeskGeneration: number | null;
+  detailFixtureIdentityRevision: string | null;
+  detailPayloadSha256: string | null;
+  detailRowCount: number | null;
+  detailPayloadBytes: number | null;
+  detailCheckpointedAt: string | null;
+}>;
+
+type FinalCheckpointValidationCacheEntry = Readonly<{
+  identity: FinalCheckpointValidationIdentity;
+  validatedAtMs: number;
+}>;
+
+const finalCheckpointValidationCache = new Map<string, FinalCheckpointValidationCacheEntry>();
+
+const checkpointDateIdentity = (value: Date | null): string | null => value?.toISOString() ?? null;
+
+const sameFinalCheckpointValidationIdentity = (
+  left: FinalCheckpointValidationIdentity,
+  right: FinalCheckpointValidationIdentity,
+): boolean =>
+  left.deskPublicationId === right.deskPublicationId &&
+  left.deskGeneration === right.deskGeneration &&
+  left.deskPayloadSha256 === right.deskPayloadSha256 &&
+  left.deskRowCount === right.deskRowCount &&
+  left.deskPayloadBytes === right.deskPayloadBytes &&
+  left.deskCheckpointedAt === right.deskCheckpointedAt &&
+  left.detailPublicationId === right.detailPublicationId &&
+  left.detailGeneration === right.detailGeneration &&
+  left.detailObservedDeskGeneration === right.detailObservedDeskGeneration &&
+  left.detailFixtureIdentityRevision === right.detailFixtureIdentityRevision &&
+  left.detailPayloadSha256 === right.detailPayloadSha256 &&
+  left.detailRowCount === right.detailRowCount &&
+  left.detailPayloadBytes === right.detailPayloadBytes &&
+  left.detailCheckpointedAt === right.detailCheckpointedAt;
+
+const rememberFinalCheckpointValidation = (
+  key: string,
+  identity: FinalCheckpointValidationIdentity,
+): void => {
+  finalCheckpointValidationCache.delete(key);
+  finalCheckpointValidationCache.set(key, { identity, validatedAtMs: Date.now() });
+  while (finalCheckpointValidationCache.size > LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT) {
+    const oldest = finalCheckpointValidationCache.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    finalCheckpointValidationCache.delete(oldest);
+  }
+};
 
 export type LivePublicationV2CheckpointRequest = {
   readonly season: FplSeasonRef;
@@ -532,16 +596,40 @@ export async function readLivePublicationV2Checkpoint(
 }
 
 /**
- * Return every terminal event whose V2 checkpoint is absent or not FINALIZED.
- * This is one set-based query so a scheduler restart can catch up an older
- * event without issuing one checkpoint lookup per historical gameweek.
+ * Return every terminal event whose Live Points, Match desk, or Match detail
+ * checkpoint is absent or not FINALIZED.
+ *
+ * The initial query is set-based and supplies the cheap state fence for every
+ * terminal event. A row that looks FINALIZED at the column level still needs
+ * the self-contained Match manifest/payload validation before it can be
+ * excluded: database constraints protect shape, not the publication
+ * checksum relationship used by the serving path.
  */
 export async function findLivePublicationV2FinalizationTargets(
   season: FplSeasonRef,
 ): Promise<number[]> {
   const db = await getDb();
   const rows = await db
-    .select({ eventId: eventsInFpl.eventId })
+    .select({
+      eventId: eventsInFpl.eventId,
+      livePointsState: livePointsPublicationCheckpointsInCompetition.state,
+      deskState: liveMatchDeskCheckpointsInFpl.state,
+      deskPublicationId: liveMatchDeskCheckpointsInFpl.publicationId,
+      deskGeneration: liveMatchDeskCheckpointsInFpl.generation,
+      deskPayloadSha256: liveMatchDeskCheckpointsInFpl.payloadSha256,
+      deskRowCount: liveMatchDeskCheckpointsInFpl.rowCount,
+      deskPayloadBytes: liveMatchDeskCheckpointsInFpl.payloadBytes,
+      deskCheckpointedAt: liveMatchDeskCheckpointsInFpl.checkpointedAt,
+      detailState: liveMatchDetailCheckpointsInFpl.state,
+      detailPublicationId: liveMatchDetailCheckpointsInFpl.publicationId,
+      detailGeneration: liveMatchDetailCheckpointsInFpl.generation,
+      detailObservedDeskGeneration: liveMatchDetailCheckpointsInFpl.observedDeskGeneration,
+      detailFixtureIdentityRevision: liveMatchDetailCheckpointsInFpl.fixtureIdentityRevision,
+      detailPayloadSha256: liveMatchDetailCheckpointsInFpl.payloadSha256,
+      detailRowCount: liveMatchDetailCheckpointsInFpl.rowCount,
+      detailPayloadBytes: liveMatchDetailCheckpointsInFpl.payloadBytes,
+      detailCheckpointedAt: liveMatchDetailCheckpointsInFpl.checkpointedAt,
+    })
     .from(eventsInFpl)
     .leftJoin(
       livePointsPublicationCheckpointsInCompetition,
@@ -550,19 +638,72 @@ export async function findLivePublicationV2FinalizationTargets(
         eq(livePointsPublicationCheckpointsInCompetition.eventId, eventsInFpl.eventId),
       ),
     )
+    .leftJoin(
+      liveMatchDeskCheckpointsInFpl,
+      and(
+        eq(liveMatchDeskCheckpointsInFpl.seasonId, eventsInFpl.seasonId),
+        eq(liveMatchDeskCheckpointsInFpl.eventId, eventsInFpl.eventId),
+      ),
+    )
+    .leftJoin(
+      liveMatchDetailCheckpointsInFpl,
+      and(
+        eq(liveMatchDetailCheckpointsInFpl.seasonId, eventsInFpl.seasonId),
+        eq(liveMatchDetailCheckpointsInFpl.eventId, eventsInFpl.eventId),
+      ),
+    )
     .where(
       and(
         eq(eventsInFpl.seasonId, season.seasonId),
         eq(eventsInFpl.finished, true),
         eq(eventsInFpl.dataChecked, true),
-        or(
-          isNull(livePointsPublicationCheckpointsInCompetition.eventId),
-          ne(livePointsPublicationCheckpointsInCompetition.state, 'FINALIZED'),
-        ),
       ),
     )
     .orderBy(eventsInFpl.eventId);
-  return rows.map((row) => row.eventId);
+  const targets: number[] = [];
+  for (const row of rows) {
+    if (
+      row.livePointsState !== 'FINALIZED' ||
+      row.deskState !== 'FINALIZED' ||
+      row.detailState !== 'FINALIZED'
+    ) {
+      finalCheckpointValidationCache.delete(`${season.seasonId}:${row.eventId}`);
+      targets.push(row.eventId);
+      continue;
+    }
+    const key = `${season.seasonId}:${row.eventId}`;
+    const identity: FinalCheckpointValidationIdentity = {
+      deskPublicationId: row.deskPublicationId ?? null,
+      deskGeneration: row.deskGeneration ?? null,
+      deskPayloadSha256: row.deskPayloadSha256 ?? null,
+      deskRowCount: row.deskRowCount ?? null,
+      deskPayloadBytes: row.deskPayloadBytes ?? null,
+      deskCheckpointedAt: checkpointDateIdentity(row.deskCheckpointedAt ?? null),
+      detailPublicationId: row.detailPublicationId ?? null,
+      detailGeneration: row.detailGeneration ?? null,
+      detailObservedDeskGeneration: row.detailObservedDeskGeneration ?? null,
+      detailFixtureIdentityRevision: row.detailFixtureIdentityRevision ?? null,
+      detailPayloadSha256: row.detailPayloadSha256 ?? null,
+      detailRowCount: row.detailRowCount ?? null,
+      detailPayloadBytes: row.detailPayloadBytes ?? null,
+      detailCheckpointedAt: checkpointDateIdentity(row.detailCheckpointedAt ?? null),
+    };
+    const cachedValidation = finalCheckpointValidationCache.get(key);
+    if (
+      cachedValidation &&
+      sameFinalCheckpointValidationIdentity(cachedValidation.identity, identity) &&
+      Date.now() - cachedValidation.validatedAtMs < LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS
+    ) {
+      continue;
+    }
+    if (!(await hasFinalLiveMatchCheckpointsV2(season, row.eventId))) {
+      finalCheckpointValidationCache.delete(key);
+      targets.push(row.eventId);
+      continue;
+    }
+    rememberFinalCheckpointValidation(key, identity);
+  }
+  return targets;
 }
 
 /**
@@ -788,37 +929,48 @@ export async function checkpointLivePublicationV2(
       await createEventLiveExplainsRepository(tx).replaceEvent(season, [...explains]);
       await createFplPlayerFixtureStatsRepository(tx).upsertEvidence(season, [...fixtureEvidence]);
       await createFixtureRepository(tx).upsertBatch(season, [...fixtures]);
+      // Keep the checked/finalized timestamps in one UPDATE. A finalized event
+      // may already have a historical finalized timestamp that is older than a
+      // late source observation. Updating checked first would violate
+      // events_finalization_order and roll back the otherwise complete
+      // checkpoint before the finalization repair can run.
+      const checkedAt =
+        publication.state === 'FINALIZED'
+          ? sql`
+              GREATEST(
+                COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+                ${observationCheckedAtParameter}::timestamptz
+              )
+            `
+          : sql`
+              CASE
+                WHEN ${eventsInFpl.liveSnapshotFinalizedAt} IS NOT NULL
+                  THEN ${eventsInFpl.liveSnapshotCheckedAt}
+                ELSE GREATEST(
+                  COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+                  ${observationCheckedAtParameter}::timestamptz
+                )
+              END
+            `;
       await tx
         .update(eventsInFpl)
         .set({
-          liveSnapshotCheckedAt: sql`
-          GREATEST(
-            COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
-            ${observationCheckedAtParameter}::timestamptz
-          )
-        `,
+          liveSnapshotCheckedAt: checkedAt,
           liveFactsPersistedAt: checkpointedAt,
           updatedAt: checkpointedAt,
+          ...(publication.state === 'FINALIZED'
+            ? {
+                liveSnapshotFinalizedAt: sql`
+                  GREATEST(
+                    COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAtParameter}::timestamptz),
+                    COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+                    ${observationCheckedAtParameter}::timestamptz
+                  )
+                `,
+              }
+            : {}),
         })
         .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
-      if (publication.state === 'FINALIZED') {
-        // The V2 checkpoint is the finalization boundary. Keep the existing
-        // checked timestamp invariant intact when a late core heartbeat won the
-        // race with this durable final write.
-        await tx
-          .update(eventsInFpl)
-          .set({
-            liveSnapshotFinalizedAt: sql`
-            GREATEST(
-              COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAtParameter}::timestamptz),
-              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
-              ${observationCheckedAtParameter}::timestamptz
-            )
-          `,
-            updatedAt: checkpointedAt,
-          })
-          .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
-      }
       if (request.seedClaimId) {
         const removedClaims = await tx
           .delete(livePointsPublicationSeedClaimsInCompetition)

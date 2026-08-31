@@ -1,7 +1,7 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
-import { getPostMatchResultsSlot } from '../domain/post-match-results';
+import { getFinalizationAwarePostMatchResultsSlot } from '../domain/post-match-results';
 import { getCurrentEvent } from '../services/events.service';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
@@ -31,7 +31,7 @@ export async function runTournamentEventResultsSync() {
   }
 
   const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
-  const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
+  const resultSlot = getFinalizationAwarePostMatchResultsSlot(currentEvent, fixtures, now);
   if (!resultSlot) {
     logInfo('Skipping tournament event results sync - conditions not met', {
       eventId: currentEvent.id,

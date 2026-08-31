@@ -6,6 +6,23 @@ on:
     types: [completed]
     branches: ['main']
   workflow_dispatch:
+    inputs:
+      retire_expired_core_staging_publication_ids:
+        description: 'Comma-separated exact expired fpl:core staging publication UUIDs to retire'
+        required: false
+        type: string
+      retire_expired_core_staging_season_id:
+        description: 'Season ID fence for the exact staging publications'
+        required: false
+        type: string
+      retire_expired_core_staging_active_publication_id:
+        description: 'Expected active fpl:core publication UUID fence'
+        required: false
+        type: string
+      retire_expired_core_staging_active_revision:
+        description: 'Expected active fpl:core revision fence'
+        required: false
+        type: string
 
 concurrency:
   group: deploy-main
@@ -110,6 +127,10 @@ jobs:
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           LIVE_POINTS_V2_SEED_SEASON: ${{ vars.LIVE_POINTS_V2_SEED_SEASON }}
           LIVE_POINTS_V2_SEED_EVENT_ID: ${{ vars.LIVE_POINTS_V2_SEED_EVENT_ID }}
+          RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS: ${{ inputs.retire_expired_core_staging_publication_ids }}
+          RETIRE_EXPIRED_CORE_STAGING_SEASON_ID: ${{ inputs.retire_expired_core_staging_season_id }}
+          RETIRE_EXPIRED_CORE_STAGING_ACTIVE_PUBLICATION_ID: ${{ inputs.retire_expired_core_staging_active_publication_id }}
+          RETIRE_EXPIRED_CORE_STAGING_ACTIVE_REVISION: ${{ inputs.retire_expired_core_staging_active_revision }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
@@ -120,7 +141,7 @@ jobs:
           # leave the SSH command enough time for preflight, migration, and
           # rollback/recovery if readiness never converges.
           timeout: 20m
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,LIVE_POINTS_V2_SEED_SEASON,LIVE_POINTS_V2_SEED_EVENT_ID
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,LIVE_POINTS_V2_SEED_SEASON,LIVE_POINTS_V2_SEED_EVENT_ID,RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS,RETIRE_EXPIRED_CORE_STAGING_SEASON_ID,RETIRE_EXPIRED_CORE_STAGING_ACTIVE_PUBLICATION_ID,RETIRE_EXPIRED_CORE_STAGING_ACTIVE_REVISION
           script: |
             set -euo pipefail
             old_image=""
@@ -397,6 +418,13 @@ jobs:
               bun scripts/wait-for-migration-login.ts
             finish_stage
 
+            start_stage stagingRepair
+            if ! retire_expired_core_staging_publications; then
+              echo 'deploy repair: exact staging publication repair failed; services were not stopped' >&2
+              exit 1
+            fi
+            finish_stage
+
             deployment_started=true
             migration_started=false
 
@@ -488,11 +516,15 @@ jobs:
             # the one-shot cutover container. Keep DATABASE_URL from
             # .env.deploy so checkpoint services use the least-privilege
             # runtime role instead of the migration owner role.
-            v2_seed_database_url="$migration_database_url"
-            LIVE_POINTS_SEED_CONFIRM=YES \
+            # Keep secret values in the environment rather than the Compose
+            # process argv. `-e NAME` asks Compose to inherit NAME from the
+            # shell environment; putting NAME=value here leaks credentials to
+            # host process listings while the one-shot container is running.
+            LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url" \
+              LIVE_POINTS_SEED_CONFIRM=YES \
               APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
-              -e "LIVE_POINTS_V2_SEED_DATABASE_URL=$v2_seed_database_url" \
-              -e LIVE_POINTS_SEED_CONFIRM=YES \
+              -e LIVE_POINTS_V2_SEED_DATABASE_URL \
+              -e LIVE_POINTS_SEED_CONFIRM \
               api bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
@@ -501,10 +533,15 @@ jobs:
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
               --all-finalized
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              api bun run db:cutover-seed-live-match-v2 -- --execute --all-finalized \
+              --season "$LIVE_POINTS_V2_SEED_SEASON" \
+              --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
             finish_stage
             start_stage cachePublish
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
-              -e "DATABASE_URL=$data_runtime_database_url" api \
+            DATABASE_URL="$data_runtime_database_url" \
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+              -e DATABASE_URL api \
               bun run cache:publish-core -- --execute --allow-empty
             finish_stage
             start_stage serviceReady

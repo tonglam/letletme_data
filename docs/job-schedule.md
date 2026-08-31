@@ -39,6 +39,7 @@ bug-report-screenshot-retention
 client-signal-retention
 player-season-summary-repair
 tournament-trends-repair
+tournament-review-v2
 launch-monitor
 post-match-consolidation
 my-fpl-snapshot
@@ -151,6 +152,7 @@ invalidate otherwise complete history.
 | Job | Cadence | Gate / behavior |
 |---|---|---|
 | `live-snapshot` | 30-second lifecycle obligation | `isFPLSeason`, current event, and lifecycle window; one coherent fetch validates event-live + fixtures before atomically publishing the V2 Redis current/previous pair. Heartbeats update source freshness only; semantic changes advance the relevant revision and a merged PostgreSQL checkpoint obligation. |
+| `live-match-checkpoint` | coalesced asynchronous obligation | Internal `live-data` worker job created by the Match V2 publisher. It reads only the latest Redis desired publication, writes the compact desk/detail checkpoint after the ten-minute watermark (or immediately for first, lifecycle/identity-boundary, and final publications), then CAS-marks Redis. It never calls FPL and never queues one job per heartbeat. |
 | `post-match-consolidation` | bounded post-match slots | Maintenance coordinator enqueues the separate live-finalization and player-stat checkpoint obligations; its success means downstream jobs were accepted, not that their writes are complete. |
 
 The snapshot derives all global live items from the same accepted upstream pair. Every changed item
@@ -158,6 +160,13 @@ publishes under one immutable generation; content-identical checks only update `
 and `expectedNextCheckAt`. The standalone scheduler owns the 30-second lifecycle obligation and
 the separate post-match finalization obligation. Redis is promoted before PostgreSQL checkpointing,
 so a database outage does not remove the last complete page response.
+
+Live Matches V2 is a sibling of that observation, not a second provider poll. It promotes a compact
+desk when fixtures are valid and promotes fixture-grain player detail only when the event-live result
+and player identity are valid. A fixtures-only success therefore advances the score desk while the
+previous compatible detail remains available and marked degraded. The warm checkpoint path is
+`Redis current -> Redis previous -> process LKG -> bounded PostgreSQL cold fallback`; no page request
+calls FPL, Data API, a queue, or PostgreSQL.
 
 The V2 snapshot does not synchronously write the legacy `fpl.player_gameweek_stats`
 rowset. Its complete event-live payload is checkpointed as one immutable V2
@@ -203,7 +212,10 @@ has converged; otherwise it throws one aggregate failure so a later generation
 can repair the incomplete set.
 
 The tournament event-results job starts its cascade only when at least one
-active tournament entry was processed. The cascade contains:
+active tournament entry was processed, and the event has exact
+`finished && data_checked` evidence plus season-owned finalized event-live
+rows. Provisional result checkpoints do not open derived tournament work. The
+cascade contains:
 
 - points-race, battle-race, and knockout structure jobs;
 - post-event transfer calculation;
@@ -230,6 +242,29 @@ since that same job began and fetches only the remaining entry/event units.
 | Job | Cadence | Gate / behavior |
 |---|---|---|
 | `tournament-info-sync` | daily obligation | `isFPLSeason` |
+
+## My Tournament Review V2
+
+| Job | Cadence | Gate / behavior |
+|---|---|---|
+| `tournament-review-v2` | every five minutes | Reconciles finalized, setup-ready `(season, tournament, event)` obligations and processes at most 20 due scopes per run on the `my-fpl-orchestration` lane. |
+
+The worker is downstream of finalization. It will not publish an event until
+`finished = true`, `data_checked = true`, `data_checked_at` is present, and the
+selected format's source rows are complete and fresh through that timestamp. A
+source-not-ready result increments `source_rechecks` without consuming an
+execution attempt; source delays retry at 60s/180s/600s. Execution failures
+retry at 60s/300s/900s. After those bounded attempts the obligation is
+`DEGRADED` and is repaired every 15 minutes for up to 24 hours from
+eligibility.
+
+Success evidence is the committed immutable publication plus the matching
+atomic head and `READY` obligation. A BullMQ completion record alone is not
+success evidence. The publication transaction uses repeatable-read plus a
+scope advisory lock, content hashes the JSON payload, reuses identical content,
+and advances only that tournament/event head. Custom tournaments use this same
+backfill after `setup_status = 'ready'`; no second creation-time scheduler is
+required.
 
 ## Gate definitions
 

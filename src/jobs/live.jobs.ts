@@ -1,7 +1,7 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { getPostMatchResultsSlot } from '../domain/post-match-results';
+import { getFinalizationAwarePostMatchResultsSlot } from '../domain/post-match-results';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
 import { getCurrentEvent } from '../services/events.service';
@@ -45,6 +45,8 @@ export async function runLiveSnapshot(now = new Date()): Promise<unknown | null>
 
   const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
     now,
+    lifecycleState: 'LIVE_ACTIVE',
+    expectedNextCheckAt: new Date(now.getTime() + LIVE_POLL_MS),
   });
   if (job) {
     logInfo('Live snapshot job enqueued', {
@@ -64,13 +66,14 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
   if (!currentEvent) return null;
 
   const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
-  const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
+  const resultSlot = getFinalizationAwarePostMatchResultsSlot(currentEvent, fixtures, now);
   if (!resultSlot) return null;
 
   const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cascade', {
     // Provisional slots are useful for recovery, but the worker must not be
     // asked to publish a final event checkpoint until FPL marks data checked.
     finalizeEvent: resultSlot.startsWith('final-'),
+    lifecycleState: resultSlot.startsWith('final-') ? 'FINALIZED' : 'GW_REVIEW',
     jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
   });
   if (job) {

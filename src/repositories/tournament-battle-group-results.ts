@@ -193,6 +193,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
               awayNetPoints: sql`excluded.away_net_points`,
               awayRank: sql`excluded.away_rank`,
               awayMatchPoints: sql`excluded.away_match_points`,
+              sourceCheckedAt: sql`COALESCE(excluded.source_checked_at, ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt})`,
               updatedAt: new Date(),
             },
           });

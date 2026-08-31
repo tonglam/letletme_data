@@ -13,6 +13,14 @@ import {
   type QueueAdmissionMode,
 } from '../services/queue-governance.service';
 import { getJobsStatus, type JobsStatusWindow } from '../services/jobs-status.service';
+import { runLiveMatchesV2Repair } from '../services/live-match-v2-repair.service';
+import {
+  getHttpStatusFromError,
+  getOrCreateRequestId,
+  getPublicErrorCode,
+  getPublicErrorMessage,
+} from '../utils/errors';
+import { logError } from '../utils/logger';
 import { apiKeyFailureHttpResponse, verifyRequestApiKey } from './auth.guard';
 
 const FRESHNESS_STATUSES = new Set(['PENDING', 'MET', 'BREACHED', 'INVALID', 'NOT_APPLICABLE']);
@@ -186,6 +194,53 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
       body: t.Object({
         action: t.Union([t.Literal('dry-run'), t.Literal('execute'), t.Literal('dismiss')]),
         expectedUpdatedAt: t.String(),
+      }),
+    },
+  )
+  .post(
+    '/live-matches-v2/repair',
+    async ({ request, set, body }) => {
+      if (!(await requireOpsKey(request, set))) return { success: false, error: 'Unauthorized' };
+      try {
+        const repair = await runLiveMatchesV2Repair({
+          action: body.action,
+          season: body.season,
+          eventId: body.eventId,
+          kind: body.kind ?? null,
+          reason: body.reason ?? null,
+          confirmation: body.confirmation ?? null,
+        });
+        return { success: true, repair };
+      } catch (error) {
+        const status = getHttpStatusFromError(error);
+        const requestId = getOrCreateRequestId(request);
+        if (status >= 500) {
+          logError('Live Matches V2 operator repair failed', error, { requestId });
+          set.headers['x-request-id'] = requestId;
+        }
+        set.status = status;
+        const code = getPublicErrorCode(error, status);
+        return {
+          success: false,
+          error: getPublicErrorMessage(error, status),
+          ...(code ? { code } : {}),
+          ...(status >= 500 && process.env.NODE_ENV === 'production' ? { requestId } : {}),
+        };
+      }
+    },
+    {
+      body: t.Object({
+        action: t.Union([
+          t.Literal('inspect'),
+          t.Literal('promote-previous'),
+          t.Literal('rebuild-current'),
+          t.Literal('replay-checkpoint'),
+        ]),
+        season: t.String({ pattern: '^\\d{4}$' }),
+        eventId: t.Integer({ minimum: 1 }),
+        kind: t.Optional(t.Union([t.Literal('desk'), t.Literal('detail')])),
+        reason: t.Optional(t.String({ maxLength: 240 })),
+        confirmation: t.Optional(t.String({ maxLength: 64 })),
       }),
     },
   )

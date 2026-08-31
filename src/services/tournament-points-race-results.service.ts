@@ -1,6 +1,7 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentSyncContext } from '../domain/tournament';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
+import { entryInfoRepository } from '../repositories/entry-infos';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -19,7 +20,15 @@ function groupRankKey(totalNetPoints: number, overallRank: number | null) {
   return `${totalNetPoints}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
 }
 
-function rankGroups(
+/** Clamp an entry's cumulative-results lower bound to the tournament window. */
+export function effectiveTournamentReviewEntryStartEventId(
+  groupStartedEventId: number,
+  entryStartedEventId: number | null | undefined,
+): number {
+  return Math.max(groupStartedEventId, entryStartedEventId ?? groupStartedEventId);
+}
+
+export function rankTournamentReviewPointsGroups(
   groups: Array<{ entryId: number; totalNetPoints: number; overallRank: number | null }>,
 ) {
   const sorted = [...groups].sort((a, b) => {
@@ -33,7 +42,11 @@ function rankGroups(
 
   const rankMap = new Map<string, number>();
   sorted.forEach((entry, index) => {
-    rankMap.set(groupRankKey(entry.totalNetPoints, entry.overallRank), index + 1);
+    const rankKey = groupRankKey(entry.totalNetPoints, entry.overallRank);
+    // Keep the first position for a tied score/rank key. This is the same
+    // competition-ranking convention used by the immutable review validator
+    // (1, 1, 3), rather than overwriting the key with the last tied row.
+    if (!rankMap.has(rankKey)) rankMap.set(rankKey, index + 1);
   });
 
   return rankMap;
@@ -44,23 +57,43 @@ async function loadTournamentEntryTotals(
   entryIds: number[],
   startEventId: number,
   endEventId: number,
+  startedEventByEntry: ReadonlyMap<number, number | null | undefined>,
 ): Promise<Map<number, EntryTotals>> {
-  const totals = await entryEventResultsRepository.aggregateTotalsByEntry(
-    season,
-    entryIds,
-    startEventId,
-    endEventId,
-  );
-  return new Map(
-    totals.map((row) => [
-      row.entryId,
-      {
+  // Entries can join a tournament after its group window starts.  Aggregate
+  // each effective lower-bound cohort so no pre-entry event result leaks into
+  // the cumulative review totals.  Grouping by bound keeps the query count
+  // bounded by the number of distinct start events while preserving the
+  // indexed range scan in aggregateTotalsByEntry.
+  const entryIdsByStartEvent = new Map<number, number[]>();
+  for (const entryId of entryIds) {
+    const entryStartedEvent = startedEventByEntry.get(entryId);
+    const effectiveStartEvent = effectiveTournamentReviewEntryStartEventId(
+      startEventId,
+      entryStartedEvent,
+    );
+    const cohort = entryIdsByStartEvent.get(effectiveStartEvent) ?? [];
+    cohort.push(entryId);
+    entryIdsByStartEvent.set(effectiveStartEvent, cohort);
+  }
+
+  const totalsByEntry = new Map<number, EntryTotals>();
+  for (const [effectiveStartEvent, cohortEntryIds] of entryIdsByStartEvent) {
+    const totals = await entryEventResultsRepository.aggregateTotalsByEntry(
+      season,
+      cohortEntryIds,
+      effectiveStartEvent,
+      endEventId,
+      { finalizedOnly: true },
+    );
+    for (const row of totals) {
+      totalsByEntry.set(row.entryId, {
         totalPoints: row.totalPoints,
         totalTransfersCost: row.totalTransfersCost,
         totalNetPoints: row.totalNetPoints,
-      },
-    ]),
-  );
+      });
+    }
+  }
+  return totalsByEntry;
 }
 
 export async function syncTournamentPointsRaceResultsForTournament(
@@ -108,11 +141,15 @@ export async function syncTournamentPointsRaceResultsForTournament(
     return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
   }
 
+  const entryInfos = await entryInfoRepository.findByIds(season, entryIds);
+  const startedEventByEntry = new Map(entryInfos.map((entry) => [entry.id, entry.startedEvent]));
+
   const totalsMap = await loadTournamentEntryTotals(
     season,
     entryIds,
     tournament.groupStartedEventId,
     Math.min(eventId, tournament.groupEndedEventId),
+    startedEventByEntry,
   );
 
   const pointsGroupResults = await tournamentPointsGroupResultsRepository.findByTournamentAndEvent(
@@ -173,13 +210,16 @@ export async function syncTournamentPointsRaceResultsForTournament(
     };
     updatedGroups.push(groupUpdate);
 
-    const groupList = groupsByGroupId.get(group.groupId) ?? [];
-    groupList.push({
-      entryId,
-      totalNetPoints: totals.totalNetPoints,
-      overallRank: eventResult.overallRank,
-    });
-    groupsByGroupId.set(group.groupId, groupList);
+    const startedEvent = startedEventByEntry.get(entryId);
+    if (startedEvent === undefined || startedEvent === null || eventId >= startedEvent) {
+      const groupList = groupsByGroupId.get(group.groupId) ?? [];
+      groupList.push({
+        entryId,
+        totalNetPoints: totals.totalNetPoints,
+        overallRank: eventResult.overallRank,
+      });
+      groupsByGroupId.set(group.groupId, groupList);
+    }
 
     const existingPoints = pointsGroupResultsMap.get(entryId);
     const eventNetPoints = eventResult.eventPoints - eventResult.eventTransfersCost;
@@ -200,7 +240,7 @@ export async function syncTournamentPointsRaceResultsForTournament(
 
   const rankLookup = new Map<number, Map<string, number>>();
   for (const [groupId, groupEntries] of groupsByGroupId.entries()) {
-    rankLookup.set(groupId, rankGroups(groupEntries));
+    rankLookup.set(groupId, rankTournamentReviewPointsGroups(groupEntries));
   }
 
   for (const group of updatedGroups) {

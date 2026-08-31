@@ -39,6 +39,7 @@ import {
   enqueueMyFplSnapshot,
   enqueueMyFplSnapshotOutbox,
   enqueueTournamentTrendsRepair,
+  enqueueTournamentReview,
 } from '../jobs/maintenance.jobs';
 import { enqueueUnderstatPlayerSync, enqueueUnderstatTeamSync } from '../jobs/understat-enqueue';
 import { enqueueUnderstatOrphanReconciler } from '../jobs/understat-recovery.jobs';
@@ -50,8 +51,8 @@ import {
   coreSnapshotRefreshReason,
 } from '../domain/core-snapshot-refresh';
 import {
-  getPostMatchResultsCheckpoint,
-  getPostMatchResultsSlot,
+  getFinalizationAwarePostMatchResultsCheckpoint,
+  getFinalizationAwarePostMatchResultsSlot,
 } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
@@ -66,6 +67,7 @@ import {
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
+import { normalizeMatchLifecycleState } from '../services/live-match-v2';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
@@ -458,8 +460,11 @@ function postMatchFixtureAuthority(fixtures: readonly Fixture[]): Readonly<{
 /**
  * Results are meaningful only after the final fixture's expected end. During
  * the first 24 hours each event gets one idempotent hourly checkpoint. Once
- * FPL marks an event finished and data_checked, a stable final checkpoint
- * remains eligible forever so scheduler downtime cannot strand historical GWs.
+ * FPL marks an event finished, data_checked, and data_checked_at, a stable
+ * final checkpoint remains eligible forever so scheduler downtime cannot
+ * strand historical GWs. An event that has the boolean flags but not the
+ * timestamp stays on a distinct provisional slot until complete finalization
+ * evidence arrives.
  */
 export async function resolvePostMatchResultPlans(
   context: SchedulerContext,
@@ -470,7 +475,7 @@ export async function resolvePostMatchResultPlans(
   const unsettledEvents: SchedulerContext['events'][number][] = [];
 
   for (const event of context.events) {
-    if (event.finished && event.dataChecked) {
+    if (event.finished === true && event.dataChecked === true && event.dataCheckedAt != null) {
       const dueAt = event.dataCheckedAt ?? event.deadlineTime ?? context.now;
       if (context.now < dueAt) continue;
       plans.push({
@@ -499,8 +504,8 @@ export async function resolvePostMatchResultPlans(
   const provisional = await Promise.all(
     unsettledEvents.map(async (event): Promise<SchedulerObligationPlan | null> => {
       const fixtures = await loadFixtures(context.season, event.id);
-      const checkpoint = getPostMatchResultsCheckpoint(
-        { dataChecked: event.dataChecked === true },
+      const checkpoint = getFinalizationAwarePostMatchResultsCheckpoint(
+        event,
         fixtures,
         context.now,
       );
@@ -525,23 +530,32 @@ export function resolveLiveFinalizationCatchupPlans(
   context: SchedulerContext,
   targetEventIds: ReadonlySet<number>,
 ): readonly SchedulerObligationPlan[] {
-  return context.events
-    .filter((event) => targetEventIds.has(event.id))
-    .map((event) => {
-      const dueAt = event.dataCheckedAt ?? event.updatedAt ?? event.deadlineTime ?? context.now;
-      return {
-        scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-        periodKey: `live-final-catchup-${event.id}-${dueAt.getTime()}`,
-        dueAt,
-        eventId: event.id,
-        source: 'catchup' as const,
-        evidence: {
-          finalization: 'missing-v2-checkpoint',
-          finalizeEvent: true,
-          dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
-        },
-      };
-    });
+  return context.events.flatMap((event) => {
+    if (!targetEventIds.has(event.id) || event.dataCheckedAt == null) return [];
+
+    const dueAt = event.dataCheckedAt;
+    const resultAuthorityAtMs = (
+      event.updatedAt ??
+      event.dataCheckedAt ??
+      event.deadlineTime ??
+      dueAt
+    ).getTime();
+    return {
+      scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+      periodKey: `live-final-catchup-${event.id}-${dueAt.getTime()}`,
+      dueAt,
+      eventId: event.id,
+      source: 'catchup' as const,
+      evidence: {
+        finalization: 'missing-v2-checkpoint',
+        resultSlot: 'final-checkpoint',
+        resultAuthorityAtMs,
+        resultScheduleAnchorMs: dueAt.getTime(),
+        finalizeEvent: true,
+        dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
+      },
+    };
+  });
 }
 
 const postMatchPlanCache = new WeakMap<
@@ -557,9 +571,8 @@ function resultEventDefinition(
     timezone: 'UTC',
     resolve: (context) => {
       const cached = postMatchPlanCache.get(context);
-      if (cached) return cached;
-      const plans = resolvePostMatchResultPlans(context);
-      postMatchPlanCache.set(context, plans);
+      const plans = cached ?? resolvePostMatchResultPlans(context);
+      if (!cached) postMatchPlanCache.set(context, plans);
       return plans;
     },
   };
@@ -955,7 +968,7 @@ function postMatchMaintenanceDefinition(): ScheduledJobDefinition {
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
-      const resultSlot = getPostMatchResultsSlot(event, fixtures, context.now);
+      const resultSlot = getFinalizationAwarePostMatchResultsSlot(event, fixtures, context.now);
       if (!resultSlot) return [];
       const dateKey = formatCronDateKey(context.now);
       const hours = [6, 8, 10];
@@ -1033,6 +1046,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
           evidence: {
             lifecycleState: decision.state,
             pollIntervalMs,
+            expectedNextCheckAt: new Date(context.now.getTime() + pollIntervalMs).toISOString(),
           },
         },
       ];
@@ -1046,6 +1060,11 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         obligationId,
         obligationGeneration: generation,
         freshnessWindowId,
+        lifecycleState: normalizeMatchLifecycleState(plan.evidence?.lifecycleState),
+        expectedNextCheckAt:
+          typeof plan.evidence?.expectedNextCheckAt === 'string'
+            ? plan.evidence.expectedNextCheckAt
+            : null,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },
@@ -1508,6 +1527,22 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       successPredicate: 'active tournament public trend scopes are published',
       enqueue: async ({ context, obligationId, generation }) => {
         const job = await enqueueTournamentTrendsRepair(context.season, 'catchup', {
+          jobId: `scheduler-${obligationId}-g${generation}`,
+          obligationId,
+          obligationGeneration: generation,
+        });
+        return { bullJobId: job.id, runId: job.data.runId };
+      },
+    }),
+    periodicMaintenanceDefinition({
+      name: MAINTENANCE_JOBS.TOURNAMENT_REVIEW,
+      cadence: 'every five minutes; finalized scopes only',
+      periodMs: 5 * 60_000,
+      criticality: 'critical',
+      successPredicate:
+        'finalized My Tournament Review V2 scopes are published or retained in bounded repair',
+      enqueue: async ({ context, obligationId, generation }) => {
+        const job = await enqueueTournamentReview(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,

@@ -16,6 +16,7 @@ import {
   resolveLivePointsV2SeedDatabaseUrl,
   resolveSeedObservationCheckedAt,
   seedClaimMatchesActiveFence,
+  shouldSkipLegacyLivePublication,
   type ExistingPickRow,
   type FinalResultSeedRow,
   type LegacyFixtureEvidenceRow,
@@ -595,5 +596,13 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(() => parseSeedArguments(['--all-finalized'])).toThrow();
     expect(() => parseSeedArguments(['--season', '2627', '--season', '2627'])).toThrow();
     expect(() => parseSeedArguments(['--event-id', '0'])).toThrow();
+  });
+
+  test('treats an existing V2 checkpoint as authoritative over legacy seed validation', () => {
+    const existingCheckpoints = new Set([2, 5]);
+
+    expect(shouldSkipLegacyLivePublication(2, existingCheckpoints)).toBe(true);
+    expect(shouldSkipLegacyLivePublication(5, existingCheckpoints)).toBe(true);
+    expect(shouldSkipLegacyLivePublication(3, existingCheckpoints)).toBe(false);
   });
 });

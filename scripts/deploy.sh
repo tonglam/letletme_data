@@ -314,6 +314,12 @@ deploy() {
     exit 1
   fi
   finish_stage
+  start_stage stagingRepair
+  if ! retire_expired_core_staging_publications; then
+    log_error "Exact staging publication repair failed; services were not stopped."
+    exit 1
+  fi
+  finish_stage
   start_stage quiescence
   log_info "Validating migration plan before stopping services"
   if ! run_migration_plan; then
@@ -442,9 +448,11 @@ deploy() {
   # The cutover seed is a one-shot operation: use the migration LOGIN's
   # direct/session URL, while compose supplies the runtime database and Redis
   # credentials to checkpoint services.
-  if ! compose run --rm -T --interactive=false \
-    -e "LIVE_POINTS_V2_SEED_DATABASE_URL=${migration_database_url}" \
-    -e LIVE_POINTS_SEED_CONFIRM=YES api \
+  if ! LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url" \
+    LIVE_POINTS_SEED_CONFIRM=YES \
+    compose run --rm -T --interactive=false \
+    -e LIVE_POINTS_V2_SEED_DATABASE_URL \
+    -e LIVE_POINTS_SEED_CONFIRM api \
     bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
     --season "$LIVE_POINTS_V2_SEED_SEASON" \
     --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
@@ -460,11 +468,20 @@ deploy() {
     log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
     exit 1
   fi
+  if ! compose run --rm -T --interactive=false \
+    api \
+    bun run db:cutover-seed-live-match-v2 -- --execute --all-finalized \
+    --season "$LIVE_POINTS_V2_SEED_SEASON" \
+    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+    log_error "Live Matches V2 seed failed; services remain stopped for a forward fix."
+    exit 1
+  fi
   finish_stage
   start_stage cachePublish
   log_info "Publishing and verifying the canonical core cache"
-  if ! compose run --rm -T --interactive=false \
-    -e "DATABASE_URL=${data_runtime_database_url}" api \
+  if ! DATABASE_URL="$data_runtime_database_url" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL api \
     bun run cache:publish-core -- --execute --allow-empty; then
     log_error "Core cache publication failed; services remain stopped for a forward fix."
     exit 1

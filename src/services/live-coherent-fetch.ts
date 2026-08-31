@@ -1,19 +1,44 @@
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import {
+  createFplPlayerFixtureStatsRepository,
+  type FplPlayerFixtureIdentity,
+} from '../repositories/fpl-player-fixture-stats';
 import { createPlayerRepository } from '../repositories/players';
 import { createTeamRepository } from '../repositories/teams';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
 import { transformFixtures } from '../transformers/fixtures';
 import { DatabaseError } from '../utils/errors';
+import { logWarn } from '../utils/logger';
 import { prepareEventLives, type PreparedEventLives } from './event-lives.service';
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 
 export type LiveSnapshotState = 'scheduled' | 'live' | 'settled';
 
+type LivePlayerIdentity = Pick<Player, 'id' | 'type' | 'teamId' | 'price' | 'webName'>;
+
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
   readonly playerTeamById: Map<number, number>;
+  /**
+   * Minimum player identity required by the fixture-grain Live Matches
+   * detail publication.  It is optional for the existing Live Points
+   * preparation path; Match V2 fails closed for detail when it is absent.
+   */
+  readonly playerById?: ReadonlyMap<number, LivePlayerIdentity>;
+  /**
+   * Event-time identity enrichment started for every live event. The promise
+   * is intentionally not part of the Core/Live Points readiness gate; Match
+   * detail consumes it when it settles within its bounded enrichment budget.
+   */
+  readonly eventPinnedIdentities?: Promise<readonly FplPlayerFixtureIdentity[] | null>;
+  /**
+   * Event-time identity captured with fixture evidence. Once enrichment is
+   * available, a current-roster transfer cannot replace the club represented
+   * by the fixture.
+   */
+  readonly playerByFixtureAndId?: ReadonlyMap<string, LivePlayerIdentity>;
 }
 
 export interface PreparedLiveSnapshot {
@@ -58,26 +83,174 @@ function referenceDataFromCore(
       'LIVE_REFERENCE_DATA_INCOMPLETE',
     );
   }
+  const playerById = new Map(
+    players.map((player) => [
+      player.id,
+      {
+        id: player.id,
+        type: player.type,
+        teamId: player.teamId,
+        price: player.price,
+        webName: player.webName,
+      },
+    ]),
+  );
   return {
     season: season.seasonCode,
     ...createLiveFixtureTeamMaps(teams),
     playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
+    playerById,
   };
+}
+
+function addEventPinnedIdentities(
+  referenceData: LiveSnapshotReferenceData,
+  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[],
+): LiveSnapshotReferenceData {
+  const playerByFixtureAndId = new Map<string, LivePlayerIdentity>();
+  for (const identity of eventPinnedIdentities) {
+    if (
+      !Number.isSafeInteger(identity.fixtureId) ||
+      identity.fixtureId <= 0 ||
+      !Number.isSafeInteger(identity.elementId) ||
+      identity.elementId <= 0 ||
+      !Number.isSafeInteger(identity.teamId) ||
+      identity.teamId <= 0 ||
+      !Number.isSafeInteger(identity.elementType) ||
+      identity.elementType < 1 ||
+      identity.elementType > 4 ||
+      !identity.webName.trim()
+    ) {
+      throw new DatabaseError(
+        `Event-pinned player identity is invalid for event ${identity.fixtureId}`,
+        'LIVE_EVENT_PLAYER_IDENTITY_INVALID',
+      );
+    }
+    const key = `${identity.fixtureId}:${identity.elementId}`;
+    if (playerByFixtureAndId.has(key)) {
+      throw new DatabaseError(
+        `Event-pinned player identity is duplicated for ${key}`,
+        'LIVE_EVENT_PLAYER_IDENTITY_DUPLICATE',
+      );
+    }
+    playerByFixtureAndId.set(key, {
+      id: identity.elementId,
+      type: identity.elementType,
+      teamId: identity.teamId,
+      price: identity.price,
+      webName: identity.webName,
+    });
+  }
+
+  return {
+    ...referenceData,
+    ...(playerByFixtureAndId.size > 0 ? { playerByFixtureAndId } : {}),
+  };
+}
+
+async function loadEventPinnedIdentities(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<readonly FplPlayerFixtureIdentity[] | null> {
+  try {
+    return await createFplPlayerFixtureStatsRepository().findIdentityByEvent(season, eventId);
+  } catch (error) {
+    // Event-time identity enriches the fixture-grain detail publication; it
+    // must never take an already valid Core/live observation off the serving
+    // path. Detail keeps its compatible LKG until this enrichment recovers,
+    // while Live Points continues with the current-roster Core baseline.
+    logWarn('Live event identity enrichment unavailable; continuing with Core reference data', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+const LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS = 500;
+
+function resolveWithinBudget<T>(promise: Promise<T>, budgetMs: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), budgetMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timeout);
+        resolve(null);
+      },
+    );
+  });
+}
+
+/**
+ * Resolve event identity only for fixture-grain detail. A slow database must
+ * never hold the Core baseline, Live Points, or Match desk publication. The
+ * caller keeps its same-event detail LKG when the optional enrichment misses
+ * this budget.
+ */
+export async function resolveLiveReferenceDataForDetail(
+  referenceData: LiveSnapshotReferenceData,
+  options: { readonly requireEventPinnedIdentity?: boolean } = {},
+): Promise<LiveSnapshotReferenceData | null> {
+  const requireEventPinnedIdentity = options.requireEventPinnedIdentity === true;
+  if (!referenceData.eventPinnedIdentities) {
+    return requireEventPinnedIdentity && !referenceData.playerByFixtureAndId ? null : referenceData;
+  }
+  const eventPinnedIdentities = await resolveWithinBudget(
+    referenceData.eventPinnedIdentities,
+    LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS,
+  );
+  if (!eventPinnedIdentities || eventPinnedIdentities.length === 0) {
+    // A completed event query with no rows and an unavailable query are both
+    // non-authoritative for fixture-grain detail. The Core roster can remain
+    // the Live Points/desk baseline, but it must not replace a missing event
+    // identity in a detail candidate, even provisionally.
+    return null;
+  }
+  try {
+    return addEventPinnedIdentities(referenceData, eventPinnedIdentities);
+  } catch (error) {
+    logWarn('Live event identity enrichment is invalid; keeping detail LKG', {
+      season: referenceData.season,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /** Core metadata for coherent validation; it is never a live publication. */
 export async function loadLiveReferenceData(
   season: FplSeasonRef,
+  eventId: number,
 ): Promise<LiveSnapshotReferenceData> {
   const cached = await readCoreSnapshotCache(season.seasonCode);
-  if (cached) return referenceDataFromCore(season, cached.teams, cached.players);
-  return withCoreSnapshotReadLock(season, async (transaction) => {
+  if (cached) {
+    // Redis Core is already the serving baseline, so start the optional
+    // identity read immediately without making the Core lookup wait for DB.
+    return {
+      ...referenceDataFromCore(season, cached.teams, cached.players),
+      eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+    };
+  }
+
+  // When Redis Core is absent, finish the short coherent Core transaction
+  // first. This avoids letting the optional identity query win the only Data
+  // pool connection and delay the baseline it is meant to enrich.
+  const coreReferenceData = await withCoreSnapshotReadLock(season, async (transaction) => {
     const [teams, players] = await Promise.all([
       createTeamRepository(transaction).findAll(season),
       createPlayerRepository(transaction).findAll(season),
     ]);
     return referenceDataFromCore(season, teams, players);
   });
+  return {
+    ...coreReferenceData,
+    eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+  };
 }
 
 function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
@@ -97,25 +270,12 @@ function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
     : 'scheduled';
 }
 
-/**
- * Fetch validation is a single coherent boundary: event-live, fixtures, the
- * expected fixture set and the player/team baseline are all checked before a
- * V2 candidate can be staged. No Redis or PostgreSQL writes happen here.
- */
-export function prepareCoherentLiveSnapshot(
+export function validateLiveElementIdentity(
   eventId: number,
-  liveResponse: RawFPLEventLiveResponse,
-  rawFixtures: RawFPLFixture[],
-  referenceData: LiveSnapshotReferenceData,
-  expectedFixtureIds: readonly number[],
+  liveElementIds: readonly number[],
+  referenceData: Pick<LiveSnapshotReferenceData, 'playerTeamById'>,
   publishedLiveElementIds: readonly number[] = [],
-): PreparedLiveSnapshot {
-  if (!Number.isInteger(eventId) || eventId <= 0)
-    throw new Error(`Invalid live snapshot event ID: ${eventId}`);
-  if (!Array.isArray(liveResponse.elements) || liveResponse.elements.length === 0) {
-    throw new Error('FPL event live response contains no elements');
-  }
-  const liveElementIds = liveResponse.elements.map((element) => element.id);
+): 'current-roster' | 'published-event' {
   const expectedLiveElementIds = [...referenceData.playerTeamById.keys()];
   if (
     new Set(liveElementIds).size !== liveElementIds.length ||
@@ -138,6 +298,34 @@ export function prepareCoherentLiveSnapshot(
       `Player identity mismatch for live snapshot event ${eventId}; missing=${missingPlayers.sort((a, b) => a - b).join(',') || 'none'}; unexpected=${unexpectedPlayers.sort((a, b) => a - b).join(',') || 'none'}`,
     );
   }
+  return matchesCurrentRoster ? 'current-roster' : 'published-event';
+}
+
+/**
+ * Fetch validation is a single coherent boundary: event-live, fixtures, the
+ * expected fixture set and the player/team baseline are all checked before a
+ * V2 candidate can be staged. No Redis or PostgreSQL writes happen here.
+ */
+export function prepareCoherentLiveSnapshot(
+  eventId: number,
+  liveResponse: RawFPLEventLiveResponse,
+  rawFixtures: RawFPLFixture[],
+  referenceData: LiveSnapshotReferenceData,
+  expectedFixtureIds: readonly number[],
+  publishedLiveElementIds: readonly number[] = [],
+): PreparedLiveSnapshot {
+  if (!Number.isInteger(eventId) || eventId <= 0)
+    throw new Error(`Invalid live snapshot event ID: ${eventId}`);
+  if (!Array.isArray(liveResponse.elements) || liveResponse.elements.length === 0) {
+    throw new Error('FPL event live response contains no elements');
+  }
+  const liveElementIds = liveResponse.elements.map((element) => element.id);
+  const liveIdentityBaseline = validateLiveElementIdentity(
+    eventId,
+    liveElementIds,
+    referenceData,
+    publishedLiveElementIds,
+  );
 
   if (!Array.isArray(rawFixtures)) throw new Error('FPL fixtures response contains no fixtures');
   const wrongEventFixture = rawFixtures.find(
@@ -186,6 +374,6 @@ export function prepareCoherentLiveSnapshot(
     eventLives,
     fixtures,
     state: resolveSnapshotState(fixtures),
-    liveIdentityBaseline: matchesCurrentRoster ? 'current-roster' : 'published-event',
+    liveIdentityBaseline,
   };
 }
