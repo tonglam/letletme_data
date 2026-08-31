@@ -35,6 +35,8 @@ export type LiveMatchSeedArguments = {
   readonly eventId: number | null;
 };
 
+const SEED_CLEANUP_TIMEOUT_MS = 5_000;
+
 function usage(): never {
   throw new Error(
     'usage: bun scripts/seed-live-matches-v2.ts --execute --season YYYY [--event-id N] [--all-finalized]',
@@ -324,6 +326,34 @@ async function main(): Promise<void> {
   );
 }
 
+async function closeSeedResources(): Promise<void> {
+  let cleanupTimedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const cleanup = Promise.allSettled([
+    closeLiveDataQueue(),
+    redisSingleton.disconnect(),
+    databaseSingleton.disconnect(),
+  ]);
+  try {
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(() => {
+          cleanupTimedOut = true;
+          resolve();
+        }, SEED_CLEANUP_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+  }
+  if (cleanupTimedOut) {
+    console.error(
+      `[seed-live-matches-v2] cleanup exceeded ${SEED_CLEANUP_TIMEOUT_MS}ms; forcing one-shot exit`,
+    );
+  }
+}
+
 if (import.meta.main) {
   let exitCode = 0;
   try {
@@ -331,15 +361,11 @@ if (import.meta.main) {
   } catch (error) {
     console.error('[seed-live-matches-v2] failed', error);
     exitCode = 1;
-  } finally {
-    await Promise.allSettled([
-      closeLiveDataQueue(),
-      redisSingleton.disconnect(),
-      databaseSingleton.disconnect(),
-    ]);
   }
-  // This one-shot cutover command must not leave provider/database handles
-  // alive after reporting a failure; otherwise the deploy runner remains in
-  // maintenance mode until its external timeout kills the container.
-  if (exitCode !== 0) process.exit(exitCode);
+  // This one-shot cutover command must not leave provider/database/queue
+  // handles alive after reporting either success or failure. A bounded cleanup
+  // prevents an individual client close from holding the deploy in maintenance
+  // mode until its external timeout kills the container.
+  await closeSeedResources();
+  process.exit(exitCode);
 }
