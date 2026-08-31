@@ -169,22 +169,44 @@ function reviewFingerprint(code: string, bucket: string): string {
     .digest('hex');
 }
 
-function sourceSpan(timestamps: Array<Date | string | null | undefined>): {
+function sourceSpan(
+  timestamps: Array<Date | string | null | undefined>,
+  eventDataCheckedAt: Date,
+): {
   sourceMin: Date;
   sourceMax: Date;
 } {
   const dates = timestamps.map(asDate).filter((date): date is Date => date !== null);
   if (dates.length === 0)
     throw new TournamentReviewSourceNotReadyError('review source provenance is missing');
-  const sourceMin = dates.reduce(
-    (min, date) => (date.getTime() < min.getTime() ? date : min),
-    dates[0],
-  );
   const sourceMax = dates.reduce(
     (max, date) => (date.getTime() > max.getTime() ? date : max),
     dates[0],
   );
+  // The review publication contract treats the finalized event checkpoint as
+  // the lower freshness fence. Historical/static inputs may legitimately have
+  // older timestamps, while current event sources are independently checked
+  // against this checkpoint before a payload is built. Keep the persisted
+  // source_min field at the event fence so Data's existing database constraint
+  // and GraphQL's consumer validator describe the same interval.
+  const sourceMin = eventDataCheckedAt;
+  if (sourceMin.getTime() > sourceMax.getTime()) {
+    throw new TournamentReviewSourceNotReadyError(
+      'review source provenance is before event checkpoint',
+    );
+  }
   return { sourceMin, sourceMax };
+}
+
+export function tournamentReviewSourceSpan(
+  eventDataCheckedAt: Date | string,
+  timestamps: Array<Date | string | null | undefined>,
+): { sourceMin: Date; sourceMax: Date } {
+  const checkpoint = asDate(eventDataCheckedAt);
+  if (!checkpoint) {
+    throw new TournamentReviewSourceNotReadyError('review event checkpoint is invalid');
+  }
+  return sourceSpan(timestamps, checkpoint);
 }
 
 function eventReviewPayload(
@@ -2093,7 +2115,7 @@ async function publishTournamentReviewScopeOnce(
         : format === 'H2H'
           ? await buildH2HPayload(tx, season.seasonId, tournament, event, header)
           : await buildKnockoutPayload(tx, season.seasonId, tournament, event, header);
-    const freshness = sourceSpan([
+    const freshness = tournamentReviewSourceSpan(eventDataCheckedAt, [
       eventDataCheckedAt,
       ...(eventMetadataChanged ? [event.updated_at] : []),
       ...(tournamentMetadataChanged ? [tournament.tournament_updated_at] : []),

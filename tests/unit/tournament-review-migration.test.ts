@@ -14,6 +14,10 @@ const groupAssignmentMigration = readFileSync(
   'migrations/0081_tournament_review_obligation_group_assignment.sql',
   'utf8',
 );
+const sourceFloorMigration = readFileSync(
+  'migrations/0082_tournament_review_source_floor_requeue.sql',
+  'utf8',
+);
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
@@ -84,6 +88,20 @@ describe('My Tournament Review V2 migration', () => {
     expect(groupAssignmentMigration).toContain('publication.payload #> \x27{h2h,standings}\x27');
     expect(groupAssignmentMigration).toContain(
       'jsonb_typeof(group_assignment_payload) = \x27object\x27',
+    );
+  });
+
+  test('requeues active heads that predate the finalized event source floor', () => {
+    expect(sourceFloorMigration).toContain('WITH stale_scopes AS MATERIALIZED');
+    expect(sourceFloorMigration).toContain(
+      'publication.source_min_checked_at < publication.event_data_checked_at',
+    );
+    expect(sourceFloorMigration).toContain('DELETE FROM competition.tournament_review_heads head');
+    expect(sourceFloorMigration).toMatch(/SET state = 'PENDING'/);
+    expect(sourceFloorMigration).toContain('next_attempt_at = clock_timestamp()');
+    expect(sourceFloorMigration).toContain('ready_revision = NULL');
+    expect(sourceFloorMigration).not.toContain(
+      'DELETE FROM competition.tournament_review_publications',
     );
   });
 });
