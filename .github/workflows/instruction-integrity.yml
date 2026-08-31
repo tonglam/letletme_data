@@ -1212,6 +1212,71 @@ jobs:
               if not placeholder_check:
                   raise SystemExit("approved validator has_secret does not propagate credential-pattern results")
 
+          def check_locked_skill_secret_shape(node):
+              """Keep locked-skill secret detection positively reachable."""
+
+              def statically_false(expression):
+                  if isinstance(expression, ast.Constant):
+                      return expression.value is False
+                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+                      return statically_true(expression.operand)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.And):
+                      return any(statically_false(value) for value in expression.values)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.Or):
+                      return all(statically_false(value) for value in expression.values)
+                  return False
+
+              def statically_true(expression):
+                  if isinstance(expression, ast.Constant):
+                      return expression.value is True
+                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+                      return statically_false(expression.operand)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.And):
+                      return all(statically_true(value) for value in expression.values)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.Or):
+                      return any(statically_true(value) for value in expression.values)
+                  return False
+
+              def calls_secret_search(expression):
+                  return any(
+                      isinstance(item, ast.Call)
+                      and isinstance(item.func, ast.Attribute)
+                      and item.func.attr == "search"
+                      and (
+                          (isinstance(item.func.value, ast.Name) and item.func.value.id == "PEM_RE")
+                          or (
+                              isinstance(item.func.value, ast.Subscript)
+                              and isinstance(item.func.value.value, ast.Name)
+                              and item.func.value.value.id == "SECRET_VALUE_RES"
+                          )
+                      )
+                      for item in ast.walk(expression)
+                  )
+
+              def returns_true(statements):
+                  return any(
+                      isinstance(item, ast.Return)
+                      and isinstance(item.value, ast.Constant)
+                      and item.value.value is True
+                      for statement in statements
+                      for item in ast.walk(statement)
+                  )
+
+              positive_lines = []
+              for branch in ast.walk(node):
+                  if (
+                      isinstance(branch, ast.If)
+                      and not statically_false(branch.test)
+                      and calls_secret_search(branch.test)
+                      and returns_true(branch.body)
+                  ):
+                      positive_lines.append(branch.lineno)
+              if not positive_lines:
+                  raise SystemExit("approved validator has_locked_skill_secret lacks a positive detection path")
+              early_terminators = direct_terminator_lines(node.body)
+              if early_terminators and min(early_terminators) < min(positive_lines):
+                  raise SystemExit("approved validator has_locked_skill_secret can terminate before detection")
+
           def check_validator_shape(tree):
               parse_yaml = function_node(tree, "parse_yaml_mapping")
               validate = function_node(tree, "validate_asset")
@@ -1254,6 +1319,7 @@ jobs:
               if rebound:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               check_has_secret_shape(helper_nodes["has_secret"])
+              check_locked_skill_secret_shape(helper_nodes["has_locked_skill_secret"])
               secret_bytes = helper_nodes["has_secret_bytes"]
               json_operations = {
                   item.func.attr
@@ -2300,10 +2366,18 @@ jobs:
               paths = {Path(raw) for raw in raw_paths}
               # Every repository-owned scoped entrypoint is governed, while
               # installer-owned plugin skill mounts remain preserved inputs.
-              unmanaged_prefixes = {(".agents", "skills"), (".claude", "skills")}
+              unmanaged_prefixes = {(".agents", "skills")}
               for item in root.rglob("*"):
                   relative = item.relative_to(root)
                   if any(part in {".git", "node_modules", ".next"} for part in relative.parts):
+                      continue
+                  if (
+                      len(relative.parts) >= 3
+                      and relative.parts[:2] == (".claude", "skills")
+                      and (root / Path(*relative.parts[:3])).is_symlink()
+                  ):
+                      # Legacy Claude plugin aliases are symlinks and remain
+                      # outside this repository-owned governance surface.
                       continue
                   if any(
                       len(relative.parts) >= len(prefix) and relative.parts[: len(prefix)] == prefix
@@ -2313,6 +2387,8 @@ jobs:
                   if item.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
                       paths.add(relative)
                   if len(relative.parts) >= 3 and relative.parts[:2] in {(".claude", "agents"), (".claude", "rules")} and item.suffix.casefold() == ".md":
+                      paths.add(relative)
+                  if len(relative.parts) >= 4 and relative.parts[:2] == (".claude", "skills") and item.name == "SKILL.md":
                       paths.add(relative)
               for relative in sorted(paths, key=str):
                   if relative.is_absolute() or ".." in relative.parts:

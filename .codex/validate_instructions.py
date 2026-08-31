@@ -132,7 +132,6 @@ CANONICAL_CONFIG_COMMIT = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
 IGNORED_PARTS = {".git", "node_modules", ".next"}
 UNMANAGED_INSTRUCTION_PREFIXES = {
     (".agents", "skills"),
-    (".claude", "skills"),
 }
 
 
@@ -377,7 +376,12 @@ def _is_unmanaged_plugin_skill_path(path: Path, repo: Path) -> bool:
         relative = path.absolute().relative_to(repo.absolute())
     except ValueError:
         return False
-    return len(relative.parts) >= 2 and relative.parts[:2] == (".claude", "skills")
+    if len(relative.parts) < 3 or relative.parts[:2] != (".claude", "skills"):
+        return False
+    # Keep the narrow legacy exemption for installer-created symlink aliases;
+    # a regular Claude skill directory is repository-owned and must be
+    # discovered and governed like every other instruction entrypoint.
+    return (repo / ".claude" / "skills" / relative.parts[2]).is_symlink()
 
 
 def resolve_path(
@@ -1288,6 +1292,11 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     for root, directories, files in os.walk(repo, followlinks=False):
         root_path = Path(root)
         relative_root = root_path.relative_to(repo)
+        if len(relative_root.parts) >= 2 and relative_root.parts[:2] == (".claude", "skills"):
+            # Skill trees are handled as entrypoints below.  Do not let their
+            # nested helper files become unrelated instruction discoveries.
+            directories[:] = []
+            continue
         if _is_unmanaged_instruction_path(relative_root):
             directories[:] = []
             continue
@@ -1305,6 +1314,14 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
                 if path.is_file() or path.is_symlink():
                     if not _is_unmanaged_instruction_path(path.relative_to(repo)):
                         paths.add(path.absolute())
+    claude_skills_root = repo / ".claude" / "skills"
+    if claude_skills_root.is_dir():
+        for skill in claude_skills_root.iterdir():
+            if skill.is_symlink() or not skill.is_dir():
+                continue
+            entry = skill / "SKILL.md"
+            if entry.is_file():
+                paths.add(entry.absolute())
     return sorted(paths)
 
 
