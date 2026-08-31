@@ -2113,6 +2113,7 @@ export const tournamentReviewObligationsInCompetition = competition.table(
       .notNull(),
     metadataPayload: jsonb('metadata_payload'),
     entryMetadataPayload: jsonb('entry_metadata_payload'),
+    groupAssignmentPayload: jsonb('group_assignment_payload'),
   },
   (table) => [
     primaryKey({
@@ -2178,6 +2179,10 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     check(
       'tournament_review_obligations_entry_metadata_payload_check',
       sql`entry_metadata_payload IS NULL OR jsonb_typeof(entry_metadata_payload) = 'array'`,
+    ),
+    check(
+      'tournament_review_obligations_group_assignment_payload_check',
+      sql`group_assignment_payload IS NULL OR jsonb_typeof(group_assignment_payload) = 'object'`,
     ),
   ],
 );

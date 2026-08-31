@@ -10,6 +10,10 @@ const entryMetadataMigration = readFileSync(
   'migrations/0080_tournament_review_obligation_entry_metadata.sql',
   'utf8',
 );
+const groupAssignmentMigration = readFileSync(
+  'migrations/0081_tournament_review_obligation_group_assignment.sql',
+  'utf8',
+);
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
@@ -65,6 +69,21 @@ describe('My Tournament Review V2 migration', () => {
     expect(entryMetadataMigration).toContain('tournament_review_heads head');
     expect(entryMetadataMigration).toContain(
       'tournament_review_obligations_entry_metadata_payload_check',
+    );
+  });
+
+  test('persists a canonical group-assignment baseline for reconciliation', () => {
+    expect(groupAssignmentMigration).toContain('ADD COLUMN group_assignment_payload jsonb');
+    expect(groupAssignmentMigration).toContain(
+      'tournament_review_obligations_group_assignment_payload_check',
+    );
+    expect(groupAssignmentMigration).toContain(
+      'SET group_assignment_payload = observed.group_assignment_payload',
+    );
+    expect(groupAssignmentMigration).toContain('publication.payload #> \x27{points,rows}\x27');
+    expect(groupAssignmentMigration).toContain('publication.payload #> \x27{h2h,standings}\x27');
+    expect(groupAssignmentMigration).toContain(
+      'jsonb_typeof(group_assignment_payload) = \x27object\x27',
     );
   });
 });

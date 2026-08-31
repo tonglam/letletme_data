@@ -270,6 +270,11 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('canonical_group_assignments AS MATERIALIZED');
     expect(publicationSource).toContain('group_assignment_eligible_at');
     expect(publicationSource).toMatch(/existing\.state = 'READY'/);
+    expect(publicationSource).toContain(
+      'existing.state = \x27DEGRADED\x27 AND existing.next_attempt_at IS NULL',
+    );
+    expect(publicationSource).toContain('existing.group_assignment_payload');
+    expect(publicationSource).toContain('group_assignment_payload = COALESCE');
     expect(publicationSource).toContain('jsonb_object_agg(');
     expect(publicationSource).toMatch(/jsonb_typeof\(previous\.payload #> '\{points,rows\}'\)/);
     expect(publicationSource).toMatch(/jsonb_typeof\(previous\.payload #> '\{h2h,standings\}'\)/);
@@ -287,6 +292,8 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('event.data_checked = true');
     expect(publicationSource).toContain('history_group_mismatch_count');
     expect(publicationSource).toContain('historical points group assignment is stale');
+    expect(publicationSource).toContain('previous points group ranks are stale');
+    expect(publicationSource).toContain('RANK() OVER');
     expect(publicationSource).toContain('history.event_id >= GREATEST(');
     expect(publicationSource).toContain(
       'history_group.event_points IS DISTINCT FROM history_result.event_points',
@@ -296,6 +303,11 @@ describe('My Tournament Review V2 format and retry policy', () => {
     );
     expect(publicationSource).toContain('points group ranks are inconsistent');
     expect(publicationSource).toContain('payload_row->>\x27applicable\x27');
+    expect(publicationSource).toContain('readiness: {');
+    expect(publicationSource).toContain('expectedSubjectCount: built.expectedSubjectCount');
+    expect(publicationSource).toContain(
+      'notApplicableSubjectCount: built.notApplicableSubjectCount',
+    );
     expect(publicationSource).toContain('state.existing_payload IS NOT NULL');
     expect(publicationSource).toMatch(/state\.existing_payload->'points'->'rows'/);
     expect(publicationSource).toMatch(/state\.existing_payload->'h2h'->'standings'/);
