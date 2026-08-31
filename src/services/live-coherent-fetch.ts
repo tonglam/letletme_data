@@ -205,7 +205,11 @@ export async function resolveLiveReferenceDataForDetail(
     LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS,
   );
   if (!eventPinnedIdentities || eventPinnedIdentities.length === 0) {
-    return requireEventPinnedIdentity ? null : referenceData;
+    // A completed event query with no rows and an unavailable query are both
+    // non-authoritative for fixture-grain detail. The Core roster can remain
+    // the Live Points/desk baseline, but it must not replace a missing event
+    // identity in a detail candidate, even provisionally.
+    return null;
   }
   try {
     return addEventPinnedIdentities(referenceData, eventPinnedIdentities);
@@ -214,7 +218,7 @@ export async function resolveLiveReferenceDataForDetail(
       season: referenceData.season,
       error: error instanceof Error ? error.message : String(error),
     });
-    return requireEventPinnedIdentity ? null : referenceData;
+    return null;
   }
 }
 

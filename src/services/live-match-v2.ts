@@ -495,6 +495,67 @@ export function prepareLiveMatchDetail(input: {
   };
 }
 
+/**
+ * Check fixture-grain provider evidence without consulting player identity.
+ * This is used only to classify a final retry when event-time identity is
+ * unavailable; it must not make the current roster an authority or publish a
+ * candidate by itself.
+ */
+export function hasLiveMatchDetailEvidence(input: {
+  readonly eventId: number;
+  readonly rawElements: readonly RawFPLEventLiveElement[];
+  readonly rawFixtures: readonly RawFPLFixture[];
+  readonly deskFixtures: readonly MatchDeskFixture[];
+  readonly finalized?: boolean;
+}): boolean {
+  const { eventId, rawElements, rawFixtures, deskFixtures } = input;
+  assertPositiveInteger(eventId, 'Live Match event ID');
+
+  const fixtureIds = new Set(deskFixtures.map((fixture) => fixture.fixtureId));
+  if (fixtureIds.size !== deskFixtures.length) {
+    throw new Error(`Live Match desk contains duplicate fixtures for event ${eventId}`);
+  }
+  for (const fixture of rawFixtures) {
+    if (fixture.event !== null && fixture.event !== eventId) {
+      throw new Error(
+        `FPL fixture ${fixture.id} belongs to event ${fixture.event}, not ${eventId}`,
+      );
+    }
+  }
+
+  const prepared = prepareEventLives(eventId, [...rawElements]);
+  if (
+    prepared.errors !== 0 ||
+    prepared.sourceCount !== rawElements.length ||
+    prepared.eventLives.length !== rawElements.length
+  ) {
+    throw new Error(`Live Match detail transformation is incomplete for event ${eventId}`);
+  }
+
+  const visibleFixtureIds = new Set<number>();
+  for (const row of prepared.eventLives) {
+    for (const fixture of row.fixtureBreakdown ?? []) {
+      if (!fixtureIds.has(fixture.fixtureId)) {
+        throw new Error(
+          `Live Match detail contains fixture ${fixture.fixtureId} outside event ${eventId}`,
+        );
+      }
+      if (statsHaveVisibleValue(fixture.stats)) visibleFixtureIds.add(fixture.fixtureId);
+    }
+  }
+  for (const [key, bpsValue] of bpsByFixtureAndPlayer(rawFixtures)) {
+    const separator = key.indexOf(':');
+    const fixtureId = Number(key.slice(0, separator));
+    if (fixtureIds.has(fixtureId) && bpsValue !== 0) visibleFixtureIds.add(fixtureId);
+  }
+
+  return deskFixtures.every((fixture) => {
+    const started =
+      fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0;
+    return !(input.finalized === true || started) || visibleFixtureIds.has(fixture.fixtureId);
+  });
+}
+
 export function hasStartedLiveMatchDetail(
   fixtures: readonly MatchDeskFixture[],
   detail: PreparedLiveMatchDetail,

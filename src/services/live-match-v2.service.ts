@@ -31,6 +31,7 @@ import {
   type LiveSnapshotReferenceData,
 } from './live-coherent-fetch';
 import {
+  hasLiveMatchDetailEvidence,
   hasStartedLiveMatchDetail,
   prepareLiveMatchDesk,
   prepareLiveMatchDetail,
@@ -481,29 +482,26 @@ export async function syncLiveMatchesV2FromObservation(
       let preparedDetail: ReturnType<typeof prepareLiveMatchDetail> | null = null;
 
       if (finalizationRequested && preparedDesk.fixtures.length > 0) {
-        // Classify a provider-wide empty explain/BPS response before requiring
-        // event-pinned identity. A missing identity must still fail closed for
-        // a complete candidate, but it must not hide the stronger evidence
-        // signal that the provider has not supplied publishable detail at all.
-        const evidenceProbe = prepareLiveMatchDetail({
-          ...detailInput,
-          referenceData: input.referenceData,
+        // Resolve fixture identity before preparing any final candidate. The
+        // current roster is never used as a final evidence probe, because a
+        // transferred player can make that probe fail or pass under the wrong
+        // club. Raw explain/BPS evidence is classified separately only when
+        // enrichment is unavailable.
+        const detailReferenceData = await resolveLiveReferenceDataForDetail(input.referenceData, {
+          requireEventPinnedIdentity: true,
         });
-        if (
-          !detailHasRequiredCoverage(
-            preparedDesk.fixtures,
-            evidenceProbe.fixtures,
-            preparedDesk.state === 'FINALIZED',
-          )
-        ) {
-          detailUnavailableReason = 'DETAIL_EVIDENCE_INCOMPLETE';
-        } else {
-          const detailReferenceData = await resolveLiveReferenceDataForDetail(input.referenceData, {
-            requireEventPinnedIdentity: true,
-          });
-          if (!detailReferenceData) {
+        if (!detailReferenceData) {
+          if (
+            !hasLiveMatchDetailEvidence({
+              ...detailInput,
+              finalized: preparedDesk.state === 'FINALIZED',
+            })
+          ) {
+            detailUnavailableReason = 'DETAIL_EVIDENCE_INCOMPLETE';
+          } else {
             throw new Error('Live Match final detail requires event-pinned player identity');
           }
+        } else {
           preparedDetail = prepareLiveMatchDetail({
             ...detailInput,
             referenceData: detailReferenceData,

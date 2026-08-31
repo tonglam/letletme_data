@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { rawExplainElementsFixture } from '../fixtures/event-live-explains.fixtures';
 import {
+  hasLiveMatchDetailEvidence,
   prepareLiveMatchDesk,
   prepareLiveMatchDetail,
   type MatchDeskFixture,
@@ -329,6 +330,36 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     ).toThrow('missing event-time player identity for fixture 402 element 101');
   });
 
+  test('classifies empty detail evidence without consulting player identity', () => {
+    const fixture = rawFixture({
+      id: 401,
+      teamH: 10,
+      teamA: 20,
+      homeScore: 1,
+      awayScore: 0,
+      bpsElement: 101,
+      bps: 30,
+    });
+    const desk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: [fixture],
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+    });
+    const emptyElement = cloneRawElement(rawExplainElementsFixture[0]!);
+    emptyElement.explain = [];
+
+    expect(
+      hasLiveMatchDetailEvidence({
+        eventId: 2,
+        rawElements: [emptyElement],
+        rawFixtures: [{ ...fixture, stats: [] }],
+        deskFixtures: desk.fixtures,
+        finalized: true,
+      }),
+    ).toBe(false);
+  });
+
   test('fails closed when a visible transferred player has no fixture-time identity', () => {
     const fixtures = [
       rawFixture({
@@ -366,7 +397,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     ).toThrow('no event-time team identity');
   });
 
-  test('does not let pending event identity block the Core detail baseline', async () => {
+  test('does not let pending event identity block the Core baseline', async () => {
     const reference = referenceData();
     const resolved = await Promise.race([
       resolveLiveReferenceDataForDetail({
@@ -378,9 +409,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       ),
     ]);
 
-    if (!resolved) throw new Error('pending event identity unexpectedly returned no baseline');
-    expect(resolved.playerById).toEqual(reference.playerById);
-    expect(resolved.playerByFixtureAndId).toBeUndefined();
+    expect(resolved).toBeNull();
   });
 
   test('does not use the Core roster as the final identity fallback', async () => {
