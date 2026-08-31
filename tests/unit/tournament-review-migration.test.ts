@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
-const migration = readFileSync('migrations/0075_tournament_review_v2_publications.sql', 'utf8');
+const migration = readFileSync('migrations/0076_tournament_review_v2_publications.sql', 'utf8');
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
