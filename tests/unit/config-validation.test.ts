@@ -227,7 +227,7 @@ describe('production environment preflight', () => {
       stopServices,
     );
     const postStopRedisQuiescence = workflow.indexOf(
-      'bun scripts/assert-queue-quiescence.ts --redis-only --scoped',
+      'run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10',
       stopServices,
     );
     expect(postStopDatabaseQuiescence).toBeGreaterThan(stopServices);
@@ -281,7 +281,7 @@ describe('production environment preflight', () => {
     const databaseQuiescenceCommand =
       'compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped';
     const redisQuiescenceCommand =
-      'compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped';
+      'run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10';
     const databaseQuiescenceBeforeStop = deployScript.lastIndexOf(
       databaseQuiescenceCommand,
       stopServices,

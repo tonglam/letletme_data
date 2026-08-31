@@ -415,11 +415,16 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+  final_queue_probe_output=$(mktemp "${TMPDIR:-/tmp}/letletme-data-final-queue-quiescence.XXXXXX")
+  if ! run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10; then
+    cat "$final_queue_probe_output" >&2 || true
+    rm -f "$final_queue_probe_output"
     log_error "Queue work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1
   fi
+  cat "$final_queue_probe_output"
+  rm -f "$final_queue_probe_output"
   log_info "Creating and validating the pre-migration PostgreSQL dump"
   if ! compose --profile migration run --rm -T --interactive=false backup; then
     log_error "Pre-migration backup failed; migration was not started."

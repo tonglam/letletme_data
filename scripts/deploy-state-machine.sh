@@ -16,6 +16,8 @@ DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=${DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED:-f
 DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED=${DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED:-false}
 DEPLOY_CONTENT_WORKER_PAUSED_QUEUES=${DEPLOY_CONTENT_WORKER_PAUSED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES=${DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES:-}
+DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
+DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS:-10}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -168,6 +170,22 @@ content_worker_queue_is_listed() {
   [[ " $queue_list " == *" $queue_name "* ]]
 }
 
+ensure_content_worker_pause_owner_token() {
+  if [[ -n "$DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN" ]]; then return 0; fi
+  local token
+  if command -v uuidgen >/dev/null 2>&1; then
+    token=$(uuidgen | tr -d '[:space:]-' || true)
+  fi
+  if [[ -z "$token" ]] && command -v openssl >/dev/null 2>&1; then
+    token=$(openssl rand -hex 16)
+  fi
+  if [[ -z "$token" ]]; then
+    token="${DEPLOY_SHA:-unknown}-$$-$(date +%s)"
+  fi
+  [[ -n "$token" ]] || return 1
+  DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN="deployment-$token"
+}
+
 append_content_worker_paused_queue() {
   local queue_name=${1:-}
   if ! content_worker_queue_is_listed "$queue_name" "$DEPLOY_CONTENT_WORKER_PAUSED_QUEUES"; then
@@ -195,7 +213,8 @@ remove_content_worker_owned_queue() {
 set_content_worker_consumer_mode() {
   local mode=${1:-}
   local queue_name=${2:-}
-  local output
+  local output_file output
+  ensure_content_worker_pause_owner_token
   if [[ "$mode" != STATUS && "$mode" != PAUSE && "$mode" != RESUME ]]; then
     echo "deploy preflight: invalid content worker consumer mode=$mode" >&2
     return 1
@@ -204,14 +223,16 @@ set_content_worker_consumer_mode() {
     echo "deploy preflight: invalid content worker consumer queue=$queue_name" >&2
     return 1
   fi
-  if ! output=$(
-    APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
-      bun scripts/assert-queue-quiescence.ts \
-      --consumer-mode "$mode" --consumer-queue "$queue_name" 2>&1
-  ); then
-    printf '%s\n' "$output" >&2
+  output_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-consumer-control.XXXXXX")
+  if ! run_bounded_deploy_probe \
+    "$output_file" "$DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS" \
+    consumer "$queue_name" "$mode"; then
+    cat "$output_file" >&2 || true
+    rm -f "$output_file"
     return 1
   fi
+  output=$(cat "$output_file")
+  rm -f "$output_file"
   printf '%s\n' "$output"
   if ! printf '%s\n' "$output" | grep -F '"contractVersion":"content-worker-consumer-v1"' >/dev/null ||
     ! printf '%s\n' "$output" | grep -F '"queueName":"'"$queue_name"'"' >/dev/null; then
@@ -223,6 +244,7 @@ set_content_worker_consumer_mode() {
 pause_content_worker_consumers_for_deploy() {
   if [[ "$DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED" = true ]]; then return 0; fi
   DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED=true
+  ensure_content_worker_pause_owner_token
 
   local queue_name status_output output
   for queue_name in "${CONTENT_WORKER_CONSUMER_QUEUE_NAMES[@]}"; do
@@ -232,6 +254,9 @@ pause_content_worker_consumers_for_deploy() {
     fi
     if printf '%s\n' "$status_output" | grep -F '"paused":true' >/dev/null; then
       append_content_worker_paused_queue "$queue_name"
+      if printf '%s\n' "$status_output" | grep -F '"owned":true' >/dev/null; then
+        append_content_worker_owned_queue "$queue_name"
+      fi
       continue
     fi
     if ! printf '%s\n' "$status_output" | grep -F '"paused":false' >/dev/null; then
@@ -252,9 +277,9 @@ pause_content_worker_consumers_for_deploy() {
     # previousPaused/changed result. If an operator paused the queue after
     # STATUS but before PAUSE, changed=false and the deployment must not resume
     # that operator-owned pause during cleanup.
-    if printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
+    if printf '%s\n' "$output" | grep -F '"owned":true' >/dev/null; then
       append_content_worker_owned_queue "$queue_name"
-    elif printf '%s\n' "$output" | grep -F '"changed":false' >/dev/null; then
+    elif printf '%s\n' "$output" | grep -F '"owned":false' >/dev/null; then
       echo "deploy preflight: $queue_name was paused concurrently; preserving the external pause"
     else
       echo "deploy preflight: $queue_name consumer pause result was not machine-readable" >&2
@@ -265,7 +290,7 @@ pause_content_worker_consumers_for_deploy() {
 }
 
 run_content_worker_consumer_status_probe() {
-  run_bounded_deploy_probe "$1" "$2" consumer "$3"
+  run_bounded_deploy_probe "$1" "$2" consumer "$3" STATUS
 }
 
 assert_content_worker_consumers_paused() {
@@ -291,19 +316,35 @@ assert_content_worker_consumers_paused() {
       echo "deploy preflight: $queue_name consumer pause was lost while draining" >&2
       return 1
     fi
+    if content_worker_queue_is_listed "$queue_name" "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" &&
+      ! grep -F '"owned":true' "$output_file" >/dev/null; then
+      cat "$output_file" >&2 || true
+      rm -f "$output_file"
+      echo "deploy preflight: $queue_name consumer pause ownership was lost while draining" >&2
+      return 1
+    fi
     rm -f "$output_file"
   done
 }
 
 resume_content_worker_consumers_for_deploy() {
   local queue_name output
+  ensure_content_worker_pause_owner_token
   for queue_name in $DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES; do
     if ! output=$(set_content_worker_consumer_mode RESUME "$queue_name"); then
       printf '%s\n' "$output" >&2
       echo "deploy admission: failed to resume the deployment-owned $queue_name consumer pause" >&2
       return 1
     fi
-    if ! printf '%s\n' "$output" | grep -F '"paused":false' >/dev/null; then
+    if printf '%s\n' "$output" | grep -F '"owned":false' >/dev/null &&
+      printf '%s\n' "$output" | grep -F '"released":false' >/dev/null; then
+      remove_content_worker_owned_queue "$queue_name"
+      echo "deploy admission: preserved the externally-owned $queue_name consumer pause"
+      continue
+    fi
+    if ! printf '%s\n' "$output" | grep -F '"paused":false' >/dev/null ||
+      ! printf '%s\n' "$output" | grep -F '"owned":true' >/dev/null ||
+      ! printf '%s\n' "$output" | grep -F '"released":true' >/dev/null; then
       echo "deploy admission: $queue_name consumer resume result was not machine-readable" >&2
       return 1
     fi
@@ -337,8 +378,9 @@ run_deploy_probe_command() {
         bun scripts/assert-queue-quiescence.ts --redis-only --scoped
       ;;
     consumer)
-      APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false api \
-        bun scripts/assert-queue-quiescence.ts --consumer-mode STATUS \
+      APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false \
+        -e "DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN=${DEPLOY_PROBE_CONSUMER_OWNER_TOKEN:-}" api \
+        bun scripts/assert-queue-quiescence.ts --consumer-mode "${DEPLOY_PROBE_CONSUMER_MODE:-STATUS}" \
         --consumer-queue "${DEPLOY_PROBE_QUEUE:-}"
       ;;
     *)
@@ -353,6 +395,7 @@ run_bounded_deploy_probe() {
   local timeout_seconds=$2
   local probe_kind=${3:-queue}
   local probe_queue=${4:-}
+  local probe_consumer_mode=${5:-STATUS}
   local probe_pid
   local probe_group_pid=''
   local probe_deadline
@@ -361,14 +404,25 @@ run_bounded_deploy_probe() {
   local probe_compose_file=${COMPOSE_FILE:-docker-compose.yml}
   local probe_compose_bin=${COMPOSE_BIN:-docker compose}
   local probe_allow_paused_queues=${DEPLOY_CONTENT_WORKER_PAUSED_QUEUES// /,}
+  local probe_consumer_owner_token=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
 
   if [[ "$probe_kind" != queue && "$probe_kind" != consumer ]]; then
     echo "deploy preflight: invalid deploy probe kind=$probe_kind" >&2
     return 1
   fi
+  if [[ "$probe_kind" = consumer ]] &&
+    [[ "$probe_consumer_mode" != STATUS && "$probe_consumer_mode" != PAUSE &&
+      "$probe_consumer_mode" != RESUME ]]; then
+    echo "deploy preflight: invalid deploy consumer mode=$probe_consumer_mode" >&2
+    return 1
+  fi
   if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
     echo "deploy preflight: invalid deploy probe timeout=$timeout_seconds" >&2
     return 1
+  fi
+  if [[ "$probe_kind" = consumer ]]; then
+    ensure_content_worker_pause_owner_token
+    probe_consumer_owner_token=$DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN
   fi
 
   # Keep the exact Compose probe in its own process group when `setsid` is
@@ -377,6 +431,10 @@ run_bounded_deploy_probe() {
   # cannot consume the whole deployment deadline or the deployment shell.
   if command -v setsid >/dev/null 2>&1; then
     (
+      # Do not run the caller's deployment EXIT handler from the probe child.
+      # It owns restoration and lock release for the parent deployment and
+      # must never race a short-lived Compose/Redis check.
+      trap - EXIT
       export -f compose run_deploy_probe_command 2>/dev/null || true
       export DEPLOY_PROBE_PROJECT_DIR="$probe_project_dir"
       export DEPLOY_PROBE_COMPOSE_FILE="$probe_compose_file"
@@ -384,7 +442,9 @@ run_bounded_deploy_probe() {
       export DEPLOY_PROBE_APP_IMAGE="${APP_IMAGE:-}"
       export DEPLOY_PROBE_KIND="$probe_kind"
       export DEPLOY_PROBE_QUEUE="$probe_queue"
+      export DEPLOY_PROBE_CONSUMER_MODE="$probe_consumer_mode"
       export DEPLOY_PROBE_ALLOW_PAUSED_QUEUES="$probe_allow_paused_queues"
+      export DEPLOY_PROBE_CONSUMER_OWNER_TOKEN="$probe_consumer_owner_token"
       exec setsid bash -c '
         # Bash functions and arrays are not enough to carry the local deploy
         # context across `bash -c`: PROJECT_DIR/COMPOSE_FILE/COMPOSE_BIN are
@@ -403,10 +463,15 @@ run_bounded_deploy_probe() {
     probe_group_pid=$probe_pid
   else
     (
+      # Match the setsid branch: a probe child must not inherit deployment
+      # cleanup, queue restoration, or lock-release traps.
+      trap - EXIT
       export DEPLOY_PROBE_KIND="$probe_kind"
       export DEPLOY_PROBE_QUEUE="$probe_queue"
+      export DEPLOY_PROBE_CONSUMER_MODE="$probe_consumer_mode"
       export DEPLOY_PROBE_APP_IMAGE="${APP_IMAGE:-}"
       export DEPLOY_PROBE_ALLOW_PAUSED_QUEUES="$probe_allow_paused_queues"
+      export DEPLOY_PROBE_CONSUMER_OWNER_TOKEN="$probe_consumer_owner_token"
       run_deploy_probe_command >"$output_file" 2>&1
     ) &
     probe_pid=$!
@@ -418,7 +483,10 @@ run_bounded_deploy_probe() {
       printf '%s\n' "deploy preflight: ${probe_kind} probe timed out after ${timeout_seconds}s" >>"$output_file"
       return 124
     fi
-    sleep 1
+    # The control probes are intentionally short-lived.  A one-second poll
+    # interval makes a three-queue pause/resume sequence exceed Bun's focused
+    # test deadline and adds avoidable latency to the deployment path.
+    sleep 0.1
   done
   if wait "$probe_pid"; then
     return 0

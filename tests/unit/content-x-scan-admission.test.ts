@@ -68,20 +68,28 @@ rm -f "$output_file"
 set -euo pipefail
 event_file=$(mktemp)
 pause_dir=$(mktemp -d)
+owner_dir=$(mktemp -d)
 FAIL_OPEN=false
 CONCURRENT_PAUSE_QUEUE=''
-trap 'rm -f "$event_file"; rm -rf "$pause_dir"' EXIT
+REASSERT_AFTER_PAUSE_QUEUE=''
+export event_file pause_dir owner_dir FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE
+trap 'rm -f "$event_file"; rm -rf "$pause_dir" "$owner_dir"' EXIT
 source scripts/deploy-state-machine.sh
 compose() {
   local args="$*"
   local queue_name=''
   queue_name=$(awk '{ for (i = 1; i <= NF; i += 1) if ($i == "--consumer-queue") print $(i + 1) }' <<<"$args")
   local pause_file="$pause_dir/$queue_name"
+  local owner_file="$owner_dir/$queue_name"
+  local owner='NONE'
+  [[ -e "$owner_file" ]] && owner=$(<"$owner_file")
   if [[ "$args" == *"--consumer-mode STATUS"* ]]; then
     local paused=false
     [[ -e "$pause_file" ]] && paused=true
     printf 'STATUS:%s\n' "$queue_name" >>"$event_file"
-    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":%s}\n' "$queue_name" "$paused"
+    local owned=false
+    [[ "$owner" = deployment ]] && owned=true
+    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":%s,"owner":"%s","owned":%s,"released":false}\n' "$queue_name" "$paused" "$owner" "$owned"
     return 0
   fi
   if [[ "$args" == *"--consumer-mode PAUSE"* ]]; then
@@ -89,19 +97,34 @@ compose() {
     [[ -e "$pause_file" ]] && previous_paused=true
     if [[ "$queue_name" = "$CONCURRENT_PAUSE_QUEUE" && "$previous_paused" = false ]]; then
       touch "$pause_file"
+      printf '%s\n' operator >"$owner_file"
       printf 'PAUSE-RACE:%s\n' "$queue_name" >>"$event_file"
-      printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":true,"paused":true,"changed":false}\n' "$queue_name"
+      printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":true,"paused":true,"changed":false,"owner":"OPERATOR","owned":false,"released":false}\n' "$queue_name"
       return 0
     fi
     touch "$pause_file"
+    if [[ "$owner" = operator ]]; then
+      printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":%s,"paused":true,"changed":%s,"owner":"OPERATOR","owned":false,"released":false}\n' "$queue_name" "$previous_paused" "$([[ "$previous_paused" = false ]] && echo true || echo false)"
+      return 0
+    fi
+    printf '%s\n' deployment >"$owner_file"
     printf 'PAUSE:%s\n' "$queue_name" >>"$event_file"
-    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":%s,"paused":true,"changed":%s}\n' "$queue_name" "$previous_paused" "$([[ "$previous_paused" = false ]] && echo true || echo false)"
+    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":%s,"paused":true,"changed":%s,"owner":"DEPLOYMENT","owned":true,"released":false}\n' "$queue_name" "$previous_paused" "$([[ "$previous_paused" = false ]] && echo true || echo false)"
+    if [[ "$queue_name" = "$REASSERT_AFTER_PAUSE_QUEUE" ]]; then
+      printf '%s\n' operator >"$owner_file"
+    fi
     return 0
   fi
   if [[ "$args" == *"--consumer-mode RESUME"* ]]; then
+    if [[ "$owner" = operator ]]; then
+      printf 'RESUME-PRESERVED:%s\n' "$queue_name" >>"$event_file"
+      printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":true,"paused":true,"changed":false,"owner":"OPERATOR","owned":false,"released":false}\n' "$queue_name"
+      return 0
+    fi
     rm -f "$pause_file"
+    rm -f "$owner_file"
     printf 'RESUME:%s\n' "$queue_name" >>"$event_file"
-    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":false}\n' "$queue_name"
+    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":true,"paused":false,"changed":true,"owner":"NONE","owned":true,"released":true}\n' "$queue_name"
     return 0
   fi
   if [[ "$args" == *"--admission-mode OPEN"* ]]; then
@@ -209,7 +232,10 @@ DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
 [[ ! -e "$pause_dir/content-media-transcript" ]]
 [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]
 `);
-    expect(result.exitCode).toBe(0);
+    expect(
+      result.exitCode,
+      `${result.stderr?.toString() ?? ''}\n${result.stdout?.toString() ?? ''}`,
+    ).toBe(0);
     const stdout = result.stdout?.toString() ?? '';
     expect(stdout).toContain('STATUS:content-x-scan');
     expect(stdout).toContain('PAUSE:content-x-scan');
@@ -246,6 +272,20 @@ restore_content_deploy_controls
     expect(result.exitCode).toBe(0);
     const stdout = result.stdout?.toString() ?? '';
     expect(stdout).toContain('PAUSE-RACE:content-http-acquisition');
+    expect(stdout).not.toContain('RESUME:content-http-acquisition');
+  });
+
+  test('does not resume a deployment pause reasserted by an operator', () => {
+    const result = runConsumerControlShell(String.raw`
+REASSERT_AFTER_PAUSE_QUEUE=content-http-acquisition
+pause_content_worker_consumers_for_deploy
+restore_content_deploy_controls
+[[ -e "$pause_dir/content-http-acquisition" ]]
+[[ "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" != *content-http-acquisition* ]]
+`);
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout?.toString() ?? '';
+    expect(stdout).toContain('RESUME-PRESERVED:content-http-acquisition');
     expect(stdout).not.toContain('RESUME:content-http-acquisition');
   });
 

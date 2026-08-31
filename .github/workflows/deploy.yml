@@ -494,8 +494,15 @@ jobs:
             wait_for_port_3000_free 30 2
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun scripts/assert-queue-quiescence.ts --database-only --scoped
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false api \
-              bun scripts/assert-queue-quiescence.ts --redis-only --scoped
+            final_queue_probe_output=$(mktemp "${TMPDIR:-/tmp}/letletme-data-final-queue-quiescence.XXXXXX")
+            if ! run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10; then
+              cat "$final_queue_probe_output" >&2 || true
+              rm -f "$final_queue_probe_output"
+              echo 'deploy preflight: queue work is not quiescent; migration was not started' >&2
+              exit 1
+            fi
+            cat "$final_queue_probe_output"
+            rm -f "$final_queue_probe_output"
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration run --rm -T --interactive=false backup
             finish_stage
 

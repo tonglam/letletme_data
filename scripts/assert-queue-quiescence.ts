@@ -12,10 +12,20 @@ import {
 } from './queue-quiescence-gate';
 import { allQueueNames, contentQueueNames, contentXScanQueueName } from '../src/queues/names';
 import {
+  beginQueueConsumerPauseRelease,
+  claimQueueConsumerPauseOwner,
   compareAndSetQueueAdmission,
+  completeQueueConsumerPauseRelease,
+  deploymentQueueConsumerPauseOwner,
+  markQueueConsumerOperatorPaused,
+  queueConsumerPauseOwnerState,
   readQueueAdmission,
+  readQueueConsumerPauseOwner,
+  releasingQueueConsumerPauseOwner,
+  touchQueueConsumerPauseOwner,
   type QueueAdmission,
   type QueueAdmissionMode,
+  QUEUE_CONSUMER_PAUSE_OPERATOR,
 } from '../src/services/queue-governance.service';
 import { queueRedisSingleton } from '../src/queues/redis';
 import { getConfig, resolveQueueRedisConfig } from '../src/utils/config';
@@ -38,6 +48,7 @@ export const DEPLOY_QUEUE_ADMISSION_TTL_SECONDS = 900;
 export const DEPLOY_QUEUE_ADMISSION_REASON = 'DEPLOY_QUEUE_QUIESCENCE';
 export const DEPLOY_QUEUE_ADMISSION_ACTOR = 'deployment';
 export const DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS = 3;
+export const CONTENT_CONSUMER_OWNER_TOKEN_ENV = 'DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN';
 
 type ContentConsumerQueueName = (typeof contentQueueNames)[number];
 export type ContentConsumerMode = 'STATUS' | 'PAUSE' | 'RESUME';
@@ -91,6 +102,11 @@ export function parseContentXScanAdmissionArguments(
 
 function isContentConsumerQueueName(value: string): value is ContentConsumerQueueName {
   return (contentQueueNames as readonly string[]).includes(value);
+}
+
+function readContentConsumerOwnerToken(): string | null {
+  const token = process.env[CONTENT_CONSUMER_OWNER_TOKEN_ENV]?.trim();
+  return token ? token : null;
 }
 
 export function parseContentConsumerModeArguments(
@@ -225,25 +241,141 @@ async function applyContentXScanAdmission(args: ContentXScanAdmissionArguments) 
 
 async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
   const queue = new Queue(args.queueName, { connection: getQueueConnection() });
+  const ownerToken = readContentConsumerOwnerToken();
+  const callerOwner = ownerToken
+    ? deploymentQueueConsumerPauseOwner(ownerToken)
+    : QUEUE_CONSUMER_PAUSE_OPERATOR;
+
+  const resultSummary = (input: {
+    mode: ContentConsumerMode;
+    previousPaused: boolean;
+    paused: boolean;
+    owner: string | null;
+    owned: boolean;
+    released?: boolean;
+  }) => ({
+    contractVersion: CONTENT_CONSUMER_CONTRACT_VERSION,
+    queueName: args.queueName,
+    mode: input.mode,
+    previousPaused: input.previousPaused,
+    paused: input.paused,
+    changed: input.previousPaused !== input.paused,
+    owner: queueConsumerPauseOwnerState(input.owner),
+    owned: input.owned,
+    released: input.released ?? false,
+  });
+
   try {
     const previousPaused = await queue.isPaused();
-    if (args.mode === 'PAUSE' && !previousPaused) await queue.pause();
-    if (args.mode === 'RESUME' && previousPaused) await queue.resume();
+    let owner = await readQueueConsumerPauseOwner(args.queueName);
+
+    if (args.mode === 'STATUS') {
+      let owned = owner === callerOwner;
+      if (ownerToken && owned && previousPaused) {
+        owned = await touchQueueConsumerPauseOwner(args.queueName, callerOwner);
+        if (!owned) owner = await readQueueConsumerPauseOwner(args.queueName);
+      }
+      return resultSummary({
+        mode: args.mode,
+        previousPaused,
+        paused: previousPaused,
+        owner,
+        owned,
+      });
+    }
+
+    if (args.mode === 'PAUSE') {
+      if (owner?.startsWith('releasing:')) {
+        throw new Error(`Content consumer pause is being released: ${args.queueName}`);
+      }
+      if (ownerToken && owner && owner !== callerOwner) {
+        return resultSummary({
+          mode: args.mode,
+          previousPaused,
+          paused: previousPaused,
+          owner,
+          owned: false,
+        });
+      }
+
+      if (!previousPaused) await queue.pause();
+      const paused = await queue.isPaused();
+      if (!paused) {
+        throw new Error(
+          `Content consumer did not reach requested mode: ${args.queueName}=${args.mode}`,
+        );
+      }
+
+      const owned = ownerToken
+        ? owner === callerOwner || !previousPaused
+          ? await claimQueueConsumerPauseOwner(args.queueName, callerOwner)
+          : false
+        : await markQueueConsumerOperatorPaused(args.queueName);
+      owner = await readQueueConsumerPauseOwner(args.queueName);
+      return resultSummary({
+        mode: args.mode,
+        previousPaused,
+        paused,
+        owner,
+        owned: owned && owner === callerOwner,
+      });
+    }
+
+    const releasingOwner = releasingQueueConsumerPauseOwner(callerOwner);
+    const canRelease = owner === callerOwner || owner === releasingOwner;
+    if (ownerToken && !canRelease) {
+      return resultSummary({
+        mode: args.mode,
+        previousPaused,
+        paused: previousPaused,
+        owner,
+        owned: false,
+      });
+    }
+    if (!ownerToken && owner && owner !== QUEUE_CONSUMER_PAUSE_OPERATOR && !canRelease) {
+      // An explicit operator resume may recover a queue left paused by a
+      // crashed deployment. It still takes the queue state through the same
+      // releasing marker, so a supported concurrent pause cannot be lost.
+      if (owner.startsWith('releasing:')) {
+        throw new Error(`Content consumer release is already in progress: ${args.queueName}`);
+      }
+      if (!(await markQueueConsumerOperatorPaused(args.queueName))) {
+        throw new Error(`Content consumer operator release was fenced: ${args.queueName}`);
+      }
+      owner = QUEUE_CONSUMER_PAUSE_OPERATOR;
+    }
+
+    if (owner) {
+      if (!(await beginQueueConsumerPauseRelease(args.queueName, callerOwner))) {
+        owner = await readQueueConsumerPauseOwner(args.queueName);
+        return resultSummary({
+          mode: args.mode,
+          previousPaused,
+          paused: previousPaused,
+          owner,
+          owned: false,
+        });
+      }
+    }
+
+    if (previousPaused) await queue.resume();
     const paused = await queue.isPaused();
-    const expectedPaused = args.mode === 'PAUSE' ? true : args.mode === 'RESUME' ? false : paused;
-    if (args.mode !== 'STATUS' && paused !== expectedPaused) {
+    if (paused) {
       throw new Error(
         `Content consumer did not reach requested mode: ${args.queueName}=${args.mode}`,
       );
     }
-    return {
-      contractVersion: CONTENT_CONSUMER_CONTRACT_VERSION,
-      queueName: args.queueName,
+    if (owner && !(await completeQueueConsumerPauseRelease(args.queueName, callerOwner))) {
+      throw new Error(`Content consumer release ownership changed: ${args.queueName}`);
+    }
+    return resultSummary({
       mode: args.mode,
       previousPaused,
       paused,
-      changed: previousPaused !== paused,
-    };
+      owner: null,
+      owned: Boolean(owner),
+      released: Boolean(owner),
+    });
   } finally {
     await queue.close();
   }
@@ -335,7 +467,13 @@ async function main(): Promise<void> {
   }
   if (hasContentConsumerModeArguments(args)) {
     const consumerArguments = parseContentConsumerModeArguments(args);
-    process.stdout.write(`${JSON.stringify(await applyContentConsumerMode(consumerArguments))}\n`);
+    try {
+      process.stdout.write(
+        `${JSON.stringify(await applyContentConsumerMode(consumerArguments))}\n`,
+      );
+    } finally {
+      await queueRedisSingleton.disconnect();
+    }
     return;
   }
 

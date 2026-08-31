@@ -110,9 +110,59 @@ export class QueueDrainOnlyError extends Error {
 
 const SNAPSHOT_PREFIX = 'ops:queue-health:';
 const ADMISSION_PREFIX = 'ops:queue-admission:';
+const CONSUMER_PAUSE_OWNER_PREFIX = 'ops:queue-consumer-pause-owner:';
 const RED_SAMPLE_PREFIX = 'ops:queue-admission-red:';
 const GREEN_SAMPLE_PREFIX = 'ops:queue-admission-green-since:';
 const MONITOR_LEASE_PREFIX = 'ops:queue-monitor-leader:';
+export const QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS = 3_600;
+export const QUEUE_CONSUMER_PAUSE_OPERATOR = 'operator';
+const QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX = 'releasing:';
+
+/**
+ * Consumer pause is a BullMQ queue-level state, so BullMQ itself has no
+ * ownership token that can be checked when a deployment later resumes it.
+ * Keep that ownership in a separate Redis key and fence the release with a
+ * short atomic transition.  The marker is deliberately not part of the
+ * queue payload or business data.
+ */
+export const MARK_QUEUE_CONSUMER_OPERATOR_PAUSE_LUA = `
+local current = redis.call('GET', KEYS[1])
+local releasingPrefix = ARGV[1]
+if current and string.sub(current, 1, string.len(releasingPrefix)) == releasingPrefix then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+`;
+export const CLAIM_QUEUE_CONSUMER_PAUSE_OWNER_LUA = `
+local current = redis.call('GET', KEYS[1])
+local owner = ARGV[1]
+if current and current ~= owner then return 0 end
+redis.call('SET', KEYS[1], owner, 'EX', ARGV[2])
+return 1
+`;
+export const TOUCH_QUEUE_CONSUMER_PAUSE_OWNER_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('EXPIRE', KEYS[1], ARGV[2])
+`;
+export const BEGIN_QUEUE_CONSUMER_PAUSE_RELEASE_LUA = `
+local current = redis.call('GET', KEYS[1])
+local owner = ARGV[1]
+local releasing = ARGV[2]
+if current == owner then
+  redis.call('SET', KEYS[1], releasing, 'EX', ARGV[3])
+  return 1
+end
+if current == releasing then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  return 1
+end
+return 0
+`;
+export const COMPLETE_QUEUE_CONSUMER_PAUSE_RELEASE_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+`;
 export const COMPARE_AND_SET_QUEUE_ADMISSION_LUA = `
 local current = redis.call('GET', KEYS[1])
 local expected = ARGV[1]
@@ -248,6 +298,127 @@ export function queueHealthSnapshotKey(queueName: string): string {
 
 export function queueAdmissionKey(queueName: string): string {
   return `${ADMISSION_PREFIX}${queueName}`;
+}
+
+export function queueConsumerPauseOwnerKey(queueName: string): string {
+  const normalized = queueName.trim();
+  if (!normalized) throw new Error('Queue consumer pause owner requires a queue name');
+  return `${CONSUMER_PAUSE_OWNER_PREFIX}${normalized}`;
+}
+
+export function deploymentQueueConsumerPauseOwner(ownerToken: string): string {
+  const normalized = ownerToken.trim();
+  if (!normalized) throw new Error('Queue consumer pause owner requires an owner token');
+  return `deployment:${normalized}`;
+}
+
+export function releasingQueueConsumerPauseOwner(owner: string): string {
+  return `${QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX}${owner}`;
+}
+
+export type QueueConsumerPauseOwnerState = 'NONE' | 'DEPLOYMENT' | 'OPERATOR' | 'RELEASING';
+
+export function queueConsumerPauseOwnerState(owner: string | null): QueueConsumerPauseOwnerState {
+  if (!owner) return 'NONE';
+  if (owner === QUEUE_CONSUMER_PAUSE_OPERATOR) return 'OPERATOR';
+  if (owner.startsWith(QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX)) return 'RELEASING';
+  if (owner.startsWith('deployment:')) return 'DEPLOYMENT';
+  return 'NONE';
+}
+
+export async function readQueueConsumerPauseOwner(queueName: string): Promise<string | null> {
+  const redis = await queueRedisSingleton.getClient();
+  return redis.get(queueConsumerPauseOwnerKey(queueName));
+}
+
+export async function claimQueueConsumerPauseOwner(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        CLAIM_QUEUE_CONSUMER_PAUSE_OWNER_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        owner,
+        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+export async function touchQueueConsumerPauseOwner(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        TOUCH_QUEUE_CONSUMER_PAUSE_OWNER_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        owner,
+        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+/** Mark a no-token pause as an explicit operator-owned pause. */
+export async function markQueueConsumerOperatorPaused(queueName: string): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  const result = (await redis.eval(
+    MARK_QUEUE_CONSUMER_OPERATOR_PAUSE_LUA,
+    1,
+    queueConsumerPauseOwnerKey(queueName),
+    QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX,
+    QUEUE_CONSUMER_PAUSE_OPERATOR,
+  )) as number | string;
+  return Number(result) === 1;
+}
+
+/**
+ * Move an exact owner to a releasing marker.  A concurrent supported pause
+ * operation cannot overwrite a releasing marker, so it cannot be undone by
+ * the deployment's later BullMQ resume call.
+ */
+export async function beginQueueConsumerPauseRelease(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        BEGIN_QUEUE_CONSUMER_PAUSE_RELEASE_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        owner,
+        releasingQueueConsumerPauseOwner(owner),
+        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+export async function completeQueueConsumerPauseRelease(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        COMPLETE_QUEUE_CONSUMER_PAUSE_RELEASE_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        releasingQueueConsumerPauseOwner(owner),
+      ),
+    ) === 1
+  );
 }
 
 export function queueMonitorLeaseKey(queueName: string): string {
