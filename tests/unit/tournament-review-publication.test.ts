@@ -7,6 +7,7 @@ import {
   isTournamentReviewEntryApplicable,
   rankTournamentReviewH2HStandings,
   resolveTournamentReviewFormat,
+  tournamentReviewScoreMatchesEntryResult,
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
 } from '../../src/services/tournament-review-publication.service';
@@ -120,6 +121,39 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(h2hMatchPointsMatchScore(70, 55, 1, 1)).toBe(false);
     expect(h2hMatchPointsMatchScore(55, 55, 1, 1)).toBe(true);
     expect(h2hMatchPointsMatchScore(55, 55, 3, 0)).toBe(false);
+  });
+
+  test('requires derived matchup scores to cover the entry result watermark', () => {
+    const result = {
+      event_net_points: 70,
+      updated_at: '2026-08-30T10:00:00.000Z',
+      rich_synced_at: '2026-08-30T09:59:00.000Z',
+    };
+    expect(
+      tournamentReviewScoreMatchesEntryResult(
+        70,
+        '2026-08-30T10:01:00.000Z',
+        '2026-08-30T10:02:00.000Z',
+        result,
+      ),
+    ).toBe(true);
+    expect(
+      tournamentReviewScoreMatchesEntryResult(
+        69,
+        '2026-08-30T10:01:00.000Z',
+        '2026-08-30T10:02:00.000Z',
+        result,
+      ),
+    ).toBe(false);
+    expect(
+      tournamentReviewScoreMatchesEntryResult(
+        70,
+        '2026-08-30T09:58:00.000Z',
+        '2026-08-30T09:58:00.000Z',
+        result,
+      ),
+    ).toBe(false);
+    expect(tournamentReviewScoreMatchesEntryResult(70, null, null, null)).toBe(false);
   });
 
   test('reconciles incrementally and retires scopes under the publication lock', () => {

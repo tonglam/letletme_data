@@ -650,6 +650,12 @@ type BattleSourceRow = {
   event_data_checked_at?: Date | string | null;
   event_finished?: boolean;
   event_data_checked?: boolean;
+  home_result_net_points?: number | null;
+  home_result_updated_at?: Date | string | null;
+  home_result_rich_synced_at?: Date | string | null;
+  away_result_net_points?: number | null;
+  away_result_updated_at?: Date | string | null;
+  away_result_rich_synced_at?: Date | string | null;
   source_checked_at: Date | string | null;
   updated_at: Date | string;
 };
@@ -664,6 +670,7 @@ type EntryScoreRow = {
   event_points: number | null;
   event_transfers_cost: number | null;
   event_net_points: number | null;
+  result_updated_at: Date | string | null;
   rich_synced_at: Date | string | null;
 };
 
@@ -683,6 +690,7 @@ async function loadEntryScores(
            result.event_points,
            result.event_transfers_cost,
            result.event_net_points,
+           result.updated_at AS result_updated_at,
            result.rich_synced_at
     FROM competition.tournament_entries roster
     JOIN competition.entries entry
@@ -780,6 +788,44 @@ export function h2hMatchPointsMatchScore(
   const expectedHome = homeNetPoints > awayNetPoints ? 3 : homeNetPoints < awayNetPoints ? 0 : 1;
   const expectedAway = homeNetPoints > awayNetPoints ? 0 : homeNetPoints < awayNetPoints ? 3 : 1;
   return homeMatchPoints === expectedHome && awayMatchPoints === expectedAway;
+}
+
+type TournamentReviewEntryResultEvidence = {
+  event_net_points: number | null;
+  updated_at: Date | string | null | undefined;
+  rich_synced_at: Date | string | null | undefined;
+};
+
+/**
+ * Derived H2H/knockout rows may be written after the entry result they read.
+ * Require both the score value and a row watermark that covers the result
+ * watermark before allowing an immutable review publication to use the row.
+ */
+export function tournamentReviewScoreMatchesEntryResult(
+  matchNetPoints: number | null,
+  matchSourceCheckedAt: Date | string | null | undefined,
+  matchUpdatedAt: Date | string | null | undefined,
+  result: TournamentReviewEntryResultEvidence | null | undefined,
+): boolean {
+  if (!result || matchNetPoints === null || result.event_net_points === null) return false;
+  if (matchNetPoints !== result.event_net_points) return false;
+  const matchWatermark = Math.max(
+    ...[matchSourceCheckedAt, matchUpdatedAt]
+      .map(asDate)
+      .filter((date): date is Date => date !== null)
+      .map((date) => date.getTime()),
+  );
+  const resultWatermark = Math.max(
+    ...[result.updated_at, result.rich_synced_at]
+      .map(asDate)
+      .filter((date): date is Date => date !== null)
+      .map((date) => date.getTime()),
+  );
+  return (
+    Number.isFinite(matchWatermark) &&
+    Number.isFinite(resultWatermark) &&
+    matchWatermark >= resultWatermark
+  );
 }
 
 async function buildH2HPayload(
@@ -911,6 +957,40 @@ async function buildH2HPayload(
           'H2H match points are inconsistent with scores',
         );
       }
+      if (
+        (match.home_entry_id !== null &&
+          !match.home_is_average &&
+          !tournamentReviewScoreMatchesEntryResult(
+            match.home_net_points,
+            match.source_checked_at,
+            match.updated_at,
+            home
+              ? {
+                  event_net_points: home.event_net_points,
+                  updated_at: home.result_updated_at,
+                  rich_synced_at: home.rich_synced_at,
+                }
+              : null,
+          )) ||
+        (match.away_entry_id !== null &&
+          !match.away_is_average &&
+          !tournamentReviewScoreMatchesEntryResult(
+            match.away_net_points,
+            match.source_checked_at,
+            match.updated_at,
+            away
+              ? {
+                  event_net_points: away.event_net_points,
+                  updated_at: away.result_updated_at,
+                  rich_synced_at: away.rich_synced_at,
+                }
+              : null,
+          ))
+      ) {
+        throw new TournamentReviewSourceNotReadyError(
+          'H2H match scores do not match entry event results',
+        );
+      }
     }
     const sourceCheckedAt = battleSourceCheckedAt(match);
     if (!sourceCheckedAt) {
@@ -998,11 +1078,25 @@ async function buildH2HPayload(
            battle.source_checked_at, battle.updated_at,
            event.finished AS event_finished,
            event.data_checked AS event_data_checked,
-           event.data_checked_at AS event_data_checked_at
+           event.data_checked_at AS event_data_checked_at,
+           home_result.event_net_points AS home_result_net_points,
+           home_result.updated_at AS home_result_updated_at,
+           home_result.rich_synced_at AS home_result_rich_synced_at,
+           away_result.event_net_points AS away_result_net_points,
+           away_result.updated_at AS away_result_updated_at,
+           away_result.rich_synced_at AS away_result_rich_synced_at
     FROM competition.tournament_battle_group_results battle
     JOIN fpl.events event
       ON event.season_id = battle.season_id
      AND event.event_id = battle.event_id
+    LEFT JOIN competition.entry_event_results home_result
+      ON home_result.season_id = battle.season_id
+     AND home_result.entry_id = battle.home_entry_id
+     AND home_result.event_id = battle.event_id
+    LEFT JOIN competition.entry_event_results away_result
+      ON away_result.season_id = battle.season_id
+     AND away_result.entry_id = battle.away_entry_id
+     AND away_result.event_id = battle.event_id
     WHERE battle.season_id = ${seasonId}
       AND battle.tournament_id = ${tournament.tournament_id}
       AND battle.event_id >= COALESCE(${tournament.group_started_event_id}, 1)
@@ -1176,6 +1270,40 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError(
         'H2H history match points are inconsistent with scores',
+      );
+    }
+    if (
+      (match.home_entry_id !== null &&
+        !match.home_is_average &&
+        !tournamentReviewScoreMatchesEntryResult(
+          match.home_net_points,
+          match.source_checked_at,
+          match.updated_at,
+          match.home_result_net_points === undefined
+            ? null
+            : {
+                event_net_points: match.home_result_net_points,
+                updated_at: match.home_result_updated_at,
+                rich_synced_at: match.home_result_rich_synced_at,
+              },
+        )) ||
+      (match.away_entry_id !== null &&
+        !match.away_is_average &&
+        !tournamentReviewScoreMatchesEntryResult(
+          match.away_net_points,
+          match.source_checked_at,
+          match.updated_at,
+          match.away_result_net_points === undefined
+            ? null
+            : {
+                event_net_points: match.away_result_net_points,
+                updated_at: match.away_result_updated_at,
+                rich_synced_at: match.away_result_rich_synced_at,
+              },
+        ))
+    ) {
+      throw new TournamentReviewSourceNotReadyError(
+        'H2H history scores do not match entry event results',
       );
     }
 
@@ -1414,6 +1542,38 @@ async function buildKnockoutPayload(
     }
     if (match.away_entry_id !== null && !away) {
       throw new TournamentReviewSourceNotReadyError('knockout away entry is outside the roster');
+    }
+    if (
+      (match.home_entry_id !== null &&
+        !tournamentReviewScoreMatchesEntryResult(
+          match.home_net_points,
+          match.source_checked_at,
+          match.updated_at,
+          home
+            ? {
+                event_net_points: home.event_net_points,
+                updated_at: home.result_updated_at,
+                rich_synced_at: home.rich_synced_at,
+              }
+            : null,
+        )) ||
+      (match.away_entry_id !== null &&
+        !tournamentReviewScoreMatchesEntryResult(
+          match.away_net_points,
+          match.source_checked_at,
+          match.updated_at,
+          away
+            ? {
+                event_net_points: away.event_net_points,
+                updated_at: away.result_updated_at,
+                rich_synced_at: away.rich_synced_at,
+              }
+            : null,
+        ))
+    ) {
+      throw new TournamentReviewSourceNotReadyError(
+        'knockout scores do not match entry event results',
+      );
     }
     if (
       match.match_winner !== null &&
