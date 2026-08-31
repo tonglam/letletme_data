@@ -5,7 +5,10 @@ import {
   getPostMatchResultsSlot,
   POST_MATCH_RESULTS_WINDOW_MS,
 } from '../../src/domain/post-match-results';
-import { shouldEnqueueTournamentCascade } from '../../src/domain/tournament-event-results';
+import {
+  isTournamentCascadeFinalizedEvent,
+  shouldEnqueueTournamentCascade,
+} from '../../src/domain/tournament-event-results';
 import {
   resolvePlayerValuesSyncDecision,
   shouldRunPlayerValuesSync,
@@ -220,5 +223,31 @@ describe('empty tournament result sync', () => {
   test('does not fan out a cascade when there are no active entries', () => {
     expect(shouldEnqueueTournamentCascade({ totalEntries: 0 })).toBe(false);
     expect(shouldEnqueueTournamentCascade({ totalEntries: 2 })).toBe(true);
+  });
+});
+
+describe('tournament cascade finalization fence', () => {
+  test('requires exact finished, data_checked, and data_checked_at evidence', () => {
+    expect(
+      isTournamentCascadeFinalizedEvent({
+        finished: false,
+        dataChecked: true,
+        dataCheckedAt: new Date('2026-08-22T22:00:00.000Z'),
+      }),
+    ).toBe(false);
+    expect(
+      isTournamentCascadeFinalizedEvent({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: null,
+      }),
+    ).toBe(false);
+    expect(
+      isTournamentCascadeFinalizedEvent({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: new Date('2026-08-22T22:00:00.000Z'),
+      }),
+    ).toBe(true);
   });
 });

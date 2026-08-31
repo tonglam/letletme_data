@@ -201,11 +201,21 @@ describe('release workflow gates', () => {
 
   test('keeps the V2 seed connection separate from the runtime connection', () => {
     const v2Seed = deployScript.slice(deployScript.indexOf('start_stage v2Seed'));
-    expect(v2Seed).toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=${migration_database_url}"');
+    expect(v2Seed).toContain('LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url"');
+    expect(v2Seed).toContain('-e LIVE_POINTS_V2_SEED_DATABASE_URL');
+    expect(v2Seed).not.toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=${migration_database_url}"');
     expect(v2Seed).not.toContain('-e "DATABASE_URL=${migration_database_url}"');
     expect(v2Seed).toMatch(
       /if ! compose run --rm -T --interactive=false \\\n\s+api \\\n\s+bun run verify:live-points-v2/,
     );
+
+    const workflowV2Seed = workflow.slice(workflow.indexOf('start_stage v2Seed'));
+    expect(workflowV2Seed).toContain('LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url"');
+    expect(workflowV2Seed).toContain('-e LIVE_POINTS_V2_SEED_DATABASE_URL');
+    expect(workflowV2Seed).not.toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=$');
+    expect(workflowV2Seed).toContain('DATABASE_URL="$data_runtime_database_url"');
+    expect(workflowV2Seed).toContain('-e DATABASE_URL api');
+    expect(workflowV2Seed).not.toContain('-e "DATABASE_URL=$');
   });
 
   test('keeps the read-only backup container able to normalize its writable mount', () => {

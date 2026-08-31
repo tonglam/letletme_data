@@ -8,6 +8,7 @@ import {
   resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
   resolveLiveFinalizationCatchupPlans,
+  resolveFinalizedPostMatchResultPlans,
   resolvePostMatchResultPlans,
   playerPricesDefinition,
   schedulerQueueLaneOverride,
@@ -858,6 +859,52 @@ describe('standalone scheduler registry', () => {
         }),
       }),
     ]);
+  });
+
+  test('excludes provisional and incomplete-final result slots from tournament plans', async () => {
+    const checkedAt = new Date('2026-08-22T22:00:00.000Z');
+    const plans = await resolveFinalizedPostMatchResultPlans(
+      {
+        season: TEST_SEASON,
+        now: new Date('2026-08-23T12:00:00.000Z'),
+        events: [
+          {
+            id: 1,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: checkedAt,
+          },
+          {
+            id: 2,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: true,
+            dataChecked: true,
+            dataCheckedAt: null,
+          },
+          {
+            id: 3,
+            deadlineTime: new Date('2026-08-22T17:30:00.000Z'),
+            finished: false,
+            dataChecked: false,
+            dataCheckedAt: null,
+          },
+        ],
+      },
+      async (season, eventId) => {
+        expect(season).toEqual(TEST_SEASON);
+        expect(eventId).toBe(3);
+        return [
+          {
+            ...mockFixture1,
+            event: 3,
+            kickoffTime: new Date('2026-08-22T18:00:00.000Z'),
+          },
+        ];
+      },
+    );
+
+    expect(plans.map((plan) => plan.periodKey)).toEqual(['event-1-final']);
   });
 
   test('bounds hourly result slots to 24 hours', async () => {
