@@ -799,6 +799,30 @@ export function hasCompleteTournamentReviewH2HGroupCoverage(input: {
   );
 }
 
+/**
+ * The battle result rows are a derived projection.  Compare their observed
+ * entry-to-group assignment with the durable tournament_groups roster before
+ * treating an H2H event as publishable.  A complete but uniformly shifted
+ * projection must fail this check just like a missing or duplicate row.
+ */
+export function hasCanonicalTournamentReviewH2HGroupAssignment(input: {
+  entryIds: ReadonlySet<number>;
+  observedEntryGroupIds: ReadonlyMap<number, number>;
+  canonicalRows: readonly { entry_id: number; group_id: number }[];
+}): boolean {
+  if (input.canonicalRows.length !== input.entryIds.size) return false;
+  const canonicalEntryGroupIds = new Map<number, number>();
+  for (const row of input.canonicalRows) {
+    if (!input.entryIds.has(row.entry_id) || canonicalEntryGroupIds.has(row.entry_id)) {
+      return false;
+    }
+    canonicalEntryGroupIds.set(row.entry_id, row.group_id);
+  }
+  return [...input.entryIds].every(
+    (entryId) => canonicalEntryGroupIds.get(entryId) === input.observedEntryGroupIds.get(entryId),
+  );
+}
+
 export function rankTournamentReviewH2HStandings<
   T extends { entryId: number; matchPoints: number; pointsFor: number },
 >(rows: readonly T[]): Array<T & { rank: number }> {
@@ -1159,6 +1183,28 @@ async function buildH2HPayload(
     })
   ) {
     throw new TournamentReviewSourceNotReadyError('H2H roster coverage is incomplete');
+  }
+
+  // Match rows are a derived projection and can be internally consistent
+  // while still assigning every entry to the wrong group.  The durable
+  // tournament_groups rows are the canonical roster/group assignment, so
+  // publication must fence on that assignment before accepting the H2H
+  // projection.  Duplicate or missing canonical rows fail closed as well.
+  const canonicalGroupRows = await tx<Array<{ entry_id: number; group_id: number }>>`
+    SELECT entry_id, group_id
+    FROM competition.tournament_groups
+    WHERE season_id = ${seasonId}
+      AND tournament_id = ${tournament.tournament_id}
+    ORDER BY entry_id, group_id
+  `;
+  if (
+    !hasCanonicalTournamentReviewH2HGroupAssignment({
+      entryIds: new Set(scores.keys()),
+      observedEntryGroupIds: entryGroupIds,
+      canonicalRows: canonicalGroupRows,
+    })
+  ) {
+    throw new TournamentReviewSourceNotReadyError('H2H group assignment is stale');
   }
 
   const history = await tx<BattleSourceRow[]>`

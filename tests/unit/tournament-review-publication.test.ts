@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   hasCompleteTournamentReviewH2HGroupCoverage,
+  hasCanonicalTournamentReviewH2HGroupAssignment,
   h2hMatchPointsMatchScore,
   isTournamentReviewEntryApplicable,
   rankTournamentReviewH2HStandings,
@@ -11,7 +12,10 @@ import {
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
 } from '../../src/services/tournament-review-publication.service';
-import { rankTournamentReviewPointsGroups } from '../../src/services/tournament-points-race-results.service';
+import {
+  effectiveTournamentReviewEntryStartEventId,
+  rankTournamentReviewPointsGroups,
+} from '../../src/services/tournament-points-race-results.service';
 
 const publicationSource = readFileSync(
   'src/services/tournament-review-publication.service.ts',
@@ -97,6 +101,54 @@ describe('My Tournament Review V2 format and retry policy', () => {
     ).toBe(false);
   });
 
+  test('rejects complete but stale H2H group assignments', () => {
+    const entryIds = new Set([1, 2, 3, 4]);
+    const observedEntryGroupIds = new Map([
+      [1, 10],
+      [2, 10],
+      [3, 20],
+      [4, 20],
+    ]);
+    expect(
+      hasCanonicalTournamentReviewH2HGroupAssignment({
+        entryIds,
+        observedEntryGroupIds,
+        canonicalRows: [
+          { entry_id: 1, group_id: 10 },
+          { entry_id: 2, group_id: 10 },
+          { entry_id: 3, group_id: 20 },
+          { entry_id: 4, group_id: 20 },
+        ],
+      }),
+    ).toBe(true);
+    // Every derived row can be internally coherent while being shifted to a
+    // different canonical group.  That must not publish as a valid review.
+    expect(
+      hasCanonicalTournamentReviewH2HGroupAssignment({
+        entryIds,
+        observedEntryGroupIds,
+        canonicalRows: [
+          { entry_id: 1, group_id: 20 },
+          { entry_id: 2, group_id: 20 },
+          { entry_id: 3, group_id: 10 },
+          { entry_id: 4, group_id: 10 },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      hasCanonicalTournamentReviewH2HGroupAssignment({
+        entryIds,
+        observedEntryGroupIds,
+        canonicalRows: [
+          { entry_id: 1, group_id: 10 },
+          { entry_id: 1, group_id: 20 },
+          { entry_id: 3, group_id: 20 },
+          { entry_id: 4, group_id: 20 },
+        ],
+      }),
+    ).toBe(false);
+  });
+
   test('represents pre-entry H2H participants without treating their scores as ready', () => {
     expect(isTournamentReviewEntryApplicable(null, 5)).toBe(true);
     expect(isTournamentReviewEntryApplicable(5, 5)).toBe(true);
@@ -132,6 +184,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
     ]);
     expect(ranks.get('100-10')).toBe(1);
     expect(ranks.get('80-30')).toBe(3);
+  });
+
+  test('clamps points cumulative totals to each entry start event', () => {
+    expect(effectiveTournamentReviewEntryStartEventId(5, null)).toBe(5);
+    expect(effectiveTournamentReviewEntryStartEventId(5, 3)).toBe(5);
+    expect(effectiveTournamentReviewEntryStartEventId(5, 7)).toBe(7);
   });
 
   test('repairs historical points ranks with finalized cumulative inputs', () => {

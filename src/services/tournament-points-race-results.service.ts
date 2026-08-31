@@ -20,6 +20,14 @@ function groupRankKey(totalNetPoints: number, overallRank: number | null) {
   return `${totalNetPoints}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
 }
 
+/** Clamp an entry's cumulative-results lower bound to the tournament window. */
+export function effectiveTournamentReviewEntryStartEventId(
+  groupStartedEventId: number,
+  entryStartedEventId: number | null | undefined,
+): number {
+  return Math.max(groupStartedEventId, entryStartedEventId ?? groupStartedEventId);
+}
+
 export function rankTournamentReviewPointsGroups(
   groups: Array<{ entryId: number; totalNetPoints: number; overallRank: number | null }>,
 ) {
@@ -49,24 +57,43 @@ async function loadTournamentEntryTotals(
   entryIds: number[],
   startEventId: number,
   endEventId: number,
+  startedEventByEntry: ReadonlyMap<number, number | null | undefined>,
 ): Promise<Map<number, EntryTotals>> {
-  const totals = await entryEventResultsRepository.aggregateTotalsByEntry(
-    season,
-    entryIds,
-    startEventId,
-    endEventId,
-    { finalizedOnly: true },
-  );
-  return new Map(
-    totals.map((row) => [
-      row.entryId,
-      {
+  // Entries can join a tournament after its group window starts.  Aggregate
+  // each effective lower-bound cohort so no pre-entry event result leaks into
+  // the cumulative review totals.  Grouping by bound keeps the query count
+  // bounded by the number of distinct start events while preserving the
+  // indexed range scan in aggregateTotalsByEntry.
+  const entryIdsByStartEvent = new Map<number, number[]>();
+  for (const entryId of entryIds) {
+    const entryStartedEvent = startedEventByEntry.get(entryId);
+    const effectiveStartEvent = effectiveTournamentReviewEntryStartEventId(
+      startEventId,
+      entryStartedEvent,
+    );
+    const cohort = entryIdsByStartEvent.get(effectiveStartEvent) ?? [];
+    cohort.push(entryId);
+    entryIdsByStartEvent.set(effectiveStartEvent, cohort);
+  }
+
+  const totalsByEntry = new Map<number, EntryTotals>();
+  for (const [effectiveStartEvent, cohortEntryIds] of entryIdsByStartEvent) {
+    const totals = await entryEventResultsRepository.aggregateTotalsByEntry(
+      season,
+      cohortEntryIds,
+      effectiveStartEvent,
+      endEventId,
+      { finalizedOnly: true },
+    );
+    for (const row of totals) {
+      totalsByEntry.set(row.entryId, {
         totalPoints: row.totalPoints,
         totalTransfersCost: row.totalTransfersCost,
         totalNetPoints: row.totalNetPoints,
-      },
-    ]),
-  );
+      });
+    }
+  }
+  return totalsByEntry;
 }
 
 export async function syncTournamentPointsRaceResultsForTournament(
@@ -122,6 +149,7 @@ export async function syncTournamentPointsRaceResultsForTournament(
     entryIds,
     tournament.groupStartedEventId,
     Math.min(eventId, tournament.groupEndedEventId),
+    startedEventByEntry,
   );
 
   const pointsGroupResults = await tournamentPointsGroupResultsRepository.findByTournamentAndEvent(
