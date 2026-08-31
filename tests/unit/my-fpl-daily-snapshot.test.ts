@@ -202,6 +202,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('entryPicks.length === 15');
     expect(publicationService).toContain('entryPicks.every((pick) => pick.total_points !== null');
     expect(publicationService).toContain('same transaction as the immutable');
+    expect(publicationService).toContain('contractVersion: 2');
+    expect(publicationService).toContain('buildMyFplManagerReview');
   });
 
   test('binds final picks to the immutable result row', () => {
@@ -272,6 +274,12 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(tournamentWorker).toContain('perEntryMutationScopes: true');
     expect(tournamentTransfers).toContain('findEntryIdsNeedingSourceRefresh');
     expect(tournamentTransfers).toContain('requiredUnits: entryIds.length');
+    expect(worker).toMatch(
+      /if \(snapshotKind === 'FINAL'\) \{[\s\S]{0,500}enqueueTournamentEventResults/,
+    );
+    expect(worker.search(/if \(snapshotKind === 'FINAL'\) \{/)).toBeLessThan(
+      worker.indexOf('enqueueTournamentEventResults(season, eventId, source'),
+    );
   });
 
   test('decides same-day provisional noops only after normalized content hashing', () => {

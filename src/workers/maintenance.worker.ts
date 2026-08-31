@@ -424,28 +424,36 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             }),
           ]);
 
-          await runQueueRunPhase(attemptKey, [
-            enqueueTournamentEventResults(season, eventId, source, {
-              freshAfter,
-              jobId: `my-fpl-${attemptKey}-tournament-results`,
-              runId: attemptKey,
-            }),
-          ]);
+          // The daily review snapshot calculates its tournament projection
+          // directly from the same pinned entry scores used by the personal
+          // payload. The tournament result cascade is a finalized-event
+          // workflow (including transfers-post), so running it for a live
+          // event can never satisfy its authority fence and strands the daily
+          // publication barrier. Only FINAL captures enter those phases.
+          if (snapshotKind === 'FINAL') {
+            await runQueueRunPhase(attemptKey, [
+              enqueueTournamentEventResults(season, eventId, source, {
+                freshAfter,
+                jobId: `my-fpl-${attemptKey}-tournament-results`,
+                runId: attemptKey,
+              }),
+            ]);
 
-          await runQueueRunPhase(attemptKey, [
-            enqueueTournamentEventPicks(season, eventId, source, {
-              jobId: `my-fpl-${attemptKey}-tournament-picks`,
-              runId: attemptKey,
-            }),
-          ]);
+            await runQueueRunPhase(attemptKey, [
+              enqueueTournamentEventPicks(season, eventId, source, {
+                jobId: `my-fpl-${attemptKey}-tournament-picks`,
+                runId: attemptKey,
+              }),
+            ]);
 
-          await runQueueRunPhase(attemptKey, [
-            enqueueTournamentTransfersPre(season, eventId, source, {
-              freshAfter,
-              jobId: `my-fpl-${attemptKey}-tournament-transfers`,
-              runId: attemptKey,
-            }),
-          ]);
+            await runQueueRunPhase(attemptKey, [
+              enqueueTournamentTransfersPre(season, eventId, source, {
+                freshAfter,
+                jobId: `my-fpl-${attemptKey}-tournament-transfers`,
+                runId: attemptKey,
+              }),
+            ]);
+          }
           const capture = await captureMyFplSnapshot(season, eventId, snapshotKind, {
             ...(job.data.snapshotActor ? { actor: job.data.snapshotActor } : {}),
             ...(job.data.snapshotReason ? { reason: job.data.snapshotReason } : {}),
