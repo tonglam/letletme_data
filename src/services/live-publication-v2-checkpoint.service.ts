@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, eq, ne, or, sql } from 'drizzle-orm';
 
 import {
   eventsInFpl,
@@ -21,6 +21,7 @@ import { createEventLiveRepository } from '../repositories/event-lives';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
 import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
 import { CORE_SNAPSHOT_WRITE_LOCK_KEY } from './core-snapshot-persistence.service';
+import { hasFinalLiveMatchCheckpointsV2 } from './live-match-v2-checkpoint.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import {
   liveV2ItemKey,
@@ -536,15 +537,24 @@ export async function readLivePublicationV2Checkpoint(
 /**
  * Return every terminal event whose Live Points, Match desk, or Match detail
  * checkpoint is absent or not FINALIZED.
- * This is one set-based query so a scheduler restart can catch up an older
- * event without issuing one checkpoint lookup per historical gameweek.
+ *
+ * The initial query is set-based and supplies the cheap state fence for every
+ * terminal event. A row that looks FINALIZED at the column level still needs
+ * the self-contained Match manifest/payload validation before it can be
+ * excluded: database constraints protect shape, not the publication
+ * checksum relationship used by the serving path.
  */
 export async function findLivePublicationV2FinalizationTargets(
   season: FplSeasonRef,
 ): Promise<number[]> {
   const db = await getDb();
   const rows = await db
-    .select({ eventId: eventsInFpl.eventId })
+    .select({
+      eventId: eventsInFpl.eventId,
+      livePointsState: livePointsPublicationCheckpointsInCompetition.state,
+      deskState: liveMatchDeskCheckpointsInFpl.state,
+      detailState: liveMatchDetailCheckpointsInFpl.state,
+    })
     .from(eventsInFpl)
     .leftJoin(
       livePointsPublicationCheckpointsInCompetition,
@@ -572,24 +582,24 @@ export async function findLivePublicationV2FinalizationTargets(
         eq(eventsInFpl.seasonId, season.seasonId),
         eq(eventsInFpl.finished, true),
         eq(eventsInFpl.dataChecked, true),
-        or(
-          isNull(livePointsPublicationCheckpointsInCompetition.eventId),
-          ne(livePointsPublicationCheckpointsInCompetition.state, 'FINALIZED'),
-          isNull(liveMatchDeskCheckpointsInFpl.eventId),
-          ne(liveMatchDeskCheckpointsInFpl.state, 'FINALIZED'),
-          isNull(liveMatchDetailCheckpointsInFpl.eventId),
-          ne(liveMatchDetailCheckpointsInFpl.state, 'FINALIZED'),
-          sql<boolean>`${liveMatchDetailCheckpointsInFpl.observedDeskGeneration} <> ${liveMatchDeskCheckpointsInFpl.generation}`,
-          sql<boolean>`
-            ${liveMatchDetailCheckpointsInFpl.fixtureIdentityRevision} IS DISTINCT FROM
-              (${liveMatchDeskCheckpointsInFpl.revisions} -> 'fixtureIdentity' ->> 'revision')
-            OR (${liveMatchDeskCheckpointsInFpl.revisions} -> 'fixtureIdentity' ->> 'revision') IS NULL
-          `,
-        ),
       ),
     )
     .orderBy(eventsInFpl.eventId);
-  return rows.map((row) => row.eventId);
+  const targets: number[] = [];
+  for (const row of rows) {
+    if (
+      row.livePointsState !== 'FINALIZED' ||
+      row.deskState !== 'FINALIZED' ||
+      row.detailState !== 'FINALIZED'
+    ) {
+      targets.push(row.eventId);
+      continue;
+    }
+    if (!(await hasFinalLiveMatchCheckpointsV2(season, row.eventId))) {
+      targets.push(row.eventId);
+    }
+  }
+  return targets;
 }
 
 /**
