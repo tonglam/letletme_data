@@ -89,6 +89,9 @@ describe('live lifecycle decisions', () => {
     expect(workerSource).not.toContain('live-picks-compatibility');
     expect(workerSource).not.toContain('LIVE_PICKS_COMPATIBILITY_BUCKET_MS');
     expect(workerSource).not.toContain('QueueDrainOnlyError');
+    const liveWorkerSource = readFileSync('src/workers/live-data.worker.ts', 'utf8');
+    expect(liveWorkerSource).toContain('expectedNextCheckAt: job.data.expectedNextCheckAt');
+    expect(liveWorkerSource).toContain('if (result.checkpointed)');
     const maintenanceSource = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
     expect(maintenanceSource).toContain('isPublicationOutbox');
     const maintenanceWorkerSource = readFileSync('src/workers/maintenance.worker.ts', 'utf8');

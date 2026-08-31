@@ -825,3 +825,109 @@ export const playerEventSnapshotPublicationsInFpl = fpl.table(
     ),
   ],
 );
+
+/** Redis-first Live Matches V2 compact desk checkpoint. */
+export const liveMatchDeskCheckpointsInFpl = fpl.table(
+  'live_match_desk_checkpoints',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    publicationId: text('publication_id').notNull(),
+    generation: bigint('generation', { mode: 'number' }).notNull(),
+    state: text().notNull(),
+    manifest: jsonb().notNull(),
+    revisions: jsonb().notNull(),
+    payload: jsonb().notNull(),
+    rowCount: integer('row_count').notNull(),
+    payloadBytes: integer('payload_bytes').notNull(),
+    payloadSha256: text('payload_sha256').notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }).notNull(),
+    checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    expectedNextCheckAt: timestamp('expected_next_check_at', { withTimezone: true, mode: 'date' }),
+    staleAt: timestamp('stale_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.eventId],
+      name: 'live_match_desk_checkpoints_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'live_match_desk_checkpoints_event_fk',
+    }),
+    unique('live_match_desk_checkpoints_publication_once').on(
+      table.seasonId,
+      table.eventId,
+      table.publicationId,
+    ),
+    index('live_match_desk_checkpoints_generation_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.generation,
+    ),
+    check(
+      'live_match_desk_checkpoints_identity_valid',
+      sql`event_id > 0 AND generation > 0 AND publication_id ~ '^[0-9a-f-]{36}$' AND state = ANY (ARRAY['PRE_DEADLINE','LIVE_ACTIVE','BETWEEN_FIXTURES','DAY_SETTLING','GW_REVIEW','FINALIZED']::text[])`,
+    ),
+    check(
+      'live_match_desk_checkpoints_payload_valid',
+      sql`jsonb_typeof(manifest) = 'object' AND pg_column_size(manifest) <= 131072 AND jsonb_typeof(revisions) = 'object' AND jsonb_typeof(payload) = 'array' AND row_count = jsonb_array_length(payload) AND row_count BETWEEN 0 AND 32 AND payload_bytes BETWEEN 0 AND 131072 AND payload_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
+/** Redis-first Live Matches V2 compact fixture-detail checkpoint. */
+export const liveMatchDetailCheckpointsInFpl = fpl.table(
+  'live_match_detail_checkpoints',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    publicationId: text('publication_id').notNull(),
+    generation: bigint('generation', { mode: 'number' }).notNull(),
+    state: text().notNull(),
+    observedDeskGeneration: bigint('observed_desk_generation', { mode: 'number' }).notNull(),
+    fixtureIdentityRevision: text('fixture_identity_revision').notNull(),
+    manifest: jsonb().notNull(),
+    revisions: jsonb().notNull(),
+    payload: jsonb().notNull(),
+    rowCount: integer('row_count').notNull(),
+    payloadBytes: integer('payload_bytes').notNull(),
+    payloadSha256: text('payload_sha256').notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }).notNull(),
+    checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    expectedNextCheckAt: timestamp('expected_next_check_at', { withTimezone: true, mode: 'date' }),
+    staleAt: timestamp('stale_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.eventId],
+      name: 'live_match_detail_checkpoints_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'live_match_detail_checkpoints_event_fk',
+    }),
+    unique('live_match_detail_checkpoints_publication_once').on(
+      table.seasonId,
+      table.eventId,
+      table.publicationId,
+    ),
+    index('live_match_detail_checkpoints_generation_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.generation,
+    ),
+    check(
+      'live_match_detail_checkpoints_identity_valid',
+      sql`event_id > 0 AND generation > 0 AND observed_desk_generation > 0 AND publication_id ~ '^[0-9a-f-]{36}$' AND fixture_identity_revision ~ '^[0-9a-f]{64}$' AND state = ANY (ARRAY['PROVISIONAL','FINALIZED']::text[])`,
+    ),
+    check(
+      'live_match_detail_checkpoints_payload_valid',
+      sql`jsonb_typeof(manifest) = 'object' AND pg_column_size(manifest) <= 131072 AND jsonb_typeof(revisions) = 'object' AND jsonb_typeof(payload) = 'array' AND row_count = jsonb_array_length(payload) AND row_count BETWEEN 0 AND 32 AND payload_bytes BETWEEN 0 AND 2097152 AND payload_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);

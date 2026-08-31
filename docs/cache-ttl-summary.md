@@ -15,6 +15,12 @@ ownership, and cleanup guardrails are in [redis-contract.md](redis-contract.md).
 | Entry Live V2 current manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:active` | event validity + 48h after final |
 | Entry Live V2 previous manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:previous` | 24 hours |
 | Entry Live V2 immutable input | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:{generation}:*` | active lifetime; 24h after replacement |
+| Live Matches V2 active-event pointer | `llm:data:v2:fpl:live-match:{season}:active-event` | active season control pointer |
+| Live Matches V2 desk current/active items | `llm:data:v2:fpl:live-match:desk:{season}:{event}:...` | no expiry until final; 48h after final |
+| Live Matches V2 desk previous | `llm:data:v2:fpl:live-match:desk:{season}:{event}:previous` | 24 hours |
+| Live Matches V2 detail current/manifest/items | `llm:data:v2:fpl:live-match:detail:{season}:{event}:...` | no expiry until final; 48h after final |
+| Live Matches V2 detail previous/items | `llm:data:v2:fpl:live-match:detail:{season}:{event}:previous` and immutable items | 24 hours |
+| Live Matches V2 checkpoint desired/watermark | `llm:data:v2:fpl:live-match:checkpoint:{season}:{event}:{kind}*` | desired: 24h; watermark: 48h |
 | Unactivated publication staging | immutable item key | 15 minutes |
 | Replaced publication items | immutable item key | 24 hours |
 
@@ -25,6 +31,11 @@ generation-aware; readers validate the manifest, item type, bytes, count, and
 SHA-256 before serving it. Reads do not extend retention and a repeated
 publication ID is idempotent. PostgreSQL is an asynchronous complete
 checkpoint/cold fallback, not a heartbeat write path.
+
+Live Matches V2 has one external root but two internal publications: compact
+desk and fixture-grain detail. Detail may lag desk but may never lead its desk
+generation or cross fixture identity. The detail item hash is part of its key,
+so unchanged fixture detail is reused instead of rewritten.
 
 GraphQL owns its own bounded `llm:gql:*` query and security cache policy. Data
 does not scan or delete those keys.

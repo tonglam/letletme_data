@@ -66,6 +66,7 @@ import {
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
+import { normalizeMatchLifecycleState } from '../services/live-match-v2';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
@@ -1033,6 +1034,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
           evidence: {
             lifecycleState: decision.state,
             pollIntervalMs,
+            expectedNextCheckAt: new Date(context.now.getTime() + pollIntervalMs).toISOString(),
           },
         },
       ];
@@ -1046,6 +1048,11 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         obligationId,
         obligationGeneration: generation,
         freshnessWindowId,
+        lifecycleState: normalizeMatchLifecycleState(plan.evidence?.lifecycleState),
+        expectedNextCheckAt:
+          typeof plan.evidence?.expectedNextCheckAt === 'string'
+            ? plan.evidence.expectedNextCheckAt
+            : null,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },

@@ -8,7 +8,12 @@ import {
   liveDataQueueName,
 } from '../queues/live-data.queue';
 import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
+import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
+import {
+  checkpointLiveMatchScopeV2,
+  hasFinalLiveMatchCheckpointsV2,
+} from '../services/live-match-v2-checkpoint.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -60,11 +65,32 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
   logJobTriggered(context);
 
   return runTrackedJob(context, async () => {
+    if (job.name === LIVE_JOBS.LIVE_MATCH_CHECKPOINT) {
+      if (!job.data.checkpointKind) {
+        throw new Error('Live Match checkpoint job is missing checkpoint kind');
+      }
+      const result = await checkpointLiveMatchScopeV2({
+        season,
+        eventId,
+        kind: job.data.checkpointKind,
+      });
+      // A failed or coalesced checkpoint leaves the Redis desired marker in
+      // place for the periodic reconciler. Re-enqueue only after a successful
+      // checkpoint, when a newer desired marker could have arrived during the
+      // DB transaction. Calling this on every normal failure creates a zero-
+      // delay successor loop that can starve live snapshot work for 24 hours.
+      if (result.checkpointed) {
+        await enqueueRemainingLiveMatchCheckpoint(season, eventId, job.data.checkpointKind);
+      }
+      return result;
+    }
     if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
       throw new Error(`Unknown job name: ${job.name}`);
     }
     const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,
+      lifecycleState: job.data.lifecycleState,
+      expectedNextCheckAt: job.data.expectedNextCheckAt,
       trigger: source,
       sourceRunId: job.data.runId,
     });
@@ -96,6 +122,19 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       if (!snapshot.checkpointed) {
         throw new Error(
           `Finalized live publication is not durably checkpointed for event ${eventId}`,
+        );
+      }
+      // Final Match obligations are queued for normal recovery, but the final
+      // snapshot must not race those jobs on this same two-slot worker before
+      // it starts the downstream final-results cascade. Consume both exact
+      // desired markers inline once; any duplicate queue jobs then observe an
+      // already-cleared marker and become harmless no-ops.
+      for (const kind of ['desk', 'detail'] as const) {
+        await checkpointLiveMatchScopeV2({ season, eventId, kind });
+      }
+      if (!(await hasFinalLiveMatchCheckpointsV2(season, eventId))) {
+        throw new Error(
+          `Finalized Live Matches desk/detail are not durably checkpointed for event ${eventId}`,
         );
       }
       await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
