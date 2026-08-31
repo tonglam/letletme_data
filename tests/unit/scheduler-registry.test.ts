@@ -1018,9 +1018,6 @@ describe('standalone scheduler registry', () => {
           resultAuthorityAtMs: checkedAt.getTime(),
           resultScheduleAnchorMs: checkedAt.getTime(),
           finalizeEvent: true,
-          resultSlot: 'final-checkpoint',
-          resultAuthorityAtMs: checkedAt.getTime(),
-          resultScheduleAnchorMs: checkedAt.getTime(),
         }),
       }),
     ]);
