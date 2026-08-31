@@ -522,11 +522,31 @@ export function createEntrySyncWorker(
     // The dedicated live-picks lane carries one root canary job followed by
     // entry-picks child jobs. Both must share the same consumer so the root
     // cannot be accidentally treated as a normal entry payload (or marked
-    // complete before its fan-out drains).
+    // complete before its fan-out drains). An accepted coordinator backoff is
+    // an explicit skipped root: it must not leave the current obligation
+    // running until enqueue recovery misclassifies the completed Bull job.
     if (job.name === 'live-picks-refresh') {
       const result = await runLivePicksRefreshJob(job.data as unknown as LivePicksRefreshJobData);
+      const fence = inspectSchedulerObligationFence(job.data);
+      if (result.outcome === 'accepted-backoff') {
+        if (fence.kind === 'complete') {
+          await completeSchedulerObligation({
+            obligationId: fence.obligationId,
+            generation: fence.generation,
+            status: 'skipped',
+            evidence: {
+              queue: workerQueueName,
+              jobName: job.name,
+              eventId: job.data.eventId,
+              reason: 'live-picks-probe-backoff-accepted',
+              sourceReady: result.sourceReady,
+              scanComplete: result.scanComplete,
+            },
+          });
+        }
+        return result;
+      }
       if (result.scanComplete) {
-        const fence = inspectSchedulerObligationFence(job.data);
         if (fence.kind === 'complete') {
           await completeSchedulerObligation({
             obligationId: fence.obligationId,

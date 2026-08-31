@@ -95,6 +95,29 @@ describe('scheduler obligation lifecycle service', () => {
     expect(dependencies.recordFreshness).not.toHaveBeenCalled();
   });
 
+  test('skips generic freshness telemetry for an accepted live-picks backoff', async () => {
+    const row = obligation({
+      jobName: 'live-picks-refresh',
+      status: 'skipped',
+      evidence: {
+        freshnessWindowId: 7,
+        reason: 'live-picks-probe-backoff-accepted',
+        scanComplete: false,
+      },
+    });
+    const dependencies = fakes(row);
+    const lifecycle = createSchedulerObligationLifecycle(dependencies as never);
+
+    expect(
+      await lifecycle.completeSchedulerObligation({
+        obligationId: row.obligationId,
+        status: 'skipped',
+        evidence: { reason: 'live-picks-probe-backoff-accepted' },
+      }),
+    ).toBe(true);
+    expect(dependencies.recordFreshness).not.toHaveBeenCalled();
+  });
+
   test('keeps freshness telemetry failures best effort', async () => {
     const dependencies = fakes(obligation({ evidence: { freshnessWindowId: 7, complete: true } }));
     dependencies.recordFreshness.mockImplementation(async () => {

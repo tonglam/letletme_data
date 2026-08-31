@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 
-import { freshnessSloWindowsInOps, schedulerObligationsInOps } from '../db/schemas/index.schema';
+import {
+  dataGovernanceCasesInOps,
+  freshnessSloWindowsInOps,
+  schedulerObligationsInOps,
+} from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
 import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
@@ -39,6 +43,8 @@ export type SchedulerObligation = Readonly<{
 }>;
 
 const SUPERSEDED_BY_LATEST_AUTHORITATIVE = 'superseded-by-latest-authoritative';
+const LIVE_PICKS_ACCEPTED_BACKOFF_REASON = 'live-picks-probe-backoff-accepted';
+const LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON = 'LIVE_PICKS_BACKOFF_ACCEPTED';
 
 // A scheduled job may own one obligation while it scans a bounded batch of
 // entries. The lease is progress evidence for monitoring and explicit
@@ -55,6 +61,83 @@ function dateValue(value: Date | string | null | undefined): Date | null {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error('Invalid scheduler timestamp');
   return date;
+}
+
+function freshnessWindowIdsFromEvidence(evidence: unknown): number[] {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
+  const record = evidence as Record<string, unknown>;
+  const values = [
+    ...(Array.isArray(record.freshnessWindowIds) ? record.freshnessWindowIds : []),
+    record.freshnessWindowId,
+  ];
+  return [
+    ...new Set(
+      values.filter(
+        (value): value is number =>
+          typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
+      ),
+    ),
+  ];
+}
+
+function isAcceptedLivePicksBackoff(status: SchedulerObligationStatus, evidence: unknown): boolean {
+  return (
+    status === 'skipped' &&
+    evidence !== null &&
+    typeof evidence === 'object' &&
+    !Array.isArray(evidence) &&
+    (evidence as Record<string, unknown>).reason === LIVE_PICKS_ACCEPTED_BACKOFF_REASON
+  );
+}
+
+async function retireAcceptedLivePicksBackoffWindows(
+  db: DbOrTransaction,
+  obligationId: string,
+  evidence: unknown,
+): Promise<void> {
+  const windowIds = freshnessWindowIdsFromEvidence(evidence);
+  if (windowIds.length === 0) return;
+  const retirementEvidence = JSON.stringify({
+    jobName: 'live-picks-refresh',
+    reason: LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON,
+    notApplicableReason: LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON,
+    schedulerObligationId: obligationId,
+  });
+  await db
+    .update(freshnessSloWindowsInOps)
+    .set({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
+      breachCode: null,
+      evidence: sql`${freshnessSloWindowsInOps.evidence} || ${retirementEvidence}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        inArray(freshnessSloWindowsInOps.windowId, windowIds),
+        // An accepted backoff is explicit evidence that this scheduled
+        // window was intentionally not applicable. If the bounded observer
+        // raced and recorded a breach first, reconcile only these exact
+        // attached windows; ordinary breach history remains immutable.
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'NOT_APPLICABLE', 'BREACHED']),
+      ),
+    );
+  await db
+    .update(dataGovernanceCasesInOps)
+    .set({
+      status: 'DISMISSED',
+      lastError: null,
+      repairJobId: null,
+      repairDeadlineAt: null,
+      evidence: sql`${dataGovernanceCasesInOps.evidence} || ${retirementEvidence}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        inArray(dataGovernanceCasesInOps.sloWindowId, windowIds),
+        inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
+      ),
+    );
 }
 
 function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerObligation {
@@ -1364,34 +1447,41 @@ export async function completeSchedulerObligation(input: {
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  const updated = await db
-    .update(schedulerObligationsInOps)
-    .set({
-      status: input.status,
-      evidence: terminalSchedulerEvidence(input.evidence),
-      completedAt: sql`clock_timestamp()`,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      lastError: input.status === 'irrecoverable' ? (input.lastError ?? null) : null,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(schedulerObligationsInOps.obligationId, input.obligationId),
-        input.generation === undefined
-          ? undefined
-          : eq(schedulerObligationsInOps.generation, input.generation),
-        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
-      ),
-    )
-    .returning({
-      obligationId: schedulerObligationsInOps.obligationId,
-      jobName: schedulerObligationsInOps.jobName,
-      evidence: schedulerObligationsInOps.evidence,
-      completedAt: schedulerObligationsInOps.completedAt,
-      runId: schedulerObligationsInOps.runId,
-    });
-  return updated.length === 1;
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        status: input.status,
+        evidence: terminalSchedulerEvidence(input.evidence),
+        completedAt: sql`clock_timestamp()`,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastError: input.status === 'irrecoverable' ? (input.lastError ?? null) : null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, input.obligationId),
+          input.generation === undefined
+            ? undefined
+            : eq(schedulerObligationsInOps.generation, input.generation),
+          inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        ),
+      )
+      .returning({
+        obligationId: schedulerObligationsInOps.obligationId,
+        jobName: schedulerObligationsInOps.jobName,
+        evidence: schedulerObligationsInOps.evidence,
+        completedAt: schedulerObligationsInOps.completedAt,
+        runId: schedulerObligationsInOps.runId,
+      });
+    if (updated.length !== 1) return false;
+    const completed = updated[0]!;
+    if (isAcceptedLivePicksBackoff(input.status, input.evidence)) {
+      await retireAcceptedLivePicksBackoffWindows(tx, completed.obligationId, completed.evidence);
+    }
+    return true;
+  });
 }
 
 /**
@@ -1448,31 +1538,39 @@ export async function completeSchedulerObligationByBullJobId(input: {
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  const updated = await db
-    .update(schedulerObligationsInOps)
-    .set({
-      status: input.status ?? 'succeeded',
-      evidence: terminalSchedulerEvidence(input.evidence),
-      completedAt: sql`clock_timestamp()`,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      lastError: null,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(schedulerObligationsInOps.bullJobId, String(input.bullJobId)),
-        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
-      ),
-    )
-    .returning({
-      obligationId: schedulerObligationsInOps.obligationId,
-      jobName: schedulerObligationsInOps.jobName,
-      evidence: schedulerObligationsInOps.evidence,
-      completedAt: schedulerObligationsInOps.completedAt,
-      runId: schedulerObligationsInOps.runId,
-    });
-  return updated.length === 1;
+  return db.transaction(async (tx) => {
+    const status = input.status ?? 'succeeded';
+    const updated = await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        status,
+        evidence: terminalSchedulerEvidence(input.evidence),
+        completedAt: sql`clock_timestamp()`,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastError: null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.bullJobId, String(input.bullJobId)),
+          inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        ),
+      )
+      .returning({
+        obligationId: schedulerObligationsInOps.obligationId,
+        jobName: schedulerObligationsInOps.jobName,
+        evidence: schedulerObligationsInOps.evidence,
+        completedAt: schedulerObligationsInOps.completedAt,
+        runId: schedulerObligationsInOps.runId,
+      });
+    if (updated.length !== 1) return false;
+    const completed = updated[0]!;
+    if (isAcceptedLivePicksBackoff(status, input.evidence)) {
+      await retireAcceptedLivePicksBackoffWindows(tx, completed.obligationId, completed.evidence);
+    }
+    return true;
+  });
 }
 
 export async function failSchedulerObligationByBullJobId(input: {

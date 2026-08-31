@@ -209,13 +209,14 @@ function schedulerRecoveryCompletionJob(
   }
   if (mode === 'live-picks-finalizer') {
     return (
-      completed.find(
-        (job) =>
-          recordData(job.returnValue).scanComplete === true ||
-          (job.data.lane === 'live-picks' &&
-            recordData(job.returnValue).hasMore === false &&
-            recordData(job.returnValue).failedUnits === 0),
-      ) ?? null
+      completed.find((job) => {
+        const result = recordData(job.returnValue);
+        return (
+          result.scanComplete === true ||
+          (job.name === 'live-picks-refresh' && result.outcome === 'accepted-backoff') ||
+          (job.data.lane === 'live-picks' && result.hasMore === false && result.failedUnits === 0)
+        );
+      }) ?? null
     );
   }
   if (mode === 'tournament-cascade-finalizer') {
@@ -238,12 +239,20 @@ function schedulerRecoveryTerminalOutcome(
   status: 'succeeded' | 'skipped';
   evidence: Readonly<Record<string, unknown>>;
 }> {
+  const acceptedLivePicksBackoff =
+    definition.name === 'live-picks-refresh' &&
+    recordData(completionJob.returnValue).outcome === 'accepted-backoff';
   const skippedPriceChange =
     definition.name === 'price-change-predictions' &&
     recordData(completionJob.returnValue).outcome === 'noop';
+  const skipped = acceptedLivePicksBackoff || skippedPriceChange;
   return {
-    status: skippedPriceChange ? 'skipped' : 'succeeded',
-    evidence: skippedPriceChange ? { reason: 'official_fields_not_open' } : {},
+    status: skipped ? 'skipped' : 'succeeded',
+    evidence: acceptedLivePicksBackoff
+      ? { reason: 'live-picks-probe-backoff-accepted' }
+      : skippedPriceChange
+        ? { reason: 'official_fields_not_open' }
+        : {},
   };
 }
 

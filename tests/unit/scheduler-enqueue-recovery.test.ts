@@ -580,6 +580,59 @@ describe('scheduler enqueue recovery', () => {
     expect(completed).toEqual(['live-picks-chain']);
   });
 
+  test('settles an accepted live-picks backoff root as skipped', async () => {
+    const completed: Array<{ id: string; status: string; evidence: unknown }> = [];
+    const result = await reconcileExpiredSchedulerEnqueueClaims({
+      definitions: [
+        {
+          name: 'live-picks-refresh',
+          queueName: 'live-picks',
+          recoveryCompletionMode: 'live-picks-finalizer',
+        },
+      ],
+      dependencies: {
+        listCandidates: async () => [obligation('live-picks-backoff', 8, 'live-picks-refresh')],
+        inspectJobs: async () => ({
+          jobs: [
+            {
+              ...queueJob('live-picks-backoff', 8, 'completed'),
+              name: 'live-picks-refresh',
+              returnValue: {
+                sourceReady: true,
+                scanComplete: false,
+                outcome: 'accepted-backoff',
+              },
+            },
+          ],
+          missingEvidenceVerified: true,
+        }),
+        confirm: async () => true,
+        start: async () => false,
+        renew: async () => false,
+        complete: async (input) => {
+          completed.push({
+            id: input.obligationId,
+            status: input.status,
+            evidence: input.evidence,
+          });
+          return true;
+        },
+        fail: async () => false,
+      },
+    });
+
+    expect(result.succeeded).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(result.retried).toBe(0);
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toEqual(
+      expect.objectContaining({ id: 'live-picks-backoff', status: 'skipped' }),
+    );
+    expect(completed[0]?.evidence).toEqual(
+      expect.objectContaining({ reason: 'live-picks-probe-backoff-accepted' }),
+    );
+  });
+
   test('recognizes tournament and Understat semantic finalizers', async () => {
     const candidates = [
       obligation('tournament-chain', 5, 'tournament-event-results'),
