@@ -6,6 +6,15 @@ import type { Player, RawFPLElement } from '../types';
 // Domain Validation Schemas
 // ================================
 
+export const FPL_PLAYER_PRICE_MIN = 35;
+export const FPL_PLAYER_PRICE_MAX = 200;
+
+export function isCanonicalPlayerPrice(value: unknown): value is number {
+  if (!Number.isSafeInteger(value)) return false;
+  const price = value as number;
+  return price >= FPL_PLAYER_PRICE_MIN && price <= FPL_PLAYER_PRICE_MAX;
+}
+
 export const PlayerSchema = z.object({
   id: z.number().int().positive('Player ID must be a positive integer'),
   code: z.number().int().positive('Player code must be a positive integer'),
@@ -18,13 +27,13 @@ export const PlayerSchema = z.object({
   price: z
     .number()
     .int()
-    .min(35, 'Price must be at least 3.5m')
-    .max(200, 'Price cannot exceed 20.0m'),
+    .min(FPL_PLAYER_PRICE_MIN, 'Price must be at least 3.5m')
+    .max(FPL_PLAYER_PRICE_MAX, 'Price cannot exceed 20.0m'),
   startPrice: z
     .number()
     .int()
-    .min(35, 'Start price must be at least 3.5m')
-    .max(200, 'Start price cannot exceed 20.0m'),
+    .min(FPL_PLAYER_PRICE_MIN, 'Start price must be at least 3.5m')
+    .max(FPL_PLAYER_PRICE_MAX, 'Start price cannot exceed 20.0m'),
   firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
   secondName: z.string().min(1, 'Second name is required').max(50, 'Second name too long'),
   webName: z.string().min(1, 'Web name is required').max(30, 'Web name too long'),
@@ -35,7 +44,7 @@ export const RawFPLElementSchema = z.object({
   code: z.number().int().positive(),
   element_type: z.number().int().min(1).max(4),
   team: z.number().int().positive(),
-  now_cost: z.number().int().min(35).max(200),
+  now_cost: z.number().int().min(FPL_PLAYER_PRICE_MIN).max(FPL_PLAYER_PRICE_MAX),
   cost_change_start: z.number().int(),
   cost_change_event: z.number().int(),
   cost_change_event_fall: z.number().int(),

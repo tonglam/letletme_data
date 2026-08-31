@@ -854,4 +854,65 @@ describe('Live Matches V2 Redis publications', () => {
     await clearLiveMatchCheckpointDesiredV2(desired, redis);
     expect(await readLiveMatchCheckpointDesiredV2({ ...scope, kind: 'desk', redis })).toBeNull();
   });
+
+  test('replaces only the exact stale final detail obligation during cutover', async () => {
+    const desk = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'FINALIZED',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const stale = await publishLiveMatchDetailV2({
+      ...scope,
+      observedDeskGeneration: desk.publication.generation,
+      fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(30),
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      finalized: true,
+      redis,
+    });
+    const staleDesired = await setLiveMatchCheckpointDesiredV2({
+      kind: 'detail',
+      publication: stale.publication,
+      force: true,
+      redis,
+    });
+    const candidate = await publishLiveMatchDetailV2({
+      ...scope,
+      observedDeskGeneration: desk.publication.generation,
+      fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(35),
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      finalized: true,
+      previous: await readLiveMatchDetailV2({ ...scope, redis }),
+      redis,
+    });
+
+    const replaced = await setLiveMatchCheckpointDesiredV2({
+      kind: 'detail',
+      publication: candidate.publication,
+      force: true,
+      replaceFinalizedForCutover: {
+        expectedPublicationId: staleDesired.publicationId,
+        expectedGeneration: staleDesired.generation,
+      },
+      redis,
+    });
+    expect(replaced.publicationId).toBe(candidate.publication.publicationId);
+    expect(replaced.generation).toBe(candidate.publication.generation);
+
+    const raced = await setLiveMatchCheckpointDesiredV2({
+      kind: 'detail',
+      publication: stale.publication,
+      force: true,
+      replaceFinalizedForCutover: {
+        expectedPublicationId: staleDesired.publicationId,
+        expectedGeneration: staleDesired.generation,
+      },
+      redis,
+    });
+    expect(raced.publicationId).toBe(candidate.publication.publicationId);
+    expect(raced.generation).toBe(candidate.publication.generation);
+  });
 });

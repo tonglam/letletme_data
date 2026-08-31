@@ -1,4 +1,5 @@
 import type { RawFPLEventLiveElement, RawFPLFixture } from '../types';
+import { isCanonicalPlayerPrice } from '../domain/players';
 import { prepareEventLives } from './event-lives.service';
 import { validateLiveElementIdentity, type LiveSnapshotReferenceData } from './live-coherent-fetch';
 import { transformFixtures } from '../transformers/fixtures';
@@ -332,7 +333,7 @@ function buildDetailPlayer(input: {
   if (player.teamId <= 0) {
     throw new Error(`Live Match detail has invalid player team for element ${input.elementId}`);
   }
-  if (!Number.isSafeInteger(player.price) || player.price < 0) {
+  if (!isCanonicalPlayerPrice(player.price)) {
     throw new Error(`Live Match detail has invalid player price for element ${input.elementId}`);
   }
   if (!input.fixtureTeamIds.has(player.teamId)) {

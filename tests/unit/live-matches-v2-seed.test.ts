@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 import {
+  canFinalizeLiveMatchSeed,
   canSkipMissingDetailDuringSeed,
   parseLiveMatchSeedArguments,
 } from '../../scripts/seed-live-matches-v2';
@@ -50,10 +51,45 @@ describe('live match V2 cutover seed arguments', () => {
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'FINALIZED' })).toBe(false);
   });
 
+  it('requires the normal all-fixtures-finished finalization fence', () => {
+    const event = {
+      deadlineTime: '2026-08-29T10:00:00.000Z',
+      finished: true,
+      dataChecked: true,
+      dataCheckedAt: new Date('2026-08-29T14:00:00.000Z'),
+    } as const;
+    const finishedFixture = {
+      started: true,
+      finished: true,
+      finished_provisional: false,
+      kickoff_time: '2026-08-29T10:00:00.000Z',
+    } as const;
+    expect(canFinalizeLiveMatchSeed(event, [finishedFixture])).toBe(true);
+    expect(canFinalizeLiveMatchSeed(event, [{ ...finishedFixture, finished: false }])).toBe(false);
+    expect(canFinalizeLiveMatchSeed({ ...event, dataCheckedAt: null }, [finishedFixture])).toBe(
+      false,
+    );
+  });
+
   it('keeps the checked-in deploy helper on the same Match V2 seed path', () => {
     const deploy = readFileSync(new URL('../../scripts/deploy.sh', import.meta.url), 'utf8');
     expect(deploy).toMatch(
       /bun run db:cutover-seed-live-match-v2 -- --execute --all-finalized[\s\S]*--season "\$LIVE_POINTS_V2_SEED_SEASON"[\s\S]*--event-id "\$LIVE_POINTS_V2_SEED_EVENT_ID"/,
+    );
+  });
+
+  it('durably fences the desk before the price-bearing detail seed', () => {
+    const source = readFileSync(
+      new URL('../../scripts/seed-live-matches-v2.ts', import.meta.url),
+      'utf8',
+    );
+    const deskCheckpoint = source.search(/kind: 'desk'/);
+    const detailCheckpoint = source.search(/kind: 'detail'/);
+    expect(deskCheckpoint).toBeGreaterThan(-1);
+    expect(detailCheckpoint).toBeGreaterThan(deskCheckpoint);
+    expect(source).toContain('readLiveMatchDeskPointerV2');
+    expect(source).toContain(
+      'allowFinalizedReplacementForCutover: active.publication.finalized === true',
     );
   });
 });

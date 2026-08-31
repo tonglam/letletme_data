@@ -1,22 +1,29 @@
 /* eslint-disable no-console */
 
+import { fplClient } from '../src/clients/fpl';
 import { explicitSeasonRef } from '../src/domain/fpl-season';
+import { isCanonicalPlayerPrice } from '../src/domain/players';
 import { eventRepository } from '../src/repositories/events';
 import { seasonRepository } from '../src/repositories/seasons';
 import {
+  readLiveMatchDeskCheckpointV2,
   readLiveMatchDetailCheckpointV2,
   checkpointLiveMatchScopeV2,
 } from '../src/services/live-match-v2-checkpoint.service';
 import {
+  readLiveMatchCheckpointDesiredV2,
+  readLiveMatchDeskPointerV2,
   readLiveMatchDetailPointerV2,
   setLiveMatchCheckpointDesiredV2,
 } from '../src/cache/live-match-publication-v2';
+import { decideLiveLifecycle } from '../src/services/live-lifecycle-orchestrator';
 import {
   syncLiveSnapshotV2,
   type LiveSnapshotV2SyncResult,
 } from '../src/services/live-snapshot-v2.service';
 import { databaseSingleton } from '../src/db/singleton';
 import { redisSingleton } from '../src/cache/singleton';
+import type { Event, RawFPLFixture } from '../src/types';
 
 export type LiveMatchSeedArguments = {
   readonly execute: boolean;
@@ -70,8 +77,34 @@ function hasCanonicalPrices(
   fixtures: readonly { readonly players: readonly { readonly price: number }[] }[],
 ): boolean {
   return fixtures.every((fixture) =>
-    fixture.players.every((player) => Number.isSafeInteger(player.price) && player.price >= 0),
+    fixture.players.every((player) => isCanonicalPlayerPrice(player.price)),
   );
+}
+
+type FinalizationEvent = Pick<Event, 'finished' | 'dataChecked' | 'dataCheckedAt' | 'deadlineTime'>;
+
+/**
+ * The cutover seed must use the same all-fixtures-finished fence as the live
+ * scheduler. Event-level finished/dataChecked flags alone are not enough:
+ * FPL can mark the event while one fixture still has provisional facts.
+ */
+export function canFinalizeLiveMatchSeed(
+  event: FinalizationEvent,
+  fixtures: readonly Pick<
+    RawFPLFixture,
+    'started' | 'finished' | 'finished_provisional' | 'kickoff_time'
+  >[],
+): boolean {
+  if (!event.finished || !event.dataChecked || event.dataCheckedAt === null) return false;
+  return decideLiveLifecycle(
+    event,
+    fixtures.map((fixture) => ({
+      started: fixture.started === true,
+      finished: fixture.finished,
+      finishedProvisional: fixture.finished_provisional,
+      kickoffTime: fixture.kickoff_time === null ? null : new Date(fixture.kickoff_time),
+    })),
+  ).finalizeEvent;
 }
 
 export function canSkipMissingDetailDuringSeed(
@@ -85,7 +118,12 @@ async function seedOne(seasonCode: string, eventId: number) {
   const event = await eventRepository.findById(season, eventId);
   if (!event) throw new Error(`event ${eventId} does not exist in season ${seasonCode}`);
 
-  const finalized = event.finished && event.dataChecked && event.dataCheckedAt !== null;
+  // This is a deployment-only source fence. syncLiveSnapshotV2 performs the
+  // coherent observation itself; this small preflight decides whether that
+  // observation may request the immutable FINAL path without trusting only
+  // event-level flags.
+  const observedFixtures = await fplClient.getFixtures(eventId);
+  const finalized = canFinalizeLiveMatchSeed(event, observedFixtures);
   const result = await syncLiveSnapshotV2(season, eventId, {
     trigger: 'catchup',
     finalizeEvent: finalized,
@@ -114,20 +152,78 @@ async function seedOne(seasonCode: string, eventId: number) {
     throw new Error(`event ${eventId} detail publication is missing canonical player prices`);
   }
 
+  const desk = await readLiveMatchDeskPointerV2({ season: seasonCode, eventId }, 'active');
+  if (!desk || desk.servedFrom !== 'REDIS_CURRENT') {
+    throw new Error(`event ${eventId} does not have a current V2 desk publication`);
+  }
+  if (
+    active.publication.observedDeskGeneration !== desk.publication.generation ||
+    active.publication.fixtureIdentityRevision !==
+      desk.publication.revisions.fixtureIdentity.revision
+  ) {
+    throw new Error(`event ${eventId} detail is not aligned with the current V2 desk publication`);
+  }
+
+  // Detail carries the desk generation it was calculated from. Persist the
+  // matching desk first so a cold read can never restore detail N alongside
+  // desk N-1. Both writes remain scope-local and are verified independently.
+  const deskDesired = await setLiveMatchCheckpointDesiredV2({
+    kind: 'desk',
+    publication: desk.publication,
+    finalized: desk.publication.state === 'FINALIZED',
+    force: true,
+  });
+  if (
+    deskDesired.publicationId !== desk.publication.publicationId ||
+    deskDesired.generation !== desk.publication.generation
+  ) {
+    throw new Error(`event ${eventId} desk checkpoint obligation was superseded during seed`);
+  }
+  const deskCheckpoint = await checkpointLiveMatchScopeV2({ season, eventId, kind: 'desk' });
+  if (!deskCheckpoint.checkpointed) {
+    throw new Error(`event ${eventId} desk checkpoint did not converge before detail`);
+  }
+  const durableDesk = await readLiveMatchDeskCheckpointV2(season, eventId);
+  if (
+    !durableDesk ||
+    durableDesk.publication.publicationId !== desk.publication.publicationId ||
+    durableDesk.publication.generation !== desk.publication.generation
+  ) {
+    throw new Error(`event ${eventId} desk checkpoint is not the matching V2 publication`);
+  }
+
   // Force one exact durable write for this cutover publication. This is a
   // source-backed seed, not a legacy reader: the new runtime only accepts the
   // price-bearing publication after this checkpoint succeeds.
-  await setLiveMatchCheckpointDesiredV2({
+  const existingDetailDesired = await readLiveMatchCheckpointDesiredV2({
+    kind: 'detail',
+    season: seasonCode,
+    eventId,
+  });
+  const detailDesired = await setLiveMatchCheckpointDesiredV2({
     kind: 'detail',
     publication: active.publication,
     finalized: active.publication.finalized,
     force: true,
+    replaceFinalizedForCutover:
+      existingDetailDesired?.final === true && active.publication.finalized === true
+        ? {
+            expectedPublicationId: existingDetailDesired.publicationId,
+            expectedGeneration: existingDetailDesired.generation,
+          }
+        : undefined,
   });
+  if (
+    detailDesired.publicationId !== active.publication.publicationId ||
+    detailDesired.generation !== active.publication.generation
+  ) {
+    throw new Error(`event ${eventId} detail checkpoint obligation was superseded during seed`);
+  }
   const checkpoint = await checkpointLiveMatchScopeV2({
     season,
     eventId,
     kind: 'detail',
-    allowFinalizedReplacementForCutover: true,
+    allowFinalizedReplacementForCutover: active.publication.finalized === true,
   });
   if (!checkpoint.checkpointed) {
     throw new Error(`event ${eventId} detail checkpoint did not converge`);
