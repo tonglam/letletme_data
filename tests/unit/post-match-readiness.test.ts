@@ -1,8 +1,10 @@
 import { describe, expect, mock, test } from 'bun:test';
 
 import {
+  getFinalizationAwarePostMatchResultsSlot,
   getPostMatchResultsCheckpoint,
   getPostMatchResultsSlot,
+  hasCompletePostMatchFinalization,
   POST_MATCH_RESULTS_WINDOW_MS,
 } from '../../src/domain/post-match-results';
 import {
@@ -124,6 +126,26 @@ describe('bounded post-match result slots', () => {
         new Date('2026-08-22T23:00:00.000Z'),
       ),
     ).toBe('final-3');
+  });
+
+  test('keeps boolean-checked events provisional until the finalization timestamp exists', () => {
+    const now = new Date('2026-08-22T22:00:00.000Z');
+    const incompleteFinal = {
+      finished: true,
+      dataChecked: true,
+      dataCheckedAt: null,
+    };
+    const completeFinal = {
+      ...incompleteFinal,
+      dataCheckedAt: new Date('2026-08-22T21:45:00.000Z'),
+    };
+
+    expect(hasCompletePostMatchFinalization(incompleteFinal)).toBe(false);
+    expect(hasCompletePostMatchFinalization(completeFinal)).toBe(true);
+    expect(getFinalizationAwarePostMatchResultsSlot(incompleteFinal, fixtures, now)).toBe(
+      'provisional-2',
+    );
+    expect(getFinalizationAwarePostMatchResultsSlot(completeFinal, fixtures, now)).toBe('final-2');
   });
 
   test('keeps the GW38 final window open on the next UTC day', () => {

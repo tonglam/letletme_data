@@ -1,6 +1,7 @@
 import type { Event } from '../domain/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture } from '../types';
+import { hasCompletePostMatchFinalization } from '../domain/post-match-results';
 import { logInfo } from '../utils/logger';
 
 export type MatchWindowDeps = {
@@ -44,7 +45,13 @@ export async function enqueueFinalLeagueResultsAfterLiveSync(
 ): Promise<unknown | null> {
   const resolved = deps ?? (await loadDefaultFinalLeagueResultsDeps());
   const currentEvent = await resolved.getCurrentEvent(season);
-  if (!currentEvent || currentEvent.id !== eventId || !currentEvent.dataChecked) return null;
+  if (
+    !currentEvent ||
+    currentEvent.id !== eventId ||
+    !hasCompletePostMatchFinalization(currentEvent)
+  ) {
+    return null;
+  }
 
   const fixtures = await resolved.findFixturesByEvent(season, eventId);
   const resultSlot = resolved.getPostMatchResultsSlot(currentEvent, fixtures, new Date());

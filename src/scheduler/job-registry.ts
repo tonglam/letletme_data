@@ -50,8 +50,8 @@ import {
   coreSnapshotRefreshReason,
 } from '../domain/core-snapshot-refresh';
 import {
-  getPostMatchResultsCheckpoint,
-  getPostMatchResultsSlot,
+  getFinalizationAwarePostMatchResultsCheckpoint,
+  getFinalizationAwarePostMatchResultsSlot,
 } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
@@ -503,10 +503,8 @@ export async function resolvePostMatchResultPlans(
   const provisional = await Promise.all(
     unsettledEvents.map(async (event): Promise<SchedulerObligationPlan | null> => {
       const fixtures = await loadFixtures(context.season, event.id);
-      const finalized =
-        event.finished === true && event.dataChecked === true && event.dataCheckedAt != null;
-      const checkpoint = getPostMatchResultsCheckpoint(
-        { dataChecked: finalized },
+      const checkpoint = getFinalizationAwarePostMatchResultsCheckpoint(
+        event,
         fixtures,
         context.now,
       );
@@ -960,7 +958,7 @@ function postMatchMaintenanceDefinition(): ScheduledJobDefinition {
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
-      const resultSlot = getPostMatchResultsSlot(event, fixtures, context.now);
+      const resultSlot = getFinalizationAwarePostMatchResultsSlot(event, fixtures, context.now);
       if (!resultSlot) return [];
       const dateKey = formatCronDateKey(context.now);
       const hours = [6, 8, 10];

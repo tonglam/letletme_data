@@ -1,7 +1,7 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { getPostMatchResultsSlot } from '../domain/post-match-results';
+import { getFinalizationAwarePostMatchResultsSlot } from '../domain/post-match-results';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
 import { getCurrentEvent } from '../services/events.service';
@@ -66,7 +66,7 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
   if (!currentEvent) return null;
 
   const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
-  const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
+  const resultSlot = getFinalizationAwarePostMatchResultsSlot(currentEvent, fixtures, now);
   if (!resultSlot) return null;
 
   const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cascade', {
