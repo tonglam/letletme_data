@@ -64,6 +64,7 @@ const gameweek = (
   eventAutoSubPoints: eventId === 2 ? 12 : 0,
   eventChip: eventId === 2 ? 'WILDCARD' : 'NONE',
   eventCaptainPoints: 18,
+  captainBlank: false,
   playedCaptainElement: 10,
   playedCaptainWebName: 'Player 10',
   playedCaptainTeamShortName: 'FWD',
@@ -170,5 +171,51 @@ describe('My FPL manager review', () => {
       starts: 2,
     });
     expect(review.holdings.some((holding) => holding.element === 101)).toBe(false);
+  });
+
+  test('uses the intended captain multiplier when both captain choices fail', () => {
+    const failedChoices = picks(false).map((pick) =>
+      pick.isCaptain || pick.isViceCaptain ? { ...pick, multiplier: 0, totalPoints: 0 } : pick,
+    );
+    const review = buildMyFplManagerReview(1, [
+      gameweek(1, {
+        playedCaptainElement: null,
+        playedCaptainWebName: null,
+        playedCaptainTeamShortName: null,
+        picks: failedChoices,
+      }),
+    ]);
+
+    expect(review.timeline[0]?.review.captain.regretPoints).toBe(12);
+  });
+
+  test('normalizes unranked rows and keys captains by element id', () => {
+    const first = gameweek(1, {
+      overallRank: 0,
+      eventRank: 0,
+      playedCaptainElement: 10,
+      playedCaptainWebName: 'Same name',
+      picks: picks(false).map((pick) =>
+        pick.element === 10 ? { ...pick, webName: 'Same name' } : pick,
+      ),
+    });
+    const second = gameweek(2, {
+      status: 'FINAL',
+      overallRank: 800,
+      playedCaptainElement: 9,
+      playedCaptainWebName: 'Same name',
+      picks: picks(false).map((pick) =>
+        pick.element === 9
+          ? { ...pick, isCaptain: true, isViceCaptain: false, webName: 'Same name' }
+          : pick.element === 10
+            ? { ...pick, isCaptain: false, isViceCaptain: true }
+            : pick,
+      ),
+    });
+    const review = buildMyFplManagerReview(2, [first, second]);
+
+    expect(review.timeline[0]).toMatchObject({ overallRank: null, eventRank: null });
+    expect(review.timeline[1]?.overallRankDelta).toBeNull();
+    expect(review.summary.uniqueCaptains).toBe(2);
   });
 });

@@ -33,6 +33,8 @@ export type MyFplManagerReviewGameweekInput = Readonly<{
   eventAutoSubPoints: number;
   eventChip: string;
   eventCaptainPoints: number;
+  /** Whether the selected (non-vice) captain produced no qualifying return. */
+  captainBlank: boolean;
   playedCaptainElement: number | null;
   playedCaptainWebName: string | null;
   playedCaptainTeamShortName: string | null;
@@ -77,6 +79,7 @@ export type MyFplManagerCaptainReview = Readonly<{
   captainWebName: string | null;
   captainTeamShortName: string | null;
   captainBasePoints: number;
+  captainBlank: boolean;
   captainContribution: number;
   viceCaptainElement: number | null;
   viceCaptainWebName: string | null;
@@ -287,7 +290,10 @@ const buildGameweekReview = (
     (left, right) => right.totalPoints - left.totalPoints || left.position - right.position,
   )[0];
   const captainBasePoints = captain?.totalPoints ?? 0;
-  const captainMultiplier = Math.max(1, captain?.multiplier ?? 1);
+  // Captain failure still has the normal 2x (or Triple Captain 3x) opportunity
+  // cost even when both captain and vice-captain fail to play and FPL reports
+  // no played captain element. Do not derive this from the effective multiplier.
+  const captainMultiplier = gameweek.eventChip === 'TRIPLE_CAPTAIN' ? 3 : 2;
   const bestSquadPoints = bestSquad?.totalPoints ?? 0;
 
   const pickByElement = new Map(gameweek.picks.map((pick) => [pick.element, pick] as const));
@@ -317,6 +323,7 @@ const buildGameweekReview = (
       captainWebName: gameweek.playedCaptainWebName ?? captain?.webName ?? null,
       captainTeamShortName: gameweek.playedCaptainTeamShortName ?? captain?.teamShortName ?? null,
       captainBasePoints,
+      captainBlank: gameweek.captainBlank,
       captainContribution: gameweek.eventCaptainPoints,
       viceCaptainElement: viceCaptain?.element ?? null,
       viceCaptainWebName: viceCaptain?.webName ?? null,
@@ -422,14 +429,19 @@ const buildSummary = (timeline: readonly MyFplManagerTimelineRow[]): MyFplManage
     row.status === 'FINAL' && row.overallRank !== null ? [row.overallRank] : [],
   );
   const formations = new Map<string, number>();
-  const captains = new Map<string, number>();
+  const captains = new Map<number, { webName: string; gameweeks: number }>();
   const positionPoints = emptyPositionPoints();
   let currentImprovementStreak = 0;
   let longestImprovementStreak = 0;
   for (const row of timeline) {
     formations.set(row.review.formation, (formations.get(row.review.formation) ?? 0) + 1);
-    if (row.captainWebName) {
-      captains.set(row.captainWebName, (captains.get(row.captainWebName) ?? 0) + 1);
+    const captainElement = row.review.captain.captainElement;
+    if (captainElement !== null) {
+      const current = captains.get(captainElement);
+      captains.set(captainElement, {
+        webName: row.captainWebName ?? row.review.captain.captainWebName ?? '',
+        gameweeks: (current?.gameweeks ?? 0) + 1,
+      });
     }
     for (const key of ['goalkeeper', 'defender', 'midfielder', 'forward', 'total'] as const) {
       positionPoints[key] += row.review.positionPoints[key];
@@ -444,8 +456,8 @@ const buildSummary = (timeline: readonly MyFplManagerTimelineRow[]): MyFplManage
       currentImprovementStreak = 0;
     }
   }
-  const topCaptain = [...captains.entries()].sort(
-    (left, right) => right[1] - left[1] || left[0].localeCompare(right[0]),
+  const topCaptain = [...captains.values()].sort(
+    (left, right) => right.gameweeks - left.gameweeks || left.webName.localeCompare(right.webName),
   )[0];
   const otherFinalAverageFor = (eventId: number): number | null => {
     const other = timeline.filter((row) => row.status === 'FINAL' && row.eventId !== eventId);
@@ -481,12 +493,14 @@ const buildSummary = (timeline: readonly MyFplManagerTimelineRow[]): MyFplManage
     totalCaptainPoints: timeline.reduce((sum, row) => sum + row.eventCaptainPoints, 0),
     uniqueCaptains: captains.size,
     captainBlankGameweeks: timeline.filter(
-      (row) => row.status === 'FINAL' && row.review.captain.captainBasePoints === 0,
+      (row) => row.status === 'FINAL' && row.review.captain.captainBlank,
     ).length,
-    topCaptainWebName: topCaptain?.[0] ?? null,
-    topCaptainGameweeks: topCaptain?.[1] ?? 0,
+    topCaptainWebName: topCaptain?.webName || null,
+    topCaptainGameweeks: topCaptain?.gameweeks ?? 0,
     topCaptainRate:
-      timeline.length === 0 || !topCaptain ? 0 : round((topCaptain[1] * 100) / timeline.length, 1),
+      timeline.length === 0 || !topCaptain
+        ? 0
+        : round((topCaptain.gameweeks * 100) / timeline.length, 1),
     bestOverallRank: ranks.length === 0 ? null : Math.min(...ranks),
     worstOverallRank: ranks.length === 0 ? null : Math.max(...ranks),
     overallRankChange: ranks.length < 2 ? null : ranks[0]! - ranks.at(-1)!,
@@ -523,18 +537,21 @@ export function buildMyFplManagerReview(
 ): MyFplManagerReview {
   const ordered = [...gameweeks].sort((left, right) => left.eventId - right.eventId);
   const timeline = ordered.map((gameweek, index): MyFplManagerTimelineRow => {
-    const previousRank = ordered[index - 1]?.overallRank ?? null;
+    const overallRank = gameweek.overallRank === 0 ? null : gameweek.overallRank;
+    const eventRank = gameweek.eventRank === 0 ? null : gameweek.eventRank;
+    const previousRank = ordered[index - 1]?.overallRank;
+    const previousRankOrNull = previousRank === 0 ? null : (previousRank ?? null);
     return {
       eventId: gameweek.eventId,
       status: gameweek.status,
       eventPoints: gameweek.eventPoints,
-      eventRank: gameweek.eventRank,
+      eventRank,
       overallPoints: gameweek.overallPoints,
-      overallRank: gameweek.overallRank,
+      overallRank,
       overallRankDelta:
-        gameweek.status === 'PROVISIONAL' || previousRank === null || gameweek.overallRank === null
+        gameweek.status === 'PROVISIONAL' || previousRankOrNull === null || overallRank === null
           ? null
-          : previousRank - gameweek.overallRank,
+          : previousRankOrNull - overallRank,
       eventTransfers: gameweek.eventTransfers,
       eventTransfersCost: gameweek.eventTransfersCost,
       eventNetPoints: gameweek.eventNetPoints,

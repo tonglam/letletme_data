@@ -407,6 +407,7 @@ type PickRow = {
   yellow_cards: number | null;
   red_cards: number | null;
   saves: number | null;
+  penalties_saved: number | null;
   bonus: number | null;
   bps: number | null;
   expected_goals: string | number | null;
@@ -712,6 +713,7 @@ const mapPick = (
     yellowCards,
     redCards,
     saves: integerValue(row.saves),
+    penaltiesSaved: integerValue(row.penalties_saved),
     bonus: integerValue(row.bonus),
     bps: integerValue(row.bps),
     againstShortName: row.against_short_name ?? '',
@@ -727,6 +729,31 @@ const mapPick = (
     expectedGoalInvolvements: nullableNumber(row.expected_goal_involvements),
     expectedGoalsConceded: nullableNumber(row.expected_goals_conceded),
   };
+};
+
+/**
+ * Keep captain blank classification identical to the established league
+ * result semantics. Appearance-only points (including two points) are blank;
+ * goals, assists, bonus, penalty saves, >3 saves, and GK/DEF clean sheets are
+ * qualifying returns.
+ */
+const isBlankManagerCaptain = (picks: readonly JsonRecord[]): boolean => {
+  const captain = picks.find((pick) => pick.isCaptain === true);
+  if (!captain) return true;
+  const goalsScored = integerValue(captain.goalsScored);
+  const assists = integerValue(captain.assists);
+  const bonus = integerValue(captain.bonus);
+  const penaltiesSaved = integerValue(captain.penaltiesSaved);
+  const saves = integerValue(captain.saves);
+  const cleanSheets = integerValue(captain.cleanSheets);
+  if (goalsScored > 0 || assists > 0 || bonus > 0 || penaltiesSaved > 0 || saves > 3) {
+    return false;
+  }
+  const elementTypeName = String(captain.elementTypeName ?? '');
+  if ((elementTypeName === 'GKP' || elementTypeName === 'DEF') && cleanSheets > 0) {
+    return false;
+  }
+  return true;
 };
 
 type CanonicalEventPick = Readonly<{
@@ -1010,6 +1037,7 @@ const managerReviewGameweekInput = (
     eventAutoSubPoints: result.event_auto_sub_points ?? 0,
     eventChip: chip(result.event_chip),
     eventCaptainPoints: result.captain_points ?? 0,
+    captainBlank: isBlankManagerCaptain(picks),
     playedCaptainElement: result.played_captain_element_id,
     playedCaptainWebName: typeof playedCaptain?.webName === 'string' ? playedCaptain.webName : null,
     playedCaptainTeamShortName:
@@ -1908,6 +1936,7 @@ async function captureMyFplSnapshotOnce(
     if (entries.length === 0) {
       throw new MyFplSnapshotIncompleteError('No current-season entries are available');
     }
+    const entrySourceById = new Map(entries.map((entry) => [entry.entry_id, entry] as const));
     const entryEligibility = countEntryEligibility(
       entries.map((entry) => ({ startedEvent: entry.started_event, eventId })),
     );
@@ -1942,7 +1971,26 @@ async function captureMyFplSnapshotOnce(
         .filter((row) => row.event_id === eventId && row.rich_synced_at !== null)
         .map((row) => [row.entry_id, row]),
     );
-    const resultsByEntry = groupBy(resultRows, (row) => row.entry_id);
+    const isIncludedReviewResult = (row: {
+      entry_id: number;
+      event_id?: number;
+      eventId?: number;
+    }): boolean => {
+      const entry = entrySourceById.get(row.entry_id);
+      const rowEventId = row.event_id ?? row.eventId;
+      return Boolean(
+        entry &&
+          rowEventId !== undefined &&
+          isEntryEligibleForEvent({
+            startedEvent: entry.started_event,
+            eventId: rowEventId,
+          }),
+      );
+    };
+    const resultsByEntry = groupBy(
+      resultRows.filter(isIncludedReviewResult),
+      (row) => row.entry_id,
+    );
     if (kind === 'FINAL') {
       const finalFreshAfter = event.data_checked_at
         ? new Date(event.data_checked_at).getTime()
@@ -2049,7 +2097,10 @@ async function captureMyFplSnapshotOnce(
         AND result_event.data_checked = true
       ORDER BY result.entry_id, result.event_id
     `;
-    const mappedHistory = groupBy(historyRows, (row) => row.entry_id);
+    const mappedHistory = groupBy(
+      historyRows.filter(isIncludedReviewResult),
+      (row) => row.entry_id,
+    );
 
     const pickRows = await tx<PickRow[]>`
       SELECT pick.entry_id, pick.event_id, pick.element_id AS element, pick.position,
@@ -2060,7 +2111,8 @@ async function captureMyFplSnapshotOnce(
              pick.transfers, pick.transfers_cost, pick.multiplier, pick.source_updated_at,
              stats.total_points, stats.minutes, stats.goals_scored,
              stats.assists, stats.clean_sheets, stats.goals_conceded,
-             stats.yellow_cards, stats.red_cards, stats.saves, stats.bonus,
+             stats.yellow_cards, stats.red_cards, stats.saves, stats.penalties_saved,
+             stats.bonus,
              stats.bps, stats.expected_goals, stats.expected_assists,
              stats.expected_goal_involvements, stats.expected_goals_conceded,
              fixture.against_short_name, fixture.was_home, fixture.score,
@@ -2120,7 +2172,8 @@ async function captureMyFplSnapshotOnce(
              pick.transfers, pick.transfers_cost, pick.multiplier, pick.source_updated_at,
              stats.total_points, stats.minutes, stats.goals_scored,
              stats.assists, stats.clean_sheets, stats.goals_conceded,
-             stats.yellow_cards, stats.red_cards, stats.saves, stats.bonus,
+             stats.yellow_cards, stats.red_cards, stats.saves, stats.penalties_saved,
+             stats.bonus,
              stats.bps, stats.expected_goals, stats.expected_assists,
              stats.expected_goal_involvements, stats.expected_goals_conceded,
              NULL::text AS against_short_name, NULL::text AS was_home,
@@ -2136,7 +2189,7 @@ async function captureMyFplSnapshotOnce(
       LEFT JOIN fpl.teams team
         ON team.season_id = pick.season_id
        AND team.team_id = COALESCE(pick.event_team_id, player.team_id)
-      LEFT JOIN fpl.player_gameweek_stats stats
+      JOIN fpl.player_gameweek_stats stats
         ON stats.season_id = pick.season_id
        AND stats.event_id = pick.event_id
        AND stats.element_id = pick.element_id
@@ -2169,6 +2222,18 @@ async function captureMyFplSnapshotOnce(
 
     for (const historicalResult of resultRows) {
       if (historicalResult.event_id >= eventId) continue;
+      const historicalEntry = entrySourceById.get(historicalResult.entry_id);
+      if (
+        !historicalEntry ||
+        !isEntryEligibleForEvent({
+          startedEvent: historicalEntry.started_event,
+          eventId: historicalResult.event_id,
+        })
+      ) {
+        // Backfilled result rows can legitimately predate a late entrant's
+        // first scoring event. They must not become review timeline inputs.
+        continue;
+      }
       const key = `${historicalResult.entry_id}:${historicalResult.event_id}`;
       const historicalPicks = historicalReviewPicksByEntryEvent.get(key) ?? [];
       const finalPicks = overlayFinalResultPicks(historicalResult, historicalPicks);
