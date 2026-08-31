@@ -929,37 +929,48 @@ export async function checkpointLivePublicationV2(
       await createEventLiveExplainsRepository(tx).replaceEvent(season, [...explains]);
       await createFplPlayerFixtureStatsRepository(tx).upsertEvidence(season, [...fixtureEvidence]);
       await createFixtureRepository(tx).upsertBatch(season, [...fixtures]);
+      // Keep the checked/finalized timestamps in one UPDATE. A finalized event
+      // may already have a historical finalized timestamp that is older than a
+      // late source observation. Updating checked first would violate
+      // events_finalization_order and roll back the otherwise complete
+      // checkpoint before the finalization repair can run.
+      const checkedAt =
+        publication.state === 'FINALIZED'
+          ? sql`
+              GREATEST(
+                COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+                ${observationCheckedAtParameter}::timestamptz
+              )
+            `
+          : sql`
+              CASE
+                WHEN ${eventsInFpl.liveSnapshotFinalizedAt} IS NOT NULL
+                  THEN ${eventsInFpl.liveSnapshotCheckedAt}
+                ELSE GREATEST(
+                  COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+                  ${observationCheckedAtParameter}::timestamptz
+                )
+              END
+            `;
       await tx
         .update(eventsInFpl)
         .set({
-          liveSnapshotCheckedAt: sql`
-          GREATEST(
-            COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
-            ${observationCheckedAtParameter}::timestamptz
-          )
-        `,
+          liveSnapshotCheckedAt: checkedAt,
           liveFactsPersistedAt: checkpointedAt,
           updatedAt: checkpointedAt,
+          ...(publication.state === 'FINALIZED'
+            ? {
+                liveSnapshotFinalizedAt: sql`
+                  GREATEST(
+                    COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAtParameter}::timestamptz),
+                    COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
+                    ${observationCheckedAtParameter}::timestamptz
+                  )
+                `,
+              }
+            : {}),
         })
         .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
-      if (publication.state === 'FINALIZED') {
-        // The V2 checkpoint is the finalization boundary. Keep the existing
-        // checked timestamp invariant intact when a late core heartbeat won the
-        // race with this durable final write.
-        await tx
-          .update(eventsInFpl)
-          .set({
-            liveSnapshotFinalizedAt: sql`
-            GREATEST(
-              COALESCE(${eventsInFpl.liveSnapshotFinalizedAt}, ${checkpointedAtParameter}::timestamptz),
-              COALESCE(${eventsInFpl.liveSnapshotCheckedAt}, ${observationCheckedAtParameter}::timestamptz),
-              ${observationCheckedAtParameter}::timestamptz
-            )
-          `,
-            updatedAt: checkpointedAt,
-          })
-          .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
-      }
       if (request.seedClaimId) {
         const removedClaims = await tx
           .delete(livePointsPublicationSeedClaimsInCompetition)
