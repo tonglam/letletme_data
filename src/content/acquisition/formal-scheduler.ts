@@ -3,13 +3,15 @@ import {
   claimDueXIdentityRuns,
   claimDueFormalRuns,
   confirmFormalRunEnqueued,
+  deferFormalRunForAdmission,
   failFormalRun,
   type ClaimedFormalRun,
   type RecurringAdapterKind,
 } from './formal-run-repository';
 import type { XBudgetPolicy } from './x-budget';
 import { failXIdentityRun } from './x-identity-repository';
-import { logError } from '../../utils/logger';
+import { logError, logInfo } from '../../utils/logger';
+import { QueueDrainOnlyError } from '../../services/queue-governance.service';
 
 export type FormalRunEnqueuer = (run: ClaimedFormalRun) => Promise<unknown>;
 
@@ -35,10 +37,12 @@ export async function scheduleFormalAcquisition(input: {
   fullRolloutEligible: boolean;
   flags?: ContentRuntimeFlags;
   xBudgetPolicy?: XBudgetPolicy;
+  xSchedulingPaused?: boolean;
   enqueueX: FormalRunEnqueuer;
   enqueueHttp: FormalRunEnqueuer;
 }): Promise<FormalSchedulerResult> {
   const flags = input.flags ?? getContentRuntimeFlags();
+  const xSchedulingPaused = input.xSchedulingPaused === true;
   if (!flags.pipelineEnabled) {
     return { claimed: 0, enqueued: 0, enqueueFailed: 0, skippedCoverageGate: false };
   }
@@ -47,11 +51,11 @@ export async function scheduleFormalAcquisition(input: {
   }
 
   const xCapacity = flags.grokConcurrency * 2;
-  if (flags.xScanEnabled && flags.realGrokEnabled && !input.xBudgetPolicy) {
+  if (!xSchedulingPaused && flags.xScanEnabled && flags.realGrokEnabled && !input.xBudgetPolicy) {
     throw new Error('Formal X scheduling requires an explicit budget policy');
   }
   const [identityRuns, httpRuns] = await Promise.all([
-    flags.xScanEnabled && flags.realGrokEnabled
+    !xSchedulingPaused && flags.xScanEnabled && flags.realGrokEnabled
       ? claimDueXIdentityRuns({
           claimLimit: xCapacity,
           budgetPolicy: input.xBudgetPolicy!,
@@ -65,11 +69,13 @@ export async function scheduleFormalAcquisition(input: {
   // Claim repositories enforce one shared DB admission limit across pending
   // and running X work. Asking both X claimers for the full capacity avoids
   // double-counting identity runs and wasting available slots.
-  const xRuns = await claimDueFormalRuns({
-    enabledAdapters: xAdapters(flags),
-    claimLimit: xCapacity,
-    xBudgetPolicy: input.xBudgetPolicy,
-  });
+  const xRuns = xSchedulingPaused
+    ? []
+    : await claimDueFormalRuns({
+        enabledAdapters: xAdapters(flags),
+        claimLimit: xCapacity,
+        xBudgetPolicy: input.xBudgetPolicy,
+      });
   const runs = [...identityRuns, ...xRuns, ...httpRuns];
   let enqueued = 0;
   let enqueueFailed = 0;
@@ -80,6 +86,19 @@ export async function scheduleFormalAcquisition(input: {
         else await input.enqueueHttp(run);
         enqueued += 1;
       } catch (error) {
+        if (error instanceof QueueDrainOnlyError) {
+          await deferFormalRunForAdmission({
+            runId: run.runId,
+            queueName: error.queueName,
+            retryAfterSeconds: error.retryAfterSeconds,
+          });
+          logInfo('Formal acquisition run deferred by queue admission gate', {
+            runId: run.runId,
+            queue: error.queueName,
+            retryAfterSeconds: error.retryAfterSeconds,
+          });
+          return;
+        }
         enqueueFailed += 1;
         const errorSummary = error instanceof Error ? error.message : 'Formal queue enqueue failed';
         if (run.jobKind === 'X_IDENTITY') {

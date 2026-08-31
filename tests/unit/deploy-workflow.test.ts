@@ -16,6 +16,7 @@ const sourceMediaRolloutWorkflow = readFileSync(
 const pinnedOpenSshAction = readFileSync('.github/actions/pinned-openssh/action.yml', 'utf8');
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
+const formalScheduler = readFileSync('src/content/acquisition/formal-scheduler.ts', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
 const hostRunnerDeployScript = readFileSync('scripts/deploy-host-grok-runner.sh', 'utf8');
 const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh', 'utf8');
@@ -119,6 +120,16 @@ describe('release workflow gates', () => {
     expect(contentWorker).toContain('publicationOutboxDispatcher = setInterval');
     expect(contentWorker).not.toContain('publicationOutboxDispatcher.unref?.()');
     expect(contentWorker).not.toContain('scheduler.unref?.()');
+  });
+
+  test('defers formal acquisition while deployment admission is closed', () => {
+    expect(contentWorker).toContain('isQueueDrainOnly(contentXScanQueueName)');
+    expect(formalScheduler).toContain('xSchedulingPaused');
+    expect(formalScheduler).toContain('if (error instanceof QueueDrainOnlyError)');
+    expect(formalScheduler).toContain('deferFormalRunForAdmission');
+    expect(deployStateMachine).toContain('assert-queue-quiescence.ts --admission-mode');
+    expect(deployStateMachine).toContain('deadline_seconds=${3:-300}');
+    expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
   });
 
   test('keeps the compiled host runner free of runtime logger transports', () => {

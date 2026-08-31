@@ -97,11 +97,13 @@ export type QueueAdmissionCompareAndSetResult = Readonly<{
 export class QueueDrainOnlyError extends Error {
   readonly status = 503;
   readonly code = 'QUEUE_DRAIN_ONLY';
+  readonly queueName: string;
   readonly retryAfterSeconds: number;
 
   constructor(queueName: string, retryAfterSeconds = 60) {
     super(`Queue ${queueName} is drain-only; new work is temporarily paused`);
     this.name = 'QueueDrainOnlyError';
+    this.queueName = queueName;
     this.retryAfterSeconds = retryAfterSeconds;
   }
 }

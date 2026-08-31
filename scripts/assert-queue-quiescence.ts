@@ -11,6 +11,13 @@ import {
   type RunnableQueueCounts,
 } from './queue-quiescence-gate';
 import { allQueueNames } from '../src/queues/names';
+import {
+  compareAndSetQueueAdmission,
+  readQueueAdmission,
+  type QueueAdmission,
+  type QueueAdmissionMode,
+} from '../src/services/queue-governance.service';
+import { queueRedisSingleton } from '../src/queues/redis';
 import { getConfig, resolveQueueRedisConfig } from '../src/utils/config';
 
 const RUNNABLE_JOB_TYPES = [
@@ -22,6 +29,121 @@ const RUNNABLE_JOB_TYPES = [
   'paused',
 ] as const satisfies readonly JobType[];
 const CASCADE_PATTERN = 'llm:queue:coordination:tournament-cascade:*';
+
+export const CONTENT_X_SCAN_QUEUE = 'content-x-scan' as const;
+export const DEPLOY_QUEUE_ADMISSION_TTL_SECONDS = 900;
+export const DEPLOY_QUEUE_ADMISSION_REASON = 'DEPLOY_QUEUE_QUIESCENCE';
+export const DEPLOY_QUEUE_ADMISSION_ACTOR = 'deployment';
+export const DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS = 3;
+
+export type ContentXScanAdmissionArguments = Readonly<{
+  mode: QueueAdmissionMode;
+}>;
+
+function admissionUsage(): never {
+  throw new Error('usage: bun scripts/assert-queue-quiescence.ts --admission-mode DRAIN_ONLY|OPEN');
+}
+
+export function parseContentXScanAdmissionArguments(
+  argv: readonly string[],
+): ContentXScanAdmissionArguments {
+  const values = new Map<string, string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!token?.startsWith('--')) admissionUsage();
+    const separator = token.indexOf('=');
+    if (separator > 2) {
+      const key = token.slice(2, separator);
+      if (key !== 'admission-mode' || values.has(key)) admissionUsage();
+      values.set(key, token.slice(separator + 1));
+      continue;
+    }
+    const key = token.slice(2);
+    const value = argv[index + 1];
+    if (key !== 'admission-mode' || !value || value.startsWith('--') || values.has(key)) {
+      admissionUsage();
+    }
+    values.set(key, value);
+    index += 1;
+  }
+
+  const mode = values.get('admission-mode');
+  if (mode !== 'DRAIN_ONLY' && mode !== 'OPEN') admissionUsage();
+  return { mode };
+}
+
+function isDeploymentAdmission(admission: QueueAdmission | null): boolean {
+  return (
+    admission?.mode === 'DRAIN_ONLY' &&
+    admission.changedBy === DEPLOY_QUEUE_ADMISSION_ACTOR &&
+    admission.reasonCode === DEPLOY_QUEUE_ADMISSION_REASON
+  );
+}
+
+function admissionSummary(input: {
+  mode: QueueAdmissionMode;
+  changed: boolean;
+  admission: QueueAdmission | null;
+  previousMode: QueueAdmissionMode | null;
+}) {
+  return {
+    contractVersion: 'queue-admission-v2',
+    queueName: CONTENT_X_SCAN_QUEUE,
+    mode: input.mode,
+    changed: input.changed,
+    previousMode: input.previousMode,
+    admission: input.admission
+      ? {
+          mode: input.admission.mode,
+          expiresAt: input.admission.expiresAt,
+          reasonCode: input.admission.reasonCode,
+          changedBy: input.admission.changedBy,
+        }
+      : null,
+  };
+}
+
+async function applyContentXScanAdmission(args: ContentXScanAdmissionArguments) {
+  let expected = await readQueueAdmission(CONTENT_X_SCAN_QUEUE);
+  const previousMode = expected?.mode ?? null;
+
+  for (let attempt = 0; attempt < DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS; attempt += 1) {
+    if (expected?.mode === 'DRAIN_ONLY' && !isDeploymentAdmission(expected)) {
+      return admissionSummary({
+        mode: args.mode,
+        changed: false,
+        admission: expected,
+        previousMode,
+      });
+    }
+
+    const result = await compareAndSetQueueAdmission({
+      queueName: CONTENT_X_SCAN_QUEUE,
+      expected,
+      mode: args.mode,
+      ttlSeconds: DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
+      reasonCode: DEPLOY_QUEUE_ADMISSION_REASON,
+      changedBy: DEPLOY_QUEUE_ADMISSION_ACTOR,
+    });
+    if (result.swapped) {
+      if (!result.admission) throw new Error('Queue admission CAS returned no replacement');
+      return admissionSummary({
+        mode: args.mode,
+        changed: true,
+        admission: result.admission,
+        previousMode,
+      });
+    }
+
+    expected = result.admission;
+  }
+
+  throw new Error('Queue admission changed concurrently; refusing non-CAS update');
+}
+
+function hasContentXScanAdmissionArguments(argv: readonly string[]): boolean {
+  return argv.some((arg) => arg === '--admission-mode' || arg.startsWith('--admission-mode='));
+}
 
 async function scan(redis: Redis, pattern: string): Promise<string[]> {
   const keys: string[] = [];
@@ -88,6 +210,18 @@ async function readDatabaseQuiescenceState(database: postgres.Sql): Promise<{
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (hasContentXScanAdmissionArguments(args)) {
+    const admissionArguments = parseContentXScanAdmissionArguments(args);
+    try {
+      process.stdout.write(
+        `${JSON.stringify(await applyContentXScanAdmission(admissionArguments))}\n`,
+      );
+    } finally {
+      await queueRedisSingleton.disconnect();
+    }
+    return;
+  }
+
   const scoped = args.includes('--scoped');
   const modeArgs = args.filter((arg) => arg !== '--scoped');
   const databaseOnly = modeArgs.length === 1 && modeArgs[0] === '--database-only';
@@ -153,7 +287,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error('[queue-quiescence] failed', error);
-  process.exitCode = 1;
-});
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error('[queue-quiescence] failed', error);
+    process.exitCode = 1;
+  });
+}

@@ -7,7 +7,7 @@ import {
   DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS,
   DEPLOY_QUEUE_ADMISSION_REASON,
   DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
-} from '../../scripts/set-content-x-scan-admission';
+} from '../../scripts/assert-queue-quiescence';
 import { COMPARE_AND_SET_QUEUE_ADMISSION_LUA } from '../../src/services/queue-governance.service';
 
 describe('content X deployment admission command', () => {
@@ -19,7 +19,7 @@ describe('content X deployment admission command', () => {
   });
 
   test('uses an exact Redis CAS for deployment ownership and restoration', () => {
-    const command = readFileSync('scripts/set-content-x-scan-admission.ts', 'utf8');
+    const command = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
     expect(command).toContain('compareAndSetQueueAdmission');
     expect(command).not.toContain('setQueueAdmission');
     expect(COMPARE_AND_SET_QUEUE_ADMISSION_LUA).toContain('current ~= expected');
@@ -28,20 +28,22 @@ describe('content X deployment admission command', () => {
   });
 
   test('parses both supported admission modes', () => {
-    expect(parseContentXScanAdmissionArguments(['--mode', 'DRAIN_ONLY'])).toEqual({
+    expect(parseContentXScanAdmissionArguments(['--admission-mode', 'DRAIN_ONLY'])).toEqual({
       mode: 'DRAIN_ONLY',
     });
-    expect(parseContentXScanAdmissionArguments(['--mode=OPEN'])).toEqual({ mode: 'OPEN' });
+    expect(parseContentXScanAdmissionArguments(['--admission-mode=OPEN'])).toEqual({
+      mode: 'OPEN',
+    });
   });
 
   test('rejects unknown, missing, repeated and invalid arguments', () => {
     for (const argv of [
       [],
       ['--unknown', 'OPEN'],
-      ['--mode'],
-      ['--mode', 'DRAIN_ONLY', '--mode', 'OPEN'],
-      ['--mode', 'drain-only'],
-      ['--mode=DRAIN_ONLY', 'extra'],
+      ['--admission-mode'],
+      ['--admission-mode', 'DRAIN_ONLY', '--admission-mode', 'OPEN'],
+      ['--admission-mode', 'drain-only'],
+      ['--admission-mode=DRAIN_ONLY', 'extra'],
     ]) {
       expect(() => parseContentXScanAdmissionArguments(argv)).toThrow();
     }

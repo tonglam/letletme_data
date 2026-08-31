@@ -1793,7 +1793,7 @@ export async function deferFormalRunForCapacity(input: {
             ...providerPatch,
             failureClass: deferredFailureClass,
             failureDetailsHash: sha256CanonicalJson(metrics),
-            errorSummary: `Host Grok runner ${deferredFailureClass} occurred; X follow-up will retry`,
+            errorSummary: `Formal acquisition ${deferredFailureClass} occurred; X follow-up will retry`,
             runMetrics: metrics,
             enqueueConfirmedAt: null,
             completedAt: null,
@@ -1883,7 +1883,7 @@ export async function deferFormalRunForCapacity(input: {
         ...providerPatch,
         failureClass: deferredFailureClass,
         failureDetailsHash: sha256CanonicalJson(metrics),
-        errorSummary: `Host Grok runner ${deferredFailureClass} occurred before provider start`,
+        errorSummary: `Formal acquisition ${deferredFailureClass} occurred before provider start`,
         runMetrics: metrics,
         completedAt: dbNow,
         leaseExpiresAt: null,
@@ -1916,6 +1916,31 @@ export async function deferFormalRunForCapacity(input: {
         .where(eq(contentSourceEndpoints.endpointId, run.endpointId));
     }
     return true;
+  });
+}
+
+export async function deferFormalRunForAdmission(input: {
+  runId: string;
+  queueName: string;
+  retryAfterSeconds: number;
+  db?: DbHandle;
+}): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(input.retryAfterSeconds) ||
+    input.retryAfterSeconds < 1 ||
+    input.retryAfterSeconds > 15 * 60
+  ) {
+    throw new Error('Queue admission retryAfterSeconds must be an integer from 1 to 900');
+  }
+  return deferFormalRunForCapacity({
+    runId: input.runId,
+    metrics: {
+      deferredReason: 'QUEUE_ADMISSION_CLOSED',
+      queueName: input.queueName,
+    },
+    failureClass: 'QUEUE_ADMISSION_CLOSED',
+    retryDelayMs: input.retryAfterSeconds * 1_000,
+    db: input.db,
   });
 }
 

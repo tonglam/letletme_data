@@ -81,7 +81,7 @@ set_content_x_scan_admission() {
   fi
   if ! output=$(
     APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
-      bun scripts/set-content-x-scan-admission.ts --mode "$mode" 2>&1
+      bun scripts/assert-queue-quiescence.ts --admission-mode "$mode" 2>&1
   ); then
     printf '%s\n' "$output" >&2
     return 1
@@ -153,26 +153,91 @@ restore_content_x_scan_admission() {
   echo 'deploy admission: content-x-scan admission restored'
 }
 
+run_scoped_queue_quiescence_probe() {
+  local output_file=$1
+  local timeout_seconds=$2
+  local probe_pid
+  local probe_deadline
+  local probe_status
+
+  # Keep the exact Compose probe in a child process so a hung Docker/Redis
+  # startup cannot consume the whole deployment deadline.  Killing only this
+  # child leaves the deployment shell and its admission-renewal trap alive.
+  (
+    APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+      bun scripts/assert-queue-quiescence.ts --redis-only --scoped >"$output_file" 2>&1
+  ) &
+  probe_pid=$!
+  probe_deadline=$(( $(date +%s) + timeout_seconds ))
+  while kill -0 "$probe_pid" 2>/dev/null; do
+    if (( $(date +%s) >= probe_deadline )); then
+      kill -TERM "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+      printf '%s\n' "deploy preflight: scoped queue probe timed out after ${timeout_seconds}s" >>"$output_file"
+      return 124
+    fi
+    sleep 1
+  done
+  if wait "$probe_pid"; then
+    return 0
+  else
+    probe_status=$?
+    return "$probe_status"
+  fi
+}
+
 wait_for_scoped_queue_quiescence() {
   local attempts=${1:-90}
   local delay_seconds=${2:-2}
+  local deadline_seconds=${3:-300}
+  local probe_timeout_seconds=${4:-10}
   local output_file
   local attempt
-  if ! [[ "$attempts" =~ ^[1-9][0-9]*$ && "$delay_seconds" =~ ^[0-9]+$ ]]; then
+  local deadline_at
+  local now_seconds
+  local remaining_seconds
+  local effective_probe_timeout
+  local sleep_seconds
+  if ! [[
+    "$attempts" =~ ^[1-9][0-9]*$ &&
+    "$delay_seconds" =~ ^[0-9]+$ &&
+    "$deadline_seconds" =~ ^[1-9][0-9]*$ &&
+    "$probe_timeout_seconds" =~ ^[1-9][0-9]*$
+  ]]; then
     echo 'deploy preflight: queue quiescence wait bounds are invalid' >&2
     return 1
   fi
   output_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-queue-quiescence.XXXXXX")
+  deadline_at=$(( $(date +%s) + deadline_seconds ))
   for ((attempt = 1; attempt <= attempts; attempt += 1)); do
-    if APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
-      bun scripts/assert-queue-quiescence.ts --redis-only --scoped >"$output_file" 2>&1; then
+    now_seconds=$(date +%s)
+    if (( now_seconds >= deadline_at )); then
+      printf '%s\n' "deploy preflight: scoped queue quiescence deadline exceeded (${deadline_seconds}s)" >>"$output_file"
+      break
+    fi
+    remaining_seconds=$((deadline_at - now_seconds))
+    effective_probe_timeout=$probe_timeout_seconds
+    if (( effective_probe_timeout > remaining_seconds )); then
+      effective_probe_timeout=$remaining_seconds
+    fi
+    if run_scoped_queue_quiescence_probe "$output_file" "$effective_probe_timeout"; then
       cat "$output_file"
       rm -f "$output_file"
       return 0
     fi
+    now_seconds=$(date +%s)
+    if (( now_seconds >= deadline_at )); then
+      printf '%s\n' "deploy preflight: scoped queue quiescence deadline exceeded (${deadline_seconds}s)" >>"$output_file"
+      break
+    fi
     if (( attempt < attempts )); then
       echo "deploy preflight: waiting for scoped queue work to drain (attempt $attempt/$attempts)"
-      sleep "$delay_seconds"
+      remaining_seconds=$((deadline_at - now_seconds))
+      sleep_seconds=$delay_seconds
+      if (( sleep_seconds > remaining_seconds )); then
+        sleep_seconds=$remaining_seconds
+      fi
+      if (( sleep_seconds > 0 )); then sleep "$sleep_seconds"; fi
     fi
   done
   cat "$output_file" >&2

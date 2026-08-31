@@ -326,7 +326,8 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('restore_content_x_scan_admission');
     expect(deployScript).toContain('wait_for_scoped_queue_quiescence 150 2');
     expect(stateMachine).toContain('wait_for_scoped_queue_quiescence()');
-    expect(stateMachine).toContain('set-content-x-scan-admission.ts');
+    expect(stateMachine).toContain('assert-queue-quiescence.ts --admission-mode');
+    expect(stateMachine).not.toContain('set-content-x-scan-admission.ts');
     expect(stateMachine).toContain('assert-queue-quiescence.ts --redis-only --scoped');
     expect(deployScript).toContain(
       '"$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"',
