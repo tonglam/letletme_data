@@ -80,6 +80,20 @@ export type QueueAdmission = Readonly<{
   forceCritical: boolean;
 }>;
 
+export type QueueAdmissionMutationInput = Readonly<{
+  queueName: string;
+  mode: QueueAdmissionMode;
+  ttlSeconds: number;
+  reasonCode: string;
+  changedBy: string;
+  forceCritical?: boolean;
+}>;
+
+export type QueueAdmissionCompareAndSetResult = Readonly<{
+  swapped: boolean;
+  admission: QueueAdmission | null;
+}>;
+
 export class QueueDrainOnlyError extends Error {
   readonly status = 503;
   readonly code = 'QUEUE_DRAIN_ONLY';
@@ -97,6 +111,18 @@ const ADMISSION_PREFIX = 'ops:queue-admission:';
 const RED_SAMPLE_PREFIX = 'ops:queue-admission-red:';
 const GREEN_SAMPLE_PREFIX = 'ops:queue-admission-green-since:';
 const MONITOR_LEASE_PREFIX = 'ops:queue-monitor-leader:';
+export const COMPARE_AND_SET_QUEUE_ADMISSION_LUA = `
+local current = redis.call('GET', KEYS[1])
+local expected = ARGV[1]
+if expected == '' then
+  if current then return {0, current} end
+elseif not current or current ~= expected then
+  return {0, current or ''}
+end
+local replacement = ARGV[2]
+redis.call('SET', KEYS[1], replacement, 'EX', ARGV[3])
+return {1, replacement}
+`;
 export const QUEUE_HEALTH_RETENTION_LEASE_QUEUE = '__queue-health-retention__';
 export const QUEUE_HEALTH_RETENTION_DAYS = 35;
 export const QUEUE_HEALTH_RETENTION_BATCH_SIZE = 5_000;
@@ -282,14 +308,7 @@ export async function readQueueHealthSnapshot(
   }
 }
 
-export async function setQueueAdmission(input: {
-  queueName: string;
-  mode: QueueAdmissionMode;
-  ttlSeconds: number;
-  reasonCode: string;
-  changedBy: string;
-  forceCritical?: boolean;
-}): Promise<QueueAdmission> {
+function validateQueueAdmissionInput(input: QueueAdmissionMutationInput): void {
   if (!(canonicalQueueCatalog as readonly string[]).includes(input.queueName)) {
     throw new Error(`Unknown canonical queue: ${input.queueName}`);
   }
@@ -304,8 +323,11 @@ export async function setQueueAdmission(input: {
   ) {
     throw new Error(`Critical queue ${input.queueName} requires forceCritical=true`);
   }
-  const now = new Date();
-  const admission: QueueAdmission = {
+}
+
+function buildQueueAdmission(input: QueueAdmissionMutationInput, now = new Date()): QueueAdmission {
+  validateQueueAdmissionInput(input);
+  return {
     queueName: input.queueName,
     mode: input.mode,
     expiresAt: new Date(now.getTime() + input.ttlSeconds * 1_000).toISOString(),
@@ -314,6 +336,39 @@ export async function setQueueAdmission(input: {
     changedBy: input.changedBy.slice(0, 120),
     forceCritical: input.forceCritical === true,
   };
+}
+
+function parseQueueAdmissionRaw(raw: string, queueName: string): QueueAdmission {
+  const parsed = JSON.parse(raw) as Partial<QueueAdmission>;
+  if (
+    parsed.queueName !== queueName ||
+    (parsed.mode !== 'OPEN' && parsed.mode !== 'DRAIN_ONLY') ||
+    typeof parsed.expiresAt !== 'string' ||
+    !Number.isFinite(Date.parse(parsed.expiresAt)) ||
+    typeof parsed.reasonCode !== 'string' ||
+    typeof parsed.changedAt !== 'string' ||
+    !Number.isFinite(Date.parse(parsed.changedAt)) ||
+    typeof parsed.changedBy !== 'string' ||
+    typeof parsed.forceCritical !== 'boolean'
+  ) {
+    throw new Error(`Invalid queue admission state for ${queueName}`);
+  }
+  return parsed as QueueAdmission;
+}
+
+function logQueueAdmissionChanged(admission: QueueAdmission): void {
+  logInfo('Queue admission changed', {
+    queue: admission.queueName,
+    mode: admission.mode,
+    reasonCode: admission.reasonCode,
+    expiresAt: admission.expiresAt,
+  });
+}
+
+export async function setQueueAdmission(
+  input: QueueAdmissionMutationInput,
+): Promise<QueueAdmission> {
+  const admission = buildQueueAdmission(input);
   const redis = await queueRedisSingleton.getClient();
   await redis.set(
     queueAdmissionKey(input.queueName),
@@ -321,13 +376,40 @@ export async function setQueueAdmission(input: {
     'EX',
     input.ttlSeconds,
   );
-  logInfo('Queue admission changed', {
-    queue: input.queueName,
-    mode: input.mode,
-    reasonCode: admission.reasonCode,
-    expiresAt: admission.expiresAt,
-  });
+  logQueueAdmissionChanged(admission);
   return admission;
+}
+
+/**
+ * Replace a queue admission only when Redis still contains the exact value
+ * observed by the caller. The absent-key case is also guarded in Lua so a
+ * deployment cannot overwrite an operator gate that arrived between its
+ * read and its write.
+ */
+export async function compareAndSetQueueAdmission(
+  input: QueueAdmissionMutationInput & { expected: QueueAdmission | null },
+): Promise<QueueAdmissionCompareAndSetResult> {
+  validateQueueAdmissionInput(input);
+  if (input.expected && input.expected.queueName !== input.queueName) {
+    throw new Error('Queue admission compare-and-set expected queue does not match target queue');
+  }
+
+  const now = new Date();
+  const admission = buildQueueAdmission(input, now);
+  const redis = await queueRedisSingleton.getClient();
+  const result = (await redis.eval(
+    COMPARE_AND_SET_QUEUE_ADMISSION_LUA,
+    1,
+    queueAdmissionKey(input.queueName),
+    input.expected ? JSON.stringify(input.expected) : '',
+    JSON.stringify(admission),
+    String(input.ttlSeconds),
+  )) as [number | string, string?];
+  const swapped = Number(result[0]) === 1;
+  const currentRaw = result[1] ?? '';
+  const current = currentRaw ? parseQueueAdmissionRaw(currentRaw, input.queueName) : null;
+  if (swapped) logQueueAdmissionChanged(admission);
+  return { swapped, admission: current };
 }
 
 export async function readQueueAdmission(queueName: string): Promise<QueueAdmission | null> {
@@ -338,7 +420,7 @@ export async function readQueueAdmission(queueName: string): Promise<QueueAdmiss
     const redis = await queueRedisSingleton.getClient();
     const raw = await redis.get(queueAdmissionKey(queueName));
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as QueueAdmission;
+    const parsed = parseQueueAdmissionRaw(raw, queueName);
     if (Date.parse(parsed.expiresAt) <= Date.now()) return null;
     return parsed;
   } catch (error) {

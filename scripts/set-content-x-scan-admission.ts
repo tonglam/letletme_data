@@ -1,6 +1,6 @@
 import {
+  compareAndSetQueueAdmission,
   readQueueAdmission,
-  setQueueAdmission,
   type QueueAdmission,
   type QueueAdmissionMode,
 } from '../src/services/queue-governance.service';
@@ -10,6 +10,7 @@ export const CONTENT_X_SCAN_QUEUE = 'content-x-scan' as const;
 export const DEPLOY_QUEUE_ADMISSION_TTL_SECONDS = 900;
 export const DEPLOY_QUEUE_ADMISSION_REASON = 'DEPLOY_QUEUE_QUIESCENCE';
 export const DEPLOY_QUEUE_ADMISSION_ACTOR = 'deployment';
+export const DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS = 3;
 
 export type ContentXScanAdmissionArguments = Readonly<{
   mode: QueueAdmissionMode;
@@ -77,44 +78,41 @@ function summary(input: {
 }
 
 async function applyAdmission(args: ContentXScanAdmissionArguments) {
-  const existing = await readQueueAdmission(CONTENT_X_SCAN_QUEUE);
-  const previousMode = existing?.mode ?? null;
+  let expected = await readQueueAdmission(CONTENT_X_SCAN_QUEUE);
+  const previousMode = expected?.mode ?? null;
 
-  if (
-    args.mode === 'DRAIN_ONLY' &&
-    existing?.mode === 'DRAIN_ONLY' &&
-    !isDeploymentAdmission(existing)
-  ) {
-    return summary({
+  for (let attempt = 0; attempt < DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS; attempt += 1) {
+    if (expected?.mode === 'DRAIN_ONLY' && !isDeploymentAdmission(expected)) {
+      return summary({
+        mode: args.mode,
+        changed: false,
+        admission: expected,
+        previousMode,
+      });
+    }
+
+    const result = await compareAndSetQueueAdmission({
+      queueName: CONTENT_X_SCAN_QUEUE,
+      expected,
       mode: args.mode,
-      changed: false,
-      admission: existing,
-      previousMode,
+      ttlSeconds: DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
+      reasonCode: DEPLOY_QUEUE_ADMISSION_REASON,
+      changedBy: DEPLOY_QUEUE_ADMISSION_ACTOR,
     });
+    if (result.swapped) {
+      if (!result.admission) throw new Error('Queue admission CAS returned no replacement');
+      return summary({
+        mode: args.mode,
+        changed: true,
+        admission: result.admission,
+        previousMode,
+      });
+    }
+
+    expected = result.admission;
   }
 
-  if (args.mode === 'OPEN' && existing?.mode === 'DRAIN_ONLY' && !isDeploymentAdmission(existing)) {
-    return summary({
-      mode: args.mode,
-      changed: false,
-      admission: existing,
-      previousMode,
-    });
-  }
-
-  const admission = await setQueueAdmission({
-    queueName: CONTENT_X_SCAN_QUEUE,
-    mode: args.mode,
-    ttlSeconds: DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
-    reasonCode: DEPLOY_QUEUE_ADMISSION_REASON,
-    changedBy: DEPLOY_QUEUE_ADMISSION_ACTOR,
-  });
-  return summary({
-    mode: args.mode,
-    changed: true,
-    admission,
-    previousMode,
-  });
+  throw new Error('Queue admission changed concurrently; refusing non-CAS update');
 }
 
 async function main(): Promise<void> {
