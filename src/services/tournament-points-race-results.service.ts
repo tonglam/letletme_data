@@ -1,6 +1,7 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentSyncContext } from '../domain/tournament';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
+import { entryInfoRepository } from '../repositories/entry-infos';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -113,6 +114,9 @@ export async function syncTournamentPointsRaceResultsForTournament(
     return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
   }
 
+  const entryInfos = await entryInfoRepository.findByIds(season, entryIds);
+  const startedEventByEntry = new Map(entryInfos.map((entry) => [entry.id, entry.startedEvent]));
+
   const totalsMap = await loadTournamentEntryTotals(
     season,
     entryIds,
@@ -178,13 +182,16 @@ export async function syncTournamentPointsRaceResultsForTournament(
     };
     updatedGroups.push(groupUpdate);
 
-    const groupList = groupsByGroupId.get(group.groupId) ?? [];
-    groupList.push({
-      entryId,
-      totalNetPoints: totals.totalNetPoints,
-      overallRank: eventResult.overallRank,
-    });
-    groupsByGroupId.set(group.groupId, groupList);
+    const startedEvent = startedEventByEntry.get(entryId);
+    if (startedEvent === undefined || startedEvent === null || eventId >= startedEvent) {
+      const groupList = groupsByGroupId.get(group.groupId) ?? [];
+      groupList.push({
+        entryId,
+        totalNetPoints: totals.totalNetPoints,
+        overallRank: eventResult.overallRank,
+      });
+      groupsByGroupId.set(group.groupId, groupList);
+    }
 
     const existingPoints = pointsGroupResultsMap.get(entryId);
     const eventNetPoints = eventResult.eventPoints - eventResult.eventTransfersCost;

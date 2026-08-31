@@ -354,6 +354,10 @@ async function buildPointsPayload(
              WHERE previous.season_id = roster.season_id
                AND previous.tournament_id = roster.tournament_id
                AND previous.entry_id = roster.entry_id
+               AND previous.event_id >= GREATEST(
+                 COALESCE(tournament.group_started_event_id, 1),
+                 COALESCE(entry.started_event, 1)
+               )
                AND previous.event_id < ${event.event_id}
                AND previous_event.finished = true
                AND previous_event.data_checked = true
@@ -370,6 +374,10 @@ async function buildPointsPayload(
              WHERE previous.season_id = roster.season_id
                AND previous.tournament_id = roster.tournament_id
                AND previous.entry_id = roster.entry_id
+               AND previous.event_id >= GREATEST(
+                 COALESCE(tournament.group_started_event_id, 1),
+                 COALESCE(entry.started_event, 1)
+               )
                AND previous.event_id < ${event.event_id}
                AND previous_event.finished = true
                AND previous_event.data_checked = true
@@ -1064,6 +1072,9 @@ async function buildH2HPayload(
     const sourceCheckedAt = battleSourceCheckedAt(match);
     if (!sourceCheckedAt) {
       throw new TournamentReviewSourceNotReadyError('H2H match source timestamp is missing');
+    }
+    if (sourceCheckedAt.getTime() < eventDataCheckedAt.getTime()) {
+      throw new TournamentReviewSourceNotReadyError('H2H match source is stale');
     }
     // Keep both timestamps in the freshness span. A present but stale
     // source_checked_at must not be hidden by a newer row updated_at.
@@ -2254,10 +2265,16 @@ export async function reconcileTournamentReviewObligations(
           UNION ALL
           SELECT points.updated_at AS source_updated_at
           FROM competition.tournament_points_group_results points
+          JOIN fpl.events points_event
+            ON points_event.season_id = points.season_id
+           AND points_event.event_id = points.event_id
           WHERE state.format = 'POINTS'
             AND points.season_id = ${season.seasonId}
             AND points.tournament_id = state.tournament_id
             AND points.event_id <= state.event_id
+            AND points_event.finished = true
+            AND points_event.data_checked = true
+            AND points_event.data_checked_at IS NOT NULL
             AND points.updated_at > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
           UNION ALL
           SELECT battle.updated_at AS source_updated_at
@@ -2286,6 +2303,18 @@ export async function reconcileTournamentReviewObligations(
           WHERE state.format = 'KNOCKOUT'
             AND result.season_id = ${season.seasonId}
             AND result.event_id = state.event_id
+            AND EXISTS (
+              SELECT 1
+              FROM competition.tournament_knockouts active_bracket
+              WHERE active_bracket.season_id = result.season_id
+                AND active_bracket.tournament_id = state.tournament_id
+                AND active_bracket.started_event_id <= state.event_id
+                AND (active_bracket.ended_event_id IS NULL OR active_bracket.ended_event_id >= state.event_id)
+                AND (
+                  active_bracket.home_entry_id = result.entry_id
+                  OR active_bracket.away_entry_id = result.entry_id
+                )
+            )
             AND GREATEST(
               result.updated_at,
               COALESCE(result.rich_synced_at, '-infinity'::timestamptz)
