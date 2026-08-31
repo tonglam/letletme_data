@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
+import { rawExplainElementsFixture } from '../fixtures/event-live-explains.fixtures';
 import type { LivePublicationRead } from '../../src/cache/live-publication-v2';
+import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
 import { syncLiveSnapshotV2 } from '../../src/services/live-snapshot-v2.service';
+import type { RawFPLFixture } from '../../src/types';
 
 const season = { seasonId: 2026, seasonCode: '2627' } as const;
 
@@ -222,5 +225,78 @@ describe('Live Points and Live Matches shared observation', () => {
 
     await expect(sync).rejects.toThrow('contains no elements');
     expect(finalizeFlags).toEqual([false, false]);
+  });
+
+  test('rejects a final Live Points publication when provisional Match detail is unavailable', async () => {
+    const rawFixture: RawFPLFixture = {
+      code: 10401,
+      event: 2,
+      finished: false,
+      finished_provisional: false,
+      id: 401,
+      kickoff_time: '2026-08-29T10:00:00.000Z',
+      minutes: 45,
+      provisional_start_time: false,
+      started: true,
+      team_a: 20,
+      team_a_score: 0,
+      team_h: 10,
+      team_h_score: 1,
+      stats: [{ identifier: 'bps', h: [{ element: 101, value: 30 }], a: [] }],
+      team_h_difficulty: 3,
+      team_a_difficulty: 3,
+      pulse_id: 401,
+    };
+    const sourceElement = rawExplainElementsFixture[0];
+    if (!sourceElement) throw new Error('live snapshot fixture is missing');
+    const referenceData: LiveSnapshotReferenceData = {
+      season: season.seasonCode,
+      nameById: new Map([
+        [10, 'Home FC'],
+        [20, 'Away FC'],
+      ]),
+      shortNameById: new Map([
+        [10, 'HOM'],
+        [20, 'AWA'],
+      ]),
+      positionById: new Map(),
+      playerTeamById: new Map([[101, 10]]),
+      playerById: new Map([[101, { id: 101, type: 3, teamId: 10, webName: 'Player One' }]]),
+    };
+    let checkpointCalls = 0;
+    const sync = syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      dependencies: {
+        getEventLive: async () => ({ elements: [structuredClone(sourceElement)] }),
+        getFixtures: async () => [rawFixture],
+        getExpectedFixtureIds: async () => [401],
+        getReferenceData: async () => referenceData,
+        readObservedMatchDesk: async () => ({ observed: '', read: null }),
+        syncLiveMatches: async () =>
+          ({
+            season: season.seasonCode,
+            eventId: 2,
+            state: 'LIVE_ACTIVE',
+            desk: {} as never,
+            deskFixtures: [{ fixtureId: 401 }] as never,
+            detail: null,
+            deskChanged: true,
+            detailChanged: false,
+            deskCheckpointScheduled: true,
+            detailCheckpointScheduled: false,
+            detailUnavailableReason: 'DETAIL_CANDIDATE_INVALID',
+          }) as never,
+        readPublished: async () => null,
+        readCheckpointed: async () => null,
+        checkpointPublication: async () => {
+          checkpointCalls += 1;
+          return false;
+        },
+      },
+    });
+
+    await expect(sync).rejects.toThrow('provisional detail is unavailable');
+    expect(checkpointCalls).toBe(0);
   });
 });

@@ -564,11 +564,9 @@ describe('Live Matches V2 Redis publications', () => {
     });
     const checkpoint = await readLiveMatchDeskPointerV2({ ...scope, redis }, 'active');
     if (!checkpoint) throw new Error('desk checkpoint fixture is missing');
-    await redis.del(
-      liveMatchDeskKey(scope, 'active'),
-      checkpoint.publication.desk.key,
-      `${checkpoint.publication.desk.key}:meta`,
-    );
+    await redis.del(liveMatchDeskKey(scope, 'active'));
+    await redis.set(checkpoint.publication.desk.key, 'corrupt-desk-payload');
+    await redis.set(`${checkpoint.publication.desk.key}:meta`, 'corrupt-desk-metadata');
 
     const result = await restoreLiveMatchDeskCheckpointV2({ checkpoint, redis });
 
@@ -599,9 +597,9 @@ describe('Live Matches V2 Redis publications', () => {
     await redis.del(
       liveMatchDetailKey(scope, 'active'),
       liveMatchDetailManifestKey(scope, checkpoint.publication.generation),
-      item.key,
-      `${item.key}:meta`,
     );
+    await redis.set(item.key, 'corrupt-detail-payload');
+    await redis.set(`${item.key}:meta`, 'corrupt-detail-metadata');
 
     const result = await restoreLiveMatchDetailCheckpointV2({ checkpoint, redis });
     const restored = await readLiveMatchDetailPointerV2({ ...scope, redis }, 'active');
@@ -644,6 +642,47 @@ describe('Live Matches V2 Redis publications', () => {
     expect(
       (await readLiveMatchDetailV2({ ...scope, redis }))?.fixtures[0]?.players[0]?.stats[0]?.value,
     ).toBe(35);
+  });
+
+  test('does not promote detail beside a newer incompatible desk publication', async () => {
+    const desk = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const detail = await publishLiveMatchDetailV2({
+      ...scope,
+      observedDeskGeneration: desk.publication.generation,
+      fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(35),
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [{ ...deskFixture(2), homeTeamName: 'Home FC Renamed' }],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV2({ ...scope, redis }),
+      redis,
+    });
+
+    await expect(
+      publishLiveMatchDetailV2({
+        ...scope,
+        observedDeskGeneration: desk.publication.generation,
+        fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+        fixtures: detailFixtures(40),
+        sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+        previous: await readLiveMatchDetailV2({ ...scope, redis }),
+        redis,
+      }),
+    ).rejects.toMatchObject({ code: 'LIVE_MATCH_PROMOTE_CHANGED' });
+    expect((await readLiveMatchDetailV2({ ...scope, redis }))?.publication.publicationId).toBe(
+      detail.publication.publicationId,
+    );
   });
 
   test('coalesces checkpoint intent and protects a final desk from non-final intent', async () => {

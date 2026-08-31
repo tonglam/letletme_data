@@ -210,7 +210,11 @@ export async function findLivePublicationV2FinalizationTargets(
           isNull(liveMatchDetailCheckpointsInFpl.eventId),
           ne(liveMatchDetailCheckpointsInFpl.state, 'FINALIZED'),
           sql<boolean>`${liveMatchDetailCheckpointsInFpl.observedDeskGeneration} <> ${liveMatchDeskCheckpointsInFpl.generation}`,
-          sql<boolean>`${liveMatchDetailCheckpointsInFpl.fixtureIdentityRevision} <> (${liveMatchDeskCheckpointsInFpl.revisions} -> 'fixtureIdentity' ->> 'revision')`,
+          sql<boolean>`
+            ${liveMatchDetailCheckpointsInFpl.fixtureIdentityRevision} IS DISTINCT FROM
+              (${liveMatchDeskCheckpointsInFpl.revisions} -> 'fixtureIdentity' ->> 'revision')
+            OR (${liveMatchDeskCheckpointsInFpl.revisions} -> 'fixtureIdentity' ->> 'revision') IS NULL
+          `,
         ),
       ),
     )

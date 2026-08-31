@@ -130,6 +130,19 @@ export function assertLiveMatchesV2RepairAuthorization(
   }
 }
 
+/** Check the same current-season fence used by the checkpoint worker. */
+export function assertLiveMatchesV2RepairSeason(
+  action: LiveMatchesV2RepairAction,
+  season: Pick<Awaited<ReturnType<typeof seasonRepository.requireByCode>>, 'isCurrent'>,
+): void {
+  if (action === 'replay-checkpoint' && !season.isCurrent) {
+    throw new ValidationError(
+      'historical Live Matches checkpoint replay cannot be enqueued on the current-season worker',
+      'LIVE_MATCH_REPAIR_HISTORICAL_SEASON',
+    );
+  }
+}
+
 function deskSummary(read: MatchDeskRead | null) {
   if (!read) return null;
   return {
@@ -295,6 +308,7 @@ async function executeLiveMatchesV2Repair(request: LiveMatchesV2RepairRequest) {
   assertLiveMatchesV2RepairAuthorization(request);
   if (!request.kind) throw new ValidationError('write repairs require an exact kind');
   const season = await seasonRepository.requireByCode(request.season);
+  assertLiveMatchesV2RepairSeason(request.action, season);
   const redis = await redisSingleton.getClient();
   const scope = { season: request.season, eventId: request.eventId } as const;
 

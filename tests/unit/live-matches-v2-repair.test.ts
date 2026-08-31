@@ -1,43 +1,24 @@
 import { describe, expect, test } from 'bun:test';
 
-import { parseLiveMatchesV2RepairCliArguments } from '../../scripts/repair-live-matches-v2';
 import {
   assertLiveMatchesV2RepairAuthorization,
+  assertLiveMatchesV2RepairSeason,
   LIVE_MATCHES_V2_REPAIR_CONFIRMATION,
   isLiveMatchDetailCompatibleWithDesk,
   parseLiveMatchesV2RepairRequest,
 } from '../../src/services/live-match-v2-repair.service';
 
 describe('Live Matches V2 repair guardrails', () => {
-  test('CLI maps one exact scope and rejects duplicate flags', () => {
-    expect(
-      parseLiveMatchesV2RepairCliArguments(
-        [
-          '--action=inspect',
-          '--season',
-          '2627',
-          '--event-id',
-          '2',
-          '--kind=detail',
-          '--reason',
-          'read the paired publication state',
-        ],
-        {},
-      ),
-    ).toEqual({
-      action: 'inspect',
-      season: '2627',
-      eventId: 2,
-      kind: 'detail',
-      reason: 'read the paired publication state',
-      confirmation: null,
-    });
+  test('rejects historical checkpoint replay before enqueueing it', () => {
     expect(() =>
-      parseLiveMatchesV2RepairCliArguments(
-        ['--action', 'inspect', '--action', 'inspect', '--season', '2627', '--event-id', '2'],
-        {},
-      ),
-    ).toThrow('usage: bun scripts/repair-live-matches-v2.ts');
+      assertLiveMatchesV2RepairSeason('replay-checkpoint', { isCurrent: false }),
+    ).toThrow('historical Live Matches checkpoint replay');
+    expect(() =>
+      assertLiveMatchesV2RepairSeason('replay-checkpoint', { isCurrent: true }),
+    ).not.toThrow();
+    expect(() =>
+      assertLiveMatchesV2RepairSeason('rebuild-current', { isCurrent: false }),
+    ).not.toThrow();
   });
 
   test('parses an exact read-only scope without write authorization', () => {

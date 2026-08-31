@@ -124,6 +124,14 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
           `Finalized live publication is not durably checkpointed for event ${eventId}`,
         );
       }
+      // Final Match obligations are queued for normal recovery, but the final
+      // snapshot must not race those jobs on this same two-slot worker before
+      // it starts the downstream final-results cascade. Consume both exact
+      // desired markers inline once; any duplicate queue jobs then observe an
+      // already-cleared marker and become harmless no-ops.
+      for (const kind of ['desk', 'detail'] as const) {
+        await checkpointLiveMatchScopeV2({ season, eventId, kind });
+      }
       if (!(await hasFinalLiveMatchCheckpointsV2(season, eventId))) {
         throw new Error(
           `Finalized Live Matches desk/detail are not durably checkpointed for event ${eventId}`,

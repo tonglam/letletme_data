@@ -93,6 +93,18 @@ export type MatchDeskRead = Readonly<{
   servedFrom: 'REDIS_CURRENT' | 'REDIS_PREVIOUS' | 'POSTGRES_CHECKPOINT';
 }>;
 
+/**
+ * An active desk read together with the exact Redis pointer bytes observed at
+ * the start of an upstream observation. The bytes are an ordering fence, not
+ * business data; promotion must compare them in Lua so an older provider
+ * response cannot overwrite a desk published while that response was in
+ * flight.
+ */
+export type MatchDeskActiveFence = Readonly<{
+  observed: string;
+  read: MatchDeskRead | null;
+}>;
+
 export type MatchDetailRead = Readonly<{
   publication: MatchDetailPublication;
   fixtures: readonly MatchFixtureDetail[];
@@ -315,6 +327,19 @@ local now = redis.call('TIME')
 return {tostring(generation), tostring(now[1]), tostring(now[2])}
 `;
 
+// Checkpoint restore is the one path allowed to repair a corrupted immutable
+// item. Keep the payload and its metadata replacement in one Redis script so
+// a failed repair cannot leave a half-repaired item visible to promotion.
+const RESTORE_STAGE_LUA = `
+if (#KEYS % 2) ~= 0 or #ARGV ~= (#KEYS / 2) * 3 then return redis.error_reply('invalid restore stage') end
+for index = 1, #KEYS, 2 do
+  local argument = ((index - 1) / 2) * 3 + 1
+  redis.call('SET', KEYS[index], ARGV[argument], 'PX', ARGV[argument + 2])
+  redis.call('SET', KEYS[index + 1], ARGV[argument + 1], 'PX', ARGV[argument + 2])
+end
+return 'staged'
+`;
+
 const SET_ACTIVE_EVENT_LUA = `
 local candidate = tonumber(ARGV[1])
 if not candidate then return redis.error_reply('invalid candidate event') end
@@ -380,6 +405,22 @@ local observed = ARGV[2] or ''
 local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= observed then return {'changed'} end
 if candidate.contractVersion ~= 'live-matches-v2' or type(candidate.fixtures) ~= 'table' then return {'invalid_candidate'} end
+if type(candidate.generation) ~= 'number' or type(candidate.season) ~= 'string' or type(candidate.eventId) ~= 'number' or type(candidate.finalized) ~= 'boolean' or type(candidate.observedDeskGeneration) ~= 'number' or candidate.observedDeskGeneration <= 0 or type(candidate.fixtureIdentityRevision) ~= 'string' or string.len(candidate.fixtureIdentityRevision) ~= 64 then return {'invalid_candidate'} end
+local deskRaw = redis.call('GET', KEYS[4]) or ''
+local deskOk, desk = pcall(cjson.decode, deskRaw)
+local deskRevision = nil
+if deskOk and type(desk) == 'table' and type(desk.revisions) == 'table' and type(desk.revisions.fixtureIdentity) == 'table' then deskRevision = desk.revisions.fixtureIdentity.revision end
+local deskCompatible = deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v2' and desk.season == candidate.season and desk.eventId == candidate.eventId and type(desk.generation) == 'number' and type(desk.state) == 'string' and type(deskRevision) == 'string' and deskRevision == candidate.fixtureIdentityRevision and desk.generation == candidate.observedDeskGeneration and ((desk.state == 'FINALIZED') == (candidate.finalized == true))
+if not deskCompatible then
+  -- A provisional retry must not turn an already-final detail into a hard
+  -- failure merely because its desk has crossed the finalization fence. Keep
+  -- the complete final detail as LKG; all other desk races fail closed.
+  if deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v2' and desk.season == candidate.season and desk.eventId == candidate.eventId and desk.state == 'FINALIZED' and candidate.finalized == false and currentRaw ~= '' then
+    local currentOk, currentValue = pcall(cjson.decode, currentRaw)
+    if currentOk and type(currentValue) == 'table' and currentValue.contractVersion == 'live-matches-v2' and currentValue.finalized == true then return {'stale', currentRaw} end
+  end
+  return {'desk_changed'}
+end
 local current = nil
 if currentRaw ~= '' then
   local ok, decoded = pcall(cjson.decode, currentRaw)
@@ -597,6 +638,7 @@ async function stage(
     payload: string;
     item: Readonly<{ count: number; bytes: number; sha256: string }>;
   }>[],
+  mode: 'create' | 'restore' = 'create',
 ): Promise<void> {
   if (values.length === 0) return;
   if (values.length > LIVE_MATCH_MAX_FIXTURES) {
@@ -611,20 +653,36 @@ async function stage(
       limitExceeded('Live Match staged item exceeds its bounded manifest');
     }
   }
-  const pipeline = redis.pipeline();
-  for (const value of values) {
-    pipeline.set(value.key, value.payload, 'PX', LIVE_MATCH_STAGING_TTL_MS, 'NX');
-    pipeline.set(
-      metadataKey(value.key),
+  if (mode === 'restore') {
+    const keys = values.flatMap((value) => [value.key, metadataKey(value.key)]);
+    const args = values.flatMap((value) => [
+      value.payload,
       itemMetadata(value.item),
-      'PX',
-      LIVE_MATCH_STAGING_TTL_MS,
-      'NX',
-    );
-  }
-  const result = await pipeline.exec();
-  if (!result || result.some(([error]) => error)) {
-    throw new CacheError('Live Matches V2 item staging failed', 'LIVE_MATCH_STAGE_FAILED');
+      String(LIVE_MATCH_STAGING_TTL_MS),
+    ]);
+    const result = await redis.eval(RESTORE_STAGE_LUA, keys.length, ...keys, ...args);
+    if (result !== 'staged') {
+      throw new CacheError(
+        'Live Matches V2 item restore staging failed',
+        'LIVE_MATCH_STAGE_FAILED',
+      );
+    }
+  } else {
+    const pipeline = redis.pipeline();
+    for (const value of values) {
+      pipeline.set(value.key, value.payload, 'PX', LIVE_MATCH_STAGING_TTL_MS, 'NX');
+      pipeline.set(
+        metadataKey(value.key),
+        itemMetadata(value.item),
+        'PX',
+        LIVE_MATCH_STAGING_TTL_MS,
+        'NX',
+      );
+    }
+    const result = await pipeline.exec();
+    if (!result || result.some(([error]) => error)) {
+      throw new CacheError('Live Matches V2 item staging failed', 'LIVE_MATCH_STAGE_FAILED');
+    }
   }
   const payloads = await redis.mget(...values.map((value) => value.key));
   const metadata = await redis.mget(...values.map((value) => metadataKey(value.key)));
@@ -952,16 +1010,14 @@ export function parseLiveMatchDetailPublicationV2(
   );
 }
 
-async function readDeskPointer(
+async function readDeskPointerWithRaw(
   redis: Redis,
   scope: MatchScope,
   pointer: 'active' | 'previous',
-): Promise<MatchDeskRead | null> {
-  const publication = parseDeskPublication(
-    await redis.get(liveMatchDeskKey(scope, pointer)),
-    scope,
-  );
-  if (!publication) return null;
+): Promise<MatchDeskActiveFence> {
+  const observed = (await redis.get(liveMatchDeskKey(scope, pointer))) ?? '';
+  const publication = parseDeskPublication(observed, scope);
+  if (!publication) return { observed, read: null };
   const [payload, metadata] = await redis.mget(
     publication.desk.key,
     metadataKey(publication.desk.key),
@@ -972,15 +1028,27 @@ async function readDeskPointer(
     Buffer.byteLength(payload, 'utf8') !== publication.desk.bytes ||
     contentHash(parseJson(payload)) !== publication.desk.sha256
   )
-    return null;
+    return { observed, read: null };
   const value = parseJson(payload);
-  if (!validDeskPayload(value, scope.eventId) || value.length !== publication.desk.count)
-    return null;
+  if (!validDeskPayload(value, scope.eventId) || value.length !== publication.desk.count) {
+    return { observed, read: null };
+  }
   return {
-    publication,
-    fixtures: value,
-    servedFrom: pointer === 'active' ? 'REDIS_CURRENT' : 'REDIS_PREVIOUS',
+    observed,
+    read: {
+      publication,
+      fixtures: value,
+      servedFrom: pointer === 'active' ? 'REDIS_CURRENT' : 'REDIS_PREVIOUS',
+    },
   };
+}
+
+async function readDeskPointer(
+  redis: Redis,
+  scope: MatchScope,
+  pointer: 'active' | 'previous',
+): Promise<MatchDeskRead | null> {
+  return (await readDeskPointerWithRaw(redis, scope, pointer)).read;
 }
 
 async function readDetailPointer(
@@ -1083,6 +1151,18 @@ export async function readLiveMatchDeskPointerV2(
   return readDeskPointer(redis, scope, pointer);
 }
 
+/** Capture the active desk pointer before a provider observation begins. */
+export async function readLiveMatchDeskFenceV2(input: {
+  readonly season: string;
+  readonly eventId: number;
+  readonly redis?: Redis;
+}): Promise<MatchDeskActiveFence> {
+  const scope = { season: input.season, eventId: input.eventId } as const;
+  assertScope(scope);
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  return readDeskPointerWithRaw(redis, scope, 'active');
+}
+
 export async function readLiveMatchDetailV2(input: {
   readonly season: string;
   readonly eventId: number;
@@ -1143,6 +1223,8 @@ export async function publishLiveMatchDeskV2(input: {
   readonly expectedNextCheckAt?: Date | string | null;
   readonly staleAt?: Date | string | null;
   readonly previous?: MatchDeskRead | null;
+  /** Exact active pointer captured before the upstream observation started. */
+  readonly observedActive?: MatchDeskActiveFence;
   readonly generationFloor?: number;
   readonly redis?: Redis;
 }): Promise<{
@@ -1225,7 +1307,9 @@ export async function publishLiveMatchDeskV2(input: {
   assertPublicationBytes(publication);
   const payload = canonicalJson(input.fixtures);
   await stage(redis, [{ key: desk.key, payload, item: desk }]);
-  const promotionActive = await stableDeskActiveForPromotion(redis, scope);
+  const promotionActive = input.observedActive
+    ? { observed: input.observedActive.observed, validated: input.observedActive.read }
+    : await stableDeskActiveForPromotion(redis, scope);
   const [status, currentRaw] = promotionResult(
     await redis.eval(
       PROMOTE_DESK_LUA,
@@ -1371,10 +1455,11 @@ export async function publishLiveMatchDetailV2(input: {
   const [status, currentRaw] = promotionResult(
     await redis.eval(
       PROMOTE_DETAIL_LUA,
-      3,
+      4,
       liveMatchDetailKey(scope, 'active'),
       liveMatchDetailKey(scope, 'previous'),
       liveMatchDetailKey(scope, 'sequence'),
+      liveMatchDeskKey(scope, 'active'),
       JSON.stringify(publication),
       promotionActive.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
@@ -1390,9 +1475,9 @@ export async function publishLiveMatchDetailV2(input: {
       throw new CacheError('Stale detail publication is invalid', 'LIVE_MATCH_PROMOTE_FAILED');
     return { publication: current, previous: current, published: false };
   }
-  if (status === 'changed')
+  if (status === 'changed' || status === 'desk_changed')
     throw new CacheError(
-      'Live Match detail current changed during promotion',
+      'Live Match detail or desk current changed during promotion',
       'LIVE_MATCH_PROMOTE_CHANGED',
     );
   if (status !== 'published')
@@ -1449,9 +1534,11 @@ export async function restoreLiveMatchDeskCheckpointV2(input: {
     );
   }
   const redis = input.redis ?? (await redisSingleton.getClient());
-  await stage(redis, [
-    { key: publication.desk.key, payload: canonicalJson(fixtures), item: publication.desk },
-  ]);
+  await stage(
+    redis,
+    [{ key: publication.desk.key, payload: canonicalJson(fixtures), item: publication.desk }],
+    'restore',
+  );
   const active = await stableDeskActiveForPromotion(redis, scope);
   const [status] = promotionResult(
     await redis.eval(
@@ -1540,15 +1627,16 @@ export async function restoreLiveMatchDetailCheckpointV2(input: {
     return { key: item.key, payload: canonicalJson(fixture.players), item };
   });
   const redis = input.redis ?? (await redisSingleton.getClient());
-  await stage(redis, values);
+  await stage(redis, values, 'restore');
   const active = await stableDetailActiveForPromotion(redis, scope);
   const [status] = promotionResult(
     await redis.eval(
       PROMOTE_DETAIL_LUA,
-      3,
+      4,
       liveMatchDetailKey(scope, 'active'),
       liveMatchDetailKey(scope, 'previous'),
       liveMatchDetailKey(scope, 'sequence'),
+      liveMatchDeskKey(scope, 'active'),
       JSON.stringify(publication),
       active.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
@@ -1559,9 +1647,9 @@ export async function restoreLiveMatchDetailCheckpointV2(input: {
       'restore',
     ),
   );
-  if (status === 'changed') {
+  if (status === 'changed' || status === 'desk_changed') {
     throw new CacheError(
-      'Live Match detail changed during checkpoint restore',
+      'Live Match detail or desk changed during checkpoint restore',
       'LIVE_MATCH_CHECKPOINT_RESTORE_CHANGED',
     );
   }
@@ -1635,10 +1723,11 @@ export async function promotePreviousLiveMatchV2(input: {
   const [status] = promotionResult(
     await redis.eval(
       PROMOTE_DETAIL_LUA,
-      3,
+      4,
       liveMatchDetailKey(scope, 'active'),
       liveMatchDetailKey(scope, 'previous'),
       liveMatchDetailKey(scope, 'sequence'),
+      liveMatchDeskKey(scope, 'active'),
       JSON.stringify(previous.publication),
       active.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
@@ -1649,7 +1738,8 @@ export async function promotePreviousLiveMatchV2(input: {
       'rollback',
     ),
   );
-  if (status === 'changed' || status === 'stale') return { status: 'changed', publication: null };
+  if (status === 'changed' || status === 'desk_changed' || status === 'stale')
+    return { status: 'changed', publication: null };
   if (status !== 'published')
     throw new CacheError(
       `Live Match detail rollback failed: ${status}`,

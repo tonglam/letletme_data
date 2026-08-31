@@ -13,6 +13,7 @@ import {
   type LivePublicationRead,
   type LivePublicationState,
 } from '../cache/live-publication-v2';
+import { readLiveMatchDeskFenceV2 } from '../cache/live-match-publication-v2';
 import {
   loadLiveReferenceData,
   prepareCoherentLiveSnapshot,
@@ -55,6 +56,7 @@ export interface LiveSnapshotV2Dependencies {
     season: FplSeasonRef,
     eventId?: number,
   ) => Promise<LiveSnapshotReferenceData>;
+  readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2;
   readonly syncLiveMatches?: typeof syncLiveMatchesV2FromObservation;
   readonly readPublished: (season: string, eventId: number) => Promise<LivePublicationRead | null>;
   readonly readCheckpointed?: (
@@ -103,6 +105,7 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
       .filter((fixture) => fixture.event === eventId)
       .map((fixture) => fixture.id);
   },
+  readObservedMatchDesk: (input) => readLiveMatchDeskFenceV2(input),
   getReferenceData: (season, eventId) => loadLiveReferenceData(season, eventId),
   syncLiveMatches: syncLiveMatchesV2FromObservation,
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
@@ -321,6 +324,14 @@ export async function syncLiveSnapshotV2(
       return null;
     });
   const current = await currentReadPromise;
+  // Capture the exact Match desk pointer before any FPL request begins. A
+  // slower older observation must lose its desk CAS if a newer observation
+  // publishes while its provider response is in flight. Custom unit callers
+  // may omit this read; the direct Match service then keeps its legacy local
+  // read behaviour without changing the production fence.
+  const observedMatchDeskPromise = dependencies.readObservedMatchDesk
+    ? dependencies.readObservedMatchDesk({ season: season.seasonCode, eventId })
+    : Promise.resolve(undefined);
   const expectedFixtureIdsPromise = dependencies
     .getExpectedFixtureIds(season, eventId)
     .catch((error) => {
@@ -362,6 +373,7 @@ export async function syncLiveSnapshotV2(
   ] as const)
     .then(async ([fixturesResult, expectedFixtureIdsResult]) => {
       if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
+      const observedDesk = await observedMatchDeskPromise;
       return (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
         season,
         eventId,
@@ -374,6 +386,7 @@ export async function syncLiveSnapshotV2(
         finalizeEvent: false,
         lifecycleState: nonFinalMatchLifecycleState,
         expectedNextCheckAt: options.expectedNextCheckAt,
+        observedDesk,
       });
     })
     .then((result) => ({ result, error: null as unknown }))
@@ -383,6 +396,7 @@ export async function syncLiveSnapshotV2(
       if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
       const early = await earlyMatchDeskOutcome;
       const rawFixtures = fixturesResult.value;
+      const observedDesk = await observedMatchDeskPromise;
       const expectedFixtureIds =
         expectedFixtureIdsResult.status === 'fulfilled'
           ? expectedFixtureIdsResult.value
@@ -403,6 +417,7 @@ export async function syncLiveSnapshotV2(
           finalizeEvent: false,
           lifecycleState: nonFinalMatchLifecycleState,
           expectedNextCheckAt: options.expectedNextCheckAt,
+          observedDesk,
           publishedDesk:
             early.result === null
               ? undefined
@@ -445,6 +460,31 @@ export async function syncLiveSnapshotV2(
     // boundary both publications are exact durable obligations and therefore
     // fail closed together.
     if (options.finalizeEvent && outcome.error) throw outcome.error;
+  };
+
+  const requireProvisionalMatchDetail = async (): Promise<void> => {
+    if (!options.finalizeEvent) return;
+    const outcome = await matchPublicationOutcome;
+    if (outcome.error) throw outcome.error;
+    const result = outcome.result;
+    if (!result)
+      throw new Error(`Live Match provisional publication is unavailable for event ${eventId}`);
+    // A blank gameweek has no fixture-grain player detail to validate. Its
+    // finalized empty detail is created in the final Match phase below. Any
+    // non-empty desk, however, must have a complete compatible detail before
+    // the immutable Live Points FINAL is allowed to publish.
+    if (result.deskFixtures.length === 0) return;
+    if (
+      result.detail === null ||
+      result.detailUnavailableReason !== null ||
+      result.detail.finalized ||
+      result.detail.observedDeskGeneration !== result.desk.generation ||
+      result.detail.fixtureIdentityRevision !== result.desk.revisions.fixtureIdentity.revision
+    ) {
+      throw new Error(
+        `Live Match provisional detail is unavailable before Live Points final publication for event ${eventId}`,
+      );
+    }
   };
 
   const finalizeAcceptedMatch = async (observation: AcceptedMatchObservation): Promise<void> => {
@@ -769,6 +809,8 @@ export async function syncLiveSnapshotV2(
       checkpointed: publication.checkpointedAt !== null || checkpointed,
     };
   }
+
+  await requireProvisionalMatchDetail();
 
   const promoted = await publishLivePublicationV2({
     season: season.seasonCode,

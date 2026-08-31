@@ -10,6 +10,7 @@ import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
 import {
   liveMatchDeskKey,
+  readLiveMatchDeskFenceV2,
   readLiveMatchDeskV2,
   readLiveMatchDetailV2,
 } from '../../src/cache/live-match-publication-v2';
@@ -150,6 +151,53 @@ describe('Live Matches V2 observation publication', () => {
       (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures,
     ).toHaveLength(1);
     expect(await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis })).toBeNull();
+  });
+
+  test('rejects an older observation after the desk changes during its provider window', async () => {
+    await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const observedDesk = await readLiveMatchDeskFenceV2({
+      season: season.seasonCode,
+      eventId,
+      redis,
+    });
+    expect(observedDesk.read).not.toBeNull();
+
+    await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [{ ...fixture(30), team_h_score: 2 }],
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:30.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+
+    await expect(
+      syncLiveMatchesV2FromObservation({
+        season,
+        eventId,
+        rawFixtures: [fixture(30)],
+        referenceData: referenceData(),
+        expectedFixtureIds: [401],
+        observedAt: '2026-08-29T10:00:00.000Z',
+        observedDesk,
+        redis,
+        enqueueCheckpoint,
+      }),
+    ).rejects.toMatchObject({ code: 'LIVE_MATCH_PROMOTE_CHANGED' });
+    expect(
+      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
+    ).toMatchObject({ homeScore: 2 });
   });
 
   test('reuses the fixture-phase desk without a second touch or checkpoint decision', async () => {

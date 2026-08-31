@@ -8,6 +8,7 @@ import {
   readLiveMatchDetailV2,
   readLiveMatchCheckpointLastAtV2,
   readLiveMatchCheckpointDesiredV2,
+  type MatchDeskActiveFence,
   restoreLiveMatchDeskCheckpointV2,
   restoreLiveMatchDetailCheckpointV2,
   setLiveMatchActiveEventV2,
@@ -63,6 +64,8 @@ export interface LiveMatchObservation {
   readonly lifecycleState?: MatchLifecycleState;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly observedAt?: Date | string;
+  /** Active desk pointer captured before the provider observation began. */
+  readonly observedDesk?: MatchDeskActiveFence;
   /**
    * Desk already published from the fixture-only phase of this exact provider
    * observation. The complete phase may reuse it without another Redis read,
@@ -315,7 +318,9 @@ export async function syncLiveMatchesV2FromObservation(
         fixtures: input.publishedDesk.fixtures,
         servedFrom: 'REDIS_CURRENT',
       }
-    : await readDeskSafely(input);
+    : input.observedDesk !== undefined
+      ? input.observedDesk.read
+      : await readDeskSafely(input);
   const deskIsFinal = currentDesk?.publication.state === 'FINALIZED';
   const expectedFixtureIds =
     input.expectedFixtureIds ?? currentDesk?.fixtures.map((fixture) => fixture.fixtureId);
@@ -372,6 +377,7 @@ export async function syncLiveMatchesV2FromObservation(
       expectedNextCheckAt: input.expectedNextCheckAt,
       staleAt,
       previous: currentDesk,
+      observedActive: input.observedDesk,
       generationFloor: currentDesk?.publication.generation ?? 0,
       redis: input.redis,
     });
@@ -445,7 +451,8 @@ export async function syncLiveMatchesV2FromObservation(
       if (
         !detail &&
         (detailIsStarted(input.rawFixtures) ||
-          hasStartedLiveMatchDetail(preparedDesk.fixtures, preparedDetail))
+          hasStartedLiveMatchDetail(preparedDesk.fixtures, preparedDetail) ||
+          preparedDesk.state === 'FINALIZED')
       ) {
         const published = await publishLiveMatchDetailV2({
           season: input.season.seasonCode,
