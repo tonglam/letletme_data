@@ -194,7 +194,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
 
   test('repairs historical points ranks with finalized cumulative inputs', () => {
     const migration = readFileSync(
-      'migrations/0077_repair_tournament_points_group_ranks.sql',
+      'migrations/0078_repair_tournament_points_group_ranks.sql',
       'utf8',
     );
     expect(migration).toContain('event.finished = true');

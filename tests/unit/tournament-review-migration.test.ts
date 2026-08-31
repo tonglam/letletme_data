@@ -1,13 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
-const migration = readFileSync('migrations/0076_tournament_review_v2_publications.sql', 'utf8');
+const migration = readFileSync('migrations/0077_tournament_review_v2_publications.sql', 'utf8');
 const metadataMigration = readFileSync(
-  'migrations/0078_tournament_review_obligation_metadata_baseline.sql',
+  'migrations/0079_tournament_review_obligation_metadata_baseline.sql',
   'utf8',
 );
 const entryMetadataMigration = readFileSync(
-  'migrations/0079_tournament_review_obligation_entry_metadata.sql',
+  'migrations/0080_tournament_review_obligation_entry_metadata.sql',
   'utf8',
 );
 
