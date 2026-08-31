@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-const migration = await Bun.file('migrations/0075_live_matches_v2_checkpoints.sql').text();
+const migration = await Bun.file('migrations/0076_live_matches_v2_checkpoints.sql').text();
 
 describe('Live Matches V2 checkpoint migration contract', () => {
   test('stores self-contained bounded manifests and payloads', () => {
