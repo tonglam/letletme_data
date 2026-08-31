@@ -246,6 +246,31 @@ export function resolveLivePicksEntryDeduplicationId(
   return `live-picks-entry:${seasonCode}:event-${eventId}:entry-${entryId}`;
 }
 
+export function resolveLivePicksProbeBackoffResult(
+  canarySucceeded: boolean,
+  options: Readonly<{
+    schedulerFenced?: boolean;
+    retryableRepair?: boolean;
+  }> = {},
+) {
+  const schedulerFenced = options.schedulerFenced === true;
+  const retryableRepair = options.retryableRepair === true;
+  const acceptedBackoff = canarySucceeded && schedulerFenced;
+  // A governance repair carries a freshness window but no scheduler fence.
+  // It must stay source-not-ready so the BullMQ retry policy can wait for the
+  // shared probe backoff to expire; only a fenced scheduler root may be
+  // terminally settled as an accepted no-op.
+  const sourceReady = canarySucceeded && (!retryableRepair || schedulerFenced);
+  return {
+    canaryCount: 0,
+    synced: 0,
+    pending: 0,
+    sourceReady,
+    scanComplete: false,
+    ...(acceptedBackoff ? { outcome: 'accepted-backoff' as const } : {}),
+  } as const;
+}
+
 /**
  * The scheduler asks the shared coordinator before creating a root probe.
  * This keeps the retry schedule in one durable Redis state machine instead of
@@ -605,6 +630,8 @@ export async function runPicksProbeAndSync(
   canaryCount: number;
   synced: number;
   pending: number;
+  /** The scheduler may settle this root as skipped after an accepted backoff. */
+  outcome?: 'accepted-backoff';
   /** The source canary was accepted for this event window. */
   sourceReady: boolean;
   /** The complete eligible-entry sweep reached its semantic finalizer. */
@@ -618,13 +645,22 @@ export async function runPicksProbeAndSync(
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
   };
   if (now.getTime() < state.nextProbeAt) {
-    return {
-      canaryCount: 0,
-      synced: 0,
-      pending: 0,
-      sourceReady: false,
-      scanComplete: false,
-    };
+    // The scheduler can resolve an obligation just before the coordinator
+    // writes its next-probe fence. A fenced root whose source canary has
+    // already been accepted is a successful no-op; an unfenced freshness
+    // repair must remain source-not-ready so BullMQ retries it. Keep
+    // scanComplete false so an outstanding checkpoint/repair is not marked
+    // complete early.
+    const schedulerFenced =
+      typeof obligation.obligationId === 'string' &&
+      obligation.obligationId.length > 0 &&
+      typeof obligation.obligationGeneration === 'number' &&
+      Number.isSafeInteger(obligation.obligationGeneration) &&
+      obligation.obligationGeneration >= 0;
+    return resolveLivePicksProbeBackoffResult(state.canarySucceeded, {
+      schedulerFenced,
+      retryableRepair: obligation.freshnessWindowId !== undefined,
+    });
   }
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
   if (entryIds.length === 0) {

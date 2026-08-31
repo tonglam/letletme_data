@@ -1166,35 +1166,59 @@ export async function openGovernanceCase(input: {
     return null;
   }
   const db = input.db ?? (await getDb());
-  const [row] = await db
-    .insert(dataGovernanceCasesInOps)
-    .values({
-      caseKind: input.caseKind,
-      contractKey: input.contractKey,
-      lane: input.lane,
-      obligationId: input.obligationId,
-      sloWindowId: input.sloWindowId,
-      scopeKey: input.scopeKey,
-      targetRevision: input.targetRevision,
-      errorClass: input.errorClass,
-      errorCode: input.errorCode,
-      fingerprint: input.fingerprint,
-      evidence: asJsonObject(input.evidence),
-      repairTarget: asJsonObject(input.repairTarget),
-      compensator: input.compensator,
-    })
-    .onConflictDoUpdate({
-      target: [
-        dataGovernanceCasesInOps.caseKind,
-        dataGovernanceCasesInOps.contractKey,
-        dataGovernanceCasesInOps.lane,
-        dataGovernanceCasesInOps.scopeKey,
-        dataGovernanceCasesInOps.fingerprint,
-      ],
-      targetWhere: sql`status IN ('OPEN','AUTO_REPAIRING','REQUIRES_REVIEW')`,
-      set: { updatedAt: sql`clock_timestamp()`, evidence: asJsonObject(input.evidence) },
-    })
-    .returning();
+  const insertCase = async (handle: DbOrTransaction) => {
+    const [row] = await handle
+      .insert(dataGovernanceCasesInOps)
+      .values({
+        caseKind: input.caseKind,
+        contractKey: input.contractKey,
+        lane: input.lane,
+        obligationId: input.obligationId,
+        sloWindowId: input.sloWindowId,
+        scopeKey: input.scopeKey,
+        targetRevision: input.targetRevision,
+        errorClass: input.errorClass,
+        errorCode: input.errorCode,
+        fingerprint: input.fingerprint,
+        evidence: asJsonObject(input.evidence),
+        repairTarget: asJsonObject(input.repairTarget),
+        compensator: input.compensator,
+      })
+      .onConflictDoUpdate({
+        target: [
+          dataGovernanceCasesInOps.caseKind,
+          dataGovernanceCasesInOps.contractKey,
+          dataGovernanceCasesInOps.lane,
+          dataGovernanceCasesInOps.scopeKey,
+          dataGovernanceCasesInOps.fingerprint,
+        ],
+        targetWhere: sql`status IN ('OPEN','AUTO_REPAIRING','REQUIRES_REVIEW')`,
+        set: { updatedAt: sql`clock_timestamp()`, evidence: asJsonObject(input.evidence) },
+      })
+      .returning();
+    return row;
+  };
+
+  let row: Awaited<ReturnType<typeof insertCase>> | null;
+  if (input.caseKind === 'freshness-breach' && input.sloWindowId !== undefined) {
+    // Retiring an accepted live-picks backoff and opening its breach case are
+    // concurrent operations. Lock the exact window before inserting so a case
+    // cannot be created from a stale BREACHED snapshot after retirement has
+    // committed NOT_APPLICABLE. If the observer wins the lock first, the
+    // retirement transaction will dismiss this case atomically afterwards.
+    row = await db.transaction(async (tx) => {
+      const [window] = await tx
+        .select({ status: freshnessSloWindowsInOps.status })
+        .from(freshnessSloWindowsInOps)
+        .where(eq(freshnessSloWindowsInOps.windowId, input.sloWindowId!))
+        .for('update')
+        .limit(1);
+      if (!window || !['BREACHED', 'INVALID'].includes(window.status)) return null;
+      return insertCase(tx);
+    });
+  } else {
+    row = await insertCase(db);
+  }
   logInfo('Data governance case opened or refreshed', {
     caseId: row?.caseId,
     caseKind: input.caseKind,
