@@ -345,9 +345,8 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('DEPLOY_COMMITTED=false');
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=false');
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=true');
-    expect(deployScript).toContain(
-      '"$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true',
-    );
+    expect(deployScript).toContain('"$DEPLOY_COMMITTED" = false &&');
+    expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED');
     expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
     expect(deployScript).toContain('run-briefing-control-probe.sh');

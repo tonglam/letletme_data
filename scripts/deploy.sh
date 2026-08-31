@@ -103,6 +103,7 @@ DEPLOY_RUNNER_PREVIOUS_TARGET=''
 DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_OLD_MEDIA_PRESENT=false
 DEPLOY_SERVICES_STOPPED=false
+DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=false
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -181,6 +182,7 @@ restore_stopped_services() {
   fi
   if [[ "$restored" = true ]]; then
     DEPLOY_SERVICES_STOPPED=false
+    DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=false
   fi
 }
 
@@ -208,7 +210,9 @@ deploy() {
           "$DEPLOY_OLD_IMAGE_ID"; then
           log_error "Rollback eligibility or migration ledger proof failed; leaving the deployment in forward recovery."
         fi
-      elif [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true ]]; then
+      elif [[ "$DEPLOY_COMMITTED" = false &&
+        ( "$DEPLOY_SERVICES_STOPPED" = true ||
+          "$DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED" = true ) ]]; then
         restore_stopped_services || true
       fi
     fi
@@ -341,6 +345,23 @@ deploy() {
     log_error "Database work is not quiescent; services were not stopped."
     exit 1
   fi
+  # content-worker is the only runtime producer for content-x-scan. Fence it
+  # before accepting the scoped Redis quiescence result; a worker that passed
+  # the admission read immediately before the gate was installed must finish
+  # (or fail) before the queue is sampled.
+  DEPLOY_ROLLBACK_ELIGIBLE=false
+  if rollback_runtime_is_eligible \
+    "$old_container" "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_REVISION" \
+    "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
+    DEPLOY_ROLLBACK_ELIGIBLE=true
+  fi
+  DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true
+  log_info "Fencing content-worker before accepting queue quiescence"
+  if ! compose stop -t 45 content-worker; then
+    log_error "Content worker producer did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
   if ! wait_for_scoped_queue_quiescence 150 2; then
     log_error "Queue work is not quiescent; services were not stopped."
     exit 1
@@ -365,11 +386,6 @@ deploy() {
   fi
   if ! compose stop -t 45 scheduler; then
     log_error "Scheduler did not stop cleanly; migration was not started."
-    restore_stopped_services
-    exit 1
-  fi
-  if ! compose stop -t 45 content-worker; then
-    log_error "Content worker did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi

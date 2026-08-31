@@ -7,6 +7,7 @@
 deploy_lock_path=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
 deploy_lock_fd=''
 DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}
+DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=${DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED:-false}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -157,22 +158,35 @@ run_scoped_queue_quiescence_probe() {
   local output_file=$1
   local timeout_seconds=$2
   local probe_pid
+  local probe_group_pid=''
   local probe_deadline
   local probe_status
 
-  # Keep the exact Compose probe in a child process so a hung Docker/Redis
-  # startup cannot consume the whole deployment deadline.  Killing only this
-  # child leaves the deployment shell and its admission-renewal trap alive.
-  (
-    APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
-      bun scripts/assert-queue-quiescence.ts --redis-only --scoped >"$output_file" 2>&1
-  ) &
-  probe_pid=$!
+  # Keep the exact Compose probe in its own process group when `setsid` is
+  # available. The fallback tracks descendants explicitly for macOS/local
+  # shells that do not ship `setsid`. Either way, a hung Docker/Redis startup
+  # cannot consume the whole deployment deadline or the deployment shell.
+  if command -v setsid >/dev/null 2>&1; then
+    (
+      export -f compose 2>/dev/null || true
+      exec setsid bash -c '
+        APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+          bun scripts/assert-queue-quiescence.ts --redis-only --scoped
+      '
+    ) >"$output_file" 2>&1 &
+    probe_pid=$!
+    probe_group_pid=$probe_pid
+  else
+    (
+      APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+        bun scripts/assert-queue-quiescence.ts --redis-only --scoped >"$output_file" 2>&1
+    ) &
+    probe_pid=$!
+  fi
   probe_deadline=$(( $(date +%s) + timeout_seconds ))
   while kill -0 "$probe_pid" 2>/dev/null; do
     if (( $(date +%s) >= probe_deadline )); then
-      kill -TERM "$probe_pid" 2>/dev/null || true
-      wait "$probe_pid" 2>/dev/null || true
+      terminate_scoped_queue_probe "$probe_pid" "$probe_group_pid" 2
       printf '%s\n' "deploy preflight: scoped queue probe timed out after ${timeout_seconds}s" >>"$output_file"
       return 124
     fi
@@ -184,6 +198,54 @@ run_scoped_queue_quiescence_probe() {
     probe_status=$?
     return "$probe_status"
   fi
+}
+
+probe_process_descendants() {
+  local parent_pid=$1
+  local child_pid
+  while IFS= read -r child_pid; do
+    [[ -n "$child_pid" ]] || continue
+    probe_process_descendants "$child_pid"
+    printf '%s\n' "$child_pid"
+  done < <(pgrep -P "$parent_pid" 2>/dev/null || true)
+}
+
+signal_scoped_queue_probe() {
+  local signal=$1
+  local probe_pid=$2
+  local probe_group_pid=${3:-}
+  local child_pid
+  if [[ -n "$probe_group_pid" ]]; then
+    kill "-$signal" -- "-$probe_group_pid" 2>/dev/null || true
+    return 0
+  fi
+  while IFS= read -r child_pid; do
+    [[ -n "$child_pid" ]] || continue
+    kill "-$signal" "$child_pid" 2>/dev/null || true
+  done < <(probe_process_descendants "$probe_pid")
+  kill "-$signal" "$probe_pid" 2>/dev/null || true
+}
+
+terminate_scoped_queue_probe() {
+  local probe_pid=$1
+  local probe_group_pid=${2:-}
+  local grace_seconds=${3:-2}
+  local grace_deadline
+  signal_scoped_queue_probe TERM "$probe_pid" "$probe_group_pid"
+  grace_deadline=$(( $(date +%s) + grace_seconds ))
+  while kill -0 "$probe_pid" 2>/dev/null; do
+    if (( $(date +%s) >= grace_deadline )); then
+      signal_scoped_queue_probe KILL "$probe_pid" "$probe_group_pid"
+      # The root process was just SIGKILLed (or was already gone), so this
+      # reap cannot wait on a TERM-ignoring descendant. Descendants in a
+      # dedicated group were killed together; the fallback killed them by
+      # walking the process tree above.
+      wait "$probe_pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  wait "$probe_pid" 2>/dev/null || true
 }
 
 wait_for_scoped_queue_quiescence() {

@@ -132,6 +132,28 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
   });
 
+  test('fences the content producer before accepting scoped queue quiescence', () => {
+    const localAdmission = deployScript.indexOf('if ! drain_content_x_scan_for_deploy');
+    const localFence = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
+    const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
+    expect(localAdmission).toBeGreaterThan(-1);
+    expect(localFence).toBeGreaterThan(localAdmission);
+    expect(localProbe).toBeGreaterThan(localFence);
+    expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true');
+    expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED');
+
+    const workflowAdmission = workflow.indexOf('if ! drain_content_x_scan_for_deploy');
+    const workflowFence = workflow.indexOf('docker compose stop -t 45 content-worker');
+    const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
+    expect(workflowAdmission).toBeGreaterThan(-1);
+    expect(workflowFence).toBeGreaterThan(workflowAdmission);
+    expect(workflowProbe).toBeGreaterThan(workflowFence);
+    expect(workflow).toContain('content_worker_fenced=true');
+    expect(workflow).toContain(
+      '[ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]',
+    );
+  });
+
   test('keeps the compiled host runner free of runtime logger transports', () => {
     expect(hostGrokRunner).toContain(String.raw`from '../utils/strict-env'`);
     expect(hostGrokRunner).not.toContain(String.raw`from './config'`);
@@ -193,7 +215,8 @@ describe('release workflow gates', () => {
       'HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300',
     );
     expect(workflow).toContain('timeout: 20m');
-    expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
+    expect(workflow).toContain('docker compose stop -t 45 content-worker');
+    expect(workflow).toContain('docker compose stop -t 45 scheduler media-worker');
     expect(workflow).toContain('"$old_media_present" "$old_image_id" || true');
     expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');

@@ -161,6 +161,7 @@ jobs:
             runner_probe_succeeded=false
             runner_previous_target=""
             runner_previous_release=""
+            content_worker_fenced=false
             image_id_for_ref() {
               local image_ref=${1:-}
               [ -n "$image_ref" ] || return 0
@@ -239,7 +240,7 @@ jobs:
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
                 if [ "$migration_started" = false ]; then
-                  if [ "$services_stopped" = true ] && \
+                  if { [ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]; } && \
                     [ "$old_runtime_rollback_eligible" = true ]; then
                     if [ -n "$old_revision" ]; then
                       git reset --hard "$old_revision" || true
@@ -250,6 +251,8 @@ jobs:
                       "$old_media_present" "$old_image_id" || true
                   elif [ "$services_stopped" = true ]; then
                     echo "Data deployment failed with no eligible rollback target; leaving services stopped for forward recovery" >&2
+                  elif [ "$content_worker_fenced" = true ]; then
+                    echo "Data deployment failed after fencing content-worker with no eligible rollback target; leaving the deployment in forward recovery" >&2
                   fi
                 elif [ "$migration_started" = true ]; then
                   if ! restore_last_known_healthy_if_ledger_unchanged \
@@ -447,6 +450,23 @@ jobs:
               echo "deploy preflight: database work is not quiescent; services were not stopped" >&2
               exit 1
             fi
+            # content-worker is the only runtime producer for content-x-scan.
+            # Fence it before accepting the scoped Redis quiescence result; a
+            # worker that passed the admission read immediately before the
+            # gate was installed must finish (or fail) before the queue is
+            # sampled.
+            old_runtime_rollback_eligible=false
+            if rollback_runtime_is_eligible \
+              "$old_container" "$old_image" "$old_revision" \
+              "$old_release_sha" "$old_image_id"; then
+              old_runtime_rollback_eligible=true
+            fi
+            content_worker_fenced=true
+            echo "deploy preflight: fencing content-worker before accepting queue quiescence"
+            if ! docker compose stop -t 45 content-worker; then
+              echo "deploy preflight: content-worker producer did not stop cleanly; services were not stopped" >&2
+              exit 1
+            fi
             if ! wait_for_scoped_queue_quiescence 150 2; then
               echo "deploy preflight: queue work is not quiescent; services were not stopped" >&2
               exit 1
@@ -465,7 +485,8 @@ jobs:
             # Keep the API/worker gate explicit: API bind recovery must never
             # stop a healthy worker.  (The scheduler is stopped separately.)
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
-            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler content-worker media-worker
+            # content-worker was fenced before the quiescence probe.
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler media-worker
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
             wait_for_port_3000_free 30 2
