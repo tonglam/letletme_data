@@ -573,35 +573,27 @@ export function isExactFinalLiveMatchCheckpointPair(
   );
 }
 
-/** Finalization succeeds only when both independent Match publications are durable. */
+/**
+ * Finalization succeeds only when both independent Match publications are
+ * durable and every self-contained manifest/payload checksum validates. The
+ * lightweight joined-row identity is useful as a final fence, but it is not
+ * durable proof on its own.
+ */
 export async function hasFinalLiveMatchCheckpointsV2(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<boolean> {
-  const db = await getDb();
-  const rows = await db
-    .select({
-      deskState: liveMatchDeskCheckpointsInFpl.state,
-      deskGeneration: liveMatchDeskCheckpointsInFpl.generation,
-      deskRevisions: liveMatchDeskCheckpointsInFpl.revisions,
-      detailState: liveMatchDetailCheckpointsInFpl.state,
-      detailObservedDeskGeneration: liveMatchDetailCheckpointsInFpl.observedDeskGeneration,
-      detailFixtureIdentityRevision: liveMatchDetailCheckpointsInFpl.fixtureIdentityRevision,
-    })
-    .from(liveMatchDeskCheckpointsInFpl)
-    .leftJoin(
-      liveMatchDetailCheckpointsInFpl,
-      and(
-        eq(liveMatchDetailCheckpointsInFpl.seasonId, liveMatchDeskCheckpointsInFpl.seasonId),
-        eq(liveMatchDetailCheckpointsInFpl.eventId, liveMatchDeskCheckpointsInFpl.eventId),
-      ),
-    )
-    .where(
-      and(
-        eq(liveMatchDeskCheckpointsInFpl.seasonId, season.seasonId),
-        eq(liveMatchDeskCheckpointsInFpl.eventId, eventId),
-      ),
-    )
-    .limit(1);
-  return isExactFinalLiveMatchCheckpointPair(rows[0]);
+  const [desk, detail] = await Promise.all([
+    readLiveMatchDeskCheckpointV2(season, eventId),
+    readLiveMatchDetailCheckpointV2(season, eventId),
+  ]);
+  if (!desk || !detail) return false;
+  return isExactFinalLiveMatchCheckpointPair({
+    deskState: desk.publication.state,
+    deskGeneration: desk.publication.generation,
+    deskRevisions: desk.publication.revisions,
+    detailState: detail.publication.finalized ? 'FINALIZED' : 'PROVISIONAL',
+    detailObservedDeskGeneration: detail.publication.observedDeskGeneration,
+    detailFixtureIdentityRevision: detail.publication.fixtureIdentityRevision,
+  });
 }

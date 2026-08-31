@@ -347,8 +347,25 @@ const RESTORE_STAGE_LUA = `
 if (#KEYS % 2) ~= 0 or #ARGV ~= (#KEYS / 2) * 3 then return redis.error_reply('invalid restore stage') end
 for index = 1, #KEYS, 2 do
   local argument = ((index - 1) / 2) * 3 + 1
-  redis.call('SET', KEYS[index], ARGV[argument], 'PX', ARGV[argument + 2])
-  redis.call('SET', KEYS[index + 1], ARGV[argument + 1], 'PX', ARGV[argument + 2])
+  local payloadTtl = redis.call('PTTL', KEYS[index])
+  local metadataTtl = redis.call('PTTL', KEYS[index + 1])
+  redis.call('SET', KEYS[index], ARGV[argument])
+  redis.call('SET', KEYS[index + 1], ARGV[argument + 1])
+  -- A restore may be a no-op because the active publication already equals
+  -- the durable checkpoint. Do not turn a persistent/current or final item
+  -- into a short-lived staging value just because promotion returns stale.
+  -- Missing keys still get a bounded lease so promotion has time to consume
+  -- the repaired item; an existing TTL is retained exactly.
+  if payloadTtl > 0 then
+    redis.call('PEXPIRE', KEYS[index], payloadTtl)
+  elseif payloadTtl == -2 then
+    redis.call('PEXPIRE', KEYS[index], ARGV[argument + 2])
+  end
+  if metadataTtl > 0 then
+    redis.call('PEXPIRE', KEYS[index + 1], metadataTtl)
+  elseif metadataTtl == -2 then
+    redis.call('PEXPIRE', KEYS[index + 1], ARGV[argument + 2])
+  end
 end
 return 'staged'
 `;
@@ -1485,7 +1502,6 @@ export async function publishLiveMatchDetailV2(input: {
     fixtures: descriptors,
   };
   assertPublicationBytes(publication);
-  const previousByKey = new Set(previousPublication?.fixtures.map((item) => item.key) ?? []);
   const values = sortedFixtures
     .map((fixture, index) => ({
       key: descriptors[index]?.key,
@@ -1494,7 +1510,7 @@ export async function publishLiveMatchDetailV2(input: {
     }))
     .filter(
       (value): value is { key: string; payload: string; item: MatchDetailItem } =>
-        value.key !== undefined && value.item !== undefined && !previousByKey.has(value.key),
+        value.key !== undefined && value.item !== undefined,
     );
   await stage(redis, values);
   const promotionActive = input.observedActive

@@ -635,6 +635,11 @@ describe('Live Matches V2 Redis publications', () => {
     expect(result.published).toBe(true);
     expect(result.publication.publicationId).toBe(checkpoint.publication.publicationId);
     expect(result.publication.generation).toBe(checkpoint.publication.generation);
+
+    const activeItemTtl = await redis.pttl(checkpoint.publication.desk.key);
+    const staleRestore = await restoreLiveMatchDeskCheckpointV2({ checkpoint, redis });
+    expect(staleRestore.published).toBe(false);
+    expect(await redis.pttl(checkpoint.publication.desk.key)).toBe(activeItemTtl);
   });
 
   test('restores exact detail manifest and immutable item key from checkpoint', async () => {
@@ -660,8 +665,7 @@ describe('Live Matches V2 Redis publications', () => {
       liveMatchDetailKey(scope, 'active'),
       liveMatchDetailManifestKey(scope, checkpoint.publication.generation),
     );
-    await redis.set(item.key, 'corrupt-detail-payload');
-    await redis.set(`${item.key}:meta`, 'corrupt-detail-metadata');
+    await redis.del(item.key, `${item.key}:meta`);
 
     const result = await restoreLiveMatchDetailCheckpointV2({ checkpoint, redis });
     const restored = await readLiveMatchDetailPointerV2({ ...scope, redis }, 'active');
