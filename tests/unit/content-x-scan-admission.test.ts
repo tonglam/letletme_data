@@ -87,4 +87,38 @@ cat "$output_file"
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').toContain('result=0');
   });
+
+  test('preserves the local Compose context in a setsid probe', () => {
+    const script = String.raw`
+set -euo pipefail
+PROJECT_DIR=/tmp/letletme-data-compose-context
+COMPOSE_FILE=compose.production.yml
+COMPOSE_BIN='compose-wrapper --project-name letletme-data'
+IFS=' ' read -r -a COMPOSE_CMD <<<"$COMPOSE_BIN"
+export APP_IMAGE=letletme-data:test
+source scripts/deploy-state-machine.sh
+compose() {
+  [[ "$PROJECT_DIR" == /tmp/letletme-data-compose-context ]]
+  [[ "$COMPOSE_FILE" == compose.production.yml ]]
+  [[ "$COMPOSE_BIN" == 'compose-wrapper --project-name letletme-data' ]]
+  [[ "\${COMPOSE_CMD[*]}" == 'compose-wrapper --project-name letletme-data' ]]
+  [[ "$APP_IMAGE" == letletme-data:test ]]
+  return 0
+}
+output_file=$(mktemp)
+set +e
+run_scoped_queue_quiescence_probe "$output_file" 1
+result=$?
+set -e
+printf 'result=%s\n' "$result"
+cat "$output_file"
+`;
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: process.env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('result=0');
+  });
 });

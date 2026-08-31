@@ -161,6 +161,9 @@ run_scoped_queue_quiescence_probe() {
   local probe_group_pid=''
   local probe_deadline
   local probe_status
+  local probe_project_dir=${PROJECT_DIR:-$PWD}
+  local probe_compose_file=${COMPOSE_FILE:-docker-compose.yml}
+  local probe_compose_bin=${COMPOSE_BIN:-docker compose}
 
   # Keep the exact Compose probe in its own process group when `setsid` is
   # available. The fallback tracks descendants explicitly for macOS/local
@@ -169,8 +172,22 @@ run_scoped_queue_quiescence_probe() {
   if command -v setsid >/dev/null 2>&1; then
     (
       export -f compose 2>/dev/null || true
+      export DEPLOY_PROBE_PROJECT_DIR="$probe_project_dir"
+      export DEPLOY_PROBE_COMPOSE_FILE="$probe_compose_file"
+      export DEPLOY_PROBE_COMPOSE_BIN="$probe_compose_bin"
+      export DEPLOY_PROBE_APP_IMAGE="${APP_IMAGE:-}"
       exec setsid bash -c '
-        APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+        # Bash functions and arrays are not enough to carry the local deploy
+        # context across `bash -c`: PROJECT_DIR/COMPOSE_FILE/COMPOSE_BIN are
+        # shell locals in deploy.sh and COMPOSE_CMD is an unexportable array.
+        # Rehydrate the same values before invoking the exported compose
+        # function so Linux and local/manual deployments probe the intended
+        # Compose project.
+        PROJECT_DIR="$DEPLOY_PROBE_PROJECT_DIR"
+        COMPOSE_FILE="$DEPLOY_PROBE_COMPOSE_FILE"
+        COMPOSE_BIN="$DEPLOY_PROBE_COMPOSE_BIN"
+        IFS=" " read -r -a COMPOSE_CMD <<<"$COMPOSE_BIN"
+        APP_IMAGE="$DEPLOY_PROBE_APP_IMAGE" compose run --rm -T --interactive=false api \
           bun scripts/assert-queue-quiescence.ts --redis-only --scoped
       '
     ) >"$output_file" 2>&1 &
