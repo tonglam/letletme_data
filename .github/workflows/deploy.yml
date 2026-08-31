@@ -6,6 +6,23 @@ on:
     types: [completed]
     branches: ['main']
   workflow_dispatch:
+    inputs:
+      retire_expired_core_staging_publication_ids:
+        description: 'Comma-separated exact expired fpl:core staging publication UUIDs to retire'
+        required: false
+        type: string
+      retire_expired_core_staging_season_id:
+        description: 'Season ID fence for the exact staging publications'
+        required: false
+        type: string
+      retire_expired_core_staging_active_publication_id:
+        description: 'Expected active fpl:core publication UUID fence'
+        required: false
+        type: string
+      retire_expired_core_staging_active_revision:
+        description: 'Expected active fpl:core revision fence'
+        required: false
+        type: string
 
 concurrency:
   group: deploy-main
@@ -110,6 +127,10 @@ jobs:
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           LIVE_POINTS_V2_SEED_SEASON: ${{ vars.LIVE_POINTS_V2_SEED_SEASON }}
           LIVE_POINTS_V2_SEED_EVENT_ID: ${{ vars.LIVE_POINTS_V2_SEED_EVENT_ID }}
+          RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS: ${{ inputs.retire_expired_core_staging_publication_ids }}
+          RETIRE_EXPIRED_CORE_STAGING_SEASON_ID: ${{ inputs.retire_expired_core_staging_season_id }}
+          RETIRE_EXPIRED_CORE_STAGING_ACTIVE_PUBLICATION_ID: ${{ inputs.retire_expired_core_staging_active_publication_id }}
+          RETIRE_EXPIRED_CORE_STAGING_ACTIVE_REVISION: ${{ inputs.retire_expired_core_staging_active_revision }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
@@ -120,7 +141,7 @@ jobs:
           # leave the SSH command enough time for preflight, migration, and
           # rollback/recovery if readiness never converges.
           timeout: 20m
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,LIVE_POINTS_V2_SEED_SEASON,LIVE_POINTS_V2_SEED_EVENT_ID
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,LIVE_POINTS_V2_SEED_SEASON,LIVE_POINTS_V2_SEED_EVENT_ID,RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS,RETIRE_EXPIRED_CORE_STAGING_SEASON_ID,RETIRE_EXPIRED_CORE_STAGING_ACTIVE_PUBLICATION_ID,RETIRE_EXPIRED_CORE_STAGING_ACTIVE_REVISION
           script: |
             set -euo pipefail
             old_image=""
@@ -395,6 +416,51 @@ jobs:
             fi
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false migration \
               bun scripts/wait-for-migration-login.ts
+            finish_stage
+
+            start_stage stagingRepair
+            repair_publication_ids=${RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS:-}
+            if [ -n "$repair_publication_ids" ]; then
+              repair_season_id=${RETIRE_EXPIRED_CORE_STAGING_SEASON_ID:-}
+              repair_active_publication_id=${RETIRE_EXPIRED_CORE_STAGING_ACTIVE_PUBLICATION_ID:-}
+              repair_active_revision=${RETIRE_EXPIRED_CORE_STAGING_ACTIVE_REVISION:-}
+              if ! [[ "$repair_season_id" =~ ^[1-9][0-9]*$ ]]; then
+                echo 'deploy repair: season id must be a positive integer' >&2
+                exit 1
+              fi
+              if ! [[ "$repair_active_publication_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+                echo 'deploy repair: expected active publication must be an RFC UUID' >&2
+                exit 1
+              fi
+              if ! [[ "$repair_active_revision" =~ ^[1-9][0-9]*$ ]]; then
+                echo 'deploy repair: expected active revision must be a positive integer' >&2
+                exit 1
+              fi
+              IFS=',' read -r -a repair_ids <<< "$repair_publication_ids"
+              if [ "${#repair_ids[@]}" -lt 1 ] || [ "${#repair_ids[@]}" -gt 8 ]; then
+                echo 'deploy repair: provide between one and eight exact publication UUIDs' >&2
+                exit 1
+              fi
+              for raw_repair_id in "${repair_ids[@]}"; do
+                repair_id=$(printf '%s' "$raw_repair_id" | tr -d '[:space:]')
+                if ! [[ "$repair_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+                  echo 'deploy repair: every staging publication value must be an RFC UUID' >&2
+                  exit 1
+                fi
+                echo "deploy repair: validating and retiring exact expired core staging publication $repair_id"
+                APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false \
+                  -e DATA_STAGING_REPAIR_CONFIRM=YES migration \
+                  bun scripts/retire-superseded-core-staging-publication.ts \
+                  --action retire \
+                  --publication-id "$repair_id" \
+                  --season-id "$repair_season_id" \
+                  --expected-active-publication-id "$repair_active_publication_id" \
+                  --expected-active-revision "$repair_active_revision" \
+                  --reason 'operator-confirmed expired superseded core staging repair'
+              done
+            else
+              echo 'deploy repair: no exact staging publication repair requested'
+            fi
             finish_stage
 
             deployment_started=true

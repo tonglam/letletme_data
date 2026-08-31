@@ -111,6 +111,14 @@ docker compose run --rm -T migration bun run db:migration-contract
 docker compose run --rm -T migration bun run db:verify-runtime-logins
 ```
 
+If a deployment is blocked by a verified expired, superseded `fpl:core` staging publication, use
+the `Deploy` workflow's manual inputs for the exact publication UUIDs and the observed active
+publication UUID/revision fence. The workflow runs one transactionally guarded command per UUID
+before the normal quiescence check. It refuses non-expired rows, a changed active fence, incomplete
+item proofs, published rows with an outbox receipt, or any scope other than the specified season's
+global core publication. Leave all four repair inputs empty for a normal deployment; do not bypass
+the quiescence check or run ad-hoc SQL.
+
 `/health/live` proves process liveness. `/health/ready` is capability readiness for the hot path: it
 requires cache Redis and exactly one current `fpl.seasons` row, while PostgreSQL, queue Redis, or
 worker degradation does not remove an already-servable Redis publication. `/health/deploy` is the strict
