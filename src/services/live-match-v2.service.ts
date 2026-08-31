@@ -26,7 +26,10 @@ import {
   readLiveMatchDetailCheckpointV2,
 } from './live-match-v2-checkpoint.service';
 import { enqueueLiveMatchCheckpoint } from '../jobs/live-data.jobs';
-import type { LiveSnapshotReferenceData } from './live-coherent-fetch';
+import {
+  resolveLiveReferenceDataForDetail,
+  type LiveSnapshotReferenceData,
+} from './live-coherent-fetch';
 import {
   hasStartedLiveMatchDetail,
   prepareLiveMatchDesk,
@@ -468,12 +471,13 @@ export async function syncLiveMatchesV2FromObservation(
     detailUnavailableReason = 'PLAYER_IDENTITY_UNAVAILABLE';
   } else {
     try {
+      const detailReferenceData = await resolveLiveReferenceDataForDetail(input.referenceData);
       const preparedDetail = prepareLiveMatchDetail({
         eventId: input.eventId,
         rawElements: input.rawEventLive.elements,
         rawFixtures: input.rawFixtures,
         deskFixtures: preparedDesk.fixtures,
-        referenceData: input.referenceData,
+        referenceData: detailReferenceData,
         publishedLiveElementIds: input.publishedLiveElementIds,
       });
       const preparedDetailComplete = detailHasRequiredCoverage(

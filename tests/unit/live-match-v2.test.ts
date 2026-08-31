@@ -6,7 +6,10 @@ import {
   prepareLiveMatchDetail,
   type MatchDeskFixture,
 } from '../../src/services/live-match-v2';
-import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
+import {
+  resolveLiveReferenceDataForDetail,
+  type LiveSnapshotReferenceData,
+} from '../../src/services/live-coherent-fetch';
 import type {
   RawFPLEventExplainFixture,
   RawFPLEventLiveElement,
@@ -310,6 +313,22 @@ describe('Live Matches V2 fixture-grain preparation', () => {
         publishedLiveElementIds: [101],
       }),
     ).toThrow('no event-time team identity');
+  });
+
+  test('does not let pending event identity block the Core detail baseline', async () => {
+    const reference = referenceData();
+    const resolved = await Promise.race([
+      resolveLiveReferenceDataForDetail({
+        ...reference,
+        eventPinnedIdentities: new Promise(() => undefined),
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('event identity enrichment blocked detail')), 1_000),
+      ),
+    ]);
+
+    expect(resolved.playerById).toEqual(reference.playerById);
+    expect(resolved.playerByFixtureAndId).toBeUndefined();
   });
 
   test('derives active and settled lifecycle from current fixtures on a stale job retry', () => {

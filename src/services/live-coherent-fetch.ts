@@ -28,8 +28,14 @@ export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
    */
   readonly playerById?: ReadonlyMap<number, LivePlayerIdentity>;
   /**
-   * Event-time identity captured with fixture evidence. It is loaded for every
-   * live event so a current-roster transfer cannot replace the club represented
+   * Event-time identity enrichment started for every live event. The promise
+   * is intentionally not part of the Core/Live Points readiness gate; Match
+   * detail consumes it when it settles within its bounded enrichment budget.
+   */
+  readonly eventPinnedIdentities?: Promise<readonly FplPlayerFixtureIdentity[] | null>;
+  /**
+   * Event-time identity captured with fixture evidence. Once enrichment is
+   * available, a current-roster transfer cannot replace the club represented
    * by the fixture.
    */
   readonly playerByFixtureAndId?: ReadonlyMap<string, LivePlayerIdentity>;
@@ -162,39 +168,79 @@ async function loadEventPinnedIdentities(
   }
 }
 
+const LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS = 500;
+
+function resolveWithinBudget<T>(promise: Promise<T>, budgetMs: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), budgetMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timeout);
+        resolve(null);
+      },
+    );
+  });
+}
+
+/**
+ * Resolve event identity only for fixture-grain detail. A slow database must
+ * never hold the Core baseline, Live Points, or Match desk publication. The
+ * caller keeps its same-event detail LKG when the optional enrichment misses
+ * this budget.
+ */
+export async function resolveLiveReferenceDataForDetail(
+  referenceData: LiveSnapshotReferenceData,
+): Promise<LiveSnapshotReferenceData> {
+  if (!referenceData.eventPinnedIdentities) return referenceData;
+  const eventPinnedIdentities = await resolveWithinBudget(
+    referenceData.eventPinnedIdentities,
+    LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS,
+  );
+  if (!eventPinnedIdentities || eventPinnedIdentities.length === 0) return referenceData;
+  try {
+    return addEventPinnedIdentities(referenceData, eventPinnedIdentities);
+  } catch (error) {
+    logWarn('Live event identity enrichment is invalid; keeping detail LKG', {
+      season: referenceData.season,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return referenceData;
+  }
+}
+
 /** Core metadata for coherent validation; it is never a live publication. */
 export async function loadLiveReferenceData(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<LiveSnapshotReferenceData> {
   const cached = await readCoreSnapshotCache(season.seasonCode);
-  const coreReferenceData = cached
-    ? referenceDataFromCore(season, cached.teams, cached.players)
-    : await withCoreSnapshotReadLock(season, async (transaction) => {
-        const [teams, players] = await Promise.all([
-          createTeamRepository(transaction).findAll(season),
-          createPlayerRepository(transaction).findAll(season),
-        ]);
-        return referenceDataFromCore(season, teams, players);
-      });
+  if (cached) {
+    // Redis Core is already the serving baseline, so start the optional
+    // identity read immediately without making the Core lookup wait for DB.
+    return {
+      ...referenceDataFromCore(season, cached.teams, cached.players),
+      eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+    };
+  }
 
-  const eventPinnedIdentities = await loadEventPinnedIdentities(season, eventId);
-  if (eventPinnedIdentities === null || eventPinnedIdentities.length === 0) {
-    return coreReferenceData;
-  }
-  try {
-    return addEventPinnedIdentities(coreReferenceData, eventPinnedIdentities);
-  } catch (error) {
-    // A malformed/duplicate identity row is equivalent to an unavailable
-    // enrichment for this observation. Never discard the valid Core baseline
-    // or overwrite a previously published detail candidate because of it.
-    logWarn('Live event identity enrichment is invalid; continuing with Core reference data', {
-      season: season.seasonCode,
-      eventId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return coreReferenceData;
-  }
+  // When Redis Core is absent, finish the short coherent Core transaction
+  // first. This avoids letting the optional identity query win the only Data
+  // pool connection and delay the baseline it is meant to enrich.
+  const coreReferenceData = await withCoreSnapshotReadLock(season, async (transaction) => {
+    const [teams, players] = await Promise.all([
+      createTeamRepository(transaction).findAll(season),
+      createPlayerRepository(transaction).findAll(season),
+    ]);
+    return referenceDataFromCore(season, teams, players);
+  });
+  return {
+    ...coreReferenceData,
+    eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+  };
 }
 
 function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
