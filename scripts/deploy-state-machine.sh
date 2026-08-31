@@ -104,8 +104,30 @@ drain_content_x_scan_for_deploy() {
   printf '%s\n' "$output"
   if printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
     echo 'deploy preflight: content-x-scan admission is drain-only; waiting for active work to finish'
-  else
+  elif printf '%s\n' "$output" | grep -F '"changed":false' >/dev/null; then
     echo 'deploy preflight: content-x-scan was already drain-only; preserving its existing operator gate'
+  else
+    echo 'deploy preflight: content-x-scan admission result was not machine-readable' >&2
+    return 1
+  fi
+}
+
+renew_content_x_scan_admission() {
+  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" != true ]]; then return 0; fi
+  local output
+  if ! output=$(set_content_x_scan_admission DRAIN_ONLY); then
+    printf '%s\n' "$output" >&2
+    echo 'deploy admission: failed to renew content-x-scan drain-only gate' >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+  if printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
+    echo 'deploy admission: content-x-scan drain-only gate renewed'
+  elif printf '%s\n' "$output" | grep -F '"changed":false' >/dev/null; then
+    echo 'deploy admission: external content-x-scan drain-only gate remains in force'
+  else
+    echo 'deploy admission: content-x-scan renewal result was not machine-readable' >&2
+    return 1
   fi
 }
 
@@ -118,6 +140,15 @@ restore_content_x_scan_admission() {
     return 1
   fi
   printf '%s\n' "$output"
+  if printf '%s\n' "$output" | grep -F '"changed":false' >/dev/null; then
+    DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=false
+    echo 'deploy admission: preserved an externally-owned content-x-scan drain-only gate'
+    return 0
+  fi
+  if ! printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
+    echo 'deploy admission: restore result was not machine-readable; leaving the gate state tracked' >&2
+    return 1
+  fi
   DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=false
   echo 'deploy admission: content-x-scan admission restored'
 }

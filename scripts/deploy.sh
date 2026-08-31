@@ -345,6 +345,10 @@ deploy() {
     log_error "Queue work is not quiescent; services were not stopped."
     exit 1
   fi
+  if ! renew_content_x_scan_admission; then
+    log_error "Content-x-scan admission could not be renewed before stopping services."
+    exit 1
+  fi
   log_info "Migration plan and queue quiescence passed before stopping services"
   DEPLOY_ROLLBACK_ELIGIBLE=false
   if rollback_runtime_is_eligible \
@@ -494,6 +498,10 @@ deploy() {
     exit 1
   fi
   finish_stage
+  if ! renew_content_x_scan_admission; then
+    log_error "Content-x-scan admission could not be renewed before service start."
+    exit 1
+  fi
   start_stage serviceReady
   log_info "Starting services"
   # The media worker owns a runtime heartbeat even when source-media

@@ -245,6 +245,7 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('services_stopped=false');
     expect(workflow).toContain('services_stopped=true');
     expect(workflow).toContain('drain_content_x_scan_for_deploy');
+    expect(workflow).toContain('renew_content_x_scan_admission');
     expect(workflow).toContain('restore_content_x_scan_admission');
     expect(workflow).not.toContain('restore_before_migration');
     expect(workflow).not.toContain('/usr/local/libexec/vps-maintenance');
@@ -321,6 +322,7 @@ describe('production environment preflight', () => {
     expect(deployScript).not.toContain('db:provision-runtime-logins');
     expect(deployScript).not.toContain('sleep 60');
     expect(deployScript).toContain('drain_content_x_scan_for_deploy');
+    expect(deployScript).toContain('renew_content_x_scan_admission');
     expect(deployScript).toContain('restore_content_x_scan_admission');
     expect(deployScript).toContain('wait_for_scoped_queue_quiescence 150 2');
     expect(stateMachine).toContain('wait_for_scoped_queue_quiescence()');

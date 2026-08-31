@@ -451,6 +451,10 @@ jobs:
               echo "deploy preflight: queue work is not quiescent; services were not stopped" >&2
               exit 1
             fi
+            if ! renew_content_x_scan_admission; then
+              echo "deploy preflight: content-x-scan admission could not be renewed before stopping services" >&2
+              exit 1
+            fi
             echo "deploy preflight: migration plan and queue quiescence passed before stopping services"
             old_runtime_rollback_eligible=false
             if rollback_runtime_is_eligible \
@@ -551,6 +555,10 @@ jobs:
               -e DATABASE_URL api \
               bun run cache:publish-core -- --execute --allow-empty
             finish_stage
+            if ! renew_content_x_scan_admission; then
+              echo 'deploy admission: content-x-scan admission could not be renewed before service start' >&2
+              exit 1
+            fi
             start_stage serviceReady
             services_start_attempted=true
             # The media worker owns a runtime heartbeat even when source-media
