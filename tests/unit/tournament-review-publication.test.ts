@@ -11,6 +11,7 @@ import {
   tournamentReviewScoreMatchesEntryResult,
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
+  tournamentReviewSourceSpan,
 } from '../../src/services/tournament-review-publication.service';
 import {
   effectiveTournamentReviewEntryStartEventId,
@@ -60,6 +61,16 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(first).toBe(tournamentReviewFailureFingerprint('SOURCE', '6953:1:5:1'));
     expect(first).not.toBe(tournamentReviewFailureFingerprint('SOURCE', '6953:1:5:2'));
+  });
+
+  test('floors the persisted source span at the finalized event checkpoint', () => {
+    const checkpoint = '2026-08-30T10:00:00.000Z';
+    const span = tournamentReviewSourceSpan(checkpoint, [
+      '2026-08-01T00:00:00.000Z',
+      '2026-08-30T10:05:00.000Z',
+    ]);
+    expect(span.sourceMin.toISOString()).toBe(checkpoint);
+    expect(span.sourceMax.toISOString()).toBe('2026-08-30T10:05:00.000Z');
   });
 
   test('validates H2H fixture coverage independently for every group', () => {
