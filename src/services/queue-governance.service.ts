@@ -116,6 +116,7 @@ const GREEN_SAMPLE_PREFIX = 'ops:queue-admission-green-since:';
 const MONITOR_LEASE_PREFIX = 'ops:queue-monitor-leader:';
 export const QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS = 3_600;
 export const QUEUE_CONSUMER_PAUSE_OPERATOR = 'operator';
+const QUEUE_CONSUMER_PAUSE_ACQUIRING_PREFIX = 'acquiring:';
 const QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX = 'releasing:';
 
 /**
@@ -134,12 +135,31 @@ end
 redis.call('SET', KEYS[1], ARGV[2])
 return 1
 `;
-export const CLAIM_QUEUE_CONSUMER_PAUSE_OWNER_LUA = `
+export const CLAIM_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA = `
 local current = redis.call('GET', KEYS[1])
 local owner = ARGV[1]
-if current and current ~= owner then return 0 end
-redis.call('SET', KEYS[1], owner, 'EX', ARGV[2])
+local acquiring = ARGV[2]
+if current == owner then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  return 1
+end
+if current and current ~= acquiring then return 0 end
+redis.call('SET', KEYS[1], acquiring, 'EX', ARGV[3])
 return 1
+`;
+export const COMPLETE_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA = `
+local current = redis.call('GET', KEYS[1])
+if current == ARGV[2] then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  return 1
+end
+if current ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+return 1
+`;
+export const ABORT_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
 `;
 export const TOUCH_QUEUE_CONSUMER_PAUSE_OWNER_LUA = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
@@ -148,13 +168,18 @@ return redis.call('EXPIRE', KEYS[1], ARGV[2])
 export const BEGIN_QUEUE_CONSUMER_PAUSE_RELEASE_LUA = `
 local current = redis.call('GET', KEYS[1])
 local owner = ARGV[1]
-local releasing = ARGV[2]
+local acquiring = ARGV[2]
+local releasing = ARGV[3]
 if current == owner then
-  redis.call('SET', KEYS[1], releasing, 'EX', ARGV[3])
+  redis.call('SET', KEYS[1], releasing, 'EX', ARGV[4])
+  return 1
+end
+if current == acquiring then
+  redis.call('SET', KEYS[1], releasing, 'EX', ARGV[4])
   return 1
 end
 if current == releasing then
-  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  redis.call('EXPIRE', KEYS[1], ARGV[4])
   return 1
 end
 return 0
@@ -312,16 +337,28 @@ export function deploymentQueueConsumerPauseOwner(ownerToken: string): string {
   return `deployment:${normalized}`;
 }
 
+export function acquiringQueueConsumerPauseOwner(owner: string): string {
+  const normalized = owner.trim();
+  if (!normalized) throw new Error('Queue consumer pause owner requires an owner token');
+  return `${QUEUE_CONSUMER_PAUSE_ACQUIRING_PREFIX}${normalized}`;
+}
+
 export function releasingQueueConsumerPauseOwner(owner: string): string {
   return `${QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX}${owner}`;
 }
 
-export type QueueConsumerPauseOwnerState = 'NONE' | 'DEPLOYMENT' | 'OPERATOR' | 'RELEASING';
+export type QueueConsumerPauseOwnerState =
+  | 'NONE'
+  | 'DEPLOYMENT'
+  | 'ACQUIRING'
+  | 'OPERATOR'
+  | 'RELEASING';
 
 export function queueConsumerPauseOwnerState(owner: string | null): QueueConsumerPauseOwnerState {
   if (!owner) return 'NONE';
   if (owner === QUEUE_CONSUMER_PAUSE_OPERATOR) return 'OPERATOR';
   if (owner.startsWith(QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX)) return 'RELEASING';
+  if (owner.startsWith(QUEUE_CONSUMER_PAUSE_ACQUIRING_PREFIX)) return 'ACQUIRING';
   if (owner.startsWith('deployment:')) return 'DEPLOYMENT';
   return 'NONE';
 }
@@ -331,7 +368,7 @@ export async function readQueueConsumerPauseOwner(queueName: string): Promise<st
   return redis.get(queueConsumerPauseOwnerKey(queueName));
 }
 
-export async function claimQueueConsumerPauseOwner(
+export async function claimQueueConsumerPauseAcquisition(
   queueName: string,
   owner: string,
 ): Promise<boolean> {
@@ -339,11 +376,48 @@ export async function claimQueueConsumerPauseOwner(
   return (
     Number(
       await redis.eval(
-        CLAIM_QUEUE_CONSUMER_PAUSE_OWNER_LUA,
+        CLAIM_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA,
         1,
         queueConsumerPauseOwnerKey(queueName),
         owner,
+        acquiringQueueConsumerPauseOwner(owner),
         String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+export async function completeQueueConsumerPauseAcquisition(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        COMPLETE_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        acquiringQueueConsumerPauseOwner(owner),
+        owner,
+        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+export async function abortQueueConsumerPauseAcquisition(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        ABORT_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        acquiringQueueConsumerPauseOwner(owner),
       ),
     ) === 1
   );
@@ -397,6 +471,7 @@ export async function beginQueueConsumerPauseRelease(
         1,
         queueConsumerPauseOwnerKey(queueName),
         owner,
+        acquiringQueueConsumerPauseOwner(owner),
         releasingQueueConsumerPauseOwner(owner),
         String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
       ),

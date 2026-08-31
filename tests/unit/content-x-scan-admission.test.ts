@@ -72,7 +72,8 @@ owner_dir=$(mktemp -d)
 FAIL_OPEN=false
 CONCURRENT_PAUSE_QUEUE=''
 REASSERT_AFTER_PAUSE_QUEUE=''
-export event_file pause_dir owner_dir FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE
+FAIL_PAUSE_AFTER_MARKER_QUEUE=''
+export event_file pause_dir owner_dir FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE FAIL_PAUSE_AFTER_MARKER_QUEUE
 trap 'rm -f "$event_file"; rm -rf "$pause_dir" "$owner_dir"' EXIT
 source scripts/deploy-state-machine.sh
 compose() {
@@ -88,13 +89,19 @@ compose() {
     [[ -e "$pause_file" ]] && paused=true
     printf 'STATUS:%s\n' "$queue_name" >>"$event_file"
     local owned=false
-    [[ "$owner" = deployment ]] && owned=true
+    [[ "$owner" = deployment || "$owner" = acquiring ]] && owned=true
     printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":%s,"owner":"%s","owned":%s,"released":false}\n' "$queue_name" "$paused" "$owner" "$owned"
     return 0
   fi
   if [[ "$args" == *"--consumer-mode PAUSE"* ]]; then
     local previous_paused=false
     [[ -e "$pause_file" ]] && previous_paused=true
+    if [[ "$queue_name" = "$FAIL_PAUSE_AFTER_MARKER_QUEUE" && "$previous_paused" = false ]]; then
+      touch "$pause_file"
+      printf '%s\n' acquiring >"$owner_file"
+      printf 'PAUSE-FAILED-AFTER-MARKER:%s\n' "$queue_name" >>"$event_file"
+      return 1
+    fi
     if [[ "$queue_name" = "$CONCURRENT_PAUSE_QUEUE" && "$previous_paused" = false ]]; then
       touch "$pause_file"
       printf '%s\n' operator >"$owner_file"
@@ -289,6 +296,21 @@ restore_content_deploy_controls
     expect(stdout).not.toContain('RESUME:content-http-acquisition');
   });
 
+  test('reconciles a pause marker when the control probe fails after BullMQ pause', () => {
+    const result = runConsumerControlShell(String.raw`
+FAIL_PAUSE_AFTER_MARKER_QUEUE=content-x-scan
+if pause_content_worker_consumers_for_deploy; then exit 1; fi
+restore_content_deploy_controls
+[[ ! -e "$pause_dir/content-x-scan" ]]
+[[ "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" != *content-x-scan* ]]
+`);
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout?.toString() ?? '';
+    expect(stdout).toContain('PAUSE-FAILED-AFTER-MARKER:content-x-scan');
+    expect(stdout).toContain('reconciled content-x-scan consumer pause');
+    expect(stdout).toContain('RESUME:content-x-scan');
+  });
+
   test('keeps deployment-owned consumers paused when admission restoration fails', () => {
     const result = runConsumerControlShell(String.raw`
 pause_content_worker_consumers_for_deploy
@@ -325,6 +347,79 @@ if restore_content_deploy_controls; then exit 1; fi
     expect(stdout).toContain('result=124');
     expect(stdout).toContain('queue probe timed out after 1s');
     expect(elapsedMs).toBeLessThan(5_000);
+  });
+
+  test('kills a TERM-ignoring descendant after the probe leader exits', () => {
+    const startedAt = Date.now();
+    const script = String.raw`
+set -euo pipefail
+probe_child_pid_file=$(mktemp)
+trap 'rm -f "$probe_child_pid_file"' EXIT
+source scripts/deploy-state-machine.sh
+compose() {
+  (trap ':' TERM; while :; do sleep 1; done) &
+  child_pid=$!
+  printf '%s\n' "$child_pid" >"$probe_child_pid_file"
+  trap 'exit 0' TERM
+  wait "$child_pid"
+}
+output_file=$(mktemp)
+set +e
+run_scoped_queue_quiescence_probe "$output_file" 1
+result=$?
+set -e
+child_pid=$(<"$probe_child_pid_file")
+if kill -0 "$child_pid" 2>/dev/null; then
+  echo child-alive
+  kill -KILL "$child_pid" 2>/dev/null || true
+else
+  echo child-dead
+fi
+printf 'result=%s\n' "$result"
+cat "$output_file"
+rm -f "$output_file"
+`;
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: process.env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const elapsedMs = Date.now() - startedAt;
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout?.toString() ?? '';
+    expect(stdout).toContain('result=124');
+    expect(stdout).toContain('child-dead');
+    expect(elapsedMs).toBeLessThan(7_000);
+  });
+
+  test('bounds content-x-scan admission control calls', () => {
+    const startedAt = Date.now();
+    const script = String.raw`
+set -euo pipefail
+source scripts/deploy-state-machine.sh
+compose() {
+  trap ':' TERM
+  sleep 30
+}
+set +e
+set_content_x_scan_admission DRAIN_ONLY
+result=$?
+set -e
+printf 'result=%s\n' "$result"
+`;
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: {
+        ...process.env,
+        DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS: '1',
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const elapsedMs = Date.now() - startedAt;
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('result=1');
+    expect(result.stderr?.toString() ?? '').toContain('admission probe timed out after 1s');
+    expect(elapsedMs).toBeLessThan(7_000);
   });
 
   test('keeps a successful scoped probe successful', () => {

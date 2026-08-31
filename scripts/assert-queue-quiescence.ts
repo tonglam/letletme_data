@@ -13,8 +13,11 @@ import {
 import { allQueueNames, contentQueueNames, contentXScanQueueName } from '../src/queues/names';
 import {
   beginQueueConsumerPauseRelease,
-  claimQueueConsumerPauseOwner,
+  abortQueueConsumerPauseAcquisition,
+  acquiringQueueConsumerPauseOwner,
+  claimQueueConsumerPauseAcquisition,
   compareAndSetQueueAdmission,
+  completeQueueConsumerPauseAcquisition,
   completeQueueConsumerPauseRelease,
   deploymentQueueConsumerPauseOwner,
   markQueueConsumerOperatorPaused,
@@ -245,6 +248,7 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
   const callerOwner = ownerToken
     ? deploymentQueueConsumerPauseOwner(ownerToken)
     : QUEUE_CONSUMER_PAUSE_OPERATOR;
+  const acquiringOwner = ownerToken ? acquiringQueueConsumerPauseOwner(callerOwner) : null;
 
   const resultSummary = (input: {
     mode: ContentConsumerMode;
@@ -270,9 +274,9 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
     let owner = await readQueueConsumerPauseOwner(args.queueName);
 
     if (args.mode === 'STATUS') {
-      let owned = owner === callerOwner;
-      if (ownerToken && owned && previousPaused) {
-        owned = await touchQueueConsumerPauseOwner(args.queueName, callerOwner);
+      let owned = owner === callerOwner || owner === acquiringOwner;
+      if (ownerToken && owned && previousPaused && owner) {
+        owned = await touchQueueConsumerPauseOwner(args.queueName, owner);
         if (!owned) owner = await readQueueConsumerPauseOwner(args.queueName);
       }
       return resultSummary({
@@ -288,7 +292,7 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
       if (owner?.startsWith('releasing:')) {
         throw new Error(`Content consumer pause is being released: ${args.queueName}`);
       }
-      if (ownerToken && owner && owner !== callerOwner) {
+      if (ownerToken && owner && owner !== callerOwner && owner !== acquiringOwner) {
         return resultSummary({
           mode: args.mode,
           previousPaused,
@@ -298,20 +302,75 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
         });
       }
 
-      if (!previousPaused) await queue.pause();
-      const paused = await queue.isPaused();
+      if (ownerToken && !previousPaused && owner !== callerOwner) {
+        if (!(await claimQueueConsumerPauseAcquisition(args.queueName, callerOwner))) {
+          owner = await readQueueConsumerPauseOwner(args.queueName);
+          return resultSummary({
+            mode: args.mode,
+            previousPaused,
+            paused: await queue.isPaused(),
+            owner,
+            owned: false,
+          });
+        }
+        owner = acquiringOwner;
+      }
+
+      let paused: boolean;
+      try {
+        if (!previousPaused) await queue.pause();
+        paused = await queue.isPaused();
+      } catch (error) {
+        if (ownerToken && owner === acquiringOwner) {
+          try {
+            // Only roll back an interrupted reservation after confirming that
+            // BullMQ is still open.  If Redis cannot answer, keep the marker
+            // so an operator can safely reconcile the possibly-paused queue.
+            if (!(await queue.isPaused())) {
+              await abortQueueConsumerPauseAcquisition(args.queueName, callerOwner);
+            }
+          } catch {
+            // Preserve the acquisition marker when the queue state is unknown.
+          }
+        }
+        throw error;
+      }
       if (!paused) {
+        if (ownerToken && owner === acquiringOwner) {
+          try {
+            if (await abortQueueConsumerPauseAcquisition(args.queueName, callerOwner)) {
+              owner = await readQueueConsumerPauseOwner(args.queueName);
+            }
+          } catch {
+            // Preserve the marker when Redis cannot complete the rollback.
+          }
+        }
         throw new Error(
           `Content consumer did not reach requested mode: ${args.queueName}=${args.mode}`,
         );
       }
 
-      const owned = ownerToken
-        ? owner === callerOwner || !previousPaused
-          ? await claimQueueConsumerPauseOwner(args.queueName, callerOwner)
-          : false
-        : await markQueueConsumerOperatorPaused(args.queueName);
-      owner = await readQueueConsumerPauseOwner(args.queueName);
+      let owned = false;
+      if (ownerToken) {
+        owned =
+          owner === acquiringOwner
+            ? await completeQueueConsumerPauseAcquisition(args.queueName, callerOwner)
+            : owner === callerOwner
+              ? await touchQueueConsumerPauseOwner(args.queueName, callerOwner)
+              : false;
+        owner = await readQueueConsumerPauseOwner(args.queueName);
+        if (!owned && !owner) {
+          // A lost Redis marker after BullMQ confirmed the pause is still
+          // recoverable as an explicit operator-owned pause rather than an
+          // unowned global stop.  A concurrent operator/release marker wins
+          // inside the same Lua CAS.
+          await markQueueConsumerOperatorPaused(args.queueName);
+          owner = await readQueueConsumerPauseOwner(args.queueName);
+        }
+      } else {
+        owned = await markQueueConsumerOperatorPaused(args.queueName);
+        owner = await readQueueConsumerPauseOwner(args.queueName);
+      }
       return resultSummary({
         mode: args.mode,
         previousPaused,
@@ -322,7 +381,8 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
     }
 
     const releasingOwner = releasingQueueConsumerPauseOwner(callerOwner);
-    const canRelease = owner === callerOwner || owner === releasingOwner;
+    const canRelease =
+      owner === callerOwner || owner === acquiringOwner || owner === releasingOwner;
     if (ownerToken && !canRelease) {
       return resultSummary({
         mode: args.mode,

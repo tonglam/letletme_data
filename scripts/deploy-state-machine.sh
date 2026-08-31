@@ -18,6 +18,7 @@ DEPLOY_CONTENT_WORKER_PAUSED_QUEUES=${DEPLOY_CONTENT_WORKER_PAUSED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES=${DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
 DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS:-10}
+DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS:-10}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -85,18 +86,21 @@ wait_for_port_3000_free() {
 
 set_content_x_scan_admission() {
   local mode=${1:-}
-  local output
+  local output_file output
   if [[ "$mode" != DRAIN_ONLY && "$mode" != OPEN ]]; then
     echo "deploy preflight: invalid content-x-scan admission mode=$mode" >&2
     return 1
   fi
-  if ! output=$(
-    APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
-      bun scripts/assert-queue-quiescence.ts --admission-mode "$mode" 2>&1
-  ); then
-    printf '%s\n' "$output" >&2
+  output_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-admission-control.XXXXXX")
+  if ! run_bounded_deploy_probe \
+    "$output_file" "$DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS" \
+    admission '' "$mode"; then
+    cat "$output_file" >&2 || true
+    rm -f "$output_file"
     return 1
   fi
+  output=$(cat "$output_file")
+  rm -f "$output_file"
   printf '%s\n' "$output"
 }
 
@@ -200,6 +204,21 @@ append_content_worker_owned_queue() {
   fi
 }
 
+reconcile_failed_content_worker_pause() {
+  local queue_name=${1:-}
+  local status_output
+  if ! status_output=$(set_content_worker_consumer_mode STATUS "$queue_name"); then
+    return 1
+  fi
+  if printf '%s\n' "$status_output" | grep -F '"owned":true' >/dev/null; then
+    append_content_worker_owned_queue "$queue_name"
+  fi
+  if printf '%s\n' "$status_output" | grep -F '"paused":true' >/dev/null; then
+    append_content_worker_paused_queue "$queue_name"
+  fi
+  return 0
+}
+
 remove_content_worker_owned_queue() {
   local queue_name=${1:-}
   local remaining=()
@@ -266,6 +285,9 @@ pause_content_worker_consumers_for_deploy() {
 
     if ! output=$(set_content_worker_consumer_mode PAUSE "$queue_name"); then
       printf '%s\n' "$output" >&2
+      if reconcile_failed_content_worker_pause "$queue_name"; then
+        echo "deploy preflight: reconciled $queue_name consumer pause after control failure"
+      fi
       return 1
     fi
     if ! printf '%s\n' "$output" | grep -F '"paused":true' >/dev/null; then
@@ -273,10 +295,12 @@ pause_content_worker_consumers_for_deploy() {
       return 1
     fi
     append_content_worker_paused_queue "$queue_name"
-    # Ownership is established only by the mutating command's own
+    # The mutating command establishes ownership from its own
     # previousPaused/changed result. If an operator paused the queue after
     # STATUS but before PAUSE, changed=false and the deployment must not resume
-    # that operator-owned pause during cleanup.
+    # that operator-owned pause during cleanup. A failed mutating command is
+    # reconciled through bounded STATUS above so a pause marker created before
+    # the failure remains recoverable by the EXIT cleanup.
     if printf '%s\n' "$output" | grep -F '"owned":true' >/dev/null; then
       append_content_worker_owned_queue "$queue_name"
     elif printf '%s\n' "$output" | grep -F '"owned":false' >/dev/null; then
@@ -380,8 +404,12 @@ run_deploy_probe_command() {
     consumer)
       APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false \
         -e "DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN=${DEPLOY_PROBE_CONSUMER_OWNER_TOKEN:-}" api \
-        bun scripts/assert-queue-quiescence.ts --consumer-mode "${DEPLOY_PROBE_CONSUMER_MODE:-STATUS}" \
+        bun scripts/assert-queue-quiescence.ts --consumer-mode "${DEPLOY_PROBE_MODE:-STATUS}" \
         --consumer-queue "${DEPLOY_PROBE_QUEUE:-}"
+      ;;
+    admission)
+      APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+        bun scripts/assert-queue-quiescence.ts --admission-mode "${DEPLOY_PROBE_MODE:-}"
       ;;
     *)
       echo "deploy preflight: invalid probe kind=${DEPLOY_PROBE_KIND:-}" >&2
@@ -395,7 +423,7 @@ run_bounded_deploy_probe() {
   local timeout_seconds=$2
   local probe_kind=${3:-queue}
   local probe_queue=${4:-}
-  local probe_consumer_mode=${5:-STATUS}
+  local probe_mode=${5:-STATUS}
   local probe_pid
   local probe_group_pid=''
   local probe_deadline
@@ -406,14 +434,19 @@ run_bounded_deploy_probe() {
   local probe_allow_paused_queues=${DEPLOY_CONTENT_WORKER_PAUSED_QUEUES// /,}
   local probe_consumer_owner_token=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
 
-  if [[ "$probe_kind" != queue && "$probe_kind" != consumer ]]; then
+  if [[ "$probe_kind" != queue && "$probe_kind" != consumer && "$probe_kind" != admission ]]; then
     echo "deploy preflight: invalid deploy probe kind=$probe_kind" >&2
     return 1
   fi
   if [[ "$probe_kind" = consumer ]] &&
-    [[ "$probe_consumer_mode" != STATUS && "$probe_consumer_mode" != PAUSE &&
-      "$probe_consumer_mode" != RESUME ]]; then
-    echo "deploy preflight: invalid deploy consumer mode=$probe_consumer_mode" >&2
+    [[ "$probe_mode" != STATUS && "$probe_mode" != PAUSE &&
+      "$probe_mode" != RESUME ]]; then
+    echo "deploy preflight: invalid deploy consumer mode=$probe_mode" >&2
+    return 1
+  fi
+  if [[ "$probe_kind" = admission ]] &&
+    [[ "$probe_mode" != DRAIN_ONLY && "$probe_mode" != OPEN ]]; then
+    echo "deploy preflight: invalid deploy admission mode=$probe_mode" >&2
     return 1
   fi
   if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
@@ -442,7 +475,7 @@ run_bounded_deploy_probe() {
       export DEPLOY_PROBE_APP_IMAGE="${APP_IMAGE:-}"
       export DEPLOY_PROBE_KIND="$probe_kind"
       export DEPLOY_PROBE_QUEUE="$probe_queue"
-      export DEPLOY_PROBE_CONSUMER_MODE="$probe_consumer_mode"
+      export DEPLOY_PROBE_MODE="$probe_mode"
       export DEPLOY_PROBE_ALLOW_PAUSED_QUEUES="$probe_allow_paused_queues"
       export DEPLOY_PROBE_CONSUMER_OWNER_TOKEN="$probe_consumer_owner_token"
       exec setsid bash -c '
@@ -468,7 +501,7 @@ run_bounded_deploy_probe() {
       trap - EXIT
       export DEPLOY_PROBE_KIND="$probe_kind"
       export DEPLOY_PROBE_QUEUE="$probe_queue"
-      export DEPLOY_PROBE_CONSUMER_MODE="$probe_consumer_mode"
+      export DEPLOY_PROBE_MODE="$probe_mode"
       export DEPLOY_PROBE_APP_IMAGE="${APP_IMAGE:-}"
       export DEPLOY_PROBE_ALLOW_PAUSED_QUEUES="$probe_allow_paused_queues"
       export DEPLOY_PROBE_CONSUMER_OWNER_TOKEN="$probe_consumer_owner_token"
@@ -514,32 +547,59 @@ signal_scoped_queue_probe() {
   local signal=$1
   local probe_pid=$2
   local probe_group_pid=${3:-}
+  local known_descendants=${4:-}
   local child_pid
   if [[ -n "$probe_group_pid" ]]; then
     kill "-$signal" -- "-$probe_group_pid" 2>/dev/null || true
     return 0
   fi
+  local live_descendants=''
+  if kill -0 "$probe_pid" 2>/dev/null; then
+    live_descendants=$(probe_process_descendants "$probe_pid")
+  fi
   while IFS= read -r child_pid; do
     [[ -n "$child_pid" ]] || continue
     kill "-$signal" "$child_pid" 2>/dev/null || true
-  done < <(probe_process_descendants "$probe_pid")
+  done < <(
+    printf '%s\n' "$live_descendants"
+    printf '%s\n' "$known_descendants"
+  )
   kill "-$signal" "$probe_pid" 2>/dev/null || true
+}
+
+scoped_queue_probe_is_alive() {
+  local probe_pid=$1
+  local probe_group_pid=${2:-}
+  local known_descendants=${3:-}
+  local child_pid
+  if [[ -n "$probe_group_pid" ]] && kill -0 -- "-$probe_group_pid" 2>/dev/null; then
+    return 0
+  fi
+  if kill -0 "$probe_pid" 2>/dev/null; then return 0; fi
+  while IFS= read -r child_pid; do
+    [[ -n "$child_pid" ]] || continue
+    if kill -0 "$child_pid" 2>/dev/null; then return 0; fi
+  done <<<"$known_descendants"
+  return 1
 }
 
 terminate_scoped_queue_probe() {
   local probe_pid=$1
   local probe_group_pid=${2:-}
   local grace_seconds=${3:-2}
+  local known_descendants
   local grace_deadline
-  signal_scoped_queue_probe TERM "$probe_pid" "$probe_group_pid"
+  # Capture the tree before TERM.  A shell leader can exit immediately while
+  # a Docker/Compose child ignores TERM and gets reparented, so walking only
+  # the live root after that exit cannot find the surviving child.
+  known_descendants=$(probe_process_descendants "$probe_pid")
+  signal_scoped_queue_probe TERM "$probe_pid" "$probe_group_pid" "$known_descendants"
   grace_deadline=$(( $(date +%s) + grace_seconds ))
-  while kill -0 "$probe_pid" 2>/dev/null; do
+  while scoped_queue_probe_is_alive "$probe_pid" "$probe_group_pid" "$known_descendants"; do
     if (( $(date +%s) >= grace_deadline )); then
-      signal_scoped_queue_probe KILL "$probe_pid" "$probe_group_pid"
-      # The root process was just SIGKILLed (or was already gone), so this
-      # reap cannot wait on a TERM-ignoring descendant. Descendants in a
-      # dedicated group were killed together; the fallback killed them by
-      # walking the process tree above.
+      # Always send the final signal to the saved descendants, even when the
+      # root was already reaped or no longer owns them in the process tree.
+      signal_scoped_queue_probe KILL "$probe_pid" "$probe_group_pid" "$known_descendants"
       wait "$probe_pid" 2>/dev/null || true
       return 0
     fi
