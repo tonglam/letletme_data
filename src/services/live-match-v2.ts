@@ -317,6 +317,7 @@ function buildDetailPlayer(input: {
   readonly stats: readonly MatchDetailStat[];
   readonly referenceData: LiveSnapshotReferenceData;
   readonly fixtureTeamIds: ReadonlySet<number>;
+  readonly requireEventPinnedIdentity?: boolean;
 }): MatchDetailPlayer | null {
   const stats = [...input.stats].sort(statSort);
   // FPL includes zero-valued explain placeholders for players whose event
@@ -327,9 +328,15 @@ function buildDetailPlayer(input: {
   // passes every identity, price and fixture-team check below.
   if (!statsHaveVisibleValue(stats)) return null;
 
-  const player =
-    input.referenceData.playerByFixtureAndId?.get(`${input.fixtureId}:${input.elementId}`) ??
-    input.referenceData.playerById?.get(input.elementId);
+  const eventPinnedPlayer = input.referenceData.playerByFixtureAndId?.get(
+    `${input.fixtureId}:${input.elementId}`,
+  );
+  if (input.requireEventPinnedIdentity && !eventPinnedPlayer) {
+    throw new Error(
+      `Live Match detail is missing event-time player identity for fixture ${input.fixtureId} element ${input.elementId}`,
+    );
+  }
+  const player = eventPinnedPlayer ?? input.referenceData.playerById?.get(input.elementId);
   if (!player) {
     throw new Error(`Live Match detail is missing player identity for element ${input.elementId}`);
   }
@@ -383,6 +390,8 @@ export function prepareLiveMatchDetail(input: {
   readonly deskFixtures: readonly MatchDeskFixture[];
   readonly referenceData: LiveSnapshotReferenceData;
   readonly publishedLiveElementIds?: readonly number[];
+  /** Final detail must never fall back to the current roster for a visible row. */
+  readonly requireEventPinnedIdentity?: boolean;
 }): PreparedLiveMatchDetail {
   const {
     eventId,
@@ -448,6 +457,7 @@ export function prepareLiveMatchDetail(input: {
         stats,
         referenceData,
         fixtureTeamIds: fixtureTeamIds.get(fixture.fixtureId) ?? new Set(),
+        requireEventPinnedIdentity: input.requireEventPinnedIdentity,
       });
       if (player) playersByFixture.get(fixture.fixtureId)?.set(player.id, player);
     }
@@ -467,6 +477,7 @@ export function prepareLiveMatchDetail(input: {
       stats: [{ identifier: 'bps', value: bpsValue, points: 0, pointsModification: null }],
       referenceData,
       fixtureTeamIds: fixtureTeamIds.get(fixtureId) ?? new Set(),
+      requireEventPinnedIdentity: input.requireEventPinnedIdentity,
     });
     if (player) bucket.set(player.id, player);
   }

@@ -507,6 +507,7 @@ export async function syncLiveMatchesV2FromObservation(
           preparedDetail = prepareLiveMatchDetail({
             ...detailInput,
             referenceData: detailReferenceData,
+            requireEventPinnedIdentity: true,
           });
         }
       } else {
