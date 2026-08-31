@@ -314,6 +314,12 @@ deploy() {
     exit 1
   fi
   finish_stage
+  start_stage stagingRepair
+  if ! retire_expired_core_staging_publications; then
+    log_error "Exact staging publication repair failed; services were not stopped."
+    exit 1
+  fi
+  finish_stage
   start_stage quiescence
   log_info "Validating migration plan before stopping services"
   if ! run_migration_plan; then
