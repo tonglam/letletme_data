@@ -1007,6 +1007,9 @@ describe('standalone scheduler registry', () => {
         periodKey: `live-final-catchup-2-${checkedAt.getTime()}`,
         evidence: expect.objectContaining({
           finalization: 'missing-v2-checkpoint',
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: checkedAt.getTime(),
+          resultScheduleAnchorMs: checkedAt.getTime(),
           finalizeEvent: true,
         }),
       }),

@@ -534,6 +534,12 @@ export function resolveLiveFinalizationCatchupPlans(
     .filter((event) => targetEventIds.has(event.id))
     .map((event) => {
       const dueAt = event.dataCheckedAt ?? event.updatedAt ?? event.deadlineTime ?? context.now;
+      const resultAuthorityAtMs = (
+        event.updatedAt ??
+        event.dataCheckedAt ??
+        event.deadlineTime ??
+        dueAt
+      ).getTime();
       return {
         scopeKey: `${context.season.seasonCode}:event:${event.id}`,
         periodKey: `live-final-catchup-${event.id}-${dueAt.getTime()}`,
@@ -542,6 +548,9 @@ export function resolveLiveFinalizationCatchupPlans(
         source: 'catchup' as const,
         evidence: {
           finalization: 'missing-v2-checkpoint',
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs,
+          resultScheduleAnchorMs: dueAt.getTime(),
           finalizeEvent: true,
           dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
         },
