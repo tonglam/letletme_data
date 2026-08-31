@@ -542,6 +542,14 @@ export function resolveLiveFinalizationCatchupPlans(
         evidence: {
           finalization: 'missing-v2-checkpoint',
           finalizeEvent: true,
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: (
+            event.updatedAt ??
+            event.dataCheckedAt ??
+            event.deadlineTime ??
+            dueAt
+          ).getTime(),
+          resultScheduleAnchorMs: dueAt.getTime(),
           dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
         },
       };

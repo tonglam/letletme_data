@@ -1008,6 +1008,9 @@ describe('standalone scheduler registry', () => {
         evidence: expect.objectContaining({
           finalization: 'missing-v2-checkpoint',
           finalizeEvent: true,
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: checkedAt.getTime(),
+          resultScheduleAnchorMs: checkedAt.getTime(),
         }),
       }),
     ]);
