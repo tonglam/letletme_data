@@ -36,7 +36,6 @@ function fakes(row: SchedulerObligation | null = obligation()) {
     failByBullJobId: mock(async (_input: unknown) => true),
     getById: mock(async (_input: unknown) => row),
     getByBullJobId: mock(async (_input: unknown) => row),
-    markFreshnessWindowNotApplicable: mock(async (_input: Record<string, unknown>) => true),
     recordFreshness: mock(async (_input: Record<string, unknown>) => 1),
     openCase: mock(async (_input: Record<string, unknown>) => row?.obligationId ?? 'case-1'),
     now: () => completedAt,
@@ -96,7 +95,7 @@ describe('scheduler obligation lifecycle service', () => {
     expect(dependencies.recordFreshness).not.toHaveBeenCalled();
   });
 
-  test('retires the freshness window for an accepted live-picks backoff', async () => {
+  test('skips generic freshness telemetry for an accepted live-picks backoff', async () => {
     const row = obligation({
       jobName: 'live-picks-refresh',
       status: 'skipped',
@@ -116,14 +115,6 @@ describe('scheduler obligation lifecycle service', () => {
         evidence: { reason: 'live-picks-probe-backoff-accepted' },
       }),
     ).toBe(true);
-    expect(dependencies.markFreshnessWindowNotApplicable).toHaveBeenCalledWith({
-      windowId: 7,
-      reasonCode: 'LIVE_PICKS_BACKOFF_ACCEPTED',
-      evidence: {
-        jobName: 'live-picks-refresh',
-        reason: 'live-picks-probe-backoff-accepted',
-      },
-    });
     expect(dependencies.recordFreshness).not.toHaveBeenCalled();
   });
 

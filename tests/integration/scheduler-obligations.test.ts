@@ -22,6 +22,7 @@ import {
   supersedeSchedulerObligationsByDueAt,
   supersedeSchedulerObligationsByDueAtBatch,
 } from '../../src/repositories/scheduler-obligations';
+import { upsertFreshnessWindow } from '../../src/services/data-governance.service';
 
 const OBLIGATION_ID = '30000000-0000-4000-8000-000000000001';
 const NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000002';
@@ -33,6 +34,9 @@ const LATEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000007';
 const IMMUTABLE_DEADLINE_OBLIGATION_ID = '30000000-0000-4000-8000-000000000008';
 const IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000009';
 const IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000010';
+const ACCEPTED_BACKOFF_OBLIGATION_ID = '30000000-0000-4000-8000-000000000011';
+const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
+const ACCEPTED_BACKOFF_SCOPE_KEY = 'integration:event:accepted-backoff';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -48,7 +52,8 @@ async function cleanup(): Promise<void> {
       ${LATEST_OBLIGATION_ID}::uuid,
       ${IMMUTABLE_DEADLINE_OBLIGATION_ID}::uuid,
       ${IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID}::uuid,
-      ${IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID}::uuid
+      ${IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID}::uuid,
+      ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
@@ -58,8 +63,14 @@ async function cleanup(): Promise<void> {
          'integration:event:same-slot-correction',
          'integration:event:lane-race',
          'integration:event:immutable-deadline',
-         'integration:event:immutable-claim'
+         'integration:event:immutable-claim',
+         ${ACCEPTED_BACKOFF_SCOPE_KEY}
        )
+  `;
+  await sql`
+    DELETE FROM ops.freshness_slo_windows
+    WHERE slo_key = ${ACCEPTED_BACKOFF_SLO_KEY}
+      AND scope_key = ${ACCEPTED_BACKOFF_SCOPE_KEY}
   `;
 }
 
@@ -67,6 +78,86 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler obligation generation fencing', () => {
+  test('retires accepted live-picks backoff windows in the completion transaction', async () => {
+    const sql = await getDbClient();
+    const windowId = await upsertFreshnessWindow({
+      sloKey: ACCEPTED_BACKOFF_SLO_KEY,
+      contractKey: 'my-fpl',
+      scopeKey: ACCEPTED_BACKOFF_SCOPE_KEY,
+      periodKey: 'probe-1',
+      eligibleAt: new Date('2026-08-28T00:00:00.000Z'),
+      dueAt: new Date('2026-08-28T00:05:00.000Z'),
+      evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
+    });
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid,
+        'live-picks-refresh',
+        ${ACCEPTED_BACKOFF_SCOPE_KEY},
+        'probe-1',
+        '*/2 * * * *',
+        'UTC',
+        'running',
+        'schedule',
+        clock_timestamp(),
+        0,
+        1,
+        jsonb_build_object(
+          'freshnessWindowId', ${windowId}::bigint,
+          'freshnessWindowIds', jsonb_build_array(${windowId}::bigint),
+          'scanComplete', false
+        )
+      )
+    `;
+
+    expect(
+      await completeSchedulerObligation({
+        obligationId: ACCEPTED_BACKOFF_OBLIGATION_ID,
+        generation: 0,
+        status: 'skipped',
+        evidence: { reason: 'live-picks-probe-backoff-accepted' },
+      }),
+    ).toBe(true);
+
+    const [obligation, window] = await Promise.all([
+      sql<Array<{ status: string }>>`
+        SELECT status
+        FROM ops.scheduler_obligations
+        WHERE obligation_id = ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid
+      `,
+      sql<
+        Array<{
+          status: string;
+          completeness_status: string;
+          job_name: string;
+          reason: string;
+          not_applicable_reason: string;
+        }>
+      >`
+        SELECT
+          status,
+          completeness_status,
+          evidence->>'jobName' AS job_name,
+          evidence->>'reason' AS reason,
+          evidence->>'notApplicableReason' AS not_applicable_reason
+        FROM ops.freshness_slo_windows
+        WHERE window_id = ${windowId}
+      `,
+    ]);
+    expect(obligation[0]?.status).toBe('skipped');
+    expect(window[0]).toEqual({
+      status: 'NOT_APPLICABLE',
+      completeness_status: 'NOT_APPLICABLE',
+      job_name: 'live-picks-refresh',
+      reason: 'LIVE_PICKS_BACKOFF_ACCEPTED',
+      not_applicable_reason: 'LIVE_PICKS_BACKOFF_ACCEPTED',
+    });
+  });
+
   test('keeps immutable schedule time separate from mutable retry due time', async () => {
     const sql = await getDbClient();
     const scheduledDueAt = new Date('2026-08-23T00:01:00.000Z');

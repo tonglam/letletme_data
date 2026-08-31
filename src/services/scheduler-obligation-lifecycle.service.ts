@@ -9,11 +9,7 @@ import {
 } from '../repositories/scheduler-obligations';
 import { contractForSchedulerJob, queueLaneForSchedulerJob } from '../domain/data-contracts';
 import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
-import {
-  markFreshnessWindowNotApplicable,
-  openGovernanceCase,
-  recordFreshnessObservation,
-} from './data-governance.service';
+import { openGovernanceCase, recordFreshnessObservation } from './data-governance.service';
 import { logError } from '../utils/logger';
 
 type CompletionEvidence = Pick<
@@ -28,7 +24,6 @@ type SchedulerObligationLifecycleDependencies = Readonly<{
   failByBullJobId: typeof failSchedulerObligationByBullJobIdRecord;
   getById: typeof getSchedulerObligation;
   getByBullJobId: typeof getSchedulerObligationByBullJobId;
-  markFreshnessWindowNotApplicable: typeof markFreshnessWindowNotApplicable;
   recordFreshness: typeof recordFreshnessObservation;
   openCase: typeof openGovernanceCase;
   now: () => Date;
@@ -72,7 +67,6 @@ function checkpointCompleteness(evidence: Record<string, unknown>): 'COMPLETE' |
 }
 
 const LIVE_PICKS_ACCEPTED_BACKOFF_REASON = 'live-picks-probe-backoff-accepted';
-const LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON = 'LIVE_PICKS_BACKOFF_ACCEPTED';
 
 function isAcceptedLivePicksBackoff(input: CompletionEvidence): boolean {
   return (
@@ -94,37 +88,11 @@ export function createSchedulerObligationLifecycle(
     failByBullJobId: failSchedulerObligationByBullJobIdRecord,
     getById: getSchedulerObligation,
     getByBullJobId: getSchedulerObligationByBullJobId,
-    markFreshnessWindowNotApplicable,
     recordFreshness: recordFreshnessObservation,
     openCase: openGovernanceCase,
     now: () => new Date(),
     reportError: (message, error, context) => logError(message, error, context),
     ...overrides,
-  };
-
-  const retireAcceptedLivePicksBackoffWindows = async (
-    input: CompletionEvidence,
-  ): Promise<void> => {
-    if (!isAcceptedLivePicksBackoff(input)) return;
-    const evidence = input.evidence as Record<string, unknown>;
-    for (const windowId of freshnessWindowIdsFromEvidence(evidence)) {
-      try {
-        await dependencies.markFreshnessWindowNotApplicable({
-          windowId,
-          reasonCode: LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON,
-          evidence: {
-            jobName: input.jobName,
-            reason: LIVE_PICKS_ACCEPTED_BACKOFF_REASON,
-          },
-        });
-      } catch (error) {
-        dependencies.reportError(
-          'Accepted live picks backoff freshness window retirement failed',
-          error,
-          { jobName: input.jobName, windowId },
-        );
-      }
-    }
   };
 
   const recordCheckpointFreshnessEvidence = async (input: CompletionEvidence): Promise<void> => {
@@ -178,10 +146,11 @@ export function createSchedulerObligationLifecycle(
 
   const recordCompletion = async (obligation: SchedulerObligation | null): Promise<void> => {
     if (!obligation) return;
-    if (isAcceptedLivePicksBackoff(obligation)) {
-      await retireAcceptedLivePicksBackoffWindows(obligation);
-      return;
-    }
+    // The repository completes accepted backoff and retires its freshness
+    // windows in one transaction. Do not issue a second, best-effort write
+    // here: the obligation is terminal and cannot be retried if that write
+    // fails after the worker has already returned success.
+    if (isAcceptedLivePicksBackoff(obligation)) return;
     await recordCheckpointFreshnessEvidence(obligation);
   };
 
