@@ -36,6 +36,7 @@ const composeFile = readFileSync('docker-compose.yml', 'utf8');
 const mediaWorker = readFileSync('src/media-worker.ts', 'utf8');
 const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'utf8');
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
+const xCapacityFence = readFileSync('scripts/hold-briefing-x-capacity-lock.sh', 'utf8');
 const quote = String.fromCharCode(39);
 
 function expectNonInteractiveComposeRuns(source: string, label: string) {
@@ -132,22 +133,39 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
   });
 
-  test('fences the content producer before accepting scoped queue quiescence', () => {
+  test('fences the old producer and drains active work before stopping the consumer', () => {
+    expect(xCapacityFence).toContain(
+      String.raw`pg_advisory_lock(hashtext('briefing-x-capacity-v1'))`,
+    );
+    expect(xCapacityFence).toContain('deploy_x_capacity_lock_ready');
+    expect(xCapacityFence).toContain('pg_sleep(900)');
+    expect(xCapacityFence).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/);
+
+    const localAdvisoryFence = deployScript.indexOf('if ! start_content_x_scan_advisory_fence');
     const localAdmission = deployScript.indexOf('if ! drain_content_x_scan_for_deploy');
-    const localFence = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
+    const localFence = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
+    const localRelease = deployScript.indexOf('if ! stop_content_x_scan_advisory_fence; then');
+    expect(localAdvisoryFence).toBeGreaterThan(-1);
     expect(localAdmission).toBeGreaterThan(-1);
-    expect(localFence).toBeGreaterThan(localAdmission);
-    expect(localProbe).toBeGreaterThan(localFence);
+    expect(localAdvisoryFence).toBeLessThan(localAdmission);
+    expect(localAdmission).toBeLessThan(localProbe);
+    expect(localProbe).toBeLessThan(localFence);
+    expect(localFence).toBeLessThan(localRelease);
     expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true');
     expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED');
 
+    const workflowAdvisoryFence = workflow.indexOf('if ! start_content_x_scan_advisory_fence');
     const workflowAdmission = workflow.indexOf('if ! drain_content_x_scan_for_deploy');
     const workflowFence = workflow.indexOf('docker compose stop -t 45 content-worker');
     const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
+    const workflowRelease = workflow.indexOf('if ! stop_content_x_scan_advisory_fence; then');
+    expect(workflowAdvisoryFence).toBeGreaterThan(-1);
     expect(workflowAdmission).toBeGreaterThan(-1);
-    expect(workflowFence).toBeGreaterThan(workflowAdmission);
-    expect(workflowProbe).toBeGreaterThan(workflowFence);
+    expect(workflowAdvisoryFence).toBeLessThan(workflowAdmission);
+    expect(workflowAdmission).toBeLessThan(workflowProbe);
+    expect(workflowProbe).toBeLessThan(workflowFence);
+    expect(workflowFence).toBeLessThan(workflowRelease);
     expect(workflow).toContain('content_worker_fenced=true');
     expect(workflow).toContain(
       '[ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]',

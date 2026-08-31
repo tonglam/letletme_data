@@ -192,8 +192,9 @@ deploy() {
     local status=$?
     trap - EXIT
     set +e
+    local admission_restored=true
     if [[ "$status" -ne 0 && "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]]; then
-      restore_content_x_scan_admission || true
+      if ! restore_content_x_scan_admission; then admission_restored=false; fi
     fi
     if [[ "$status" -ne 0 ]]; then
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_RUNNER_UPDATED" = true ]]; then
@@ -214,6 +215,14 @@ deploy() {
         ( "$DEPLOY_SERVICES_STOPPED" = true ||
           "$DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED" = true ) ]]; then
         restore_stopped_services || true
+      fi
+    fi
+    if [[ -n "$DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER" ]]; then
+      if [[ "$status" -eq 0 || "$admission_restored" = true ||
+        "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" != true ]]; then
+        stop_content_x_scan_advisory_fence || true
+      else
+        log_error "X capacity advisory fence remains held because admission restore failed; forward recovery must release it after Redis is healthy."
       fi
     fi
     release_deploy_lock || true
@@ -327,6 +336,10 @@ deploy() {
     exit 1
   fi
   finish_stage
+  if ! start_content_x_scan_advisory_fence; then
+    log_error "Could not fence the old X producer before changing queue admission; services were not stopped."
+    exit 1
+  fi
   if ! drain_content_x_scan_for_deploy; then
     log_error "Could not place content-x-scan into drain-only mode; services were not stopped."
     exit 1
@@ -345,22 +358,15 @@ deploy() {
     log_error "Database work is not quiescent; services were not stopped."
     exit 1
   fi
-  # content-worker is the only runtime producer for content-x-scan. Fence it
-  # before accepting the scoped Redis quiescence result; a worker that passed
-  # the admission read immediately before the gate was installed must finish
-  # (or fail) before the queue is sampled.
+  # The session advisory lock acquired before the Redis gate blocks old-image
+  # X claim transactions. Keep the combined content worker alive while its
+  # already-active BullMQ jobs drain; stopping it first would orphan a slow
+  # provider job behind the worker's 30s shutdown controller.
   DEPLOY_ROLLBACK_ELIGIBLE=false
   if rollback_runtime_is_eligible \
     "$old_container" "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_REVISION" \
     "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
     DEPLOY_ROLLBACK_ELIGIBLE=true
-  fi
-  DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true
-  log_info "Fencing content-worker before accepting queue quiescence"
-  if ! compose stop -t 45 content-worker; then
-    log_error "Content worker producer did not stop cleanly; migration was not started."
-    restore_stopped_services
-    exit 1
   fi
   if ! wait_for_scoped_queue_quiescence 150 2; then
     log_error "Queue work is not quiescent; services were not stopped."
@@ -368,6 +374,18 @@ deploy() {
   fi
   if ! renew_content_x_scan_admission; then
     log_error "Content-x-scan admission could not be renewed before stopping services."
+    exit 1
+  fi
+  DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true
+  log_info "Stopping content-worker after active X queue work drained"
+  if ! compose stop -t 45 content-worker; then
+    log_error "Content worker did not stop cleanly after queue drain; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  if ! stop_content_x_scan_advisory_fence; then
+    log_error "Could not release the X producer advisory fence after stopping content-worker."
+    restore_stopped_services
     exit 1
   fi
   log_info "Migration plan and queue quiescence passed before stopping services"

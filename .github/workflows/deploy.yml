@@ -162,6 +162,7 @@ jobs:
             runner_previous_target=""
             runner_previous_release=""
             content_worker_fenced=false
+            admission_restored=true
             image_id_for_ref() {
               local image_ref=${1:-}
               [ -n "$image_ref" ] || return 0
@@ -223,9 +224,10 @@ jobs:
               original_status=$?
               trap - EXIT
               set +e
+              admission_restored=true
               if [ "$original_status" -ne 0 ] && \
                 [ "${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}" = true ]; then
-                restore_content_x_scan_admission || true
+                if ! restore_content_x_scan_admission; then admission_restored=false; fi
               fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_committed" = false ] && [ "$runner_updated" = true ]; then
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
@@ -265,6 +267,14 @@ jobs:
               fi
               if [ "$original_status" -ne 0 ] && [ "$image_pull_attempted" = true ]; then
                 cleanup_failed_image "${IMAGE_REF:-}"
+              fi
+              if [ -n "${DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER:-}" ]; then
+                if [ "$original_status" -eq 0 ] || [ "$admission_restored" = true ] || \
+                  [ "${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}" != true ]; then
+                  stop_content_x_scan_advisory_fence || true
+                else
+                  echo "X capacity advisory fence remains held because admission restore failed; forward recovery must release it after Redis is healthy." >&2
+                fi
               fi
               release_deploy_lock || true
               exit "$original_status"
@@ -431,6 +441,10 @@ jobs:
               exit 1
             fi
             finish_stage
+            if ! start_content_x_scan_advisory_fence; then
+              echo 'deploy preflight: could not fence the old X producer before changing queue admission; services were not stopped' >&2
+              exit 1
+            fi
             if ! drain_content_x_scan_for_deploy; then
               echo 'deploy preflight: could not place content-x-scan into drain-only mode; services were not stopped' >&2
               exit 1
@@ -450,22 +464,16 @@ jobs:
               echo "deploy preflight: database work is not quiescent; services were not stopped" >&2
               exit 1
             fi
-            # content-worker is the only runtime producer for content-x-scan.
-            # Fence it before accepting the scoped Redis quiescence result; a
-            # worker that passed the admission read immediately before the
-            # gate was installed must finish (or fail) before the queue is
-            # sampled.
+            # The session advisory lock acquired before the Redis gate blocks
+            # old-image X claim transactions. Keep the combined content worker
+            # alive while already-active BullMQ jobs drain; stopping it first
+            # would orphan a slow provider job behind the worker's 30s shutdown
+            # controller.
             old_runtime_rollback_eligible=false
             if rollback_runtime_is_eligible \
               "$old_container" "$old_image" "$old_revision" \
               "$old_release_sha" "$old_image_id"; then
               old_runtime_rollback_eligible=true
-            fi
-            content_worker_fenced=true
-            echo "deploy preflight: fencing content-worker before accepting queue quiescence"
-            if ! docker compose stop -t 45 content-worker; then
-              echo "deploy preflight: content-worker producer did not stop cleanly; services were not stopped" >&2
-              exit 1
             fi
             if ! wait_for_scoped_queue_quiescence 150 2; then
               echo "deploy preflight: queue work is not quiescent; services were not stopped" >&2
@@ -473,6 +481,16 @@ jobs:
             fi
             if ! renew_content_x_scan_admission; then
               echo "deploy preflight: content-x-scan admission could not be renewed before stopping services" >&2
+              exit 1
+            fi
+            content_worker_fenced=true
+            echo "deploy preflight: stopping content-worker after active X queue work drained"
+            if ! docker compose stop -t 45 content-worker; then
+              echo "deploy preflight: content-worker did not stop cleanly after queue drain; services were not stopped" >&2
+              exit 1
+            fi
+            if ! stop_content_x_scan_advisory_fence; then
+              echo "deploy preflight: could not release the X producer advisory fence after stopping content-worker" >&2
               exit 1
             fi
             echo "deploy preflight: migration plan and queue quiescence passed before stopping services"
@@ -485,7 +503,9 @@ jobs:
             # Keep the API/worker gate explicit: API bind recovery must never
             # stop a healthy worker.  (The scheduler is stopped separately.)
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
-            # content-worker was fenced before the quiescence probe.
+            # content-worker was drained and stopped before the quiescence probe
+            # below; the advisory fence has already been released because no X
+            # producer remains in the old runtime.
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler media-worker
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
