@@ -13,7 +13,10 @@ import {
   type LivePublicationRead,
   type LivePublicationState,
 } from '../cache/live-publication-v2';
-import { readLiveMatchDeskFenceV2 } from '../cache/live-match-publication-v2';
+import {
+  readLiveMatchDeskFenceV2,
+  type MatchDeskActiveFence,
+} from '../cache/live-match-publication-v2';
 import {
   loadLiveReferenceData,
   prepareCoherentLiveSnapshot,
@@ -241,11 +244,23 @@ type AcceptedMatchObservation = Readonly<{
 function publishedDeskFromMatchResult(
   result: LiveMatchObservationResult,
 ): NonNullable<Parameters<typeof syncLiveMatchesV2FromObservation>[0]['publishedDesk']> {
+  const observedActive: MatchDeskActiveFence = {
+    // Desk promotion writes this exact JSON string as the Redis active pointer.
+    // Carrying it into finalization makes the second promotion a CAS against
+    // the provisional desk, rather than a fresh read after the provider wait.
+    observed: JSON.stringify(result.desk),
+    read: {
+      publication: result.desk,
+      fixtures: result.deskFixtures,
+      servedFrom: 'REDIS_CURRENT',
+    },
+  };
   return {
     publication: result.desk,
     fixtures: result.deskFixtures,
     changed: result.deskChanged,
     checkpointScheduled: result.deskCheckpointScheduled,
+    observedActive,
   };
 }
 
@@ -419,14 +434,7 @@ export async function syncLiveSnapshotV2(
           expectedNextCheckAt: options.expectedNextCheckAt,
           observedDesk,
           publishedDesk:
-            early.result === null
-              ? undefined
-              : {
-                  publication: early.result.desk,
-                  fixtures: early.result.deskFixtures,
-                  changed: early.result.deskChanged,
-                  checkpointScheduled: early.result.deskCheckpointScheduled,
-                },
+            early.result === null ? undefined : publishedDeskFromMatchResult(early.result),
         });
         if (options.finalizeEvent && liveResult.status === 'rejected') throw liveResult.reason;
         return { result, error: null as unknown };

@@ -64,6 +64,7 @@ const desired = (
   generation: current.generation,
   requestedAt: now,
   final,
+  force: false,
 });
 
 function dependencies(input: {

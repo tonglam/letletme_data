@@ -120,6 +120,8 @@ export type MatchCheckpointDesired = Readonly<{
   generation: number;
   requestedAt: string;
   final: boolean;
+  /** Boundary publications bypass the normal ten-minute DB coalescing window. */
+  force: boolean;
 }>;
 
 type MatchScope = Readonly<{ season: string; eventId: number }>;
@@ -589,7 +591,13 @@ if currentRaw then
     if current.final == true then return {'kept', currentRaw} end
     if current.generation > candidate.generation then return {'kept', currentRaw} end
     if current.generation == candidate.generation and current.publicationId ~= candidate.publicationId then return {'kept', currentRaw} end
-    if current.generation == candidate.generation and current.publicationId == candidate.publicationId then return {'kept', currentRaw} end
+    if current.generation == candidate.generation and current.publicationId == candidate.publicationId then
+      candidate.force = current.force == true or candidate.force == true
+      if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
+      local encoded = cjson.encode(candidate)
+      redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
+      return {'set', encoded}
+    end
     if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
   end
 end
@@ -1892,7 +1900,8 @@ function desiredFromRaw(
     generation === null ||
     generation <= 0 ||
     !validIso(value.requestedAt) ||
-    typeof value.final !== 'boolean'
+    typeof value.final !== 'boolean' ||
+    typeof value.force !== 'boolean'
   )
     return null;
   return value as unknown as MatchCheckpointDesired;
@@ -1903,6 +1912,7 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
   readonly publication: MatchDeskPublication | MatchDetailPublication;
   readonly requestedAt?: Date | string;
   readonly finalized?: boolean;
+  readonly force?: boolean;
   readonly redis?: Redis;
 }): Promise<MatchCheckpointDesired> {
   const scope = { season: input.publication.season, eventId: input.publication.eventId } as const;
@@ -1921,6 +1931,7 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
       (input.kind === 'desk' &&
         'state' in input.publication &&
         input.publication.state === 'FINALIZED'),
+    force: input.force === true,
   };
   const [status, raw] = promotionResult(
     await redis.eval(

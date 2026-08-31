@@ -175,7 +175,7 @@ export async function enqueueRemainingLiveMatchCheckpoint(
   });
   if (!desired) return null;
   let delayMs = 0;
-  if (!desired.final) {
+  if (!desired.final && !desired.force) {
     const lastAt = await readLiveMatchCheckpointLastAtV2({
       season: season.seasonCode,
       eventId,

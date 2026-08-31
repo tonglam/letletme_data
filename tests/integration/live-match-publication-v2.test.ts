@@ -136,6 +136,31 @@ describe('Live Matches V2 Redis publications', () => {
     );
   });
 
+  test('persists forced checkpoint urgency for a boundary publication', async () => {
+    const publication = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const forced = await setLiveMatchCheckpointDesiredV2({
+      kind: 'desk',
+      publication: publication.publication,
+      force: true,
+      redis,
+    });
+    expect(forced.force).toBe(true);
+
+    const kept = await setLiveMatchCheckpointDesiredV2({
+      kind: 'desk',
+      publication: publication.publication,
+      force: false,
+      redis,
+    });
+    expect(kept.force).toBe(true);
+  });
+
   test('rejects an oversized desk before it can replace current', async () => {
     const current = await publishLiveMatchDeskV2({
       ...scope,

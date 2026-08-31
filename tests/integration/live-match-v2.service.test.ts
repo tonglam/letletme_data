@@ -200,6 +200,68 @@ describe('Live Matches V2 observation publication', () => {
     ).toMatchObject({ homeScore: 2 });
   });
 
+  test('does not finalize a provisional desk after a newer desk wins', async () => {
+    const provisional = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [fixture(30)],
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const observedActive = {
+      observed: JSON.stringify(provisional.desk),
+      read: {
+        publication: provisional.desk,
+        fixtures: provisional.deskFixtures,
+        servedFrom: 'REDIS_CURRENT' as const,
+      },
+    };
+
+    await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [{ ...fixture(30), team_h_score: 2 }],
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:00:30.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+
+    await expect(
+      syncLiveMatchesV2FromObservation({
+        season,
+        eventId,
+        rawFixtures: [fixture(30)],
+        rawEventLive: { elements: eventLive() },
+        referenceData: referenceData(),
+        expectedFixtureIds: [401],
+        finalizeEvent: true,
+        lifecycleState: 'FINALIZED',
+        observedAt: '2026-08-29T10:01:00.000Z',
+        publishedDesk: {
+          publication: provisional.desk,
+          fixtures: provisional.deskFixtures,
+          changed: provisional.deskChanged,
+          checkpointScheduled: provisional.deskCheckpointScheduled,
+          observedActive,
+        },
+        redis,
+        enqueueCheckpoint,
+      }),
+    ).rejects.toMatchObject({ code: 'LIVE_MATCH_PROMOTE_CHANGED' });
+
+    expect(
+      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.publication.state,
+    ).toBe('LIVE_ACTIVE');
+    expect(
+      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
+    ).toMatchObject({ homeScore: 2 });
+  });
+
   test('reuses the fixture-phase desk without a second touch or checkpoint decision', async () => {
     const checkpointKinds: Array<'desk' | 'detail'> = [];
     const recordCheckpoint = async (
@@ -232,6 +294,14 @@ describe('Live Matches V2 observation publication', () => {
         fixtures: early.deskFixtures,
         changed: early.deskChanged,
         checkpointScheduled: early.deskCheckpointScheduled,
+        observedActive: {
+          observed: JSON.stringify(early.desk),
+          read: {
+            publication: early.desk,
+            fixtures: early.deskFixtures,
+            servedFrom: 'REDIS_CURRENT',
+          },
+        },
       },
       redis,
       enqueueCheckpoint: recordCheckpoint,

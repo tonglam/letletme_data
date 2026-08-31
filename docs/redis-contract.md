@@ -88,7 +88,9 @@ generation, client content revision, PostgreSQL row, or checkpoint watermark.
 The `checkpoint:*` marker is latest-wins desired state; the `*:last` marker is
 the Redis checkpoint watermark used to coalesce non-boundary PostgreSQL writes
 to at most one per ten minutes. Final and lifecycle/identity boundary
-publications bypass that window and are fenced against supersession.
+publications set `force: true`, bypass that window, and are fenced against
+supersession. A worker must honor that durable marker even when the previous
+checkpoint is recent.
 
 Protected diagnosis and recovery use `POST /ops/live-matches-v2/repair` with
 one explicit season/event. An `inspect` request validates active, previous,

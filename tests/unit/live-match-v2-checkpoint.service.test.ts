@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-import { isExactFinalLiveMatchCheckpointPair } from '../../src/services/live-match-v2-checkpoint.service';
+import {
+  isExactFinalLiveMatchCheckpointPair,
+  liveMatchCheckpointDue,
+} from '../../src/services/live-match-v2-checkpoint.service';
 
 const revision = 'a'.repeat(64);
 const exact = {
@@ -39,5 +42,13 @@ describe('Live Matches V2 final checkpoint fence', () => {
     expect(isExactFinalLiveMatchCheckpointPair({ ...exact, detailState: 'PROVISIONAL' })).toBe(
       false,
     );
+  });
+
+  test('does not coalesce a forced lifecycle or identity boundary', () => {
+    const now = Date.parse('2026-08-29T10:05:00.000Z');
+    const recent = '2026-08-29T10:00:00.000Z';
+    expect(liveMatchCheckpointDue({ final: false, force: true }, recent, now)).toBe(true);
+    expect(liveMatchCheckpointDue({ final: false, force: false }, recent, now)).toBe(false);
+    expect(liveMatchCheckpointDue({ final: false, force: false }, null, now)).toBe(true);
   });
 });

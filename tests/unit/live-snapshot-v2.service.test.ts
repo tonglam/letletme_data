@@ -199,6 +199,14 @@ describe('Live Points and Live Matches shared observation', () => {
       fixtures: [],
       changed: true,
       checkpointScheduled: true,
+      observedActive: {
+        observed: JSON.stringify(desk),
+        read: {
+          publication: desk,
+          fixtures: [],
+          servedFrom: 'REDIS_CURRENT',
+        },
+      },
     });
   });
 

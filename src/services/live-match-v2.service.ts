@@ -76,6 +76,8 @@ export interface LiveMatchObservation {
     fixtures: readonly MatchDeskFixture[];
     changed: boolean;
     checkpointScheduled: boolean;
+    /** Exact active pointer after the fixture-phase publication. */
+    observedActive: MatchDeskActiveFence;
   }>;
   readonly redis?: Parameters<typeof readLiveMatchDeskV2>[0]['redis'];
   /** Test/repair seam; production uses the coalescing checkpoint queue. */
@@ -264,12 +266,14 @@ async function scheduleCheckpoint(
       kind,
       publication,
       finalized,
+      force: boundary,
       redis,
     });
     const lastMs = lastCheckpointedAt === null ? Number.NaN : Date.parse(lastCheckpointedAt);
     const due =
       finalized ||
       boundary ||
+      desired.force ||
       !Number.isFinite(lastMs) ||
       Date.now() - lastMs >= CHECKPOINT_INTERVAL_MS ||
       existingDesired?.final === true;
@@ -377,7 +381,7 @@ export async function syncLiveMatchesV2FromObservation(
       expectedNextCheckAt: input.expectedNextCheckAt,
       staleAt,
       previous: currentDesk,
-      observedActive: input.observedDesk,
+      observedActive: input.publishedDesk?.observedActive ?? input.observedDesk,
       generationFloor: currentDesk?.publication.generation ?? 0,
       redis: input.redis,
     });

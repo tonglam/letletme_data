@@ -21,6 +21,7 @@ import {
   readLiveMatchCheckpointDesiredV2,
   readLiveMatchDeskV2,
   readLiveMatchDetailV2,
+  type MatchCheckpointDesired,
   type MatchDeskPublication,
   type MatchDeskRead,
   type MatchDetailPublication,
@@ -30,6 +31,25 @@ import type { MatchDeskFixture, MatchFixtureDetail } from './live-match-v2';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 
 type CheckpointClock = { checkpointed_at: Date | string };
+
+const LIVE_MATCH_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Boundary and final obligations are durable urgency, not scheduler hints.
+ * Keep this decision pure so the queue worker and its tests cannot accidentally
+ * reintroduce the normal ten-minute coalescing gate after an obligation was
+ * explicitly marked urgent.
+ */
+export function liveMatchCheckpointDue(
+  desired: Pick<MatchCheckpointDesired, 'final' | 'force'>,
+  lastCheckpointedAt: string | null,
+  nowMs = Date.now(),
+): boolean {
+  if (desired.final || desired.force) return true;
+  if (lastCheckpointedAt === null) return true;
+  const lastMs = Date.parse(lastCheckpointedAt);
+  return !Number.isFinite(lastMs) || nowMs - lastMs >= LIVE_MATCH_CHECKPOINT_INTERVAL_MS;
+}
 
 function checkpointClock(rows: readonly CheckpointClock[]): Date {
   const value = new Date(String(rows[0]?.checkpointed_at ?? ''));
@@ -140,8 +160,7 @@ export async function checkpointLiveMatchScopeV2(input: {
       season: input.season.seasonCode,
       eventId: input.eventId,
     });
-    const lastMs = lastCheckpointedAt === null ? Number.NaN : Date.parse(lastCheckpointedAt);
-    if (Number.isFinite(lastMs) && Date.now() - lastMs < 10 * 60_000) {
+    if (!liveMatchCheckpointDue(desired, lastCheckpointedAt)) {
       // The desired marker intentionally remains. A later observation will
       // enqueue the same scope after the coalescing window; no provider or DB
       // work is performed by this early queue completion.
