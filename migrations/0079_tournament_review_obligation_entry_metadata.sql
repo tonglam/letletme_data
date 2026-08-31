@@ -34,6 +34,39 @@ WHERE obligation.season_id = roster.season_id
   AND obligation.event_id = roster.event_id
   AND obligation.entry_metadata_payload IS NULL;
 
+-- A pre-migration worker may have exhausted the repair horizon for a
+-- headless scope after observing an incomplete roster.  The baseline above
+-- intentionally represents the current source, but that observation must
+-- still get one processing opportunity; otherwise the corrected scope stays
+-- headless forever because the next attempt was already cleared at the
+-- horizon.  Wake only non-processing, exhausted rows with an observed roster
+-- and leave eligible_at unchanged so this compatibility pass does not extend
+-- the repair horizon.
+UPDATE competition.tournament_review_obligations obligation
+SET state = 'PENDING',
+    next_attempt_at = clock_timestamp(),
+    execution_attempts = 0,
+    source_rechecks = 0,
+    first_attempt_at = NULL,
+    last_attempt_at = NULL,
+    ready_at = NULL,
+    degraded_at = NULL,
+    ready_revision = NULL,
+    last_error_code = NULL,
+    last_failure_fingerprint = NULL,
+    updated_at = clock_timestamp()
+WHERE obligation.entry_metadata_payload IS NOT NULL
+  AND obligation.state = 'DEGRADED'
+  AND obligation.next_attempt_at IS NULL
+  AND obligation.ready_revision IS NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM competition.tournament_review_heads head
+    WHERE head.season_id = obligation.season_id
+      AND head.tournament_id = obligation.tournament_id
+      AND head.event_id = obligation.event_id
+  );
+
 ALTER TABLE competition.tournament_review_obligations
   ADD CONSTRAINT tournament_review_obligations_entry_metadata_payload_check
   CHECK (

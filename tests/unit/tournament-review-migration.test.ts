@@ -58,6 +58,11 @@ describe('My Tournament Review V2 migration', () => {
   test('persists an entry applicability baseline for headless obligations', () => {
     expect(entryMetadataMigration).toContain('ADD COLUMN entry_metadata_payload jsonb');
     expect(entryMetadataMigration).toMatch(/'startedEvent', entry\.started_event/);
+    expect(entryMetadataMigration).toMatch(/SET state = 'PENDING'/);
+    expect(entryMetadataMigration).toContain('next_attempt_at = clock_timestamp()');
+    expect(entryMetadataMigration).toMatch(/obligation\.state = 'DEGRADED'/);
+    expect(entryMetadataMigration).toContain('obligation.next_attempt_at IS NULL');
+    expect(entryMetadataMigration).toContain('tournament_review_heads head');
     expect(entryMetadataMigration).toContain(
       'tournament_review_obligations_entry_metadata_payload_check',
     );
