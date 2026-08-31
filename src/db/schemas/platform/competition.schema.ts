@@ -2112,6 +2112,7 @@ export const tournamentReviewObligationsInCompetition = competition.table(
       .default(sql`clock_timestamp()`)
       .notNull(),
     metadataPayload: jsonb('metadata_payload'),
+    entryMetadataPayload: jsonb('entry_metadata_payload'),
   },
   (table) => [
     primaryKey({

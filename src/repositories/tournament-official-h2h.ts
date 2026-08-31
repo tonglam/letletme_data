@@ -376,15 +376,9 @@ export const tournamentOfficialH2HRepository = {
               existing.matchId !== incoming.matchId ||
               existing.playAgainstId !== incoming.playAgainstId ||
               !sameNullable(existing.sourceOrder, incoming.sourceOrder) ||
-              (existing.homeEntryId !== null &&
-                incoming.homeEntryId !== null &&
-                existing.homeEntryId !== incoming.homeEntryId) ||
-              (existing.awayEntryId !== null &&
-                incoming.awayEntryId !== null &&
-                existing.awayEntryId !== incoming.awayEntryId) ||
-              (existing.knockoutName !== null &&
-                incoming.knockoutName !== null &&
-                existing.knockoutName !== incoming.knockoutName);
+              (existing.homeEntryId !== null && existing.homeEntryId !== incoming.homeEntryId) ||
+              (existing.awayEntryId !== null && existing.awayEntryId !== incoming.awayEntryId) ||
+              (existing.knockoutName !== null && existing.knockoutName !== incoming.knockoutName);
             if (changed) {
               throw new ConflictError(
                 `Official H2H knockout match ${existing.officialMatchId} changed after import.`,

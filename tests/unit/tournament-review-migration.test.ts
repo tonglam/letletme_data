@@ -6,6 +6,10 @@ const metadataMigration = readFileSync(
   'migrations/0078_tournament_review_obligation_metadata_baseline.sql',
   'utf8',
 );
+const entryMetadataMigration = readFileSync(
+  'migrations/0079_tournament_review_obligation_entry_metadata.sql',
+  'utf8',
+);
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
@@ -49,5 +53,13 @@ describe('My Tournament Review V2 migration', () => {
     expect(metadataMigration).toContain('ADD COLUMN metadata_payload jsonb');
     expect(metadataMigration).toContain('SET metadata_payload = publication.payload #>');
     expect(metadataMigration).toContain('tournament_review_obligations_metadata_payload_check');
+  });
+
+  test('persists an entry applicability baseline for headless obligations', () => {
+    expect(entryMetadataMigration).toContain('ADD COLUMN entry_metadata_payload jsonb');
+    expect(entryMetadataMigration).toMatch(/'startedEvent', entry\.started_event/);
+    expect(entryMetadataMigration).toContain(
+      'tournament_review_obligations_entry_metadata_payload_check',
+    );
   });
 });

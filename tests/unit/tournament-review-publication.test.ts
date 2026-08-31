@@ -194,6 +194,9 @@ describe('My Tournament Review V2 format and retry policy', () => {
     );
     expect(publicationSource).toMatch(/\+ interval '1 microsecond'/);
     expect(publicationSource).toContain('metadata_payload = EXCLUDED.metadata_payload');
+    expect(publicationSource).toContain('entry_metadata_payload = COALESCE');
+    expect(publicationSource).toContain('entry_metadata_eligible_at');
+    expect(publicationSource).toMatch(/'startedEvent', entry\.started_event/);
     expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
     expect(publicationSource).toContain('state.format <> \x27KNOCKOUT\x27');
     expect(publicationSource).toContain('state.group_started_event_id');
@@ -247,6 +250,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(officialH2HSource).toContain('fetchedOfficialMatchIds');
     expect(officialH2HSource).toContain('officialMatchWasFetched');
     expect(officialH2HSource).toContain('WHEN ${officialMatchWasFetched}');
+    expect(officialH2HSource).toContain('existing.homeEntryId !== incoming.homeEntryId');
     expect(officialH2HSource).toContain(
       'THEN ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}',
     );
