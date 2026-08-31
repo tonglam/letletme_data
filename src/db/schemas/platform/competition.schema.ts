@@ -2171,6 +2171,14 @@ export const tournamentReviewObligationsInCompetition = competition.table(
       'tournament_review_obligations_fingerprint_check',
       sql`last_failure_fingerprint IS NULL OR last_failure_fingerprint ~ '^[0-9a-f]{64}$'`,
     ),
+    check(
+      'tournament_review_obligations_metadata_payload_check',
+      sql`metadata_payload IS NULL OR jsonb_typeof(metadata_payload) = 'object'`,
+    ),
+    check(
+      'tournament_review_obligations_entry_metadata_payload_check',
+      sql`entry_metadata_payload IS NULL OR jsonb_typeof(entry_metadata_payload) = 'array'`,
+    ),
   ],
 );
 
