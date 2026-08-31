@@ -161,6 +161,43 @@ describe('Live Matches V2 Redis publications', () => {
     expect(kept.force).toBe(true);
   });
 
+  test('carries boundary urgency onto a newer desired publication', async () => {
+    const older = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const newer = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV2({ ...scope, redis }),
+      redis,
+    });
+
+    const current = await setLiveMatchCheckpointDesiredV2({
+      kind: 'desk',
+      publication: newer.publication,
+      force: false,
+      redis,
+    });
+    expect(current.generation).toBe(newer.publication.generation);
+    expect(current.force).toBe(false);
+
+    const urgent = await setLiveMatchCheckpointDesiredV2({
+      kind: 'desk',
+      publication: older.publication,
+      force: true,
+      redis,
+    });
+    expect(urgent.publicationId).toBe(newer.publication.publicationId);
+    expect(urgent.generation).toBe(newer.publication.generation);
+    expect(urgent.force).toBe(true);
+  });
+
   test('rejects an oversized desk before it can replace current', async () => {
     const current = await publishLiveMatchDeskV2({
       ...scope,

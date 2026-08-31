@@ -589,7 +589,19 @@ if currentRaw then
   local ok, current = pcall(cjson.decode, currentRaw)
   if ok and type(current.generation) == 'number' then
     if current.final == true then return {'kept', currentRaw} end
-    if current.generation > candidate.generation then return {'kept', currentRaw} end
+    if current.generation > candidate.generation then
+      -- Never replace a newer publication with an older checkpoint target, but
+      -- do carry a boundary's urgency onto that newer target.  Otherwise a
+      -- lifecycle/identity boundary can be silently coalesced for ten minutes
+      -- simply because a newer score publication won the desired-pointer race.
+      if candidate.force == true and current.force ~= true then
+        current.force = true
+        local encoded = cjson.encode(current)
+        redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
+        return {'set', encoded}
+      end
+      return {'kept', currentRaw}
+    end
     if current.generation == candidate.generation and current.publicationId ~= candidate.publicationId then return {'kept', currentRaw} end
     if current.generation == candidate.generation and current.publicationId == candidate.publicationId then
       candidate.force = current.force == true or candidate.force == true
