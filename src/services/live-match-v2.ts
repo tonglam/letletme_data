@@ -317,10 +317,26 @@ function buildDetailPlayer(input: {
   readonly stats: readonly MatchDetailStat[];
   readonly referenceData: LiveSnapshotReferenceData;
   readonly fixtureTeamIds: ReadonlySet<number>;
+  readonly requireEventPinnedIdentity?: boolean;
 }): MatchDetailPlayer | null {
-  const player =
-    input.referenceData.playerByFixtureAndId?.get(`${input.fixtureId}:${input.elementId}`) ??
-    input.referenceData.playerById?.get(input.elementId);
+  const stats = [...input.stats].sort(statSort);
+  // FPL includes zero-valued explain placeholders for players whose event
+  // identity can no longer be associated with the fixture (for example a
+  // transferred player retained in the event-live response). These rows are
+  // intentionally not published, so they must not make the complete detail
+  // candidate fail its event-time identity validation. Any visible row still
+  // passes every identity, price and fixture-team check below.
+  if (!statsHaveVisibleValue(stats)) return null;
+
+  const eventPinnedPlayer = input.referenceData.playerByFixtureAndId?.get(
+    `${input.fixtureId}:${input.elementId}`,
+  );
+  if (input.requireEventPinnedIdentity && !eventPinnedPlayer) {
+    throw new Error(
+      `Live Match detail is missing event-time player identity for fixture ${input.fixtureId} element ${input.elementId}`,
+    );
+  }
+  const player = eventPinnedPlayer ?? input.referenceData.playerById?.get(input.elementId);
   if (!player) {
     throw new Error(`Live Match detail is missing player identity for element ${input.elementId}`);
   }
@@ -341,8 +357,6 @@ function buildDetailPlayer(input: {
       `Live Match detail has no event-time team identity for fixture ${input.fixtureId} element ${input.elementId}`,
     );
   }
-  const stats = [...input.stats].sort(statSort);
-  if (!statsHaveVisibleValue(stats)) return null;
   const totalPoints = stats.reduce(
     (sum, stat) => sum + stat.points + (stat.pointsModification ?? 0),
     0,
@@ -376,6 +390,8 @@ export function prepareLiveMatchDetail(input: {
   readonly deskFixtures: readonly MatchDeskFixture[];
   readonly referenceData: LiveSnapshotReferenceData;
   readonly publishedLiveElementIds?: readonly number[];
+  /** Final detail must never fall back to the current roster for a visible row. */
+  readonly requireEventPinnedIdentity?: boolean;
 }): PreparedLiveMatchDetail {
   const {
     eventId,
@@ -441,6 +457,7 @@ export function prepareLiveMatchDetail(input: {
         stats,
         referenceData,
         fixtureTeamIds: fixtureTeamIds.get(fixture.fixtureId) ?? new Set(),
+        requireEventPinnedIdentity: input.requireEventPinnedIdentity,
       });
       if (player) playersByFixture.get(fixture.fixtureId)?.set(player.id, player);
     }
@@ -460,6 +477,7 @@ export function prepareLiveMatchDetail(input: {
       stats: [{ identifier: 'bps', value: bpsValue, points: 0, pointsModification: null }],
       referenceData,
       fixtureTeamIds: fixtureTeamIds.get(fixtureId) ?? new Set(),
+      requireEventPinnedIdentity: input.requireEventPinnedIdentity,
     });
     if (player) bucket.set(player.id, player);
   }
@@ -475,6 +493,67 @@ export function prepareLiveMatchDetail(input: {
         ),
       })),
   };
+}
+
+/**
+ * Check fixture-grain provider evidence without consulting player identity.
+ * This is used only to classify a final retry when event-time identity is
+ * unavailable; it must not make the current roster an authority or publish a
+ * candidate by itself.
+ */
+export function hasLiveMatchDetailEvidence(input: {
+  readonly eventId: number;
+  readonly rawElements: readonly RawFPLEventLiveElement[];
+  readonly rawFixtures: readonly RawFPLFixture[];
+  readonly deskFixtures: readonly MatchDeskFixture[];
+  readonly finalized?: boolean;
+}): boolean {
+  const { eventId, rawElements, rawFixtures, deskFixtures } = input;
+  assertPositiveInteger(eventId, 'Live Match event ID');
+
+  const fixtureIds = new Set(deskFixtures.map((fixture) => fixture.fixtureId));
+  if (fixtureIds.size !== deskFixtures.length) {
+    throw new Error(`Live Match desk contains duplicate fixtures for event ${eventId}`);
+  }
+  for (const fixture of rawFixtures) {
+    if (fixture.event !== null && fixture.event !== eventId) {
+      throw new Error(
+        `FPL fixture ${fixture.id} belongs to event ${fixture.event}, not ${eventId}`,
+      );
+    }
+  }
+
+  const prepared = prepareEventLives(eventId, [...rawElements]);
+  if (
+    prepared.errors !== 0 ||
+    prepared.sourceCount !== rawElements.length ||
+    prepared.eventLives.length !== rawElements.length
+  ) {
+    throw new Error(`Live Match detail transformation is incomplete for event ${eventId}`);
+  }
+
+  const visibleFixtureIds = new Set<number>();
+  for (const row of prepared.eventLives) {
+    for (const fixture of row.fixtureBreakdown ?? []) {
+      if (!fixtureIds.has(fixture.fixtureId)) {
+        throw new Error(
+          `Live Match detail contains fixture ${fixture.fixtureId} outside event ${eventId}`,
+        );
+      }
+      if (statsHaveVisibleValue(fixture.stats)) visibleFixtureIds.add(fixture.fixtureId);
+    }
+  }
+  for (const [key, bpsValue] of bpsByFixtureAndPlayer(rawFixtures)) {
+    const separator = key.indexOf(':');
+    const fixtureId = Number(key.slice(0, separator));
+    if (fixtureIds.has(fixtureId) && bpsValue !== 0) visibleFixtureIds.add(fixtureId);
+  }
+
+  return deskFixtures.every((fixture) => {
+    const started =
+      fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0;
+    return !(input.finalized === true || started) || visibleFixtureIds.has(fixture.fixtureId);
+  });
 }
 
 export function hasStartedLiveMatchDetail(
