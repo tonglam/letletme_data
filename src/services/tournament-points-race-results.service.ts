@@ -54,6 +54,7 @@ async function loadTournamentEntryTotals(
     entryIds,
     startEventId,
     endEventId,
+    { finalizedOnly: true },
   );
   return new Map(
     totals.map((row) => [

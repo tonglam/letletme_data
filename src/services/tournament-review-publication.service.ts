@@ -205,6 +205,15 @@ function eventReviewPayload(
       leagueId: tournament.league_id,
       leagueType: tournament.league_type,
       totalTeamNum: tournament.total_team_num,
+      // The structural review window is part of the immutable input. Keeping
+      // it in the payload lets reconciliation detect a setup correction even
+      // when the human-facing tournament header is unchanged.
+      groupMode: tournament.group_mode,
+      groupStartedEventId: tournament.group_started_event_id,
+      groupEndedEventId: tournament.group_ended_event_id,
+      knockoutMode: tournament.knockout_mode,
+      knockoutStartedEventId: tournament.knockout_started_event_id,
+      knockoutEndedEventId: tournament.knockout_ended_event_id,
     },
     event: {
       id: event.event_id,
@@ -1976,7 +1985,13 @@ export async function reconcileTournamentReviewObligations(
                'adminEntryId', tournament.admin_entry_id,
                'leagueId', tournament.league_id,
                'leagueType', tournament.league_type,
-               'totalTeamNum', tournament.total_team_num
+               'totalTeamNum', tournament.total_team_num,
+               'groupMode', tournament.group_mode,
+               'groupStartedEventId', tournament.group_started_event_id,
+               'groupEndedEventId', tournament.group_ended_event_id,
+               'knockoutMode', tournament.knockout_mode,
+               'knockoutStartedEventId', tournament.knockout_started_event_id,
+               'knockoutEndedEventId', tournament.knockout_ended_event_id
              ) AS tournament_payload,
              CASE
                WHEN tournament.knockout_mode <> 'no_knockout'
@@ -2156,10 +2171,16 @@ export async function reconcileTournamentReviewObligations(
           UNION ALL
           SELECT battle.updated_at AS source_updated_at
           FROM competition.tournament_battle_group_results battle
+          JOIN fpl.events battle_event
+            ON battle_event.season_id = battle.season_id
+           AND battle_event.event_id = battle.event_id
           WHERE state.format = 'H2H'
             AND battle.season_id = ${season.seasonId}
             AND battle.tournament_id = state.tournament_id
             AND battle.event_id <= state.event_id
+            AND battle_event.finished = true
+            AND battle_event.data_checked = true
+            AND battle_event.data_checked_at IS NOT NULL
             AND battle.updated_at > COALESCE(state.existing_eligible_at, '-infinity'::timestamptz)
           UNION ALL
           SELECT GREATEST(
@@ -2518,75 +2539,106 @@ export async function processTournamentReviewObligations(
   const claimed = await claimTournamentReviewObligations(season, options.limit ?? 20);
   let published = 0;
   let failed = 0;
-  for (const obligation of claimed.rows) {
-    let renewalInFlight: Promise<boolean> | null = null;
-    let leaseLost = false;
-    const renew = async () => {
-      if (!renewalInFlight) {
-        renewalInFlight = renewReviewObligationLease(claimed.owner, obligation).finally(() => {
+  const obligationKey = (obligation: ClaimedReviewObligation): string =>
+    `${obligation.season_id}:${obligation.tournament_id}:${obligation.event_id}`;
+  // The claim query returns a batch, but processing is deliberately
+  // sequential. Keep one heartbeat over the complete outstanding claim set;
+  // a timer scoped to the current loop item would let later claims expire
+  // while an earlier publication is slow.
+  const active = new Map(claimed.rows.map((obligation) => [obligationKey(obligation), obligation]));
+  const leaseLost = new Set<string>();
+  let renewalInFlight: Promise<void> | null = null;
+  const renewAll = async (): Promise<void> => {
+    if (!renewalInFlight) {
+      renewalInFlight = Promise.all(
+        [...active.entries()].map(async ([key, obligation]) => {
+          try {
+            if (!(await renewReviewObligationLease(claimed.owner, obligation))) {
+              leaseLost.add(key);
+            }
+          } catch (error) {
+            leaseLost.add(key);
+            logError('Failed to renew tournament review obligation lease', error, {
+              seasonId: obligation.season_id,
+              tournamentId: obligation.tournament_id,
+              eventId: obligation.event_id,
+            });
+          }
+        }),
+      )
+        .then(() => undefined)
+        .finally(() => {
           renewalInFlight = null;
         });
-      }
-      const renewed = await renewalInFlight;
-      if (!renewed) leaseLost = true;
-      return renewed;
-    };
-    const leaseTimer = setInterval(() => {
-      void renew().catch((error) => {
-        leaseLost = true;
-        logError('Failed to renew tournament review obligation lease', error, {
+    }
+    await renewalInFlight;
+  };
+  const leaseTimer = setInterval(() => {
+    void renewAll().catch(() => undefined);
+  }, TOURNAMENT_REVIEW_LEASE_RENEW_INTERVAL_MS);
+  try {
+    await renewAll();
+    for (const obligation of claimed.rows) {
+      const key = obligationKey(obligation);
+      if (!active.has(key)) continue;
+      // Ensure the row we are about to process is still owned after any
+      // concurrent heartbeat pass. A lost claim is left for the next worker.
+      await renewAll();
+      if (leaseLost.has(key)) {
+        active.delete(key);
+        failed += 1;
+        logInfo('Tournament review obligation lease was lost before publication', {
           seasonId: obligation.season_id,
           tournamentId: obligation.tournament_id,
           eventId: obligation.event_id,
         });
-      });
-    }, TOURNAMENT_REVIEW_LEASE_RENEW_INTERVAL_MS);
-    try {
-      if (!(await renew())) {
-        failed += 1;
         continue;
       }
-      const result = await publishTournamentReviewScope(
-        season,
-        obligation.tournament_id,
-        obligation.event_id,
-      );
-      // A lost lease means another worker owns the obligation. The immutable
-      // publication is idempotent, but this worker must not claim completion.
-      if (!leaseLost) {
-        const finished = await finishReviewObligation(claimed.owner, obligation, result);
-        if (finished) {
-          published += 1;
+      try {
+        const result = await publishTournamentReviewScope(
+          season,
+          obligation.tournament_id,
+          obligation.event_id,
+        );
+        // A lost lease means another worker owns the obligation. The immutable
+        // publication is idempotent, but this worker must not claim completion.
+        if (!leaseLost.has(key)) {
+          const finished = await finishReviewObligation(claimed.owner, obligation, result);
+          if (finished) {
+            published += 1;
+          } else {
+            failed += 1;
+            logInfo('Tournament review obligation lease was lost before completion', {
+              seasonId: obligation.season_id,
+              tournamentId: obligation.tournament_id,
+              eventId: obligation.event_id,
+            });
+          }
         } else {
           failed += 1;
-          logInfo('Tournament review obligation lease was lost before completion', {
+          logInfo('Tournament review obligation lease was lost during publication', {
             seasonId: obligation.season_id,
             tournamentId: obligation.tournament_id,
             eventId: obligation.event_id,
           });
         }
-      } else {
+      } catch (error) {
         failed += 1;
-        logInfo('Tournament review obligation lease was lost during publication', {
-          seasonId: obligation.season_id,
-          tournamentId: obligation.tournament_id,
-          eventId: obligation.event_id,
-        });
+        const failedByOwner = await failReviewObligation(claimed.owner, obligation, error);
+        if (!failedByOwner) {
+          logInfo('Tournament review obligation lease was lost before failure recording', {
+            seasonId: obligation.season_id,
+            tournamentId: obligation.tournament_id,
+            eventId: obligation.event_id,
+          });
+        }
+      } finally {
+        active.delete(key);
       }
-    } catch (error) {
-      failed += 1;
-      const failedByOwner = await failReviewObligation(claimed.owner, obligation, error);
-      if (!failedByOwner) {
-        logInfo('Tournament review obligation lease was lost before failure recording', {
-          seasonId: obligation.season_id,
-          tournamentId: obligation.tournament_id,
-          eventId: obligation.event_id,
-        });
-      }
-    } finally {
-      clearInterval(leaseTimer);
-      await Promise.resolve(renewalInFlight).catch(() => undefined);
     }
+  } finally {
+    clearInterval(leaseTimer);
+    await Promise.resolve(renewalInFlight).catch(() => undefined);
   }
   return { reconciled, claimed: claimed.rows.length, published, failed };
 }

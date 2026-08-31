@@ -134,6 +134,18 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(ranks.get('80-30')).toBe(3);
   });
 
+  test('repairs historical points ranks with finalized cumulative inputs', () => {
+    const migration = readFileSync(
+      'migrations/0077_repair_tournament_points_group_ranks.sql',
+      'utf8',
+    );
+    expect(migration).toContain('event.finished = true');
+    expect(migration).toContain('event.data_checked = true');
+    expect(migration).toContain('RANK() OVER');
+    expect(migration).toContain('ORDER BY cumulative_net_points DESC, overall_rank NULLS LAST');
+    expect(migration).toContain('points.event_group_rank IS DISTINCT FROM ranked.repaired_rank');
+  });
+
   test('requires derived matchup scores to cover the entry result watermark', () => {
     const result = {
       event_net_points: 70,
