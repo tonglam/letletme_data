@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertRetireAuthorization,
+  isSupportedCoreItemSet,
   parseRetireCoreStagingArguments,
 } from '../../scripts/retire-superseded-core-staging-publication';
 
@@ -9,6 +10,42 @@ const PUBLICATION_ID = '0257fd66-864f-4637-8565-e8108317b648';
 const ACTIVE_PUBLICATION_ID = '91a5e72f-2b69-416f-a4c9-36a8627a35aa';
 
 describe('superseded core staging repair command', () => {
+  test('accepts both complete legacy and current core item sets', () => {
+    expect(
+      isSupportedCoreItemSet([
+        'events',
+        'teams',
+        'players',
+        'phases',
+        'fixtures',
+        'currentEventId',
+      ]),
+    ).toBe(true);
+    expect(
+      isSupportedCoreItemSet([
+        'events',
+        'teams',
+        'players',
+        'phases',
+        'fixtures',
+        'currentEventId',
+        'selectionRules',
+      ]),
+    ).toBe(true);
+    expect(isSupportedCoreItemSet(['events', 'teams'])).toBe(false);
+    expect(
+      isSupportedCoreItemSet([
+        'events',
+        'teams',
+        'players',
+        'phases',
+        'fixtures',
+        'currentEventId',
+        'unexpected',
+      ]),
+    ).toBe(false);
+  });
+
   test('parses one exact publication and active revision fence', () => {
     expect(
       parseRetireCoreStagingArguments([

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 import { and, eq, isNull, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 
 import {
   dataPublicationOutboxInOps,
@@ -8,18 +10,14 @@ import {
   datasetPublicationsInOps,
   syncRunsInOps,
 } from '../src/db/schemas/index.schema';
-import { databaseSingleton, getDb } from '../src/db/singleton';
 import { isDataPublicationId, parseDataPublicationManifest } from '../src/cache/data-publication';
+import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
+import * as schema from '../src/db/schemas/index.schema';
 import { canonicalJson } from '../src/utils/content-hash';
 
-const CORE_ITEM_NAMES = [
-  'events',
-  'teams',
-  'players',
-  'phases',
-  'fixtures',
-  'currentEventId',
-  'selectionRules',
+const CORE_ITEM_NAME_SETS = [
+  ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'],
+  ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId', 'selectionRules'],
 ] as const;
 
 type RepairAction = 'inspect' | 'retire';
@@ -144,6 +142,37 @@ function serializedPayloadCandidates(payload: unknown): readonly string[] {
   return [canonicalJson(payload), JSON.stringify(payload)];
 }
 
+export function isSupportedCoreItemSet(itemNames: readonly string[]): boolean {
+  const uniqueNames = [...new Set(itemNames)].sort();
+  if (uniqueNames.length !== itemNames.length) return false;
+  return CORE_ITEM_NAME_SETS.some((expectedNames) => {
+    const sortedExpectedNames = [...expectedNames].sort();
+    return (
+      sortedExpectedNames.length === uniqueNames.length &&
+      sortedExpectedNames.every((name, index) => name === uniqueNames[index])
+    );
+  });
+}
+
+type RepairDatabase = ReturnType<typeof drizzle>;
+type RepairClient = ReturnType<typeof postgres>;
+
+function createRepairDatabase(environment: NodeJS.ProcessEnv): {
+  client: RepairClient;
+  db: RepairDatabase;
+} {
+  const databaseUrl = environment.DATABASE_URL?.trim();
+  if (!databaseUrl) throw new Error('DATABASE_URL is required for core staging repair');
+  if (isTransactionPoolerConnection(databaseUrl)) {
+    throw new Error(
+      'Core staging repair requires direct PostgreSQL or a session-mode pooler; transaction poolers cannot hold its row lock',
+    );
+  }
+
+  const client = postgres(databaseUrl, { max: 1, prepare: true });
+  return { client, db: drizzle(client, { schema }) };
+}
+
 function validateCoreManifest(
   row: CoreStagingRow,
   args: RetireCoreStagingArguments,
@@ -161,13 +190,9 @@ function validateCoreManifest(
   if (row.seasonId !== args.seasonId) {
     throw new Error('target season does not match --season-id');
   }
-  const manifestItemNames = manifest.items.map((item) => item.name).sort();
-  const expectedItemNames = [...CORE_ITEM_NAMES].sort();
-  if (
-    manifestItemNames.length !== expectedItemNames.length ||
-    manifestItemNames.some((name, index) => name !== expectedItemNames[index])
-  ) {
-    throw new Error('target manifest is not the complete seven-item core publication');
+  const manifestItemNames = manifest.items.map((item) => item.name);
+  if (!isSupportedCoreItemSet(manifestItemNames)) {
+    throw new Error('target manifest is not a complete six- or seven-item core publication');
   }
   return manifest;
 }
@@ -175,6 +200,7 @@ function validateCoreManifest(
 async function validateTarget(
   args: RetireCoreStagingArguments,
   operation: 'inspect' | 'retire',
+  db: RepairDatabase,
 ): Promise<{
   target: CoreStagingRow;
   active: { publicationId: string; revision: number };
@@ -184,7 +210,6 @@ async function validateTarget(
   outboxCount: number;
   retiredAt: Date | null;
 }> {
-  const db = await getDb();
   return db.transaction(async (tx) => {
     const clockRows = await tx.execute<{ now: Date }>(sql`SELECT clock_timestamp() AS now`);
     const databaseNow = clockRows[0]?.now;
@@ -299,8 +324,10 @@ async function validateTarget(
       })
       .from(datasetPublicationItemsInOps)
       .where(eq(datasetPublicationItemsInOps.publicationId, target.publicationId));
-    if (itemRows.length !== CORE_ITEM_NAMES.length) {
-      throw new Error('target does not contain exactly seven immutable core items');
+    if (itemRows.length !== manifest.items.length) {
+      throw new Error(
+        `target does not contain exactly ${manifest.items.length} immutable core items`,
+      );
     }
     for (const itemManifest of manifest.items) {
       const item = itemRows.find((candidate) => candidate.itemName === itemManifest.name);
@@ -361,24 +388,29 @@ export async function runRetireCoreStagingPublication(
   environment: NodeJS.ProcessEnv = process.env,
 ) {
   assertRetireAuthorization(args.action, environment);
-  const result = await validateTarget(args, args.action);
-  return {
-    contractVersion: 'data-repair-v2',
-    action: args.action,
-    dataset: 'fpl:core',
-    seasonId: args.seasonId,
-    publicationId: result.target.publicationId,
-    sourceRunId: result.sourceRunId,
-    sourcePublicationId: result.sourcePublicationId,
-    targetRevision: result.target.revision,
-    expectedActivePublicationId: result.active.publicationId,
-    expectedActiveRevision: result.active.revision,
-    itemCount: result.itemCount,
-    outboxCount: result.outboxCount,
-    expiredAt: result.target.expiresAt?.toISOString() ?? null,
-    retiredAt: result.retiredAt?.toISOString() ?? null,
-    reason: args.reason,
-  };
+  const { client, db } = createRepairDatabase(environment);
+  try {
+    const result = await validateTarget(args, args.action, db);
+    return {
+      contractVersion: 'data-repair-v2',
+      action: args.action,
+      dataset: 'fpl:core',
+      seasonId: args.seasonId,
+      publicationId: result.target.publicationId,
+      sourceRunId: result.sourceRunId,
+      sourcePublicationId: result.sourcePublicationId,
+      targetRevision: result.target.revision,
+      expectedActivePublicationId: result.active.publicationId,
+      expectedActiveRevision: result.active.revision,
+      itemCount: result.itemCount,
+      outboxCount: result.outboxCount,
+      expiredAt: result.target.expiresAt?.toISOString() ?? null,
+      retiredAt: result.retiredAt?.toISOString() ?? null,
+      reason: args.reason,
+    };
+  } finally {
+    await client.end();
+  }
 }
 
 async function main(): Promise<void> {
@@ -387,9 +419,5 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  try {
-    await main();
-  } finally {
-    await databaseSingleton.disconnect();
-  }
+  await main();
 }

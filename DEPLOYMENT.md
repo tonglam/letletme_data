@@ -116,8 +116,10 @@ the `Deploy` workflow's manual inputs for the exact publication UUIDs and the ob
 publication UUID/revision fence. The workflow runs one transactionally guarded command per UUID
 before the normal quiescence check. It refuses non-expired rows, a changed active fence, incomplete
 item proofs, published rows with an outbox receipt, or any scope other than the specified season's
-global core publication. Leave all four repair inputs empty for a normal deployment; do not bypass
-the quiescence check or run ad-hoc SQL.
+global core publication. The local `scripts/deploy.sh deploy` helper uses the same four environment
+variables and the same guarded state-machine path. Leave all four repair inputs/environment values
+empty for a normal deployment; do not invoke the Bun repair file directly, bypass the quiescence
+check, or run ad-hoc SQL.
 
 `/health/live` proves process liveness. `/health/ready` is capability readiness for the hot path: it
 requires cache Redis and exactly one current `fpl.seasons` row, while PostgreSQL, queue Redis, or

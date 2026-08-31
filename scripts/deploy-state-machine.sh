@@ -319,6 +319,60 @@ run_migration_plan() {
   compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
 }
 
+retire_expired_core_staging_publications() {
+  local repair_publication_ids=${RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS:-}
+  local repair_season_id=${RETIRE_EXPIRED_CORE_STAGING_SEASON_ID:-}
+  local repair_active_publication_id=${RETIRE_EXPIRED_CORE_STAGING_ACTIVE_PUBLICATION_ID:-}
+  local repair_active_revision=${RETIRE_EXPIRED_CORE_STAGING_ACTIVE_REVISION:-}
+  if [[ -z "$repair_publication_ids" ]]; then
+    if [[ -n "$repair_season_id" || -n "$repair_active_publication_id" || -n "$repair_active_revision" ]]; then
+      echo 'deploy repair: all repair inputs must be empty when no publication UUIDs are supplied' >&2
+      return 1
+    fi
+    echo 'deploy repair: no exact staging publication repair requested'
+    return 0
+  fi
+
+  if ! [[ "$repair_season_id" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'deploy repair: season id must be a positive integer' >&2
+    return 1
+  fi
+  if ! [[ "$repair_active_publication_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+    echo 'deploy repair: expected active publication must be an RFC UUID' >&2
+    return 1
+  fi
+  if ! [[ "$repair_active_revision" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'deploy repair: expected active revision must be a positive integer' >&2
+    return 1
+  fi
+
+  local repair_ids=()
+  IFS=',' read -r -a repair_ids <<< "$repair_publication_ids"
+  if [[ "${#repair_ids[@]}" -lt 1 || "${#repair_ids[@]}" -gt 8 ]]; then
+    echo 'deploy repair: provide between one and eight exact publication UUIDs' >&2
+    return 1
+  fi
+
+  local raw_repair_id repair_id
+  for raw_repair_id in "${repair_ids[@]}"; do
+    repair_id=$(printf '%s' "$raw_repair_id" | tr -d '[:space:]')
+    if ! [[ "$repair_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+      echo 'deploy repair: every staging publication value must be an RFC UUID' >&2
+      return 1
+    fi
+    echo "deploy repair: validating and retiring exact expired core staging publication $repair_id"
+    APP_IMAGE="${APP_IMAGE:-}" compose --profile migration run --rm -T --interactive=false \
+      -e DATA_STAGING_REPAIR_CONFIRM=YES migration \
+      bun scripts/retire-superseded-core-staging-publication.ts \
+      --action retire \
+      --publication-id "$repair_id" \
+      --season-id "$repair_season_id" \
+      --expected-active-publication-id "$repair_active_publication_id" \
+      --expected-active-revision "$repair_active_revision" \
+      --reason 'operator-confirmed expired superseded core staging repair'
+  done
+}
+
 start_runtime_services() {
   # Scheduler and workers have no host port and must be healthy before API
   # startup.  An API bind failure may be retried once, but never tears down a
