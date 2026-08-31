@@ -415,7 +415,9 @@ async function buildPointsPayload(
                AND history_result.event_points IS NOT NULL
                AND history_result.event_net_points IS NOT NULL
                AND (
-                 history_group.event_net_points IS DISTINCT FROM history_result.event_net_points
+                 history_group.event_points IS DISTINCT FROM history_result.event_points
+                 OR history_group.event_cost IS DISTINCT FROM history_result.event_transfers_cost
+                 OR history_group.event_net_points IS DISTINCT FROM history_result.event_net_points
                  OR history_group.updated_at < GREATEST(
                    history_result.updated_at,
                    COALESCE(history_result.rich_synced_at, '-infinity'::timestamptz),

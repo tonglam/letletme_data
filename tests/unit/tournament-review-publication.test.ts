@@ -197,6 +197,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('event.finished = true');
     expect(publicationSource).toContain('event.data_checked = true');
     expect(publicationSource).toContain('history_group_mismatch_count');
+    expect(publicationSource).toContain(
+      'history_group.event_points IS DISTINCT FROM history_result.event_points',
+    );
+    expect(publicationSource).toContain(
+      'history_group.event_cost IS DISTINCT FROM history_result.event_transfers_cost',
+    );
     expect(publicationSource).toContain('points group ranks are inconsistent');
     expect(publicationSource).toContain('payload_row->>\x27applicable\x27');
     expect(publicationSource).toContain('state.existing_eligible_at IS NULL');
