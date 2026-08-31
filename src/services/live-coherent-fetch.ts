@@ -27,9 +27,9 @@ export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
    */
   readonly playerById?: ReadonlyMap<number, LivePlayerIdentity>;
   /**
-   * Event-time identity captured with fixture evidence.  Current Core remains
-   * the normal hot-path baseline, while final/historical reconstruction can
-   * resolve a transferred player to the club represented in that fixture.
+   * Event-time identity captured with fixture evidence. It is loaded for every
+   * live event so a current-roster transfer cannot replace the club represented
+   * by the fixture.
    */
   readonly playerByFixtureAndId?: ReadonlyMap<string, LivePlayerIdentity>;
 }
@@ -69,7 +69,7 @@ function referenceDataFromCore(
   season: FplSeasonRef,
   teams: readonly Team[],
   players: readonly Player[],
-  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[] = [],
+  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[],
 ): LiveSnapshotReferenceData {
   if (teams.length === 0 || players.length === 0) {
     throw new DatabaseError(
@@ -136,23 +136,21 @@ function referenceDataFromCore(
 /** Core metadata for coherent validation; it is never a live publication. */
 export async function loadLiveReferenceData(
   season: FplSeasonRef,
-  eventId?: number,
+  eventId: number,
 ): Promise<LiveSnapshotReferenceData> {
   const cached = await readCoreSnapshotCache(season.seasonCode);
   if (cached) {
-    const eventPinnedIdentities =
-      eventId === undefined
-        ? []
-        : await createFplPlayerFixtureStatsRepository().findIdentityByEvent(season, eventId);
+    const eventPinnedIdentities = await createFplPlayerFixtureStatsRepository().findIdentityByEvent(
+      season,
+      eventId,
+    );
     return referenceDataFromCore(season, cached.teams, cached.players, eventPinnedIdentities);
   }
   return withCoreSnapshotReadLock(season, async (transaction) => {
     const [teams, players, eventPinnedIdentities] = await Promise.all([
       createTeamRepository(transaction).findAll(season),
       createPlayerRepository(transaction).findAll(season),
-      eventId === undefined
-        ? Promise.resolve([] as FplPlayerFixtureIdentity[])
-        : createFplPlayerFixtureStatsRepository(transaction).findIdentityByEvent(season, eventId),
+      createFplPlayerFixtureStatsRepository(transaction).findIdentityByEvent(season, eventId),
     ]);
     return referenceDataFromCore(season, teams, players, eventPinnedIdentities);
   });

@@ -275,6 +275,43 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     expect(detail.fixtures[0]?.players[0]).toMatchObject({ id: 101, teamId: 10 });
   });
 
+  test('fails closed when a visible transferred player has no fixture-time identity', () => {
+    const fixtures = [
+      rawFixture({
+        id: 401,
+        teamH: 10,
+        teamA: 20,
+        homeScore: 1,
+        awayScore: 0,
+        bpsElement: 101,
+        bps: 30,
+      }),
+    ];
+    const desk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: fixtures,
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+    });
+    const baseReference = referenceData();
+
+    expect(() =>
+      prepareLiveMatchDetail({
+        eventId: 2,
+        rawElements: cloneRawElements().filter((element) => element.id === 101),
+        rawFixtures: fixtures,
+        deskFixtures: desk.fixtures,
+        referenceData: {
+          ...baseReference,
+          playerById: new Map([
+            [101, { id: 101, type: 3, teamId: 30, price: 50, webName: 'Player One' }],
+          ]),
+        },
+        publishedLiveElementIds: [101],
+      }),
+    ).toThrow('no event-time team identity');
+  });
+
   test('derives active and settled lifecycle from current fixtures on a stale job retry', () => {
     const playing = rawFixture({
       id: 401,

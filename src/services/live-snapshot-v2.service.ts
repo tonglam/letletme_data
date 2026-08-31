@@ -66,7 +66,7 @@ export interface LiveSnapshotV2Dependencies {
   ) => Promise<readonly number[]>;
   readonly getReferenceData: (
     season: FplSeasonRef,
-    eventId?: number,
+    eventId: number,
   ) => Promise<LiveSnapshotReferenceData>;
   readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2;
   readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV2;
@@ -413,12 +413,7 @@ export async function syncLiveSnapshotV2(
   const fixturesPromise = options.observedFixtures
     ? Promise.resolve([...options.observedFixtures])
     : dependencies.getFixtures(eventId);
-  const referenceDataPromise = dependencies.getReferenceData(
-    season,
-    options.finalizeEvent === true || current?.publication.state === 'FINALIZED'
-      ? eventId
-      : undefined,
-  );
+  const referenceDataPromise = dependencies.getReferenceData(season, eventId);
   const observationPromise = Promise.allSettled([
     eventLivePromise,
     fixturesPromise,
