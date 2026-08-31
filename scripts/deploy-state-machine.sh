@@ -6,6 +6,7 @@
 # GraphQL on 4000, but both compose projects touch the same host resources.
 deploy_lock_path=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
 deploy_lock_fd=''
+DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -69,6 +70,83 @@ wait_for_port_3000_free() {
     sleep "$delay"
   done
   assert_port_3000_free
+}
+
+set_content_x_scan_admission() {
+  local mode=${1:-}
+  local output
+  if [[ "$mode" != DRAIN_ONLY && "$mode" != OPEN ]]; then
+    echo "deploy preflight: invalid content-x-scan admission mode=$mode" >&2
+    return 1
+  fi
+  if ! output=$(
+    APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+      bun scripts/set-content-x-scan-admission.ts --mode "$mode" 2>&1
+  ); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+}
+
+drain_content_x_scan_for_deploy() {
+  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]]; then return 0; fi
+  # Mark the attempt before Redis is touched.  The EXIT handler can then
+  # safely ask the command to restore only a gate owned by this deployment,
+  # even if the one-shot command dies after changing Redis but before it
+  # prints its result.
+  DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+  local output
+  if ! output=$(set_content_x_scan_admission DRAIN_ONLY); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+  if printf '%s\n' "$output" | grep -F '"changed":true' >/dev/null; then
+    echo 'deploy preflight: content-x-scan admission is drain-only; waiting for active work to finish'
+  else
+    echo 'deploy preflight: content-x-scan was already drain-only; preserving its existing operator gate'
+  fi
+}
+
+restore_content_x_scan_admission() {
+  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" != true ]]; then return 0; fi
+  local output
+  if ! output=$(set_content_x_scan_admission OPEN); then
+    printf '%s\n' "$output" >&2
+    echo 'deploy admission: failed to restore content-x-scan admission; its bounded gate remains in force' >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+  DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=false
+  echo 'deploy admission: content-x-scan admission restored'
+}
+
+wait_for_scoped_queue_quiescence() {
+  local attempts=${1:-90}
+  local delay_seconds=${2:-2}
+  local output_file
+  local attempt
+  if ! [[ "$attempts" =~ ^[1-9][0-9]*$ && "$delay_seconds" =~ ^[0-9]+$ ]]; then
+    echo 'deploy preflight: queue quiescence wait bounds are invalid' >&2
+    return 1
+  fi
+  output_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-queue-quiescence.XXXXXX")
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    if APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+      bun scripts/assert-queue-quiescence.ts --redis-only --scoped >"$output_file" 2>&1; then
+      cat "$output_file"
+      rm -f "$output_file"
+      return 0
+    fi
+    if (( attempt < attempts )); then
+      echo "deploy preflight: waiting for scoped queue work to drain (attempt $attempt/$attempts)"
+      sleep "$delay_seconds"
+    fi
+  done
+  cat "$output_file" >&2
+  rm -f "$output_file"
+  return 1
 }
 
 migration_ledger_fingerprint() {

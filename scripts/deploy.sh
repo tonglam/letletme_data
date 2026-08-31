@@ -190,6 +190,9 @@ deploy() {
     local status=$?
     trap - EXIT
     set +e
+    if [[ "$status" -ne 0 && "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]]; then
+      restore_content_x_scan_admission || true
+    fi
     if [[ "$status" -ne 0 ]]; then
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_RUNNER_UPDATED" = true ]]; then
         export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
@@ -320,6 +323,10 @@ deploy() {
     exit 1
   fi
   finish_stage
+  if ! drain_content_x_scan_for_deploy; then
+    log_error "Could not place content-x-scan into drain-only mode; services were not stopped."
+    exit 1
+  fi
   start_stage quiescence
   log_info "Validating migration plan before stopping services"
   if ! run_migration_plan; then
@@ -334,7 +341,7 @@ deploy() {
     log_error "Database work is not quiescent; services were not stopped."
     exit 1
   fi
-  if ! compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+  if ! wait_for_scoped_queue_quiescence 150 2; then
     log_error "Queue work is not quiescent; services were not stopped."
     exit 1
   fi
@@ -512,6 +519,10 @@ deploy() {
   elif [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
     [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
     printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
+  fi
+  if ! restore_content_x_scan_admission; then
+    log_error "Could not restore content-x-scan admission after service readiness."
+    exit 1
   fi
   DEPLOY_COMMITTED=true
 }

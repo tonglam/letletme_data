@@ -222,6 +222,10 @@ jobs:
               original_status=$?
               trap - EXIT
               set +e
+              if [ "$original_status" -ne 0 ] && \
+                [ "${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}" = true ]; then
+                restore_content_x_scan_admission || true
+              fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_committed" = false ] && [ "$runner_updated" = true ]; then
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 scripts/rollback-host-grok-runner.sh \
@@ -424,6 +428,10 @@ jobs:
               exit 1
             fi
             finish_stage
+            if ! drain_content_x_scan_for_deploy; then
+              echo 'deploy preflight: could not place content-x-scan into drain-only mode; services were not stopped' >&2
+              exit 1
+            fi
 
             deployment_started=true
             migration_started=false
@@ -439,8 +447,7 @@ jobs:
               echo "deploy preflight: database work is not quiescent; services were not stopped" >&2
               exit 1
             fi
-            if ! APP_IMAGE="$IMAGE_REF" docker compose run --rm -T --interactive=false api \
-              bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+            if ! wait_for_scoped_queue_quiescence 150 2; then
               echo "deploy preflight: queue work is not quiescent; services were not stopped" >&2
               exit 1
             fi
@@ -569,6 +576,10 @@ jobs:
             elif [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
               [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
               printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
+            fi
+            if ! restore_content_x_scan_admission; then
+              echo 'deploy admission: could not restore content-x-scan admission after service readiness' >&2
+              exit 1
             fi
             deployment_committed=true
             docker compose ps
