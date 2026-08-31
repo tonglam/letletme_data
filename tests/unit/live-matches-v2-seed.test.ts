@@ -43,9 +43,12 @@ describe('live match V2 cutover seed arguments', () => {
     ).toThrow();
   });
 
-  it('only skips missing detail for blank or genuinely pre-deadline scopes', () => {
+  it('only skips missing detail for blank, pre-deadline, or between-fixtures scopes', () => {
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 0, state: 'LIVE_ACTIVE' })).toBe(true);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'PRE_DEADLINE' })).toBe(true);
+    expect(
+      canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'LIVE_ACTIVE' }, 'BETWEEN_FIXTURES'),
+    ).toBe(true);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'LIVE_ACTIVE' })).toBe(false);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'DAY_SETTLING' })).toBe(false);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'FINALIZED' })).toBe(false);

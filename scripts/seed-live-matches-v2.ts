@@ -21,6 +21,7 @@ import {
   syncLiveSnapshotV2,
   type LiveSnapshotV2SyncResult,
 } from '../src/services/live-snapshot-v2.service';
+import type { MatchLifecycleState } from '../src/services/live-match-v2';
 import { databaseSingleton } from '../src/db/singleton';
 import { redisSingleton } from '../src/cache/singleton';
 import type { Event, RawFPLFixture } from '../src/types';
@@ -109,8 +110,13 @@ export function canFinalizeLiveMatchSeed(
 
 export function canSkipMissingDetailDuringSeed(
   result: Pick<LiveSnapshotV2SyncResult, 'fixtureCount' | 'state'>,
+  matchState: MatchLifecycleState | null = null,
 ): boolean {
-  return result.fixtureCount === 0 || result.state === 'PRE_DEADLINE';
+  return (
+    result.fixtureCount === 0 ||
+    result.state === 'PRE_DEADLINE' ||
+    matchState === 'BETWEEN_FIXTURES'
+  );
 }
 
 async function seedOne(seasonCode: string, eventId: number) {
@@ -131,13 +137,16 @@ async function seedOne(seasonCode: string, eventId: number) {
     lifecycleState: finalized ? 'FINALIZED' : undefined,
   });
 
+  const desk = await readLiveMatchDeskPointerV2({ season: seasonCode, eventId }, 'active');
   const active = await readLiveMatchDetailPointerV2({ season: seasonCode, eventId }, 'active');
   if (!active) {
-    // A blank gameweek or a genuinely pre-deadline event has no player payload
-    // to migrate. Once the coherent observer says the event is active or
-    // settling, missing detail is a failed cutover prerequisite rather than a
-    // successful no-op.
-    if (canSkipMissingDetailDuringSeed(result)) {
+    // A blank gameweek, a genuinely pre-deadline event, or a settled gap
+    // between fixtures has no price-bearing detail that this cutover needs to
+    // make durable. The desk is still published and remains independently
+    // readable. Once the coherent observer says the event is active or in
+    // final settling, missing detail is a failed cutover prerequisite rather
+    // than a successful no-op.
+    if (canSkipMissingDetailDuringSeed(result, desk?.publication.state ?? null)) {
       return {
         season: seasonCode,
         eventId,
@@ -153,7 +162,6 @@ async function seedOne(seasonCode: string, eventId: number) {
     throw new Error(`event ${eventId} detail publication is missing canonical player prices`);
   }
 
-  const desk = await readLiveMatchDeskPointerV2({ season: seasonCode, eventId }, 'active');
   if (!desk || desk.servedFrom !== 'REDIS_CURRENT') {
     throw new Error(`event ${eventId} does not have a current V2 desk publication`);
   }
@@ -281,12 +289,17 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
+  let exitCode = 0;
   try {
     await main();
   } catch (error) {
     console.error('[seed-live-matches-v2] failed', error);
-    process.exitCode = 1;
+    exitCode = 1;
   } finally {
     await Promise.allSettled([redisSingleton.disconnect(), databaseSingleton.disconnect()]);
   }
+  // This one-shot cutover command must not leave provider/database handles
+  // alive after reporting a failure; otherwise the deploy runner remains in
+  // maintenance mode until its external timeout kills the container.
+  if (exitCode !== 0) process.exit(exitCode);
 }
