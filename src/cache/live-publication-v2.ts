@@ -71,6 +71,19 @@ export interface LivePublicationV2 {
   };
 }
 
+export type LivePublicationV2OrderingFence = {
+  readonly contractVersion: typeof LIVE_POINTS_CONTRACT_VERSION;
+  /** A damaged generation cannot provide an allocation floor. */
+  readonly generation: number | null;
+  readonly season: string;
+  readonly eventId: number;
+  /** A damaged state preserves source ordering but cannot authorize promotion. */
+  readonly state: LivePublicationState | null;
+  readonly sourceCheckedAt: string;
+  /** Undefined means the durable marker is corrupt/unknown and must fail closed. */
+  readonly checkpointedAt: string | null | undefined;
+};
+
 export interface LivePublicationRead {
   readonly publication: LivePublicationV2;
   readonly eventLives: readonly EventLive[];
@@ -312,6 +325,20 @@ function validRevision(value: unknown): value is StreamRevision {
   );
 }
 
+function validLivePublicationState(value: unknown): value is LivePublicationState {
+  return (
+    value === 'PRE_DEADLINE' ||
+    value === 'PICKS_WAIT' ||
+    value === 'PICKS_PROBE' ||
+    value === 'PICKS_SYNC' ||
+    value === 'LIVE_ACTIVE' ||
+    value === 'BETWEEN_FIXTURES' ||
+    value === 'DAY_SETTLING' ||
+    value === 'GW_REVIEW' ||
+    value === 'FINALIZED'
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -347,17 +374,7 @@ function parseLiveManifest(raw: string | null, scope: LiveScope): LivePublicatio
       value.generation <= 0 ||
       value.season !== scope.season ||
       value.eventId !== scope.eventId ||
-      !(
-        value.state === 'PRE_DEADLINE' ||
-        value.state === 'PICKS_WAIT' ||
-        value.state === 'PICKS_PROBE' ||
-        value.state === 'PICKS_SYNC' ||
-        value.state === 'LIVE_ACTIVE' ||
-        value.state === 'BETWEEN_FIXTURES' ||
-        value.state === 'DAY_SETTLING' ||
-        value.state === 'GW_REVIEW' ||
-        value.state === 'FINALIZED'
-      ) ||
+      !validLivePublicationState(value.state) ||
       !validIso(value.sourceCheckedAt) ||
       !validIso(value.publishedAt) ||
       (value.checkpointedAt !== null && !validIso(value.checkpointedAt)) ||
@@ -385,6 +402,65 @@ function parseLiveManifest(raw: string | null, scope: LiveScope): LivePublicatio
       return null;
     }
     return value as unknown as LivePublicationV2;
+  } catch {
+    return null;
+  }
+}
+
+/** Parse a complete manifest without reading immutable payload siblings. */
+export function parseLivePublicationV2Manifest(
+  raw: string | null,
+  scope: LiveScope,
+): LivePublicationV2 | null {
+  assertSeasonEvent(scope);
+  return parseLiveManifest(raw, scope);
+}
+
+/**
+ * Recover only fields that can order a candidate. Revision and item
+ * descriptors are deliberately ignored: corruption there makes the active
+ * publication unreadable, but must not erase a newer source or FINALIZED
+ * fence from the exact active pointer bytes.
+ */
+export function parseLivePublicationV2OrderingFence(
+  raw: string | null,
+  scope: LiveScope,
+): LivePublicationV2OrderingFence | null {
+  assertSeasonEvent(scope);
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (
+      !isRecord(value) ||
+      value.contractVersion !== LIVE_POINTS_CONTRACT_VERSION ||
+      value.season !== scope.season ||
+      value.eventId !== scope.eventId ||
+      !validIso(value.sourceCheckedAt)
+    ) {
+      return null;
+    }
+    const generation =
+      typeof value.generation === 'number' &&
+      Number.isSafeInteger(value.generation) &&
+      value.generation > 0
+        ? value.generation
+        : null;
+    const state = validLivePublicationState(value.state) ? value.state : null;
+    const checkpointedAt =
+      value.checkpointedAt === null
+        ? null
+        : validIso(value.checkpointedAt)
+          ? value.checkpointedAt
+          : undefined;
+    return {
+      contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+      generation,
+      season: scope.season,
+      eventId: scope.eventId,
+      state,
+      sourceCheckedAt: value.sourceCheckedAt,
+      checkpointedAt,
+    };
   } catch {
     return null;
   }
@@ -556,7 +632,14 @@ return {tostring(value), tostring(now[1]), tostring(now[2])}
 
 const PROMOTE_LIVE_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
+local function valid_generation(value)
+  return type(value) == 'number' and value > 0 and value <= 9007199254740991 and value == math.floor(value)
+end
+local function valid_live_state(value)
+  return value == 'PRE_DEADLINE' or value == 'PICKS_WAIT' or value == 'PICKS_PROBE' or value == 'PICKS_SYNC' or value == 'LIVE_ACTIVE' or value == 'BETWEEN_FIXTURES' or value == 'DAY_SETTLING' or value == 'GW_REVIEW' or value == 'FINALIZED'
+end
 local restoring = ARGV[4] == 'restore'
+local seed_recovery = ARGV[4] == 'seed-recovery'
 local observed_current_raw = ARGV[5] or ''
 local current_raw = redis.call('GET', KEYS[1]) or ''
 if current_raw ~= observed_current_raw then return {'changed', current_raw} end
@@ -566,6 +649,7 @@ local current_publication_id = nil
 local current_scope_valid = false
 local current_scope_mismatch = false
 local current_state = nil
+local current_state_unknown = false
 local current = nil
 if current_raw then
   local ok, decoded = pcall(cjson.decode, current_raw)
@@ -577,8 +661,12 @@ if current_raw then
       -- immutable siblings is damaged.  A corrupt FINAL must still fence a
       -- provisional candidate, while a newer complete FINAL remains a valid
       -- recovery path when no durable checkpoint is available.
-      current_state = decoded.state
-      if type(decoded.generation) == 'number' and decoded.generation > 0 then
+      if valid_live_state(decoded.state) then
+        current_state = decoded.state
+      else
+        current_state_unknown = true
+      end
+      if valid_generation(decoded.generation) then
         current_generation = decoded.generation
         current_publication_id = decoded.publicationId
         current_scope_valid = true
@@ -601,6 +689,7 @@ if current_raw then
 end
 if candidate.contractVersion ~= 'live-points-v2' or not candidate.items then return {'invalid_candidate'} end
 if current_scope_mismatch then return {'scope_mismatch'} end
+if current_state_unknown and not restoring then return {'invalid_current_state'} end
 local same_identity = current_generation ~= nil and current_generation == candidate.generation and current_publication_id == candidate.publicationId
 -- A PostgreSQL durable FINAL checkpoint is the canonical recovery proof.  A
 -- conflicting Redis FINAL may be a stale/rebuilt pointer, so an explicit
@@ -613,8 +702,10 @@ end
 if current_state == 'FINALIZED' and not same_identity and not restoring_final then
   -- A valid FINAL is immutable.  If its manifest/items fail validation, allow
   -- only a newer complete FINAL to replace the poisoned pointer; never let a
-  -- provisional heartbeat downgrade the terminal scope.
-  if candidate.state ~= 'FINALIZED' or current ~= nil then return {'stale', current_raw} end
+  -- provisional heartbeat downgrade the terminal scope. A cutover seed may
+  -- replace a valid orphan FINAL only after its PostgreSQL claim was committed
+  -- before this script; normal producers can never select that mode.
+  if candidate.state ~= 'FINALIZED' or (current ~= nil and not seed_recovery) then return {'stale', current_raw} end
 end
 for index, name in ipairs({'eventLive', 'fixtures'}) do
   local item = candidate.items[name]
@@ -696,6 +787,9 @@ return {'published', previous_result}
 
 const PROMOTE_ENTRY_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
+local function valid_generation(value)
+  return type(value) == 'number' and value > 0 and value <= 9007199254740991 and value == math.floor(value)
+end
 local observed_current_raw = ARGV[4] or ''
 local current_raw = redis.call('GET', KEYS[1]) or ''
 if current_raw ~= observed_current_raw then return {'changed', current_raw} end
@@ -710,7 +804,7 @@ if current_raw then
   if ok and decoded.contractVersion == 'live-points-v2' then
     if decoded.season ~= candidate.season or decoded.eventId ~= candidate.eventId or decoded.entryId ~= candidate.entryId then
       current_scope_mismatch = true
-    elseif type(decoded.generation) == 'number' and decoded.generation > 0 then
+    elseif valid_generation(decoded.generation) then
       current_generation = decoded.generation
       current_scope_valid = true
       current_state = decoded.state
@@ -1113,6 +1207,14 @@ export async function publishLivePublicationV2(input: {
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
   readonly previous?: LivePublicationV2 | null;
+  /**
+   * Optional caller-owned raw-pointer CAS base. Seed/recovery callers retain
+   * even an invalid active value and bind eligibility to those exact bytes;
+   * an empty string means the active key must still be absent.
+   */
+  readonly expectedCurrentRaw?: string;
+  /** PostgreSQL-claimed one-shot cutover recovery; never used by producers. */
+  readonly promotionMode?: 'normal' | 'seed-recovery';
   readonly generationFloor?: number;
   readonly redis?: Redis;
 }): Promise<{
@@ -1158,6 +1260,15 @@ export async function publishLivePublicationV2(input: {
   };
   await stage(redis, [liveItem, fixtureItem]);
   const currentProof = await readLivePromotionProof(redis, scope);
+  if (
+    input.expectedCurrentRaw !== undefined &&
+    currentProof.pointerRaw !== input.expectedCurrentRaw
+  ) {
+    throw new CacheError(
+      'V2 promotion no longer observes the expected current pointer',
+      'LIVE_V2_PROMOTE_CHANGED',
+    );
+  }
   const [status, detail] = promotionResult(
     await redis.eval(
       PROMOTE_LIVE_SCRIPT,
@@ -1168,7 +1279,7 @@ export async function publishLivePublicationV2(input: {
       JSON.stringify(manifest),
       String(LIVE_PUBLICATION_PREVIOUS_TTL_MS),
       String(input.state === 'FINALIZED' ? LIVE_PUBLICATION_FINAL_TTL_MS : 0),
-      '',
+      input.promotionMode === 'seed-recovery' ? 'seed-recovery' : '',
       currentProof.pointerRaw,
       currentProof.eventLivePayload,
       currentProof.fixturesPayload,
@@ -1534,6 +1645,16 @@ export async function readLivePublicationV2(
     (await readLiveCandidate(redis, scope, 'active')) ??
     (await readLiveCandidate(redis, scope, 'previous'))
   );
+}
+
+/** Preserve the exact active bytes for cutover eligibility and Lua CAS. */
+export async function readLivePublicationV2ActiveRaw(
+  scope: LiveScope,
+  redisClient?: Redis,
+): Promise<string> {
+  assertSeasonEvent(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  return (await redis.get(liveV2Key(scope, 'active'))) ?? '';
 }
 
 /** Read one pointer for diagnostics and protected repair tooling. */

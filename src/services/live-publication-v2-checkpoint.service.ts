@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { and, eq, isNull, ne, or, sql } from 'drizzle-orm';
 
 import {
@@ -5,6 +7,7 @@ import {
   liveMatchDeskCheckpointsInFpl,
   liveMatchDetailCheckpointsInFpl,
   livePointsPublicationCheckpointsInCompetition,
+  livePointsPublicationSeedClaimsInCompetition,
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -44,7 +47,35 @@ export type LivePublicationV2CheckpointRequest = {
    * proves the facts were observed after the current relational authority.
    */
   readonly observationCheckedAt?: Date | string;
+  /**
+   * Seed recovery uses an absent durable head as part of its eligibility
+   * proof. Enforce that proof only after taking the scope advisory lock so a
+   * concurrent normal checkpoint cannot commit between the check and insert.
+   */
+  readonly requireMissingCheckpoint?: boolean;
+  /** Exact durable seed claim acquired before the Redis active switch. */
+  readonly seedClaimId?: string;
 };
+
+export type LivePublicationV2SeedClaim = {
+  readonly claimId: string;
+  readonly expectedActiveSha256: string;
+  readonly candidateState: LivePublicationState;
+  readonly candidateSourceCheckedAt: string;
+  readonly candidateEventLiveSha256: string;
+  readonly candidateFixturesSha256: string;
+  readonly claimedAt: string;
+};
+
+export type LivePublicationV2SeedCandidate = Omit<
+  LivePublicationV2SeedClaim,
+  'claimId' | 'expectedActiveSha256' | 'claimedAt'
+>;
+
+// After the claim commits, promotion performs only bounded Redis commands
+// (5-second command timeout each). One minute is therefore a conservative
+// ownership lease, not a publication cadence or freshness threshold.
+export const LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS = 60_000;
 
 const LIVE_PUBLICATION_STATES: readonly LivePublicationState[] = [
   'PRE_DEADLINE',
@@ -74,6 +105,345 @@ function isLivePublicationState(value: unknown): value is LivePublicationState {
   return (
     typeof value === 'string' && LIVE_PUBLICATION_STATES.includes(value as LivePublicationState)
   );
+}
+
+export function livePublicationSeedClaimAllowsCheckpoint(
+  persistedClaimId: string | null,
+  requestedClaimId: string | undefined,
+): boolean {
+  return persistedClaimId === null
+    ? requestedClaimId === undefined
+    : requestedClaimId === persistedClaimId;
+}
+
+export function livePublicationSeedClaimMatchesPublication(
+  claim: LivePublicationV2SeedClaim,
+  publication: LivePublicationV2,
+): boolean {
+  return (
+    claim.candidateState === publication.state &&
+    claim.candidateSourceCheckedAt === publication.sourceCheckedAt &&
+    claim.candidateEventLiveSha256 === publication.items.eventLive.sha256 &&
+    claim.candidateFixturesSha256 === publication.items.fixtures.sha256
+  );
+}
+
+export function livePublicationSeedClaimMatchesCandidate(
+  claim: LivePublicationV2SeedClaim,
+  candidate: LivePublicationV2SeedCandidate,
+): boolean {
+  return (
+    claim.candidateState === candidate.candidateState &&
+    claim.candidateSourceCheckedAt === candidate.candidateSourceCheckedAt &&
+    claim.candidateEventLiveSha256 === candidate.candidateEventLiveSha256 &&
+    claim.candidateFixturesSha256 === candidate.candidateFixturesSha256
+  );
+}
+
+export async function readLivePublicationV2SeedClaim(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<LivePublicationV2SeedClaim | null> {
+  const db = await getDb();
+  const row = (
+    await db
+      .select({
+        claimId: livePointsPublicationSeedClaimsInCompetition.claimId,
+        expectedActiveSha256: livePointsPublicationSeedClaimsInCompetition.expectedActiveSha256,
+        candidateState: livePointsPublicationSeedClaimsInCompetition.candidateState,
+        candidateSourceCheckedAt:
+          livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt,
+        candidateEventLiveSha256:
+          livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
+        candidateFixturesSha256:
+          livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+        claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt,
+      })
+      .from(livePointsPublicationSeedClaimsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+        ),
+      )
+      .limit(1)
+  )[0];
+  return row
+    ? {
+        ...row,
+        candidateState: row.candidateState as LivePublicationState,
+        candidateSourceCheckedAt: row.candidateSourceCheckedAt.toISOString(),
+        claimedAt: row.claimedAt.toISOString(),
+      }
+    : null;
+}
+
+/** Commit the seed's absence claim before any Redis pointer can change. */
+export async function acquireLivePublicationV2SeedClaim(
+  season: FplSeasonRef,
+  eventId: number,
+  expectedActiveSha256: string,
+  candidate: LivePublicationV2SeedCandidate,
+): Promise<
+  | { readonly status: 'claimed'; readonly claim: LivePublicationV2SeedClaim }
+  | { readonly status: 'durable'; readonly claim: null }
+  | { readonly status: 'blocked'; readonly claim: null }
+> {
+  if (!/^[0-9a-f]{64}$/.test(expectedActiveSha256)) {
+    throw new Error('Live Points V2 seed claim active hash is invalid');
+  }
+  if (
+    !LIVE_PUBLICATION_STATES.includes(candidate.candidateState) ||
+    !Number.isFinite(Date.parse(candidate.candidateSourceCheckedAt)) ||
+    !/^[0-9a-f]{64}$/.test(candidate.candidateEventLiveSha256) ||
+    !/^[0-9a-f]{64}$/.test(candidate.candidateFixturesSha256)
+  ) {
+    throw new Error('Live Points V2 seed claim candidate is invalid');
+  }
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const scopeLock = `${season.seasonCode}:${eventId}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+    const durable = await tx
+      .select({ publicationId: livePointsPublicationCheckpointsInCompetition.publicationId })
+      .from(livePointsPublicationCheckpointsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationCheckpointsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationCheckpointsInCompetition.eventId, eventId),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (durable[0]) return { status: 'durable', claim: null } as const;
+
+    const existing = await tx
+      .select({
+        claimId: livePointsPublicationSeedClaimsInCompetition.claimId,
+        expectedActiveSha256: livePointsPublicationSeedClaimsInCompetition.expectedActiveSha256,
+        candidateState: livePointsPublicationSeedClaimsInCompetition.candidateState,
+        candidateSourceCheckedAt:
+          livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt,
+        candidateEventLiveSha256:
+          livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
+        candidateFixturesSha256:
+          livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+        claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt,
+      })
+      .from(livePointsPublicationSeedClaimsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    const prior = existing[0];
+    if (prior) {
+      const normalizedPrior: LivePublicationV2SeedClaim = {
+        ...prior,
+        candidateState: prior.candidateState as LivePublicationState,
+        candidateSourceCheckedAt: prior.candidateSourceCheckedAt.toISOString(),
+        claimedAt: prior.claimedAt.toISOString(),
+      };
+      if (
+        prior.expectedActiveSha256 !== expectedActiveSha256 ||
+        !livePublicationSeedClaimMatchesCandidate(normalizedPrior, candidate)
+      ) {
+        return { status: 'blocked', claim: null } as const;
+      }
+
+      // A retry may arrive after the previous owner abandoned the same claim.
+      // Rotate the ownership token and renew the lease using PostgreSQL time;
+      // an old owner can no longer checkpoint after this transaction commits.
+      // Never share an unexpired token between executions: otherwise one
+      // retry can release it after a failed Redis CAS while the original owner
+      // is concurrently promoting the claimed candidate.
+      const renewedClaimId = randomUUID();
+      const renewed = (
+        await tx
+          .update(livePointsPublicationSeedClaimsInCompetition)
+          .set({
+            claimId: renewedClaimId,
+            claimedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+              eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+              eq(livePointsPublicationSeedClaimsInCompetition.claimId, prior.claimId),
+              sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
+            ),
+          )
+          .returning({ claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt })
+      )[0];
+      if (!renewed) return { status: 'blocked', claim: null } as const;
+      return {
+        status: 'claimed',
+        claim: {
+          ...normalizedPrior,
+          claimId: renewedClaimId,
+          claimedAt: renewed.claimedAt.toISOString(),
+        },
+      } as const;
+    }
+
+    const claimId = randomUUID();
+    const inserted = (
+      await tx
+        .insert(livePointsPublicationSeedClaimsInCompetition)
+        .values({
+          seasonId: season.seasonId,
+          eventId,
+          claimId,
+          expectedActiveSha256,
+          candidateState: candidate.candidateState,
+          candidateSourceCheckedAt: new Date(candidate.candidateSourceCheckedAt),
+          candidateEventLiveSha256: candidate.candidateEventLiveSha256,
+          candidateFixturesSha256: candidate.candidateFixturesSha256,
+        })
+        .returning({ claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt })
+    )[0];
+    if (!inserted) throw new Error('Live Points V2 seed claim insert returned no row');
+    const claim: LivePublicationV2SeedClaim = {
+      claimId,
+      expectedActiveSha256,
+      ...candidate,
+      claimedAt: inserted.claimedAt.toISOString(),
+    };
+    return { status: 'claimed', claim } as const;
+  });
+}
+
+export async function releaseLivePublicationV2SeedClaim(
+  season: FplSeasonRef,
+  eventId: number,
+  claimId: string,
+): Promise<boolean> {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const scopeLock = `${season.seasonCode}:${eventId}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+    const removed = await tx
+      .delete(livePointsPublicationSeedClaimsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+          eq(livePointsPublicationSeedClaimsInCompetition.claimId, claimId),
+        ),
+      )
+      .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });
+    return removed.length === 1;
+  });
+}
+
+/**
+ * Reclaim only an expired claim that still describes the exact active bytes
+ * observed before its abandoned promotion and whose candidate no longer
+ * matches this seed. The claim id is the ownership token; a delayed old owner
+ * cannot checkpoint after this exact row is deleted.
+ */
+export async function reclaimAbandonedLivePublicationV2SeedClaim(
+  season: FplSeasonRef,
+  eventId: number,
+  claimId: string,
+  observedActiveSha256: string,
+  candidate: LivePublicationV2SeedCandidate,
+): Promise<boolean> {
+  if (!/^[0-9a-f]{64}$/.test(observedActiveSha256)) {
+    throw new Error('Live Points V2 abandoned claim active hash is invalid');
+  }
+  const candidateSourceCheckedAt = new Date(candidate.candidateSourceCheckedAt);
+  if (!Number.isFinite(candidateSourceCheckedAt.getTime())) {
+    throw new Error('Live Points V2 abandoned claim candidate timestamp is invalid');
+  }
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const scopeLock = `${season.seasonCode}:${eventId}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+    const removed = await tx
+      .delete(livePointsPublicationSeedClaimsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+          eq(livePointsPublicationSeedClaimsInCompetition.claimId, claimId),
+          eq(
+            livePointsPublicationSeedClaimsInCompetition.expectedActiveSha256,
+            observedActiveSha256,
+          ),
+          sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
+          sql`${livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt} <= ${candidateSourceCheckedAt.toISOString()}::timestamptz`,
+          sql`(${livePointsPublicationSeedClaimsInCompetition.candidateState} <> 'FINALIZED' OR ${candidate.candidateState} = 'FINALIZED')`,
+          or(
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateState,
+              candidate.candidateState,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt,
+              candidateSourceCheckedAt,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
+              candidate.candidateEventLiveSha256,
+            ),
+            ne(
+              livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+              candidate.candidateFixturesSha256,
+            ),
+          ),
+        ),
+      )
+      .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });
+    return removed.length === 1;
+  });
+}
+
+/**
+ * Reclaim a claim whose candidate is already the Redis active publication but
+ * whose owner abandoned the durable checkpoint, including a retry of the
+ * same candidate.  The checkpoint transaction
+ * takes this same scope lock before it can wait on the shared Core lock, so an
+ * in-flight owner retains its exact claim even after the wall-clock lease has
+ * elapsed.  PostgreSQL owns both the lease clock and the compare/delete.
+ */
+export async function reclaimAbandonedPromotedLivePublicationV2SeedClaim(
+  season: FplSeasonRef,
+  eventId: number,
+  claimId: string,
+  candidate: LivePublicationV2SeedCandidate,
+): Promise<boolean> {
+  const candidateSourceCheckedAt = new Date(candidate.candidateSourceCheckedAt);
+  if (
+    !LIVE_PUBLICATION_STATES.includes(candidate.candidateState) ||
+    !Number.isFinite(candidateSourceCheckedAt.getTime()) ||
+    !/^[0-9a-f]{64}$/.test(candidate.candidateEventLiveSha256) ||
+    !/^[0-9a-f]{64}$/.test(candidate.candidateFixturesSha256)
+  ) {
+    throw new Error('Live Points V2 abandoned promoted claim candidate is invalid');
+  }
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const scopeLock = `${season.seasonCode}:${eventId}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+    const removed = await tx
+      .delete(livePointsPublicationSeedClaimsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+          eq(livePointsPublicationSeedClaimsInCompetition.claimId, claimId),
+          sql`${livePointsPublicationSeedClaimsInCompetition.claimedAt} <= clock_timestamp() - (${LIVE_PUBLICATION_SEED_CLAIM_LEASE_MS} * interval '1 millisecond')`,
+          sql`${livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt} <= ${candidateSourceCheckedAt.toISOString()}::timestamptz`,
+          sql`(${livePointsPublicationSeedClaimsInCompetition.candidateState} <> 'FINALIZED' OR ${candidate.candidateState} = 'FINALIZED')`,
+        ),
+      )
+      .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });
+    return removed.length === 1;
+  });
 }
 
 /**
@@ -280,6 +650,16 @@ export async function checkpointLivePublicationV2(
   const db = await getDb();
   return db
     .transaction(async (tx) => {
+      const scopeLock = `${season.seasonCode}:${eventId}`;
+      // Claim ownership and generation/final ordering are scope-local. Take
+      // this lock first so an already-started checkpoint cannot lose its claim
+      // merely because it waits on the shared Core publication lock.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+      // Core publication writes use this same lock before touching events or
+      // fixtures. Scope -> Core is safe because Core-only writers never wait
+      // for a live scope lock, and it keeps the source fence and mutations in
+      // one ordering domain.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${CORE_SNAPSHOT_WRITE_LOCK_KEY})`);
       // publishedAt comes from Redis TIME. checkpointedAt is deliberately
       // obtained from the same PostgreSQL clock that owns the durable row;
       // never compare or synthesize the durable timestamp from an app host.
@@ -292,16 +672,43 @@ export async function checkpointLivePublicationV2(
       }
       const observationCheckedAtParameter = postgresTimestampParameter(observationCheckedAt);
       const checkpointedAtParameter = postgresTimestampParameter(checkpointedAt);
-      // Core publication writes use this same lock before touching events or
-      // fixtures. Taking it first gives live checkpoint upserts the identical
-      // ordering and prevents a newer core observation from racing between the
-      // source fence and the fixture mutation below.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(${CORE_SNAPSHOT_WRITE_LOCK_KEY})`);
-      const scopeLock = `${season.seasonCode}:${eventId}`;
-      // Redis-first checkpoint obligations can race with a scheduler retry or a
-      // finalization worker. Serialize the scope before applying the generation
-      // and FINAL fences; a row lock alone cannot protect the initial insert.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeLock}, 0))`);
+      const seedClaims = await tx
+        .select({
+          claimId: livePointsPublicationSeedClaimsInCompetition.claimId,
+          expectedActiveSha256: livePointsPublicationSeedClaimsInCompetition.expectedActiveSha256,
+          candidateState: livePointsPublicationSeedClaimsInCompetition.candidateState,
+          candidateSourceCheckedAt:
+            livePointsPublicationSeedClaimsInCompetition.candidateSourceCheckedAt,
+          candidateEventLiveSha256:
+            livePointsPublicationSeedClaimsInCompetition.candidateEventLiveSha256,
+          candidateFixturesSha256:
+            livePointsPublicationSeedClaimsInCompetition.candidateFixturesSha256,
+          claimedAt: livePointsPublicationSeedClaimsInCompetition.claimedAt,
+        })
+        .from(livePointsPublicationSeedClaimsInCompetition)
+        .where(
+          and(
+            eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+            eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      const seedClaimId = seedClaims[0]?.claimId ?? null;
+      const seedClaim = seedClaims[0]
+        ? ({
+            ...seedClaims[0],
+            candidateState: seedClaims[0].candidateState as LivePublicationState,
+            candidateSourceCheckedAt: seedClaims[0].candidateSourceCheckedAt.toISOString(),
+            claimedAt: seedClaims[0].claimedAt.toISOString(),
+          } satisfies LivePublicationV2SeedClaim)
+        : null;
+      if (
+        !livePublicationSeedClaimAllowsCheckpoint(seedClaimId, request.seedClaimId) ||
+        (seedClaim !== null && !livePublicationSeedClaimMatchesPublication(seedClaim, publication))
+      ) {
+        return false;
+      }
       const [eventAuthority] = await tx
         .select({ liveSnapshotCheckedAt: eventsInFpl.liveSnapshotCheckedAt })
         .from(eventsInFpl)
@@ -334,6 +741,9 @@ export async function checkpointLivePublicationV2(
         .for('update')
         .limit(1);
       const winner = existing[0];
+      if (request.requireMissingCheckpoint && winner) {
+        return false;
+      }
       if (
         winner &&
         winner.publicationId !== publication.publicationId &&
@@ -435,6 +845,21 @@ export async function checkpointLivePublicationV2(
             updatedAt: checkpointedAt,
           })
           .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)));
+      }
+      if (request.seedClaimId) {
+        const removedClaims = await tx
+          .delete(livePointsPublicationSeedClaimsInCompetition)
+          .where(
+            and(
+              eq(livePointsPublicationSeedClaimsInCompetition.seasonId, season.seasonId),
+              eq(livePointsPublicationSeedClaimsInCompetition.eventId, eventId),
+              eq(livePointsPublicationSeedClaimsInCompetition.claimId, request.seedClaimId),
+            ),
+          )
+          .returning({ claimId: livePointsPublicationSeedClaimsInCompetition.claimId });
+        if (removedClaims.length !== 1) {
+          throw new Error('Live Points V2 seed claim disappeared before checkpoint commit');
+        }
       }
       return true;
     })

@@ -39,6 +39,7 @@
   "liveMatchDeskCheckpointsInFpl",
   "liveMatchDetailCheckpointsInFpl",
   "livePointsPublicationCheckpointsInCompetition",
+  "livePointsPublicationSeedClaimsInCompetition",
   "matchLinksInBridge",
   "matchesInUnderstat",
   "mutationScopesInOps",

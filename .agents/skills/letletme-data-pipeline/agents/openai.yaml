@@ -1,0 +1,4 @@
+interface:
+  display_name: 'LetLetMe Data Pipeline'
+  short_description: 'Trace Data ingestion, queues, storage, and publications'
+  default_prompt: 'Use $letletme-data-pipeline to audit or change this LetLetMe Data pipeline with repository-specific ownership and validation gates.'
