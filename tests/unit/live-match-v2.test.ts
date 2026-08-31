@@ -73,8 +73,8 @@ const referenceData = (): LiveSnapshotReferenceData => ({
     [102, 30],
   ]),
   playerById: new Map([
-    [101, { id: 101, type: 3, teamId: 10, webName: 'Player One' }],
-    [102, { id: 102, type: 2, teamId: 30, webName: 'Player Two' }],
+    [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+    [102, { id: 102, type: 2, teamId: 30, price: 60, webName: 'Player Two' }],
   ]),
 });
 
@@ -164,6 +164,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     expect(detail.fixtures).toHaveLength(2);
     expect(detail.fixtures[0]?.players[0]).toMatchObject({
       id: 101,
+      price: 50,
       totalPoints: 12,
       stats: expect.arrayContaining([
         { identifier: 'bps', value: 30, points: 0, pointsModification: null },
@@ -171,6 +172,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
     });
     expect(detail.fixtures[1]?.players[0]).toMatchObject({
       id: 101,
+      price: 50,
       totalPoints: 4,
       stats: expect.arrayContaining([
         { identifier: 'bps', value: 5, points: 0, pointsModification: null },
@@ -215,7 +217,9 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       referenceData: {
         ...referenceData(),
         playerTeamById: new Map([[101, 10]]),
-        playerById: new Map([[101, { id: 101, type: 3, teamId: 10, webName: 'Player One' }]]),
+        playerById: new Map([
+          [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+        ]),
       },
     });
 
@@ -244,6 +248,7 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       id: 101,
       type: 3,
       teamId: 30,
+      price: 50,
       webName: 'Player One',
     } as const;
     const detail = prepareLiveMatchDetail({
@@ -443,5 +448,40 @@ describe('Live Matches V2 fixture-grain preparation', () => {
         referenceData: referenceData(),
       }),
     ).toThrow();
+  });
+
+  test('rejects a player identity with an invalid canonical price', () => {
+    const fixtures = [
+      rawFixture({
+        id: 401,
+        teamH: 10,
+        teamA: 20,
+        homeScore: 1,
+        awayScore: 0,
+        bpsElement: 101,
+        bps: 30,
+      }),
+    ];
+    const desk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: fixtures,
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+    });
+    expect(() =>
+      prepareLiveMatchDetail({
+        eventId: 2,
+        rawElements: cloneRawElements().filter((element) => element.id === 101),
+        rawFixtures: fixtures,
+        deskFixtures: desk.fixtures,
+        referenceData: {
+          ...referenceData(),
+          playerById: new Map([
+            [101, { id: 101, type: 3, teamId: 10, price: -1, webName: 'Player One' }],
+          ]),
+        },
+        publishedLiveElementIds: [101],
+      }),
+    ).toThrow('invalid player price');
   });
 });

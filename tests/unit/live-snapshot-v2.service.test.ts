@@ -269,7 +269,9 @@ describe('Live Points and Live Matches shared observation', () => {
       ]),
       positionById: new Map(),
       playerTeamById: new Map([[101, 10]]),
-      playerById: new Map([[101, { id: 101, type: 3, teamId: 10, webName: 'Player One' }]]),
+      playerById: new Map([
+        [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+      ]),
     };
     let checkpointCalls = 0;
     const sync = syncLiveSnapshotV2(season, 2, {

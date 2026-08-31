@@ -72,6 +72,7 @@ const detailFixtures = (bps: number): MatchFixtureDetail[] => [
         webName: 'Player One',
         position: 3,
         teamId: 10,
+        price: 50,
         totalPoints: 6,
         stats: [
           { identifier: 'bps', value: bps, points: 0, pointsModification: null },
@@ -444,6 +445,7 @@ describe('Live Matches V2 Redis publications', () => {
           webName: 'x'.repeat(232_000),
           position: 3,
           teamId: 10,
+          price: 50,
           totalPoints: 0,
           stats: [],
         },

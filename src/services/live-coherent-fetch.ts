@@ -15,6 +15,8 @@ import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 
 export type LiveSnapshotState = 'scheduled' | 'live' | 'settled';
 
+type LivePlayerIdentity = Pick<Player, 'id' | 'type' | 'teamId' | 'price' | 'webName'>;
+
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   readonly season: string;
   readonly playerTeamById: Map<number, number>;
@@ -23,16 +25,13 @@ export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
    * detail publication.  It is optional for the existing Live Points
    * preparation path; Match V2 fails closed for detail when it is absent.
    */
-  readonly playerById?: ReadonlyMap<number, Pick<Player, 'id' | 'type' | 'teamId' | 'webName'>>;
+  readonly playerById?: ReadonlyMap<number, LivePlayerIdentity>;
   /**
    * Event-time identity captured with fixture evidence.  Current Core remains
    * the normal hot-path baseline, while final/historical reconstruction can
    * resolve a transferred player to the club represented in that fixture.
    */
-  readonly playerByFixtureAndId?: ReadonlyMap<
-    string,
-    Pick<Player, 'id' | 'type' | 'teamId' | 'webName'>
-  >;
+  readonly playerByFixtureAndId?: ReadonlyMap<string, LivePlayerIdentity>;
 }
 
 export interface PreparedLiveSnapshot {
@@ -81,13 +80,16 @@ function referenceDataFromCore(
   const playerById = new Map(
     players.map((player) => [
       player.id,
-      { id: player.id, type: player.type, teamId: player.teamId, webName: player.webName },
+      {
+        id: player.id,
+        type: player.type,
+        teamId: player.teamId,
+        price: player.price,
+        webName: player.webName,
+      },
     ]),
   );
-  const playerByFixtureAndId = new Map<
-    string,
-    Pick<Player, 'id' | 'type' | 'teamId' | 'webName'>
-  >();
+  const playerByFixtureAndId = new Map<string, LivePlayerIdentity>();
   for (const identity of eventPinnedIdentities) {
     if (
       !Number.isSafeInteger(identity.fixtureId) ||
@@ -117,6 +119,7 @@ function referenceDataFromCore(
       id: identity.elementId,
       type: identity.elementType,
       teamId: identity.teamId,
+      price: identity.price,
       webName: identity.webName,
     });
   }
