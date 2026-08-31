@@ -269,6 +269,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('entry_metadata_eligible_at');
     expect(publicationSource).toContain('canonical_group_assignments AS MATERIALIZED');
     expect(publicationSource).toContain('group_assignment_eligible_at');
+    expect(publicationSource).toMatch(/existing\.state = 'READY'/);
     expect(publicationSource).toContain('jsonb_object_agg(');
     expect(publicationSource).toMatch(/jsonb_typeof\(previous\.payload #> '\{points,rows\}'\)/);
     expect(publicationSource).toMatch(/jsonb_typeof\(previous\.payload #> '\{h2h,standings\}'\)/);
@@ -306,6 +307,13 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('DELETE FROM competition.tournament_review_heads');
     expect(publicationSource).toContain('DELETE FROM competition.tournament_review_obligations');
     expect(publicationSource).toContain('\x27review:\x27 || ${season.seasonId}::text');
+    const retirementProbe = publicationSource.slice(
+      publicationSource.indexOf('const potentialStaleScopes'),
+      publicationSource.indexOf('for (const scope of potentialStaleScopes)'),
+    );
+    expect(retirementProbe).not.toContain('event.finished = true');
+    expect(retirementProbe).not.toContain('event.data_checked = true');
+    expect(retirementProbe).not.toContain('event.data_checked_at IS NOT NULL');
   });
 
   test('includes entry metadata and validated cumulative history in provenance', () => {

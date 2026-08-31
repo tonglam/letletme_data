@@ -2183,9 +2183,6 @@ export async function reconcileTournamentReviewObligations(
         WHERE tournament.season_id = ${season.seasonId}
           AND tournament.tournament_id = stored.tournament_id
           AND tournament.setup_status = 'ready'
-          AND event.finished = true
-          AND event.data_checked = true
-          AND event.data_checked_at IS NOT NULL
           AND (
             (
               tournament.knockout_mode <> 'no_knockout'
@@ -2370,8 +2367,9 @@ export async function reconcileTournamentReviewObligations(
                ELSE '-infinity'::timestamptz
              END AS entry_metadata_eligible_at,
              CASE
-               WHEN previous.payload IS NOT NULL
-                AND candidate.format IN ('POINTS', 'H2H')
+              WHEN previous.payload IS NOT NULL
+               AND existing.state = 'READY'
+               AND candidate.format IN ('POINTS', 'H2H')
                 AND (
                   SELECT jsonb_build_object(
                     'count', count(*)::integer,
