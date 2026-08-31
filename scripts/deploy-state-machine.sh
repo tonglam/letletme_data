@@ -267,7 +267,10 @@ start_content_worker_pause_renewal() {
     trap 'renewal_stop_requested=true; exit 0' TERM INT
     trap 'if [[ "$renewal_stop_requested" != true ]]; then kill -TERM "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID" 2>/dev/null || true; fi' EXIT
     while :; do
-      sleep "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS" || exit 1
+      if ! sleep "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS"; then
+        [[ "$renewal_stop_requested" = true ]] && exit 0
+        exit 1
+      fi
       renew_content_worker_pause_ownership || exit 1
     done
   ) &
@@ -284,7 +287,7 @@ stop_content_worker_pause_renewal() {
   local renewal_pid=$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=''
   if [[ -n "$renewal_pid" ]]; then
-    terminate_scoped_queue_probe "$renewal_pid" '' 2
+    terminate_scoped_queue_probe "$renewal_pid" '' 2 true
   fi
   if [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE" = true ]]; then
     if [[ -n "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP" ]]; then
@@ -634,10 +637,14 @@ signal_scoped_queue_probe() {
   local probe_pid=$2
   local probe_group_pid=${3:-}
   local known_descendants=${4:-}
+  local root_first=${5:-false}
   local child_pid
   if [[ -n "$probe_group_pid" ]]; then
     kill "-$signal" -- "-$probe_group_pid" 2>/dev/null || true
     return 0
+  fi
+  if [[ "$root_first" = true ]]; then
+    kill "-$signal" "$probe_pid" 2>/dev/null || true
   fi
   local live_descendants=''
   if kill -0 "$probe_pid" 2>/dev/null; then
@@ -650,7 +657,9 @@ signal_scoped_queue_probe() {
     printf '%s\n' "$live_descendants"
     printf '%s\n' "$known_descendants"
   )
-  kill "-$signal" "$probe_pid" 2>/dev/null || true
+  if [[ "$root_first" != true ]]; then
+    kill "-$signal" "$probe_pid" 2>/dev/null || true
+  fi
 }
 
 scoped_queue_probe_is_alive() {
@@ -673,19 +682,20 @@ terminate_scoped_queue_probe() {
   local probe_pid=$1
   local probe_group_pid=${2:-}
   local grace_seconds=${3:-2}
+  local root_first=${4:-false}
   local known_descendants
   local grace_deadline
   # Capture the tree before TERM.  A shell leader can exit immediately while
   # a Docker/Compose child ignores TERM and gets reparented, so walking only
   # the live root after that exit cannot find the surviving child.
   known_descendants=$(probe_process_descendants "$probe_pid")
-  signal_scoped_queue_probe TERM "$probe_pid" "$probe_group_pid" "$known_descendants"
+  signal_scoped_queue_probe TERM "$probe_pid" "$probe_group_pid" "$known_descendants" "$root_first"
   grace_deadline=$(( $(date +%s) + grace_seconds ))
   while scoped_queue_probe_is_alive "$probe_pid" "$probe_group_pid" "$known_descendants"; do
     if (( $(date +%s) >= grace_deadline )); then
       # Always send the final signal to the saved descendants, even when the
       # root was already reaped or no longer owns them in the process tree.
-      signal_scoped_queue_probe KILL "$probe_pid" "$probe_group_pid" "$known_descendants"
+      signal_scoped_queue_probe KILL "$probe_pid" "$probe_group_pid" "$known_descendants" "$root_first"
       wait "$probe_pid" 2>/dev/null || true
       return 0
     fi
