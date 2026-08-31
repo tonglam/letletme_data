@@ -1307,6 +1307,30 @@ jobs:
               def statically_true(expression):
                   return static_truth(expression) is True
 
+              positional_parameters = node.args.posonlyargs + node.args.args
+              primary_input = positional_parameters[0].arg if positional_parameters else None
+
+              def consumes_primary_input(call):
+                  if not primary_input:
+                      return False
+                  return any(
+                      isinstance(item, ast.Name)
+                      and isinstance(item.ctx, ast.Load)
+                      and item.id == primary_input
+                      for argument in list(call.args) + [keyword.value for keyword in call.keywords]
+                      for item in ast.walk(argument)
+                  )
+
+              if primary_input and any(
+                  isinstance(item, ast.Name)
+                  and isinstance(item.ctx, ast.Store)
+                  and item.id == primary_input
+                  for item in ast.walk(node)
+              ):
+                  raise SystemExit(
+                      "approved validator has_locked_skill_secret rebinds its primary input"
+                  )
+
               def block_flow(statements):
                   """Return (reachable True return, may fall through)."""
 
@@ -1370,6 +1394,8 @@ jobs:
                           and isinstance(item.func, ast.Attribute)
                           and item.func.attr in {"search", "finditer"}
                       ):
+                          continue
+                      if not consumes_primary_input(item):
                           continue
                       receiver = item.func.value
                       if isinstance(receiver, ast.Name) and receiver.id in direct_pattern_names:
@@ -1489,6 +1515,8 @@ jobs:
 
                   names = set()
                   for item in reachable_finditer_calls(loop.body):
+                      if not consumes_primary_input(item):
+                          continue
                       receiver = item.func.value
                       if isinstance(receiver, ast.Name) and receiver.id in direct_pattern_names:
                           names.add(receiver.id)
@@ -1508,11 +1536,13 @@ jobs:
               def reachable_placeholder_return(statements):
                   """Require a reachable placeholder guard that returns True."""
 
-                  def has_placeholder_call(expression):
+                  def has_non_placeholder_guard(expression):
                       return any(
-                          isinstance(item, ast.Call)
-                          and isinstance(item.func, ast.Name)
-                          and item.func.id == "_looks_like_placeholder"
+                          isinstance(item, ast.UnaryOp)
+                          and isinstance(item.op, ast.Not)
+                          and isinstance(item.operand, ast.Call)
+                          and isinstance(item.operand.func, ast.Name)
+                          and item.operand.func.id == "_looks_like_placeholder"
                           for item in ast.walk(expression)
                       )
 
@@ -1530,7 +1560,7 @@ jobs:
                                       return True
                                   may_fall_through = block_flow(statement.orelse)[1]
                                   continue
-                              if has_placeholder_call(statement.test) and block_flow(statement.body)[0]:
+                              if has_non_placeholder_guard(statement.test) and block_flow(statement.body)[0]:
                                   return True
                               if statically_true(statement.test):
                                   if scan(statement.body):
@@ -1565,14 +1595,59 @@ jobs:
 
                   return scan(statements)
 
+              def reachable_detection_branches(statements):
+                  """Yield credential control nodes from reachable code only."""
+
+                  def visit(block):
+                      for statement in block:
+                          if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                              break
+                          if isinstance(statement, ast.If):
+                              if statically_false(statement.test):
+                                  yield from visit(statement.orelse)
+                                  if not block_flow(statement.orelse)[1]:
+                                      break
+                                  continue
+                              yield ("if", statement)
+                              yield from visit(statement.body)
+                              if statically_true(statement.test):
+                                  if not block_flow(statement.body)[1]:
+                                      break
+                                  continue
+                              yield from visit(statement.orelse)
+                              if not (block_flow(statement.body)[1] or block_flow(statement.orelse)[1]):
+                                  break
+                              continue
+                          if isinstance(statement, (ast.For, ast.AsyncFor)):
+                              if static_truth(statement.iter) is False:
+                                  continue
+                              yield ("for", statement)
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                              continue
+                          if isinstance(statement, ast.While):
+                              if statically_false(statement.test):
+                                  continue
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                              continue
+                          if isinstance(statement, ast.Try):
+                              yield from visit(statement.body)
+                              for handler in statement.handlers:
+                                  yield from visit(handler.body)
+                              yield from visit(statement.orelse)
+                              yield from visit(statement.finalbody)
+
+                  yield from visit(statements)
+
               positive_lines = []
               positive_patterns = set()
-              for branch in ast.walk(node):
-                  patterns = secret_search_names(branch.test) if isinstance(branch, ast.If) else loop_search_names(branch)
+              for kind, branch in reachable_detection_branches(node.body):
+                  patterns = secret_search_names(branch.test) if kind == "if" else loop_search_names(branch)
                   if (
-                      ((isinstance(branch, ast.If) and not statically_false(branch.test)) or isinstance(branch, ast.For))
+                      ((kind == "if" and not statically_false(branch.test)) or kind == "for")
                       and patterns
-                      and (returns_true(branch.body) if isinstance(branch, ast.If) else True)
+                      and (returns_true(branch.body) if kind == "if" else True)
                   ):
                       positive_lines.append(branch.lineno)
                       positive_patterns.update(patterns)
