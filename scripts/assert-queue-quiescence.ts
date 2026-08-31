@@ -380,6 +380,7 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
       });
     }
 
+    let releaseOwner = callerOwner;
     const releasingOwner = releasingQueueConsumerPauseOwner(callerOwner);
     const canRelease =
       owner === callerOwner || owner === acquiringOwner || owner === releasingOwner;
@@ -393,20 +394,26 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
       });
     }
     if (!ownerToken && owner && owner !== QUEUE_CONSUMER_PAUSE_OPERATOR && !canRelease) {
-      // An explicit operator resume may recover a queue left paused by a
-      // crashed deployment. It still takes the queue state through the same
-      // releasing marker, so a supported concurrent pause cannot be lost.
+      // An explicit operator resume may recover a queue left in an interrupted
+      // release. Keep the exact releasing owner so completion can delete only
+      // that marker after the observed BullMQ state reaches OPEN.
       if (owner.startsWith('releasing:')) {
-        throw new Error(`Content consumer release is already in progress: ${args.queueName}`);
+        releaseOwner = owner.slice('releasing:'.length);
+        if (!releaseOwner) {
+          throw new Error(`Content consumer release owner is invalid: ${args.queueName}`);
+        }
+      } else {
+        // A deployment owner without an active release may be converted to an
+        // explicit operator-owned pause before the operator releases it.
+        if (!(await markQueueConsumerOperatorPaused(args.queueName))) {
+          throw new Error(`Content consumer operator release was fenced: ${args.queueName}`);
+        }
+        owner = QUEUE_CONSUMER_PAUSE_OPERATOR;
       }
-      if (!(await markQueueConsumerOperatorPaused(args.queueName))) {
-        throw new Error(`Content consumer operator release was fenced: ${args.queueName}`);
-      }
-      owner = QUEUE_CONSUMER_PAUSE_OPERATOR;
     }
 
     if (owner) {
-      if (!(await beginQueueConsumerPauseRelease(args.queueName, callerOwner))) {
+      if (!(await beginQueueConsumerPauseRelease(args.queueName, releaseOwner))) {
         owner = await readQueueConsumerPauseOwner(args.queueName);
         return resultSummary({
           mode: args.mode,
@@ -425,7 +432,7 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
         `Content consumer did not reach requested mode: ${args.queueName}=${args.mode}`,
       );
     }
-    if (owner && !(await completeQueueConsumerPauseRelease(args.queueName, callerOwner))) {
+    if (owner && !(await completeQueueConsumerPauseRelease(args.queueName, releaseOwner))) {
       throw new Error(`Content consumer release ownership changed: ${args.queueName}`);
     }
     return resultSummary({

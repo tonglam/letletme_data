@@ -24,6 +24,9 @@ DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_X_SCAN_
 # than the original control operation without losing release ownership.
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS:-300}
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID:-}
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID:-}
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP:-}
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE:-false}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -253,12 +256,19 @@ start_content_worker_pause_renewal() {
     echo 'deploy admission: pause ownership renewal interval must be a positive value no greater than 15 minutes' >&2
     return 1
   fi
+  if [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE" != true ]]; then
+    DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP=$(trap -p TERM || true)
+    trap 'exit 1' TERM
+    DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE=true
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID=$$
   (
-    trap - EXIT
-    trap 'exit 0' TERM INT
+    renewal_stop_requested=false
+    trap 'renewal_stop_requested=true; exit 0' TERM INT
+    trap 'if [[ "$renewal_stop_requested" != true ]]; then kill -TERM "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID" 2>/dev/null || true; fi' EXIT
     while :; do
-      sleep "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS" || exit 0
-      renew_content_worker_pause_ownership || true
+      sleep "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS" || exit 1
+      renew_content_worker_pause_ownership || exit 1
     done
   ) &
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=$!
@@ -267,13 +277,26 @@ start_content_worker_pause_renewal() {
     echo 'deploy admission: could not start pause ownership renewal' >&2
     return 1
   fi
+  return 0
 }
 
 stop_content_worker_pause_renewal() {
   local renewal_pid=$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=''
-  [[ -n "$renewal_pid" ]] || return 0
-  terminate_scoped_queue_probe "$renewal_pid" '' 2
+  if [[ -n "$renewal_pid" ]]; then
+    terminate_scoped_queue_probe "$renewal_pid" '' 2
+  fi
+  if [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE" = true ]]; then
+    if [[ -n "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP" ]]; then
+      eval "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP"
+    else
+      trap - TERM
+    fi
+    DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PREVIOUS_TERM_TRAP=''
+    DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE=false
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PARENT_PID=''
+  return 0
 }
 
 remove_content_worker_owned_queue() {
@@ -442,16 +465,17 @@ resume_content_worker_consumers_for_deploy() {
 }
 
 restore_content_deploy_controls() {
-  # Open producer admission before resuming any consumer. If either control
-  # cannot be restored, keep deployment-owned queues paused and fail closed.
+  # Stop ownership renewal before changing either control. Resume consumers
+  # while producer admission is still closed; if a resume fails, no producer
+  # can add work to the remaining paused queues.
   stop_content_worker_pause_renewal
-  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]] &&
-    ! restore_content_x_scan_admission; then
-    echo 'deploy admission: keeping content-worker consumers paused because producer admission could not be restored' >&2
-    return 1
-  fi
   if ! resume_content_worker_consumers_for_deploy; then
     echo 'deploy admission: deployment-owned content-worker consumers remain paused for forward recovery' >&2
+    return 1
+  fi
+  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]] &&
+    ! restore_content_x_scan_admission; then
+    echo 'deploy admission: content-x-scan producer admission remains closed for forward recovery' >&2
     return 1
   fi
 }

@@ -69,12 +69,15 @@ set -euo pipefail
 event_file=$(mktemp)
 pause_dir=$(mktemp -d)
 owner_dir=$(mktemp -d)
+status_failure_file=$(mktemp)
 FAIL_OPEN=false
 CONCURRENT_PAUSE_QUEUE=''
 REASSERT_AFTER_PAUSE_QUEUE=''
 FAIL_PAUSE_AFTER_MARKER_QUEUE=''
-export event_file pause_dir owner_dir FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE FAIL_PAUSE_AFTER_MARKER_QUEUE
-trap 'rm -f "$event_file"; rm -rf "$pause_dir" "$owner_dir"' EXIT
+FAIL_RESUME_QUEUE=''
+FAIL_STATUS_QUEUE=''
+export event_file pause_dir owner_dir status_failure_file FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE FAIL_PAUSE_AFTER_MARKER_QUEUE FAIL_RESUME_QUEUE FAIL_STATUS_QUEUE
+trap 'rm -f "$event_file" "$status_failure_file"; rm -rf "$pause_dir" "$owner_dir"' EXIT
 source scripts/deploy-state-machine.sh
 compose() {
   local args="$*"
@@ -85,6 +88,10 @@ compose() {
   local owner='NONE'
   [[ -e "$owner_file" ]] && owner=$(<"$owner_file")
   if [[ "$args" == *"--consumer-mode STATUS"* ]]; then
+    if [[ "$queue_name" = "$FAIL_STATUS_QUEUE" && -e "$status_failure_file" ]]; then
+      printf 'STATUS-FAILED:%s\n' "$queue_name" >>"$event_file"
+      return 1
+    fi
     local paused=false
     [[ -e "$pause_file" ]] && paused=true
     printf 'STATUS:%s\n' "$queue_name" >>"$event_file"
@@ -123,6 +130,10 @@ compose() {
     return 0
   fi
   if [[ "$args" == *"--consumer-mode RESUME"* ]]; then
+    if [[ "$queue_name" = "$FAIL_RESUME_QUEUE" ]]; then
+      printf 'RESUME-FAILED:%s\n' "$queue_name" >>"$event_file"
+      return 1
+    fi
     if [[ "$owner" = operator ]]; then
       printf 'RESUME-PRESERVED:%s\n' "$queue_name" >>"$event_file"
       printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":true,"paused":true,"changed":false,"owner":"OPERATOR","owned":false,"released":false}\n' "$queue_name"
@@ -229,7 +240,7 @@ cat "$event_file"
     );
   });
 
-  test('pauses every content-worker consumer and opens admission before restoring owned pauses', () => {
+  test('restores owned consumer pauses before opening admission', () => {
     const result = runConsumerControlShell(String.raw`
 pause_content_worker_consumers_for_deploy
 DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
@@ -254,6 +265,9 @@ DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
     expect(stdout).toContain('RESUME:content-x-scan');
     expect(stdout).toContain('RESUME:content-http-acquisition');
     expect(stdout).toContain('RESUME:content-media-transcript');
+    expect(stdout.lastIndexOf('RESUME:content-media-transcript')).toBeLessThan(
+      stdout.indexOf('OPEN'),
+    );
   });
 
   test('renews each deployment-owned consumer pause before long stages', () => {
@@ -271,6 +285,21 @@ restore_content_deploy_controls
         2,
       );
     }
+  });
+
+  test('fails closed when pause ownership renewal fails', () => {
+    const result = runConsumerControlShell(String.raw`
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=1
+FAIL_STATUS_QUEUE=content-x-scan
+export FAIL_STATUS_QUEUE
+pause_content_worker_consumers_for_deploy
+touch "$status_failure_file"
+sleep 3
+`);
+    expect(
+      result.exitCode,
+      `${result.stderr?.toString() ?? ''}\n${result.stdout?.toString() ?? ''}`,
+    ).toBe(1);
   });
 
   test('preserves an externally paused consumer', () => {
@@ -328,18 +357,36 @@ restore_content_deploy_controls
     expect(stdout).toContain('RESUME:content-x-scan');
   });
 
-  test('keeps deployment-owned consumers paused when admission restoration fails', () => {
+  test('keeps producer admission closed when admission restoration fails', () => {
     const result = runConsumerControlShell(String.raw`
 pause_content_worker_consumers_for_deploy
 DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
 export FAIL_OPEN=true
 if restore_content_deploy_controls; then exit 1; fi
+[[ ! -e "$pause_dir/content-x-scan" ]]
+[[ ! -e "$pause_dir/content-http-acquisition" ]]
+[[ ! -e "$pause_dir/content-media-transcript" ]]
+`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('RESUME');
+    expect(result.stdout?.toString() ?? '').not.toContain('OPEN');
+  });
+
+  test('keeps producer admission closed when consumer restoration fails', () => {
+    const result = runConsumerControlShell(String.raw`
+pause_content_worker_consumers_for_deploy
+DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+FAIL_RESUME_QUEUE=content-x-scan
+export FAIL_RESUME_QUEUE
+if restore_content_deploy_controls; then exit 1; fi
 [[ -e "$pause_dir/content-x-scan" ]]
 [[ -e "$pause_dir/content-http-acquisition" ]]
 [[ -e "$pause_dir/content-media-transcript" ]]
+! grep -F 'OPEN' "$event_file"
 `);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout?.toString() ?? '').not.toContain('RESUME');
+    expect(result.stdout?.toString() ?? '').toContain('RESUME-FAILED:content-x-scan');
+    expect(result.stdout?.toString() ?? '').not.toContain('OPEN');
   });
 
   test('rejects unknown, missing, repeated and invalid arguments', () => {
