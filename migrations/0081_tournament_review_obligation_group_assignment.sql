@@ -17,7 +17,7 @@ FROM (
   SELECT head.season_id,
          head.tournament_id,
          head.event_id,
-         head.format,
+         publication.format,
          jsonb_build_object(
            'count', count(payload_row)::integer,
            'assignments', COALESCE(
@@ -35,7 +35,7 @@ FROM (
    AND publication.event_id = head.event_id
    AND publication.revision = head.revision
   LEFT JOIN LATERAL jsonb_array_elements(
-    CASE head.format
+    CASE publication.format
       WHEN 'POINTS' THEN
         CASE
           WHEN jsonb_typeof(publication.payload #> '{points,rows}') = 'array'
@@ -51,8 +51,8 @@ FROM (
       ELSE '[]'::jsonb
     END
   ) payload_row ON true
-  WHERE head.format IN ('POINTS', 'H2H')
-  GROUP BY head.season_id, head.tournament_id, head.event_id, head.format
+  WHERE publication.format IN ('POINTS', 'H2H')
+  GROUP BY head.season_id, head.tournament_id, head.event_id, publication.format
 ) observed
 WHERE obligation.season_id = observed.season_id
   AND obligation.tournament_id = observed.tournament_id
