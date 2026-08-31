@@ -134,6 +134,20 @@ function isDate(value: unknown): value is Date {
   return value instanceof Date && Number.isFinite(value.getTime());
 }
 
+export function parseDatabaseClockEpoch(value: unknown): Date | null {
+  const milliseconds =
+    typeof value === 'bigint'
+      ? Number(value)
+      : typeof value === 'number'
+        ? value
+        : typeof value === 'string' && /^\d+$/.test(value)
+          ? Number(value)
+          : Number.NaN;
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) return null;
+  const parsed = new Date(milliseconds);
+  return isDate(parsed) ? parsed : null;
+}
+
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
@@ -211,9 +225,11 @@ async function validateTarget(
   retiredAt: Date | null;
 }> {
   return db.transaction(async (tx) => {
-    const clockRows = await tx.execute<{ now: Date }>(sql`SELECT clock_timestamp() AS now`);
-    const databaseNow = clockRows[0]?.now;
-    if (!isDate(databaseNow)) throw new Error('database clock is invalid');
+    const clockRows = await tx.execute<{ nowMs: string | number | bigint }>(
+      sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS "nowMs"`,
+    );
+    const databaseNow = parseDatabaseClockEpoch(clockRows[0]?.nowMs);
+    if (!databaseNow) throw new Error('database clock is invalid');
 
     const targetRows = await tx
       .select({

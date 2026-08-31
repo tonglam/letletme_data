@@ -361,15 +361,18 @@ retire_expired_core_staging_publications() {
       return 1
     fi
     echo "deploy repair: validating and retiring exact expired core staging publication $repair_id"
-    APP_IMAGE="${APP_IMAGE:-}" compose --profile migration run --rm -T --interactive=false \
-      -e DATA_STAGING_REPAIR_CONFIRM=YES migration \
-      bun scripts/retire-superseded-core-staging-publication.ts \
-      --action retire \
-      --publication-id "$repair_id" \
-      --season-id "$repair_season_id" \
-      --expected-active-publication-id "$repair_active_publication_id" \
-      --expected-active-revision "$repair_active_revision" \
-      --reason 'operator-confirmed expired superseded core staging repair'
+    if ! APP_IMAGE="${APP_IMAGE:-}" compose --profile migration run --rm -T --interactive=false \
+        -e DATA_STAGING_REPAIR_CONFIRM=YES migration \
+        bun scripts/retire-superseded-core-staging-publication.ts \
+        --action retire \
+        --publication-id "$repair_id" \
+        --season-id "$repair_season_id" \
+        --expected-active-publication-id "$repair_active_publication_id" \
+        --expected-active-revision "$repair_active_revision" \
+        --reason 'operator-confirmed expired superseded core staging repair'; then
+      echo "deploy repair: publication $repair_id was not retired; stopping the repair list" >&2
+      return 1
+    fi
   done
 }
 
