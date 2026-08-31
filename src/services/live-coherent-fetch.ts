@@ -9,6 +9,7 @@ import { createTeamRepository } from '../repositories/teams';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
 import { transformFixtures } from '../transformers/fixtures';
 import { DatabaseError } from '../utils/errors';
+import { logWarn } from '../utils/logger';
 import { prepareEventLives, type PreparedEventLives } from './event-lives.service';
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
@@ -27,9 +28,15 @@ export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
    */
   readonly playerById?: ReadonlyMap<number, LivePlayerIdentity>;
   /**
-   * Event-time identity captured with fixture evidence.  Current Core remains
-   * the normal hot-path baseline, while final/historical reconstruction can
-   * resolve a transferred player to the club represented in that fixture.
+   * Event-time identity enrichment started for every live event. The promise
+   * is intentionally not part of the Core/Live Points readiness gate; Match
+   * detail consumes it when it settles within its bounded enrichment budget.
+   */
+  readonly eventPinnedIdentities?: Promise<readonly FplPlayerFixtureIdentity[] | null>;
+  /**
+   * Event-time identity captured with fixture evidence. Once enrichment is
+   * available, a current-roster transfer cannot replace the club represented
+   * by the fixture.
    */
   readonly playerByFixtureAndId?: ReadonlyMap<string, LivePlayerIdentity>;
 }
@@ -69,7 +76,6 @@ function referenceDataFromCore(
   season: FplSeasonRef,
   teams: readonly Team[],
   players: readonly Player[],
-  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[] = [],
 ): LiveSnapshotReferenceData {
   if (teams.length === 0 || players.length === 0) {
     throw new DatabaseError(
@@ -89,6 +95,18 @@ function referenceDataFromCore(
       },
     ]),
   );
+  return {
+    season: season.seasonCode,
+    ...createLiveFixtureTeamMaps(teams),
+    playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
+    playerById,
+  };
+}
+
+function addEventPinnedIdentities(
+  referenceData: LiveSnapshotReferenceData,
+  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[],
+): LiveSnapshotReferenceData {
   const playerByFixtureAndId = new Map<string, LivePlayerIdentity>();
   for (const identity of eventPinnedIdentities) {
     if (
@@ -125,37 +143,114 @@ function referenceDataFromCore(
   }
 
   return {
-    season: season.seasonCode,
-    ...createLiveFixtureTeamMaps(teams),
-    playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
-    playerById,
+    ...referenceData,
     ...(playerByFixtureAndId.size > 0 ? { playerByFixtureAndId } : {}),
   };
+}
+
+async function loadEventPinnedIdentities(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<readonly FplPlayerFixtureIdentity[] | null> {
+  try {
+    return await createFplPlayerFixtureStatsRepository().findIdentityByEvent(season, eventId);
+  } catch (error) {
+    // Event-time identity enriches the fixture-grain detail publication; it
+    // must never take an already valid Core/live observation off the serving
+    // path. Detail keeps its compatible LKG until this enrichment recovers,
+    // while Live Points continues with the current-roster Core baseline.
+    logWarn('Live event identity enrichment unavailable; continuing with Core reference data', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+const LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS = 500;
+
+function resolveWithinBudget<T>(promise: Promise<T>, budgetMs: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), budgetMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timeout);
+        resolve(null);
+      },
+    );
+  });
+}
+
+/**
+ * Resolve event identity only for fixture-grain detail. A slow database must
+ * never hold the Core baseline, Live Points, or Match desk publication. The
+ * caller keeps its same-event detail LKG when the optional enrichment misses
+ * this budget.
+ */
+export async function resolveLiveReferenceDataForDetail(
+  referenceData: LiveSnapshotReferenceData,
+  options: { readonly requireEventPinnedIdentity?: boolean } = {},
+): Promise<LiveSnapshotReferenceData | null> {
+  const requireEventPinnedIdentity = options.requireEventPinnedIdentity === true;
+  if (!referenceData.eventPinnedIdentities) {
+    return requireEventPinnedIdentity && !referenceData.playerByFixtureAndId ? null : referenceData;
+  }
+  const eventPinnedIdentities = await resolveWithinBudget(
+    referenceData.eventPinnedIdentities,
+    LIVE_EVENT_IDENTITY_ENRICHMENT_BUDGET_MS,
+  );
+  if (!eventPinnedIdentities || eventPinnedIdentities.length === 0) {
+    // A completed event query with no rows and an unavailable query are both
+    // non-authoritative for fixture-grain detail. The Core roster can remain
+    // the Live Points/desk baseline, but it must not replace a missing event
+    // identity in a detail candidate, even provisionally.
+    return null;
+  }
+  try {
+    return addEventPinnedIdentities(referenceData, eventPinnedIdentities);
+  } catch (error) {
+    logWarn('Live event identity enrichment is invalid; keeping detail LKG', {
+      season: referenceData.season,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /** Core metadata for coherent validation; it is never a live publication. */
 export async function loadLiveReferenceData(
   season: FplSeasonRef,
-  eventId?: number,
+  eventId: number,
 ): Promise<LiveSnapshotReferenceData> {
   const cached = await readCoreSnapshotCache(season.seasonCode);
   if (cached) {
-    const eventPinnedIdentities =
-      eventId === undefined
-        ? []
-        : await createFplPlayerFixtureStatsRepository().findIdentityByEvent(season, eventId);
-    return referenceDataFromCore(season, cached.teams, cached.players, eventPinnedIdentities);
+    // Redis Core is already the serving baseline, so start the optional
+    // identity read immediately without making the Core lookup wait for DB.
+    return {
+      ...referenceDataFromCore(season, cached.teams, cached.players),
+      eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+    };
   }
-  return withCoreSnapshotReadLock(season, async (transaction) => {
-    const [teams, players, eventPinnedIdentities] = await Promise.all([
+
+  // When Redis Core is absent, finish the short coherent Core transaction
+  // first. This avoids letting the optional identity query win the only Data
+  // pool connection and delay the baseline it is meant to enrich.
+  const coreReferenceData = await withCoreSnapshotReadLock(season, async (transaction) => {
+    const [teams, players] = await Promise.all([
       createTeamRepository(transaction).findAll(season),
       createPlayerRepository(transaction).findAll(season),
-      eventId === undefined
-        ? Promise.resolve([] as FplPlayerFixtureIdentity[])
-        : createFplPlayerFixtureStatsRepository(transaction).findIdentityByEvent(season, eventId),
     ]);
-    return referenceDataFromCore(season, teams, players, eventPinnedIdentities);
+    return referenceDataFromCore(season, teams, players);
   });
+  return {
+    ...coreReferenceData,
+    eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+  };
 }
 
 function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {

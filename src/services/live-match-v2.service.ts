@@ -26,8 +26,12 @@ import {
   readLiveMatchDetailCheckpointV2,
 } from './live-match-v2-checkpoint.service';
 import { enqueueLiveMatchCheckpoint } from '../jobs/live-data.jobs';
-import type { LiveSnapshotReferenceData } from './live-coherent-fetch';
 import {
+  resolveLiveReferenceDataForDetail,
+  type LiveSnapshotReferenceData,
+} from './live-coherent-fetch';
+import {
+  hasLiveMatchDetailEvidence,
   hasStartedLiveMatchDetail,
   prepareLiveMatchDesk,
   prepareLiveMatchDetail,
@@ -468,19 +472,60 @@ export async function syncLiveMatchesV2FromObservation(
     detailUnavailableReason = 'PLAYER_IDENTITY_UNAVAILABLE';
   } else {
     try {
-      const preparedDetail = prepareLiveMatchDetail({
+      const detailInput = {
         eventId: input.eventId,
         rawElements: input.rawEventLive.elements,
         rawFixtures: input.rawFixtures,
         deskFixtures: preparedDesk.fixtures,
-        referenceData: input.referenceData,
         publishedLiveElementIds: input.publishedLiveElementIds,
-      });
-      const preparedDetailComplete = detailHasRequiredCoverage(
-        preparedDesk.fixtures,
-        preparedDetail.fixtures,
-        preparedDesk.state === 'FINALIZED',
-      );
+      } as const;
+      let preparedDetail: ReturnType<typeof prepareLiveMatchDetail> | null = null;
+
+      if (finalizationRequested && preparedDesk.fixtures.length > 0) {
+        // Resolve fixture identity before preparing any final candidate. The
+        // current roster is never used as a final evidence probe, because a
+        // transferred player can make that probe fail or pass under the wrong
+        // club. Raw explain/BPS evidence is classified separately only when
+        // enrichment is unavailable.
+        const detailReferenceData = await resolveLiveReferenceDataForDetail(input.referenceData, {
+          requireEventPinnedIdentity: true,
+        });
+        if (!detailReferenceData) {
+          if (
+            !hasLiveMatchDetailEvidence({
+              ...detailInput,
+              finalized: preparedDesk.state === 'FINALIZED',
+            })
+          ) {
+            detailUnavailableReason = 'DETAIL_EVIDENCE_INCOMPLETE';
+          } else {
+            throw new Error('Live Match final detail requires event-pinned player identity');
+          }
+        } else {
+          preparedDetail = prepareLiveMatchDetail({
+            ...detailInput,
+            referenceData: detailReferenceData,
+            requireEventPinnedIdentity: true,
+          });
+        }
+      } else {
+        const detailReferenceData = await resolveLiveReferenceDataForDetail(input.referenceData);
+        if (!detailReferenceData) {
+          throw new Error('Live Match detail reference data is unavailable');
+        }
+        preparedDetail = prepareLiveMatchDetail({
+          ...detailInput,
+          referenceData: detailReferenceData,
+        });
+      }
+
+      const preparedDetailComplete = preparedDetail
+        ? detailHasRequiredCoverage(
+            preparedDesk.fixtures,
+            preparedDetail.fixtures,
+            preparedDesk.state === 'FINALIZED',
+          )
+        : false;
       const loadedDetail = await readDetailSafely(input);
       const currentDetail =
         loadedDetail &&
@@ -495,12 +540,13 @@ export async function syncLiveMatchesV2FromObservation(
         // Empty explain/BPS evidence is a transient provider regression, not a
         // valid new detail publication. Keep the complete same-fixture LKG and
         // wait for a candidate with the required player coverage.
-        detailUnavailableReason = 'DETAIL_EVIDENCE_INCOMPLETE';
-      } else {
+        detailUnavailableReason ??= 'DETAIL_EVIDENCE_INCOMPLETE';
+      } else if (preparedDetail) {
+        const completeDetail = preparedDetail;
         if (
           sameDetail(
             currentDetail,
-            preparedDetail.fixtures,
+            completeDetail.fixtures,
             desk.revisions.fixtureIdentity.revision,
             desk.state === 'FINALIZED',
           ) &&
@@ -520,7 +566,7 @@ export async function syncLiveMatchesV2FromObservation(
         if (
           !detail &&
           (detailIsStarted(input.rawFixtures) ||
-            hasStartedLiveMatchDetail(preparedDesk.fixtures, preparedDetail) ||
+            hasStartedLiveMatchDetail(preparedDesk.fixtures, completeDetail) ||
             preparedDesk.state === 'FINALIZED')
         ) {
           const published = await publishLiveMatchDetailV2({
@@ -528,7 +574,7 @@ export async function syncLiveMatchesV2FromObservation(
             eventId: input.eventId,
             observedDeskGeneration: desk.generation,
             fixtureIdentityRevision: desk.revisions.fixtureIdentity.revision,
-            fixtures: preparedDetail.fixtures,
+            fixtures: completeDetail.fixtures,
             sourceCheckedAt: observedAt,
             expectedNextCheckAt: input.expectedNextCheckAt,
             staleAt,

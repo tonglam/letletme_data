@@ -35,6 +35,88 @@ describe('Live Points and Live Matches shared observation', () => {
     expect(fixtureCalls).toBe(0);
   });
 
+  test('loads event-pinned identity for every live lifecycle', async () => {
+    const calls: Array<{ lifecycleState: string; eventId: number }> = [];
+    const lifecycleStates = ['LIVE_ACTIVE', 'BETWEEN_FIXTURES', 'GW_REVIEW'] as const;
+
+    for (const lifecycleState of lifecycleStates) {
+      const sync = syncLiveSnapshotV2(season, 2, {
+        observedFixtures: [],
+        lifecycleState,
+        dependencies: {
+          getEventLive: async () => {
+            throw new Error('event-live unavailable');
+          },
+          getFixtures: async () => {
+            throw new Error('unexpected provider fixture request');
+          },
+          getExpectedFixtureIds: async () => [],
+          getReferenceData: async (_season, eventId) => {
+            calls.push({ lifecycleState, eventId });
+            throw new Error('event identity unavailable');
+          },
+          readObservedMatchDesk: async () => ({ observed: '', read: null }),
+          readObservedMatchDetail: async () => ({ observed: '', read: null }),
+          syncLiveMatches: async () =>
+            ({
+              desk: {} as never,
+              deskFixtures: [],
+              deskChanged: false,
+              deskCheckpointScheduled: false,
+            }) as never,
+          readPublished: async () => null,
+          readCheckpointed: async () => null,
+          checkpointPublication: async () => false,
+        },
+      });
+
+      await sync.catch(() => undefined);
+    }
+
+    expect(calls).toEqual(
+      lifecycleStates.map((lifecycleState) => ({ lifecycleState, eventId: 2 })),
+    );
+  });
+
+  test('keeps the fixture-only desk path when event identity loading fails', async () => {
+    let earlyDeskCalls = 0;
+    const sync = syncLiveSnapshotV2(season, 2, {
+      observedFixtures: [],
+      lifecycleState: 'LIVE_ACTIVE',
+      dependencies: {
+        getEventLive: async () => {
+          throw new Error('event-live unavailable');
+        },
+        getFixtures: async () => {
+          throw new Error('unexpected provider fixture request');
+        },
+        getExpectedFixtureIds: async () => [],
+        getReferenceData: async () => {
+          throw new Error('event identity unavailable');
+        },
+        readObservedMatchDesk: async () => ({ observed: '', read: null }),
+        readObservedMatchDetail: async () => ({ observed: '', read: null }),
+        syncLiveMatches: async (observation) => {
+          earlyDeskCalls += 1;
+          expect(observation.referenceData).toBeUndefined();
+          expect(observation.finalizeEvent).toBe(false);
+          return {
+            desk: {} as never,
+            deskFixtures: [],
+            deskChanged: false,
+            deskCheckpointScheduled: false,
+          } as never;
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => null,
+        checkpointPublication: async () => false,
+      },
+    });
+
+    await expect(sync).rejects.toThrow('event-live unavailable');
+    expect(earlyDeskCalls).toBe(1);
+  });
+
   test('starts provider observation before the durable Live Points read completes', async () => {
     let resolveDurable!: (value: LivePublicationRead | null) => void;
     const durable = new Promise<LivePublicationRead | null>((resolve) => {
