@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertRetireAuthorization,
+  parseDatabaseClockEpoch,
   isSupportedCoreItemSet,
   parseRetireCoreStagingArguments,
 } from '../../scripts/retire-superseded-core-staging-publication';
@@ -10,6 +11,13 @@ const PUBLICATION_ID = '0257fd66-864f-4637-8565-e8108317b648';
 const ACTIVE_PUBLICATION_ID = '91a5e72f-2b69-416f-a4c9-36a8627a35aa';
 
 describe('superseded core staging repair command', () => {
+  test('parses the database epoch without accepting invalid clock values', () => {
+    const parsed = parseDatabaseClockEpoch('1777593600000');
+    expect(parsed?.toISOString()).toBe('2026-05-01T00:00:00.000Z');
+    expect(parseDatabaseClockEpoch(0)).toBeNull();
+    expect(parseDatabaseClockEpoch('not-a-clock')).toBeNull();
+  });
+
   test('accepts both complete legacy and current core item sets', () => {
     expect(
       isSupportedCoreItemSet([
