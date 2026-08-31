@@ -675,6 +675,47 @@ describe('Live Matches V2 Redis publications', () => {
     expect(restored?.publication.fixtures[0]?.key).toBe(item.key);
   });
 
+  test('restores compatible provisional detail behind a newer desk generation', async () => {
+    const firstDesk = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    await publishLiveMatchDetailV2({
+      ...scope,
+      observedDeskGeneration: firstDesk.publication.generation,
+      fixtureIdentityRevision: firstDesk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(35),
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const firstDetail = await readLiveMatchDetailV2({ ...scope, redis });
+    if (!firstDetail) throw new Error('first detail publication is missing');
+    const newerDesk = await publishLiveMatchDeskV2({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(2)],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV2({ ...scope, redis }),
+      redis,
+    });
+    expect(newerDesk.publication.generation).toBeGreaterThan(firstDesk.publication.generation);
+
+    await redis.del(liveMatchDetailKey(scope, 'active'));
+    const restored = await restoreLiveMatchDetailCheckpointV2({
+      checkpoint: firstDetail,
+      redis,
+    });
+
+    expect(restored.published).toBe(true);
+    expect(restored.publication.observedDeskGeneration).toBe(firstDesk.publication.generation);
+    expect((await readLiveMatchDetailV2({ ...scope, redis }))?.publication.publicationId).toBe(
+      firstDetail.publication.publicationId,
+    );
+  });
+
   test('does not let a provisional detail publication supersede final detail', async () => {
     const desk = await publishLiveMatchDeskV2({
       ...scope,

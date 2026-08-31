@@ -440,7 +440,10 @@ local deskRaw = redis.call('GET', KEYS[4]) or ''
 local deskOk, desk = pcall(cjson.decode, deskRaw)
 local deskRevision = nil
 if deskOk and type(desk) == 'table' and type(desk.revisions) == 'table' and type(desk.revisions.fixtureIdentity) == 'table' then deskRevision = desk.revisions.fixtureIdentity.revision end
-local deskCompatible = deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v2' and desk.season == candidate.season and desk.eventId == candidate.eventId and type(desk.generation) == 'number' and type(desk.state) == 'string' and type(deskRevision) == 'string' and deskRevision == candidate.fixtureIdentityRevision and desk.generation == candidate.observedDeskGeneration and ((desk.state == 'FINALIZED') == (candidate.finalized == true))
+local repairMode = ARGV[8] or ''
+local exactDeskGeneration = deskOk and type(desk) == 'table' and type(desk.generation) == 'number' and desk.generation == candidate.observedDeskGeneration
+local compatibleLaggingDesk = (repairMode == 'rollback' or repairMode == 'restore') and candidate.finalized == false and deskOk and type(desk) == 'table' and desk.state ~= 'FINALIZED' and type(desk.generation) == 'number' and desk.generation >= candidate.observedDeskGeneration
+local deskCompatible = deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v2' and desk.season == candidate.season and desk.eventId == candidate.eventId and type(desk.generation) == 'number' and type(desk.state) == 'string' and type(deskRevision) == 'string' and deskRevision == candidate.fixtureIdentityRevision and (exactDeskGeneration or compatibleLaggingDesk) and ((desk.state == 'FINALIZED') == (candidate.finalized == true))
 if not deskCompatible then
   -- A provisional retry must not turn an already-final detail into a hard
   -- failure merely because its desk has crossed the finalization fence. Keep
@@ -458,7 +461,6 @@ if currentRaw ~= '' then
 end
 local validatedId = ARGV[6] or ''
 local validatedGeneration = tonumber(ARGV[7] or '')
-local repairMode = ARGV[8] or ''
 if validatedId ~= '' and (not current or current.publicationId ~= validatedId or current.generation ~= validatedGeneration) then return {'changed'} end
 if current and current.finalized == true and validatedId ~= '' then return {'stale', currentRaw} end
 if current and current.generation >= candidate.generation and (repairMode == '' or (repairMode == 'restore' and validatedId ~= '')) then return {'stale', currentRaw} end
