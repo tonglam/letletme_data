@@ -36,7 +36,7 @@ const composeFile = readFileSync('docker-compose.yml', 'utf8');
 const mediaWorker = readFileSync('src/media-worker.ts', 'utf8');
 const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'utf8');
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
-const xCapacityFence = readFileSync('scripts/hold-briefing-x-capacity-lock.sh', 'utf8');
+const xConsumerMode = readFileSync('scripts/set-content-x-scan-consumer-mode.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
 function expectNonInteractiveComposeRuns(source: string, label: string) {
@@ -133,39 +133,53 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
   });
 
-  test('fences the old producer and drains active work before stopping the consumer', () => {
-    expect(xCapacityFence).toContain(
-      String.raw`pg_advisory_lock(hashtext('briefing-x-capacity-v1'))`,
+  test('pauses the X consumer and drains active work before stopping the producer', () => {
+    expect(xConsumerMode).toContain(
+      ['export const CONTENT_X_SCAN_QUEUE = ', quote, 'content-x-scan', quote].join(''),
     );
-    expect(xCapacityFence).toContain('deploy_x_capacity_lock_ready');
-    expect(xCapacityFence).toContain('pg_sleep(900)');
-    expect(xCapacityFence).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/);
+    expect(xConsumerMode).toContain(
+      ['CONTENT_X_CONSUMER_CONTRACT_VERSION = ', quote, 'content-x-consumer-v1', quote].join(''),
+    );
+    expect(xConsumerMode).toContain('queue.isPaused()');
+    expect(xConsumerMode).toContain('queue.pause()');
+    expect(xConsumerMode).toContain('queue.resume()');
+    expect(xConsumerMode).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/);
 
-    const localAdvisoryFence = deployScript.indexOf('if ! start_content_x_scan_advisory_fence');
-    const localAdmission = deployScript.indexOf('if ! drain_content_x_scan_for_deploy');
+    for (const source of [deployStateMachine, deployScript, workflow]) {
+      expect(source).not.toContain('start_content_x_scan_advisory_fence');
+      expect(source).not.toContain('stop_content_x_scan_advisory_fence');
+      expect(source).not.toContain('hold-briefing-x-capacity-lock');
+    }
+    expect(deployStateMachine).toContain('set-content-x-scan-consumer-mode.ts --mode');
+    expect(deployStateMachine).toContain('pause_content_x_scan_consumer_for_deploy');
+    expect(deployStateMachine).toContain('assert_content_x_scan_consumer_paused');
+    expect(deployStateMachine).toContain('restore_content_x_deploy_controls');
+    expect(deployScript).toContain('restore_content_x_deploy_controls');
+    expect(workflow).toContain('restore_content_x_deploy_controls');
+
+    const localPause = deployScript.indexOf('if ! pause_content_x_scan_consumer_for_deploy; then');
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
-    const localFence = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
-    const localRelease = deployScript.indexOf('if ! stop_content_x_scan_advisory_fence; then');
-    expect(localAdvisoryFence).toBeGreaterThan(-1);
-    expect(localAdmission).toBeGreaterThan(-1);
-    expect(localAdvisoryFence).toBeLessThan(localAdmission);
-    expect(localAdmission).toBeLessThan(localProbe);
-    expect(localProbe).toBeLessThan(localFence);
-    expect(localFence).toBeLessThan(localRelease);
+    const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
+    const localAdmission = deployScript.indexOf('if ! drain_content_x_scan_for_deploy; then');
+    const localRenew = deployScript.indexOf('if ! renew_content_x_scan_admission; then');
+    expect(localPause).toBeGreaterThan(-1);
+    expect(localPause).toBeLessThan(localProbe);
+    expect(localProbe).toBeLessThan(localStop);
+    expect(localStop).toBeLessThan(localAdmission);
+    expect(localAdmission).toBeLessThan(localRenew);
     expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true');
     expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED');
 
-    const workflowAdvisoryFence = workflow.indexOf('if ! start_content_x_scan_advisory_fence');
-    const workflowAdmission = workflow.indexOf('if ! drain_content_x_scan_for_deploy');
-    const workflowFence = workflow.indexOf('docker compose stop -t 45 content-worker');
+    const workflowPause = workflow.indexOf('if ! pause_content_x_scan_consumer_for_deploy; then');
     const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
-    const workflowRelease = workflow.indexOf('if ! stop_content_x_scan_advisory_fence; then');
-    expect(workflowAdvisoryFence).toBeGreaterThan(-1);
-    expect(workflowAdmission).toBeGreaterThan(-1);
-    expect(workflowAdvisoryFence).toBeLessThan(workflowAdmission);
-    expect(workflowAdmission).toBeLessThan(workflowProbe);
-    expect(workflowProbe).toBeLessThan(workflowFence);
-    expect(workflowFence).toBeLessThan(workflowRelease);
+    const workflowStop = workflow.indexOf('if ! docker compose stop -t 45 content-worker; then');
+    const workflowAdmission = workflow.indexOf('if ! drain_content_x_scan_for_deploy; then');
+    const workflowRenew = workflow.indexOf('if ! renew_content_x_scan_admission; then');
+    expect(workflowPause).toBeGreaterThan(-1);
+    expect(workflowPause).toBeLessThan(workflowProbe);
+    expect(workflowProbe).toBeLessThan(workflowStop);
+    expect(workflowStop).toBeLessThan(workflowAdmission);
+    expect(workflowAdmission).toBeLessThan(workflowRenew);
     expect(workflow).toContain('content_worker_fenced=true');
     expect(workflow).toContain(
       '[ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]',

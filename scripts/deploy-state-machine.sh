@@ -8,8 +8,9 @@ deploy_lock_path=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
 deploy_lock_fd=''
 DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}
 DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=${DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED:-false}
-DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER=${DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER:-}
-DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_READY=${DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_READY:-false}
+DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED=${DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED:-false}
+DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_ATTEMPTED=${DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_ATTEMPTED:-false}
+DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_OWNED=${DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_OWNED:-false}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -156,95 +157,108 @@ restore_content_x_scan_admission() {
   echo 'deploy admission: content-x-scan admission restored'
 }
 
-start_content_x_scan_advisory_fence() {
-  if [[ "$DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_READY" = true ]]; then return 0; fi
-
-  local deploy_identity=${DEPLOY_SHA:-unknown}
-  local fence_name
-  local fence_state
-  deploy_identity=${deploy_identity//[^a-zA-Z0-9_.-]/-}
-  fence_name="letletme-data-x-capacity-fence-${deploy_identity}-$$"
-  DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER=$fence_name
-
-  # The backup service already has the direct/session migration LOGIN and a
-  # psql client. Run a uniquely named, exact one-shot container so a failure
-  # cannot accidentally stop or remove any application service.
-  if ! APP_IMAGE="${APP_IMAGE:-}" compose --profile migration run \
-    --rm -T --interactive=false --detach --no-deps --name "$fence_name" \
-    --entrypoint sh backup -euc \
-    'exec bash /app/scripts/hold-briefing-x-capacity-lock.sh' >/dev/null; then
-    echo 'deploy preflight: could not start the X capacity advisory fence' >&2
+set_content_x_scan_consumer_mode() {
+  local mode=${1:-}
+  local output
+  if [[ "$mode" != STATUS && "$mode" != PAUSE && "$mode" != RESUME ]]; then
+    echo "deploy preflight: invalid content-x-scan consumer mode=$mode" >&2
     return 1
   fi
-
-  for _ in $(seq 1 30); do
-    fence_state=$(docker inspect --format '{{.State.Status}}' "$fence_name" 2>/dev/null || true)
-    if [[ "$fence_state" = running ]] &&
-      docker logs "$fence_name" 2>&1 | grep -Fq 'deploy_x_capacity_lock_ready'; then
-      DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_READY=true
-      echo 'deploy preflight: X capacity advisory fence acquired'
-      return 0
-    fi
-    case "$fence_state" in
-      exited|dead)
-        echo "deploy preflight: X capacity advisory fence exited before becoming ready (state=$fence_state)" >&2
-        stop_content_x_scan_advisory_fence || true
-        return 1
-        ;;
-    esac
-    sleep 1
-  done
-
-  echo 'deploy preflight: X capacity advisory fence did not become ready within 30s' >&2
-  stop_content_x_scan_advisory_fence || true
-  return 1
-}
-
-assert_content_x_scan_advisory_fence() {
-  if [[ "$DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_READY" != true ]]; then return 0; fi
-  local fence_state
-  fence_state=$(docker inspect --format '{{.State.Status}}' \
-    "$DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER" 2>/dev/null || true)
-  if [[ "$fence_state" != running ]] ||
-    ! docker logs "$DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER" 2>&1 |
-      grep -Fq 'deploy_x_capacity_lock_ready'; then
-    echo 'deploy preflight: X capacity advisory fence is no longer healthy' >&2
+  if ! output=$(
+    APP_IMAGE="${APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+      bun scripts/set-content-x-scan-consumer-mode.ts --mode "$mode" 2>&1
+  ); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+  if ! printf '%s\n' "$output" | grep -F '"contractVersion":"content-x-consumer-v1"' >/dev/null; then
+    echo 'deploy preflight: content-x-scan consumer result was not machine-readable' >&2
     return 1
   fi
 }
 
-stop_content_x_scan_advisory_fence() {
-  local fence_container=${DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER:-}
-  local fence_state
-  [[ -n "$fence_container" ]] || return 0
+pause_content_x_scan_consumer_for_deploy() {
+  if [[ "$DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED" = true ]]; then return 0; fi
 
-  fence_state=$(docker inspect --format '{{.State.Status}}' "$fence_container" 2>/dev/null || true)
-  case "$fence_state" in
-    running|restarting|paused|created)
-      echo 'deploy admission: releasing X capacity advisory fence'
-      if ! docker stop -t 5 "$fence_container" >/dev/null 2>&1; then
-        echo 'deploy admission: failed to stop the exact X capacity fence container' >&2
-        return 1
-      fi
-      ;;
-    exited|dead|'')
-      ;;
-    *)
-      echo "deploy admission: unknown X capacity fence container state=$fence_state; refusing cleanup" >&2
-      return 1
-      ;;
-  esac
-
-  # --rm normally removes it as part of docker stop. Remove only this exact
-  # stopped container if the engine retained it, never a service or project.
-  if docker inspect "$fence_container" >/dev/null 2>&1; then
-    if ! docker rm "$fence_container" >/dev/null 2>&1; then
-      echo 'deploy admission: failed to remove the exact stopped X capacity fence container' >&2
-      return 1
-    fi
+  local status_output
+  if ! status_output=$(set_content_x_scan_consumer_mode STATUS); then
+    printf '%s\n' "$status_output" >&2
+    return 1
   fi
-  DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER=''
-  DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_READY=false
+  if printf '%s\n' "$status_output" | grep -F '"paused":true' >/dev/null; then
+    DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED=true
+    echo 'deploy preflight: content-x-scan consumer was already paused; preserving the external pause'
+    return 0
+  fi
+  if ! printf '%s\n' "$status_output" | grep -F '"paused":false' >/dev/null; then
+    echo 'deploy preflight: content-x-scan consumer status was not machine-readable' >&2
+    return 1
+  fi
+
+  # Claim ownership before the mutating command. If the one-shot command is
+  # interrupted after Queue.pause() but before it prints its result, the EXIT
+  # handler still knows it must attempt an exact resume.
+  DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_ATTEMPTED=true
+  DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_OWNED=true
+  local output
+  if ! output=$(set_content_x_scan_consumer_mode PAUSE); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$output" | grep -F '"paused":true' >/dev/null; then
+    echo 'deploy preflight: content-x-scan consumer did not remain paused' >&2
+    return 1
+  fi
+  DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED=true
+  echo 'deploy preflight: content-x-scan consumer paused; active work can drain without new X claims'
+}
+
+assert_content_x_scan_consumer_paused() {
+  if [[ "$DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED" != true ]]; then return 0; fi
+  local output
+  if ! output=$(set_content_x_scan_consumer_mode STATUS); then
+    printf '%s\n' "$output" >&2
+    echo 'deploy preflight: could not verify the X consumer pause' >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$output" | grep -F '"paused":true' >/dev/null; then
+    echo 'deploy preflight: X consumer pause was lost while draining' >&2
+    return 1
+  fi
+}
+
+resume_content_x_scan_consumer_for_deploy() {
+  if [[ "$DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_OWNED" != true ]]; then return 0; fi
+  local output
+  if ! output=$(set_content_x_scan_consumer_mode RESUME); then
+    printf '%s\n' "$output" >&2
+    echo 'deploy admission: failed to resume the deployment-owned X consumer pause' >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$output" | grep -F '"paused":false' >/dev/null; then
+    echo 'deploy admission: X consumer resume result was not machine-readable' >&2
+    return 1
+  fi
+  DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED=false
+  DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_ATTEMPTED=false
+  DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_OWNED=false
+  echo 'deploy admission: deployment-owned X consumer pause released'
+}
+
+restore_content_x_deploy_controls() {
+  # Open producer admission before resuming the consumer. If either control
+  # cannot be restored, keep the X queue paused and fail closed rather than
+  # starting a worker that can accept work it cannot consume.
+  if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]] &&
+    ! restore_content_x_scan_admission; then
+    echo 'deploy admission: keeping the X consumer paused because producer admission could not be restored' >&2
+    return 1
+  fi
+  if ! resume_content_x_scan_consumer_for_deploy; then
+    echo 'deploy admission: X consumer remains paused for forward recovery' >&2
+    return 1
+  fi
 }
 
 run_scoped_queue_quiescence_probe() {
@@ -387,7 +401,7 @@ wait_for_scoped_queue_quiescence() {
       printf '%s\n' "deploy preflight: scoped queue quiescence deadline exceeded (${deadline_seconds}s)" >>"$output_file"
       break
     fi
-    if ! assert_content_x_scan_advisory_fence; then
+    if ! assert_content_x_scan_consumer_paused; then
       rm -f "$output_file"
       return 1
     fi
@@ -397,7 +411,7 @@ wait_for_scoped_queue_quiescence() {
       effective_probe_timeout=$remaining_seconds
     fi
     if run_scoped_queue_quiescence_probe "$output_file" "$effective_probe_timeout"; then
-      if ! assert_content_x_scan_advisory_fence; then
+      if ! assert_content_x_scan_consumer_paused; then
         rm -f "$output_file"
         return 1
       fi

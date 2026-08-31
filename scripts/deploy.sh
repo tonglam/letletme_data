@@ -158,6 +158,10 @@ source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 
 restore_stopped_services() {
   local restored=false
+  if ! restore_content_x_deploy_controls; then
+    log_error "Deployment controls could not be restored; leaving services in forward recovery."
+    return 1
+  fi
   if [[ "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
     log_error "Previous runtime was not proven rollback-eligible; leaving services stopped for forward recovery."
     return 1
@@ -192,10 +196,8 @@ deploy() {
     local status=$?
     trap - EXIT
     set +e
-    local admission_restored=true
-    if [[ "$status" -ne 0 && "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]]; then
-      if ! restore_content_x_scan_admission; then admission_restored=false; fi
-    fi
+    local controls_restored=true
+    if ! restore_content_x_deploy_controls; then controls_restored=false; fi
     if [[ "$status" -ne 0 ]]; then
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_RUNNER_UPDATED" = true ]]; then
         export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
@@ -203,7 +205,8 @@ deploy() {
           /home/workspace/letletme-grok-runner \
           "$DEPLOY_RUNNER_PREVIOUS_TARGET" "$DEPLOY_RUNNER_PREVIOUS_RELEASE" || true
       fi
-      if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true ]]; then
+      if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true &&
+        "$controls_restored" = true ]]; then
         if ! restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
           "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
@@ -213,16 +216,11 @@ deploy() {
         fi
       elif [[ "$DEPLOY_COMMITTED" = false &&
         ( "$DEPLOY_SERVICES_STOPPED" = true ||
-          "$DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED" = true ) ]]; then
+          "$DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED" = true ) &&
+        "$controls_restored" = true ]]; then
         restore_stopped_services || true
-      fi
-    fi
-    if [[ -n "$DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER" ]]; then
-      if [[ "$status" -eq 0 || "$admission_restored" = true ||
-        "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" != true ]]; then
-        stop_content_x_scan_advisory_fence || true
-      else
-        log_error "X capacity advisory fence remains held because admission restore failed; forward recovery must release it after Redis is healthy."
+      elif [[ "$controls_restored" != true ]]; then
+        log_error "Deployment controls remain closed; skipping runtime restoration until forward recovery releases them."
       fi
     fi
     release_deploy_lock || true
@@ -336,12 +334,8 @@ deploy() {
     exit 1
   fi
   finish_stage
-  if ! start_content_x_scan_advisory_fence; then
-    log_error "Could not fence the old X producer before changing queue admission; services were not stopped."
-    exit 1
-  fi
-  if ! drain_content_x_scan_for_deploy; then
-    log_error "Could not place content-x-scan into drain-only mode; services were not stopped."
+  if ! pause_content_x_scan_consumer_for_deploy; then
+    log_error "Could not pause the X consumer before queue quiescence; services were not stopped."
     exit 1
   fi
   start_stage quiescence
@@ -358,10 +352,11 @@ deploy() {
     log_error "Database work is not quiescent; services were not stopped."
     exit 1
   fi
-  # The session advisory lock acquired before the Redis gate blocks old-image
-  # X claim transactions. Keep the combined content worker alive while its
-  # already-active BullMQ jobs drain; stopping it first would orphan a slow
-  # provider job behind the worker's 30s shutdown controller.
+  # Pause the X queue before accepting the scoped result so delayed and
+  # prioritized X jobs cannot become active in the stop race. Keep the
+  # combined content worker alive while active work (including HTTP work)
+  # drains; stopping it first would orphan a slow provider job behind the
+  # worker's 30s shutdown controller.
   DEPLOY_ROLLBACK_ELIGIBLE=false
   if rollback_runtime_is_eligible \
     "$old_container" "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_REVISION" \
@@ -372,10 +367,6 @@ deploy() {
     log_error "Queue work is not quiescent; services were not stopped."
     exit 1
   fi
-  if ! renew_content_x_scan_admission; then
-    log_error "Content-x-scan admission could not be renewed before stopping services."
-    exit 1
-  fi
   DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true
   log_info "Stopping content-worker after active X queue work drained"
   if ! compose stop -t 45 content-worker; then
@@ -383,8 +374,8 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! stop_content_x_scan_advisory_fence; then
-    log_error "Could not release the X producer advisory fence after stopping content-worker."
+  if ! drain_content_x_scan_for_deploy; then
+    log_error "Could not place content-x-scan into drain-only mode after stopping the producer; migration was not started."
     restore_stopped_services
     exit 1
   fi
@@ -562,8 +553,8 @@ deploy() {
     [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
     printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
   fi
-  if ! restore_content_x_scan_admission; then
-    log_error "Could not restore content-x-scan admission after service readiness."
+  if ! restore_content_x_deploy_controls; then
+    log_error "Could not restore content-x-scan admission and consumer state after service readiness."
     exit 1
   fi
   DEPLOY_COMMITTED=true

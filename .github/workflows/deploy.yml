@@ -162,7 +162,7 @@ jobs:
             runner_previous_target=""
             runner_previous_release=""
             content_worker_fenced=false
-            admission_restored=true
+            controls_restored=true
             image_id_for_ref() {
               local image_ref=${1:-}
               [ -n "$image_ref" ] || return 0
@@ -224,11 +224,8 @@ jobs:
               original_status=$?
               trap - EXIT
               set +e
-              admission_restored=true
-              if [ "$original_status" -ne 0 ] && \
-                [ "${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}" = true ]; then
-                if ! restore_content_x_scan_admission; then admission_restored=false; fi
-              fi
+              controls_restored=true
+              if ! restore_content_x_deploy_controls; then controls_restored=false; fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_committed" = false ] && [ "$runner_updated" = true ]; then
                 export CONTENT_GROK_RUNNER_RELEASE_SHA="${runner_previous_release:-unknown}"
                 scripts/rollback-host-grok-runner.sh \
@@ -241,7 +238,7 @@ jobs:
                   APP_IMAGE="$IMAGE_REF" docker compose ps || true
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
-                if [ "$migration_started" = false ]; then
+                if [ "$migration_started" = false ] && [ "$controls_restored" = true ]; then
                   if { [ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]; } && \
                     [ "$old_runtime_rollback_eligible" = true ]; then
                     if [ -n "$old_revision" ]; then
@@ -256,25 +253,19 @@ jobs:
                   elif [ "$content_worker_fenced" = true ]; then
                     echo "Data deployment failed after fencing content-worker with no eligible rollback target; leaving the deployment in forward recovery" >&2
                   fi
-                elif [ "$migration_started" = true ]; then
+                elif [ "$migration_started" = true ] && [ "$controls_restored" = true ]; then
                   if ! restore_last_known_healthy_if_ledger_unchanged \
                     "$old_image" "$ledger_before" "$old_revision" "$old_release_sha" \
                     "$old_runner_release_sha" "$old_media_present" \
                     "$old_runtime_rollback_eligible" "$old_image_id"; then
                     echo "Data deployment failed without an eligible, ledger-safe rollback target; leaving the deployment in forward recovery" >&2
                   fi
+                elif [ "$controls_restored" != true ]; then
+                  echo "Data deployment controls remain closed; skipping runtime restoration until forward recovery releases them" >&2
                 fi
               fi
               if [ "$original_status" -ne 0 ] && [ "$image_pull_attempted" = true ]; then
                 cleanup_failed_image "${IMAGE_REF:-}"
-              fi
-              if [ -n "${DEPLOY_CONTENT_X_SCAN_ADVISORY_FENCE_CONTAINER:-}" ]; then
-                if [ "$original_status" -eq 0 ] || [ "$admission_restored" = true ] || \
-                  [ "${DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED:-false}" != true ]; then
-                  stop_content_x_scan_advisory_fence || true
-                else
-                  echo "X capacity advisory fence remains held because admission restore failed; forward recovery must release it after Redis is healthy." >&2
-                fi
               fi
               release_deploy_lock || true
               exit "$original_status"
@@ -441,12 +432,8 @@ jobs:
               exit 1
             fi
             finish_stage
-            if ! start_content_x_scan_advisory_fence; then
-              echo 'deploy preflight: could not fence the old X producer before changing queue admission; services were not stopped' >&2
-              exit 1
-            fi
-            if ! drain_content_x_scan_for_deploy; then
-              echo 'deploy preflight: could not place content-x-scan into drain-only mode; services were not stopped' >&2
+            if ! pause_content_x_scan_consumer_for_deploy; then
+              echo 'deploy preflight: could not pause the X consumer before queue quiescence; services were not stopped' >&2
               exit 1
             fi
 
@@ -464,11 +451,11 @@ jobs:
               echo "deploy preflight: database work is not quiescent; services were not stopped" >&2
               exit 1
             fi
-            # The session advisory lock acquired before the Redis gate blocks
-            # old-image X claim transactions. Keep the combined content worker
-            # alive while already-active BullMQ jobs drain; stopping it first
-            # would orphan a slow provider job behind the worker's 30s shutdown
-            # controller.
+            # Pause the X queue before accepting the scoped result so delayed
+            # and prioritized X jobs cannot become active in the stop race.
+            # Keep the combined content worker alive while active work drains;
+            # stopping it first would orphan a slow provider job behind the
+            # worker's 30s shutdown controller.
             old_runtime_rollback_eligible=false
             if rollback_runtime_is_eligible \
               "$old_container" "$old_image" "$old_revision" \
@@ -479,18 +466,14 @@ jobs:
               echo "deploy preflight: queue work is not quiescent; services were not stopped" >&2
               exit 1
             fi
-            if ! renew_content_x_scan_admission; then
-              echo "deploy preflight: content-x-scan admission could not be renewed before stopping services" >&2
-              exit 1
-            fi
             content_worker_fenced=true
             echo "deploy preflight: stopping content-worker after active X queue work drained"
             if ! docker compose stop -t 45 content-worker; then
               echo "deploy preflight: content-worker did not stop cleanly after queue drain; services were not stopped" >&2
               exit 1
             fi
-            if ! stop_content_x_scan_advisory_fence; then
-              echo "deploy preflight: could not release the X producer advisory fence after stopping content-worker" >&2
+            if ! drain_content_x_scan_for_deploy; then
+              echo "deploy preflight: could not place content-x-scan into drain-only mode after stopping the producer; migration was not started" >&2
               exit 1
             fi
             echo "deploy preflight: migration plan and queue quiescence passed before stopping services"
@@ -503,9 +486,8 @@ jobs:
             # Keep the API/worker gate explicit: API bind recovery must never
             # stop a healthy worker.  (The scheduler is stopped separately.)
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
-            # content-worker was drained and stopped before the quiescence probe
-            # below; the advisory fence has already been released because no X
-            # producer remains in the old runtime.
+            # content-worker was drained and stopped before the final
+            # database/Redis quiescence probes below; no old producer remains.
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 scheduler media-worker
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
@@ -626,8 +608,8 @@ jobs:
               [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
               printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
             fi
-            if ! restore_content_x_scan_admission; then
-              echo 'deploy admission: could not restore content-x-scan admission after service readiness' >&2
+            if ! restore_content_x_deploy_controls; then
+              echo 'deploy admission: could not restore content-x-scan admission and consumer state after service readiness' >&2
               exit 1
             fi
             deployment_committed=true

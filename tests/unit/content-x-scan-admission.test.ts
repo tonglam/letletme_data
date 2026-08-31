@@ -8,6 +8,7 @@ import {
   DEPLOY_QUEUE_ADMISSION_REASON,
   DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
 } from '../../scripts/assert-queue-quiescence';
+import { parseContentXScanConsumerModeArguments } from '../../scripts/set-content-x-scan-consumer-mode';
 import { COMPARE_AND_SET_QUEUE_ADMISSION_LUA } from '../../src/services/queue-governance.service';
 
 describe('content X deployment admission command', () => {
@@ -25,6 +26,54 @@ result=$?
 set -e
 printf 'result=%s\n' "$result"
 cat "$output_file"
+`;
+    return Bun.spawnSync(['bash', '-c', script], {
+      env: process.env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+  }
+
+  function runConsumerControlShell(body: string): ReturnType<typeof Bun.spawnSync> {
+    const script = String.raw`
+set -euo pipefail
+event_file=$(mktemp)
+pause_file=$(mktemp)
+FAIL_OPEN=false
+rm -f "$pause_file"
+trap 'rm -f "$event_file" "$pause_file"' EXIT
+source scripts/deploy-state-machine.sh
+compose() {
+  local args="$*"
+  if [[ "$args" == *"set-content-x-scan-consumer-mode.ts --mode STATUS"* ]]; then
+    local paused=false
+    [[ -e "$pause_file" ]] && paused=true
+    printf 'STATUS\n' >>"$event_file"
+    printf '{"contractVersion":"content-x-consumer-v1","paused":%s}\n' "$paused"
+    return 0
+  fi
+  if [[ "$args" == *"set-content-x-scan-consumer-mode.ts --mode PAUSE"* ]]; then
+    touch "$pause_file"
+    printf 'PAUSE\n' >>"$event_file"
+    printf '%s\n' '{"contractVersion":"content-x-consumer-v1","paused":true}'
+    return 0
+  fi
+  if [[ "$args" == *"set-content-x-scan-consumer-mode.ts --mode RESUME"* ]]; then
+    rm -f "$pause_file"
+    printf 'RESUME\n' >>"$event_file"
+    printf '%s\n' '{"contractVersion":"content-x-consumer-v1","paused":false}'
+    return 0
+  fi
+  if [[ "$args" == *"--admission-mode OPEN"* ]]; then
+    [[ "$FAIL_OPEN" = true ]] && return 1
+    printf 'OPEN\n' >>"$event_file"
+    printf '%s\n' '{"contractVersion":"queue-admission-v2","changed":true}'
+    return 0
+  fi
+  return 1
+}
+${body}
+cat "$event_file"
 `;
     return Bun.spawnSync(['bash', '-c', script], {
       env: process.env,
@@ -56,6 +105,55 @@ cat "$output_file"
     expect(parseContentXScanAdmissionArguments(['--admission-mode=OPEN'])).toEqual({
       mode: 'OPEN',
     });
+  });
+
+  test('parses the explicit consumer pause protocol', () => {
+    expect(parseContentXScanConsumerModeArguments(['--mode', 'STATUS'])).toEqual({
+      mode: 'STATUS',
+    });
+    expect(parseContentXScanConsumerModeArguments(['--mode', 'PAUSE'])).toEqual({
+      mode: 'PAUSE',
+    });
+    expect(parseContentXScanConsumerModeArguments(['--mode', 'RESUME'])).toEqual({
+      mode: 'RESUME',
+    });
+  });
+
+  test('restores only the deployment-owned pause and opens admission first', () => {
+    const result = runConsumerControlShell(String.raw`
+pause_content_x_scan_consumer_for_deploy
+DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+restore_content_x_deploy_controls
+[[ ! -e "$pause_file" ]]
+[[ "$DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED" = false ]]
+[[ "$DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_OWNED" = false ]]
+`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('STATUS\nPAUSE\nOPEN\nRESUME');
+  });
+
+  test('preserves an externally paused consumer', () => {
+    const result = runConsumerControlShell(String.raw`
+touch "$pause_file"
+pause_content_x_scan_consumer_for_deploy
+restore_content_x_deploy_controls
+[[ -e "$pause_file" ]]
+`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('STATUS');
+    expect(result.stdout?.toString() ?? '').not.toContain('RESUME');
+  });
+
+  test('keeps the consumer paused when admission restoration fails', () => {
+    const result = runConsumerControlShell(String.raw`
+pause_content_x_scan_consumer_for_deploy
+DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
+export FAIL_OPEN=true
+    if restore_content_x_deploy_controls; then exit 1; fi
+    [[ -e "$pause_file" ]]
+`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').not.toContain('RESUME');
   });
 
   test('rejects unknown, missing, repeated and invalid arguments', () => {
