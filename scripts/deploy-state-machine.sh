@@ -172,7 +172,7 @@ content_worker_queue_is_listed() {
 
 ensure_content_worker_pause_owner_token() {
   if [[ -n "$DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN" ]]; then return 0; fi
-  local token
+  local token=''
   if command -v uuidgen >/dev/null 2>&1; then
     token=$(uuidgen | tr -d '[:space:]-' || true)
   fi
