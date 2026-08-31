@@ -9,6 +9,7 @@ import { createTeamRepository } from '../repositories/teams';
 import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
 import { transformFixtures } from '../transformers/fixtures';
 import { DatabaseError } from '../utils/errors';
+import { logWarn } from '../utils/logger';
 import { prepareEventLives, type PreparedEventLives } from './event-lives.service';
 import { createLiveFixtureTeamMaps, type LiveFixtureTeamMaps } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
@@ -69,7 +70,6 @@ function referenceDataFromCore(
   season: FplSeasonRef,
   teams: readonly Team[],
   players: readonly Player[],
-  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[],
 ): LiveSnapshotReferenceData {
   if (teams.length === 0 || players.length === 0) {
     throw new DatabaseError(
@@ -89,6 +89,18 @@ function referenceDataFromCore(
       },
     ]),
   );
+  return {
+    season: season.seasonCode,
+    ...createLiveFixtureTeamMaps(teams),
+    playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
+    playerById,
+  };
+}
+
+function addEventPinnedIdentities(
+  referenceData: LiveSnapshotReferenceData,
+  eventPinnedIdentities: readonly FplPlayerFixtureIdentity[],
+): LiveSnapshotReferenceData {
   const playerByFixtureAndId = new Map<string, LivePlayerIdentity>();
   for (const identity of eventPinnedIdentities) {
     if (
@@ -125,12 +137,29 @@ function referenceDataFromCore(
   }
 
   return {
-    season: season.seasonCode,
-    ...createLiveFixtureTeamMaps(teams),
-    playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
-    playerById,
+    ...referenceData,
     ...(playerByFixtureAndId.size > 0 ? { playerByFixtureAndId } : {}),
   };
+}
+
+async function loadEventPinnedIdentities(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<readonly FplPlayerFixtureIdentity[] | null> {
+  try {
+    return await createFplPlayerFixtureStatsRepository().findIdentityByEvent(season, eventId);
+  } catch (error) {
+    // Event-time identity enriches the fixture-grain detail publication; it
+    // must never take an already valid Core/live observation off the serving
+    // path. Detail keeps its compatible LKG until this enrichment recovers,
+    // while Live Points continues with the current-roster Core baseline.
+    logWarn('Live event identity enrichment unavailable; continuing with Core reference data', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /** Core metadata for coherent validation; it is never a live publication. */
@@ -139,21 +168,33 @@ export async function loadLiveReferenceData(
   eventId: number,
 ): Promise<LiveSnapshotReferenceData> {
   const cached = await readCoreSnapshotCache(season.seasonCode);
-  if (cached) {
-    const eventPinnedIdentities = await createFplPlayerFixtureStatsRepository().findIdentityByEvent(
-      season,
-      eventId,
-    );
-    return referenceDataFromCore(season, cached.teams, cached.players, eventPinnedIdentities);
+  const coreReferenceData = cached
+    ? referenceDataFromCore(season, cached.teams, cached.players)
+    : await withCoreSnapshotReadLock(season, async (transaction) => {
+        const [teams, players] = await Promise.all([
+          createTeamRepository(transaction).findAll(season),
+          createPlayerRepository(transaction).findAll(season),
+        ]);
+        return referenceDataFromCore(season, teams, players);
+      });
+
+  const eventPinnedIdentities = await loadEventPinnedIdentities(season, eventId);
+  if (eventPinnedIdentities === null || eventPinnedIdentities.length === 0) {
+    return coreReferenceData;
   }
-  return withCoreSnapshotReadLock(season, async (transaction) => {
-    const [teams, players, eventPinnedIdentities] = await Promise.all([
-      createTeamRepository(transaction).findAll(season),
-      createPlayerRepository(transaction).findAll(season),
-      createFplPlayerFixtureStatsRepository(transaction).findIdentityByEvent(season, eventId),
-    ]);
-    return referenceDataFromCore(season, teams, players, eventPinnedIdentities);
-  });
+  try {
+    return addEventPinnedIdentities(coreReferenceData, eventPinnedIdentities);
+  } catch (error) {
+    // A malformed/duplicate identity row is equivalent to an unavailable
+    // enrichment for this observation. Never discard the valid Core baseline
+    // or overwrite a previously published detail candidate because of it.
+    logWarn('Live event identity enrichment is invalid; continuing with Core reference data', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return coreReferenceData;
+  }
 }
 
 function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
