@@ -256,6 +256,23 @@ DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
     expect(stdout).toContain('RESUME:content-media-transcript');
   });
 
+  test('renews each deployment-owned consumer pause before long stages', () => {
+    const result = runConsumerControlShell(String.raw`
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=1
+pause_content_worker_consumers_for_deploy
+sleep 2
+restore_content_deploy_controls
+[[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]
+`);
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout?.toString() ?? '';
+    for (const queueName of CONTENT_CONSUMER_QUEUE_NAMES) {
+      expect(stdout.match(new RegExp(`STATUS:${queueName}`, 'g'))?.length).toBeGreaterThanOrEqual(
+        2,
+      );
+    }
+  });
+
   test('preserves an externally paused consumer', () => {
     const result = runConsumerControlShell(String.raw`
 touch "$pause_dir/content-x-scan"

@@ -19,6 +19,11 @@ DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES=${DEPLOY_CONTENT_WORKER_OWNED_PAUSED_Q
 DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
 DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS:-10}
 DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_X_SCAN_ADMISSION_CONTROL_TIMEOUT_SECONDS:-10}
+# The Redis pause-owner marker expires after one hour.  Refresh well inside
+# that window so backup, migration, seed, and recovery stages can be longer
+# than the original control operation without losing release ownership.
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS:-300}
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID:-}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -219,6 +224,58 @@ reconcile_failed_content_worker_pause() {
   return 0
 }
 
+renew_content_worker_pause_ownership() {
+  local queue_name output
+  local renewal_failed=false
+  for queue_name in $DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES; do
+    if ! output=$(set_content_worker_consumer_mode STATUS "$queue_name"); then
+      printf '%s\n' "$output" >&2
+      echo "deploy admission: failed to renew the $queue_name consumer pause ownership" >&2
+      renewal_failed=true
+      continue
+    fi
+    if ! printf '%s\n' "$output" | grep -F '"paused":true' >/dev/null ||
+      ! printf '%s\n' "$output" | grep -F '"owned":true' >/dev/null; then
+      printf '%s\n' "$output" >&2
+      echo "deploy admission: $queue_name consumer pause ownership is no longer confirmed" >&2
+      renewal_failed=true
+    fi
+  done
+  if [[ "$renewal_failed" = true ]]; then return 1; fi
+  return 0
+}
+
+start_content_worker_pause_renewal() {
+  if [[ -n "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID" ]]; then return 0; fi
+  if [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]; then return 0; fi
+  if ! [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+    (( DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS > 900 )); then
+    echo 'deploy admission: pause ownership renewal interval must be a positive value no greater than 15 minutes' >&2
+    return 1
+  fi
+  (
+    trap - EXIT
+    trap 'exit 0' TERM INT
+    while :; do
+      sleep "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS" || exit 0
+      renew_content_worker_pause_ownership || true
+    done
+  ) &
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=$!
+  if ! kill -0 "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID" 2>/dev/null; then
+    DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=''
+    echo 'deploy admission: could not start pause ownership renewal' >&2
+    return 1
+  fi
+}
+
+stop_content_worker_pause_renewal() {
+  local renewal_pid=$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID=''
+  [[ -n "$renewal_pid" ]] || return 0
+  terminate_scoped_queue_probe "$renewal_pid" '' 2
+}
+
 remove_content_worker_owned_queue() {
   local queue_name=${1:-}
   local remaining=()
@@ -310,6 +367,10 @@ pause_content_worker_consumers_for_deploy() {
       return 1
     fi
   done
+  if ! start_content_worker_pause_renewal; then
+    echo 'deploy preflight: could not start content-worker pause ownership renewal' >&2
+    return 1
+  fi
   echo 'deploy preflight: content-worker consumers paused; active work can drain without new claims'
 }
 
@@ -383,6 +444,7 @@ resume_content_worker_consumers_for_deploy() {
 restore_content_deploy_controls() {
   # Open producer admission before resuming any consumer. If either control
   # cannot be restored, keep deployment-owned queues paused and fail closed.
+  stop_content_worker_pause_renewal
   if [[ "$DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED" = true ]] &&
     ! restore_content_x_scan_admission; then
     echo 'deploy admission: keeping content-worker consumers paused because producer admission could not be restored' >&2
