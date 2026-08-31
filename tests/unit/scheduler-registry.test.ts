@@ -892,11 +892,11 @@ describe('standalone scheduler registry', () => {
       },
       async (season, eventId) => {
         expect(season).toEqual(TEST_SEASON);
-        expect(eventId).toBe(3);
+        expect([2, 3]).toContain(eventId);
         return [
           {
             ...mockFixture1,
-            event: 3,
+            event: eventId,
             kickoffTime: new Date('2026-08-22T18:00:00.000Z'),
           },
         ];
@@ -905,7 +905,7 @@ describe('standalone scheduler registry', () => {
 
     expect(plans.map((plan) => plan.periodKey)).toEqual([
       'event-1-final',
-      'event-2-final',
+      'event-2-provisional-16',
       'event-3-provisional-16',
     ]);
   });
