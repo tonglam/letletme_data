@@ -618,5 +618,27 @@ describe('Live Matches V2 observation publication', () => {
       (await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0]
         ?.players.length,
     ).toBeGreaterThan(0);
+
+    const finalAttempt = await syncLiveMatchesV2FromObservation({
+      season,
+      eventId,
+      rawFixtures: [{ ...fixture(30), finished: true, finished_provisional: true, stats: [] }],
+      rawEventLive: { elements: emptyDetailEventLive() },
+      referenceData: referenceData(),
+      expectedFixtureIds: [401],
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      observedAt: '2026-08-29T10:01:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+
+    expect(finalAttempt.desk.state).toBe('FINALIZED');
+    expect(finalAttempt.detail?.finalized).toBe(false);
+    expect(finalAttempt.detailUnavailableReason).toBe('DETAIL_EVIDENCE_INCOMPLETE');
+    expect(
+      (await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis }))?.publication
+        .finalized,
+    ).toBe(false);
   });
 });

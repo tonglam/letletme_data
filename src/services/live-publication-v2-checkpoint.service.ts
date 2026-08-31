@@ -33,6 +33,7 @@ import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logError } from '../utils/logger';
 
 const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
+const LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS = 5 * 60_000;
 
 type FinalCheckpointValidationIdentity = Readonly<{
   deskPublicationId: string | null;
@@ -51,7 +52,12 @@ type FinalCheckpointValidationIdentity = Readonly<{
   detailCheckpointedAt: string | null;
 }>;
 
-const finalCheckpointValidationCache = new Map<string, FinalCheckpointValidationIdentity>();
+type FinalCheckpointValidationCacheEntry = Readonly<{
+  identity: FinalCheckpointValidationIdentity;
+  validatedAtMs: number;
+}>;
+
+const finalCheckpointValidationCache = new Map<string, FinalCheckpointValidationCacheEntry>();
 
 const checkpointDateIdentity = (value: Date | null): string | null => value?.toISOString() ?? null;
 
@@ -79,7 +85,7 @@ const rememberFinalCheckpointValidation = (
   identity: FinalCheckpointValidationIdentity,
 ): void => {
   finalCheckpointValidationCache.delete(key);
-  finalCheckpointValidationCache.set(key, identity);
+  finalCheckpointValidationCache.set(key, { identity, validatedAtMs: Date.now() });
   while (finalCheckpointValidationCache.size > LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT) {
     const oldest = finalCheckpointValidationCache.keys().next().value;
     if (typeof oldest !== 'string') break;
@@ -682,9 +688,11 @@ export async function findLivePublicationV2FinalizationTargets(
       detailPayloadBytes: row.detailPayloadBytes ?? null,
       detailCheckpointedAt: checkpointDateIdentity(row.detailCheckpointedAt ?? null),
     };
+    const cachedValidation = finalCheckpointValidationCache.get(key);
     if (
-      finalCheckpointValidationCache.get(key) &&
-      sameFinalCheckpointValidationIdentity(finalCheckpointValidationCache.get(key)!, identity)
+      cachedValidation &&
+      sameFinalCheckpointValidationIdentity(cachedValidation.identity, identity) &&
+      Date.now() - cachedValidation.validatedAtMs < LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS
     ) {
       continue;
     }

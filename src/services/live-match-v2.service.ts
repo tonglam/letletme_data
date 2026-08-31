@@ -261,7 +261,9 @@ function detailHasRequiredCoverage(
   detail: readonly MatchFixtureDetail[],
   finalized: boolean,
 ): boolean {
+  if (detail.length !== deskFixtures.length) return false;
   const detailByFixture = new Map(detail.map((fixture) => [fixture.fixtureId, fixture]));
+  if (detailByFixture.size !== detail.length) return false;
   return deskFixtures.every((fixture) => {
     const detailFixture = detailByFixture.get(fixture.fixtureId);
     const started =
