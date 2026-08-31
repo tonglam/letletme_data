@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   hasCompleteTournamentReviewH2HGroupCoverage,
-  hasCanonicalTournamentReviewH2HGroupAssignment,
+  hasCanonicalTournamentReviewGroupAssignment,
   h2hMatchPointsMatchScore,
   isTournamentReviewEntryApplicable,
   rankTournamentReviewH2HStandings,
@@ -110,7 +110,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
       [4, 20],
     ]);
     expect(
-      hasCanonicalTournamentReviewH2HGroupAssignment({
+      hasCanonicalTournamentReviewGroupAssignment({
         entryIds,
         observedEntryGroupIds,
         canonicalRows: [
@@ -124,7 +124,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
     // Every derived row can be internally coherent while being shifted to a
     // different canonical group.  That must not publish as a valid review.
     expect(
-      hasCanonicalTournamentReviewH2HGroupAssignment({
+      hasCanonicalTournamentReviewGroupAssignment({
         entryIds,
         observedEntryGroupIds,
         canonicalRows: [
@@ -136,7 +136,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
       }),
     ).toBe(false);
     expect(
-      hasCanonicalTournamentReviewH2HGroupAssignment({
+      hasCanonicalTournamentReviewGroupAssignment({
         entryIds,
         observedEntryGroupIds,
         canonicalRows: [

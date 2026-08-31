@@ -523,6 +523,26 @@ async function buildPointsPayload(
   if (rows.length === 0 || rows.length !== tournament.total_team_num) {
     throw new TournamentReviewSourceNotReadyError('points roster is incomplete');
   }
+  const canonicalGroupRows = await tx<Array<{ entry_id: number; group_id: number }>>`
+    SELECT entry_id, group_id
+    FROM competition.tournament_groups
+    WHERE season_id = ${seasonId}
+      AND tournament_id = ${tournament.tournament_id}
+    ORDER BY entry_id, group_id
+  `;
+  const observedEntryGroupIds = new Map<number, number>();
+  for (const row of rows) {
+    if (row.group_id !== null) observedEntryGroupIds.set(row.entry_id, row.group_id);
+  }
+  if (
+    !hasCanonicalTournamentReviewGroupAssignment({
+      entryIds: new Set(rows.map((row) => row.entry_id)),
+      observedEntryGroupIds,
+      canonicalRows: canonicalGroupRows,
+    })
+  ) {
+    throw new TournamentReviewSourceNotReadyError('points group assignment is stale');
+  }
   const notApplicable = rows.filter(
     (row) => !isTournamentReviewEntryApplicable(row.started_event, event.event_id),
   );
@@ -805,7 +825,7 @@ export function hasCompleteTournamentReviewH2HGroupCoverage(input: {
  * treating an H2H event as publishable.  A complete but uniformly shifted
  * projection must fail this check just like a missing or duplicate row.
  */
-export function hasCanonicalTournamentReviewH2HGroupAssignment(input: {
+export function hasCanonicalTournamentReviewGroupAssignment(input: {
   entryIds: ReadonlySet<number>;
   observedEntryGroupIds: ReadonlyMap<number, number>;
   canonicalRows: readonly { entry_id: number; group_id: number }[];
@@ -1198,7 +1218,7 @@ async function buildH2HPayload(
     ORDER BY entry_id, group_id
   `;
   if (
-    !hasCanonicalTournamentReviewH2HGroupAssignment({
+    !hasCanonicalTournamentReviewGroupAssignment({
       entryIds: new Set(scores.keys()),
       observedEntryGroupIds: entryGroupIds,
       canonicalRows: canonicalGroupRows,
