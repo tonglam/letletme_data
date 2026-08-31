@@ -11,6 +11,7 @@ import {
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
 } from '../../src/services/tournament-review-publication.service';
+import { rankTournamentReviewPointsGroups } from '../../src/services/tournament-points-race-results.service';
 
 const publicationSource = readFileSync(
   'src/services/tournament-review-publication.service.ts',
@@ -123,6 +124,16 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(h2hMatchPointsMatchScore(55, 55, 3, 0)).toBe(false);
   });
 
+  test('keeps the producer tie rank aligned with the immutable points validator', () => {
+    const ranks = rankTournamentReviewPointsGroups([
+      { entryId: 2, totalNetPoints: 100, overallRank: 10 },
+      { entryId: 1, totalNetPoints: 100, overallRank: 10 },
+      { entryId: 3, totalNetPoints: 80, overallRank: 30 },
+    ]);
+    expect(ranks.get('100-10')).toBe(1);
+    expect(ranks.get('80-30')).toBe(3);
+  });
+
   test('requires derived matchup scores to cover the entry result watermark', () => {
     const result = {
       event_net_points: 70,
@@ -164,6 +175,15 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('previous.payload AS existing_payload');
     expect(publicationSource).toContain('tournament.updated_at AS tournament_updated_at');
     expect(publicationSource).toContain('tournamentMetadataChanged');
+    expect(publicationSource).toContain('tournament_metadata_eligible_at');
+    expect(publicationSource).toMatch(/previous\.payload #> '\{tournament\}' IS DISTINCT FROM/);
+    expect(publicationSource).toContain('renewReviewObligationLease');
+    expect(publicationSource).toMatch(
+      /lease_expires_at = clock_timestamp\(\) \+ interval '2 minutes'/,
+    );
+    expect(publicationSource).toContain('TOURNAMENT_REVIEW_LEASE_RENEW_INTERVAL_MS');
+    expect(publicationSource).toContain('event.finished = true');
+    expect(publicationSource).toContain('event.data_checked = true');
     expect(publicationSource).toContain('history_group_mismatch_count');
     expect(publicationSource).toContain('points group ranks are inconsistent');
     expect(publicationSource).toContain('payload_row->>\x27applicable\x27');

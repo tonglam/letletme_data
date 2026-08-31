@@ -1101,6 +1101,9 @@ async function buildH2HPayload(
       AND battle.tournament_id = ${tournament.tournament_id}
       AND battle.event_id >= COALESCE(${tournament.group_started_event_id}, 1)
       AND battle.event_id <= ${event.event_id}
+      AND event.finished = true
+      AND event.data_checked = true
+      AND event.data_checked_at IS NOT NULL
     ORDER BY battle.event_id,
              battle.group_id,
              COALESCE(battle.source_order, battle.home_index),
@@ -1962,6 +1965,19 @@ export async function reconcileTournamentReviewObligations(
              event.event_id,
              event.name AS event_name,
              event.updated_at AS event_updated_at,
+             event.data_checked_at AS event_data_checked_at,
+             tournament.setup_finished_at,
+             tournament.standings_ready_at,
+             tournament.updated_at AS tournament_updated_at,
+             jsonb_build_object(
+               'id', tournament.tournament_id,
+               'name', tournament.name,
+               'creator', tournament.creator,
+               'adminEntryId', tournament.admin_entry_id,
+               'leagueId', tournament.league_id,
+               'leagueType', tournament.league_type,
+               'totalTeamNum', tournament.total_team_num
+             ) AS tournament_payload,
              CASE
                WHEN tournament.knockout_mode <> 'no_knockout'
                 AND tournament.knockout_started_event_id IS NOT NULL
@@ -1978,13 +1994,7 @@ export async function reconcileTournamentReviewObligations(
                 AND event.event_id >= tournament.group_started_event_id
                 AND (tournament.group_ended_event_id IS NULL OR event.event_id <= tournament.group_ended_event_id)
                  THEN 'H2H'
-             END AS format,
-             GREATEST(
-               event.data_checked_at,
-               COALESCE(tournament.setup_finished_at, '-infinity'::timestamptz),
-               COALESCE(tournament.standings_ready_at, '-infinity'::timestamptz),
-               COALESCE(tournament.updated_at, '-infinity'::timestamptz)
-             ) AS base_eligible_at
+             END AS format
       FROM competition.tournaments tournament
       JOIN fpl.events event ON event.season_id = tournament.season_id
       WHERE tournament.season_id = ${season.seasonId}
@@ -1997,10 +2007,20 @@ export async function reconcileTournamentReviewObligations(
              candidate.event_id,
              candidate.event_name,
              candidate.event_updated_at,
+             candidate.event_data_checked_at,
+             candidate.setup_finished_at,
+             candidate.standings_ready_at,
+             candidate.tournament_updated_at,
+             candidate.tournament_payload,
              candidate.format,
-             candidate.base_eligible_at,
              existing.eligible_at AS existing_eligible_at,
-             previous.payload AS existing_payload
+             previous.payload AS existing_payload,
+             CASE
+               WHEN previous.payload IS NULL
+                 OR previous.payload #> '{tournament}' IS DISTINCT FROM candidate.tournament_payload
+                 THEN candidate.tournament_updated_at
+               ELSE '-infinity'::timestamptz
+             END AS tournament_metadata_eligible_at
       FROM candidate_formats candidate
       LEFT JOIN competition.tournament_review_obligations existing
         ON existing.season_id = ${season.seasonId}
@@ -2024,7 +2044,10 @@ export async function reconcileTournamentReviewObligations(
              state.event_id,
              state.format,
              GREATEST(
-               state.base_eligible_at,
+               state.event_data_checked_at,
+               COALESCE(state.setup_finished_at, '-infinity'::timestamptz),
+               COALESCE(state.standings_ready_at, '-infinity'::timestamptz),
+               COALESCE(state.tournament_metadata_eligible_at, '-infinity'::timestamptz),
                COALESCE(source.max_source_updated_at, '-infinity'::timestamptz)
              ) AS eligible_at
       FROM candidate_states state
@@ -2343,7 +2366,6 @@ type ClaimedReviewObligation = {
 
 async function claimTournamentReviewObligations(
   season: FplSeasonRef,
-  now: Date,
   limit: number,
 ): Promise<{ owner: string; rows: ClaimedReviewObligation[] }> {
   const owner = randomUUID();
@@ -2357,8 +2379,8 @@ async function claimTournamentReviewObligations(
         WHERE season_id = ${season.seasonId}
           AND (
             (state IN ('PENDING', 'WAITING_SOURCE', 'DEGRADED')
-              AND next_attempt_at IS NOT NULL AND next_attempt_at <= ${now.toISOString()}::timestamptz)
-            OR (state = 'PROCESSING' AND lease_expires_at < ${now.toISOString()}::timestamptz)
+              AND next_attempt_at IS NOT NULL AND next_attempt_at <= clock_timestamp())
+            OR (state = 'PROCESSING' AND lease_expires_at < clock_timestamp())
           )
         ORDER BY next_attempt_at NULLS FIRST, event_id, tournament_id
         FOR UPDATE SKIP LOCKED
@@ -2367,7 +2389,7 @@ async function claimTournamentReviewObligations(
       UPDATE competition.tournament_review_obligations obligation
       SET state = 'PROCESSING',
           lease_owner = ${owner},
-          lease_expires_at = ${new Date(now.getTime() + 2 * 60_000).toISOString()}::timestamptz,
+          lease_expires_at = clock_timestamp() + interval '2 minutes',
           first_attempt_at = COALESCE(first_attempt_at, clock_timestamp()),
           last_attempt_at = clock_timestamp(),
           updated_at = clock_timestamp()
@@ -2383,13 +2405,34 @@ async function claimTournamentReviewObligations(
   return { owner, rows };
 }
 
+const TOURNAMENT_REVIEW_LEASE_RENEW_INTERVAL_MS = 45_000;
+
+async function renewReviewObligationLease(
+  owner: string,
+  obligation: ClaimedReviewObligation,
+): Promise<boolean> {
+  const db = await getDbClient();
+  const rows = await db<Array<{ event_id: number }>>`
+    UPDATE competition.tournament_review_obligations
+    SET lease_expires_at = clock_timestamp() + interval '2 minutes',
+        updated_at = clock_timestamp()
+    WHERE season_id = ${obligation.season_id}
+      AND tournament_id = ${obligation.tournament_id}
+      AND event_id = ${obligation.event_id}
+      AND state = 'PROCESSING'
+      AND lease_owner = ${owner}
+    RETURNING event_id
+  `;
+  return rows.length === 1;
+}
+
 async function finishReviewObligation(
   owner: string,
   obligation: ClaimedReviewObligation,
   result: TournamentReviewPublicationResult,
-): Promise<void> {
+): Promise<boolean> {
   const db = await getDbClient();
-  await db`
+  const rows = await db<Array<{ event_id: number }>>`
     UPDATE competition.tournament_review_obligations
     SET state = 'READY', ready_revision = ${result.revision}, ready_at = clock_timestamp(),
         next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
@@ -2398,14 +2441,16 @@ async function finishReviewObligation(
       AND tournament_id = ${obligation.tournament_id}
       AND event_id = ${obligation.event_id}
       AND state = 'PROCESSING' AND lease_owner = ${owner}
+    RETURNING event_id
   `;
+  return rows.length === 1;
 }
 
 async function failReviewObligation(
   owner: string,
   obligation: ClaimedReviewObligation,
   error: unknown,
-): Promise<void> {
+): Promise<boolean> {
   const sourceFailure = error instanceof TournamentReviewSourceNotReadyError;
   const failureNumber = sourceFailure
     ? obligation.source_rechecks + 1
@@ -2435,7 +2480,7 @@ async function failReviewObligation(
     `${obligation.tournament_id}:${obligation.event_id}:${failureNumber}`,
   );
   const db = await getDbClient();
-  await db`
+  const rows = await db<Array<{ event_id: number }>>`
     UPDATE competition.tournament_review_obligations
     SET state = ${state},
         next_attempt_at = ${nextAt?.toISOString() ?? null}::timestamptz,
@@ -2451,6 +2496,7 @@ async function failReviewObligation(
       AND tournament_id = ${obligation.tournament_id}
       AND event_id = ${obligation.event_id}
       AND state = 'PROCESSING' AND lease_owner = ${owner}
+    RETURNING event_id
   `;
   logError('Tournament review obligation failed', error, {
     seasonId: obligation.season_id,
@@ -2460,6 +2506,7 @@ async function failReviewObligation(
     state,
     nextAttemptAt: nextAt?.toISOString() ?? null,
   });
+  return rows.length === 1;
 }
 
 export async function processTournamentReviewObligations(
@@ -2468,21 +2515,77 @@ export async function processTournamentReviewObligations(
 ): Promise<{ reconciled: number; claimed: number; published: number; failed: number }> {
   const now = options.now ?? new Date();
   const reconciled = await reconcileTournamentReviewObligations(season, now);
-  const claimed = await claimTournamentReviewObligations(season, now, options.limit ?? 20);
+  const claimed = await claimTournamentReviewObligations(season, options.limit ?? 20);
   let published = 0;
   let failed = 0;
   for (const obligation of claimed.rows) {
+    let renewalInFlight: Promise<boolean> | null = null;
+    let leaseLost = false;
+    const renew = async () => {
+      if (!renewalInFlight) {
+        renewalInFlight = renewReviewObligationLease(claimed.owner, obligation).finally(() => {
+          renewalInFlight = null;
+        });
+      }
+      const renewed = await renewalInFlight;
+      if (!renewed) leaseLost = true;
+      return renewed;
+    };
+    const leaseTimer = setInterval(() => {
+      void renew().catch((error) => {
+        leaseLost = true;
+        logError('Failed to renew tournament review obligation lease', error, {
+          seasonId: obligation.season_id,
+          tournamentId: obligation.tournament_id,
+          eventId: obligation.event_id,
+        });
+      });
+    }, TOURNAMENT_REVIEW_LEASE_RENEW_INTERVAL_MS);
     try {
+      if (!(await renew())) {
+        failed += 1;
+        continue;
+      }
       const result = await publishTournamentReviewScope(
         season,
         obligation.tournament_id,
         obligation.event_id,
       );
-      await finishReviewObligation(claimed.owner, obligation, result);
-      published += 1;
+      // A lost lease means another worker owns the obligation. The immutable
+      // publication is idempotent, but this worker must not claim completion.
+      if (!leaseLost) {
+        const finished = await finishReviewObligation(claimed.owner, obligation, result);
+        if (finished) {
+          published += 1;
+        } else {
+          failed += 1;
+          logInfo('Tournament review obligation lease was lost before completion', {
+            seasonId: obligation.season_id,
+            tournamentId: obligation.tournament_id,
+            eventId: obligation.event_id,
+          });
+        }
+      } else {
+        failed += 1;
+        logInfo('Tournament review obligation lease was lost during publication', {
+          seasonId: obligation.season_id,
+          tournamentId: obligation.tournament_id,
+          eventId: obligation.event_id,
+        });
+      }
     } catch (error) {
       failed += 1;
-      await failReviewObligation(claimed.owner, obligation, error);
+      const failedByOwner = await failReviewObligation(claimed.owner, obligation, error);
+      if (!failedByOwner) {
+        logInfo('Tournament review obligation lease was lost before failure recording', {
+          seasonId: obligation.season_id,
+          tournamentId: obligation.tournament_id,
+          eventId: obligation.event_id,
+        });
+      }
+    } finally {
+      clearInterval(leaseTimer);
+      await Promise.resolve(renewalInFlight).catch(() => undefined);
     }
   }
   return { reconciled, claimed: claimed.rows.length, published, failed };

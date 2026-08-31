@@ -19,7 +19,7 @@ function groupRankKey(totalNetPoints: number, overallRank: number | null) {
   return `${totalNetPoints}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
 }
 
-function rankGroups(
+export function rankTournamentReviewPointsGroups(
   groups: Array<{ entryId: number; totalNetPoints: number; overallRank: number | null }>,
 ) {
   const sorted = [...groups].sort((a, b) => {
@@ -33,7 +33,11 @@ function rankGroups(
 
   const rankMap = new Map<string, number>();
   sorted.forEach((entry, index) => {
-    rankMap.set(groupRankKey(entry.totalNetPoints, entry.overallRank), index + 1);
+    const rankKey = groupRankKey(entry.totalNetPoints, entry.overallRank);
+    // Keep the first position for a tied score/rank key. This is the same
+    // competition-ranking convention used by the immutable review validator
+    // (1, 1, 3), rather than overwriting the key with the last tied row.
+    if (!rankMap.has(rankKey)) rankMap.set(rankKey, index + 1);
   });
 
   return rankMap;
@@ -200,7 +204,7 @@ export async function syncTournamentPointsRaceResultsForTournament(
 
   const rankLookup = new Map<number, Map<string, number>>();
   for (const [groupId, groupEntries] of groupsByGroupId.entries()) {
-    rankLookup.set(groupId, rankGroups(groupEntries));
+    rankLookup.set(groupId, rankTournamentReviewPointsGroups(groupEntries));
   }
 
   for (const group of updatedGroups) {
