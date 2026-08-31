@@ -3,7 +3,10 @@ import { Worker, Job, QueueEvents, type Queue } from 'bullmq';
 import { finalizeTournamentEventLifecycle } from '../domain/tournament-event-finalization';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
-import { shouldEnqueueTournamentCascade } from '../domain/tournament-event-results';
+import {
+  isTournamentCascadeFinalizedEvent,
+  shouldEnqueueTournamentCascade,
+} from '../domain/tournament-event-results';
 import {
   tournamentSyncQueue,
   tournamentSyncQueueName,
@@ -35,6 +38,7 @@ import {
   reconcileOfficialTournamentRosters,
   reconcileTournamentRoster,
 } from '../services/tournament-roster.service';
+import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { IncompleteDataSyncError } from '../utils/errors';
@@ -151,7 +155,7 @@ function startSchedulerLeaseHeartbeat(job: Job<TournamentSyncJobData>): () => vo
 
 async function completeTournamentCascadeObligation(
   job: Job<TournamentSyncJobData>,
-  completionStage: 'no-active-tournaments' | 'materialized-view-finalizer',
+  completionStage: 'no-active-tournaments' | 'provisional-results' | 'materialized-view-finalizer',
 ): Promise<void> {
   const fence = inspectSchedulerObligationFence(job.data);
   if (fence.kind !== 'complete') return;
@@ -471,21 +475,20 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
               freshAfter,
               perEntryMutationScopes: true,
             });
-            if (!shouldEnqueueTournamentCascade(result)) {
+            const event = await eventRepository.findById(season, eventId);
+            const hasEntries = shouldEnqueueTournamentCascade(result);
+            const finalized = isTournamentCascadeFinalizedEvent(event);
+            if (!hasEntries) {
               logInfo('Skipping tournament cascade - no active tournament entries', {
                 eventId,
               });
             }
-            if (shouldEnqueueTournamentCascade(result)) {
-              await enqueueOfficialRosterSyncAfterFinalization(season, eventId, job.data.runId);
-              await enqueueTournamentCascade(
-                season,
+            if (hasEntries && !finalized) {
+              logInfo('Deferring tournament cascade - event is not finalized', {
                 eventId,
-                result.finalizationTargets,
-                job.data.runId,
-                cascadeObligation,
-              );
-            } else {
+              });
+            }
+            if (!hasEntries) {
               await enqueueOfficialRosterSyncAfterFinalization(season, eventId, job.data.runId);
               await finalizeTournamentEventLifecycle(eventId, {
                 ...tournamentEventFinalizationDependencies(season, []),
@@ -494,6 +497,36 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 refreshAlways: true,
               });
               await completeTournamentCascadeObligation(job, 'no-active-tournaments');
+            } else if (!finalized) {
+              await completeTournamentCascadeObligation(job, 'provisional-results');
+            } else {
+              // The V2 checkpoint is the durable final authority. Do not use
+              // the legacy row timestamp fence here: checkpoint rows can be
+              // written with PostgreSQL transaction timestamps while the
+              // finalization marker uses a later wall-clock timestamp, which
+              // would make a valid final checkpoint look empty forever.
+              const finalizedCheckpoint = await readLivePublicationV2Checkpoint(season, eventId);
+              if (
+                finalizedCheckpoint?.publication.state !== 'FINALIZED' ||
+                finalizedCheckpoint.eventLives.length === 0 ||
+                finalizedCheckpoint.fixtures.length === 0
+              ) {
+                throw new IncompleteDataSyncError(
+                  `Tournament cascade is waiting for finalized V2 checkpoint in event ${eventId}`,
+                  1,
+                  0,
+                  0,
+                  1,
+                );
+              }
+              await enqueueOfficialRosterSyncAfterFinalization(season, eventId, job.data.runId);
+              await enqueueTournamentCascade(
+                season,
+                eventId,
+                result.finalizationTargets,
+                job.data.runId,
+                cascadeObligation,
+              );
             }
             return result;
           }

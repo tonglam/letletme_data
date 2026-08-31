@@ -50,8 +50,8 @@ import {
   coreSnapshotRefreshReason,
 } from '../domain/core-snapshot-refresh';
 import {
-  getPostMatchResultsCheckpoint,
-  getPostMatchResultsSlot,
+  getFinalizationAwarePostMatchResultsCheckpoint,
+  getFinalizationAwarePostMatchResultsSlot,
 } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
@@ -459,8 +459,11 @@ function postMatchFixtureAuthority(fixtures: readonly Fixture[]): Readonly<{
 /**
  * Results are meaningful only after the final fixture's expected end. During
  * the first 24 hours each event gets one idempotent hourly checkpoint. Once
- * FPL marks an event finished and data_checked, a stable final checkpoint
- * remains eligible forever so scheduler downtime cannot strand historical GWs.
+ * FPL marks an event finished, data_checked, and data_checked_at, a stable
+ * final checkpoint remains eligible forever so scheduler downtime cannot
+ * strand historical GWs. An event that has the boolean flags but not the
+ * timestamp stays on a distinct provisional slot until complete finalization
+ * evidence arrives.
  */
 export async function resolvePostMatchResultPlans(
   context: SchedulerContext,
@@ -471,7 +474,7 @@ export async function resolvePostMatchResultPlans(
   const unsettledEvents: SchedulerContext['events'][number][] = [];
 
   for (const event of context.events) {
-    if (event.finished && event.dataChecked) {
+    if (event.finished === true && event.dataChecked === true && event.dataCheckedAt != null) {
       const dueAt = event.dataCheckedAt ?? event.deadlineTime ?? context.now;
       if (context.now < dueAt) continue;
       plans.push({
@@ -500,8 +503,8 @@ export async function resolvePostMatchResultPlans(
   const provisional = await Promise.all(
     unsettledEvents.map(async (event): Promise<SchedulerObligationPlan | null> => {
       const fixtures = await loadFixtures(context.season, event.id);
-      const checkpoint = getPostMatchResultsCheckpoint(
-        { dataChecked: event.dataChecked === true },
+      const checkpoint = getFinalizationAwarePostMatchResultsCheckpoint(
+        event,
         fixtures,
         context.now,
       );
@@ -558,9 +561,8 @@ function resultEventDefinition(
     timezone: 'UTC',
     resolve: (context) => {
       const cached = postMatchPlanCache.get(context);
-      if (cached) return cached;
-      const plans = resolvePostMatchResultPlans(context);
-      postMatchPlanCache.set(context, plans);
+      const plans = cached ?? resolvePostMatchResultPlans(context);
+      if (!cached) postMatchPlanCache.set(context, plans);
       return plans;
     },
   };
@@ -956,7 +958,7 @@ function postMatchMaintenanceDefinition(): ScheduledJobDefinition {
       const event = await loadSchedulerEvent(context, context.currentEventId);
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
-      const resultSlot = getPostMatchResultsSlot(event, fixtures, context.now);
+      const resultSlot = getFinalizationAwarePostMatchResultsSlot(event, fixtures, context.now);
       if (!resultSlot) return [];
       const dateKey = formatCronDateKey(context.now);
       const hours = [6, 8, 10];

@@ -9,7 +9,13 @@ describe('durable live snapshot result cascade', () => {
     const enqueueLeagueEventResults = mock(async () => ({ id: 'league-final' }));
 
     const result = await enqueueFinalLeagueResultsAfterLiveSync(TEST_SEASON, 12, {
-      getCurrentEvent: async () => ({ id: 12, dataChecked: true }) as Event,
+      getCurrentEvent: async () =>
+        ({
+          id: 12,
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: new Date('2026-08-22T22:00:00.000Z'),
+        }) as Event,
       findFixturesByEvent: async () => [],
       getPostMatchResultsSlot: () => 'final-10',
       enqueueLeagueEventResults,
@@ -25,7 +31,13 @@ describe('durable live snapshot result cascade', () => {
     const enqueueLeagueEventResults = mock(async () => ({ id: 'unexpected' }));
 
     const result = await enqueueFinalLeagueResultsAfterLiveSync(TEST_SEASON, 12, {
-      getCurrentEvent: async () => ({ id: 12, dataChecked: false }) as Event,
+      getCurrentEvent: async () =>
+        ({
+          id: 12,
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: null,
+        }) as Event,
       findFixturesByEvent: async () => [],
       getPostMatchResultsSlot: () => 'provisional-10',
       enqueueLeagueEventResults,

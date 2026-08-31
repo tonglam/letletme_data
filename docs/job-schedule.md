@@ -211,7 +211,10 @@ has converged; otherwise it throws one aggregate failure so a later generation
 can repair the incomplete set.
 
 The tournament event-results job starts its cascade only when at least one
-active tournament entry was processed. The cascade contains:
+active tournament entry was processed, and the event has exact
+`finished && data_checked` evidence plus season-owned finalized event-live
+rows. Provisional result checkpoints do not open derived tournament work. The
+cascade contains:
 
 - points-race, battle-race, and knockout structure jobs;
 - post-event transfer calculation;
