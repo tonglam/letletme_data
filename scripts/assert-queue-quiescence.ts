@@ -10,7 +10,7 @@ import {
   findUnsettledCascades,
   type RunnableQueueCounts,
 } from './queue-quiescence-gate';
-import { allQueueNames } from '../src/queues/names';
+import { allQueueNames, contentQueueNames, contentXScanQueueName } from '../src/queues/names';
 import {
   compareAndSetQueueAdmission,
   readQueueAdmission,
@@ -19,6 +19,7 @@ import {
 } from '../src/services/queue-governance.service';
 import { queueRedisSingleton } from '../src/queues/redis';
 import { getConfig, resolveQueueRedisConfig } from '../src/utils/config';
+import { getQueueConnection } from '../src/utils/queue';
 
 const RUNNABLE_JOB_TYPES = [
   'waiting',
@@ -30,11 +31,21 @@ const RUNNABLE_JOB_TYPES = [
 ] as const satisfies readonly JobType[];
 const CASCADE_PATTERN = 'llm:queue:coordination:tournament-cascade:*';
 
-export const CONTENT_X_SCAN_QUEUE = 'content-x-scan' as const;
+export const CONTENT_X_SCAN_QUEUE = contentXScanQueueName;
+export const CONTENT_CONSUMER_QUEUE_NAMES = contentQueueNames;
+export const CONTENT_CONSUMER_CONTRACT_VERSION = 'content-worker-consumer-v1' as const;
 export const DEPLOY_QUEUE_ADMISSION_TTL_SECONDS = 900;
 export const DEPLOY_QUEUE_ADMISSION_REASON = 'DEPLOY_QUEUE_QUIESCENCE';
 export const DEPLOY_QUEUE_ADMISSION_ACTOR = 'deployment';
 export const DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS = 3;
+
+type ContentConsumerQueueName = (typeof contentQueueNames)[number];
+export type ContentConsumerMode = 'STATUS' | 'PAUSE' | 'RESUME';
+
+export type ContentConsumerModeArguments = Readonly<{
+  mode: ContentConsumerMode;
+  queueName: ContentConsumerQueueName;
+}>;
 
 export type ContentXScanAdmissionArguments = Readonly<{
   mode: QueueAdmissionMode;
@@ -42,6 +53,12 @@ export type ContentXScanAdmissionArguments = Readonly<{
 
 function admissionUsage(): never {
   throw new Error('usage: bun scripts/assert-queue-quiescence.ts --admission-mode DRAIN_ONLY|OPEN');
+}
+
+function consumerUsage(): never {
+  throw new Error(
+    'usage: bun scripts/assert-queue-quiescence.ts --consumer-mode STATUS|PAUSE|RESUME --consumer-queue QUEUE',
+  );
 }
 
 export function parseContentXScanAdmissionArguments(
@@ -70,6 +87,71 @@ export function parseContentXScanAdmissionArguments(
   const mode = values.get('admission-mode');
   if (mode !== 'DRAIN_ONLY' && mode !== 'OPEN') admissionUsage();
   return { mode };
+}
+
+function isContentConsumerQueueName(value: string): value is ContentConsumerQueueName {
+  return (contentQueueNames as readonly string[]).includes(value);
+}
+
+export function parseContentConsumerModeArguments(
+  argv: readonly string[],
+): ContentConsumerModeArguments {
+  const values = new Map<string, string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!token?.startsWith('--')) consumerUsage();
+    const separator = token.indexOf('=');
+    if (separator > 2) {
+      const key = token.slice(2, separator);
+      if ((key !== 'consumer-mode' && key !== 'consumer-queue') || values.has(key)) {
+        consumerUsage();
+      }
+      values.set(key, token.slice(separator + 1));
+      continue;
+    }
+    const key = token.slice(2);
+    const value = argv[index + 1];
+    if (
+      (key !== 'consumer-mode' && key !== 'consumer-queue') ||
+      !value ||
+      value.startsWith('--') ||
+      values.has(key)
+    ) {
+      consumerUsage();
+    }
+    values.set(key, value);
+    index += 1;
+  }
+
+  const mode = values.get('consumer-mode');
+  const queueName = values.get('consumer-queue');
+  if (
+    (mode !== 'STATUS' && mode !== 'PAUSE' && mode !== 'RESUME') ||
+    !queueName ||
+    !isContentConsumerQueueName(queueName) ||
+    values.size !== 2
+  ) {
+    consumerUsage();
+  }
+  return { mode, queueName };
+}
+
+export function parseAllowedPausedQueueNames(
+  raw = process.env.DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES ?? '',
+): readonly ContentConsumerQueueName[] {
+  const names = raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  const unique = new Set<ContentConsumerQueueName>();
+  for (const name of names) {
+    if (!isContentConsumerQueueName(name)) {
+      throw new Error(`Invalid deployment paused queue name: ${name}`);
+    }
+    if (unique.has(name)) throw new Error(`Duplicate deployment paused queue name: ${name}`);
+    unique.add(name);
+  }
+  return [...unique];
 }
 
 function isDeploymentAdmission(admission: QueueAdmission | null): boolean {
@@ -141,8 +223,38 @@ async function applyContentXScanAdmission(args: ContentXScanAdmissionArguments) 
   throw new Error('Queue admission changed concurrently; refusing non-CAS update');
 }
 
+async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
+  const queue = new Queue(args.queueName, { connection: getQueueConnection() });
+  try {
+    const previousPaused = await queue.isPaused();
+    if (args.mode === 'PAUSE' && !previousPaused) await queue.pause();
+    if (args.mode === 'RESUME' && previousPaused) await queue.resume();
+    const paused = await queue.isPaused();
+    const expectedPaused = args.mode === 'PAUSE' ? true : args.mode === 'RESUME' ? false : paused;
+    if (args.mode !== 'STATUS' && paused !== expectedPaused) {
+      throw new Error(
+        `Content consumer did not reach requested mode: ${args.queueName}=${args.mode}`,
+      );
+    }
+    return {
+      contractVersion: CONTENT_CONSUMER_CONTRACT_VERSION,
+      queueName: args.queueName,
+      mode: args.mode,
+      previousPaused,
+      paused,
+      changed: previousPaused !== paused,
+    };
+  } finally {
+    await queue.close();
+  }
+}
+
 function hasContentXScanAdmissionArguments(argv: readonly string[]): boolean {
   return argv.some((arg) => arg === '--admission-mode' || arg.startsWith('--admission-mode='));
+}
+
+function hasContentConsumerModeArguments(argv: readonly string[]): boolean {
+  return argv.some((arg) => arg === '--consumer-mode' || arg.startsWith('--consumer-mode='));
 }
 
 async function scan(redis: Redis, pattern: string): Promise<string[]> {
@@ -221,6 +333,11 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (hasContentConsumerModeArguments(args)) {
+    const consumerArguments = parseContentConsumerModeArguments(args);
+    process.stdout.write(`${JSON.stringify(await applyContentConsumerMode(consumerArguments))}\n`);
+    return;
+  }
 
   const scoped = args.includes('--scoped');
   const modeArgs = args.filter((arg) => arg !== '--scoped');
@@ -234,6 +351,8 @@ async function main(): Promise<void> {
   if (!redisOnly && !databaseUrl) throw new Error('DATABASE_URL is required');
   const config = databaseOnly ? null : getConfig();
   const queueConnection = config ? resolveQueueRedisConfig(config) : null;
+  const allowPausedQueueNames = scoped ? parseAllowedPausedQueueNames() : [];
+  const allowPausedQueueSet = new Set(allowPausedQueueNames);
   const database = redisOnly ? null : postgres(databaseUrl as string, { max: 1, prepare: false });
   const redis = queueConnection
     ? new Redis({
@@ -259,9 +378,15 @@ async function main(): Promise<void> {
           }),
       redis ? scan(redis, CASCADE_PATTERN) : Promise.resolve([]),
       Promise.all(
-        queues.map(
-          async (queue) => [queue.name, await queue.getJobCounts(...RUNNABLE_JOB_TYPES)] as const,
-        ),
+        queues.map(async (queue) => {
+          const counts = await queue.getJobCounts(...RUNNABLE_JOB_TYPES);
+          if (allowPausedQueueSet.has(queue.name as ContentConsumerQueueName)) {
+            if (!(await queue.isPaused())) {
+              throw new Error(`Deployment paused queue is no longer paused: ${queue.name}`);
+            }
+          }
+          return [queue.name, counts] as const;
+        }),
       ),
     ]);
     const snapshot = {
@@ -271,8 +396,9 @@ async function main(): Promise<void> {
       runnableQueues: Object.fromEntries(queueCountRows) as Record<string, RunnableQueueCounts>,
       unsettledCascadeIds: findUnsettledCascades(cascadeKeys),
     };
-    if (scoped) assertScopedQueueQuiescence(snapshot);
-    else assertQueueQuiescence(snapshot);
+    if (scoped) {
+      assertScopedQueueQuiescence(snapshot, { allowPausedQueueNames });
+    } else assertQueueQuiescence(snapshot);
     console.log(
       JSON.stringify(
         { status: 'queue_quiescence_passed', mode: scoped ? 'scoped' : 'global', ...snapshot },

@@ -158,7 +158,7 @@ source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 
 restore_stopped_services() {
   local restored=false
-  if ! restore_content_x_deploy_controls; then
+  if ! restore_content_deploy_controls; then
     log_error "Deployment controls could not be restored; leaving services in forward recovery."
     return 1
   fi
@@ -197,7 +197,7 @@ deploy() {
     trap - EXIT
     set +e
     local controls_restored=true
-    if ! restore_content_x_deploy_controls; then controls_restored=false; fi
+    if ! restore_content_deploy_controls; then controls_restored=false; fi
     if [[ "$status" -ne 0 ]]; then
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_RUNNER_UPDATED" = true ]]; then
         export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
@@ -334,8 +334,8 @@ deploy() {
     exit 1
   fi
   finish_stage
-  if ! pause_content_x_scan_consumer_for_deploy; then
-    log_error "Could not pause the X consumer before queue quiescence; services were not stopped."
+  if ! pause_content_worker_consumers_for_deploy; then
+    log_error "Could not pause the content-worker consumers before queue quiescence; services were not stopped."
     exit 1
   fi
   start_stage quiescence
@@ -352,10 +352,10 @@ deploy() {
     log_error "Database work is not quiescent; services were not stopped."
     exit 1
   fi
-  # Pause the X queue before accepting the scoped result so delayed and
-  # prioritized X jobs cannot become active in the stop race. Keep the
-  # combined content worker alive while active work (including HTTP work)
-  # drains; stopping it first would orphan a slow provider job behind the
+  # Pause every queue consumed by content-worker before accepting the scoped
+  # result so delayed and prioritized content jobs cannot become active in the
+  # stop race. Keep the combined worker alive while active work (including HTTP
+  # work) drains; stopping it first would orphan a slow provider job behind the
   # worker's 30s shutdown controller.
   DEPLOY_ROLLBACK_ELIGIBLE=false
   if rollback_runtime_is_eligible \
@@ -368,7 +368,7 @@ deploy() {
     exit 1
   fi
   DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true
-  log_info "Stopping content-worker after active X queue work drained"
+  log_info "Stopping content-worker after active content work drained"
   if ! compose stop -t 45 content-worker; then
     log_error "Content worker did not stop cleanly after queue drain; migration was not started."
     restore_stopped_services
@@ -553,8 +553,8 @@ deploy() {
     [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
     printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
   fi
-  if ! restore_content_x_deploy_controls; then
-    log_error "Could not restore content-x-scan admission and consumer state after service readiness."
+  if ! restore_content_deploy_controls; then
+    log_error "Could not restore content-worker admission and consumer state after service readiness."
     exit 1
   fi
   DEPLOY_COMMITTED=true

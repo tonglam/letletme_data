@@ -36,7 +36,6 @@ const composeFile = readFileSync('docker-compose.yml', 'utf8');
 const mediaWorker = readFileSync('src/media-worker.ts', 'utf8');
 const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'utf8');
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
-const xConsumerMode = readFileSync('scripts/set-content-x-scan-consumer-mode.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
 function expectNonInteractiveComposeRuns(source: string, label: string) {
@@ -133,31 +132,35 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
   });
 
-  test('pauses the X consumer and drains active work before stopping the producer', () => {
-    expect(xConsumerMode).toContain(
-      ['export const CONTENT_X_SCAN_QUEUE = ', quote, 'content-x-scan', quote].join(''),
+  test('pauses every content-worker consumer and drains active work before stopping the producer', () => {
+    expect(queueQuiescence).toContain('export const CONTENT_X_SCAN_QUEUE = contentXScanQueueName');
+    expect(queueQuiescence).toContain(
+      ['CONTENT_CONSUMER_CONTRACT_VERSION = ', quote, 'content-worker-consumer-v1', quote].join(''),
     );
-    expect(xConsumerMode).toContain(
-      ['CONTENT_X_CONSUMER_CONTRACT_VERSION = ', quote, 'content-x-consumer-v1', quote].join(''),
-    );
-    expect(xConsumerMode).toContain('queue.isPaused()');
-    expect(xConsumerMode).toContain('queue.pause()');
-    expect(xConsumerMode).toContain('queue.resume()');
-    expect(xConsumerMode).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/);
+    expect(queueQuiescence).toContain('queue.isPaused()');
+    expect(queueQuiescence).toContain('queue.pause()');
+    expect(queueQuiescence).toContain('queue.resume()');
+    expect(queueQuiescence).toContain('parseContentConsumerModeArguments');
+    expect(queueQuiescence).toContain('parseAllowedPausedQueueNames');
+    expect(queueQuiescence).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/);
+    expect(deployStateMachine).toContain('content-x-scan');
+    expect(deployStateMachine).toContain('content-http-acquisition');
+    expect(deployStateMachine).toContain('content-media-transcript');
+    expect(deployStateMachine).toContain('DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES');
+    expect(deployStateMachine).toContain('run_bounded_deploy_probe');
 
     for (const source of [deployStateMachine, deployScript, workflow]) {
       expect(source).not.toContain('start_content_x_scan_advisory_fence');
       expect(source).not.toContain('stop_content_x_scan_advisory_fence');
       expect(source).not.toContain('hold-briefing-x-capacity-lock');
     }
-    expect(deployStateMachine).toContain('set-content-x-scan-consumer-mode.ts --mode');
-    expect(deployStateMachine).toContain('pause_content_x_scan_consumer_for_deploy');
-    expect(deployStateMachine).toContain('assert_content_x_scan_consumer_paused');
-    expect(deployStateMachine).toContain('restore_content_x_deploy_controls');
-    expect(deployScript).toContain('restore_content_x_deploy_controls');
-    expect(workflow).toContain('restore_content_x_deploy_controls');
+    expect(deployStateMachine).toContain('assert_content_worker_consumers_paused');
+    expect(deployStateMachine).toContain('pause_content_worker_consumers_for_deploy');
+    expect(deployStateMachine).toContain('restore_content_deploy_controls');
+    expect(deployScript).toContain('restore_content_deploy_controls');
+    expect(workflow).toContain('restore_content_deploy_controls');
 
-    const localPause = deployScript.indexOf('if ! pause_content_x_scan_consumer_for_deploy; then');
+    const localPause = deployScript.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
     const localAdmission = deployScript.indexOf('if ! drain_content_x_scan_for_deploy; then');
@@ -170,7 +173,7 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED=true');
     expect(deployScript).toContain('DEPLOY_CONTENT_X_SCAN_PRODUCER_FENCED');
 
-    const workflowPause = workflow.indexOf('if ! pause_content_x_scan_consumer_for_deploy; then');
+    const workflowPause = workflow.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
     const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const workflowStop = workflow.indexOf('if ! docker compose stop -t 45 content-worker; then');
     const workflowAdmission = workflow.indexOf('if ! drain_content_x_scan_for_deploy; then');

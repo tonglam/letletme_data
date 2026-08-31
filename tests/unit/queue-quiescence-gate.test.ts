@@ -139,6 +139,36 @@ describe('queue quiescence gate', () => {
     );
   });
 
+  test('allows only deployment-paused content backlog while still rejecting active work', () => {
+    expect(() =>
+      assertScopedQueueQuiescence(
+        {
+          ...accepted(),
+          runnableQueues: {
+            'content-x-scan': { paused: 12 },
+            'content-http-acquisition': { paused: 4 },
+          },
+        },
+        { allowPausedQueueNames: ['content-x-scan', 'content-http-acquisition'] },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertScopedQueueQuiescence(
+        {
+          ...accepted(),
+          runnableQueues: { 'content-x-scan': { paused: 12, active: 1 } },
+        },
+        { allowPausedQueueNames: ['content-x-scan'] },
+      ),
+    ).toThrow('active or structural jobs');
+    expect(() =>
+      assertScopedQueueQuiescence(
+        { ...accepted(), runnableQueues: { 'content-x-scan': { paused: 1 } } },
+        { allowPausedQueueNames: ['content-http-acquisition'] },
+      ),
+    ).toThrow('active or structural jobs');
+  });
+
   test('recognizes only a cascade with a terminal enqueue marker as settled', () => {
     const prefix = 'llm:queue:coordination:tournament-cascade';
     expect(cascadeId(`${prefix}:meta:2627-1-123`)).toEqual({

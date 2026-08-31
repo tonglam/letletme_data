@@ -3,16 +3,21 @@ import { readFileSync } from 'node:fs';
 
 import {
   parseContentXScanAdmissionArguments,
+  parseContentConsumerModeArguments,
+  parseAllowedPausedQueueNames,
   CONTENT_X_SCAN_QUEUE,
+  CONTENT_CONSUMER_QUEUE_NAMES,
   DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS,
   DEPLOY_QUEUE_ADMISSION_REASON,
   DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
 } from '../../scripts/assert-queue-quiescence';
-import { parseContentXScanConsumerModeArguments } from '../../scripts/set-content-x-scan-consumer-mode';
 import { COMPARE_AND_SET_QUEUE_ADMISSION_LUA } from '../../src/services/queue-governance.service';
 
 describe('content X deployment admission command', () => {
-  function runQueueProbeShell(composeBody: string): ReturnType<typeof Bun.spawnSync> {
+  function runQueueProbeShell(
+    composeBody: string,
+    environment: Record<string, string> = {},
+  ): ReturnType<typeof Bun.spawnSync> {
     const script = String.raw`
 set -euo pipefail
 source scripts/deploy-state-machine.sh
@@ -28,6 +33,30 @@ printf 'result=%s\n' "$result"
 cat "$output_file"
 `;
     return Bun.spawnSync(['bash', '-c', script], {
+      env: { ...process.env, ...environment },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+  }
+
+  function runConsumerStatusProbeShell(composeBody: string): ReturnType<typeof Bun.spawnSync> {
+    const script = String.raw`
+set -euo pipefail
+export DEPLOY_CONTENT_WORKER_PAUSED_QUEUES=content-x-scan
+source scripts/deploy-state-machine.sh
+compose() {
+  ${composeBody}
+}
+output_file=$(mktemp)
+set +e
+run_content_worker_consumer_status_probe "$output_file" 1 content-x-scan
+result=$?
+set -e
+printf 'result=%s\n' "$result"
+cat "$output_file"
+rm -f "$output_file"
+`;
+    return Bun.spawnSync(['bash', '-c', script], {
       env: process.env,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -38,30 +67,41 @@ cat "$output_file"
     const script = String.raw`
 set -euo pipefail
 event_file=$(mktemp)
-pause_file=$(mktemp)
+pause_dir=$(mktemp -d)
 FAIL_OPEN=false
-rm -f "$pause_file"
-trap 'rm -f "$event_file" "$pause_file"' EXIT
+CONCURRENT_PAUSE_QUEUE=''
+trap 'rm -f "$event_file"; rm -rf "$pause_dir"' EXIT
 source scripts/deploy-state-machine.sh
 compose() {
   local args="$*"
-  if [[ "$args" == *"set-content-x-scan-consumer-mode.ts --mode STATUS"* ]]; then
+  local queue_name=''
+  queue_name=$(awk '{ for (i = 1; i <= NF; i += 1) if ($i == "--consumer-queue") print $(i + 1) }' <<<"$args")
+  local pause_file="$pause_dir/$queue_name"
+  if [[ "$args" == *"--consumer-mode STATUS"* ]]; then
     local paused=false
     [[ -e "$pause_file" ]] && paused=true
-    printf 'STATUS\n' >>"$event_file"
-    printf '{"contractVersion":"content-x-consumer-v1","paused":%s}\n' "$paused"
+    printf 'STATUS:%s\n' "$queue_name" >>"$event_file"
+    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":%s}\n' "$queue_name" "$paused"
     return 0
   fi
-  if [[ "$args" == *"set-content-x-scan-consumer-mode.ts --mode PAUSE"* ]]; then
+  if [[ "$args" == *"--consumer-mode PAUSE"* ]]; then
+    local previous_paused=false
+    [[ -e "$pause_file" ]] && previous_paused=true
+    if [[ "$queue_name" = "$CONCURRENT_PAUSE_QUEUE" && "$previous_paused" = false ]]; then
+      touch "$pause_file"
+      printf 'PAUSE-RACE:%s\n' "$queue_name" >>"$event_file"
+      printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":true,"paused":true,"changed":false}\n' "$queue_name"
+      return 0
+    fi
     touch "$pause_file"
-    printf 'PAUSE\n' >>"$event_file"
-    printf '%s\n' '{"contractVersion":"content-x-consumer-v1","paused":true}'
+    printf 'PAUSE:%s\n' "$queue_name" >>"$event_file"
+    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","previousPaused":%s,"paused":true,"changed":%s}\n' "$queue_name" "$previous_paused" "$([[ "$previous_paused" = false ]] && echo true || echo false)"
     return 0
   fi
-  if [[ "$args" == *"set-content-x-scan-consumer-mode.ts --mode RESUME"* ]]; then
+  if [[ "$args" == *"--consumer-mode RESUME"* ]]; then
     rm -f "$pause_file"
-    printf 'RESUME\n' >>"$event_file"
-    printf '%s\n' '{"contractVersion":"content-x-consumer-v1","paused":false}'
+    printf 'RESUME:%s\n' "$queue_name" >>"$event_file"
+    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":false}\n' "$queue_name"
     return 0
   fi
   if [[ "$args" == *"--admission-mode OPEN"* ]]; then
@@ -108,49 +148,116 @@ cat "$event_file"
   });
 
   test('parses the explicit consumer pause protocol', () => {
-    expect(parseContentXScanConsumerModeArguments(['--mode', 'STATUS'])).toEqual({
+    expect(
+      parseContentConsumerModeArguments([
+        '--consumer-mode',
+        'STATUS',
+        '--consumer-queue',
+        'content-x-scan',
+      ]),
+    ).toEqual({
       mode: 'STATUS',
+      queueName: 'content-x-scan',
     });
-    expect(parseContentXScanConsumerModeArguments(['--mode', 'PAUSE'])).toEqual({
+    expect(
+      parseContentConsumerModeArguments([
+        '--consumer-mode=PAUSE',
+        '--consumer-queue=content-http-acquisition',
+      ]),
+    ).toEqual({
       mode: 'PAUSE',
+      queueName: 'content-http-acquisition',
     });
-    expect(parseContentXScanConsumerModeArguments(['--mode', 'RESUME'])).toEqual({
+    expect(
+      parseContentConsumerModeArguments([
+        '--consumer-mode',
+        'RESUME',
+        '--consumer-queue',
+        'content-media-transcript',
+      ]),
+    ).toEqual({
       mode: 'RESUME',
+      queueName: 'content-media-transcript',
     });
+    expect(CONTENT_CONSUMER_QUEUE_NAMES).toEqual([
+      'content-http-acquisition',
+      'content-media-transcript',
+      'content-x-scan',
+    ]);
   });
 
-  test('restores only the deployment-owned pause and opens admission first', () => {
+  test('parses and bounds the deployment paused-queue allowlist', () => {
+    expect(parseAllowedPausedQueueNames(' content-x-scan, content-http-acquisition ')).toEqual([
+      'content-x-scan',
+      'content-http-acquisition',
+    ]);
+    expect(() => parseAllowedPausedQueueNames('content-x-scan,content-x-scan')).toThrow(
+      'Duplicate deployment paused queue name',
+    );
+    expect(() => parseAllowedPausedQueueNames('content-x-scan,unknown')).toThrow(
+      'Invalid deployment paused queue name',
+    );
+  });
+
+  test('pauses every content-worker consumer and opens admission before restoring owned pauses', () => {
     const result = runConsumerControlShell(String.raw`
-pause_content_x_scan_consumer_for_deploy
+pause_content_worker_consumers_for_deploy
 DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
-restore_content_x_deploy_controls
-[[ ! -e "$pause_file" ]]
-[[ "$DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSED" = false ]]
-[[ "$DEPLOY_CONTENT_X_SCAN_CONSUMER_PAUSE_OWNED" = false ]]
+    restore_content_deploy_controls
+[[ ! -e "$pause_dir/content-x-scan" ]]
+[[ ! -e "$pause_dir/content-http-acquisition" ]]
+[[ ! -e "$pause_dir/content-media-transcript" ]]
+[[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]
 `);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout?.toString() ?? '').toContain('STATUS\nPAUSE\nOPEN\nRESUME');
+    const stdout = result.stdout?.toString() ?? '';
+    expect(stdout).toContain('STATUS:content-x-scan');
+    expect(stdout).toContain('PAUSE:content-x-scan');
+    expect(stdout).toContain('STATUS:content-http-acquisition');
+    expect(stdout).toContain('PAUSE:content-http-acquisition');
+    expect(stdout).toContain('STATUS:content-media-transcript');
+    expect(stdout).toContain('PAUSE:content-media-transcript');
+    expect(stdout).toContain('OPEN');
+    expect(stdout).toContain('RESUME:content-x-scan');
+    expect(stdout).toContain('RESUME:content-http-acquisition');
+    expect(stdout).toContain('RESUME:content-media-transcript');
   });
 
   test('preserves an externally paused consumer', () => {
     const result = runConsumerControlShell(String.raw`
-touch "$pause_file"
-pause_content_x_scan_consumer_for_deploy
-restore_content_x_deploy_controls
-[[ -e "$pause_file" ]]
+touch "$pause_dir/content-x-scan"
+pause_content_worker_consumers_for_deploy
+restore_content_deploy_controls
+[[ -e "$pause_dir/content-x-scan" ]]
 `);
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').toContain('STATUS');
-    expect(result.stdout?.toString() ?? '').not.toContain('RESUME');
+    expect(result.stdout?.toString() ?? '').not.toContain('RESUME:content-x-scan');
   });
 
-  test('keeps the consumer paused when admission restoration fails', () => {
+  test('does not claim ownership when an operator pauses after STATUS', () => {
     const result = runConsumerControlShell(String.raw`
-pause_content_x_scan_consumer_for_deploy
+CONCURRENT_PAUSE_QUEUE=content-http-acquisition
+pause_content_worker_consumers_for_deploy
+restore_content_deploy_controls
+[[ -e "$pause_dir/content-http-acquisition" ]]
+[[ "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" != *content-http-acquisition* ]]
+`);
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout?.toString() ?? '';
+    expect(stdout).toContain('PAUSE-RACE:content-http-acquisition');
+    expect(stdout).not.toContain('RESUME:content-http-acquisition');
+  });
+
+  test('keeps deployment-owned consumers paused when admission restoration fails', () => {
+    const result = runConsumerControlShell(String.raw`
+pause_content_worker_consumers_for_deploy
 DEPLOY_CONTENT_X_SCAN_ADMISSION_ATTEMPTED=true
 export FAIL_OPEN=true
-    if restore_content_x_deploy_controls; then exit 1; fi
-    [[ -e "$pause_file" ]]
+if restore_content_deploy_controls; then exit 1; fi
+[[ -e "$pause_dir/content-x-scan" ]]
+[[ -e "$pause_dir/content-http-acquisition" ]]
+[[ -e "$pause_dir/content-media-transcript" ]]
 `);
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').not.toContain('RESUME');
@@ -176,7 +283,7 @@ export FAIL_OPEN=true
     const stdout = result.stdout?.toString() ?? '';
     expect(result.exitCode).toBe(0);
     expect(stdout).toContain('result=124');
-    expect(stdout).toContain('scoped queue probe timed out after 1s');
+    expect(stdout).toContain('queue probe timed out after 1s');
     expect(elapsedMs).toBeLessThan(5_000);
   });
 
@@ -184,6 +291,26 @@ export FAIL_OPEN=true
     const result = runQueueProbeShell('return 0');
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').toContain('result=0');
+  });
+
+  test('passes only the deployment-paused queue allowlist to the bounded probe', () => {
+    const result = runQueueProbeShell(
+      String.raw`
+[[ "$DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES" = content-x-scan,content-http-acquisition ]]
+return 0`,
+      { DEPLOY_CONTENT_WORKER_PAUSED_QUEUES: 'content-x-scan content-http-acquisition' },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('result=0');
+  });
+
+  test('bounds consumer status checks with the same process-group deadline', () => {
+    const startedAt = Date.now();
+    const result = runConsumerStatusProbeShell(String.raw`trap ':' TERM; sleep 30`);
+    const elapsedMs = Date.now() - startedAt;
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('result=124');
+    expect(elapsedMs).toBeLessThan(5_000);
   });
 
   test('preserves the local Compose context in a setsid probe', () => {
