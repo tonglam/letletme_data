@@ -1218,20 +1218,119 @@ jobs:
                       for item in ast.walk(expression)
                   )
 
-              def returns_true(statements):
+              def block_flow(statements):
+                  """Return (reachable True return, may fall through)."""
+
+                  found_true_return = False
+                  may_fall_through = True
+                  for statement in statements:
+                      if not may_fall_through:
+                          break
+                      if isinstance(statement, ast.Return):
+                          found_true_return = found_true_return or (
+                              isinstance(statement.value, ast.Constant)
+                              and statement.value.value is True
+                          )
+                          may_fall_through = False
+                      elif isinstance(statement, (ast.Break, ast.Continue, ast.Raise)):
+                          may_fall_through = False
+                      elif isinstance(statement, ast.If):
+                          if statically_false(statement.test):
+                              branch_true, branch_falls = block_flow(statement.orelse)
+                          elif statically_true(statement.test):
+                              branch_true, branch_falls = block_flow(statement.body)
+                          else:
+                              body_true, body_falls = block_flow(statement.body)
+                              else_true, else_falls = block_flow(statement.orelse)
+                              branch_true = body_true or else_true
+                              branch_falls = body_falls or else_falls
+                          found_true_return = found_true_return or branch_true
+                          may_fall_through = branch_falls
+                      elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                          if static_truth(statement.iter) is False:
+                              continue
+                          body_true, _ = block_flow(statement.body)
+                          else_true, _ = block_flow(statement.orelse)
+                          found_true_return = found_true_return or body_true or else_true
+                          may_fall_through = True
+                      elif isinstance(statement, ast.While):
+                          if statically_false(statement.test):
+                              continue
+                          body_true, _ = block_flow(statement.body)
+                          else_true, _ = block_flow(statement.orelse)
+                          found_true_return = found_true_return or body_true or else_true
+                          may_fall_through = True
+                      elif isinstance(statement, ast.Try):
+                          branches = [statement.body, statement.orelse]
+                          branches.extend(handler.body for handler in statement.handlers)
+                          branch_results = [block_flow(branch) for branch in branches]
+                          final_true, final_falls = block_flow(statement.finalbody)
+                          if not final_falls:
+                              found_true_return = found_true_return or final_true
+                              may_fall_through = False
+                          else:
+                              found_true_return = found_true_return or final_true or any(result[0] for result in branch_results)
+                              may_fall_through = any(result[1] for result in branch_results)
+                  return found_true_return, may_fall_through
+
+              def reachable_if_branches(statements):
+                  """Yield If nodes that can execute from this block."""
+
+                  def visit(block):
+                      for statement in block:
+                          if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                              break
+                          if isinstance(statement, ast.If):
+                              if statically_false(statement.test):
+                                  yield from visit(statement.orelse)
+                                  if not block_flow(statement.orelse)[1]:
+                                      break
+                                  continue
+                              yield statement
+                              yield from visit(statement.body)
+                              body_falls = block_flow(statement.body)[1]
+                              if statically_true(statement.test):
+                                  if not body_falls:
+                                      break
+                                  continue
+                              yield from visit(statement.orelse)
+                              if not (body_falls or block_flow(statement.orelse)[1]):
+                                  break
+                          elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                              if static_truth(statement.iter) is False:
+                                  continue
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                          elif isinstance(statement, ast.While):
+                              if statically_false(statement.test):
+                                  continue
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                          elif isinstance(statement, ast.Try):
+                              yield from visit(statement.body)
+                              for handler in statement.handlers:
+                                  yield from visit(handler.body)
+                              yield from visit(statement.orelse)
+                              yield from visit(statement.finalbody)
+
+                  yield from visit(statements)
+
+              def has_non_placeholder_guard(expression):
                   return any(
-                      isinstance(item, ast.Return)
-                      and isinstance(item.value, ast.Constant)
-                      and item.value.value is True
-                      for statement in statements
-                      for item in ast.walk(statement)
+                      isinstance(item, ast.UnaryOp)
+                      and isinstance(item.op, ast.Not)
+                      and isinstance(item.operand, ast.Call)
+                      and isinstance(item.operand.func, ast.Name)
+                      and item.operand.func.id == "_looks_like_placeholder"
+                      for item in ast.walk(expression)
                   )
+
+              def returns_true(statements):
+                  return block_flow(statements)[0]
 
               precheck = False
               placeholder_check = False
-              for branch in ast.walk(node):
-                  if not isinstance(branch, ast.If):
-                      continue
+              for branch in reachable_if_branches(node.body):
                   if (
                       not statically_false(branch.test)
                       and
@@ -1241,7 +1340,7 @@ jobs:
                       and returns_true(branch.body)
                   ):
                       precheck = True
-                  if calls_name(branch.test, "_looks_like_placeholder") and returns_true(branch.body):
+                  if has_non_placeholder_guard(branch.test) and returns_true(branch.body):
                       placeholder_check = True
               if not precheck:
                   raise SystemExit("approved validator has_secret does not propagate pre-check results")
@@ -1304,7 +1403,94 @@ jobs:
               def statically_false(expression):
                   return static_truth(expression) is False
 
+              def statically_true(expression):
+                  return static_truth(expression) is True
+
+              positional_parameters = node.args.posonlyargs + node.args.args
+              primary_input = positional_parameters[0].arg if positional_parameters else None
+
+              def consumes_primary_input(call):
+                  if not primary_input:
+                      return False
+                  return any(
+                      isinstance(item, ast.Name)
+                      and isinstance(item.ctx, ast.Load)
+                      and item.id == primary_input
+                      for argument in list(call.args) + [keyword.value for keyword in call.keywords]
+                      for item in ast.walk(argument)
+                  )
+
+              if primary_input and any(
+                  isinstance(item, ast.Name)
+                  and isinstance(item.ctx, ast.Store)
+                  and item.id == primary_input
+                  for item in ast.walk(node)
+              ):
+                  raise SystemExit(
+                      "approved validator has_locked_skill_secret rebinds its primary input"
+                  )
+
+              def block_flow(statements):
+                  """Return (reachable True return, may fall through)."""
+
+                  found_true_return = False
+                  may_fall_through = True
+                  for statement in statements:
+                      if not may_fall_through:
+                          break
+                      if isinstance(statement, ast.Return):
+                          found_true_return = found_true_return or (
+                              isinstance(statement.value, ast.Constant)
+                              and statement.value.value is True
+                          )
+                          may_fall_through = False
+                      elif isinstance(statement, (ast.Break, ast.Continue, ast.Raise)):
+                          may_fall_through = False
+                      elif isinstance(statement, ast.If):
+                          if statically_false(statement.test):
+                              branch_true, branch_falls = block_flow(statement.orelse)
+                              found_true_return = found_true_return or branch_true
+                              may_fall_through = branch_falls
+                          elif statically_true(statement.test):
+                              branch_true, branch_falls = block_flow(statement.body)
+                              found_true_return = found_true_return or branch_true
+                              may_fall_through = branch_falls
+                          else:
+                              body_true, body_falls = block_flow(statement.body)
+                              else_true, else_falls = block_flow(statement.orelse)
+                              found_true_return = found_true_return or body_true or else_true
+                              may_fall_through = body_falls or else_falls
+                      elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                          if isinstance(statement, ast.While) and statically_false(statement.test):
+                              continue
+                          if isinstance(statement, (ast.For, ast.AsyncFor)) and static_truth(statement.iter) is False:
+                              continue
+                          body_true, _ = block_flow(statement.body)
+                          else_true, _ = block_flow(statement.orelse)
+                          found_true_return = found_true_return or body_true or else_true
+                          # A loop can complete normally (or via break), so
+                          # keep following the enclosing block conservatively.
+                          may_fall_through = True
+                      elif isinstance(statement, ast.Try):
+                          branches = [statement.body, statement.orelse]
+                          branches.extend(handler.body for handler in statement.handlers)
+                          branch_results = [block_flow(branch) for branch in branches]
+                          final_true, final_falls = block_flow(statement.finalbody)
+                          if not final_falls:
+                              found_true_return = found_true_return or final_true
+                              may_fall_through = False
+                          else:
+                              found_true_return = found_true_return or final_true or any(result[0] for result in branch_results)
+                              may_fall_through = any(result[1] for result in branch_results)
+                  return found_true_return, may_fall_through
+
               def secret_search_names(expression):
+                  direct_pattern_names = {
+                      "PEM_RE",
+                      "BASIC_AUTH_RE",
+                      "CLI_CREDENTIAL_RE",
+                      "AWS_CREDENTIAL_ARGUMENT_RE",
+                  }
                   names = set()
                   for item in ast.walk(expression):
                       if not (
@@ -1313,40 +1499,334 @@ jobs:
                           and item.func.attr in {"search", "finditer"}
                       ):
                           continue
+                      if not consumes_primary_input(item):
+                          continue
                       receiver = item.func.value
-                      if isinstance(receiver, ast.Name) and receiver.id in {
-                          "PEM_RE",
-                          "BASIC_AUTH_RE",
-                          "CLI_CREDENTIAL_RE",
-                          "AWS_CREDENTIAL_ARGUMENT_RE",
-                      }:
+                      if isinstance(receiver, ast.Name) and receiver.id in direct_pattern_names:
                           names.add(receiver.id)
                       elif (
                           isinstance(receiver, ast.Subscript)
                           and isinstance(receiver.value, ast.Name)
                           and receiver.value.id == "SECRET_VALUE_RES"
                       ):
-                          names.add("SECRET_VALUE_RES")
+                          index = receiver.slice
+                          if isinstance(index, ast.UnaryOp) and isinstance(index.op, ast.USub) and isinstance(index.operand, ast.Constant):
+                              index = -index.operand.value
+                          if isinstance(index, ast.Constant):
+                              index = index.value
+                          if index == -1:
+                              names.add("SECRET_VALUE_RES")
                   return names
 
+              def loop_search_names(loop):
+                  """Recognize placeholder-aware searches through a pattern loop."""
+
+                  if not isinstance(loop, ast.For):
+                      return set()
+                  direct_pattern_names = {
+                      "BASIC_AUTH_RE",
+                      "CLI_CREDENTIAL_RE",
+                      "AWS_CREDENTIAL_ARGUMENT_RE",
+                  }
+                  iterated_patterns = set()
+                  if isinstance(loop.iter, (ast.Tuple, ast.List)):
+                      iterated_patterns = {
+                          item.id
+                          for item in loop.iter.elts
+                          if isinstance(item, ast.Name) and item.id in direct_pattern_names
+                      }
+                  if isinstance(loop.target, ast.Name):
+                      for statement in loop.body:
+                          if any(
+                              isinstance(item, ast.Name)
+                              and isinstance(item.ctx, ast.Store)
+                              and item.id == loop.target.id
+                              for item in ast.walk(statement)
+                          ):
+                              return set()
+                  if static_truth(loop.iter) is False:
+                      return set()
+
+                  def reachable_finditer_calls(statements):
+                      """Collect finditer calls without traversing dead blocks."""
+
+                      def expression_calls(expression):
+                          calls = []
+                          for item in ast.walk(expression):
+                              if (
+                                  isinstance(item, ast.Call)
+                                  and isinstance(item.func, ast.Attribute)
+                                  and item.func.attr == "finditer"
+                              ):
+                                  calls.append(item)
+                          return calls
+
+                      def visit(block):
+                          found = []
+                          may_fall_through = True
+                          for statement in block:
+                              if not may_fall_through:
+                                  break
+                              if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                                  may_fall_through = False
+                                  continue
+                              if isinstance(statement, ast.If):
+                                  if statically_false(statement.test):
+                                      branch_calls, branch_falls = visit(statement.orelse)
+                                      found.extend(branch_calls)
+                                      may_fall_through = branch_falls
+                                      continue
+                                  found.extend(expression_calls(statement.test))
+                                  body_calls, body_falls = visit(statement.body)
+                                  found.extend(body_calls)
+                                  if statically_true(statement.test):
+                                      may_fall_through = body_falls
+                                  else:
+                                      else_calls, else_falls = visit(statement.orelse)
+                                      found.extend(else_calls)
+                                      may_fall_through = body_falls or else_falls
+                              elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                                  if static_truth(statement.iter) is False:
+                                      continue
+                                  found.extend(expression_calls(statement.iter))
+                                  body_calls, _ = visit(statement.body)
+                                  else_calls, _ = visit(statement.orelse)
+                                  found.extend(body_calls)
+                                  found.extend(else_calls)
+                                  may_fall_through = True
+                              elif isinstance(statement, ast.While):
+                                  if statically_false(statement.test):
+                                      continue
+                                  found.extend(expression_calls(statement.test))
+                                  body_calls, _ = visit(statement.body)
+                                  else_calls, _ = visit(statement.orelse)
+                                  found.extend(body_calls)
+                                  found.extend(else_calls)
+                                  may_fall_through = True
+                              elif isinstance(statement, ast.Try):
+                                  body_calls, body_falls = visit(statement.body)
+                                  found.extend(body_calls)
+                                  for handler in statement.handlers:
+                                      handler_calls, _ = visit(handler.body)
+                                      found.extend(handler_calls)
+                                  else_calls, else_falls = visit(statement.orelse)
+                                  final_calls, final_falls = visit(statement.finalbody)
+                                  found.extend(else_calls)
+                                  found.extend(final_calls)
+                                  may_fall_through = body_falls or else_falls or final_falls
+                              elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                                  continue
+                              else:
+                                  found.extend(expression_calls(statement))
+
+                          return found, may_fall_through
+
+                      return visit(statements)[0]
+
+                  names = set()
+                  for item in reachable_finditer_calls(loop.body):
+                      if not consumes_primary_input(item):
+                          continue
+                      receiver = item.func.value
+                      if isinstance(receiver, ast.Name) and receiver.id in direct_pattern_names:
+                          names.add(receiver.id)
+                      elif (
+                          isinstance(receiver, ast.Name)
+                          and isinstance(loop.target, ast.Name)
+                          and receiver.id == loop.target.id
+                      ):
+                          names.update(iterated_patterns)
+                  if not names:
+                      return set()
+                  return names if reachable_placeholder_return(loop.body) else set()
+
               def returns_true(statements):
-                  return any(
-                      isinstance(item, ast.Return)
-                      and isinstance(item.value, ast.Constant)
-                      and item.value.value is True
-                      for statement in statements
-                      for item in ast.walk(statement)
-                  )
+                  return block_flow(statements)[0]
+
+              def reachable_placeholder_return(statements):
+                  """Require a reachable non-placeholder return tied to a match."""
+
+                  def target_names(target):
+                      return {
+                          item.id
+                          for item in ast.walk(target)
+                          if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+                      }
+
+                  def has_non_placeholder_guard(expression, derived_names):
+                      for item in ast.walk(expression):
+                          if not (
+                              isinstance(item, ast.UnaryOp)
+                              and isinstance(item.op, ast.Not)
+                              and isinstance(item.operand, ast.Call)
+                              and isinstance(item.operand.func, ast.Name)
+                              and item.operand.func.id == "_looks_like_placeholder"
+                          ):
+                              continue
+                          arguments = list(item.operand.args) + [keyword.value for keyword in item.operand.keywords]
+                          if any(
+                              isinstance(name, ast.Name)
+                              and isinstance(name.ctx, ast.Load)
+                              and name.id in derived_names
+                              for argument in arguments
+                              for name in ast.walk(argument)
+                          ):
+                              return True
+                      return False
+
+                  def match_loop_call(statement):
+                      if not isinstance(statement, (ast.For, ast.AsyncFor)):
+                          return None
+                      return next(
+                          (
+                              item
+                              for item in ast.walk(statement.iter)
+                              if isinstance(item, ast.Call)
+                              and isinstance(item.func, ast.Attribute)
+                              and item.func.attr == "finditer"
+                              and consumes_primary_input(item)
+                          ),
+                          None,
+                      )
+
+                  def assignment_derived_names(statement, derived_names):
+                      if isinstance(statement, ast.Assign):
+                          targets = statement.targets
+                          value = statement.value
+                      elif isinstance(statement, ast.AnnAssign):
+                          targets = [statement.target]
+                          value = statement.value
+                      else:
+                          return set()
+                      if value is None:
+                          return set()
+                      for item in ast.walk(value):
+                          if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == "group":
+                              receiver = item.func.value
+                              if isinstance(receiver, ast.Name) and receiver.id in derived_names:
+                                  return {name for target in targets for name in target_names(target)}
+                          if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id in derived_names:
+                              return {name for target in targets for name in target_names(target)}
+                      return set()
+
+                  def scan(block, derived_names):
+                      known = set(derived_names)
+                      may_fall_through = True
+                      for statement in block:
+                          if not may_fall_through:
+                              break
+                          if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                              may_fall_through = False
+                              continue
+                          if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                              known.update(assignment_derived_names(statement, known))
+                              continue
+                          if isinstance(statement, ast.If):
+                              if statically_false(statement.test):
+                                  if scan(statement.orelse, known):
+                                      return True
+                                  may_fall_through = block_flow(statement.orelse)[1]
+                                  continue
+                              if has_non_placeholder_guard(statement.test, known) and block_flow(statement.body)[0]:
+                                  return True
+                              if statically_true(statement.test):
+                                  if scan(statement.body, known):
+                                      return True
+                                  may_fall_through = block_flow(statement.body)[1]
+                                  continue
+                              if scan(statement.body, known) or scan(statement.orelse, known):
+                                  return True
+                              may_fall_through = block_flow(statement.body)[1] or block_flow(statement.orelse)[1]
+                              continue
+                          if isinstance(statement, (ast.For, ast.AsyncFor)):
+                              if static_truth(statement.iter) is False:
+                                  continue
+                              search_call = match_loop_call(statement)
+                              match_names = target_names(statement.target) if search_call else known
+                              if scan(statement.body, match_names) or scan(statement.orelse, known):
+                                  return True
+                              may_fall_through = True
+                              continue
+                          if isinstance(statement, ast.While):
+                              if statically_false(statement.test):
+                                  continue
+                              if scan(statement.body, known) or scan(statement.orelse, known):
+                                  return True
+                              may_fall_through = True
+                              continue
+                          if isinstance(statement, ast.Try):
+                              branches = [statement.body, statement.orelse]
+                              branches.extend(handler.body for handler in statement.handlers)
+                              final_falls = block_flow(statement.finalbody)[1]
+                              if not final_falls:
+                                  if scan(statement.finalbody, known):
+                                      return True
+                                  may_fall_through = False
+                              else:
+                                  if any(scan(branch, known) for branch in branches):
+                                      return True
+                                  if scan(statement.finalbody, known):
+                                      return True
+                                  may_fall_through = any(block_flow(branch)[1] for branch in branches)
+                      return False
+
+                  return scan(statements, set())
+
+              def reachable_detection_branches(statements):
+                  """Yield credential control nodes from reachable code only."""
+
+                  def visit(block):
+                      for statement in block:
+                          if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                              break
+                          if isinstance(statement, ast.If):
+                              if statically_false(statement.test):
+                                  yield from visit(statement.orelse)
+                                  if not block_flow(statement.orelse)[1]:
+                                      break
+                                  continue
+                              yield ("if", statement)
+                              yield from visit(statement.body)
+                              if statically_true(statement.test):
+                                  if not block_flow(statement.body)[1]:
+                                      break
+                                  continue
+                              yield from visit(statement.orelse)
+                              if not (block_flow(statement.body)[1] or block_flow(statement.orelse)[1]):
+                                  break
+                              continue
+                          if isinstance(statement, (ast.For, ast.AsyncFor)):
+                              if static_truth(statement.iter) is False:
+                                  continue
+                              yield ("for", statement)
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                              continue
+                          if isinstance(statement, ast.While):
+                              if statically_false(statement.test):
+                                  continue
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                              continue
+                          if isinstance(statement, ast.Try):
+                              final_falls = block_flow(statement.finalbody)[1]
+                              if final_falls:
+                                  yield from visit(statement.body)
+                                  for handler in statement.handlers:
+                                      yield from visit(handler.body)
+                                  yield from visit(statement.orelse)
+                              yield from visit(statement.finalbody)
+
+                  yield from visit(statements)
 
               positive_lines = []
               positive_patterns = set()
-              for branch in ast.walk(node):
-                  patterns = secret_search_names(branch.test) if isinstance(branch, ast.If) else set()
+              for kind, branch in reachable_detection_branches(node.body):
+                  patterns = secret_search_names(branch.test) if kind == "if" else loop_search_names(branch)
                   if (
-                      isinstance(branch, ast.If)
-                      and not statically_false(branch.test)
+                      ((kind == "if" and not statically_false(branch.test)) or kind == "for")
                       and patterns
-                      and returns_true(branch.body)
+                      and (returns_true(branch.body) if kind == "if" else True)
                   ):
                       positive_lines.append(branch.lineno)
                       positive_patterns.update(patterns)
@@ -1382,6 +1862,7 @@ jobs:
                   "_validate_claude_skill_aliases": function_node(tree, "_validate_claude_skill_aliases"),
                   "validate_locked_skill": function_node(tree, "validate_locked_skill"),
                   "has_secret": function_node(tree, "has_secret"),
+                  "has_locked_skill_secret": function_node(tree, "has_locked_skill_secret"),
                   "has_secret_bytes": function_node(tree, "has_secret_bytes"),
                   "has_locked_skill_secret_bytes": function_node(tree, "has_locked_skill_secret_bytes"),
                   "skill_tree_digest": function_node(tree, "skill_tree_digest"),
@@ -1403,6 +1884,7 @@ jobs:
                       "_validate_claude_skill_aliases",
                       "validate_locked_skill",
                       "has_secret",
+                      "has_locked_skill_secret",
                       "has_secret_bytes",
                       "has_locked_skill_secret_bytes",
                       "skill_tree_digest",
@@ -1414,6 +1896,22 @@ jobs:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               check_has_secret_shape(helper_nodes["has_secret"])
               check_locked_skill_secret_shape(helper_nodes["has_locked_skill_secret"])
+              locked_pattern_names = {
+                  "PEM_RE",
+                  "BASIC_AUTH_RE",
+                  "CLI_CREDENTIAL_RE",
+                  "AWS_CREDENTIAL_ARGUMENT_RE",
+                  "LOCKED_CREDENTIAL_KEY_RE",
+                  "SECRET_VALUE_RES",
+              }
+              shadowed_locked_patterns = sorted(
+                  locked_pattern_names & function_bindings(helper_nodes["has_locked_skill_secret"])
+              )
+              if shadowed_locked_patterns:
+                  raise SystemExit(
+                      "approved validator has_locked_skill_secret shadows protected patterns: "
+                      + ", ".join(shadowed_locked_patterns)
+                  )
               secret_value_res = [
                   statement.value
                   for statement in tree.body
@@ -1425,6 +1923,9 @@ jobs:
               ]
               if len(secret_value_res) != 1:
                   raise SystemExit("approved validator SECRET_VALUE_RES must have one module assignment")
+              secret_value_expression = secret_value_res[0]
+              if not isinstance(secret_value_expression, (ast.Tuple, ast.List)):
+                  raise SystemExit("approved validator SECRET_VALUE_RES must use a literal sequence")
               required_secret_patterns = {
                   "BASIC_AUTH_RE",
                   "CLI_CREDENTIAL_RE",
@@ -1432,7 +1933,7 @@ jobs:
               }
               pattern_refs = {
                   item.id
-                  for item in ast.walk(secret_value_res[0])
+                  for item in secret_value_expression.elts
                   if isinstance(item, ast.Name)
               }
               missing_secret_patterns = sorted(required_secret_patterns - pattern_refs)
@@ -1636,6 +2137,7 @@ jobs:
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
                   "_validate_skill_inventory": {"load_json"},
                   "has_secret_bytes": {"loads", "dumps", "has_secret"},
+                  "has_locked_skill_secret": {"search", "finditer", "_looks_like_placeholder"},
                   "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
                   "_has_private_ip_literal": {"finditer", "ip_address"},
                   "_looks_like_placeholder": {"fullmatch", "match", "search"},
@@ -1656,6 +2158,7 @@ jobs:
                   "_validate_claude_skill_aliases": set(),
                   "has_secret_bytes": {"has_secret"},
                   "has_locked_skill_secret_bytes": {"has_locked_skill_secret"},
+                  "has_locked_skill_secret": {"_looks_like_placeholder"},
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
@@ -1698,6 +2201,10 @@ jobs:
                   "has_locked_skill_secret_bytes": {
                       "loads": {"json"},
                       "dumps": {"json"},
+                  },
+                  "has_locked_skill_secret": {
+                      "search": {"PEM_RE", "LOCKED_CREDENTIAL_KEY_RE"},
+                      "finditer": {"BASIC_AUTH_RE", "CLI_CREDENTIAL_RE", "AWS_CREDENTIAL_ARGUMENT_RE", "pattern"},
                   },
                   "has_secret": {
                       "search": {"PEM_RE", "PRIVATE_ORIGIN_RE"},
