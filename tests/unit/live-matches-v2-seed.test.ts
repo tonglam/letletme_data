@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   canFinalizeLiveMatchSeed,
   canSkipMissingDetailDuringSeed,
+  hasCurrentMatchDeskSyncEvidence,
   parseLiveMatchSeedArguments,
 } from '../../scripts/seed-live-matches-v2';
 
@@ -47,11 +48,40 @@ describe('live match V2 cutover seed arguments', () => {
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 0, state: 'LIVE_ACTIVE' })).toBe(true);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'PRE_DEADLINE' })).toBe(true);
     expect(
-      canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'LIVE_ACTIVE' }, 'BETWEEN_FIXTURES'),
+      canSkipMissingDetailDuringSeed(
+        { fixtureCount: 2, state: 'LIVE_ACTIVE' },
+        'BETWEEN_FIXTURES',
+        true,
+      ),
     ).toBe(true);
+    expect(
+      canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'LIVE_ACTIVE' }, 'BETWEEN_FIXTURES'),
+    ).toBe(false);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'LIVE_ACTIVE' })).toBe(false);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'DAY_SETTLING' })).toBe(false);
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'FINALIZED' })).toBe(false);
+  });
+
+  it('requires the current Match desk pointer to be refreshed before degradation', () => {
+    const before = {
+      servedFrom: 'REDIS_CURRENT' as const,
+      publication: {
+        publicationId: '00000000-0000-4000-8000-000000000001',
+        generation: 1,
+        sourceCheckedAt: '2026-08-31T14:00:00.000Z',
+      },
+    };
+    expect(hasCurrentMatchDeskSyncEvidence(before, before)).toBe(false);
+    expect(
+      hasCurrentMatchDeskSyncEvidence(before, {
+        ...before,
+        publication: { ...before.publication, sourceCheckedAt: '2026-08-31T14:00:30.000Z' },
+      }),
+    ).toBe(true);
+    expect(hasCurrentMatchDeskSyncEvidence(null, before)).toBe(true);
+    expect(
+      hasCurrentMatchDeskSyncEvidence(before, { ...before, servedFrom: 'REDIS_PREVIOUS' }),
+    ).toBe(false);
   });
 
   it('requires the normal all-fixtures-finished finalization fence', () => {
