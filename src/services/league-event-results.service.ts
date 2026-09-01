@@ -125,7 +125,7 @@ function isBlank(eventLive: LeagueEventLive | undefined, elementType: number | n
   const saves = eventLive.saves ?? 0;
   const cleanSheets = eventLive.cleanSheets ?? 0;
 
-  if (goalsScored > 0 || assists > 0 || bonus > 0 || penaltiesSaved > 0 || saves > 3) {
+  if (goalsScored > 0 || assists > 0 || bonus > 0 || penaltiesSaved > 0 || saves >= 3) {
     return false;
   }
 

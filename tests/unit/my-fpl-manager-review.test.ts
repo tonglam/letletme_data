@@ -218,4 +218,15 @@ describe('My FPL manager review', () => {
     expect(review.timeline[1]?.overallRankDelta).toBeNull();
     expect(review.summary.uniqueCaptains).toBe(2);
   });
+
+  test('uses the effective short-handed lineup after auto-substitution', () => {
+    const shortHanded = picks(false).map((pick) =>
+      pick.element === 11 ? { ...pick, multiplier: 0 } : pick,
+    );
+    const review = buildMyFplManagerReview(1, [
+      gameweek(1, { picks: shortHanded, eventBenchPoints: 3 }),
+    ]);
+
+    expect(review.timeline[0]?.review.lineupBasePoints).toBe(49);
+  });
 });

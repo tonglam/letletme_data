@@ -219,7 +219,9 @@ const effectiveLineup = (
     return gameweek.picks.filter((pick) => pick.position <= 11);
   }
   const active = gameweek.picks.filter((pick) => pick.multiplier > 0);
-  return active.length === 11 ? active : gameweek.picks.filter((pick) => pick.position <= 11);
+  // Effective multipliers are authoritative after auto-substitutions, even
+  // when FPL leaves a short-handed side with fewer than eleven starters.
+  return active.length <= 11 ? active : gameweek.picks.filter((pick) => pick.position <= 11);
 };
 
 const formation = (gameweek: MyFplManagerReviewGameweekInput): string => {

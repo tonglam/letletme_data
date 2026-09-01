@@ -746,7 +746,7 @@ const isBlankManagerCaptain = (picks: readonly JsonRecord[]): boolean => {
   const penaltiesSaved = integerValue(captain.penaltiesSaved);
   const saves = integerValue(captain.saves);
   const cleanSheets = integerValue(captain.cleanSheets);
-  if (goalsScored > 0 || assists > 0 || bonus > 0 || penaltiesSaved > 0 || saves > 3) {
+  if (goalsScored > 0 || assists > 0 || bonus > 0 || penaltiesSaved > 0 || saves >= 3) {
     return false;
   }
   const elementTypeName = String(captain.elementTypeName ?? '');
@@ -868,6 +868,7 @@ const overlayProjectedEventLiveStats = (
     row.yellow_cards = live.yellowCards;
     row.red_cards = live.redCards;
     row.saves = live.saves;
+    row.penalties_saved = live.penaltiesSaved;
     row.bonus = live.bonus;
     row.bps = live.bps;
     row.expected_goals = live.expectedGoals;
