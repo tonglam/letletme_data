@@ -378,10 +378,16 @@ describe('release workflow gates', () => {
   });
 
   test('verifies restore target identity and translates host backup paths into the container mount', () => {
-    expect(deployStateMachine).toContain('source database URL is required for identity verification');
+    expect(deployStateMachine).toContain(
+      'source database URL is required for identity verification',
+    );
     expect(deployStateMachine).toContain('DATABASE_RESTORE_SOURCE_URL="$source_url"');
-    expect(deployStateMachine).toContain('local container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"');
-    expect(deployStateMachine).toContain('"$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL" "$DATABASE_RESTORE_SOURCE_URL"');
+    expect(deployStateMachine).toContain(
+      'local container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"',
+    );
+    expect(deployStateMachine).toContain(
+      '"$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL" "$DATABASE_RESTORE_SOURCE_URL"',
+    );
     const restoreScript = readFileSync('scripts/verify-backup-restore.sh', 'utf8');
     expect(restoreScript).toContain('identity_query=');
     expect(restoreScript).toContain('source_identity=$(psql');
