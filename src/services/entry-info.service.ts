@@ -73,6 +73,10 @@ export async function syncEntryInfo(
       ? eventRepository.findLatestFinalized(season)
       : Promise.resolve(null),
   ]);
+  // Capture the source observation boundary after the coherent FPL reads and
+  // before any local transaction work.  This timestamp belongs only to the
+  // profile summary; transfer and past-season maintenance must not advance it.
+  const profileSourceCheckedAt = new Date();
   if (summary.id !== entryId) {
     throw new ValidationError(
       'Entry summary identity did not match the request.',
@@ -108,6 +112,7 @@ export async function syncEntryInfo(
       summary,
       lastEventId,
       snapshotSyncedThroughEventId,
+      profileSourceCheckedAt,
     );
     await Promise.all([
       entryHistoryInfoRepository.upsertFromHistory(season, entryId, history),

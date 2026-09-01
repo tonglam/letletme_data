@@ -2406,6 +2406,12 @@ export const entriesInCompetition = competition.table(
       mode: 'date',
     }),
     pastSeasonsCount: integer('past_seasons_count'),
+    // Migration 0086 appends this source-specific timestamp after the legacy
+    // columns so the declaration remains in catalog ordinal parity.
+    profileSourceCheckedAt: timestamp('profile_source_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('tournament_review_entries_reconcile_idx').on(

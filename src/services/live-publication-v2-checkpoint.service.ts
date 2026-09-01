@@ -223,6 +223,11 @@ function hasDurableFinalEntryInput(entryId: SQL): SQL {
         AND input_head.event_id = ${eventsInFpl.eventId}
         AND input_head.state = 'COMPLETE'
         AND input_head.row_count = 15
+        -- Final recovery is lossless only when the V2 semantic input captured
+        -- at checkpoint time is still present.  A complete pick rowset alone
+        -- cannot reconstruct previous totals or provider-side facts.
+        AND input_head.input_payload IS NOT NULL
+        AND jsonb_typeof(input_head.input_payload) = 'object'
         AND EXISTS (
           SELECT 1
           FROM competition.entry_event_picks AS input_pick

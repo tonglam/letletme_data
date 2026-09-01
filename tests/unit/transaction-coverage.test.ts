@@ -70,6 +70,7 @@ describe('entry-info atomic upsert contract', () => {
       lastEventId: 7,
       usedEntryNames: ['Alpha FC'],
     });
+    expect(insert.profileSourceCheckedAt).toBeInstanceOf(Date);
   });
 
   it('uses the schema-defined preseason checkpoint when no event exists', async () => {
@@ -100,6 +101,7 @@ describe('entry-info atomic upsert contract', () => {
     expect(renderSql(conflict.set.lastEntryName)).toContain('"competition"."entries"."entry_name"');
     expect(renderSql(conflict.set.lastEntryName)).toContain('CASE');
     expect(renderSql(conflict.set.lastEntryName)).toContain('last_entry_name');
+    expect(conflict.set.profileSourceCheckedAt).toBeInstanceOf(Date);
     expect(renderSql(conflict.set.usedEntryNames)).toContain('WITH ORDINALITY');
   });
 });

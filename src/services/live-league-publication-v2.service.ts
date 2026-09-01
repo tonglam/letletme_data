@@ -57,7 +57,7 @@ type ClassicRosterRow = {
   lastOverallRank: number | null;
   lastTeamValue: number | null;
   lastBank: number | null;
-  profileUpdatedAt: Date | string | null;
+  profileSourceCheckedAt: Date | string | null;
   finalizationAt: Date | string | null;
 };
 
@@ -165,7 +165,7 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
       NULLIF(entry.last_overall_rank, 0) AS "lastOverallRank",
       entry.last_team_value AS "lastTeamValue",
       entry.last_bank AS "lastBank",
-      entry.updated_at AS "profileUpdatedAt",
+      entry.profile_source_checked_at AS "profileSourceCheckedAt",
       event.data_checked_at AS "finalizationAt"
     FROM competition.tournaments AS tournament
     INNER JOIN fpl.events AS event
@@ -231,7 +231,7 @@ function buildRevisions(
       roster.rows.map(
         ({
           tournamentId: _tournamentId,
-          profileUpdatedAt: _profileUpdatedAt,
+          profileSourceCheckedAt: _profileSourceCheckedAt,
           finalizationAt: _finalizationAt,
           ...row
         }) => row,
@@ -302,7 +302,7 @@ async function publishClassicRoster(
       return (
         read?.input.finalResult !== null &&
         read?.input.finalResult !== undefined &&
-        isTimestampAtOrAfter(row.profileUpdatedAt, row.finalizationAt)
+        isTimestampAtOrAfter(row.profileSourceCheckedAt, row.finalizationAt)
       );
     });
   if (inputs.size !== eligibleRows.length || !allFinal) {
