@@ -3988,8 +3988,8 @@ SET manifest = jsonb_build_object(
       'eventId', publication.event_id,
       'revision', publication.revision,
       'snapshotDate', publication.snapshot_date,
-      'sourceCheckedAt', publication.source_checked_at,
-      'publishedAt', publication.published_at,
+      'sourceCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+      'publishedAt', to_char(publication.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
       'kind', publication.kind,
       'contentSha256', publication.content_sha256,
       'expectedEntryCount', publication.expected_entry_count,
@@ -4002,8 +4002,8 @@ SET manifest = jsonb_build_object(
       'livePublicationId', NULL,
       'liveRevision', NULL,
       'algorithmVersion', NULL,
-      'sourceMinCheckedAt', publication.source_min_checked_at,
-      'sourceMaxCheckedAt', publication.source_max_checked_at
+      'sourceMinCheckedAt', to_char(publication.source_min_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+      'sourceMaxCheckedAt', to_char(publication.source_max_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     ),
     status = 'PENDING',
     available_at = publication.published_at,
@@ -4046,8 +4046,8 @@ SELECT
     'eventId', publication.event_id,
     'revision', publication.revision,
     'snapshotDate', publication.snapshot_date,
-    'sourceCheckedAt', publication.source_checked_at,
-    'publishedAt', publication.published_at,
+    'sourceCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'publishedAt', to_char(publication.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     'kind', publication.kind,
     'contentSha256', publication.content_sha256,
     'expectedEntryCount', publication.expected_entry_count,
@@ -4060,8 +4060,8 @@ SELECT
     'livePublicationId', NULL,
     'liveRevision', NULL,
     'algorithmVersion', NULL,
-    'sourceMinCheckedAt', publication.source_min_checked_at,
-    'sourceMaxCheckedAt', publication.source_max_checked_at
+    'sourceMinCheckedAt', to_char(publication.source_min_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'sourceMaxCheckedAt', to_char(publication.source_max_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
   ),
   'PENDING',
   publication.published_at,
