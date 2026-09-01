@@ -173,7 +173,7 @@ describe('queue consumer pause ownership', () => {
     }
   });
 
-  test('prepares only confirmed pending formal-run leases during deployment preparation', async () => {
+  test('prepares only exact queued pending formal-run leases during deployment preparation', async () => {
     const db = await getDb();
     const deliveredRunId = randomUUID();
     const undeliveredRunId = randomUUID();
@@ -199,7 +199,12 @@ describe('queue consumer pause ownership', () => {
           leaseExpiresAt,
         },
       ]);
-      expect(await prepareQueuedFormalRunsForDeployment({ db })).toBe(1);
+      expect(
+        await prepareQueuedFormalRunsForDeployment({
+          db,
+          queuedRunIds: new Set([deliveredRunId]),
+        }),
+      ).toBe(1);
       const runs = await db
         .select({
           runId: contentAcquisitionRuns.runId,

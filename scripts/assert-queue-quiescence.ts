@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { Queue, type JobType } from 'bullmq';
+import { and, eq, isNotNull } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import Redis from 'ioredis';
 import postgres from 'postgres';
@@ -12,6 +13,10 @@ import {
   type RunnableQueueCounts,
 } from './queue-quiescence-gate';
 import { prepareQueuedFormalRunsForDeployment } from '../src/content/acquisition/formal-run-repository';
+import {
+  contentAcquisitionJobOutbox,
+  contentAcquisitionRuns,
+} from '../src/db/schemas/content.schema';
 import { allQueueNames, contentQueueNames, contentXScanQueueName } from '../src/queues/names';
 import {
   beginQueueConsumerPauseRelease,
@@ -511,7 +516,44 @@ async function preparePausedContentRunsForDeployment(argv: readonly string[]): P
       );
     }
     const db = drizzle(databaseClient, { schema });
-    const prepared = await prepareQueuedFormalRunsForDeployment({ db });
+    const candidates = await db
+      .select({
+        runId: contentAcquisitionRuns.runId,
+        queueName: contentAcquisitionJobOutbox.queueName,
+        jobId: contentAcquisitionJobOutbox.jobId,
+      })
+      .from(contentAcquisitionRuns)
+      .innerJoin(
+        contentAcquisitionJobOutbox,
+        eq(contentAcquisitionJobOutbox.runId, contentAcquisitionRuns.runId),
+      )
+      .where(
+        and(
+          eq(contentAcquisitionRuns.status, 'PENDING'),
+          isNotNull(contentAcquisitionRuns.leaseExpiresAt),
+          isNotNull(contentAcquisitionRuns.enqueueConfirmedAt),
+        ),
+      );
+    const queuesByName = new Map(queues.map((queue) => [queue.name, queue]));
+    const queuedRunIds = new Set<string>();
+    await Promise.all(
+      candidates.map(async (candidate) => {
+        if (!isContentConsumerQueueName(candidate.queueName)) {
+          throw new Error(`Invalid formal acquisition queue: ${candidate.queueName}`);
+        }
+        const queue = queuesByName.get(candidate.queueName);
+        if (!queue) {
+          throw new Error(`Formal acquisition queue is not configured: ${candidate.queueName}`);
+        }
+        const job = await queue.getJob(candidate.jobId);
+        if (!job) return;
+        const state = await job.getState();
+        if (RUNNABLE_JOB_TYPES.includes(state as (typeof RUNNABLE_JOB_TYPES)[number])) {
+          queuedRunIds.add(candidate.runId);
+        }
+      }),
+    );
+    const prepared = await prepareQueuedFormalRunsForDeployment({ db, queuedRunIds });
     process.stdout.write(
       `${JSON.stringify({ status: 'paused_content_runs_prepared', prepared })}\n`,
     );

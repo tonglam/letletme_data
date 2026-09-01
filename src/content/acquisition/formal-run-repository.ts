@@ -1656,11 +1656,12 @@ export async function deferFormalRunForBudget(input: {
  * restarted scheduler could reclaim the schedule and mark the still-queued
  * run LEASE_EXPIRED before the original job is allowed to start.
  */
-export async function prepareQueuedFormalRunsForDeployment(
-  input: {
-    db?: DbHandle;
-  } = {},
-): Promise<number> {
+export async function prepareQueuedFormalRunsForDeployment(input: {
+  db?: DbHandle;
+  queuedRunIds: ReadonlySet<string>;
+}): Promise<number> {
+  const queuedRunIds = [...new Set(input.queuedRunIds)];
+  if (queuedRunIds.length === 0) return 0;
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
     await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
@@ -1678,6 +1679,7 @@ export async function prepareQueuedFormalRunsForDeployment(
           eq(contentAcquisitionRuns.status, 'PENDING'),
           isNotNull(contentAcquisitionRuns.leaseExpiresAt),
           isNotNull(contentAcquisitionRuns.enqueueConfirmedAt),
+          inArray(contentAcquisitionRuns.runId, queuedRunIds),
         ),
       )
       .for('update');
