@@ -219,7 +219,20 @@ class MyFplCaptureLockBusyError extends Error {}
 
 const MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000;
 const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
+// Keep each JSONB expansion below the production statement timeout. The
+// surrounding repeatable-read transaction remains atomic, so a failed batch
+// still rolls back the complete candidate instead of exposing a partial
+// publication.
+const MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE = 100;
 const myFplCaptureTails = new Map<string, Promise<void>>();
+
+function batches<T>(rows: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let offset = 0; offset < rows.length; offset += size) {
+    result.push(rows.slice(offset, offset + size));
+  }
+  return result;
+}
 
 export function serializeMyFplSnapshotCapture(
   key: string,
@@ -3285,7 +3298,7 @@ async function captureMyFplSnapshotOnce(
     }
 
     const entryInsertRows = payloadEntries.map((row) => ({ ...row, revision }));
-    if (entryInsertRows.length > 0) {
+    for (const entryBatch of batches(entryInsertRows, MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE)) {
       await tx`
         INSERT INTO competition.my_fpl_snapshot_entries
           (season_id, event_id, revision, entry_id, picks_count, is_empty, payload)
@@ -3296,11 +3309,14 @@ async function captureMyFplSnapshotOnce(
                (value->>'picks_count')::integer,
                (value->>'is_empty')::boolean,
                value->'payload'
-        FROM jsonb_array_elements(${JSON.stringify(entryInsertRows)}::jsonb) value
+        FROM jsonb_array_elements(${JSON.stringify(entryBatch)}::jsonb) value
       `;
     }
     const tournamentInsertRows = tournamentPayloadRows.map((row) => ({ ...row, revision }));
-    if (tournamentInsertRows.length > 0) {
+    for (const tournamentBatch of batches(
+      tournamentInsertRows,
+      MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE,
+    )) {
       await tx`
         INSERT INTO competition.my_fpl_snapshot_tournament_rows
           (season_id, event_id, revision, tournament_id, entry_id, payload)
@@ -3310,11 +3326,14 @@ async function captureMyFplSnapshotOnce(
                (value->>'tournament_id')::integer,
                (value->>'entry_id')::integer,
                value->'payload'
-        FROM jsonb_array_elements(${JSON.stringify(tournamentInsertRows)}::jsonb) value
+        FROM jsonb_array_elements(${JSON.stringify(tournamentBatch)}::jsonb) value
       `;
     }
     const aggregateInsertRows = tournamentAggregateRows.map((row) => ({ ...row, revision }));
-    if (aggregateInsertRows.length > 0) {
+    for (const aggregateBatch of batches(
+      aggregateInsertRows,
+      MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE,
+    )) {
       await tx`
         INSERT INTO competition.my_fpl_snapshot_tournament_aggregates
           (season_id, event_id, revision, tournament_id, payload)
@@ -3323,7 +3342,7 @@ async function captureMyFplSnapshotOnce(
                (value->>'revision')::bigint,
                (value->>'tournament_id')::integer,
                value->'payload'
-        FROM jsonb_array_elements(${JSON.stringify(aggregateInsertRows)}::jsonb) value
+        FROM jsonb_array_elements(${JSON.stringify(aggregateBatch)}::jsonb) value
       `;
     }
 
