@@ -9,6 +9,18 @@
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 
+-- `eligible_at` remains the source-change watermark.  Keep the first time a
+-- scope became eligible separately so repeated source retries cannot move the
+-- 24-hour degradation horizon forward forever.
+ALTER TABLE competition.tournament_review_obligations
+  ADD COLUMN IF NOT EXISTS first_eligible_at timestamptz;
+UPDATE competition.tournament_review_obligations
+SET first_eligible_at = eligible_at
+WHERE first_eligible_at IS NULL;
+ALTER TABLE competition.tournament_review_obligations
+  ALTER COLUMN first_eligible_at SET DEFAULT clock_timestamp(),
+  ALTER COLUMN first_eligible_at SET NOT NULL;
+
 DO $$
 DECLARE
   installed_schema text;
@@ -136,6 +148,10 @@ $migration$;
 
 ALTER TABLE competition.tournament_review_publications
   DROP CONSTRAINT IF EXISTS tournament_review_publications_versions_check;
+-- A semantic hash may legitimately recur after an audited correction (A -> B
+-- -> A).  Revision, not hash, is the immutable audit identity; remove the V1
+-- uniqueness fence before the V2.1 writer can allocate that next revision.
+DROP INDEX IF EXISTS competition.tournament_review_publications_content_unique;
 ALTER TABLE competition.tournament_review_publications
   ALTER COLUMN schema_version SET DEFAULT 'my-tournament-review-v2.1',
   ALTER COLUMN metric_version SET DEFAULT 'settled-review-v2';

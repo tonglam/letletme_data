@@ -2097,12 +2097,6 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
       columns: [table.seasonId, table.tournamentId, table.eventId, table.revision],
       name: 'tournament_review_publications_pkey',
     }),
-    uniqueIndex('tournament_review_publications_content_unique').on(
-      table.seasonId,
-      table.tournamentId,
-      table.eventId,
-      table.contentSha256,
-    ),
     index('tournament_review_publications_retention_idx').on(
       table.seasonId,
       table.tournamentId,
@@ -2194,6 +2188,9 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     format: text().notNull(),
     state: text().default('PENDING').notNull(),
     eligibleAt: timestamp('eligible_at', { withTimezone: true, mode: 'date' }).notNull(),
+    firstEligibleAt: timestamp('first_eligible_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
     nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
     executionAttempts: integer('execution_attempts').default(0).notNull(),
     sourceRechecks: integer('source_rechecks').default(0).notNull(),

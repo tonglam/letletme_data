@@ -452,6 +452,18 @@ function reviewChunksMatchPayload(
   });
 }
 
+function orderedReviewChunkHashes(
+  rows: ReadonlyArray<{ section_key: string; chunk_index: number | string; chunk_sha256: string }>,
+): string[] {
+  return [...rows]
+    .sort(
+      (left, right) =>
+        left.section_key.localeCompare(right.section_key) ||
+        Number(left.chunk_index) - Number(right.chunk_index),
+    )
+    .map((row) => row.chunk_sha256);
+}
+
 /** Remove large row arrays from the publication identity.  The immutable
  * siblings are the sole row representation; this JSON keeps only the
  * aggregate/header shell plus the exact section manifest. */
@@ -2311,6 +2323,7 @@ async function publishTournamentReviewScopeOnce(
         payload: JsonRecord | null;
         revision: number | string;
         content_sha256: string;
+        publication_content_sha256: string;
         published_at: Date | string;
         obligation_state: TournamentReviewObligationState | null;
         row_count: number;
@@ -2324,6 +2337,7 @@ async function publishTournamentReviewScopeOnce(
              publication.payload,
              head.revision,
              head.content_sha256,
+             publication.content_sha256 AS publication_content_sha256,
              head.published_at,
              obligation.state AS obligation_state,
              publication.row_count,
@@ -2369,7 +2383,12 @@ async function publishTournamentReviewScopeOnce(
     if (
       !correction &&
       previousHead[0]?.obligation_state === 'READY' &&
-      reviewChunksMatchPayload(previousHead[0].payload, previousChunks)
+      previousHead[0].publication_content_sha256 === previousHead[0].content_sha256 &&
+      reviewChunksMatchPayload(previousHead[0].payload, previousChunks) &&
+      tournamentReviewSemanticSha256(
+        previousHead[0].payload,
+        orderedReviewChunkHashes(previousChunks),
+      ) === previousHead[0].content_sha256
     ) {
       const publishedAt = asDate(previousHead[0].published_at) ?? new Date();
       await tx`
@@ -2468,7 +2487,11 @@ async function publishTournamentReviewScopeOnce(
     let revision: number;
     let publishedAt: Date;
     let state: 'PUBLISHED' | 'REUSED';
-    if (existing[0]) {
+    // A correction is an audited event even when the rebuilt business content
+    // returns to an earlier semantic hash (A -> B -> A).  Do not reuse the
+    // earlier revision: allocate a new monotonically increasing revision so
+    // the reason/Change ID remains attached to a durable publication row.
+    if (existing[0] && !correction) {
       revision = Number(existing[0].revision);
       publishedAt = asDate(existing[0].published_at) ?? new Date();
       state = 'REUSED';
@@ -3343,9 +3366,9 @@ export async function reconcileTournamentReviewObligations(
       RETURNING obligation.tournament_id, obligation.event_id
     ), upserted AS (
     INSERT INTO competition.tournament_review_obligations
-      (season_id, tournament_id, event_id, format, state, eligible_at, next_attempt_at,
+      (season_id, tournament_id, event_id, format, state, eligible_at, first_eligible_at, next_attempt_at,
        metadata_payload, entry_metadata_payload, group_assignment_payload)
-    SELECT ${season.seasonId}, tournament_id, event_id, format, 'PENDING', eligible_at,
+    SELECT ${season.seasonId}, tournament_id, event_id, format, 'PENDING', eligible_at, eligible_at,
            GREATEST(eligible_at, ${now.toISOString()}::timestamptz),
            tournament_payload, entry_metadata_payload, group_assignment_payload
     FROM valid_candidates
@@ -3372,6 +3395,11 @@ export async function reconcileTournamentReviewObligations(
         eligible_at = GREATEST(
           competition.tournament_review_obligations.eligible_at,
           EXCLUDED.eligible_at
+        ),
+        first_eligible_at = COALESCE(
+          competition.tournament_review_obligations.first_eligible_at,
+          competition.tournament_review_obligations.eligible_at,
+          EXCLUDED.first_eligible_at
         ),
         next_attempt_at = CASE
           WHEN competition.tournament_review_obligations.state <> 'READY'
@@ -3515,6 +3543,7 @@ type ClaimedReviewObligation = {
   event_id: number;
   format: TournamentReviewFormat;
   eligible_at: Date | string;
+  first_eligible_at: Date | string;
   execution_attempts: number;
   source_rechecks: number;
   repair_issue_id: number | null;
@@ -3561,7 +3590,7 @@ async function claimTournamentReviewObligations(
         AND obligation.tournament_id = candidates.tournament_id
         AND obligation.event_id = candidates.event_id
       RETURNING obligation.season_id, obligation.tournament_id, obligation.event_id,
-                obligation.format, obligation.eligible_at,
+                obligation.format, obligation.eligible_at, obligation.first_eligible_at,
 	                obligation.execution_attempts, obligation.source_rechecks,
 	                obligation.repair_issue_id,
 	                obligation.correction_reason, obligation.correction_change_id
@@ -3686,35 +3715,39 @@ async function finishReviewObligation(
   result: TournamentReviewPublicationResult,
 ): Promise<boolean> {
   const db = await getDbClient();
-  const rows = await db<Array<{ event_id: number }>>`
-    UPDATE competition.tournament_review_obligations
-    SET state = 'READY', ready_revision = ${result.revision}, ready_at = clock_timestamp(),
-        next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
-	        last_error_code = NULL, last_failure_fingerprint = NULL, repair_issue_id = NULL,
-        correction_reason = NULL, correction_change_id = NULL,
-        updated_at = clock_timestamp()
-    WHERE season_id = ${obligation.season_id}
-      AND tournament_id = ${obligation.tournament_id}
-      AND event_id = ${obligation.event_id}
-      AND state = 'PROCESSING' AND lease_owner = ${owner}
-    RETURNING event_id
-  `;
-  if (rows.length !== 1) return false;
-  if (obligation.repair_issue_id !== null) {
-    // Resolve only the issue attached to this obligation. A broad
-    // tournament-level sync here could hide an unrelated open setup issue.
-    await db`
-      UPDATE competition.tournament_setup_issues
-      SET resolved_at = clock_timestamp(),
-          next_repair_at = NULL,
+  return db.begin(async (tx) => {
+    const rows = await tx<Array<{ event_id: number }>>`
+      UPDATE competition.tournament_review_obligations
+      SET state = 'READY', ready_revision = ${result.revision}, ready_at = clock_timestamp(),
+          next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
+          last_error_code = NULL, last_failure_fingerprint = NULL, repair_issue_id = NULL,
+          correction_reason = NULL, correction_change_id = NULL,
           updated_at = clock_timestamp()
       WHERE season_id = ${obligation.season_id}
         AND tournament_id = ${obligation.tournament_id}
-        AND issue_id = ${obligation.repair_issue_id}
-        AND resolved_at IS NULL
+        AND event_id = ${obligation.event_id}
+        AND state = 'PROCESSING' AND lease_owner = ${owner}
+      RETURNING event_id
     `;
-  }
-  return true;
+    if (rows.length !== 1) return false;
+    if (obligation.repair_issue_id !== null) {
+      // Resolve only the issue attached to this obligation. A broad
+      // tournament-level sync here could hide an unrelated open setup issue.
+      // Keep this transition in the same transaction as READY so a transient
+      // database failure cannot expose a completed review with a live blocker.
+      await tx`
+        UPDATE competition.tournament_setup_issues
+        SET resolved_at = clock_timestamp(),
+            next_repair_at = NULL,
+            updated_at = clock_timestamp()
+        WHERE season_id = ${obligation.season_id}
+          AND tournament_id = ${obligation.tournament_id}
+          AND issue_id = ${obligation.repair_issue_id}
+          AND resolved_at IS NULL
+      `;
+    }
+    return true;
+  });
 }
 
 async function failReviewObligation(
@@ -3729,7 +3762,7 @@ async function failReviewObligation(
     : obligation.execution_attempts + 1;
   const delay = tournamentReviewRetryDelayMs(sourceFailure ? 'source' : 'execution', failureNumber);
   const now = new Date();
-  const eligibleAt = asDate(obligation.eligible_at) ?? now;
+  const eligibleAt = asDate(obligation.first_eligible_at) ?? asDate(obligation.eligible_at) ?? now;
   const horizon = new Date(eligibleAt.getTime() + 24 * 60 * 60_000);
   // The fast schedules end after three attempts, but that is not the
   // degradation threshold. Keep retrying every 15 minutes until the durable
@@ -4009,7 +4042,7 @@ type TournamentReviewOperationalWatchRow = {
   event_id: number;
   format: TournamentReviewFormat;
   state: TournamentReviewObligationState;
-  eligible_at: Date | string;
+  first_eligible_at: Date | string;
   next_attempt_at: Date | string | null;
   ready_revision: number | string | null;
   active_revision: number | string | null;
@@ -4111,7 +4144,7 @@ export async function getTournamentReviewV2OperationalStatus(
 	               WHERE state = 'READY'
 	                 AND chunks_complete
 	             )::integer AS ready_chunk_complete_count,
-             min(eligible_at) FILTER (WHERE state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING')) AS oldest_active_eligible_at,
+             min(first_eligible_at) FILTER (WHERE state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING')) AS oldest_active_eligible_at,
              min(degraded_at) FILTER (WHERE state = 'DEGRADED') AS oldest_degraded_at,
              max(updated_at) AS latest_updated_at
       FROM joined
@@ -4148,7 +4181,7 @@ export async function getTournamentReviewV2OperationalStatus(
                obligation.event_id,
                obligation.format,
                obligation.state,
-               obligation.eligible_at,
+               obligation.first_eligible_at,
                obligation.next_attempt_at,
                obligation.ready_revision,
                head.revision AS active_revision,
@@ -4186,7 +4219,7 @@ export async function getTournamentReviewV2OperationalStatus(
           eventId: row.event_id,
           format: row.format,
           state: row.state,
-          eligibleAt: dateIso(row.eligible_at) ?? now.toISOString(),
+          eligibleAt: dateIso(row.first_eligible_at) ?? now.toISOString(),
           nextAttemptAt: dateIso(row.next_attempt_at),
           revision: integerOrNull(row.active_revision),
           readyRevision: integerOrNull(row.ready_revision),
