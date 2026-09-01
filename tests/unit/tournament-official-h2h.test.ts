@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  fetchOfficialH2HSourceSnapshot,
   projectOfficialH2HEventLiveScores,
   type OfficialH2HSourceSnapshot,
 } from '../../src/services/tournament-official-h2h.service';
@@ -53,6 +54,26 @@ const batch = (
 });
 
 describe('Official H2H Live Points V2 projection', () => {
+  test('captures source ordering before provider reads complete', async () => {
+    let providerFinishedAt = 0;
+    const client = {
+      async getLeagueH2HStandings() {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return { standings: { results: [], has_next: false } };
+      },
+      async getLeagueH2HMatches() {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        providerFinishedAt = Date.now();
+        return { results: [], has_next: false };
+      },
+    } as unknown as Parameters<typeof fetchOfficialH2HSourceSnapshot>[1];
+
+    const fetched = await fetchOfficialH2HSourceSnapshot(123, client);
+
+    expect(fetched.sourceCheckedAt).toBeDefined();
+    expect(fetched.sourceCheckedAt!.getTime()).toBeLessThan(providerFinishedAt);
+  });
+
   test('overlays only complete same-event V2 scores', () => {
     const projected = projectOfficialH2HEventLiveScores(
       snapshot(),

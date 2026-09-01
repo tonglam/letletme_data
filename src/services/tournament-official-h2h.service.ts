@@ -61,7 +61,12 @@ export type OfficialH2HStanding = RawFPLLeagueStandingsResult & { entry: number 
 export type OfficialH2HSourceSnapshot = {
   standings: OfficialH2HStanding[];
   matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
-  /** Timestamp after the complete official standings/matches fetch succeeded. */
+  /**
+   * Timestamp captured before the first provider request. This is an ordering
+   * fence: a fetch that started before FPL marked an event data_checked must
+   * not later be promoted as fresh final standings merely because the network
+   * response arrived after finalization.
+   */
   sourceCheckedAt?: Date;
   /** Exact provider page boundaries, retained for locked-manifest validation. */
   pageMatches?: readonly {
@@ -416,6 +421,11 @@ export async function fetchOfficialH2HSourceSnapshot(
   options: OfficialH2HFetchOptions = {},
 ): Promise<OfficialH2HSourceSnapshot> {
   const startedAt = Date.now();
+  // Capture the source observation boundary before any provider read. The
+  // finalization gate compares this timestamp with event.data_checked_at; a
+  // post-fetch timestamp would allow an in-flight pre-finalization response to
+  // masquerade as post-finalization evidence.
+  const sourceCheckedAt = new Date();
   const standings: OfficialH2HStanding[] = [];
   let standingsPage = 1;
   let previousStandingsSignature: string | null = null;
@@ -555,7 +565,7 @@ export async function fetchOfficialH2HSourceSnapshot(
   return {
     standings,
     matches,
-    sourceCheckedAt: capturedAt,
+    sourceCheckedAt,
     pageMatches: pageSlices,
     pageManifests,
   };
@@ -1083,7 +1093,13 @@ export async function syncOfficialH2HTournament(
         );
       }
     }
-    snapshot = { standings: fetched.standings, matches: merged, pageManifests: manifests };
+    snapshot = {
+      standings: fetched.standings,
+      matches: merged,
+      sourceCheckedAt: fetched.sourceCheckedAt,
+      pageMatches: fetched.pageMatches,
+      pageManifests: manifests,
+    };
   }
   const entryIds = await entryIdsPromise;
   const entryIdSet = new Set(entryIds);
