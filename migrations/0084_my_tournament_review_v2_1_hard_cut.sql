@@ -84,7 +84,11 @@ BEGIN
   LIMIT 1;
 
   IF current_season IS NULL THEN
-    RAISE EXCEPTION '0084 requires one current FPL season';
+    -- Schema-only CI/restore databases may be empty before the first FPL
+    -- season is seeded.  Apply the structural hard-cut below, but there is no
+    -- current-season data to back up or reset in that case.
+    RAISE NOTICE '0084 skipped current-season backup/reset because no current FPL season exists';
+    RETURN;
   END IF;
 
   -- Copy only the current season.  Historical descriptive-v1 evidence remains
