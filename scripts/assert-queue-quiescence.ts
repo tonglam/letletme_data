@@ -523,7 +523,7 @@ async function preparePausedContentRunsForDeployment(argv: readonly string[]): P
         jobId: contentAcquisitionJobOutbox.jobId,
       })
       .from(contentAcquisitionRuns)
-      .innerJoin(
+      .leftJoin(
         contentAcquisitionJobOutbox,
         eq(contentAcquisitionJobOutbox.runId, contentAcquisitionRuns.runId),
       )
@@ -536,8 +536,13 @@ async function preparePausedContentRunsForDeployment(argv: readonly string[]): P
       );
     const queuesByName = new Map(queues.map((queue) => [queue.name, queue]));
     const queuedRunIds = new Set<string>();
+    const directSchedulerRunIds = new Set<string>();
     await Promise.all(
       candidates.map(async (candidate) => {
+        if (candidate.queueName === null || candidate.jobId === null) {
+          directSchedulerRunIds.add(candidate.runId);
+          return;
+        }
         if (!isContentConsumerQueueName(candidate.queueName)) {
           throw new Error(`Invalid formal acquisition queue: ${candidate.queueName}`);
         }
@@ -553,6 +558,26 @@ async function preparePausedContentRunsForDeployment(argv: readonly string[]): P
         }
       }),
     );
+    if (directSchedulerRunIds.size > 0) {
+      await Promise.all(
+        queues.map(async (queue) => {
+          const jobs = await queue.getJobs([...RUNNABLE_JOB_TYPES], 0, -1, false);
+          for (const job of jobs) {
+            const data = job.data;
+            if (
+              !data ||
+              typeof data !== 'object' ||
+              !('runId' in data) ||
+              typeof data.runId !== 'string' ||
+              !directSchedulerRunIds.has(data.runId)
+            ) {
+              continue;
+            }
+            queuedRunIds.add(data.runId);
+          }
+        }),
+      );
+    }
     const prepared = await prepareQueuedFormalRunsForDeployment({ db, queuedRunIds });
     process.stdout.write(
       `${JSON.stringify({ status: 'paused_content_runs_prepared', prepared })}\n`,
