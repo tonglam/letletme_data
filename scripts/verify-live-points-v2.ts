@@ -48,6 +48,8 @@ export function validateFinalizedEventEntry(
     failures.push('REDIS_ENTRY_INPUT_NOT_EXACTLY_15');
   if (entry && new Set(entry.input.picksBase.picks.map((pick) => pick.element)).size !== 15)
     failures.push('REDIS_ENTRY_INPUT_ELEMENTS_NOT_UNIQUE');
+  if (entry && (entry.publication.state === 'FINAL') !== (entry.input.finalResult !== null))
+    failures.push('REDIS_ENTRY_STATE_FINAL_RESULT_MISMATCH');
   if (!head) failures.push('POSTGRES_ENTRY_PICK_HEAD_MISSING');
   if (head && (head.rowCount !== 15 || head.state !== 'COMPLETE'))
     failures.push('POSTGRES_ENTRY_PICK_HEAD_INCOMPLETE');

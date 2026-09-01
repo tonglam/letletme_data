@@ -521,6 +521,13 @@ function parseEntryManifest(raw: string | null, scope: EntryScope): EntryLivePub
   }
 }
 
+function entryPublicationStateMatchesInput(
+  publication: EntryLivePublicationV2,
+  input: EntryLiveInputV2,
+): boolean {
+  return (publication.state === 'FINAL') === (input.finalResult !== null);
+}
+
 function parseExactly15Picks(value: unknown): value is Exactly15Picks {
   if (!Array.isArray(value) || value.length !== 15) return false;
   const positions = new Set<number>();
@@ -2141,7 +2148,8 @@ async function readEntryCandidate(
     const input = JSON.parse(payload) as unknown;
     if (
       !validateEntryLiveInputV2(input, scope) ||
-      itemCount(input.picksBase.picks) !== publication.item.count
+      itemCount(input.picksBase.picks) !== publication.item.count ||
+      !entryPublicationStateMatchesInput(publication, input)
     )
       return null;
     return {
@@ -2183,7 +2191,8 @@ async function readEntryPromotionProof(
       const input = JSON.parse(value) as unknown;
       valid =
         validateEntryLiveInputV2(input, scope) &&
-        itemCount(input.picksBase.picks) === publication.item.count;
+        itemCount(input.picksBase.picks) === publication.item.count &&
+        entryPublicationStateMatchesInput(publication, input);
     } catch {
       valid = false;
     }
