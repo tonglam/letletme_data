@@ -491,7 +491,7 @@ describe('My FPL daily snapshot publication contract', () => {
 
   test('waits through transient API port-proxy teardown before rejecting an unknown listener', () => {
     expect(deployStateMachine).toContain(
-      'remove_exact_stopped_container api\n    wait_for_port_3000_free',
+      'remove_exact_stopped_container api\n    remove_stale_api_run_containers\n    wait_for_port_3000_free',
     );
     expect(deployStateMachine).not.toContain(
       'remove_exact_stopped_container api\n    assert_port_3000_free',

@@ -561,6 +561,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" compose stop -t 45 media-worker
             APP_IMAGE="$IMAGE_REF" compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
+            remove_stale_api_run_containers
             wait_for_port_3000_free 30 2
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration \
               bun scripts/assert-queue-quiescence.ts --database-only --scoped
