@@ -2083,14 +2083,14 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     rowCount: integer('row_count').notNull(),
     contentSha256: text('content_sha256').notNull(),
     payload: jsonb().notNull(),
-    correctionReason: text('correction_reason'),
-    correctionChangeId: text('correction_change_id'),
     publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
+    correctionReason: text('correction_reason'),
+    correctionChangeId: text('correction_change_id'),
   },
   (table) => [
     primaryKey({
@@ -2188,9 +2188,6 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     format: text().notNull(),
     state: text().default('PENDING').notNull(),
     eligibleAt: timestamp('eligible_at', { withTimezone: true, mode: 'date' }).notNull(),
-    firstEligibleAt: timestamp('first_eligible_at', { withTimezone: true, mode: 'date' })
-      .default(sql`clock_timestamp()`)
-      .notNull(),
     nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
     executionAttempts: integer('execution_attempts').default(0).notNull(),
     sourceRechecks: integer('source_rechecks').default(0).notNull(),
@@ -2212,6 +2209,9 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     metadataPayload: jsonb('metadata_payload'),
     entryMetadataPayload: jsonb('entry_metadata_payload'),
     groupAssignmentPayload: jsonb('group_assignment_payload'),
+    firstEligibleAt: timestamp('first_eligible_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
     lastObservedAt: timestamp('last_observed_at', { withTimezone: true, mode: 'date' }),
     lastNoopAt: timestamp('last_noop_at', { withTimezone: true, mode: 'date' }),
     lastSemanticChangeAt: timestamp('last_semantic_change_at', {
