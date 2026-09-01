@@ -176,8 +176,15 @@ BEGIN
        OR legacy.contract_key = 'my-tournament-review-v2'
   LOOP
     UPDATE ops.freshness_slo_windows AS canonical
-    SET eligible_at = LEAST(canonical.eligible_at, legacy.eligible_at),
+    SET -- The duplicate rows are one logical SLO window.  Keep the earliest
+        -- eligibility boundary, then merge every monotonic observation and
+        -- terminal result before deleting the legacy identity.  In
+        -- particular, a canonical PENDING row must not erase a legacy MET or
+        -- BREACHED result that already has completion/recovery evidence.
+        eligible_at = LEAST(canonical.eligible_at, legacy.eligible_at),
         due_at = LEAST(canonical.due_at, legacy.due_at),
+        event_id = COALESCE(canonical.event_id, legacy.event_id),
+        source_day = COALESCE(canonical.source_day, legacy.source_day),
         obligation_due_at = CASE
           WHEN canonical.obligation_due_at IS NULL THEN legacy.obligation_due_at
           WHEN legacy.obligation_due_at IS NULL THEN canonical.obligation_due_at
@@ -208,10 +215,37 @@ BEGIN
           WHEN legacy.web_seen_at IS NULL THEN canonical.web_seen_at
           ELSE GREATEST(canonical.web_seen_at, legacy.web_seen_at)
         END,
-        producer_revision = COALESCE(canonical.producer_revision, legacy.producer_revision),
-        redis_revision = COALESCE(canonical.redis_revision, legacy.redis_revision),
-        graphql_revision = COALESCE(canonical.graphql_revision, legacy.graphql_revision),
-        web_revision = COALESCE(canonical.web_revision, legacy.web_revision),
+        -- Revisions follow the milestone that observed them.  Falling back to
+        -- the other row keeps a complete terminal record when the duplicate
+        -- was only partially observed.
+        producer_revision = CASE
+          WHEN canonical.source_checked_at IS NULL THEN legacy.producer_revision
+          WHEN legacy.source_checked_at IS NULL THEN canonical.producer_revision
+          WHEN legacy.source_checked_at > canonical.source_checked_at THEN
+            COALESCE(legacy.producer_revision, canonical.producer_revision)
+          ELSE COALESCE(canonical.producer_revision, legacy.producer_revision)
+        END,
+        redis_revision = CASE
+          WHEN canonical.redis_seen_at IS NULL THEN legacy.redis_revision
+          WHEN legacy.redis_seen_at IS NULL THEN canonical.redis_revision
+          WHEN legacy.redis_seen_at > canonical.redis_seen_at THEN
+            COALESCE(legacy.redis_revision, canonical.redis_revision)
+          ELSE COALESCE(canonical.redis_revision, legacy.redis_revision)
+        END,
+        graphql_revision = CASE
+          WHEN canonical.graphql_seen_at IS NULL THEN legacy.graphql_revision
+          WHEN legacy.graphql_seen_at IS NULL THEN canonical.graphql_revision
+          WHEN legacy.graphql_seen_at > canonical.graphql_seen_at THEN
+            COALESCE(legacy.graphql_revision, canonical.graphql_revision)
+          ELSE COALESCE(canonical.graphql_revision, legacy.graphql_revision)
+        END,
+        web_revision = CASE
+          WHEN canonical.web_seen_at IS NULL THEN legacy.web_revision
+          WHEN legacy.web_seen_at IS NULL THEN canonical.web_revision
+          WHEN legacy.web_seen_at > canonical.web_seen_at THEN
+            COALESCE(legacy.web_revision, canonical.web_revision)
+          ELSE COALESCE(canonical.web_revision, legacy.web_revision)
+        END,
         expected_count = CASE
           WHEN canonical.expected_count IS NULL THEN legacy.expected_count
           WHEN legacy.expected_count IS NULL THEN canonical.expected_count
@@ -258,15 +292,40 @@ BEGIN
           END THEN legacy.status
           ELSE canonical.status
         END,
-        breach_code = COALESCE(canonical.breach_code, legacy.breach_code),
+        -- Prefer the breach code attached to the row whose terminal status
+        -- wins; retain the other code when the winning row is incomplete.
+        breach_code = CASE
+          WHEN CASE legacy.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END > CASE canonical.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END THEN COALESCE(legacy.breach_code, canonical.breach_code)
+          ELSE COALESCE(canonical.breach_code, legacy.breach_code)
+        END,
         recovered_at = CASE
           WHEN canonical.recovered_at IS NULL THEN legacy.recovered_at
           WHEN legacy.recovered_at IS NULL THEN canonical.recovered_at
-          ELSE GREATEST(canonical.recovered_at, legacy.recovered_at)
+          ELSE LEAST(canonical.recovered_at, legacy.recovered_at)
         END,
-        recovery_revision = COALESCE(canonical.recovery_revision, legacy.recovery_revision),
+        recovery_revision = CASE
+          WHEN canonical.recovered_at IS NULL THEN legacy.recovery_revision
+          WHEN legacy.recovered_at IS NULL THEN canonical.recovery_revision
+          WHEN legacy.recovered_at < canonical.recovered_at THEN
+            COALESCE(legacy.recovery_revision, canonical.recovery_revision)
+          ELSE COALESCE(canonical.recovery_revision, legacy.recovery_revision)
+        END,
         created_at = LEAST(canonical.created_at, legacy.created_at),
-        evidence = canonical.evidence || jsonb_build_object(
+        -- Merge both evidence objects at the top level, then retain a
+        -- namespaced copy of the retired row for audit/recovery inspection.
+        evidence = legacy.evidence || canonical.evidence || jsonb_build_object(
           'supersededLegacyWindowId', duplicate_row.legacy_window_id,
           'supersededLegacyEvidence', duplicate_row.legacy_evidence,
           'supersededLegacyRow', to_jsonb(legacy)

@@ -322,30 +322,15 @@ async function repairTournamentSetupIssueUnlocked(
           }),
         ),
       );
-      return;
     }
-  }
 
-  // A repaired source/structure issue is the explicit hand-off back into the
-  // settled review lane. Scope it to the corrected event whenever the issue
-  // carries one; the global reconciliation remains the safety net for issues
-  // whose repair changed the tournament window rather than one result row.
-  if (
-    issue.code === 'TOURNAMENT_RESULTS_INCOMPLETE' ||
-    issue.code === 'STRUCTURE_INTEGRITY_FAILED'
-  ) {
-    await enqueueTournamentReview(season, 'reconcile', {
-      tournamentId: issue.tournamentId,
-      // Structure repair can change group membership, phase boundaries, or a
-      // bracket edge. Rebuild every settled scope rather than assuming the
-      // issue's observed event is the only affected publication.
-      ...(issue.code === 'STRUCTURE_INTEGRITY_FAILED' ||
-      issue.eventId === null ||
-      issue.eventId === undefined
-        ? {}
-        : { eventId: issue.eventId }),
-      deduplicationId: `tournament-review-repair-${season.seasonCode}-${issue.tournamentId}-${issue.eventId ?? 'all'}`,
-    });
+    // A topology/result repair is never allowed to fall through to routine
+    // reconciliation: that path deliberately skips READY obligations and
+    // would leave a frozen head on the pre-repair facts. An empty result is
+    // valid only when the tournament has not created a review obligation yet.
+    // In that case the normal eligibility discovery will create its initial
+    // publication; there is no READY head to invalidate.
+    return;
   }
 }
 

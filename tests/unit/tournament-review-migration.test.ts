@@ -154,6 +154,15 @@ describe('My Tournament Review V2 migration', () => {
     expect(hardCutMigration).toContain('conflicting_cases');
   });
 
+  test('merges terminal freshness evidence before deleting duplicate windows', () => {
+    expect(hardCutMigration).toContain('recovery_revision = CASE');
+    expect(hardCutMigration).toContain('evidence = legacy.evidence || canonical.evidence');
+    expect(hardCutMigration).toContain(
+      'source_day = COALESCE(canonical.source_day, legacy.source_day)',
+    );
+    expect(hardCutMigration).toContain('ELSE LEAST(canonical.recovered_at, legacy.recovered_at)');
+  });
+
   test('allows the hard-cut backfill to target only the current season', () => {
     expect(backfillScript).toContain('const currentSeason = await seasonRepository.findCurrent()');
     expect(backfillScript).toContain('season.seasonId !== currentSeason.seasonId');
