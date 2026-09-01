@@ -191,6 +191,9 @@ return redis.call('DEL', KEYS[1])
 export const COMPARE_AND_SET_QUEUE_ADMISSION_LUA = `
 local current = redis.call('GET', KEYS[1])
 local expected = ARGV[1]
+if ARGV[4] == 'OPEN' and #KEYS >= 2 and redis.call('HGET', KEYS[2], 'paused') == '1' then
+  return {0, current or ''}
+end
 if expected == '' then
   if current then return {0, current} end
 elseif not current or current ~= expected then
@@ -323,6 +326,10 @@ export function queueHealthSnapshotKey(queueName: string): string {
 
 export function queueAdmissionKey(queueName: string): string {
   return `${ADMISSION_PREFIX}${queueName}`;
+}
+
+export function queueConsumerMetaKey(queueName: string): string {
+  return `bull:${queueName}:meta`;
 }
 
 export function queueConsumerPauseOwnerKey(queueName: string): string {
@@ -635,7 +642,10 @@ export async function setQueueAdmission(
  * read and its write.
  */
 export async function compareAndSetQueueAdmission(
-  input: QueueAdmissionMutationInput & { expected: QueueAdmission | null },
+  input: QueueAdmissionMutationInput & {
+    expected: QueueAdmission | null;
+    consumerMetaKey?: string;
+  },
 ): Promise<QueueAdmissionCompareAndSetResult> {
   validateQueueAdmissionInput(input);
   if (input.expected && input.expected.queueName !== input.queueName) {
@@ -645,13 +655,19 @@ export async function compareAndSetQueueAdmission(
   const now = new Date();
   const admission = buildQueueAdmission(input, now);
   const redis = await queueRedisSingleton.getClient();
-  const result = (await redis.eval(
-    COMPARE_AND_SET_QUEUE_ADMISSION_LUA,
-    1,
-    queueAdmissionKey(input.queueName),
+  const keys = [queueAdmissionKey(input.queueName)];
+  const args = [
     input.expected ? JSON.stringify(input.expected) : '',
     JSON.stringify(admission),
     String(input.ttlSeconds),
+    input.consumerMetaKey ? 'OPEN' : '',
+  ];
+  if (input.consumerMetaKey) keys.push(input.consumerMetaKey);
+  const result = (await redis.eval(
+    COMPARE_AND_SET_QUEUE_ADMISSION_LUA,
+    keys.length,
+    ...keys,
+    ...args,
   )) as [number | string, string?];
   const swapped = Number(result[0]) === 1;
   const currentRaw = result[1] ?? '';

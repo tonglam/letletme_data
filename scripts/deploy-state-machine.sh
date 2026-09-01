@@ -615,6 +615,7 @@ restore_content_deploy_controls() {
     fi
     if ! restore_content_worker_queue_admission "$queue_name"; then
       echo "deploy admission: $queue_name producer admission remains closed for forward recovery" >&2
+      stop_content_worker_for_forward_recovery || true
       return 1
     fi
   done

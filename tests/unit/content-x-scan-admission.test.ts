@@ -11,7 +11,10 @@ import {
   DEPLOY_QUEUE_ADMISSION_REASON,
   DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
 } from '../../scripts/assert-queue-quiescence';
-import { COMPARE_AND_SET_QUEUE_ADMISSION_LUA } from '../../src/services/queue-governance.service';
+import {
+  COMPARE_AND_SET_QUEUE_ADMISSION_LUA,
+  queueConsumerMetaKey,
+} from '../../src/services/queue-governance.service';
 
 describe('content-worker deployment admission command', () => {
   function runQueueProbeShell(
@@ -77,7 +80,8 @@ FAIL_PAUSE_AFTER_MARKER_QUEUE=''
 FAIL_RESUME_QUEUE=''
 FAIL_STATUS_QUEUE=''
 FAIL_DRAIN_QUEUE=''
-export event_file pause_dir owner_dir status_failure_file FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE FAIL_PAUSE_AFTER_MARKER_QUEUE FAIL_RESUME_QUEUE FAIL_STATUS_QUEUE FAIL_DRAIN_QUEUE
+CONCURRENT_OPEN_QUEUE=''
+export event_file pause_dir owner_dir status_failure_file FAIL_OPEN CONCURRENT_PAUSE_QUEUE REASSERT_AFTER_PAUSE_QUEUE FAIL_PAUSE_AFTER_MARKER_QUEUE FAIL_RESUME_QUEUE FAIL_STATUS_QUEUE FAIL_DRAIN_QUEUE CONCURRENT_OPEN_QUEUE
 trap 'rm -f "$event_file" "$status_failure_file"; rm -rf "$pause_dir" "$owner_dir"' EXIT
 source scripts/deploy-state-machine.sh
 compose() {
@@ -159,6 +163,12 @@ compose() {
       printf 'DRAIN-FAILED:%s\n' "$admission_queue" >>"$event_file"
       return 1
     fi
+    if [[ "$admission_mode" = OPEN && "$admission_queue" = "$CONCURRENT_OPEN_QUEUE" ]]; then
+      touch "$pause_dir/$admission_queue"
+      printf '%s\n' operator >"$owner_dir/$admission_queue"
+      printf 'OPEN-PAUSE-RACE:%s\n' "$admission_queue" >>"$event_file"
+      return 1
+    fi
     printf '%s:%s\n' "$admission_mode" "$admission_queue" >>"$event_file"
     printf '%s\n' "{\"contractVersion\":\"queue-admission-v2\",\"queueName\":\"$admission_queue\",\"mode\":\"$admission_mode\",\"changed\":true}"
     return 0
@@ -236,7 +246,9 @@ printf 'CONTROL_IMAGE:%s\n' "$DEPLOY_CONTENT_WORKER_CONTROL_IMAGE"
     expect(command).not.toContain('setQueueAdmission');
     expect(COMPARE_AND_SET_QUEUE_ADMISSION_LUA).toContain('current ~= expected');
     expect(COMPARE_AND_SET_QUEUE_ADMISSION_LUA).toContain('expected ==');
+    expect(COMPARE_AND_SET_QUEUE_ADMISSION_LUA).toMatch(/HGET', KEYS\[2\], 'paused'/);
     expect(COMPARE_AND_SET_QUEUE_ADMISSION_LUA).toContain('EX');
+    expect(queueConsumerMetaKey('content-x-scan')).toBe('bull:content-x-scan:meta');
   });
 
   test('parses both supported admission modes', () => {
@@ -543,6 +555,22 @@ if restore_content_deploy_controls; then exit 1; fi
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').toContain('RESUME');
     expect(result.stdout?.toString() ?? '').not.toContain('OPEN');
+  });
+
+  test('stops the producer when an operator pauses during admission restore', () => {
+    const result = runConsumerControlShell(String.raw`
+CONCURRENT_OPEN_QUEUE=content-x-scan
+export CONCURRENT_OPEN_QUEUE
+pause_content_worker_consumers_for_deploy
+drain_content_worker_queues_for_deploy
+if restore_content_deploy_controls; then exit 1; fi
+[[ -e "$pause_dir/content-x-scan" ]]
+! grep -F 'OPEN:content-x-scan' "$event_file"
+grep -F 'OPEN-PAUSE-RACE:content-x-scan' "$event_file"
+grep -F 'STOP:content-worker' "$event_file"
+`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout?.toString() ?? '').toContain('STOP:content-worker');
   });
 
   test('keeps producer admission closed when consumer restoration fails', () => {

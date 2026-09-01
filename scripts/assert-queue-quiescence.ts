@@ -24,6 +24,7 @@ import {
   acquiringQueueConsumerPauseOwner,
   claimQueueConsumerPauseAcquisition,
   compareAndSetQueueAdmission,
+  queueConsumerMetaKey,
   completeQueueConsumerPauseAcquisition,
   completeQueueConsumerPauseRelease,
   deploymentQueueConsumerPauseOwner,
@@ -248,6 +249,7 @@ async function applyContentWorkerAdmission(args: ContentWorkerAdmissionArguments
       ttlSeconds: DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
       reasonCode: DEPLOY_QUEUE_ADMISSION_REASON,
       changedBy: DEPLOY_QUEUE_ADMISSION_ACTOR,
+      ...(args.mode === 'OPEN' ? { consumerMetaKey: queueConsumerMetaKey(args.queueName) } : {}),
     });
     if (result.swapped) {
       if (!result.admission) throw new Error('Queue admission CAS returned no replacement');
