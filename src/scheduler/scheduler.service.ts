@@ -179,6 +179,11 @@ async function recordFreshnessWindowForPlan(
   // particular watch. Keep it out of the publication-SLO denominator; the
   // durable price-change lane owns the publication window.
   if (definition.name === 'price-change-watch') return null;
+  // A pre-kickoff Match-only observation publishes the independent Match V3
+  // desk and must not reserve or inherit a Live Points freshness window.
+  if (definition.name === 'live-snapshot' && plan.evidence?.matchObservationOnly === true) {
+    return null;
+  }
   const contract = contractForSchedulerJob(definition.name);
   if (
     !contract ||

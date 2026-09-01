@@ -6,9 +6,10 @@ import {
   canSkipMissingDetailDuringSeed,
   hasCurrentMatchDeskSyncEvidence,
   parseLiveMatchSeedArguments,
-} from '../../scripts/seed-live-matches-v2';
+} from '../../scripts/seed-live-matches-v3';
+import { isValidLiveMatchDetailCheckpointPayloadV3 } from '../../src/cache/live-match-publication-v3';
 
-describe('live match V2 cutover seed arguments', () => {
+describe('live match V3 cutover seed arguments', () => {
   it('requires execution, season, and either a target or finalized sweep', () => {
     expect(
       parseLiveMatchSeedArguments(['--execute', '--season', '2627', '--event-id', '2']),
@@ -62,6 +63,43 @@ describe('live match V2 cutover seed arguments', () => {
     expect(canSkipMissingDetailDuringSeed({ fixtureCount: 2, state: 'FINALIZED' })).toBe(false);
   });
 
+  it('rejects case-insensitive duplicate stat identifiers in V3 detail payloads', () => {
+    const valid = [
+      {
+        fixtureId: 1,
+        players: [
+          {
+            id: 10,
+            webName: 'Player',
+            position: 3,
+            teamId: 1,
+            price: 50,
+            totalPoints: 3,
+            stats: [{ identifier: 'bps', value: 30, awardedPoints: 3 }],
+          },
+        ],
+      },
+    ];
+
+    expect(isValidLiveMatchDetailCheckpointPayloadV3(valid)).toBe(true);
+    expect(
+      isValidLiveMatchDetailCheckpointPayloadV3([
+        {
+          ...valid[0]!,
+          players: [
+            {
+              ...valid[0]!.players[0]!,
+              stats: [
+                { identifier: 'bps', value: 30, awardedPoints: 1 },
+                { identifier: 'BPS', value: 30, awardedPoints: 2 },
+              ],
+            },
+          ],
+        },
+      ]),
+    ).toBe(false);
+  });
+
   it('requires the current Match desk pointer to be refreshed before degradation', () => {
     const before = {
       servedFrom: 'REDIS_CURRENT' as const,
@@ -104,31 +142,33 @@ describe('live match V2 cutover seed arguments', () => {
     );
   });
 
-  it('keeps the checked-in deploy helper on the same Match V2 seed path', () => {
+  it('keeps the checked-in deploy helper on the same Match V3 seed path', () => {
     const deploy = readFileSync(new URL('../../scripts/deploy.sh', import.meta.url), 'utf8');
     expect(deploy).toMatch(
-      /bun run db:cutover-seed-live-match-v2 -- --execute --all-finalized[\s\S]*--season "\$LIVE_POINTS_V2_SEED_SEASON"[\s\S]*--event-id "\$LIVE_POINTS_V2_SEED_EVENT_ID"/,
+      /bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized[\s\S]*--season "\$LIVE_POINTS_V2_SEED_SEASON"[\s\S]*--event-id "\$LIVE_POINTS_V2_SEED_EVENT_ID"/,
     );
   });
 
   it('durably fences the desk before the price-bearing detail seed', () => {
     const source = readFileSync(
-      new URL('../../scripts/seed-live-matches-v2.ts', import.meta.url),
+      new URL('../../scripts/seed-live-matches-v3.ts', import.meta.url),
       'utf8',
     );
     const deskCheckpoint = source.search(/kind: 'desk'/);
     const detailCheckpoint = source.search(/kind: 'detail'/);
+    const missingDetailBranch = source.indexOf('if (!active)');
     expect(deskCheckpoint).toBeGreaterThan(-1);
     expect(detailCheckpoint).toBeGreaterThan(deskCheckpoint);
-    expect(source).toContain('readLiveMatchDeskPointerV2');
-    expect(source).toContain(
-      'allowFinalizedReplacementForCutover: active.publication.finalized === true',
-    );
+    expect(missingDetailBranch).toBeGreaterThan(deskCheckpoint);
+    expect(source).toContain('readLiveMatchDeskPointerV3');
+    expect(source).toContain('replaceFinalizedForCutover');
+    expect(source).toContain('kind: ' + String.fromCharCode(39) + 'desk' + String.fromCharCode(39));
+    expect(source).not.toContain('allowV2ReplacementForCutover');
   });
 
   it('uses one synchronized fixtures observation for finalization and sync', () => {
     const source = readFileSync(
-      new URL('../../scripts/seed-live-matches-v2.ts', import.meta.url),
+      new URL('../../scripts/seed-live-matches-v3.ts', import.meta.url),
       'utf8',
     );
     expect(source).toMatch(
@@ -138,7 +178,7 @@ describe('live match V2 cutover seed arguments', () => {
 
   it('bounds resource cleanup and exits the one-shot seed on every outcome', () => {
     const source = readFileSync(
-      new URL('../../scripts/seed-live-matches-v2.ts', import.meta.url),
+      new URL('../../scripts/seed-live-matches-v3.ts', import.meta.url),
       'utf8',
     );
     expect(source).toContain('const SEED_CLEANUP_TIMEOUT_MS = 5_000;');

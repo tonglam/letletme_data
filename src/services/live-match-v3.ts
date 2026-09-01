@@ -55,8 +55,7 @@ export interface MatchDeskFixture {
 export interface MatchDetailStat {
   readonly identifier: string;
   readonly value: number;
-  readonly points: number;
-  readonly pointsModification: number | null;
+  readonly awardedPoints: number;
 }
 
 export interface MatchDetailPlayer {
@@ -305,10 +304,20 @@ function statSort(left: MatchDetailStat, right: MatchDetailStat): number {
   return left.identifier < right.identifier ? -1 : left.identifier > right.identifier ? 1 : 0;
 }
 
-function statsHaveVisibleValue(stats: readonly MatchDetailStat[]): boolean {
-  return stats.some(
-    (stat) => stat.value !== 0 || stat.points !== 0 || (stat.pointsModification ?? 0) !== 0,
-  );
+type MatchStatLike = Readonly<{
+  value: number;
+  points?: number;
+  pointsModification?: number | null;
+  awardedPoints?: number;
+}>;
+
+function awardedPointsOf(stat: MatchStatLike): number {
+  if (stat.awardedPoints !== undefined) return stat.awardedPoints;
+  return (stat.points ?? 0) + (stat.pointsModification ?? 0);
+}
+
+function statsHaveVisibleValue(stats: readonly MatchStatLike[]): boolean {
+  return stats.some((stat) => stat.value !== 0 || awardedPointsOf(stat) !== 0);
 }
 
 function buildDetailPlayer(input: {
@@ -357,10 +366,7 @@ function buildDetailPlayer(input: {
       `Live Match detail has no event-time team identity for fixture ${input.fixtureId} element ${input.elementId}`,
     );
   }
-  const totalPoints = stats.reduce(
-    (sum, stat) => sum + stat.points + (stat.pointsModification ?? 0),
-    0,
-  );
+  const totalPoints = stats.reduce((sum, stat) => sum + stat.awardedPoints, 0);
   if (!Number.isSafeInteger(totalPoints)) {
     throw new Error(
       `Live Match detail points are not an integer for fixture ${input.fixtureId} element ${input.elementId}`,
@@ -444,12 +450,11 @@ export function prepareLiveMatchDetail(input: {
       const stats = fixture.stats.map((stat) => ({
         identifier: stat.identifier,
         value: stat.value,
-        points: stat.points,
-        pointsModification: stat.pointsModification,
+        awardedPoints: stat.points + (stat.pointsModification ?? 0),
       }));
       const bpsValue = bps.get(`${fixture.fixtureId}:${row.elementId}`);
       if (bpsValue !== undefined && !stats.some((stat) => stat.identifier === 'bps')) {
-        stats.push({ identifier: 'bps', value: bpsValue, points: 0, pointsModification: null });
+        stats.push({ identifier: 'bps', value: bpsValue, awardedPoints: 0 });
       }
       const player = buildDetailPlayer({
         elementId: row.elementId,
@@ -474,7 +479,7 @@ export function prepareLiveMatchDetail(input: {
     const player = buildDetailPlayer({
       elementId,
       fixtureId,
-      stats: [{ identifier: 'bps', value: bpsValue, points: 0, pointsModification: null }],
+      stats: [{ identifier: 'bps', value: bpsValue, awardedPoints: 0 }],
       referenceData,
       fixtureTeamIds: fixtureTeamIds.get(fixtureId) ?? new Set(),
       requireEventPinnedIdentity: input.requireEventPinnedIdentity,

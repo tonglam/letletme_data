@@ -152,7 +152,7 @@ invalidate otherwise complete history.
 | Job | Cadence | Gate / behavior |
 |---|---|---|
 | `live-snapshot` | 30-second lifecycle obligation | `isFPLSeason`, current event, and lifecycle window; one coherent fetch validates event-live + fixtures before atomically publishing the V2 Redis current/previous pair. Heartbeats update source freshness only; semantic changes advance the relevant revision and a merged PostgreSQL checkpoint obligation. |
-| `live-match-checkpoint` | coalesced asynchronous obligation | Internal `live-data` worker job created by the Match V2 publisher. It reads only the latest Redis desired publication, writes the compact desk/detail checkpoint after the ten-minute watermark (or immediately for first, lifecycle/identity-boundary, and final publications), then CAS-marks Redis. It never calls FPL and never queues one job per heartbeat. |
+| `live-match-checkpoint` | coalesced asynchronous obligation | Internal `live-data` worker job created by the Match V3 publisher. It reads only the latest Redis desired publication, writes the compact desk/detail checkpoint after the ten-minute watermark (or immediately for first, lifecycle/identity-boundary, and final publications), then CAS-marks Redis. It never calls FPL and never queues one job per heartbeat. |
 | `post-match-consolidation` | bounded post-match slots | Maintenance coordinator enqueues the separate live-finalization and player-stat checkpoint obligations; its success means downstream jobs were accepted, not that their writes are complete. |
 
 The snapshot derives all global live items from the same accepted upstream pair. Every changed item
@@ -161,9 +161,11 @@ and `expectedNextCheckAt`. The standalone scheduler owns the 30-second lifecycle
 the separate post-match finalization obligation. Redis is promoted before PostgreSQL checkpointing,
 so a database outage does not remove the last complete page response.
 
-Live Matches V2 is a sibling of that observation, not a second provider poll. It promotes a compact
-desk when fixtures are valid and promotes fixture-grain player detail only when the event-live result
-and player identity are valid. A fixtures-only success therefore advances the score desk while the
+Live Matches V3 is a sibling of that observation during a full snapshot, reusing its accepted
+fixtures/event-live pair rather than issuing a second provider poll. During the pre-deadline
+upcoming-event warm-up, the standalone `matchObservationOnly` lane intentionally performs one
+fixtures-only provider request for the upcoming event; it does not fetch event-live and does not
+replace the full observation. A valid fixtures-only success advances the score desk while the
 previous compatible detail remains available and marked degraded. The warm checkpoint path is
 `Redis current -> Redis previous -> process LKG -> bounded PostgreSQL cold fallback`; no page request
 calls FPL, Data API, a queue, or PostgreSQL.

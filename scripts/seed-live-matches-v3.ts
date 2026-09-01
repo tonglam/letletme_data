@@ -6,23 +6,23 @@ import { isCanonicalPlayerPrice } from '../src/domain/players';
 import { eventRepository } from '../src/repositories/events';
 import { seasonRepository } from '../src/repositories/seasons';
 import {
-  readLiveMatchDeskCheckpointV2,
-  readLiveMatchDetailCheckpointV2,
-  checkpointLiveMatchScopeV2,
-} from '../src/services/live-match-v2-checkpoint.service';
+  readLiveMatchDeskCheckpointV3,
+  readLiveMatchDetailCheckpointV3,
+  checkpointLiveMatchScopeV3,
+} from '../src/services/live-match-v3-checkpoint.service';
 import {
-  readLiveMatchCheckpointDesiredV2,
-  readLiveMatchDeskPointerV2,
-  readLiveMatchDetailPointerV2,
-  setLiveMatchCheckpointDesiredV2,
+  readLiveMatchCheckpointDesiredV3,
+  readLiveMatchDeskPointerV3,
+  readLiveMatchDetailPointerV3,
+  setLiveMatchCheckpointDesiredV3,
   type MatchDeskRead,
-} from '../src/cache/live-match-publication-v2';
+} from '../src/cache/live-match-publication-v3';
 import { decideLiveLifecycle } from '../src/services/live-lifecycle-orchestrator';
 import {
   syncLiveSnapshotV2,
   type LiveSnapshotV2SyncResult,
 } from '../src/services/live-snapshot-v2.service';
-import type { MatchLifecycleState } from '../src/services/live-match-v2';
+import type { MatchLifecycleState } from '../src/services/live-match-v3';
 import { databaseSingleton } from '../src/db/singleton';
 import { closeLiveDataQueue } from '../src/queues/live-data.queue';
 import { redisSingleton } from '../src/cache/singleton';
@@ -39,7 +39,7 @@ const SEED_CLEANUP_TIMEOUT_MS = 5_000;
 
 function usage(): never {
   throw new Error(
-    'usage: bun scripts/seed-live-matches-v2.ts --execute --season YYYY [--event-id N] [--all-finalized]',
+    'usage: bun scripts/seed-live-matches-v3.ts --execute --season YYYY [--event-id N] [--all-finalized]',
   );
 }
 
@@ -154,7 +154,7 @@ async function seedOne(seasonCode: string, eventId: number) {
   const event = await eventRepository.findById(season, eventId);
   if (!event) throw new Error(`event ${eventId} does not exist in season ${seasonCode}`);
 
-  const deskBefore = await readLiveMatchDeskPointerV2({ season: seasonCode, eventId }, 'active');
+  const deskBefore = await readLiveMatchDeskPointerV3({ season: seasonCode, eventId }, 'active');
 
   // This is the deployment-only fixtures observation used by both the
   // finalization fence and syncLiveSnapshotV2. Passing the exact response into
@@ -169,8 +169,54 @@ async function seedOne(seasonCode: string, eventId: number) {
     lifecycleState: finalized ? 'FINALIZED' : undefined,
   });
 
-  const desk = await readLiveMatchDeskPointerV2({ season: seasonCode, eventId }, 'active');
-  const active = await readLiveMatchDetailPointerV2({ season: seasonCode, eventId }, 'active');
+  const desk = await readLiveMatchDeskPointerV3({ season: seasonCode, eventId }, 'active');
+  let deskCheckpoint: Awaited<ReturnType<typeof readLiveMatchDeskCheckpointV3>> = null;
+  if (desk?.servedFrom === 'REDIS_CURRENT') {
+    // Desk is independently authoritative. Checkpoint it even when the
+    // event has no price-bearing detail, so the desk still needs its own
+    // exact V3 checkpoint before the maintenance window can finish.
+    const existingDeskDesired = await readLiveMatchCheckpointDesiredV3({
+      kind: 'desk',
+      season: seasonCode,
+      eventId,
+    });
+    const desired = await setLiveMatchCheckpointDesiredV3({
+      kind: 'desk',
+      publication: desk.publication,
+      finalized: desk.publication.state === 'FINALIZED',
+      force: true,
+      replaceFinalizedForCutover:
+        existingDeskDesired?.final === true && desk.publication.state === 'FINALIZED'
+          ? {
+              expectedPublicationId: existingDeskDesired.publicationId,
+              expectedGeneration: existingDeskDesired.generation,
+            }
+          : undefined,
+    });
+    if (
+      desired.publicationId !== desk.publication.publicationId ||
+      desired.generation !== desk.publication.generation
+    ) {
+      throw new Error(`event ${eventId} desk checkpoint obligation was superseded during seed`);
+    }
+    const checkpoint = await checkpointLiveMatchScopeV3({
+      season,
+      eventId,
+      kind: 'desk',
+    });
+    if (!checkpoint.checkpointed) {
+      throw new Error(`event ${eventId} desk checkpoint did not converge`);
+    }
+    deskCheckpoint = await readLiveMatchDeskCheckpointV3(season, eventId);
+    if (
+      !deskCheckpoint ||
+      deskCheckpoint.publication.publicationId !== desk.publication.publicationId ||
+      deskCheckpoint.publication.generation !== desk.publication.generation
+    ) {
+      throw new Error(`event ${eventId} desk checkpoint is not the matching V3 publication`);
+    }
+  }
+  const active = await readLiveMatchDetailPointerV3({ season: seasonCode, eventId }, 'active');
   if (!active) {
     // A blank gameweek, a genuinely pre-deadline event, or a settled gap
     // between fixtures has no price-bearing detail that this cutover needs to
@@ -189,11 +235,11 @@ async function seedOne(seasonCode: string, eventId: number) {
         season: seasonCode,
         eventId,
         status: 'no-player-detail',
-        generation: null,
-        checkpointed: false,
+        generation: deskCheckpoint?.publication.generation ?? null,
+        checkpointed: deskCheckpoint !== null,
       } as const;
     }
-    throw new Error(`event ${eventId} did not produce a V2 detail publication`);
+    throw new Error(`event ${eventId} did not produce a V3 detail publication`);
   }
   const detail = active.fixtures;
   if (!hasCanonicalPrices(detail)) {
@@ -201,53 +247,27 @@ async function seedOne(seasonCode: string, eventId: number) {
   }
 
   if (!desk || desk.servedFrom !== 'REDIS_CURRENT') {
-    throw new Error(`event ${eventId} does not have a current V2 desk publication`);
+    throw new Error(`event ${eventId} does not have a current V3 desk publication`);
   }
   if (
     active.publication.observedDeskGeneration !== desk.publication.generation ||
     active.publication.fixtureIdentityRevision !==
       desk.publication.revisions.fixtureIdentity.revision
   ) {
-    throw new Error(`event ${eventId} detail is not aligned with the current V2 desk publication`);
+    throw new Error(`event ${eventId} detail is not aligned with the current V3 desk publication`);
   }
 
-  // Detail carries the desk generation it was calculated from. Persist the
-  // matching desk first so a cold read can never restore detail N alongside
-  // desk N-1. Both writes remain scope-local and are verified independently.
-  const deskDesired = await setLiveMatchCheckpointDesiredV2({
-    kind: 'desk',
-    publication: desk.publication,
-    finalized: desk.publication.state === 'FINALIZED',
-    force: true,
-  });
-  if (
-    deskDesired.publicationId !== desk.publication.publicationId ||
-    deskDesired.generation !== desk.publication.generation
-  ) {
-    throw new Error(`event ${eventId} desk checkpoint obligation was superseded during seed`);
-  }
-  const deskCheckpoint = await checkpointLiveMatchScopeV2({ season, eventId, kind: 'desk' });
-  if (!deskCheckpoint.checkpointed) {
-    throw new Error(`event ${eventId} desk checkpoint did not converge before detail`);
-  }
-  const durableDesk = await readLiveMatchDeskCheckpointV2(season, eventId);
-  if (
-    !durableDesk ||
-    durableDesk.publication.publicationId !== desk.publication.publicationId ||
-    durableDesk.publication.generation !== desk.publication.generation
-  ) {
-    throw new Error(`event ${eventId} desk checkpoint is not the matching V2 publication`);
-  }
+  if (!deskCheckpoint) throw new Error(`event ${eventId} desk checkpoint is missing before detail`);
 
   // Force one exact durable write for this cutover publication. This is a
   // source-backed seed, not a legacy reader: the new runtime only accepts the
   // price-bearing publication after this checkpoint succeeds.
-  const existingDetailDesired = await readLiveMatchCheckpointDesiredV2({
+  const existingDetailDesired = await readLiveMatchCheckpointDesiredV3({
     kind: 'detail',
     season: seasonCode,
     eventId,
   });
-  const detailDesired = await setLiveMatchCheckpointDesiredV2({
+  const detailDesired = await setLiveMatchCheckpointDesiredV3({
     kind: 'detail',
     publication: active.publication,
     finalized: active.publication.finalized,
@@ -266,23 +286,22 @@ async function seedOne(seasonCode: string, eventId: number) {
   ) {
     throw new Error(`event ${eventId} detail checkpoint obligation was superseded during seed`);
   }
-  const checkpoint = await checkpointLiveMatchScopeV2({
+  const checkpoint = await checkpointLiveMatchScopeV3({
     season,
     eventId,
     kind: 'detail',
-    allowFinalizedReplacementForCutover: active.publication.finalized === true,
   });
   if (!checkpoint.checkpointed) {
     throw new Error(`event ${eventId} detail checkpoint did not converge`);
   }
-  const durable = await readLiveMatchDetailCheckpointV2(season, eventId);
+  const durable = await readLiveMatchDetailCheckpointV3(season, eventId);
   if (
     !durable ||
     durable.publication.publicationId !== active.publication.publicationId ||
     durable.publication.generation !== active.publication.generation ||
     !hasCanonicalPrices(durable.fixtures)
   ) {
-    throw new Error(`event ${eventId} detail checkpoint is not the seeded V2 publication`);
+    throw new Error(`event ${eventId} detail checkpoint is not the seeded V3 publication`);
   }
   return {
     season: seasonCode,
@@ -295,7 +314,7 @@ async function seedOne(seasonCode: string, eventId: number) {
 
 async function main(): Promise<void> {
   const args = parseLiveMatchSeedArguments(process.argv.slice(2));
-  if (args.season === null) throw new Error('live-match V2 cutover seed requires --season');
+  if (args.season === null) throw new Error('live-match V3 cutover seed requires --season');
 
   const season = await seasonRepository.requireByCode(args.season);
   const eventIds = new Set<number>();
@@ -315,7 +334,7 @@ async function main(): Promise<void> {
   console.log(
     JSON.stringify(
       {
-        operation: 'seed-live-matches-v2',
+        operation: 'seed-live-matches-v3',
         season: args.season,
         allFinalized: args.allFinalized,
         results,
@@ -349,7 +368,7 @@ async function closeSeedResources(): Promise<void> {
   }
   if (cleanupTimedOut) {
     console.error(
-      `[seed-live-matches-v2] cleanup exceeded ${SEED_CLEANUP_TIMEOUT_MS}ms; forcing one-shot exit`,
+      `[seed-live-matches-v3] cleanup exceeded ${SEED_CLEANUP_TIMEOUT_MS}ms; forcing one-shot exit`,
     );
   }
 }
@@ -359,7 +378,7 @@ if (import.meta.main) {
   try {
     await main();
   } catch (error) {
-    console.error('[seed-live-matches-v2] failed', error);
+    console.error('[seed-live-matches-v3] failed', error);
     exitCode = 1;
   }
   // This one-shot cutover command must not leave provider/database/queue

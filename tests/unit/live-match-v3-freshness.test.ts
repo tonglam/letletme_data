@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 
-import { liveMatchStaleAtForCadence } from '../../src/services/live-match-v2.service';
+import { liveMatchStaleAtForCadence } from '../../src/services/live-match-v3.service';
 
-describe('Live Matches V2 freshness policy', () => {
+describe('Live Matches V3 freshness policy', () => {
   test('derives freshness only from the shared lifecycle cadence', () => {
     const checkedAt = '2026-08-29T10:00:00.000Z';
     const cases = [

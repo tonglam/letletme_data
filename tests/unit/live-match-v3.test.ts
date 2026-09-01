@@ -6,7 +6,7 @@ import {
   prepareLiveMatchDesk,
   prepareLiveMatchDetail,
   type MatchDeskFixture,
-} from '../../src/services/live-match-v2';
+} from '../../src/services/live-match-v3';
 import {
   resolveLiveReferenceDataForDetail,
   type LiveSnapshotReferenceData,
@@ -82,7 +82,7 @@ const referenceData = (): LiveSnapshotReferenceData => ({
   ]),
 });
 
-describe('Live Matches V2 fixture-grain preparation', () => {
+describe('Live Matches V3 fixture-grain preparation', () => {
   test('publishes compact desk identity/score without raw fixture stats', () => {
     const first = prepareLiveMatchDesk({
       eventId: 2,
@@ -170,17 +170,13 @@ describe('Live Matches V2 fixture-grain preparation', () => {
       id: 101,
       price: 50,
       totalPoints: 12,
-      stats: expect.arrayContaining([
-        { identifier: 'bps', value: 30, points: 0, pointsModification: null },
-      ]),
+      stats: expect.arrayContaining([{ identifier: 'bps', value: 30, awardedPoints: 0 }]),
     });
     expect(detail.fixtures[1]?.players[0]).toMatchObject({
       id: 101,
       price: 50,
       totalPoints: 4,
-      stats: expect.arrayContaining([
-        { identifier: 'bps', value: 5, points: 0, pointsModification: null },
-      ]),
+      stats: expect.arrayContaining([{ identifier: 'bps', value: 5, awardedPoints: 0 }]),
     });
   });
 

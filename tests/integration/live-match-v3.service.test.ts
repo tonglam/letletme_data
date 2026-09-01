@@ -10,15 +10,15 @@ import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
 import {
   liveMatchDeskKey,
-  readLiveMatchDeskFenceV2,
-  readLiveMatchDeskV2,
-  readLiveMatchDetailFenceV2,
-  readLiveMatchDetailV2,
-} from '../../src/cache/live-match-publication-v2';
+  readLiveMatchDeskFenceV3,
+  readLiveMatchDeskV3,
+  readLiveMatchDetailFenceV3,
+  readLiveMatchDetailV3,
+} from '../../src/cache/live-match-publication-v3';
 import {
   liveMatchStaleAtForCadence,
-  syncLiveMatchesV2FromObservation,
-} from '../../src/services/live-match-v2.service';
+  syncLiveMatchesV3FromObservation,
+} from '../../src/services/live-match-v3.service';
 import type { RawFPLFixture, RawFPLEventLiveElement } from '../../src/types';
 
 const redis = new Redis({
@@ -31,7 +31,7 @@ const redis = new Redis({
 });
 const season = { seasonId: 2026, seasonCode: '2627' } as const;
 const eventId = 2;
-const prefix = 'llm:data:v2:fpl:live-match:';
+const prefix = 'llm:data:v3:fpl:live-match:';
 
 const fixture = (bps: number): RawFPLFixture => ({
   code: 10401,
@@ -105,7 +105,7 @@ async function clean(): Promise<void> {
 
 const enqueueCheckpoint = async (): Promise<void> => undefined;
 
-describe('Live Matches V2 observation publication', () => {
+describe('Live Matches V3 observation publication', () => {
   beforeEach(clean);
   afterAll(async () => {
     await clean();
@@ -136,7 +136,7 @@ describe('Live Matches V2 observation publication', () => {
   });
 
   test('advances the desk when event-live fails and keeps detail unavailable', async () => {
-    const result = await syncLiveMatchesV2FromObservation({
+    const result = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -152,13 +152,13 @@ describe('Live Matches V2 observation publication', () => {
     expect(result.detail).toBeNull();
     expect(result.detailUnavailableReason).toBe('EVENT_LIVE_FETCH_FAILED');
     expect(
-      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures,
+      (await readLiveMatchDeskV3({ season: season.seasonCode, eventId, redis }))?.fixtures,
     ).toHaveLength(1);
-    expect(await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis })).toBeNull();
+    expect(await readLiveMatchDetailV3({ season: season.seasonCode, eventId, redis })).toBeNull();
   });
 
   test('rejects an older observation after the desk changes during its provider window', async () => {
-    await syncLiveMatchesV2FromObservation({
+    await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -168,14 +168,14 @@ describe('Live Matches V2 observation publication', () => {
       redis,
       enqueueCheckpoint,
     });
-    const observedDesk = await readLiveMatchDeskFenceV2({
+    const observedDesk = await readLiveMatchDeskFenceV3({
       season: season.seasonCode,
       eventId,
       redis,
     });
     expect(observedDesk.read).not.toBeNull();
 
-    await syncLiveMatchesV2FromObservation({
+    await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [{ ...fixture(30), team_h_score: 2 }],
@@ -187,7 +187,7 @@ describe('Live Matches V2 observation publication', () => {
     });
 
     await expect(
-      syncLiveMatchesV2FromObservation({
+      syncLiveMatchesV3FromObservation({
         season,
         eventId,
         rawFixtures: [fixture(30)],
@@ -200,12 +200,12 @@ describe('Live Matches V2 observation publication', () => {
       }),
     ).rejects.toMatchObject({ code: 'LIVE_MATCH_PROMOTE_CHANGED' });
     expect(
-      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
+      (await readLiveMatchDeskV3({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
     ).toMatchObject({ homeScore: 2 });
   });
 
   test('does not finalize a provisional desk after a newer desk wins', async () => {
-    const provisional = await syncLiveMatchesV2FromObservation({
+    const provisional = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -224,7 +224,7 @@ describe('Live Matches V2 observation publication', () => {
       },
     };
 
-    await syncLiveMatchesV2FromObservation({
+    await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [{ ...fixture(30), team_h_score: 2 }],
@@ -236,7 +236,7 @@ describe('Live Matches V2 observation publication', () => {
     });
 
     await expect(
-      syncLiveMatchesV2FromObservation({
+      syncLiveMatchesV3FromObservation({
         season,
         eventId,
         rawFixtures: [fixture(30)],
@@ -259,10 +259,10 @@ describe('Live Matches V2 observation publication', () => {
     ).rejects.toMatchObject({ code: 'LIVE_MATCH_PROMOTE_CHANGED' });
 
     expect(
-      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.publication.state,
+      (await readLiveMatchDeskV3({ season: season.seasonCode, eventId, redis }))?.publication.state,
     ).toBe('LIVE_ACTIVE');
     expect(
-      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
+      (await readLiveMatchDeskV3({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
     ).toMatchObject({ homeScore: 2 });
   });
 
@@ -275,7 +275,7 @@ describe('Live Matches V2 observation publication', () => {
     ): Promise<void> => {
       checkpointKinds.push(kind);
     };
-    const early = await syncLiveMatchesV2FromObservation({
+    const early = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -285,7 +285,7 @@ describe('Live Matches V2 observation publication', () => {
       redis,
       enqueueCheckpoint: recordCheckpoint,
     });
-    const complete = await syncLiveMatchesV2FromObservation({
+    const complete = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -321,7 +321,7 @@ describe('Live Matches V2 observation publication', () => {
 
   test('rejects a first desk without an authoritative fixture identity set', async () => {
     await expect(
-      syncLiveMatchesV2FromObservation({
+      syncLiveMatchesV3FromObservation({
         season,
         eventId,
         rawFixtures: [fixture(30)],
@@ -331,11 +331,11 @@ describe('Live Matches V2 observation publication', () => {
         enqueueCheckpoint,
       }),
     ).rejects.toThrow('fixture identity authority is unavailable');
-    expect(await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis })).toBeNull();
+    expect(await readLiveMatchDeskV3({ season: season.seasonCode, eventId, redis })).toBeNull();
   });
 
   test('promotes changed score state and retains the previous complete desk', async () => {
-    const first = await syncLiveMatchesV2FromObservation({
+    const first = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -351,7 +351,7 @@ describe('Live Matches V2 observation publication', () => {
       minutes: 60,
     } satisfies RawFPLFixture;
 
-    const second = await syncLiveMatchesV2FromObservation({
+    const second = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [changedFixture],
@@ -368,7 +368,7 @@ describe('Live Matches V2 observation publication', () => {
       first.desk.revisions.scoreState.revision,
     );
     expect(
-      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
+      (await readLiveMatchDeskV3({ season: season.seasonCode, eventId, redis }))?.fixtures[0],
     ).toMatchObject({ homeScore: 2, minutes: 60 });
     expect(
       await redis.get(liveMatchDeskKey({ season: season.seasonCode, eventId }, 'previous')),
@@ -376,7 +376,7 @@ describe('Live Matches V2 observation publication', () => {
   });
 
   test('uses a complete retained desk as identity authority and rejects partial fixtures', async () => {
-    const first = await syncLiveMatchesV2FromObservation({
+    const first = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -386,7 +386,7 @@ describe('Live Matches V2 observation publication', () => {
       redis,
       enqueueCheckpoint,
     });
-    const advanced = await syncLiveMatchesV2FromObservation({
+    const advanced = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [{ ...fixture(30), team_h_score: 2, minutes: 60 }],
@@ -398,7 +398,7 @@ describe('Live Matches V2 observation publication', () => {
     expect(advanced.desk.generation).toBeGreaterThan(first.desk.generation);
 
     await expect(
-      syncLiveMatchesV2FromObservation({
+      syncLiveMatchesV3FromObservation({
         season,
         eventId,
         rawFixtures: [],
@@ -409,13 +409,13 @@ describe('Live Matches V2 observation publication', () => {
       }),
     ).rejects.toThrow('fixture identity mismatch');
     expect(
-      (await readLiveMatchDeskV2({ season: season.seasonCode, eventId, redis }))?.publication
+      (await readLiveMatchDeskV3({ season: season.seasonCode, eventId, redis }))?.publication
         .publicationId,
     ).toBe(advanced.desk.publicationId);
   });
 
   test('advances detail independently for a BPS-only change', async () => {
-    const first = await syncLiveMatchesV2FromObservation({
+    const first = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -429,7 +429,7 @@ describe('Live Matches V2 observation publication', () => {
     const firstDeskGeneration = first.desk.generation;
     const firstDetailGeneration = first.detail?.generation;
 
-    const second = await syncLiveMatchesV2FromObservation({
+    const second = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(35)],
@@ -446,20 +446,18 @@ describe('Live Matches V2 observation publication', () => {
     expect(second.desk.generation).toBe(firstDeskGeneration);
     expect(second.detailChanged).toBe(true);
     expect(second.detail?.generation).toBeGreaterThan(firstDetailGeneration ?? 0);
-    const persistedDetail = await readLiveMatchDetailV2({
+    const persistedDetail = await readLiveMatchDetailV3({
       season: season.seasonCode,
       eventId,
       redis,
     });
     expect(persistedDetail?.fixtures[0]?.players[0]?.stats).toEqual(
-      expect.arrayContaining([
-        { identifier: 'bps', value: 35, points: 0, pointsModification: null },
-      ]),
+      expect.arrayContaining([{ identifier: 'bps', value: 35, awardedPoints: 0 }]),
     );
   });
 
   test('republishes unchanged detail when the desk generation advances', async () => {
-    const first = await syncLiveMatchesV2FromObservation({
+    const first = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -470,7 +468,7 @@ describe('Live Matches V2 observation publication', () => {
       redis,
       enqueueCheckpoint,
     });
-    const advanced = await syncLiveMatchesV2FromObservation({
+    const advanced = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [{ ...fixture(30), team_h_score: 2 }],
@@ -490,7 +488,7 @@ describe('Live Matches V2 observation publication', () => {
   });
 
   test('rejects a stale detail-only observation captured before a newer detail wins', async () => {
-    await syncLiveMatchesV2FromObservation({
+    await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -501,14 +499,14 @@ describe('Live Matches V2 observation publication', () => {
       redis,
       enqueueCheckpoint,
     });
-    const observedDetail = await readLiveMatchDetailFenceV2({
+    const observedDetail = await readLiveMatchDetailFenceV3({
       season: season.seasonCode,
       eventId,
       redis,
     });
     expect(observedDetail.read).not.toBeNull();
 
-    const newer = await syncLiveMatchesV2FromObservation({
+    const newer = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(35)],
@@ -519,7 +517,7 @@ describe('Live Matches V2 observation publication', () => {
       redis,
       enqueueCheckpoint,
     });
-    const stale = await syncLiveMatchesV2FromObservation({
+    const stale = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -535,17 +533,13 @@ describe('Live Matches V2 observation publication', () => {
     expect(stale.detailChanged).toBe(false);
     expect(stale.detail?.publicationId).toBe(newer.detail?.publicationId);
     expect(
-      (await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0]
+      (await readLiveMatchDetailV3({ season: season.seasonCode, eventId, redis }))?.fixtures[0]
         ?.players[0]?.stats,
-    ).toEqual(
-      expect.arrayContaining([
-        { identifier: 'bps', value: 35, points: 0, pointsModification: null },
-      ]),
-    );
+    ).toEqual(expect.arrayContaining([{ identifier: 'bps', value: 35, awardedPoints: 0 }]));
   });
 
   test('keeps compatible detail while a partial player roster only advances the desk', async () => {
-    const first = await syncLiveMatchesV2FromObservation({
+    const first = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -567,7 +561,7 @@ describe('Live Matches V2 observation publication', () => {
         [102, { id: 102, type: 2, teamId: 20, price: 60, webName: 'Player Two' }],
       ]),
     };
-    const second = await syncLiveMatchesV2FromObservation({
+    const second = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [{ ...fixture(30), team_h_score: 2, minutes: 60 }],
@@ -586,7 +580,7 @@ describe('Live Matches V2 observation publication', () => {
   });
 
   test('retains complete detail when provider explain and BPS evidence becomes empty', async () => {
-    const first = await syncLiveMatchesV2FromObservation({
+    const first = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [fixture(30)],
@@ -597,7 +591,7 @@ describe('Live Matches V2 observation publication', () => {
       redis,
       enqueueCheckpoint,
     });
-    const second = await syncLiveMatchesV2FromObservation({
+    const second = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [{ ...fixture(30), stats: [] }],
@@ -615,11 +609,11 @@ describe('Live Matches V2 observation publication', () => {
     expect(second.detail?.publicationId).toBe(first.detail?.publicationId);
     expect(second.detailUnavailableReason).toBe('DETAIL_EVIDENCE_INCOMPLETE');
     expect(
-      (await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis }))?.fixtures[0]
+      (await readLiveMatchDetailV3({ season: season.seasonCode, eventId, redis }))?.fixtures[0]
         ?.players.length,
     ).toBeGreaterThan(0);
 
-    const finalAttempt = await syncLiveMatchesV2FromObservation({
+    const finalAttempt = await syncLiveMatchesV3FromObservation({
       season,
       eventId,
       rawFixtures: [{ ...fixture(30), finished: true, finished_provisional: true, stats: [] }],
@@ -637,7 +631,7 @@ describe('Live Matches V2 observation publication', () => {
     expect(finalAttempt.detail?.finalized).toBe(false);
     expect(finalAttempt.detailUnavailableReason).toBe('DETAIL_EVIDENCE_INCOMPLETE');
     expect(
-      (await readLiveMatchDetailV2({ season: season.seasonCode, eventId, redis }))?.publication
+      (await readLiveMatchDetailV3({ season: season.seasonCode, eventId, redis }))?.publication
         .finalized,
     ).toBe(false);
   });

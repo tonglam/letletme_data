@@ -3,12 +3,12 @@ import { describe, expect, test } from 'bun:test';
 import type {
   MatchCheckpointDesired,
   MatchDeskPublication,
-} from '../../src/cache/live-match-publication-v2';
+} from '../../src/cache/live-match-publication-v3';
 import {
-  reconcileLiveMatchCheckpointObligationsV2,
+  reconcileLiveMatchCheckpointObligationsV3,
   type LiveMatchCheckpointHead,
   type LiveMatchCheckpointReconcilerDependencies,
-} from '../../src/services/live-match-v2-reconciler.service';
+} from '../../src/services/live-match-v3-reconciler.service';
 
 const season = { seasonId: 2026, seasonCode: '2627' } as const;
 const now = '2026-08-31T10:00:00.000Z';
@@ -24,7 +24,7 @@ const publication = (
 ): MatchDeskPublication => {
   const generation = input.generation ?? 12;
   return {
-    contractVersion: 'live-matches-v2',
+    contractVersion: 'live-matches-v3',
     publicationId:
       input.publicationId ?? `00000000-0000-4000-8000-${String(generation).padStart(12, '0')}`,
     generation,
@@ -43,7 +43,7 @@ const publication = (
     },
     desk: {
       name: 'desk',
-      key: `llm:data:v2:fpl:live-match:desk:${season.seasonCode}:2:${generation}:desk`,
+      key: `llm:data:v3:fpl:live-match:desk:${season.seasonCode}:2:${generation}:desk`,
       type: 'string',
       count: 1,
       bytes: 2,
@@ -56,7 +56,7 @@ const desired = (
   current: MatchDeskPublication,
   final = current.state === 'FINALIZED',
 ): MatchCheckpointDesired => ({
-  contractVersion: 'live-matches-v2',
+  contractVersion: 'live-matches-v3',
   kind: 'desk',
   season: season.seasonCode,
   eventId: 2,
@@ -95,7 +95,7 @@ function dependencies(input: {
   };
 }
 
-describe('Live Matches V2 checkpoint reconciler', () => {
+describe('Live Matches V3 checkpoint reconciler', () => {
   test('retries a retained desired marker after the first enqueue fails', async () => {
     const current = publication();
     const retained = desired(current);
@@ -109,8 +109,8 @@ describe('Live Matches V2 checkpoint reconciler', () => {
       },
     });
 
-    const first = await reconcileLiveMatchCheckpointObligationsV2(season, deps);
-    const second = await reconcileLiveMatchCheckpointObligationsV2(season, deps);
+    const first = await reconcileLiveMatchCheckpointObligationsV3(season, deps);
+    const second = await reconcileLiveMatchCheckpointObligationsV3(season, deps);
 
     expect(first).toEqual([{ eventId: 2, kind: 'desk', status: 'failed' }]);
     expect(second).toEqual([
@@ -141,7 +141,7 @@ describe('Live Matches V2 checkpoint reconciler', () => {
       },
     });
 
-    const result = await reconcileLiveMatchCheckpointObligationsV2(season, deps);
+    const result = await reconcileLiveMatchCheckpointObligationsV3(season, deps);
 
     expect(result).toEqual([
       {
@@ -177,7 +177,7 @@ describe('Live Matches V2 checkpoint reconciler', () => {
       },
     });
 
-    const result = await reconcileLiveMatchCheckpointObligationsV2(season, deps);
+    const result = await reconcileLiveMatchCheckpointObligationsV3(season, deps);
 
     expect(result[0]?.status).toBe('matched');
     expect(order).toEqual([`mark:${checkpointedAt.toISOString()}`, 'clear']);
@@ -201,7 +201,7 @@ describe('Live Matches V2 checkpoint reconciler', () => {
       },
     });
 
-    const result = await reconcileLiveMatchCheckpointObligationsV2(season, deps);
+    const result = await reconcileLiveMatchCheckpointObligationsV3(season, deps);
 
     expect(result).toEqual([
       {

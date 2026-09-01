@@ -67,7 +67,7 @@ import {
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
-import { normalizeMatchLifecycleState } from '../services/live-match-v2';
+import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
@@ -221,6 +221,34 @@ async function loadSchedulerFixtures(context: SchedulerContext, eventId: number)
     schedulerAllFixtureReads.set(context, allFixtures);
   }
   return (await allFixtures).filter((fixture) => fixture.event === eventId);
+}
+
+/**
+ * Live Matches must observe the next scheduled event before its deadline. The
+ * scheduler's canonical current event intentionally means the latest event
+ * whose deadline has passed, so it cannot be the sole input for the
+ * pre-deadline Match-only lane.
+ */
+export function selectLiveSnapshotEventIds(
+  context: Pick<SchedulerContext, 'currentEventId' | 'events' | 'now'>,
+): readonly number[] {
+  const candidates = [
+    ...(context.currentEventId ? [context.currentEventId] : []),
+    ...context.events
+      .filter(
+        (event) =>
+          event.id !== context.currentEventId &&
+          event.deadlineTime !== null &&
+          event.deadlineTime.getTime() > context.now.getTime(),
+      )
+      .sort(
+        (left, right) =>
+          (left.deadlineTime?.getTime() ?? Number.POSITIVE_INFINITY) -
+          (right.deadlineTime?.getTime() ?? Number.POSITIVE_INFINITY),
+      )
+      .map((event) => event.id),
+  ];
+  return [...new Set(candidates)];
 }
 
 function utc8DueAt(date: Date, hour: number, minute: number): Date {
@@ -1016,17 +1044,47 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
     successPredicate:
       'live snapshot checked; Redis publication current and checkpoint obligation reconciled',
     resolve: async (context) => {
-      if (!context.currentEventId) return [];
-      const currentEvent = context.events.find((event) => event.id === context.currentEventId);
-      if (!currentEvent?.deadlineTime) return [];
-      const event = await loadSchedulerEvent(context, context.currentEventId);
-      if (!event) return [];
-      const fixtures = await loadSchedulerFixtures(context, event.id);
-      const decision = decideLiveLifecycle(event, fixtures, context.now);
+      let selected:
+        | {
+            readonly event: NonNullable<Awaited<ReturnType<typeof loadSchedulerEvent>>>;
+            readonly fixtures: Awaited<ReturnType<typeof loadSchedulerFixtures>>;
+            readonly decision: ReturnType<typeof decideLiveLifecycle>;
+          }
+        | undefined;
+      for (const eventId of selectLiveSnapshotEventIds(context)) {
+        const event = await loadSchedulerEvent(context, eventId);
+        if (!event?.deadlineTime) continue;
+        const fixtures = await loadSchedulerFixtures(context, event.id);
+        const decision = decideLiveLifecycle(event, fixtures, context.now);
+        // The latest-deadline event owns the active pointer while its first
+        // post-deadline picks probe is still pending. A scheduler pass inside
+        // that one-second window must not skip it and publish the next event,
+        // otherwise eventless readers can be advanced to a future gameweek.
+        if (event.id === context.currentEventId && decision.state === 'PICKS_WAIT') {
+          return [];
+        }
+        if (
+          decision.state !== 'FINALIZED' &&
+          (decision.shouldFetchLive || decision.shouldObserveMatches)
+        ) {
+          selected = { event, fixtures, decision };
+          break;
+        }
+      }
+      if (!selected) return [];
+      const { event, decision } = selected;
       const quiet = await readLifecycleQuietState(context.season.seasonCode, event.id);
       // The permanent final checkpoint owns the finalized write. This lane
       // keeps the mutable official heartbeat alive for every unsettled state.
-      if (!decision.shouldFetchLive || decision.state === 'FINALIZED') return [];
+      // Match V3 observes the fixture desk before the Live Points source is
+      // eligible to refresh.  Keep this scheduler lane alive for that
+      // pre-kickoff observation; the worker still receives the lifecycle
+      // state so unchanged observations do not fan out to downstream jobs.
+      if (
+        (!decision.shouldFetchLive && !decision.shouldObserveMatches) ||
+        decision.state === 'FINALIZED'
+      )
+        return [];
       const pollIntervalMs = resolveLiveLifecycleDelay(
         decision,
         context.season,
@@ -1047,6 +1105,14 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             lifecycleState: decision.state,
             pollIntervalMs,
             expectedNextCheckAt: new Date(context.now.getTime() + pollIntervalMs).toISOString(),
+            // Match V3 can warm the fixture desk before Live Points is
+            // eligible. Preserve that lane on the durable obligation so the
+            // reconciler cannot accidentally run the all-in-one producer.
+            matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
+            promoteActiveEvent:
+              decision.shouldObserveMatches &&
+              !decision.shouldFetchLive &&
+              decision.state !== 'PRE_DEADLINE',
           },
         },
       ];
@@ -1065,6 +1131,8 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
           typeof plan.evidence?.expectedNextCheckAt === 'string'
             ? plan.evidence.expectedNextCheckAt
             : null,
+        matchObservationOnly: plan.evidence?.matchObservationOnly === true,
+        ...(plan.evidence?.promoteActiveEvent === true ? { promoteActiveEvent: true } : {}),
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },

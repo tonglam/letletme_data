@@ -14,11 +14,11 @@ import {
   type LivePublicationState,
 } from '../cache/live-publication-v2';
 import {
-  readLiveMatchDeskFenceV2,
-  readLiveMatchDetailFenceV2,
+  readLiveMatchDeskFenceV3,
+  readLiveMatchDetailFenceV3,
   type MatchDeskActiveFence,
   type MatchDetailActiveFence,
-} from '../cache/live-match-publication-v2';
+} from '../cache/live-match-publication-v3';
 import {
   loadLiveReferenceData,
   prepareCoherentLiveSnapshot,
@@ -30,10 +30,10 @@ import {
   readLivePublicationV2Checkpoint,
 } from './live-publication-v2-checkpoint.service';
 import {
-  syncLiveMatchesV2FromObservation,
+  syncLiveMatchesV3FromObservation,
   type LiveMatchObservationResult,
-} from './live-match-v2.service';
-import type { MatchLifecycleState } from './live-match-v2';
+} from './live-match-v3.service';
+import type { MatchLifecycleState } from './live-match-v3';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
 import { canonicalJson } from '../utils/content-hash';
@@ -68,9 +68,11 @@ export interface LiveSnapshotV2Dependencies {
     season: FplSeasonRef,
     eventId: number,
   ) => Promise<LiveSnapshotReferenceData>;
-  readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2;
-  readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV2;
-  readonly syncLiveMatches?: typeof syncLiveMatchesV2FromObservation;
+  readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV3;
+  readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV3;
+  readonly syncLiveMatches?: typeof syncLiveMatchesV3FromObservation;
+  /** Test/repair seam for the Redis restore; production uses the V2 helper. */
+  readonly restoreLivePublicationCheckpoint?: typeof restoreLivePublicationV2Checkpoint;
   readonly readPublished: (season: string, eventId: number) => Promise<LivePublicationRead | null>;
   readonly readCheckpointed?: (
     season: FplSeasonRef,
@@ -104,6 +106,8 @@ export interface LiveSnapshotV2SyncResult {
   readonly fixtureCount: number;
   readonly checkpointScheduled: boolean;
   readonly checkpointed: boolean;
+  /** Match desk/detail checkpoint creation failed after the Redis publication. */
+  readonly checkpointObligationFailed: boolean;
 }
 
 const defaultDependencies: LiveSnapshotV2Dependencies = {
@@ -118,10 +122,10 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
       .filter((fixture) => fixture.event === eventId)
       .map((fixture) => fixture.id);
   },
-  readObservedMatchDesk: (input) => readLiveMatchDeskFenceV2(input),
-  readObservedMatchDetail: (input) => readLiveMatchDetailFenceV2(input),
+  readObservedMatchDesk: (input) => readLiveMatchDeskFenceV3(input),
+  readObservedMatchDetail: (input) => readLiveMatchDetailFenceV3(input),
   getReferenceData: (season, eventId) => loadLiveReferenceData(season, eventId),
-  syncLiveMatches: syncLiveMatchesV2FromObservation,
+  syncLiveMatches: syncLiveMatchesV3FromObservation,
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
   readCheckpointed: readLivePublicationV2Checkpoint,
   checkpointPublication: checkpointLivePublicationV2,
@@ -254,8 +258,8 @@ type AcceptedMatchObservation = Readonly<{
 
 async function publishedDeskFromMatchResult(
   result: LiveMatchObservationResult,
-  readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2,
-): Promise<NonNullable<Parameters<typeof syncLiveMatchesV2FromObservation>[0]['publishedDesk']>> {
+  readObservedMatchDesk?: typeof readLiveMatchDeskFenceV3,
+): Promise<NonNullable<Parameters<typeof syncLiveMatchesV3FromObservation>[0]['publishedDesk']>> {
   const observedActive: MatchDeskActiveFence = readObservedMatchDesk
     ? await readObservedMatchDesk({ season: result.season, eventId: result.eventId })
     : {
@@ -283,13 +287,14 @@ async function publishedDeskFromMatchResult(
     fixtures: result.deskFixtures,
     changed: result.deskChanged,
     checkpointScheduled: result.deskCheckpointScheduled,
+    checkpointObligationFailed: result.checkpointObligationFailed,
     observedActive,
   };
 }
 
 async function detailFenceForFinalization(
   result: LiveMatchObservationResult,
-  readObservedMatchDetail?: typeof readLiveMatchDetailFenceV2,
+  readObservedMatchDetail?: typeof readLiveMatchDetailFenceV3,
 ): Promise<MatchDetailActiveFence | undefined> {
   if (!readObservedMatchDetail) return undefined;
   const observed = await readObservedMatchDetail({
@@ -434,8 +439,7 @@ export async function syncLiveSnapshotV2(
     .then(async ([fixturesResult, expectedFixtureIdsResult]) => {
       if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
       const observedDesk = await observedMatchDeskPromise;
-      const observedDetail = await observedMatchDetailPromise;
-      return (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
+      return (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
         season,
         eventId,
         rawFixtures: fixturesResult.value,
@@ -448,7 +452,6 @@ export async function syncLiveSnapshotV2(
         lifecycleState: nonFinalMatchLifecycleState,
         expectedNextCheckAt: options.expectedNextCheckAt,
         observedDesk,
-        observedDetail,
       });
     })
     .then((result) => ({ result, error: null as unknown }))
@@ -465,7 +468,7 @@ export async function syncLiveSnapshotV2(
           ? expectedFixtureIdsResult.value
           : undefined;
       if (referenceDataResult.status === 'fulfilled') {
-        const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
+        const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
           season,
           eventId,
           rawFixtures,
@@ -507,7 +510,7 @@ export async function syncLiveSnapshotV2(
       throw new Error('Live Match observation reached an impossible settled state');
     })
     .catch((error: unknown) => {
-      logError('Live Matches V2 sibling publication failed', error, {
+      logError('Live Matches V3 sibling publication failed', error, {
         season: season.seasonCode,
         eventId,
       });
@@ -515,12 +518,13 @@ export async function syncLiveSnapshotV2(
     });
   const settleMatchPublication = async (): Promise<void> => {
     const outcome = await matchPublicationOutcome;
-    // Live Matches is a sibling publication: a provisional Match failure must
-    // not make an otherwise coherent Live Points publication unavailable. We
-    // still await the sibling so the sync job cannot report completion while
-    // Redis publication work is continuing in the background. At the final
-    // boundary both publications are exact durable obligations and therefore
-    // fail closed together.
+    if (outcome.result?.checkpointObligationFailed === true) {
+      matchCheckpointObligationFailed = true;
+    }
+    // At the final boundary both publications are exact durable obligations and
+    // therefore fail closed together. During a provisional poll, Match errors
+    // remain non-fatal to Live Points, but the promise is still awaited before
+    // the scheduler can settle the shared job and lose publication evidence.
     if (options.finalizeEvent && outcome.error) throw outcome.error;
   };
 
@@ -558,7 +562,7 @@ export async function syncLiveSnapshotV2(
     const observedDetail = outcome.result
       ? await detailFenceForFinalization(outcome.result, dependencies.readObservedMatchDetail)
       : undefined;
-    const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
+    const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
       season,
       eventId,
       rawFixtures: observation.rawFixtures,
@@ -572,6 +576,9 @@ export async function syncLiveSnapshotV2(
       observedDetail,
       publishedDesk,
     });
+    if (result.checkpointObligationFailed === true) {
+      matchCheckpointObligationFailed = true;
+    }
     if (result.desk.state !== 'FINALIZED' || result.detail?.finalized !== true) {
       throw new Error(
         `Live Match final publication was not complete for event ${eventId}; desk=${result.desk.state}; detail=${result.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
@@ -579,6 +586,7 @@ export async function syncLiveSnapshotV2(
     }
   };
 
+  let matchCheckpointObligationFailed = false;
   const durableRead = await durableReadPromise;
   const durableFloor = durableRead.value;
   const recoveringFinalCheckpoint =
@@ -608,6 +616,7 @@ export async function syncLiveSnapshotV2(
         fixtureCount: current.fixtures.length,
         checkpointScheduled: false,
         checkpointed: current.publication.checkpointedAt !== null,
+        checkpointObligationFailed: matchCheckpointObligationFailed,
       };
     }
   }
@@ -622,7 +631,9 @@ export async function syncLiveSnapshotV2(
     // FINALIZED is an immutable durable boundary. Restore that exact
     // checkpoint before considering any newly fetched provisional candidate;
     // otherwise a fresh generation could supersede final data.
-    const restored = await restoreLivePublicationV2Checkpoint({
+    const restored = await (
+      dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint
+    )({
       checkpoint: durableFloor,
     });
     // A stale response is not proof that the durable FINAL is serving. Even
@@ -644,6 +655,20 @@ export async function syncLiveSnapshotV2(
       trigger: options.trigger ?? 'queue',
     });
     await settleMatchPublication();
+    if (options.finalizeEvent) {
+      const [liveResult, fixturesResult, expectedFixtureIdsResult, referenceDataResult] =
+        await observationPromise;
+      if (liveResult.status === 'rejected') throw liveResult.reason;
+      if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
+      if (expectedFixtureIdsResult.status === 'rejected') throw expectedFixtureIdsResult.reason;
+      if (referenceDataResult.status === 'rejected') throw referenceDataResult.reason;
+      await finalizeAcceptedMatch({
+        rawEventLive: liveResult.value,
+        rawFixtures: fixturesResult.value,
+        referenceData: referenceDataResult.value,
+        expectedFixtureIds: expectedFixtureIdsResult.value,
+      });
+    }
     return {
       eventId,
       changed: false,
@@ -657,6 +682,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: durableFloor.fixtures.length,
       checkpointScheduled: false,
       checkpointed: true,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -715,6 +741,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: current.fixtures.length,
       checkpointScheduled: desired !== null,
       checkpointed: false,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -755,6 +782,7 @@ export async function syncLiveSnapshotV2(
         fixtureCount: current.fixtures.length,
         checkpointScheduled: desired !== null,
         checkpointed: false,
+        checkpointObligationFailed: matchCheckpointObligationFailed,
       };
     }
 
@@ -792,6 +820,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: current.fixtures.length,
       checkpointScheduled: !checkpointed && desired !== null,
       checkpointed,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
   // This timestamp is evidence that the coherent fetch and all completeness
@@ -876,6 +905,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: prepared.fixtures.length,
       checkpointScheduled: desired !== null,
       checkpointed: publication.checkpointedAt !== null || checkpointed,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -909,6 +939,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: current?.fixtures.length ?? 0,
       checkpointScheduled: false,
       checkpointed: promoted.publication.checkpointedAt !== null,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
   if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
@@ -949,6 +980,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: prepared.fixtures.length,
       checkpointScheduled: desired !== null,
       checkpointed: false,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -988,5 +1020,6 @@ export async function syncLiveSnapshotV2(
     fixtureCount: prepared.fixtures.length,
     checkpointScheduled: desired !== null,
     checkpointed,
+    checkpointObligationFailed: matchCheckpointObligationFailed,
   };
 }

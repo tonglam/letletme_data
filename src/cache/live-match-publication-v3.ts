@@ -10,11 +10,11 @@ import type {
   MatchDetailPlayer,
   MatchFixtureDetail,
   MatchLifecycleState,
-} from '../services/live-match-v2';
+} from '../services/live-match-v3';
 import { isCanonicalPlayerPrice } from '../domain/players';
 
-export const LIVE_MATCHES_CONTRACT_VERSION = 'live-matches-v2' as const;
-export const LIVE_MATCHES_REDIS_PREFIX = 'llm:data:v2:fpl:live-match' as const;
+export const LIVE_MATCHES_CONTRACT_VERSION = 'live-matches-v3' as const;
+export const LIVE_MATCHES_REDIS_PREFIX = 'llm:data:v3:fpl:live-match' as const;
 export const LIVE_MATCH_PREVIOUS_TTL_MS = 24 * 60 * 60_000;
 export const LIVE_MATCH_FINAL_TTL_MS = 48 * 60 * 60_000;
 export const LIVE_MATCH_STAGING_TTL_MS = 15 * 60_000;
@@ -140,18 +140,18 @@ type MatchScope = Readonly<{ season: string; eventId: number }>;
 
 function assertScope(scope: MatchScope): void {
   if (!/^\d{4}$/.test(scope.season)) {
-    throw new CacheError('Invalid Live Matches V2 season', 'LIVE_MATCH_SEASON_INVALID');
+    throw new CacheError('Invalid Live Matches V3 season', 'LIVE_MATCH_SEASON_INVALID');
   }
   if (!Number.isSafeInteger(scope.eventId) || scope.eventId <= 0) {
-    throw new CacheError('Invalid Live Matches V2 event', 'LIVE_MATCH_EVENT_INVALID');
+    throw new CacheError('Invalid Live Matches V3 event', 'LIVE_MATCH_EVENT_INVALID');
   }
 }
 
 export function liveMatchActiveEventKey(season: string): string {
   if (!/^\d{4}$/.test(season)) {
-    throw new CacheError('Invalid Live Matches V2 season', 'LIVE_MATCH_SEASON_INVALID');
+    throw new CacheError('Invalid Live Matches V3 season', 'LIVE_MATCH_SEASON_INVALID');
   }
-  return `llm:data:v2:fpl:live-match:${season}:active-event`;
+  return `llm:data:v3:fpl:live-match:${season}:active-event`;
 }
 
 export function liveMatchDeskKey(
@@ -159,15 +159,15 @@ export function liveMatchDeskKey(
   suffix: 'active' | 'previous' | 'sequence',
 ): string {
   assertScope(scope);
-  return `llm:data:v2:fpl:live-match:desk:${scope.season}:${scope.eventId}:${suffix}`;
+  return `llm:data:v3:fpl:live-match:desk:${scope.season}:${scope.eventId}:${suffix}`;
 }
 
 export function liveMatchDeskItemKey(scope: MatchScope, generation: number): string {
   assertScope(scope);
   if (!Number.isSafeInteger(generation) || generation <= 0) {
-    throw new CacheError('Invalid Live Matches V2 generation', 'LIVE_MATCH_GENERATION_INVALID');
+    throw new CacheError('Invalid Live Matches V3 generation', 'LIVE_MATCH_GENERATION_INVALID');
   }
-  return `llm:data:v2:fpl:live-match:desk:${scope.season}:${scope.eventId}:${generation}:desk`;
+  return `llm:data:v3:fpl:live-match:desk:${scope.season}:${scope.eventId}:${generation}:desk`;
 }
 
 export function liveMatchDetailKey(
@@ -175,15 +175,15 @@ export function liveMatchDetailKey(
   suffix: 'active' | 'previous' | 'sequence',
 ): string {
   assertScope(scope);
-  return `llm:data:v2:fpl:live-match:detail:${scope.season}:${scope.eventId}:${suffix}`;
+  return `llm:data:v3:fpl:live-match:detail:${scope.season}:${scope.eventId}:${suffix}`;
 }
 
 export function liveMatchDetailManifestKey(scope: MatchScope, generation: number): string {
   assertScope(scope);
   if (!Number.isSafeInteger(generation) || generation <= 0) {
-    throw new CacheError('Invalid Live Matches V2 generation', 'LIVE_MATCH_GENERATION_INVALID');
+    throw new CacheError('Invalid Live Matches V3 generation', 'LIVE_MATCH_GENERATION_INVALID');
   }
-  return `llm:data:v2:fpl:live-match:detail:${scope.season}:${scope.eventId}:${generation}:manifest`;
+  return `llm:data:v3:fpl:live-match:detail:${scope.season}:${scope.eventId}:${generation}:manifest`;
 }
 
 export function liveMatchDetailItemKey(
@@ -194,25 +194,25 @@ export function liveMatchDetailItemKey(
 ): string {
   assertScope(scope);
   if (!Number.isSafeInteger(generation) || generation <= 0) {
-    throw new CacheError('Invalid Live Matches V2 generation', 'LIVE_MATCH_GENERATION_INVALID');
+    throw new CacheError('Invalid Live Matches V3 generation', 'LIVE_MATCH_GENERATION_INVALID');
   }
   if (!Number.isSafeInteger(fixtureId) || fixtureId <= 0) {
-    throw new CacheError('Invalid Live Matches V2 fixture', 'LIVE_MATCH_FIXTURE_INVALID');
+    throw new CacheError('Invalid Live Matches V3 fixture', 'LIVE_MATCH_FIXTURE_INVALID');
   }
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
-    throw new CacheError('Invalid Live Matches V2 item hash', 'LIVE_MATCH_HASH_INVALID');
+    throw new CacheError('Invalid Live Matches V3 item hash', 'LIVE_MATCH_HASH_INVALID');
   }
-  return `llm:data:v2:fpl:live-match:detail:${scope.season}:${scope.eventId}:${generation}:${fixtureId}:${sha256}`;
+  return `llm:data:v3:fpl:live-match:detail:${scope.season}:${scope.eventId}:${generation}:${fixtureId}:${sha256}`;
 }
 
 export function liveMatchCheckpointKey(scope: MatchScope, kind: 'desk' | 'detail'): string {
   assertScope(scope);
-  return `llm:data:v2:fpl:live-match:checkpoint:${scope.season}:${scope.eventId}:${kind}`;
+  return `llm:data:v3:fpl:live-match:checkpoint:${scope.season}:${scope.eventId}:${kind}`;
 }
 
 export function liveMatchCheckpointLastKey(scope: MatchScope, kind: 'desk' | 'detail'): string {
   assertScope(scope);
-  return `llm:data:v2:fpl:live-match:checkpoint:${scope.season}:${scope.eventId}:${kind}:last`;
+  return `llm:data:v3:fpl:live-match:checkpoint:${scope.season}:${scope.eventId}:${kind}:last`;
 }
 
 function metadataKey(key: string): string {
@@ -226,7 +226,7 @@ function validIso(value: unknown): value is string {
 function sourceDate(value: Date | string): string {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) {
-    throw new CacheError('Invalid Live Matches V2 timestamp', 'LIVE_MATCH_TIME_INVALID');
+    throw new CacheError('Invalid Live Matches V3 timestamp', 'LIVE_MATCH_TIME_INVALID');
   }
   return date.toISOString();
 }
@@ -386,20 +386,25 @@ local candidate = cjson.decode(ARGV[1])
 local observed = ARGV[2] or ''
 local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= observed then return {'changed'} end
-if candidate.contractVersion ~= 'live-matches-v2' or type(candidate.desk) ~= 'table' then return {'invalid_candidate'} end
+if candidate.contractVersion ~= 'live-matches-v3' or type(candidate.desk) ~= 'table' then return {'invalid_candidate'} end
 if type(candidate.generation) ~= 'number' or type(candidate.season) ~= 'string' or type(candidate.eventId) ~= 'number' then return {'invalid_candidate'} end
-local expectedDeskKey = 'llm:data:v2:fpl:live-match:desk:' .. candidate.season .. ':' .. tostring(candidate.eventId) .. ':' .. tostring(candidate.generation) .. ':desk'
+local expectedDeskKey = 'llm:data:v3:fpl:live-match:desk:' .. candidate.season .. ':' .. tostring(candidate.eventId) .. ':' .. tostring(candidate.generation) .. ':desk'
 if candidate.desk.key ~= expectedDeskKey or candidate.desk.type ~= 'string' or type(candidate.desk.sha256) ~= 'string' or not string.match(candidate.desk.sha256, '^[0-9a-f]+$') or string.len(candidate.desk.sha256) ~= 64 or type(candidate.desk.count) ~= 'number' or candidate.desk.count < 0 or candidate.desk.count > ${LIVE_MATCH_MAX_FIXTURES} or type(candidate.desk.bytes) ~= 'number' or candidate.desk.bytes < 0 or candidate.desk.bytes > ${LIVE_MATCH_MAX_DESK_BYTES} then return {'invalid_candidate'} end
 local current = nil
 if currentRaw ~= '' then
   local ok, decoded = pcall(cjson.decode, currentRaw)
-  if ok and type(decoded) == 'table' and decoded.contractVersion == 'live-matches-v2' and type(decoded.generation) == 'number' then
+  if ok and type(decoded) == 'table' and decoded.contractVersion == 'live-matches-v3' and type(decoded.generation) == 'number' then
     current = decoded
   end
 end
 local validatedId = ARGV[5] or ''
 local validatedGeneration = tonumber(ARGV[6] or '')
 local repairMode = ARGV[7] or ''
+if ARGV[8] == '1' then
+  local observedDetail = ARGV[9] or ''
+  local currentDetailRaw = redis.call('GET', KEYS[4]) or ''
+  if currentDetailRaw ~= observedDetail then return {'detail_changed'} end
+end
 if validatedId ~= '' and (not current or current.publicationId ~= validatedId or current.generation ~= validatedGeneration) then return {'changed'} end
 if current and current.state == 'FINALIZED' and validatedId ~= '' then return {'stale', currentRaw} end
 if current and current.generation >= candidate.generation and (repairMode == '' or (repairMode == 'restore' and validatedId ~= '')) then return {'stale', currentRaw} end
@@ -435,7 +440,7 @@ local candidate = cjson.decode(ARGV[1])
 local observed = ARGV[2] or ''
 local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= observed then return {'changed'} end
-if candidate.contractVersion ~= 'live-matches-v2' or type(candidate.fixtures) ~= 'table' then return {'invalid_candidate'} end
+if candidate.contractVersion ~= 'live-matches-v3' or type(candidate.fixtures) ~= 'table' then return {'invalid_candidate'} end
 if type(candidate.generation) ~= 'number' or type(candidate.season) ~= 'string' or type(candidate.eventId) ~= 'number' or type(candidate.finalized) ~= 'boolean' or type(candidate.observedDeskGeneration) ~= 'number' or candidate.observedDeskGeneration <= 0 or type(candidate.fixtureIdentityRevision) ~= 'string' or string.len(candidate.fixtureIdentityRevision) ~= 64 then return {'invalid_candidate'} end
 local deskRaw = redis.call('GET', KEYS[4]) or ''
 local deskOk, desk = pcall(cjson.decode, deskRaw)
@@ -444,21 +449,21 @@ if deskOk and type(desk) == 'table' and type(desk.revisions) == 'table' and type
 local repairMode = ARGV[8] or ''
 local exactDeskGeneration = deskOk and type(desk) == 'table' and type(desk.generation) == 'number' and desk.generation == candidate.observedDeskGeneration
 local compatibleLaggingDesk = (repairMode == 'rollback' or repairMode == 'restore') and candidate.finalized == false and deskOk and type(desk) == 'table' and desk.state ~= 'FINALIZED' and type(desk.generation) == 'number' and desk.generation >= candidate.observedDeskGeneration
-local deskCompatible = deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v2' and desk.season == candidate.season and desk.eventId == candidate.eventId and type(desk.generation) == 'number' and type(desk.state) == 'string' and type(deskRevision) == 'string' and deskRevision == candidate.fixtureIdentityRevision and (exactDeskGeneration or compatibleLaggingDesk) and ((desk.state == 'FINALIZED') == (candidate.finalized == true))
+local deskCompatible = deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v3' and desk.season == candidate.season and desk.eventId == candidate.eventId and type(desk.generation) == 'number' and type(desk.state) == 'string' and type(deskRevision) == 'string' and deskRevision == candidate.fixtureIdentityRevision and (exactDeskGeneration or compatibleLaggingDesk) and ((desk.state == 'FINALIZED') == (candidate.finalized == true))
 if not deskCompatible then
   -- A provisional retry must not turn an already-final detail into a hard
   -- failure merely because its desk has crossed the finalization fence. Keep
   -- the complete final detail as LKG; all other desk races fail closed.
-  if deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v2' and desk.season == candidate.season and desk.eventId == candidate.eventId and desk.state == 'FINALIZED' and candidate.finalized == false and currentRaw ~= '' then
+  if deskOk and type(desk) == 'table' and desk.contractVersion == 'live-matches-v3' and desk.season == candidate.season and desk.eventId == candidate.eventId and desk.state == 'FINALIZED' and candidate.finalized == false and currentRaw ~= '' then
     local currentOk, currentValue = pcall(cjson.decode, currentRaw)
-    if currentOk and type(currentValue) == 'table' and currentValue.contractVersion == 'live-matches-v2' and currentValue.finalized == true then return {'stale', currentRaw} end
+    if currentOk and type(currentValue) == 'table' and currentValue.contractVersion == 'live-matches-v3' and currentValue.finalized == true then return {'stale', currentRaw} end
   end
   return {'desk_changed'}
 end
 local current = nil
 if currentRaw ~= '' then
   local ok, decoded = pcall(cjson.decode, currentRaw)
-  if ok and type(decoded) == 'table' and decoded.contractVersion == 'live-matches-v2' and type(decoded.generation) == 'number' then current = decoded end
+  if ok and type(decoded) == 'table' and decoded.contractVersion == 'live-matches-v3' and type(decoded.generation) == 'number' then current = decoded end
 end
 local validatedId = ARGV[6] or ''
 local validatedGeneration = tonumber(ARGV[7] or '')
@@ -470,7 +475,7 @@ if #candidate.fixtures > ${LIVE_MATCH_MAX_FIXTURES} then return {'invalid_candid
 local totalBytes = 0
 for _, item in ipairs(candidate.fixtures) do
   if type(item) ~= 'table' or item.type ~= 'string' or type(item.fixtureId) ~= 'number' or type(item.key) ~= 'string' or type(item.sha256) ~= 'string' or not string.match(item.sha256, '^[0-9a-f]+$') or string.len(item.sha256) ~= 64 or type(item.count) ~= 'number' or item.count < 0 or item.count > ${LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE} or type(item.bytes) ~= 'number' or item.bytes < 0 or item.bytes > ${LIVE_MATCH_MAX_DETAIL_ITEM_BYTES} then return {'invalid_candidate'} end
-  local prefix = 'llm:data:v2:fpl:live-match:detail:' .. candidate.season .. ':' .. tostring(candidate.eventId) .. ':'
+  local prefix = 'llm:data:v3:fpl:live-match:detail:' .. candidate.season .. ':' .. tostring(candidate.eventId) .. ':'
   local suffix = ':' .. tostring(item.fixtureId) .. ':' .. item.sha256
   if string.sub(item.key, 1, string.len(prefix)) ~= prefix or string.sub(item.key, -string.len(suffix)) ~= suffix then return {'invalid_candidate'} end
   local itemGeneration = string.sub(item.key, string.len(prefix) + 1, string.len(item.key) - string.len(suffix))
@@ -488,7 +493,7 @@ if currentRaw ~= '' and current and validatedId ~= '' then
   redis.call('SET', KEYS[2], currentRaw, 'PX', ARGV[3])
 end
 if currentRaw ~= '' and current and validatedId ~= '' then
-  local oldManifestKey = 'llm:data:v2:fpl:live-match:detail:' .. current.season .. ':' .. tostring(current.eventId) .. ':' .. tostring(current.generation) .. ':manifest'
+  local oldManifestKey = 'llm:data:v3:fpl:live-match:detail:' .. current.season .. ':' .. tostring(current.eventId) .. ':' .. tostring(current.generation) .. ':manifest'
   redis.call('PEXPIRE', oldManifestKey, ARGV[3])
   for _, oldItem in ipairs(current.fixtures or {}) do
     if oldItem.key then
@@ -506,7 +511,7 @@ for _, item in ipairs(candidate.fixtures) do
     redis.call('PERSIST', item.key .. ':meta')
   end
 end
-local manifestKey = 'llm:data:v2:fpl:live-match:detail:' .. candidate.season .. ':' .. tostring(candidate.eventId) .. ':' .. tostring(candidate.generation) .. ':manifest'
+local manifestKey = 'llm:data:v3:fpl:live-match:detail:' .. candidate.season .. ':' .. tostring(candidate.eventId) .. ':' .. tostring(candidate.generation) .. ':manifest'
 redis.call('SET', manifestKey, ARGV[1])
 redis.call('SET', KEYS[1], ARGV[1])
 if ARGV[4] == '1' then
@@ -524,6 +529,7 @@ return {'published', currentRaw}
 const TOUCH_ONE_LUA = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'missing'} end
+if raw ~= (ARGV[6] or '') then return {'changed'} end
 local ok, value = pcall(cjson.decode, raw)
 if not ok or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) then return {'changed'} end
 local ttl = redis.call('PTTL', KEYS[1])
@@ -571,7 +577,7 @@ value.checkpointedAt = ARGV[3]
 local encoded = cjson.encode(value)
 if ttl > 0 then redis.call('SET', KEYS[1], encoded, 'PX', ttl) else redis.call('SET', KEYS[1], encoded) end
 local last = cjson.encode({
-  contractVersion = 'live-matches-v2',
+  contractVersion = 'live-matches-v3',
   kind = 'desk',
   season = value.season,
   eventId = value.eventId,
@@ -602,7 +608,7 @@ else
   redis.call('SET', KEYS[2], encoded)
 end
 local last = cjson.encode({
-  contractVersion = 'live-matches-v2',
+  contractVersion = 'live-matches-v3',
   kind = 'detail',
   season = value.season,
   eventId = value.eventId,
@@ -690,7 +696,7 @@ async function allocateGeneration(
   const micros = Number(result[2]);
   if (!Number.isSafeInteger(generation) || generation <= 0 || !Number.isFinite(seconds)) {
     throw new CacheError(
-      'Live Matches V2 sequence allocation failed',
+      'Live Matches V3 sequence allocation failed',
       'LIVE_MATCH_SEQUENCE_FAILED',
     );
   }
@@ -732,7 +738,7 @@ async function stage(
     const result = await redis.eval(RESTORE_STAGE_LUA, keys.length, ...keys, ...args);
     if (result !== 'staged') {
       throw new CacheError(
-        'Live Matches V2 item restore staging failed',
+        'Live Matches V3 item restore staging failed',
         'LIVE_MATCH_STAGE_FAILED',
       );
     }
@@ -750,7 +756,7 @@ async function stage(
     }
     const result = await pipeline.exec();
     if (!result || result.some(([error]) => error)) {
-      throw new CacheError('Live Matches V2 item staging failed', 'LIVE_MATCH_STAGE_FAILED');
+      throw new CacheError('Live Matches V3 item staging failed', 'LIVE_MATCH_STAGE_FAILED');
     }
   }
   const payloads = await redis.mget(...values.map((value) => value.key));
@@ -763,7 +769,7 @@ async function stage(
       contentHash(JSON.parse(payloads[index] ?? 'null')) !== value.item.sha256
     ) {
       throw new CacheError(
-        'Live Matches V2 staged item checksum failed',
+        'Live Matches V3 staged item checksum failed',
         'LIVE_MATCH_CHECKSUM_FAILED',
       );
     }
@@ -772,7 +778,7 @@ async function stage(
 
 function promotionResult(value: unknown): [string, string?] {
   if (!Array.isArray(value) || typeof value[0] !== 'string') {
-    throw new CacheError('Invalid Live Matches V2 promotion result', 'LIVE_MATCH_PROMOTE_FAILED');
+    throw new CacheError('Invalid Live Matches V3 promotion result', 'LIVE_MATCH_PROMOTE_FAILED');
   }
   return value as [string, string?];
 }
@@ -861,7 +867,7 @@ function validDeskPayload(value: unknown, eventId: number): value is readonly Ma
   );
 }
 
-export function isValidLiveMatchDeskPayloadV2(
+export function isValidLiveMatchDeskPayloadV3(
   value: unknown,
   eventId: number,
 ): value is readonly MatchDeskFixture[] {
@@ -875,37 +881,51 @@ function validDetailPlayer(value: unknown): value is MatchDetailPlayer {
   const teamId = safeInteger(value.teamId);
   const price = safeInteger(value.price);
   const totalPoints = safeInteger(value.totalPoints);
-  return (
-    id !== null &&
-    id > 0 &&
-    typeof value.webName === 'string' &&
-    value.webName.trim().length > 0 &&
-    position !== null &&
-    position >= 1 &&
-    position <= 4 &&
-    teamId !== null &&
-    teamId > 0 &&
-    price !== null &&
-    isCanonicalPlayerPrice(price) &&
-    totalPoints !== null &&
-    Array.isArray(value.stats) &&
-    value.stats.length <= LIVE_MATCH_MAX_STATS_PER_PLAYER &&
-    new Set(value.stats.map((stat) => (record(stat) ? stat.identifier : null))).size ===
-      value.stats.length &&
-    value.stats.every(
-      (stat) =>
-        record(stat) &&
-        typeof stat.identifier === 'string' &&
-        stat.identifier.trim().length > 0 &&
-        typeof stat.value === 'number' &&
-        Number.isFinite(stat.value) &&
-        typeof stat.points === 'number' &&
-        Number.isFinite(stat.points) &&
-        (stat.pointsModification === null ||
-          (typeof stat.pointsModification === 'number' &&
-            Number.isFinite(stat.pointsModification))),
+  if (
+    !(
+      id !== null &&
+      id > 0 &&
+      typeof value.webName === 'string' &&
+      value.webName.trim().length > 0 &&
+      position !== null &&
+      position >= 1 &&
+      position <= 4 &&
+      teamId !== null &&
+      teamId > 0 &&
+      price !== null &&
+      isCanonicalPlayerPrice(price) &&
+      totalPoints !== null &&
+      Array.isArray(value.stats) &&
+      value.stats.length <= LIVE_MATCH_MAX_STATS_PER_PLAYER &&
+      new Set(
+        value.stats.map((stat) =>
+          record(stat) && typeof stat.identifier === 'string'
+            ? stat.identifier.trim().toLowerCase()
+            : null,
+        ),
+      ).size === value.stats.length &&
+      value.stats.every(
+        (stat) =>
+          record(stat) &&
+          typeof stat.identifier === 'string' &&
+          stat.identifier.trim().length > 0 &&
+          typeof stat.value === 'number' &&
+          Number.isFinite(stat.value) &&
+          typeof stat.awardedPoints === 'number' &&
+          Number.isFinite(stat.awardedPoints),
+      )
     )
+  )
+    return false;
+  const awardedPoints = value.stats.reduce(
+    (sum, stat) =>
+      sum +
+      (record(stat) && typeof stat.awardedPoints === 'number' && Number.isFinite(stat.awardedPoints)
+        ? stat.awardedPoints
+        : 0),
+    0,
   );
+  return awardedPoints === totalPoints;
 }
 
 function validDetailPayload(value: unknown): value is readonly MatchDetailPlayer[] {
@@ -918,7 +938,7 @@ function validDetailPayload(value: unknown): value is readonly MatchDetailPlayer
   );
 }
 
-export function isValidLiveMatchDetailCheckpointPayloadV2(
+export function isValidLiveMatchDetailCheckpointPayloadV3(
   value: unknown,
 ): value is readonly MatchFixtureDetail[] {
   return (
@@ -985,7 +1005,7 @@ function parseDeskPublication(raw: string | null, scope: MatchScope): MatchDeskP
   return value as unknown as MatchDeskPublication;
 }
 
-export function parseLiveMatchDeskPublicationV2(
+export function parseLiveMatchDeskPublicationV3(
   value: unknown,
   scope: MatchScope,
 ): MatchDeskPublication | null {
@@ -1004,7 +1024,7 @@ function detailItemKeyMatches(
   return (
     typeof key === 'string' &&
     new RegExp(
-      `^llm:data:v2:fpl:live-match:detail:${scope.season}:${scope.eventId}:[1-9][0-9]*:${fixtureId}:${sha256}$`,
+      `^llm:data:v3:fpl:live-match:detail:${scope.season}:${scope.eventId}:[1-9][0-9]*:${fixtureId}:${sha256}$`,
     ).test(key)
   );
 }
@@ -1072,7 +1092,7 @@ function parseDetailPublication(
   return value as unknown as MatchDetailPublication;
 }
 
-export function parseLiveMatchDetailPublicationV2(
+export function parseLiveMatchDetailPublicationV3(
   value: unknown,
   scope: MatchScope,
 ): MatchDetailPublication | null {
@@ -1195,7 +1215,7 @@ async function stableDetailActiveForPromotion(
   );
 }
 
-export async function readLiveMatchDeskV2(input: {
+export async function readLiveMatchDeskV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly redis?: Redis;
@@ -1209,7 +1229,7 @@ export async function readLiveMatchDeskV2(input: {
 }
 
 /** Exact pointer read for protected diagnostics and repair tooling. */
-export async function readLiveMatchDeskPointerV2(
+export async function readLiveMatchDeskPointerV3(
   input: {
     readonly season: string;
     readonly eventId: number;
@@ -1224,7 +1244,7 @@ export async function readLiveMatchDeskPointerV2(
 }
 
 /** Capture the active desk pointer before a provider observation begins. */
-export async function readLiveMatchDeskFenceV2(input: {
+export async function readLiveMatchDeskFenceV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly redis?: Redis;
@@ -1235,7 +1255,7 @@ export async function readLiveMatchDeskFenceV2(input: {
   return readDeskPointerWithRaw(redis, scope, 'active');
 }
 
-export async function readLiveMatchDetailV2(input: {
+export async function readLiveMatchDetailV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly redis?: Redis;
@@ -1249,7 +1269,7 @@ export async function readLiveMatchDetailV2(input: {
 }
 
 /** Exact pointer read for protected diagnostics and repair tooling. */
-export async function readLiveMatchDetailPointerV2(
+export async function readLiveMatchDetailPointerV3(
   input: {
     readonly season: string;
     readonly eventId: number;
@@ -1264,7 +1284,7 @@ export async function readLiveMatchDetailPointerV2(
 }
 
 /** Capture the active detail pointer before a provider observation begins. */
-export async function readLiveMatchDetailFenceV2(input: {
+export async function readLiveMatchDetailFenceV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly redis?: Redis;
@@ -1275,7 +1295,7 @@ export async function readLiveMatchDetailFenceV2(input: {
   return stableDetailActiveForPromotion(redis, scope);
 }
 
-export async function setLiveMatchActiveEventV2(input: {
+export async function setLiveMatchActiveEventV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly redis?: Redis;
@@ -1292,13 +1312,13 @@ export async function setLiveMatchActiveEventV2(input: {
   );
   if (!Number.isSafeInteger(selected) || selected < input.eventId) {
     throw new CacheError(
-      'Live Matches V2 active event promotion failed',
+      'Live Matches V3 active event promotion failed',
       'LIVE_MATCH_ACTIVE_EVENT_FAILED',
     );
   }
 }
 
-export async function publishLiveMatchDeskV2(input: {
+export async function publishLiveMatchDeskV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly state: MatchLifecycleState;
@@ -1397,16 +1417,19 @@ export async function publishLiveMatchDeskV2(input: {
   const [status, currentRaw] = promotionResult(
     await redis.eval(
       PROMOTE_DESK_LUA,
-      3,
+      4,
       liveMatchDeskKey(scope, 'active'),
       liveMatchDeskKey(scope, 'previous'),
       liveMatchDeskKey(scope, 'sequence'),
+      liveMatchDetailKey(scope, 'active'),
       JSON.stringify(publication),
       promotionActive.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
       String(LIVE_MATCH_FINAL_TTL_MS),
       promotionActive.validated ? promotionActive.validated.publication.publicationId : '',
       promotionActive.validated ? String(promotionActive.validated.publication.generation) : '',
+      '0',
+      '',
     ),
   );
   if (status === 'stale') {
@@ -1415,7 +1438,7 @@ export async function publishLiveMatchDeskV2(input: {
       throw new CacheError('Stale desk publication is invalid', 'LIVE_MATCH_PROMOTE_FAILED');
     return { publication: current, previous: current, published: false };
   }
-  if (status === 'changed')
+  if (status === 'changed' || status === 'detail_changed')
     throw new CacheError(
       'Live Match desk current changed during promotion',
       'LIVE_MATCH_PROMOTE_CHANGED',
@@ -1434,7 +1457,7 @@ export async function publishLiveMatchDeskV2(input: {
   };
 }
 
-export async function publishLiveMatchDetailV2(input: {
+export async function publishLiveMatchDetailV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly observedDeskGeneration: number;
@@ -1595,15 +1618,19 @@ function samePublicationItem(
 }
 
 /** Restore the exact desk publication identity from a validated PostgreSQL checkpoint. */
-export async function restoreLiveMatchDeskCheckpointV2(input: {
+export async function restoreLiveMatchDeskCheckpointV3(input: {
   readonly checkpoint: MatchDeskRead;
+  /** Optional active-detail fence, required by operator desk rebuilds. */
+  readonly observedDetail?: MatchDetailActiveFence | null;
+  /** Future/pre-deadline repairs must not make the eventless pointer live. */
+  readonly promoteActiveEvent?: boolean;
   readonly redis?: Redis;
 }): Promise<{ publication: MatchDeskPublication; published: boolean }> {
   const { publication, fixtures } = input.checkpoint;
   const scope = { season: publication.season, eventId: publication.eventId } as const;
   assertScope(scope);
   assertDeskLimits(fixtures);
-  const parsed = parseLiveMatchDeskPublicationV2(publication, scope);
+  const parsed = parseLiveMatchDeskPublicationV3(publication, scope);
   const expected = manifestItem(
     'desk',
     liveMatchDeskItemKey(scope, publication.generation),
@@ -1630,10 +1657,11 @@ export async function restoreLiveMatchDeskCheckpointV2(input: {
   const [status] = promotionResult(
     await redis.eval(
       PROMOTE_DESK_LUA,
-      3,
+      4,
       liveMatchDeskKey(scope, 'active'),
       liveMatchDeskKey(scope, 'previous'),
       liveMatchDeskKey(scope, 'sequence'),
+      liveMatchDetailKey(scope, 'active'),
       JSON.stringify(publication),
       active.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
@@ -1641,9 +1669,11 @@ export async function restoreLiveMatchDeskCheckpointV2(input: {
       active.validated?.publication.publicationId ?? '',
       active.validated ? String(active.validated.publication.generation) : '',
       'restore',
+      input.observedDetail ? '1' : '0',
+      input.observedDetail?.observed ?? '',
     ),
   );
-  if (status === 'changed') {
+  if (status === 'changed' || status === 'detail_changed') {
     throw new CacheError(
       'Live Match desk changed during checkpoint restore',
       'LIVE_MATCH_CHECKPOINT_RESTORE_CHANGED',
@@ -1662,12 +1692,14 @@ export async function restoreLiveMatchDeskCheckpointV2(input: {
       'LIVE_MATCH_CHECKPOINT_RESTORE_FAILED',
     );
   }
-  await setLiveMatchActiveEventV2({ ...scope, redis });
+  if (input.promoteActiveEvent !== false) {
+    await setLiveMatchActiveEventV3({ ...scope, redis });
+  }
   return { publication: current.publication, published: status === 'published' };
 }
 
 /** Restore the exact fixture-detail publication and immutable item keys from PostgreSQL. */
-export async function restoreLiveMatchDetailCheckpointV2(input: {
+export async function restoreLiveMatchDetailCheckpointV3(input: {
   readonly checkpoint: MatchDetailRead;
   readonly redis?: Redis;
 }): Promise<{ publication: MatchDetailPublication; published: boolean }> {
@@ -1675,12 +1707,12 @@ export async function restoreLiveMatchDetailCheckpointV2(input: {
   const scope = { season: publication.season, eventId: publication.eventId } as const;
   assertScope(scope);
   assertDetailLimits(fixtures);
-  const parsed = parseLiveMatchDetailPublicationV2(publication, scope);
+  const parsed = parseLiveMatchDetailPublicationV3(publication, scope);
   const sorted = [...fixtures].sort((left, right) => left.fixtureId - right.fixtureId);
   if (
     !parsed ||
     canonicalJson(parsed) !== canonicalJson(publication) ||
-    !isValidLiveMatchDetailCheckpointPayloadV2(sorted) ||
+    !isValidLiveMatchDetailCheckpointPayloadV3(sorted) ||
     publication.fixtures.length !== sorted.length ||
     publication.detail.revision !== contentHash(sorted)
   ) {
@@ -1757,10 +1789,14 @@ export async function restoreLiveMatchDetailCheckpointV2(input: {
 }
 
 /** CAS-promote one validated previous pointer; a valid final current is never rolled back. */
-export async function promotePreviousLiveMatchV2(input: {
+export async function promotePreviousLiveMatchV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
+  /** Optional atomic detail fence used when rolling a desk pointer back. */
+  readonly observedDetail?: MatchDetailActiveFence | null;
+  /** Future desk repairs must not make the eventless pointer live. */
+  readonly promoteActiveEvent?: boolean;
   readonly redis?: Redis;
 }): Promise<{
   status: 'promoted' | 'changed' | 'unavailable';
@@ -1776,10 +1812,11 @@ export async function promotePreviousLiveMatchV2(input: {
     const [status] = promotionResult(
       await redis.eval(
         PROMOTE_DESK_LUA,
-        3,
+        4,
         liveMatchDeskKey(scope, 'active'),
         liveMatchDeskKey(scope, 'previous'),
         liveMatchDeskKey(scope, 'sequence'),
+        liveMatchDetailKey(scope, 'active'),
         JSON.stringify(previous.publication),
         active.observed,
         String(LIVE_MATCH_PREVIOUS_TTL_MS),
@@ -1787,9 +1824,12 @@ export async function promotePreviousLiveMatchV2(input: {
         active.validated?.publication.publicationId ?? '',
         active.validated ? String(active.validated.publication.generation) : '',
         'rollback',
+        input.observedDetail ? '1' : '0',
+        input.observedDetail?.observed ?? '',
       ),
     );
-    if (status === 'changed' || status === 'stale') return { status: 'changed', publication: null };
+    if (status === 'changed' || status === 'detail_changed' || status === 'stale')
+      return { status: 'changed', publication: null };
     if (status !== 'published')
       throw new CacheError(
         `Live Match desk rollback failed: ${status}`,
@@ -1801,7 +1841,9 @@ export async function promotePreviousLiveMatchV2(input: {
         'Live Match desk rollback verification failed',
         'LIVE_MATCH_REPAIR_FAILED',
       );
-    await setLiveMatchActiveEventV2({ ...scope, redis });
+    if (input.promoteActiveEvent !== false) {
+      await setLiveMatchActiveEventV3({ ...scope, redis });
+    }
     return { status: 'promoted', publication: promoted.publication };
   }
   const previous = await readDetailPointer(redis, scope, 'previous');
@@ -1841,15 +1883,18 @@ export async function promotePreviousLiveMatchV2(input: {
   return { status: 'promoted', publication: promoted.publication };
 }
 
-export async function touchLiveMatchDeskV2(input: {
+export async function touchLiveMatchDeskV3(input: {
   readonly publication: MatchDeskPublication;
   readonly sourceCheckedAt: Date | string;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly staleAt?: Date | string | null;
+  /** Exact active desk pointer captured before the upstream observation. */
+  readonly observedActive?: MatchDeskActiveFence;
   readonly redis?: Redis;
 }): Promise<MatchDeskPublication | null> {
   const scope = { season: input.publication.season, eventId: input.publication.eventId } as const;
   const redis = input.redis ?? (await redisSingleton.getClient());
+  const observedActive = input.observedActive ?? (await stableDeskActiveForPromotion(redis, scope));
   const [status, raw] = promotionResult(
     await redis.eval(
       TOUCH_ONE_LUA,
@@ -1860,13 +1905,14 @@ export async function touchLiveMatchDeskV2(input: {
       sourceDate(input.sourceCheckedAt),
       input.expectedNextCheckAt == null ? '' : sourceDate(input.expectedNextCheckAt),
       input.staleAt == null ? '' : sourceDate(input.staleAt),
+      observedActive.observed,
     ),
   );
   if (status !== 'touched') return null;
   return parseDeskPublication(raw ?? null, scope);
 }
 
-export async function touchLiveMatchDetailV2(input: {
+export async function touchLiveMatchDetailV3(input: {
   readonly publication: MatchDetailPublication;
   readonly sourceCheckedAt: Date | string;
   readonly expectedNextCheckAt?: Date | string | null;
@@ -1897,7 +1943,7 @@ export async function touchLiveMatchDetailV2(input: {
   return parseDetailPublication(raw ?? null, scope);
 }
 
-export async function markLiveMatchDeskCheckpointedV2(
+export async function markLiveMatchDeskCheckpointedV3(
   publication: MatchDeskPublication,
   checkpointedAt: Date | string,
   redisClient?: Redis,
@@ -1919,7 +1965,7 @@ export async function markLiveMatchDeskCheckpointedV2(
   return status === 'checkpointed' ? parseDeskPublication(raw ?? null, scope) : null;
 }
 
-export async function markLiveMatchDetailCheckpointedV2(
+export async function markLiveMatchDetailCheckpointedV3(
   publication: MatchDetailPublication,
   checkpointedAt: Date | string,
   redisClient?: Redis,
@@ -1942,7 +1988,7 @@ export async function markLiveMatchDetailCheckpointedV2(
   return status === 'checkpointed' ? parseDetailPublication(raw ?? null, scope) : null;
 }
 
-export async function readLiveMatchCheckpointLastAtV2(input: {
+export async function readLiveMatchCheckpointLastAtV3(input: {
   readonly kind: 'desk' | 'detail';
   readonly season: string;
   readonly eventId: number;
@@ -1991,7 +2037,7 @@ function desiredFromRaw(
   return value as unknown as MatchCheckpointDesired;
 }
 
-export async function setLiveMatchCheckpointDesiredV2(input: {
+export async function setLiveMatchCheckpointDesiredV3(input: {
   readonly kind: 'desk' | 'detail';
   readonly publication: MatchDeskPublication | MatchDetailPublication;
   readonly requestedAt?: Date | string;
@@ -2000,7 +2046,8 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
   /**
    * Seed-only fenced CAS for replacing a stale finalized desired marker. The
    * candidate must itself be finalized and forced; normal workers never pass
-   * this field.
+   * this field. It applies to either V3 stream because a cutover must replace
+   * the old finalized desk and detail checkpoints as one scoped operation.
    */
   readonly replaceFinalizedForCutover?: Readonly<{
     readonly expectedPublicationId: string;
@@ -2029,7 +2076,6 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
   const replacement = input.replaceFinalizedForCutover;
   if (replacement !== undefined) {
     if (
-      input.kind !== 'detail' ||
       desired.final !== true ||
       desired.force !== true ||
       typeof replacement.expectedPublicationId !== 'string' ||
@@ -2057,20 +2103,20 @@ export async function setLiveMatchCheckpointDesiredV2(input: {
   );
   if (status !== 'set' && status !== 'kept') {
     throw new CacheError(
-      'Live Matches V2 checkpoint obligation failed',
+      'Live Matches V3 checkpoint obligation failed',
       'LIVE_MATCH_CHECKPOINT_DESIRED_FAILED',
     );
   }
   const parsed = desiredFromRaw(parseJson(raw ?? null), input.kind, scope);
   if (!parsed)
     throw new CacheError(
-      'Stored Live Matches V2 checkpoint obligation is invalid',
+      'Stored Live Matches V3 checkpoint obligation is invalid',
       'LIVE_MATCH_CHECKPOINT_DESIRED_INVALID',
     );
   return parsed;
 }
 
-export async function readLiveMatchCheckpointDesiredV2(input: {
+export async function readLiveMatchCheckpointDesiredV3(input: {
   readonly kind: 'desk' | 'detail';
   readonly season: string;
   readonly eventId: number;
@@ -2086,7 +2132,7 @@ export async function readLiveMatchCheckpointDesiredV2(input: {
   );
 }
 
-export async function clearLiveMatchCheckpointDesiredV2(
+export async function clearLiveMatchCheckpointDesiredV3(
   desired: MatchCheckpointDesired,
   redisClient?: Redis,
 ): Promise<void> {

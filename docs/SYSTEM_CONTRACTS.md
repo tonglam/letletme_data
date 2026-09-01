@@ -131,16 +131,16 @@ See [redis-contract.md](redis-contract.md) and
   current-pointer swap, retain a previous complete version, and checkpoint
   PostgreSQL asynchronously. My FPL deletion writes the invalidation outbox in the
   same PostgreSQL transaction as deletion and uses revision-aware Redis CAS.
-- Live Matches V2 consumes that same coherent fixtures/event-live observation but
+- Live Matches V3 consumes that same coherent fixtures/event-live observation but
   publishes an independent compact desk and fixture-grain detail stream. Desk
   availability does not depend on detail, detail may lag but never lead the
   selected desk generation, and the warm page path does not call FPL, Data API,
   PostgreSQL, or a queue.
 - Live Matches repair is exact-scope only through
-  `POST /ops/live-matches-v2/repair`. Inspect is read-only; any pointer
+  `POST /ops/live-matches-v3/repair`. Inspect is read-only; any pointer
   promotion, PostgreSQL rebuild, or merged checkpoint replay requires season,
   event, desk/detail kind, a reason, and
-  `confirmation: "LIVE_MATCHES_V2_REPAIR"`. The endpoint cannot select all
+  `confirmation: "LIVE_MATCHES_V3_REPAIR"`. The endpoint cannot select all
   events, delete a namespace, or refetch FPL.
 - Tournament and league finalization remain eligible in the bounded post-match
   window, including after GW38.

@@ -33,7 +33,7 @@ import { redisSingleton } from '../cache/singleton';
 import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
-import { normalizeMatchLifecycleState } from './live-match-v2';
+import { normalizeMatchLifecycleState } from './live-match-v3';
 
 const runtimeConfig = getConfig();
 /** The live producer cadence is a data contract: one fresh poll every 30s by default. */
@@ -48,7 +48,9 @@ const DAY_SETTLING_INITIAL_POLL_MS = runtimeConfig.DAY_SETTLING_INITIAL_POLL_MS;
 const DAY_SETTLING_STABLE_POLL_MS = runtimeConfig.DAY_SETTLING_STABLE_POLL_MS;
 const DAY_SETTLING_STABLE_AFTER_MS = runtimeConfig.DAY_SETTLING_STABLE_AFTER_MS;
 const PICKS_PROBE_POLL_MS = runtimeConfig.PICKS_PROBE_POLL_MS;
-const PRE_DEADLINE_POLL_MS = runtimeConfig.PRE_DEADLINE_POLL_MS;
+const PRE_DEADLINE_SLOW_POLL_MS = runtimeConfig.PRE_DEADLINE_SLOW_POLL_MS;
+const PRE_DEADLINE_WARM_POLL_MS = runtimeConfig.PRE_DEADLINE_WARM_POLL_MS;
+const PRE_DEADLINE_NEAR_POLL_MS = runtimeConfig.PRE_DEADLINE_NEAR_POLL_MS;
 const GW_REVIEW_POLL_MS = runtimeConfig.GW_REVIEW_POLL_MS;
 const GW_REVIEW_FINALIZATION_POLL_MS = runtimeConfig.GW_REVIEW_FINALIZATION_POLL_MS;
 const FINALIZED_POLL_MS = runtimeConfig.FINALIZED_POLL_MS;
@@ -67,11 +69,15 @@ export type LiveLifecycleState =
 export type LiveLifecycleDecision = {
   state: LiveLifecycleState;
   shouldFetchLive: boolean;
+  /** Match desk/detail observation may run before Live Points is eligible. */
+  shouldObserveMatches: boolean;
   shouldProbePicks: boolean;
   shouldSyncPicks: boolean;
   recoverStaleFixtures: boolean;
   finalizeEvent: boolean;
   nextRetryAt: Date | null;
+  /** The next scheduled kickoff used to select pre-deadline cadence. */
+  nextKickoffAt?: Date | null;
 };
 
 export type LiveLifecycleObservation = {
@@ -204,7 +210,14 @@ export async function readLifecycleQuietState(
       )
     )
       return null;
-    return { revision: value.revision, unchangedSince };
+    const expectedNextCheckAt =
+      value.expectedNextCheckAt === null
+        ? null
+        : typeof value.expectedNextCheckAt === 'string' &&
+            Number.isFinite(Date.parse(value.expectedNextCheckAt))
+          ? value.expectedNextCheckAt
+          : undefined;
+    return { revision: value.revision, unchangedSince, expectedNextCheckAt };
   } catch (error) {
     logError('Failed to read shared live lifecycle state', error, { seasonCode, eventId });
     return null;
@@ -399,6 +412,7 @@ export function decideLiveLifecycle(
     return {
       state: 'FINALIZED',
       shouldFetchLive: true,
+      shouldObserveMatches: true,
       shouldProbePicks: false,
       // GW_REVIEW owns recurring multiplier/automatic-sub refreshes. Once
       // FPL marks the event data-checked, picks are immutable and the durable
@@ -419,6 +433,7 @@ export function decideLiveLifecycle(
       // its explicit finalized boundary. A time limit here would make every
       // provisional manager and H2H score disappear during a delayed review.
       shouldFetchLive: true,
+      shouldObserveMatches: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
       recoverStaleFixtures: false,
@@ -430,6 +445,7 @@ export function decideLiveLifecycle(
     return {
       state: 'LIVE_ACTIVE',
       shouldFetchLive: true,
+      shouldObserveMatches: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
       recoverStaleFixtures: false,
@@ -445,6 +461,7 @@ export function decideLiveLifecycle(
         // Keep polling at the low cadence so a new official revision and any
         // multiplier changes can both be observed.
         shouldFetchLive: true,
+        shouldObserveMatches: true,
         shouldProbePicks: false,
         shouldSyncPicks: true,
         recoverStaleFixtures: false,
@@ -455,6 +472,7 @@ export function decideLiveLifecycle(
     return {
       state: 'DAY_SETTLING',
       shouldFetchLive: true,
+      shouldObserveMatches: true,
       shouldProbePicks: false,
       shouldSyncPicks: true,
       recoverStaleFixtures: false,
@@ -463,20 +481,24 @@ export function decideLiveLifecycle(
     };
   }
   if (Number.isFinite(deadlineMs) && nowMs < deadlineMs) {
+    const nextKickoffAt = firstKickoffMs === null ? null : new Date(firstKickoffMs);
     return {
       state: 'PRE_DEADLINE',
       shouldFetchLive: false,
+      shouldObserveMatches: true,
       shouldProbePicks: false,
       shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
+      nextKickoffAt,
     };
   }
   if (Number.isFinite(deadlineMs) && nowMs < deadlineMs + PICKS_FIRST_PROBE_OFFSET_MS) {
     return {
       state: 'PICKS_WAIT',
       shouldFetchLive: false,
+      shouldObserveMatches: false,
       shouldProbePicks: false,
       shouldSyncPicks: false,
       recoverStaleFixtures: false,
@@ -488,11 +510,13 @@ export function decideLiveLifecycle(
     return {
       state: 'PICKS_PROBE',
       shouldFetchLive: false,
+      shouldObserveMatches: true,
       shouldProbePicks: true,
       shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
+      nextKickoffAt: new Date(firstKickoffMs),
     };
   }
   if (firstKickoffMs !== null && nowMs >= firstKickoffMs) {
@@ -504,6 +528,7 @@ export function decideLiveLifecycle(
       // the fetch itself must not be treated as start evidence.
       state: 'PICKS_SYNC',
       shouldFetchLive: true,
+      shouldObserveMatches: true,
       shouldProbePicks: true,
       shouldSyncPicks: true,
       recoverStaleFixtures: false,
@@ -514,6 +539,7 @@ export function decideLiveLifecycle(
   return {
     state: 'PICKS_SYNC',
     shouldFetchLive: false,
+    shouldObserveMatches: false,
     shouldProbePicks: true,
     shouldSyncPicks: true,
     recoverStaleFixtures: false,
@@ -958,9 +984,66 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
   return { season, currentEvent, fixtures, decision, expectedNextCheckAt: nextRefreshAt };
 }
 
+/**
+ * The direct cron timer historically only considered getCurrentEvent(). That
+ * event is the latest deadline that has passed, so the next event never got a
+ * pre-deadline Match V3 warmup when the standalone registry was not running.
+ * Keep this as a Match-only lane and do not promote the global event pointer:
+ * the current event remains the eventless GraphQL authority until its own
+ * post-deadline/live lane advances it.
+ */
+async function observeUpcomingMatchEventDirect(
+  season: FplSeasonRef,
+  currentEventId: number | null,
+  now: Date,
+): Promise<void> {
+  const nextEvent = await (await import('./events.service')).getNextEvent(season).catch(() => null);
+  if (!nextEvent || nextEvent.id === currentEventId || !nextEvent.deadlineTime) return;
+  const fixtures = await fixtureRepository.findByEvent(season, nextEvent.id).catch(() => []);
+  const decision = decideLiveLifecycle(nextEvent, fixtures, now);
+  if (decision.state !== 'PRE_DEADLINE' || !decision.shouldObserveMatches) return;
+
+  const quiet = await readLifecycleQuietState(season.seasonCode, nextEvent.id);
+  const expectedNextCheckMs = quiet?.expectedNextCheckAt
+    ? Date.parse(quiet.expectedNextCheckAt)
+    : Number.NaN;
+  if (Number.isFinite(expectedNextCheckMs) && expectedNextCheckMs > now.getTime()) return;
+
+  const pollIntervalMs = resolveLiveLifecycleDelay(
+    decision,
+    season,
+    nextEvent.id,
+    now,
+    quiet?.unchangedSince,
+  );
+  if (pollIntervalMs === null) return;
+  const expectedNextCheckAt = new Date(now.getTime() + pollIntervalMs);
+  await enqueueLiveSnapshot(season, nextEvent.id, 'cron', {
+    now,
+    lifecycleState: 'PRE_DEADLINE',
+    expectedNextCheckAt,
+    matchObservationOnly: true,
+    promoteActiveEvent: false,
+  });
+  await writeLifecycleQuietState(season.seasonCode, nextEvent.id, {
+    revision: quiet?.revision ?? null,
+    unchangedSince: quiet?.unchangedSince ?? now.getTime(),
+    state: 'PRE_DEADLINE',
+    expectedNextCheckAt: expectedNextCheckAt.toISOString(),
+  });
+}
+
 export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleDecision | null> {
   const tick = await persistLiveLifecycleStatus(now);
-  if (!tick) return null;
+  if (!tick) {
+    const season = await seasonRepository.findCurrent();
+    await observeUpcomingMatchEventDirect(season, null, now).catch((error) => {
+      logError('Failed to enqueue upcoming direct Match V3 observation', error, {
+        eventId: null,
+      });
+    });
+    return null;
+  }
   const { season, currentEvent, fixtures, decision, expectedNextCheckAt } = tick;
 
   // The deadline canary and pre-start retry lane are the only coordinator
@@ -974,7 +1057,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       });
     });
   }
-  if (decision.shouldFetchLive) {
+  if (decision.shouldFetchLive || decision.shouldObserveMatches) {
     const shouldEnqueueFinalization = decision.finalizeEvent
       ? (await eventRepository.findLiveSnapshotFinalizedAt(season, currentEvent.id)) === null
       : false;
@@ -990,9 +1073,13 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       } else {
         await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
           finalizeEvent: decision.finalizeEvent,
+          matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
           lifecycleState: normalizeMatchLifecycleState(decision.state),
           expectedNextCheckAt,
           now,
+          ...(decision.shouldObserveMatches && !decision.shouldFetchLive
+            ? { promoteActiveEvent: decision.state !== 'PRE_DEADLINE' }
+            : {}),
         });
       }
     }
@@ -1006,10 +1093,16 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       });
     }
   }
+  await observeUpcomingMatchEventDirect(season, currentEvent.id, now).catch((error) => {
+    logError('Failed to enqueue upcoming direct Match V3 observation', error, {
+      eventId: currentEvent.id,
+    });
+  });
   logInfo('Live lifecycle tick completed', {
     eventId: currentEvent.id,
     state: decision.state,
     shouldFetchLive: decision.shouldFetchLive,
+    shouldObserveMatches: decision.shouldObserveMatches,
   });
   return decision;
 }
@@ -1055,10 +1148,21 @@ export function resolveLiveLifecycleDelay(
     case 'GW_REVIEW':
       return isUkFinalizationWindow(now) ? GW_REVIEW_FINALIZATION_POLL_MS : GW_REVIEW_POLL_MS;
     case 'PICKS_PROBE':
+      // A picks probe is already a post-deadline retry lane. Its backoff is
+      // owned by nextRetryAt/PICKS_PROBE_POLL_MS, not by the next fixture
+      // kickoff. Applying pre-deadline tiers here can turn a failed canary
+      // into a fifteen-minute wait and miss the 2/3/5/10-minute retry plan.
+      return PICKS_PROBE_POLL_MS;
     case 'PICKS_SYNC':
       return PICKS_PROBE_POLL_MS;
     case 'PRE_DEADLINE':
-      return PRE_DEADLINE_POLL_MS;
+      if (!decision.nextKickoffAt) return PRE_DEADLINE_SLOW_POLL_MS;
+      {
+        const untilKickoffMs = decision.nextKickoffAt.getTime() - now.getTime();
+        if (untilKickoffMs <= 5 * 60_000) return PRE_DEADLINE_NEAR_POLL_MS;
+        if (untilKickoffMs <= 30 * 60_000) return PRE_DEADLINE_WARM_POLL_MS;
+        return PRE_DEADLINE_SLOW_POLL_MS;
+      }
     case 'PICKS_WAIT':
       return PICKS_PROBE_POLL_MS;
     default:

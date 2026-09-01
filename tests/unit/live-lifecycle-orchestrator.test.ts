@@ -13,6 +13,8 @@ import {
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
+const quote = String.fromCharCode(39);
+
 describe('live lifecycle decisions', () => {
   test('settles only fenced backoff roots and retries unfenced repairs', () => {
     expect(
@@ -103,6 +105,27 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain('decision.state ===');
     expect(registrySource).toContain('FINALIZED');
     expect(registrySource).toContain('resolveLiveLifecycleDelay(');
+    expect(registrySource).toContain(
+      'matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive',
+    );
+    expect(registrySource).toContain(
+      'matchObservationOnly: plan.evidence?.matchObservationOnly === true',
+    );
+    expect(registrySource).toContain('promoteActiveEvent:');
+    expect(registrySource).toContain('plan.evidence?.promoteActiveEvent === true');
+    expect(registrySource).toContain('PICKS_WAIT');
+    const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect');
+    expect(lifecycleSource).toContain('matchObservationOnly: true');
+    expect(lifecycleSource).toContain('if (!tick)');
+    expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect(season, null, now)');
+    expect(lifecycleSource).toContain(
+      'promoteActiveEvent: decision.state !== ' + quote + 'PRE_DEADLINE' + quote,
+    );
+    expect(lifecycleSource).toContain('expectedNextCheckAt');
+    expect(liveWorkerSource).toContain('checkpointObligationFailed');
+    expect(liveWorkerSource).toContain('if (snapshot.checkpointObligationFailed)');
+    expect(liveWorkerSource).toContain('promoteActiveEvent: job.data.promoteActiveEvent === true');
   });
 
   test('carries a freshness window from the live-picks root into its child scan', () => {
@@ -138,6 +161,63 @@ describe('live lifecycle decisions', () => {
     expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T10:00:01.000Z')).state).toBe(
       'PICKS_PROBE',
     );
+  });
+
+  test('tiers pre-deadline polling by the next kickoff', () => {
+    const event = {
+      deadlineTime: '2026-08-15T10:00:00.000Z',
+      finished: false,
+      dataChecked: false,
+    };
+    const makeDecision = (kickoff: string) =>
+      decideLiveLifecycle(
+        event,
+        [
+          {
+            started: false,
+            finished: false,
+            finishedProvisional: false,
+            kickoffTime: new Date(kickoff),
+          },
+        ],
+        new Date('2026-08-15T09:00:00.000Z'),
+      );
+    const season = { seasonId: 1, seasonCode: '2627' };
+    const now = new Date('2026-08-15T09:00:00.000Z');
+
+    expect(
+      resolveLiveLifecycleDelay(makeDecision('2026-08-15T12:00:00.000Z'), season, 1, now),
+    ).toBe(15 * 60_000);
+    expect(
+      resolveLiveLifecycleDelay(makeDecision('2026-08-15T09:20:00.000Z'), season, 1, now),
+    ).toBe(2 * 60_000);
+    expect(
+      resolveLiveLifecycleDelay(makeDecision('2026-08-15T09:05:00.000Z'), season, 1, now),
+    ).toBe(30_000);
+  });
+
+  test('keeps failed picks probes on their retry cadence after the deadline', () => {
+    const season = { seasonId: 1, seasonCode: '2627' };
+    const now = new Date('2026-08-15T09:00:00.000Z');
+    const probe = {
+      state: 'PICKS_PROBE' as const,
+      shouldFetchLive: false,
+      shouldObserveMatches: false,
+      shouldProbePicks: true,
+      shouldSyncPicks: false,
+      recoverStaleFixtures: false,
+      finalizeEvent: false,
+      nextRetryAt: null,
+    };
+
+    expect(
+      resolveLiveLifecycleDelay(
+        { ...probe, nextKickoffAt: new Date('2026-08-15T12:00:00.000Z') },
+        season,
+        1,
+        now,
+      ),
+    ).toBe(resolveLiveLifecycleDelay(probe, season, 1, now));
   });
 
   test('does not start live polling from a scheduled kickoff alone', () => {

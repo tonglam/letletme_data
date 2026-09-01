@@ -46,7 +46,7 @@
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
     "cache:publish-core": "bun scripts/publish-core-cache.ts",
     "db:cutover-seed-live-points-v2": "bun scripts/seed-live-points-v2.ts",
-    "db:cutover-seed-live-match-v2": "bun scripts/seed-live-matches-v2.ts",
+    "db:cutover-seed-live-match-v3": "bun scripts/seed-live-matches-v3.ts",
     "verify:live-points-v2": "bun scripts/verify-live-points-v2.ts",
     "contract:stage-week": "bun scripts/stage-graphql-contract-week.ts",
     "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts",

@@ -2,22 +2,22 @@ import { eq } from 'drizzle-orm';
 import type Redis from 'ioredis';
 
 import {
-  clearLiveMatchCheckpointDesiredV2,
+  clearLiveMatchCheckpointDesiredV3,
   LIVE_MATCHES_REDIS_PREFIX,
-  markLiveMatchDeskCheckpointedV2,
-  markLiveMatchDetailCheckpointedV2,
-  readLiveMatchCheckpointDesiredV2,
-  readLiveMatchDeskV2,
-  readLiveMatchDetailV2,
-  setLiveMatchCheckpointDesiredV2,
+  markLiveMatchDeskCheckpointedV3,
+  markLiveMatchDetailCheckpointedV3,
+  readLiveMatchCheckpointDesiredV3,
+  readLiveMatchDeskV3,
+  readLiveMatchDetailV3,
+  setLiveMatchCheckpointDesiredV3,
   type MatchCheckpointDesired,
   type MatchDeskPublication,
   type MatchDetailPublication,
-} from '../cache/live-match-publication-v2';
+} from '../cache/live-match-publication-v3';
 import {
-  readLiveMatchDeskCheckpointV2,
-  readLiveMatchDetailCheckpointV2,
-} from './live-match-v2-checkpoint.service';
+  readLiveMatchDeskCheckpointV3,
+  readLiveMatchDetailCheckpointV3,
+} from './live-match-v3-checkpoint.service';
 import { redisSingleton } from '../cache/singleton';
 import {
   liveMatchDeskCheckpointsInFpl,
@@ -129,9 +129,9 @@ async function listRedisScopes(season: string): Promise<readonly LiveMatchCheckp
     ])
   ).flat();
   const scopes = new Map<string, LiveMatchCheckpointScope>();
-  const activePattern = /^llm:data:v2:fpl:live-match:(desk|detail):(\d{4}):([1-9][0-9]*):active$/;
+  const activePattern = /^llm:data:v3:fpl:live-match:(desk|detail):(\d{4}):([1-9][0-9]*):active$/;
   const desiredPattern =
-    /^llm:data:v2:fpl:live-match:checkpoint:(\d{4}):([1-9][0-9]*):(desk|detail)$/;
+    /^llm:data:v3:fpl:live-match:checkpoint:(\d{4}):([1-9][0-9]*):(desk|detail)$/;
   for (const key of keys) {
     const active = activePattern.exec(key);
     if (active?.[2] === season) {
@@ -199,30 +199,30 @@ const defaultDependencies: LiveMatchCheckpointReconcilerDependencies = {
   readCurrent: async (season, eventId, kind) => {
     const current =
       kind === 'desk'
-        ? await readLiveMatchDeskV2({ season, eventId })
-        : await readLiveMatchDetailV2({ season, eventId });
+        ? await readLiveMatchDeskV3({ season, eventId })
+        : await readLiveMatchDetailV3({ season, eventId });
     return current?.servedFrom === 'REDIS_CURRENT' ? { publication: current.publication } : null;
   },
   readCheckpoint: async (season, eventId, kind) => {
     const checkpoint =
       kind === 'desk'
-        ? await readLiveMatchDeskCheckpointV2(season, eventId)
-        : await readLiveMatchDetailCheckpointV2(season, eventId);
+        ? await readLiveMatchDeskCheckpointV3(season, eventId)
+        : await readLiveMatchDetailCheckpointV3(season, eventId);
     return checkpoint ? { publication: checkpoint.publication } : null;
   },
   readDesired: (season, eventId, kind) =>
-    readLiveMatchCheckpointDesiredV2({ season, eventId, kind }),
+    readLiveMatchCheckpointDesiredV3({ season, eventId, kind }),
   setDesired: (kind, publication) =>
-    setLiveMatchCheckpointDesiredV2({
+    setLiveMatchCheckpointDesiredV3({
       kind,
       publication,
       finalized: finalPublication(kind, publication),
     }),
   markCheckpointed: async (kind, publication, checkpointedAt) =>
     kind === 'desk'
-      ? markLiveMatchDeskCheckpointedV2(publication as MatchDeskPublication, checkpointedAt)
-      : markLiveMatchDetailCheckpointedV2(publication as MatchDetailPublication, checkpointedAt),
-  clearDesired: clearLiveMatchCheckpointDesiredV2,
+      ? markLiveMatchDeskCheckpointedV3(publication as MatchDeskPublication, checkpointedAt)
+      : markLiveMatchDetailCheckpointedV3(publication as MatchDetailPublication, checkpointedAt),
+  clearDesired: clearLiveMatchCheckpointDesiredV3,
   enqueue: enqueueLiveMatchCheckpoint,
 };
 
@@ -231,7 +231,7 @@ const defaultDependencies: LiveMatchCheckpointReconcilerDependencies = {
  * discovers exact active/desired scopes, compares them with the durable head,
  * and either closes the exact CAS receipt or re-enqueues the latest marker.
  */
-export async function reconcileLiveMatchCheckpointObligationsV2(
+export async function reconcileLiveMatchCheckpointObligationsV3(
   season: FplSeasonRef,
   overrides: Partial<LiveMatchCheckpointReconcilerDependencies> = {},
 ): Promise<readonly LiveMatchCheckpointReconcileResult[]> {
