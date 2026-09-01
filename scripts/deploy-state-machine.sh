@@ -1317,6 +1317,23 @@ run_migration_plan() {
   compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
 }
 
+run_tournament_review_hard_cut_backfill() {
+  local season=${1:-}
+  if ! [[ "$season" =~ ^[0-9]{4}$ ]]; then
+    echo 'deploy review backfill: season must be YYYY' >&2
+    return 1
+  fi
+  echo "deploy review backfill: draining current-season V2.1 scopes for $season"
+  if ! MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES \
+    compose run --rm -T --interactive=false \
+    -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM \
+    migration bun run db:backfill-tournament-review-v2 -- \
+    --season "$season" --batch-size 100 --max-batches 10000; then
+    echo 'deploy review backfill: bounded V2.1 gate failed; services remain stopped' >&2
+    return 1
+  fi
+}
+
 retire_expired_core_staging_publications() {
   local repair_publication_ids=${RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS:-}
   local repair_season_id=${RETIRE_EXPIRED_CORE_STAGING_SEASON_ID:-}

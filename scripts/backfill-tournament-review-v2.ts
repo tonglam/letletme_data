@@ -86,7 +86,9 @@ export async function runTournamentReviewBackfill(
     if (result.claimed === 0) break;
   }
 
-  const status = await getTournamentReviewV2OperationalStatus(season);
+  const status = await getTournamentReviewV2OperationalStatus(season, undefined, new Date(), {
+    verifySemanticIntegrity: true,
+  });
   const counts = status.stateCounts;
   const incoherent = status.publication.readyWithIncoherentHead;
   const complete =

@@ -616,6 +616,12 @@ jobs:
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migration-contract
             finish_stage
+            start_stage reviewBackfill
+            if ! run_tournament_review_hard_cut_backfill "$LIVE_POINTS_V2_SEED_SEASON"; then
+              echo 'deploy: My Tournament Review V2.1 backfill failed; services remain stopped' >&2
+              exit 1
+            fi
+            finish_stage
             start_stage roleVerify
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration \
               bun run db:verify-runtime-logins

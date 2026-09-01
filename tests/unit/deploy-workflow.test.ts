@@ -335,6 +335,20 @@ describe('release workflow gates', () => {
     expect(workflowV2Seed).not.toContain('bun run db:cutover-seed-live-match-v2');
   });
 
+  test('drains the destructive review reset before runtime startup', () => {
+    expect(deployStateMachine).toContain('run_tournament_review_hard_cut_backfill');
+    expect(deployStateMachine).toContain('MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES');
+    expect(deployStateMachine).toContain('--batch-size 100 --max-batches 10000');
+    const localBackfill = deployScript.indexOf('run_tournament_review_hard_cut_backfill');
+    const localRoleVerify = deployScript.indexOf('start_stage roleVerify');
+    const workflowBackfill = workflow.indexOf('run_tournament_review_hard_cut_backfill');
+    const workflowRoleVerify = workflow.indexOf('start_stage roleVerify');
+    expect(localBackfill).toBeGreaterThan(-1);
+    expect(localBackfill).toBeLessThan(localRoleVerify);
+    expect(workflowBackfill).toBeGreaterThan(-1);
+    expect(workflowBackfill).toBeLessThan(workflowRoleVerify);
+  });
+
   test('keeps the read-only backup container able to normalize its writable mount', () => {
     const backupServiceStart = composeFile.indexOf('  backup:');
     const apiServiceStart = composeFile.indexOf('  api:', backupServiceStart);

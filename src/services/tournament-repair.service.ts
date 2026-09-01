@@ -24,7 +24,10 @@ import { auditTournamentSetup } from './tournament-audit.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { rebuildTournamentStructure } from './tournament-structure.service';
-import { requestTournamentReviewTournamentCorrection } from './tournament-review-publication.service';
+import {
+  requestTournamentReviewCorrection,
+  requestTournamentReviewTournamentCorrection,
+} from './tournament-review-publication.service';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -78,6 +81,10 @@ async function repairTournamentSetupIssueUnlocked(
   const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
   const eventId = issueEventId(issue.eventId ?? null, window);
   const repairIssues: TournamentSetupIssue[] = [];
+  let reviewCorrection:
+    | { kind: 'event'; eventId: number; reason: string; changeId: string }
+    | { kind: 'tournament'; reason: string; changeId: string }
+    | null = null;
 
   switch (issue.code) {
     case 'ENTRY_PROFILE_INCOMPLETE': {
@@ -212,29 +219,35 @@ async function repairTournamentSetupIssueUnlocked(
         () => rebuildTournamentStructure(season, tournament, entrySeeds),
       );
       // A topology rebuild can change group membership, phase boundaries, or
-      // bracket edges for every settled event. Reset the earliest existing
-      // review head (and all descendants) with explicit repair provenance so
-      // the immutable snapshots are rebuilt instead of remaining frozen.
-      await requestTournamentReviewTournamentCorrection(
-        season,
-        issue.tournamentId,
-        `Tournament structure repair issue ${issue.issueId}`,
-        `tournament-repair-${season.seasonCode}-${issue.issueId}`,
-      );
+      // bracket edges for every settled event. Defer the correction reset
+      // until the post-repair audit succeeds, then fence the earliest head
+      // and enqueue every affected scope with durable provenance.
+      reviewCorrection = {
+        kind: 'tournament',
+        reason: `Tournament structure repair issue ${issue.issueId}`,
+        changeId: `tournament-repair-${season.seasonCode}-${issue.issueId}`,
+      };
       break;
     }
 
     case 'TOURNAMENT_RESULTS_INCOMPLETE': {
       if (targetEntryIds.length === 0 || eventId === null) break;
-      repairIssues.push(
-        ...(await runTournamentEventBackfill(
-          season,
-          issue.tournamentId,
-          tournament,
-          targetEntryIds,
-          eventId,
-        )),
+      const resultIssues = await runTournamentEventBackfill(
+        season,
+        issue.tournamentId,
+        tournament,
+        targetEntryIds,
+        eventId,
       );
+      repairIssues.push(...resultIssues);
+      if (resultIssues.length === 0) {
+        reviewCorrection = {
+          kind: 'event',
+          eventId,
+          reason: `Tournament results repair issue ${issue.issueId}`,
+          changeId: `tournament-repair-${season.seasonCode}-${issue.issueId}`,
+        };
+      }
       break;
     }
   }
@@ -280,6 +293,37 @@ async function repairTournamentSetupIssueUnlocked(
     // successfully here would consume the deterministic job while the issue
     // only became eligible for the six-attempt/5-minute retry policy.
     throw new Error(`Tournament setup repair remains incomplete: ${issue.code}`);
+  }
+
+  if (reviewCorrection) {
+    const correctionEventIds =
+      reviewCorrection.kind === 'tournament'
+        ? await requestTournamentReviewTournamentCorrection(
+            season,
+            issue.tournamentId,
+            reviewCorrection.reason,
+            reviewCorrection.changeId,
+          )
+        : await requestTournamentReviewCorrection(
+            season,
+            issue.tournamentId,
+            reviewCorrection.eventId,
+            reviewCorrection.reason,
+            reviewCorrection.changeId,
+            true,
+          );
+    if (correctionEventIds.length > 0) {
+      await Promise.all(
+        correctionEventIds.map((correctionEventId) =>
+          enqueueTournamentReview(season, 'reconcile', {
+            tournamentId: issue.tournamentId,
+            eventId: correctionEventId,
+            deduplicationId: `tournament-review-repair-${season.seasonCode}-${issue.tournamentId}-${correctionEventId}-${reviewCorrection?.changeId}`,
+          }),
+        ),
+      );
+      return;
+    }
   }
 
   // A repaired source/structure issue is the explicit hand-off back into the

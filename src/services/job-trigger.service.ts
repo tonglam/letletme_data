@@ -578,6 +578,18 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
     };
   }
 
+  // Some service-only adapters return a complete typed trigger result rather
+  // than a BullMQ Job object. Preserve that result verbatim so correction
+  // requests retain their enqueue count and last job id at the HTTP boundary.
+  if (
+    result &&
+    typeof result === 'object' &&
+    'kind' in result &&
+    (result as { kind?: unknown }).kind === 'enqueued'
+  ) {
+    return result as JobTriggerResult;
+  }
+
   logInfo(`Manual job enqueued: ${name}`);
   if (result && typeof result === 'object' && ('id' in result || 'bullJobId' in result)) {
     const jobId =

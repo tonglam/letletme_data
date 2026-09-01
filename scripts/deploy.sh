@@ -528,6 +528,12 @@ deploy() {
     exit 1
   fi
   finish_stage
+  start_stage reviewBackfill
+  if ! run_tournament_review_hard_cut_backfill "$LIVE_POINTS_V2_SEED_SEASON"; then
+    log_error "My Tournament Review V2.1 backfill failed; services remain stopped."
+    exit 1
+  fi
+  finish_stage
   start_stage roleVerify
   if ! compose run --rm -T --interactive=false migration bun run db:verify-runtime-logins; then
     log_error "Runtime LOGIN verification failed; services remain stopped for a forward fix."
