@@ -23,6 +23,45 @@ type VerifyArguments = {
   readonly allFinalized: boolean;
 };
 
+export type VerifyEntryPickHead = {
+  readonly publicationId: string;
+  readonly generation: number;
+  readonly picksBaseRevision: string;
+  readonly rowCount: number;
+  readonly state: string;
+};
+
+/**
+ * An event-level FINALIZED publication proves that the event snapshot is
+ * durable. It does not prove that every entry has received its optional
+ * official finalResult yet, so entry verification must stay focused on the
+ * complete same-event picks input and its PostgreSQL head.
+ */
+export function validateFinalizedEventEntry(
+  entry: EntryLivePublicationRead | null,
+  head: VerifyEntryPickHead | null,
+): string[] {
+  const failures: string[] = [];
+  if (!entry) failures.push('REDIS_ENTRY_INPUT_MISSING_OR_INVALID');
+  if (entry && entry.servedFrom !== 'REDIS_CURRENT') failures.push('REDIS_ENTRY_INPUT_NOT_CURRENT');
+  if (entry && entry.input.picksBase.picks.length !== 15)
+    failures.push('REDIS_ENTRY_INPUT_NOT_EXACTLY_15');
+  if (entry && new Set(entry.input.picksBase.picks.map((pick) => pick.element)).size !== 15)
+    failures.push('REDIS_ENTRY_INPUT_ELEMENTS_NOT_UNIQUE');
+  if (entry && (entry.publication.state === 'FINAL') !== (entry.input.finalResult !== null))
+    failures.push('REDIS_ENTRY_STATE_FINAL_RESULT_MISMATCH');
+  if (!head) failures.push('POSTGRES_ENTRY_PICK_HEAD_MISSING');
+  if (head && (head.rowCount !== 15 || head.state !== 'COMPLETE'))
+    failures.push('POSTGRES_ENTRY_PICK_HEAD_INCOMPLETE');
+  if (entry && head && head.publicationId !== entry.publication.publicationId)
+    failures.push('POSTGRES_ENTRY_HEAD_PUBLICATION_MISMATCH');
+  if (entry && head && head.generation !== entry.publication.generation)
+    failures.push('POSTGRES_ENTRY_HEAD_GENERATION_MISMATCH');
+  if (entry && head && head.picksBaseRevision !== entry.input.picksBase.revision)
+    failures.push('POSTGRES_ENTRY_HEAD_REVISION_MISMATCH');
+  return failures;
+}
+
 function usage(): never {
   throw new Error(
     'usage: bun scripts/verify-live-points-v2.ts --season YYYY --event-id N [--entry-id N] [--all-finalized]',
@@ -185,8 +224,6 @@ async function main(): Promise<void> {
       const entryIds = args.entryId === null ? eligibleEntryIds : [args.entryId];
       if (entryIds.length === 0)
         throw new Error('No complete V2 entry pick head exists for this scope');
-      const requireFinalEntries = args.allFinalized;
-
       const [active, previous, checkpoint, entryResults] = await Promise.all([
         readLivePublicationV2Pointer(scope, 'active', redis),
         readLivePublicationV2Pointer(scope, 'previous', redis),
@@ -194,28 +231,7 @@ async function main(): Promise<void> {
         mapWithConcurrency(entryIds, 32, async (entryId) => {
           const entry = await readEntryLiveInputV2({ ...scope, entryId }, redis);
           const head = headByEntry.get(entryId) ?? null;
-          const failures: string[] = [];
-
-          if (!entry) failures.push('REDIS_ENTRY_INPUT_MISSING_OR_INVALID');
-          if (entry && entry.servedFrom !== 'REDIS_CURRENT')
-            failures.push('REDIS_ENTRY_INPUT_NOT_CURRENT');
-          if (entry && entry.input.picksBase.picks.length !== 15)
-            failures.push('REDIS_ENTRY_INPUT_NOT_EXACTLY_15');
-          if (entry && new Set(entry.input.picksBase.picks.map((pick) => pick.element)).size !== 15)
-            failures.push('REDIS_ENTRY_INPUT_ELEMENTS_NOT_UNIQUE');
-          if (requireFinalEntries && entry && entry.publication.state !== 'FINAL')
-            failures.push('REDIS_ENTRY_INPUT_NOT_FINAL');
-          if (requireFinalEntries && entry && entry.input.finalResult === null)
-            failures.push('REDIS_ENTRY_FINAL_RESULT_MISSING');
-          if (!head) failures.push('POSTGRES_ENTRY_PICK_HEAD_MISSING');
-          if (head && (head.rowCount !== 15 || head.state !== 'COMPLETE'))
-            failures.push('POSTGRES_ENTRY_PICK_HEAD_INCOMPLETE');
-          if (entry && head && head.publicationId !== entry.publication.publicationId)
-            failures.push('POSTGRES_ENTRY_HEAD_PUBLICATION_MISMATCH');
-          if (entry && head && head.generation !== entry.publication.generation)
-            failures.push('POSTGRES_ENTRY_HEAD_GENERATION_MISMATCH');
-          if (entry && head && head.picksBaseRevision !== entry.input.picksBase.revision)
-            failures.push('POSTGRES_ENTRY_HEAD_REVISION_MISMATCH');
+          const failures = validateFinalizedEventEntry(entry, head);
 
           return {
             entryId,
