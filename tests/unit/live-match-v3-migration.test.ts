@@ -31,6 +31,9 @@ describe('Live Matches V3 checkpoint migration contract', () => {
     expect(
       v3Fence.match(/ADD COLUMN contract_version text DEFAULT 'live-matches-v2'/g),
     ).toHaveLength(2);
+    expect(
+      v3Fence.match(/ALTER COLUMN contract_version SET DEFAULT 'live-matches-v3'/g),
+    ).toHaveLength(2);
     expect(v3Fence).toContain(
       `contract_version = manifest ->> ${String.fromCharCode(39)}contractVersion${String.fromCharCode(39)}`,
     );

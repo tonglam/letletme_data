@@ -17,6 +17,9 @@ ALTER TABLE fpl.live_match_desk_checkpoints
   ALTER COLUMN contract_version SET NOT NULL;
 
 ALTER TABLE fpl.live_match_desk_checkpoints
+  ALTER COLUMN contract_version SET DEFAULT 'live-matches-v3';
+
+ALTER TABLE fpl.live_match_desk_checkpoints
   ADD CONSTRAINT live_match_desk_checkpoints_contract_fence
   CHECK (
     contract_version = manifest ->> 'contractVersion'
@@ -32,6 +35,9 @@ WHERE contract_version IS NULL;
 
 ALTER TABLE fpl.live_match_detail_checkpoints
   ALTER COLUMN contract_version SET NOT NULL;
+
+ALTER TABLE fpl.live_match_detail_checkpoints
+  ALTER COLUMN contract_version SET DEFAULT 'live-matches-v3';
 
 ALTER TABLE fpl.live_match_detail_checkpoints
   ADD CONSTRAINT live_match_detail_checkpoints_contract_fence

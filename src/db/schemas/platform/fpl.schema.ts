@@ -846,7 +846,7 @@ export const liveMatchDeskCheckpointsInFpl = fpl.table(
     checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
     expectedNextCheckAt: timestamp('expected_next_check_at', { withTimezone: true, mode: 'date' }),
     staleAt: timestamp('stale_at', { withTimezone: true, mode: 'date' }),
-    contractVersion: text('contract_version').notNull(),
+    contractVersion: text('contract_version').default('live-matches-v3').notNull(),
   },
   (table) => [
     primaryKey({
@@ -901,7 +901,7 @@ export const liveMatchDetailCheckpointsInFpl = fpl.table(
     checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
     expectedNextCheckAt: timestamp('expected_next_check_at', { withTimezone: true, mode: 'date' }),
     staleAt: timestamp('stale_at', { withTimezone: true, mode: 'date' }),
-    contractVersion: text('contract_version').notNull(),
+    contractVersion: text('contract_version').default('live-matches-v3').notNull(),
   },
   (table) => [
     primaryKey({
