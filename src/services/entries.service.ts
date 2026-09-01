@@ -180,6 +180,7 @@ export async function checkpointEntryLiveInputV2(
         publicationId: candidate.publication.publicationId,
         generation: candidate.publication.generation,
         picksBaseRevision: candidate.input.picksBase.revision,
+        inputPayload: candidate.input,
         contentUpdatedAt: candidate.input.picksBase.contentUpdatedAt,
         checkpointedAt,
       },
@@ -774,6 +775,33 @@ function durableLiveInputContentHash(rows: readonly EntryLiveInputPickRow[]): st
   });
 }
 
+function durableRowsMatchEntryLiveInput(
+  rows: readonly EntryLiveInputPickRow[],
+  input: EntryLiveInputV2,
+): boolean {
+  if (rows.length !== 15) return false;
+  const picksByPosition = new Map(input.picksBase.picks.map((pick) => [pick.position, pick]));
+  const first = rows.find((row) => row.position === 1);
+  return Boolean(
+    first &&
+      rows.every((row) => {
+        const pick = picksByPosition.get(row.position);
+        return (
+          pick !== undefined &&
+          pick.element === row.elementId &&
+          pick.multiplier === row.multiplier &&
+          pick.isCaptain === row.isCaptain &&
+          pick.isViceCaptain === row.isViceCaptain &&
+          (row.position === 1
+            ? row.activeChip === input.picksBase.chip &&
+              row.transfers === input.picksBase.transferCount &&
+              row.transfersCost === input.picksBase.transferCost
+            : row.activeChip === null && row.transfers === null && row.transfersCost === null)
+        );
+      }),
+  );
+}
+
 function buildFinalEntryLiveInputFromCheckpoint(
   season: FplSeasonRef,
   eventId: number,
@@ -813,25 +841,22 @@ function buildFinalEntryLiveInputFromCheckpoint(
   ) {
     return null;
   }
-  const rawPicks = rows.map((row) => ({
-    entry: entryId,
-    event: eventId,
-    element: row.elementId,
-    position: row.position,
-    multiplier: row.multiplier,
-    is_captain: row.isCaptain,
-    is_vice_captain: row.isViceCaptain,
-  }));
-  if (!isCompleteEntryPicks(rawPicks)) return null;
-  const picks = rawPicks
-    .map((pick) => ({
-      element: pick.element,
-      position: pick.position,
-      multiplier: pick.multiplier,
-      isCaptain: pick.is_captain,
-      isViceCaptain: pick.is_vice_captain,
-    }))
-    .sort((left, right) => left.position - right.position) as unknown as Exactly15Picks;
+  if (head.inputPayload === null || head.inputPayload === undefined) return null;
+  if (
+    !validateEntryLiveInputV2(head.inputPayload, {
+      season: season.seasonCode,
+      eventId,
+      entryId,
+    }) ||
+    head.inputPayload.picksBase.revision !== head.picksBaseRevision ||
+    !durableRowsMatchEntryLiveInput(rows, head.inputPayload)
+  ) {
+    // A pick head without the complete V2 payload cannot prove the original
+    // reported points, previous totals, or Assistant Manager fact.  Keep
+    // final recovery pending instead of manufacturing a new input revision.
+    return null;
+  }
+  const baseInput = head.inputPayload;
   const finalPicks = normalizeFinalPicks(result.eventPicks, entryId, eventId);
   const automaticSubs = finalPicks
     ? normalizeFinalAutomaticSubs(
@@ -870,20 +895,7 @@ function buildFinalEntryLiveInputFromCheckpoint(
     automaticSubs,
   });
   const input: EntryLiveInputV2 = {
-    contractVersion: 'live-points-v2',
-    season: season.seasonCode,
-    eventId,
-    entryId,
-    picksBase: {
-      revision: head.picksBaseRevision,
-      contentUpdatedAt: head.contentUpdatedAt.toISOString(),
-      picks,
-      chip: first.activeChip,
-      reportedEventPoints: result.eventPoints,
-      transferCount: first.transfers,
-      transferCost: first.transfersCost,
-    },
-    previousTotals: null,
+    ...baseInput,
     officialAdjustment: {
       revision: officialAdjustmentRevision,
       multipliers,
@@ -920,6 +932,7 @@ export async function rebuildFinalEntryLiveInputsV2(
   const boundary =
     dataCheckedAt instanceof Date ? new Date(dataCheckedAt) : new Date(dataCheckedAt);
   if (!Number.isFinite(boundary.getTime())) return 0;
+  const resultsRepository = createEntryEventResultsRepository();
   const [pickRows, heads, results] = await Promise.all([
     entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
       season,
@@ -927,7 +940,7 @@ export async function rebuildFinalEntryLiveInputsV2(
       uniqueEntryIds,
     ),
     entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds),
-    createEntryEventResultsRepository().findByEventAndEntryIds(season, eventId, uniqueEntryIds),
+    resultsRepository.findByEventAndEntryIds(season, eventId, uniqueEntryIds),
   ]);
   const rowsByEntry = new Map<number, EntryLiveInputPickRow[]>();
   for (const row of pickRows) {

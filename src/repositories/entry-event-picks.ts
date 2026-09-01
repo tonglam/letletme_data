@@ -46,6 +46,8 @@ export type EntryEventPicksPublicationMetadata = {
   readonly publicationId?: string;
   readonly generation?: number;
   readonly picksBaseRevision?: string;
+  /** Complete V2 semantic input retained for lossless final recovery. */
+  readonly inputPayload?: unknown;
   readonly contentUpdatedAt?: Date | string;
   /** Durable completion time for a Redis-first V2 checkpoint. */
   readonly checkpointedAt?: Date | string;
@@ -57,6 +59,8 @@ export type EntryEventPickHeadMetadata = {
   readonly generation: number;
   readonly picksBaseRevision: string;
   readonly contentSha256: string;
+  /** Complete V2 semantic input retained for lossless final recovery. */
+  readonly inputPayload: unknown | null;
   readonly rowCount: number;
   readonly sourceCheckedAt: Date;
   readonly contentUpdatedAt: Date;
@@ -110,6 +114,7 @@ async function upsertEntryEventPickHead(
       generation: entryEventPickHeadsInCompetition.generation,
       picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
       contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+      inputPayload: entryEventPickHeadsInCompetition.inputPayload,
       rowCount: entryEventPickHeadsInCompetition.rowCount,
       sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
       contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
@@ -151,6 +156,7 @@ async function upsertEntryEventPickHead(
   const effectiveGeneration = publication?.generation ?? existingHead?.generation ?? 1;
   const effectivePicksBaseRevision =
     publication?.picksBaseRevision ?? existingHead?.picksBaseRevision ?? contentSha256;
+  const effectiveInputPayload = publication?.inputPayload ?? existingHead?.inputPayload ?? null;
   await db
     .insert(entryEventPickHeadsInCompetition)
     .values({
@@ -161,6 +167,7 @@ async function upsertEntryEventPickHead(
       generation: effectiveGeneration,
       picksBaseRevision: effectivePicksBaseRevision,
       contentSha256,
+      inputPayload: effectiveInputPayload,
       rowCount: 15,
       sourceCheckedAt: syncedAt,
       contentUpdatedAt,
@@ -178,6 +185,7 @@ async function upsertEntryEventPickHead(
         generation: effectiveGeneration,
         picksBaseRevision: effectivePicksBaseRevision,
         contentSha256,
+        inputPayload: effectiveInputPayload,
         rowCount: 15,
         sourceCheckedAt: syncedAt,
         contentUpdatedAt,
@@ -617,6 +625,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
             generation: entryEventPickHeadsInCompetition.generation,
             picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
             contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+            inputPayload: entryEventPickHeadsInCompetition.inputPayload,
             rowCount: entryEventPickHeadsInCompetition.rowCount,
             sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
             contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
@@ -664,6 +673,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 generation: entryEventPickHeadsInCompetition.generation,
                 picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
                 contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+                inputPayload: entryEventPickHeadsInCompetition.inputPayload,
                 rowCount: entryEventPickHeadsInCompetition.rowCount,
                 sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
                 contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,

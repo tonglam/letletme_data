@@ -875,10 +875,7 @@ export function validateLiveLeaguePublicationV2Checkpoint(
       !Number.isFinite(sourceCheckedAt) ||
       !Number.isFinite(contentUpdatedAt) ||
       !Number.isFinite(publishedAt) ||
-      !Number.isFinite(checkpointedAt) ||
-      contentUpdatedAt > publishedAt ||
-      sourceCheckedAt > publishedAt ||
-      publishedAt > checkpointedAt
+      !Number.isFinite(checkpointedAt)
     ) {
       return false;
     }
@@ -1085,9 +1082,44 @@ return {'checkpointed', cjson.encode(value)}
 const SET_DESIRED_LUA = `
 local existingRaw = redis.call('GET', KEYS[1])
 local desired = cjson.decode(ARGV[3])
+local expectedEventId = tonumber(ARGV[6])
+local expectedTournamentId = tonumber(ARGV[7])
+local expectedMatchId = tonumber(ARGV[9])
+local function validUuid(value)
+  return type(value) == 'string' and string.len(value) == 36 and string.match(value, '^[0-9a-fA-F%-]+$') ~= nil
+end
+local function validIso(value)
+  return type(value) == 'string' and string.match(value, '^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$') ~= nil
+end
+local function validExisting(value)
+  if type(value) ~= 'table' or
+     value.contractVersion ~= ARGV[10] or
+     value.season ~= ARGV[5] or
+     value.eventId ~= expectedEventId or
+     value.tournamentId ~= expectedTournamentId or
+     value.scope ~= ARGV[8] or
+     not validUuid(value.publicationId) or
+     type(value.generation) ~= 'number' or
+     value.generation <= 0 or
+     value.generation > 9007199254740991 or
+     value.generation ~= math.floor(value.generation) or
+     not validIso(value.requestedAt) or
+     (value.notBefore ~= cjson.null and not validIso(value.notBefore)) or
+     type(value.force) ~= 'boolean' then
+    return false
+  end
+  if ARGV[8] == 'H2H_MATCH' then
+    return type(value.matchId) == 'number' and
+      value.matchId == expectedMatchId and
+      value.matchId > 0 and
+      value.matchId <= 9007199254740991 and
+      value.matchId == math.floor(value.matchId)
+  end
+  return value.matchId == nil
+end
 if existingRaw then
   local ok, existing = pcall(cjson.decode, existingRaw)
-  if ok and type(existing.generation) == 'number' then
+  if ok and validExisting(existing) then
     local generation = tonumber(ARGV[2])
     if existing.generation > generation or (existing.generation == generation and existing.publicationId ~= ARGV[1]) then return {'kept', existingRaw} end
     if desired.force ~= true and existing.force == true then desired.force = true end
@@ -1732,6 +1764,12 @@ export async function setLiveLeagueCheckpointDesiredV2(
     String(desired.generation),
     JSON.stringify(desired),
     String(7 * 24 * 60 * 60),
+    desired.season,
+    String(desired.eventId),
+    String(desired.tournamentId),
+    desired.scope,
+    desired.matchId === undefined ? '' : String(desired.matchId),
+    desired.contractVersion,
   )) as unknown;
   if (!Array.isArray(result) || typeof result[1] !== 'string')
     throw new CacheError(

@@ -275,13 +275,17 @@ async function publishClassicRoster(
     eligibleRows.map((row) => ({ season: season.seasonCode, eventId, entryId: row.entryId })),
     redis,
   );
-  if (global.publication.state === 'FINALIZED' && inputs.size !== eligibleRows.length) {
+  const entriesNeedingFinalRecovery = eligibleRows.filter((row) => {
+    const read = inputs.get(row.entryId);
+    return !read || read.input.finalResult === null;
+  });
+  if (global.publication.state === 'FINALIZED' && entriesNeedingFinalRecovery.length > 0) {
     const finalizationAt = completeRows.find((row) => row.finalizationAt !== null)?.finalizationAt;
     if (finalizationAt !== undefined && finalizationAt !== null) {
       await rebuildFinalEntryLiveInputsV2(
         season,
         eventId,
-        eligibleRows.filter((row) => !inputs.has(row.entryId)).map((row) => row.entryId),
+        entriesNeedingFinalRecovery.map((row) => row.entryId),
         finalizationAt,
         redis,
       );
@@ -1205,7 +1209,11 @@ export async function syncLiveH2HLeaguePublicationsV2(
         entryIds.map((entryId) => ({ season: season.seasonCode, eventId, entryId })),
         redis,
       );
-      if (global.publication.state === 'FINALIZED' && inputs.size !== entryIds.length) {
+      const entryIdsNeedingFinalRecovery = entryIds.filter((entryId) => {
+        const read = inputs.get(entryId);
+        return !read || read.input.finalResult === null;
+      });
+      if (global.publication.state === 'FINALIZED' && entryIdsNeedingFinalRecovery.length > 0) {
         const finalizationAt = sourceMatches.find(
           (row) => row.finalizationAt !== null,
         )?.finalizationAt;
@@ -1213,7 +1221,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
           await rebuildFinalEntryLiveInputsV2(
             season,
             eventId,
-            entryIds.filter((entryId) => !inputs.has(entryId)),
+            entryIdsNeedingFinalRecovery,
             finalizationAt,
             redis,
           );

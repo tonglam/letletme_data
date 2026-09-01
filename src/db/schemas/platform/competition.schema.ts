@@ -665,6 +665,7 @@ export const entryEventPickHeadsInCompetition = competition.table(
     generation: bigint('generation', { mode: 'number' }).notNull(),
     picksBaseRevision: text('picks_base_revision').notNull(),
     contentSha256: text('content_sha256').notNull(),
+    inputPayload: jsonb('input_payload'),
     rowCount: smallint('row_count').notNull(),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
     contentUpdatedAt: timestamp('content_updated_at', {
@@ -694,6 +695,10 @@ export const entryEventPickHeadsInCompetition = competition.table(
     check(
       'entry_event_pick_heads_identity_valid',
       sql`entry_id > 0 AND event_id > 0 AND generation > 0 AND row_count = 15 AND state = 'COMPLETE' AND picks_base_revision ~ '^[0-9a-f]{64}$' AND content_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'entry_event_pick_heads_input_payload_valid',
+      sql`input_payload IS NULL OR (jsonb_typeof(input_payload) = 'object' AND pg_column_size(input_payload) <= 131072)`,
     ),
     check('entry_event_pick_heads_time_order', sql`checkpointed_at >= source_checked_at`),
   ],

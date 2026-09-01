@@ -265,6 +265,29 @@ describe('Live League V2 manifest contract', () => {
       ),
     ).toBe(false);
   });
+
+  test('does not compare timestamps owned by different clocks', () => {
+    const fixture = completeClassicCheckpointFixture();
+    const skewedManifest = {
+      ...fixture.checkpointManifest,
+      times: {
+        ...fixture.checkpointManifest.times,
+        sourceCheckedAt: '2026-08-30T00:00:05.000Z',
+        contentUpdatedAt: '2026-08-30T00:00:06.000Z',
+        publishedAt: '2026-08-30T00:00:02.000Z',
+        checkpointedAt: '2026-08-30T00:00:01.000Z',
+      },
+    };
+    expect(
+      validateLiveLeaguePublicationV2Checkpoint(
+        scope,
+        skewedManifest,
+        fixture.index,
+        fixture.payload,
+        fixture.proof,
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('Live League V2 checkpoint cadence', () => {
