@@ -31,6 +31,7 @@ import {
   readLiveLeagueCheckpointGenerationV2,
   reconcileLiveLeagueCheckpointV2,
 } from './live-league-checkpoint-v2.service';
+import { rebuildFinalEntryLiveInputsV2 } from './entries.service';
 import { contentHash } from '../utils/content-hash';
 import { logError, logInfo } from '../utils/logger';
 import { mapWithConcurrency } from '../utils/async';
@@ -270,10 +271,26 @@ async function publishClassicRoster(
     (row) => row.startedEvent === null || row.startedEvent <= eventId,
   );
   const redis = await redisSingleton.getClient();
-  const inputs = await readEntryLiveInputsV2(
+  let inputs = await readEntryLiveInputsV2(
     eligibleRows.map((row) => ({ season: season.seasonCode, eventId, entryId: row.entryId })),
     redis,
   );
+  if (global.publication.state === 'FINALIZED' && inputs.size !== eligibleRows.length) {
+    const finalizationAt = completeRows.find((row) => row.finalizationAt !== null)?.finalizationAt;
+    if (finalizationAt !== undefined && finalizationAt !== null) {
+      await rebuildFinalEntryLiveInputsV2(
+        season,
+        eventId,
+        eligibleRows.filter((row) => !inputs.has(row.entryId)).map((row) => row.entryId),
+        finalizationAt,
+        redis,
+      );
+      inputs = await readEntryLiveInputsV2(
+        eligibleRows.map((row) => ({ season: season.seasonCode, eventId, entryId: row.entryId })),
+        redis,
+      );
+    }
+  }
   const allFinal =
     global.publication.state !== 'FINALIZED' ||
     eligibleRows.every((row) => {
@@ -916,16 +933,16 @@ function h2hMatchScope(season: string, eventId: number, row: H2HMatchRow) {
   };
 }
 
-function h2hMatchIndex(row: H2HMatchRow, state: H2HMatchPayload['state']): H2HMatchIndexRow {
+function h2hMatchIndexFromPayload(payload: H2HMatchPayload): H2HMatchIndexRow {
   return {
-    matchId: row.officialMatchId,
-    eventId: row.eventId,
-    groupId: row.groupId > 0 ? row.groupId : 1,
-    sourceOrder: row.sourceOrder,
-    phase: row.phase,
-    availability: state,
-    homeEntryId: row.homeEntryId,
-    awayEntryId: row.awayEntryId,
+    matchId: payload.officialMatchId,
+    eventId: payload.eventId,
+    groupId: payload.groupId,
+    sourceOrder: payload.sourceOrder,
+    phase: payload.phase,
+    availability: payload.state,
+    homeEntryId: payload.home.entryId,
+    awayEntryId: payload.away.entryId,
   };
 }
 
@@ -1034,7 +1051,7 @@ async function publishH2HMatch(
 
   if (canPublish) {
     const preparedCandidate: H2HPreparedMatch = {
-      index: h2hMatchIndex(row, candidate.state),
+      index: h2hMatchIndexFromPayload(candidate),
       payload: candidate,
       finalReady: finalReadyInput,
     };
@@ -1057,7 +1074,7 @@ async function publishH2HMatch(
           ready: candidate.state === 'READY' ? 1 : 0,
           noPicks: 0,
         },
-        index: [h2hMatchIndex(row, candidate.state)],
+        index: [h2hMatchIndexFromPayload(candidate)],
         payload: { [String(row.officialMatchId)]: candidate },
         currentRead: active ?? null,
         previousRead: previous ?? null,
@@ -1095,7 +1112,11 @@ async function publishH2HMatch(
     selected.globalRef.publicationId === global.publication.publicationId &&
     selected.globalRef.generation === global.publication.generation;
   return {
-    index: h2hMatchIndex(row, selected.state),
+    // A retained payload is an immutable match snapshot. Build its index from
+    // that same payload rather than the latest relational row: an official
+    // roster/order mutation can otherwise make the head index disagree with
+    // the retained payload and invalidate the whole H2H head.
+    index: h2hMatchIndexFromPayload(selected),
     payload: selected,
     finalReady: selectedFinalReady,
   };
@@ -1180,10 +1201,28 @@ export async function syncLiveH2HLeaguePublicationsV2(
             .filter((id): id is number => id !== null),
         ),
       ];
-      const inputs = await readEntryLiveInputsV2(
+      let inputs = await readEntryLiveInputsV2(
         entryIds.map((entryId) => ({ season: season.seasonCode, eventId, entryId })),
         redis,
       );
+      if (global.publication.state === 'FINALIZED' && inputs.size !== entryIds.length) {
+        const finalizationAt = sourceMatches.find(
+          (row) => row.finalizationAt !== null,
+        )?.finalizationAt;
+        if (finalizationAt !== undefined && finalizationAt !== null) {
+          await rebuildFinalEntryLiveInputsV2(
+            season,
+            eventId,
+            entryIds.filter((entryId) => !inputs.has(entryId)),
+            finalizationAt,
+            redis,
+          );
+          inputs = await readEntryLiveInputsV2(
+            entryIds.map((entryId) => ({ season: season.seasonCode, eventId, entryId })),
+            redis,
+          );
+        }
+      }
       const matchScopes = sourceMatches.map((row) =>
         h2hMatchScope(season.seasonCode, eventId, row),
       );

@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, ne, or, sql } from 'drizzle-orm';
+import { and, eq, ne, or, sql, type SQL } from 'drizzle-orm';
 
 import {
   eventsInFpl,
   liveMatchDeskCheckpointsInFpl,
   liveMatchDetailCheckpointsInFpl,
+  liveLeagueCheckpointsInCompetition,
   livePointsPublicationCheckpointsInCompetition,
   livePointsPublicationSeedClaimsInCompetition,
+  tournamentsInCompetition,
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -29,6 +31,7 @@ import {
   type LivePublicationV2,
   type LivePublicationState,
 } from '../cache/live-publication-v2';
+import { validateLiveLeaguePublicationV2Checkpoint } from '../cache/live-league-publication-v2';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logError } from '../utils/logger';
 
@@ -92,6 +95,164 @@ const rememberFinalCheckpointValidation = (
     finalCheckpointValidationCache.delete(oldest);
   }
 };
+
+function h2hFinalizationPhaseActive(
+  groupStartedEventId: number | null,
+  groupEndedEventId: number | null,
+  knockoutStartedEventId: number | null,
+  knockoutEndedEventId: number | null,
+  eventId: number,
+): boolean {
+  const phases = [
+    [groupStartedEventId, groupEndedEventId],
+    [knockoutStartedEventId, knockoutEndedEventId],
+  ] as const;
+  if (!phases.some(([start, end]) => start !== null || end !== null)) return true;
+  return phases.some(
+    ([start, end]) =>
+      (start !== null && eventId >= start && (end === null || eventId <= end)) ||
+      (start === null && end !== null && eventId <= end),
+  );
+}
+
+/**
+ * State columns are only a cheap fence. Validate every active tournament's
+ * FINALIZED league checkpoint with the same self-contained contract used by
+ * readers before treating the event as durably complete.
+ */
+async function hasFinalLiveLeagueCheckpointsV2(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db
+    .select({
+      tournamentId: liveLeagueCheckpointsInCompetition.tournamentId,
+      scopeKind: liveLeagueCheckpointsInCompetition.scopeKind,
+      state: liveLeagueCheckpointsInCompetition.state,
+      publicationId: liveLeagueCheckpointsInCompetition.publicationId,
+      generation: liveLeagueCheckpointsInCompetition.generation,
+      manifest: liveLeagueCheckpointsInCompetition.manifest,
+      indexPayload: liveLeagueCheckpointsInCompetition.indexPayload,
+      payload: liveLeagueCheckpointsInCompetition.payload,
+      rowCount: liveLeagueCheckpointsInCompetition.rowCount,
+      payloadBytes: liveLeagueCheckpointsInCompetition.payloadBytes,
+      payloadSha256: liveLeagueCheckpointsInCompetition.payloadSha256,
+      groupStartedEventId: tournamentsInCompetition.groupStartedEventId,
+      groupEndedEventId: tournamentsInCompetition.groupEndedEventId,
+      knockoutStartedEventId: tournamentsInCompetition.knockoutStartedEventId,
+      knockoutEndedEventId: tournamentsInCompetition.knockoutEndedEventId,
+      leagueType: tournamentsInCompetition.leagueType,
+    })
+    .from(liveLeagueCheckpointsInCompetition)
+    .innerJoin(
+      tournamentsInCompetition,
+      and(
+        eq(tournamentsInCompetition.seasonId, liveLeagueCheckpointsInCompetition.seasonId),
+        eq(tournamentsInCompetition.tournamentId, liveLeagueCheckpointsInCompetition.tournamentId),
+      ),
+    )
+    .where(
+      and(
+        eq(liveLeagueCheckpointsInCompetition.seasonId, season.seasonId),
+        eq(liveLeagueCheckpointsInCompetition.eventId, eventId),
+        eq(liveLeagueCheckpointsInCompetition.state, 'FINALIZED'),
+        eq(tournamentsInCompetition.state, 'active'),
+        eq(tournamentsInCompetition.setupStatus, 'ready'),
+      ),
+    );
+  for (const row of rows) {
+    if (
+      row.leagueType === 'h2h' &&
+      !h2hFinalizationPhaseActive(
+        row.groupStartedEventId,
+        row.groupEndedEventId,
+        row.knockoutStartedEventId,
+        row.knockoutEndedEventId,
+        eventId,
+      )
+    ) {
+      continue;
+    }
+    if (
+      row.scopeKind !== 'CLASSIC' &&
+      row.scopeKind !== 'H2H_HEAD' &&
+      row.scopeKind !== 'H2H_STANDINGS'
+    ) {
+      return false;
+    }
+    if (
+      !validateLiveLeaguePublicationV2Checkpoint(
+        {
+          season: season.seasonCode,
+          eventId,
+          tournamentId: row.tournamentId,
+          scope: row.scopeKind,
+        },
+        row.manifest,
+        row.indexPayload,
+        row.payload,
+        {
+          publicationId: row.publicationId,
+          generation: row.generation,
+          state: row.state,
+          rowCount: row.rowCount,
+          payloadBytes: row.payloadBytes,
+          payloadSha256: row.payloadSha256,
+        },
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Final live league repair is allowed only when the durable rows needed to
+ * rebuild an entry input still exist.  Redis retention is a serving policy,
+ * not evidence that a final entry can be reconstructed after a cold rebuild.
+ */
+function hasDurableFinalEntryInput(entryId: SQL): SQL {
+  return sql`
+    EXISTS (
+      SELECT 1
+      FROM competition.entry_event_pick_heads AS input_head
+      WHERE input_head.season_id = ${eventsInFpl.seasonId}
+        AND input_head.entry_id = ${entryId}
+        AND input_head.event_id = ${eventsInFpl.eventId}
+        AND input_head.state = 'COMPLETE'
+        AND input_head.row_count = 15
+        AND EXISTS (
+          SELECT 1
+          FROM competition.entry_event_picks AS input_pick
+          WHERE input_pick.season_id = input_head.season_id
+            AND input_pick.entry_id = input_head.entry_id
+            AND input_pick.event_id = input_head.event_id
+          GROUP BY input_pick.season_id, input_pick.entry_id, input_pick.event_id
+          HAVING count(*) = 15
+             AND min(input_pick.position) = 1
+             AND max(input_pick.position) = 15
+             AND count(*) FILTER (WHERE input_pick.is_captain) = 1
+             AND count(*) FILTER (WHERE input_pick.is_vice_captain) = 1
+        )
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM competition.entry_event_results AS final_result
+      WHERE final_result.season_id = ${eventsInFpl.seasonId}
+        AND final_result.entry_id = ${entryId}
+        AND final_result.event_id = ${eventsInFpl.eventId}
+        AND final_result.rich_synced_at IS NOT NULL
+        AND final_result.rich_synced_at >= ${eventsInFpl.dataCheckedAt}
+        AND CASE
+          WHEN jsonb_typeof(final_result.event_picks) = 'array'
+            THEN jsonb_array_length(final_result.event_picks)
+          ELSE 0
+        END = 15
+    )
+  `;
+}
 
 export type LivePublicationV2CheckpointRequest = {
   readonly season: FplSeasonRef;
@@ -631,6 +792,20 @@ export async function findLivePublicationV2FinalizationTargets(
                 AND league_checkpoint.scope_kind = 'CLASSIC'
                 AND league_checkpoint.state = 'FINALIZED'
             )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM competition.tournament_entries AS final_roster
+              WHERE final_roster.season_id = league_tournament.season_id
+                AND final_roster.tournament_id = league_tournament.tournament_id
+                AND EXISTS (
+                  SELECT 1
+                  FROM competition.entries AS final_entry
+                  WHERE final_entry.season_id = final_roster.season_id
+                    AND final_entry.entry_id = final_roster.entry_id
+                    AND (final_entry.started_event IS NULL OR final_entry.started_event <= ${eventsInFpl.eventId})
+                )
+                AND NOT (${hasDurableFinalEntryInput(sql.raw('final_roster.entry_id'))})
+            )
           )
           OR (
             league_tournament.league_type = 'h2h'
@@ -686,9 +861,43 @@ export async function findLivePublicationV2FinalizationTargets(
                 WHERE league_standings_checkpoint.season_id = ${eventsInFpl.seasonId}
                   AND league_standings_checkpoint.event_id = ${eventsInFpl.eventId}
                   AND league_standings_checkpoint.tournament_id = league_tournament.tournament_id
-                  AND league_standings_checkpoint.scope_kind = 'H2H_STANDINGS'
-                  AND league_standings_checkpoint.state = 'FINALIZED'
+                AND league_standings_checkpoint.scope_kind = 'H2H_STANDINGS'
+                AND league_standings_checkpoint.state = 'FINALIZED'
               )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM (
+                SELECT battle.home_entry_id AS entry_id
+                FROM competition.tournament_battle_group_results AS battle
+                WHERE battle.season_id = league_tournament.season_id
+                  AND battle.tournament_id = league_tournament.tournament_id
+                  AND battle.event_id = ${eventsInFpl.eventId}
+                  AND battle.official_match_id IS NOT NULL
+                UNION
+                SELECT battle.away_entry_id AS entry_id
+                FROM competition.tournament_battle_group_results AS battle
+                WHERE battle.season_id = league_tournament.season_id
+                  AND battle.tournament_id = league_tournament.tournament_id
+                  AND battle.event_id = ${eventsInFpl.eventId}
+                  AND battle.official_match_id IS NOT NULL
+                UNION
+                SELECT knockout.home_entry_id AS entry_id
+                FROM competition.tournament_knockout_results AS knockout
+                WHERE knockout.season_id = league_tournament.season_id
+                  AND knockout.tournament_id = league_tournament.tournament_id
+                  AND knockout.event_id = ${eventsInFpl.eventId}
+                  AND knockout.official_match_id IS NOT NULL
+                UNION
+                SELECT knockout.away_entry_id AS entry_id
+                FROM competition.tournament_knockout_results AS knockout
+                WHERE knockout.season_id = league_tournament.season_id
+                  AND knockout.tournament_id = league_tournament.tournament_id
+                  AND knockout.event_id = ${eventsInFpl.eventId}
+                  AND knockout.official_match_id IS NOT NULL
+              ) AS final_h2h_entry
+              WHERE final_h2h_entry.entry_id IS NOT NULL
+                AND NOT (${hasDurableFinalEntryInput(sql.raw('final_h2h_entry.entry_id'))})
             )
           )
         )
@@ -784,6 +993,11 @@ export async function findLivePublicationV2FinalizationTargets(
       continue;
     }
     if (!(await hasFinalLiveMatchCheckpointsV3(season, row.eventId))) {
+      finalCheckpointValidationCache.delete(key);
+      targets.push(row.eventId);
+      continue;
+    }
+    if (!(await hasFinalLiveLeagueCheckpointsV2(season, row.eventId))) {
       finalCheckpointValidationCache.delete(key);
       targets.push(row.eventId);
       continue;

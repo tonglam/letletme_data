@@ -354,20 +354,10 @@ function validRevisionVector(value: unknown): value is LeagueLiveRevisionVector 
     'content',
   ];
   if (required.some((key) => !validHash(value[key]))) return false;
-  if (
-    value.officialRank !== null &&
-    value.officialRank !== undefined &&
-    !validHash(value.officialRank)
-  )
-    return false;
-  if (value.schedule !== null && value.schedule !== undefined && !validHash(value.schedule))
-    return false;
-  if (
-    value.averageSide !== null &&
-    value.averageSide !== undefined &&
-    !validHash(value.averageSide)
-  )
-    return false;
+  for (const key of ['officialRank', 'schedule', 'averageSide'] as const) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return false;
+    if (value[key] !== null && !validHash(value[key])) return false;
+  }
   return true;
 }
 
@@ -801,6 +791,115 @@ function validH2HPayload(
     manifest.counts.published === rows.length &&
     manifest.counts.ready === matchRows.filter((row) => row.availability === 'READY').length
   );
+}
+
+function validFinalizedLeaguePayload(
+  scope: LeagueLiveScope,
+  index: unknown,
+  payload: unknown,
+  manifest: LeagueLiveManifest,
+): boolean {
+  if (scope.scope === 'CLASSIC') {
+    if (!validClassicPayload(index, payload, manifest) || !isRecord(payload)) return false;
+    return index.every((row) => {
+      if (row.availability === 'NO_PICKS') return true;
+      const input = payload[String(row.entryId)];
+      return (
+        validateEntryLiveInputV2(input, {
+          season: manifest.season,
+          eventId: manifest.eventId,
+          entryId: row.entryId,
+        }) && input.finalResult !== null
+      );
+    });
+  }
+  if (!validH2HPayload(index, payload, manifest) || !isRecord(payload)) return false;
+  if (scope.scope === 'H2H_STANDINGS') {
+    return isRecord(payload.standings) && payload.standings.state === 'READY';
+  }
+  return index.every((row) => {
+    if (!validH2HMatchIndexRow(row) || !isRecord(payload[String(row.matchId)])) return false;
+    const match = payload[String(row.matchId)];
+    if (!validH2HMatchPayload(match, manifest) || match.state !== 'READY') return false;
+    return [match.home, match.away].every(
+      (side) => side.entryId === null || (side.input !== null && side.input.finalResult !== null),
+    );
+  });
+}
+
+/**
+ * Validate the self-contained proof stored by the PostgreSQL league
+ * checkpoint. A FINALIZED state column alone is not enough: serving also
+ * depends on the manifest item descriptors, their checksums, and the
+ * index/payload relationship.
+ */
+export function validateLiveLeaguePublicationV2Checkpoint(
+  scope: LeagueLiveScope,
+  manifest: unknown,
+  index: unknown,
+  payload: unknown,
+  proof: Readonly<{
+    readonly publicationId: string;
+    readonly generation: number;
+    readonly state: string;
+    readonly rowCount: number;
+    readonly payloadBytes: number;
+    readonly payloadSha256: string;
+  }>,
+): boolean {
+  try {
+    if (!isRecord(manifest) || !isRecord(proof)) return false;
+    const serializedManifest = JSON.stringify(manifest);
+    if (typeof serializedManifest !== 'string') return false;
+    const parsed = parseManifest(serializedManifest, scope);
+    if (
+      parsed === null ||
+      parsed.state !== 'FINALIZED' ||
+      parsed.times.checkpointedAt === null ||
+      proof.state !== 'FINALIZED' ||
+      proof.publicationId !== parsed.publicationId ||
+      proof.generation !== parsed.generation ||
+      !Number.isSafeInteger(proof.rowCount) ||
+      proof.rowCount < 0 ||
+      !Number.isSafeInteger(proof.payloadBytes) ||
+      proof.payloadBytes < 0 ||
+      !validHash(proof.payloadSha256)
+    ) {
+      return false;
+    }
+    const sourceCheckedAt = Date.parse(parsed.times.sourceCheckedAt);
+    const publishedAt = Date.parse(parsed.times.publishedAt);
+    const checkpointedAt = Date.parse(parsed.times.checkpointedAt);
+    const contentUpdatedAt = Date.parse(parsed.times.contentUpdatedAt);
+    if (
+      !Number.isFinite(sourceCheckedAt) ||
+      !Number.isFinite(contentUpdatedAt) ||
+      !Number.isFinite(publishedAt) ||
+      !Number.isFinite(checkpointedAt) ||
+      contentUpdatedAt > publishedAt ||
+      sourceCheckedAt > publishedAt ||
+      publishedAt > checkpointedAt
+    ) {
+      return false;
+    }
+    const indexPayload = canonicalJson(index);
+    const valuePayload = canonicalJson(payload);
+    const packed = { index, payload };
+    if (
+      proof.rowCount !== (Array.isArray(index) ? index.length : -1) ||
+      proof.payloadBytes !== Buffer.byteLength(canonicalJson(packed), 'utf8') ||
+      proof.payloadSha256 !== contentHash(packed) ||
+      parsed.items.index.bytes !== Buffer.byteLength(indexPayload, 'utf8') ||
+      parsed.items.payload.bytes !== Buffer.byteLength(valuePayload, 'utf8') ||
+      parsed.items.index.sha256 !== contentHash(index) ||
+      parsed.items.payload.sha256 !== contentHash(payload)
+    ) {
+      return false;
+    }
+    return validFinalizedLeaguePayload(scope, index, payload, parsed);
+  } catch {
+    return false;
+  }
 }
 
 function payloadCount(value: LeagueLivePayload): number {

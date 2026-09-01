@@ -30,6 +30,18 @@ export type EventLiveManagerPickRow = {
   activeChip: string | null;
 };
 
+export type EntryLiveInputPickRow = {
+  entryId: number;
+  position: number;
+  elementId: number;
+  multiplier: number;
+  isCaptain: boolean;
+  isViceCaptain: boolean;
+  activeChip: string | null;
+  transfers: number | null;
+  transfersCost: number | null;
+};
+
 export type EntryEventPicksPublicationMetadata = {
   readonly publicationId?: string;
   readonly generation?: number;
@@ -40,6 +52,7 @@ export type EntryEventPicksPublicationMetadata = {
 };
 
 export type EntryEventPickHeadMetadata = {
+  readonly entryId?: number;
   readonly publicationId: string;
   readonly generation: number;
   readonly picksBaseRevision: string;
@@ -509,6 +522,58 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       }
     },
 
+    findLiveInputPickRowsByEventAndEntryIds: async (
+      season: FplSeasonRef,
+      eventId: number,
+      entryIds: readonly number[],
+    ): Promise<EntryLiveInputPickRow[]> => {
+      if (entryIds.length === 0) return [];
+      try {
+        const db = await getDbInstance();
+        const rows: EntryLiveInputPickRow[] = [];
+        for (const chunk of chunkArray(Array.from(new Set(entryIds)), 1000)) {
+          rows.push(
+            ...(await db
+              .select({
+                entryId: entryEventPicksInCompetition.entryId,
+                position: entryEventPicksInCompetition.position,
+                elementId: entryEventPicksInCompetition.elementId,
+                multiplier: entryEventPicksInCompetition.multiplier,
+                isCaptain: entryEventPicksInCompetition.isCaptain,
+                isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
+                activeChip: entryEventPicksInCompetition.activeChip,
+                transfers: entryEventPicksInCompetition.transfers,
+                transfersCost: entryEventPicksInCompetition.transfersCost,
+              })
+              .from(entryEventPicksInCompetition)
+              .where(
+                and(
+                  eq(entryEventPicksInCompetition.seasonId, season.seasonId),
+                  eq(entryEventPicksInCompetition.eventId, eventId),
+                  inArray(entryEventPicksInCompetition.entryId, chunk),
+                ),
+              )
+              .orderBy(
+                asc(entryEventPicksInCompetition.entryId),
+                asc(entryEventPicksInCompetition.position),
+              )),
+          );
+        }
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve durable live input pick rows', error, {
+          season: season.seasonCode,
+          eventId,
+          entries: entryIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve durable live input pick rows',
+          'ENTRY_EVENT_PICKS_LIVE_INPUT_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findEntryIdsByEvent: async (
       season: FplSeasonRef,
       eventId: number,
@@ -577,6 +642,55 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         throw new DatabaseError(
           'Failed to retrieve entry event picks head',
           'ENTRY_EVENT_PICKS_HEAD_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    findHeadsByEventAndEntryIds: async (
+      season: FplSeasonRef,
+      eventId: number,
+      entryIds: readonly number[],
+    ): Promise<EntryEventPickHeadMetadata[]> => {
+      if (entryIds.length === 0) return [];
+      try {
+        const db = await getDbInstance();
+        const rows: EntryEventPickHeadMetadata[] = [];
+        for (const chunk of chunkArray(Array.from(new Set(entryIds)), 1000)) {
+          rows.push(
+            ...(await db
+              .select({
+                publicationId: entryEventPickHeadsInCompetition.publicationId,
+                generation: entryEventPickHeadsInCompetition.generation,
+                picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+                contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+                rowCount: entryEventPickHeadsInCompetition.rowCount,
+                sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+                contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
+                checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
+                state: entryEventPickHeadsInCompetition.state,
+                entryId: entryEventPickHeadsInCompetition.entryId,
+              })
+              .from(entryEventPickHeadsInCompetition)
+              .where(
+                and(
+                  eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+                  eq(entryEventPickHeadsInCompetition.eventId, eventId),
+                  inArray(entryEventPickHeadsInCompetition.entryId, chunk),
+                ),
+              )),
+          );
+        }
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve durable live input heads', error, {
+          season: season.seasonCode,
+          eventId,
+          entries: entryIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve durable live input heads',
+          'ENTRY_EVENT_PICKS_LIVE_INPUT_HEAD_FIND_ERROR',
           error instanceof Error ? error : undefined,
         );
       }

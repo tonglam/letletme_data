@@ -2,11 +2,15 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   liveLeagueV2ItemKey,
+  leagueEntryInputRevision,
   parseLiveLeaguePublicationV2Manifest,
+  validateLiveLeaguePublicationV2Checkpoint,
   type LeagueLiveManifest,
   type LeagueLiveRead,
   type LeagueLiveScope,
 } from '../../src/cache/live-league-publication-v2';
+import type { Exactly15Picks } from '../../src/cache/live-publication-v2';
+import { canonicalJson, contentHash } from '../../src/utils/content-hash';
 import { liveLeagueCheckpointIsDue } from '../../src/services/live-league-checkpoint-v2.service';
 import {
   isH2HTournamentPhaseActive,
@@ -22,6 +26,102 @@ const scope: LeagueLiveScope = {
 };
 
 const revision = 'a'.repeat(64);
+
+function completeClassicCheckpointFixture() {
+  const picks = Array.from({ length: 15 }, (_, index) => ({
+    element: index + 1,
+    position: index + 1,
+    multiplier: index === 0 ? 2 : 1,
+    isCaptain: index === 0,
+    isViceCaptain: index === 1,
+  })) as unknown as Exactly15Picks;
+  const input = {
+    contractVersion: 'live-points-v2' as const,
+    season: scope.season,
+    eventId: scope.eventId,
+    entryId: 101,
+    picksBase: {
+      revision,
+      contentUpdatedAt: '2026-08-30T00:00:00.000Z',
+      picks,
+      chip: null,
+      reportedEventPoints: 42,
+      transferCount: 0,
+      transferCost: 0,
+    },
+    previousTotals: null,
+    officialAdjustment: null,
+    finalResult: {
+      revision,
+      score: { eventPoints: 42, totalPoints: 142 },
+      picks,
+      automaticSubs: [],
+    },
+  };
+  const inputRevision = leagueEntryInputRevision(input);
+  const index = [
+    {
+      entryId: input.entryId,
+      availability: 'READY' as const,
+      entryName: 'Entry 101',
+      playerName: 'Player 101',
+      region: null,
+      startedEvent: null,
+      overallPoints: 100,
+      overallRank: 10,
+      bank: 0,
+      teamValue: 1000,
+      totalTransfers: 0,
+      lastEventId: null,
+      lastOverallPoints: null,
+      lastOverallRank: null,
+      lastTeamValue: null,
+      lastBank: null,
+      inputPublicationId: '00000000-0000-4000-8000-000000000003',
+      inputGeneration: 1,
+      inputRevision,
+      inputContentUpdatedAt: input.picksBase.contentUpdatedAt,
+    },
+  ];
+  const payload = { [String(input.entryId)]: input };
+  const indexPayload = canonicalJson(index);
+  const payloadValue = canonicalJson(payload);
+  const packed = { index, payload };
+  const checkpointManifest: LeagueLiveManifest = {
+    ...manifest(),
+    state: 'FINALIZED',
+    times: {
+      ...manifest().times,
+      checkpointedAt: '2026-08-30T00:00:02.000Z',
+    },
+    items: {
+      index: {
+        ...manifest().items.index,
+        bytes: Buffer.byteLength(indexPayload, 'utf8'),
+        sha256: contentHash(index),
+      },
+      payload: {
+        ...manifest().items.payload,
+        count: 1,
+        bytes: Buffer.byteLength(payloadValue, 'utf8'),
+        sha256: contentHash(payload),
+      },
+    },
+  };
+  return {
+    checkpointManifest,
+    index,
+    payload,
+    proof: {
+      publicationId: checkpointManifest.publicationId,
+      generation: checkpointManifest.generation,
+      state: checkpointManifest.state,
+      rowCount: index.length,
+      payloadBytes: Buffer.byteLength(canonicalJson(packed), 'utf8'),
+      payloadSha256: contentHash(packed),
+    },
+  };
+}
 
 const manifest = (): LeagueLiveManifest => ({
   contractVersion: 'live-points-v2',
@@ -112,6 +212,58 @@ describe('Live League V2 manifest contract', () => {
   test('rejects an invalid publication contract version', () => {
     const invalid = { ...manifest(), contractVersion: 'live-points-v1' };
     expect(parseLiveLeaguePublicationV2Manifest(JSON.stringify(invalid), scope)).toBeNull();
+  });
+
+  test('rejects a manifest with a missing nullable revision field', () => {
+    const invalid = structuredClone(manifest()) as Record<string, unknown>;
+    const revisions = { ...(invalid.revisions as Record<string, unknown>) };
+    delete revisions.schedule;
+    invalid.revisions = revisions;
+    expect(parseLiveLeaguePublicationV2Manifest(JSON.stringify(invalid), scope)).toBeNull();
+  });
+
+  test('validates a finalized checkpoint beyond its FINALIZED state column', () => {
+    const fixture = completeClassicCheckpointFixture();
+    expect(
+      validateLiveLeaguePublicationV2Checkpoint(
+        scope,
+        fixture.checkpointManifest,
+        fixture.index,
+        fixture.payload,
+        fixture.proof,
+      ),
+    ).toBe(true);
+
+    const corruptPayload = {
+      ...fixture.payload,
+      '999': fixture.payload['101'],
+    };
+    expect(
+      validateLiveLeaguePublicationV2Checkpoint(
+        scope,
+        fixture.checkpointManifest,
+        fixture.index,
+        corruptPayload,
+        fixture.proof,
+      ),
+    ).toBe(false);
+
+    const incompletePayload = {
+      ...fixture.payload,
+      '101': {
+        ...(fixture.payload['101'] as Record<string, unknown>),
+        finalResult: null,
+      },
+    };
+    expect(
+      validateLiveLeaguePublicationV2Checkpoint(
+        scope,
+        fixture.checkpointManifest,
+        fixture.index,
+        incompletePayload,
+        fixture.proof,
+      ),
+    ).toBe(false);
   });
 });
 
