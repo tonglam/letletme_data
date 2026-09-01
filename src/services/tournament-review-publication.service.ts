@@ -15,6 +15,7 @@ export const TOURNAMENT_REVIEW_SCHEMA_VERSION = 'my-tournament-review-v2.1';
 export const TOURNAMENT_REVIEW_METRIC_VERSION = 'settled-review-v2';
 const TOURNAMENT_REVIEW_REACTIVATION_REASON =
   'scope reactivated after temporary review-window retirement';
+const TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE = 100;
 
 export type TournamentReviewFormat = 'POINTS' | 'H2H' | 'KNOCKOUT';
 export type TournamentReviewObligationState =
@@ -4392,6 +4393,8 @@ type TournamentReviewOperationalAggregateRow = {
 };
 
 type TournamentReviewOperationalSemanticRow = {
+  tournament_id: number;
+  event_id: number;
   state: TournamentReviewObligationState;
   ready_revision: number | string | null;
   head_revision: number | string | null;
@@ -4545,46 +4548,65 @@ export async function getTournamentReviewV2OperationalStatus(
   let readyChunkCompleteCount = count(aggregateRows[0]?.ready_chunk_complete_count);
   const readyCount = count(aggregateRows[0]?.ready_count);
   if (options.verifySemanticIntegrity === true) {
-    const semanticRows = await db<TournamentReviewOperationalSemanticRow[]>`
-    SELECT obligation.state,
-           obligation.ready_revision,
-           head.revision AS head_revision,
-           head.content_sha256 AS head_content_sha256,
-           publication.content_sha256 AS publication_content_sha256,
-           publication.payload,
-           COALESCE(
-             (
-               SELECT jsonb_agg(
-                 jsonb_build_object(
-                   'section_key', chunk.section_key,
-                   'chunk_index', chunk.chunk_index,
-                   'item_count', chunk.item_count,
-                   'chunk_sha256', chunk.chunk_sha256,
-                   'items', chunk.items
-                 )
-                 ORDER BY chunk.section_key, chunk.chunk_index
-               )
-               FROM competition.tournament_review_publication_chunks chunk
-               WHERE chunk.season_id = obligation.season_id
-                 AND chunk.tournament_id = obligation.tournament_id
-                 AND chunk.event_id = obligation.event_id
-                 AND chunk.revision = head.revision
-             ),
-             '[]'::jsonb
-           ) AS chunks
-    FROM competition.tournament_review_obligations obligation
-    LEFT JOIN competition.tournament_review_heads head
-      ON head.season_id = obligation.season_id
-     AND head.tournament_id = obligation.tournament_id
-     AND head.event_id = obligation.event_id
-    LEFT JOIN competition.tournament_review_publications publication
-      ON publication.season_id = head.season_id
-     AND publication.tournament_id = head.tournament_id
-     AND publication.event_id = head.event_id
-     AND publication.revision = head.revision
-    WHERE obligation.season_id = ${season.seasonId}
-      AND obligation.state = 'READY'
-    `;
+    // Semantic verification is a bounded diagnostic/backfill path, never the
+    // routine /jobs/status path. Keyset batches cap the number of publication
+    // payloads/chunk arrays materialized in one database response while still
+    // covering every READY scope when the explicit gate opts in.
+    const semanticRows: TournamentReviewOperationalSemanticRow[] = [];
+    let lastTournamentId = 0;
+    let lastEventId = 0;
+    for (;;) {
+      const batch = await db<TournamentReviewOperationalSemanticRow[]>`
+        SELECT obligation.tournament_id,
+               obligation.event_id,
+               obligation.state,
+               obligation.ready_revision,
+               head.revision AS head_revision,
+               head.content_sha256 AS head_content_sha256,
+               publication.content_sha256 AS publication_content_sha256,
+               publication.payload,
+               COALESCE(
+                 (
+                   SELECT jsonb_agg(
+                     jsonb_build_object(
+                       'section_key', chunk.section_key,
+                       'chunk_index', chunk.chunk_index,
+                       'item_count', chunk.item_count,
+                       'chunk_sha256', chunk.chunk_sha256,
+                       'items', chunk.items
+                     )
+                     ORDER BY chunk.section_key, chunk.chunk_index
+                   )
+                   FROM competition.tournament_review_publication_chunks chunk
+                   WHERE chunk.season_id = obligation.season_id
+                     AND chunk.tournament_id = obligation.tournament_id
+                     AND chunk.event_id = obligation.event_id
+                     AND chunk.revision = head.revision
+                 ),
+                 '[]'::jsonb
+               ) AS chunks
+        FROM competition.tournament_review_obligations obligation
+        LEFT JOIN competition.tournament_review_heads head
+          ON head.season_id = obligation.season_id
+         AND head.tournament_id = obligation.tournament_id
+         AND head.event_id = obligation.event_id
+        LEFT JOIN competition.tournament_review_publications publication
+          ON publication.season_id = head.season_id
+         AND publication.tournament_id = head.tournament_id
+         AND publication.event_id = head.event_id
+         AND publication.revision = head.revision
+        WHERE obligation.season_id = ${season.seasonId}
+          AND obligation.state = 'READY'
+          AND (obligation.tournament_id, obligation.event_id) > (${lastTournamentId}, ${lastEventId})
+        ORDER BY obligation.tournament_id, obligation.event_id
+        LIMIT ${TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE}
+      `;
+      semanticRows.push(...batch);
+      if (batch.length < TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE) break;
+      const last = batch[batch.length - 1];
+      lastTournamentId = last.tournament_id;
+      lastEventId = last.event_id;
+    }
     const storedChunkRows = (
       value: unknown,
     ): Array<{

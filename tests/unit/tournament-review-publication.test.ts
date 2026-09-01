@@ -414,7 +414,11 @@ describe('My Tournament Review V2 format and retry policy', () => {
     );
     expect(publicationSource).toContain('Keep any attached repair issue on the descendant');
     expect(publicationSource).toContain(String.raw`/^[0-9a-f]{64}$/.test(chunkSha256)`);
-    expect(publicationSource).toContain('expectedKeys.some((key) => !actual.has(key))');
+    expect(publicationSource).toContain('[...expectedKeys].some((key) => !actual.has(key))');
+    expect(publicationSource).toContain('TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE = 100');
+    expect(publicationSource).toContain(
+      'Semantic verification is a bounded diagnostic/backfill path',
+    );
     expect(publicationSource).toContain(
       '(publication.payload -> \x27manifest\x27 ->> \x27chunkCount\x27)::numeric',
     );
