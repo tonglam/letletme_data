@@ -35,6 +35,7 @@ const governanceService = readFileSync('src/services/data-governance.service.ts'
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
 const maintenanceJobs = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
 const worker = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
+const schedulerObligations = readFileSync('src/repositories/scheduler-obligations.ts', 'utf8');
 const entryWorker = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
 const queueRunBarrier = readFileSync('src/services/queue-run-barrier.ts', 'utf8');
 const transaction = readFileSync('src/db/singleton.ts', 'utf8');
@@ -295,6 +296,12 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(integrityMigration).toContain(
       'COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM',
     );
+    expect(integrityMigration).toContain('AND NOT snapshot_entry.is_empty');
+    expect(integrityMigration).toContain('YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+    expect(schedulerObligations).toContain(
+      'leaseOwner: sql`COALESCE(${schedulerObligationsInOps.leaseOwner}, ${randomUUID()})`',
+    );
+    expect(worker).toContain('const publicationForDelivery');
     expect(worker).toContain('isMyFplSnapshotRedisManifestForPublication');
     expect(publicationService).toContain('provisionalEventPointsByElement');
     expect(publicationService).toContain('Event-live publication is missing transfer points');
