@@ -21,6 +21,17 @@ function seasonIdFromCode(season: string): number {
   return 2000 + Number(season.slice(0, 2));
 }
 
+export function isLiveLeagueCheckpointGenerationCompatible(
+  current: { readonly generation: number; readonly publicationId: string } | null | undefined,
+  candidate: { readonly generation: number; readonly publicationId: string },
+): boolean {
+  if (!current) return true;
+  if (current.generation > candidate.generation) return false;
+  return (
+    current.generation !== candidate.generation || current.publicationId === candidate.publicationId
+  );
+}
+
 function shouldCheckpoint(
   candidate: LeagueLiveRead,
   force: boolean,
@@ -166,7 +177,19 @@ export async function checkpointLiveLeaguePublicationV2(
           sameFinalizedPublicationContent(read, current)
         );
       }
-      if (current && Number(current.generation) >= read.publication.generation) {
+      if (
+        current &&
+        !isLiveLeagueCheckpointGenerationCompatible(
+          {
+            generation: Number(current.generation),
+            publicationId: current.publicationId,
+          },
+          {
+            generation: read.publication.generation,
+            publicationId: read.publication.publicationId,
+          },
+        )
+      ) {
         return false;
       }
       const upserted = await tx

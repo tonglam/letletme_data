@@ -980,6 +980,17 @@ function finalInputAvailable(
   return entryId === null || isAverage || inputRead?.input.finalResult !== null;
 }
 
+export function hasCompleteH2HOfficialScores(
+  homeEntryId: number | null,
+  homeNetPoints: number | null,
+  awayEntryId: number | null,
+  awayNetPoints: number | null,
+): boolean {
+  const scoreAvailable = (entryId: number | null, netPoints: number | null) =>
+    entryId === null || (netPoints !== null && Number.isFinite(netPoints));
+  return scoreAvailable(homeEntryId, homeNetPoints) && scoreAvailable(awayEntryId, awayNetPoints);
+}
+
 async function publishH2HMatch(
   season: FplSeasonRef,
   eventId: number,
@@ -1020,7 +1031,13 @@ async function publishH2HMatch(
     (global.publication.state !== 'FINALIZED' ||
       (isTimestampAtOrAfter(row.sourceCheckedAt, row.finalizationAt) &&
         finalInputAvailable(row.homeEntryId, row.homeIsAverage, homeRead) &&
-        finalInputAvailable(row.awayEntryId, row.awayIsAverage, awayRead)));
+        finalInputAvailable(row.awayEntryId, row.awayIsAverage, awayRead) &&
+        hasCompleteH2HOfficialScores(
+          row.homeEntryId,
+          row.homeNetPoints,
+          row.awayEntryId,
+          row.awayNetPoints,
+        )));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',
     season: season.seasonCode,

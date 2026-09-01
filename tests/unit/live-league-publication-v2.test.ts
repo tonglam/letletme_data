@@ -11,8 +11,12 @@ import {
 } from '../../src/cache/live-league-publication-v2';
 import type { Exactly15Picks } from '../../src/cache/live-publication-v2';
 import { canonicalJson, contentHash } from '../../src/utils/content-hash';
-import { liveLeagueCheckpointIsDue } from '../../src/services/live-league-checkpoint-v2.service';
 import {
+  isLiveLeagueCheckpointGenerationCompatible,
+  liveLeagueCheckpointIsDue,
+} from '../../src/services/live-league-checkpoint-v2.service';
+import {
+  hasCompleteH2HOfficialScores,
   isH2HTournamentPhaseActive,
   isTimestampAtOrAfter,
   selectRetainedH2HMatchPayload,
@@ -311,6 +315,40 @@ describe('Live League V2 checkpoint cadence', () => {
   });
 });
 
+describe('Live League V2 checkpoint generation fence', () => {
+  const candidate = { generation: 4, publicationId: 'candidate' };
+
+  test('allows an idempotent retry for the same publication generation', () => {
+    expect(
+      isLiveLeagueCheckpointGenerationCompatible(
+        { generation: 4, publicationId: 'candidate' },
+        candidate,
+      ),
+    ).toBe(true);
+  });
+
+  test('rejects an identity conflict or an older candidate at the same scope', () => {
+    expect(
+      isLiveLeagueCheckpointGenerationCompatible(
+        { generation: 4, publicationId: 'other' },
+        candidate,
+      ),
+    ).toBe(false);
+    expect(
+      isLiveLeagueCheckpointGenerationCompatible(
+        { generation: 5, publicationId: 'newer' },
+        candidate,
+      ),
+    ).toBe(false);
+    expect(
+      isLiveLeagueCheckpointGenerationCompatible(
+        { generation: 3, publicationId: 'older' },
+        candidate,
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('Live League V2 H2H phase window', () => {
   test('does not block finalization before, between, or after configured phases', () => {
     const tournament = {
@@ -379,6 +417,18 @@ describe('Live League V2 finalization freshness fences', () => {
     expect(isTimestampAtOrAfter('2026-08-29T23:59:59.000Z', boundary)).toBe(false);
     expect(isTimestampAtOrAfter(null, boundary)).toBe(false);
     expect(isTimestampAtOrAfter('not-a-time', boundary)).toBe(false);
+  });
+});
+
+describe('Live League V2 H2H final score fence', () => {
+  test('requires an official score for every real side, including zero', () => {
+    expect(hasCompleteH2HOfficialScores(101, 0, 202, 0)).toBe(true);
+    expect(hasCompleteH2HOfficialScores(101, null, 202, 0)).toBe(false);
+    expect(hasCompleteH2HOfficialScores(101, 0, 202, null)).toBe(false);
+  });
+
+  test('allows the missing score on a bye side with no entry', () => {
+    expect(hasCompleteH2HOfficialScores(101, 42, null, null)).toBe(true);
   });
 });
 
