@@ -127,16 +127,17 @@ export async function checkpointEntryLiveInputV2(
   const candidate = await readEntryLiveInputV2(scope);
   if (!candidate) return 'missing';
 
+  // The reader may fall back to the previous publication for serving a
+  // coherent read, but a checkpoint is a write obligation for the active
+  // generation only. Never reconstruct or persist an older fallback.
+  if (candidate.servedFrom !== 'REDIS_CURRENT') return 'missing';
+
   // A successful checkpoint clears the desired pointer after the Redis
   // manifest has been fenced to the exact durable head.  Audits can therefore
   // legitimately observe an active publication with no pending obligation.
   // Treat that marker as an idempotent success instead of re-writing every
   // already durable entry (or reporting a false missing input).
-  if (
-    !desired &&
-    candidate.servedFrom === 'REDIS_CURRENT' &&
-    candidate.publication.checkpointedAt !== null
-  ) {
+  if (!desired && candidate.publication.checkpointedAt !== null) {
     return 'checkpointed';
   }
   // A provider write can publish before its asynchronous durable checkpoint
