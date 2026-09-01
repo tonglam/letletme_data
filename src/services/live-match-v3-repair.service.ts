@@ -236,6 +236,20 @@ async function requireDetailRepairCompatibility(
   }
 }
 
+async function requireDeskRepairCompatibility(
+  scope: { readonly season: string; readonly eventId: number },
+  desk: MatchDeskRead,
+  redis: Parameters<typeof readLiveMatchDeskV3>[0]['redis'],
+): Promise<void> {
+  const detail = await readLiveMatchDetailPointerV3({ ...scope, redis }, 'active');
+  if (detail && !isLiveMatchDetailCompatibleWithDesk(detail, desk)) {
+    throw new ValidationError(
+      'desk repair would leave the current same-event detail publication incompatible',
+      'LIVE_MATCH_REPAIR_DESK_INCOMPATIBLE',
+    );
+  }
+}
+
 async function inspectLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
   const season = await seasonRepository.requireByCode(request.season);
   const redis = await redisSingleton.getClient();
@@ -313,7 +327,16 @@ async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
   const scope = { season: request.season, eventId: request.eventId } as const;
 
   if (request.action === 'promote-previous') {
-    if (request.kind === 'detail') {
+    if (request.kind === 'desk') {
+      const previous = await readLiveMatchDeskPointerV3({ ...scope, redis }, 'previous');
+      if (!previous) {
+        throw new ValidationError(
+          'no valid same-event desk previous publication is available',
+          'LIVE_MATCH_REPAIR_PREVIOUS_MISSING',
+        );
+      }
+      await requireDeskRepairCompatibility(scope, previous, redis);
+    } else {
       const previous = await readLiveMatchDetailPointerV3({ ...scope, redis }, 'previous');
       if (!previous) {
         throw new ValidationError(
