@@ -2249,11 +2249,15 @@ export async function readEntryLiveInputsV2(
   ];
   const itemValues = itemKeys.length > 0 ? await redis.mget(...itemKeys) : [];
   const itemMap = new Map(itemKeys.map((key, index) => [key, itemValues[index] ?? null]));
+  const candidatesByEntry = new Map<number, typeof candidates>();
+  for (const candidate of candidates) {
+    const entryCandidates = candidatesByEntry.get(candidate.scope.entryId) ?? [];
+    entryCandidates.push(candidate);
+    candidatesByEntry.set(candidate.scope.entryId, entryCandidates);
+  }
   const result = new Map<number, EntryLivePublicationRead>();
   for (const scope of scopes) {
-    const scopeCandidates = candidates.filter(
-      (candidate) => candidate.scope.entryId === scope.entryId,
-    );
+    const scopeCandidates = candidatesByEntry.get(scope.entryId) ?? [];
     for (const candidate of scopeCandidates) {
       const publication = candidate.publication;
       if (!publication) continue;

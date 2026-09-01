@@ -7,6 +7,7 @@ import {
   markLiveLeaguePublicationCheckpointedV2,
   readLiveLeagueCheckpointDesiredV2,
   readLiveLeaguePublicationV2,
+  validateLiveLeaguePublicationV2Checkpoint,
   type LeagueLiveRead,
   type LeagueLiveScope,
 } from '../cache/live-league-publication-v2';
@@ -138,6 +139,36 @@ function sameFinalizedPublicationContent(
   return canonicalJson(stable(persisted.manifest)) === canonicalJson(stable(read.publication));
 }
 
+function storedFinalizedCheckpointIsValid(
+  scope: LeagueLiveScope,
+  current: {
+    readonly publicationId: string;
+    readonly generation: number;
+    readonly state: string;
+    readonly manifest: unknown;
+    readonly indexPayload: unknown;
+    readonly payload: unknown;
+    readonly rowCount: number;
+    readonly payloadBytes: number;
+    readonly payloadSha256: string;
+  },
+): boolean {
+  return validateLiveLeaguePublicationV2Checkpoint(
+    scope,
+    current.manifest,
+    current.indexPayload,
+    current.payload,
+    {
+      publicationId: current.publicationId,
+      generation: current.generation,
+      state: current.state,
+      rowCount: current.rowCount,
+      payloadBytes: current.payloadBytes,
+      payloadSha256: current.payloadSha256,
+    },
+  );
+}
+
 /** Persist one self-contained latest publication without blocking its Redis promotion. */
 export async function checkpointLiveLeaguePublicationV2(
   read: LeagueLiveRead,
@@ -157,6 +188,10 @@ export async function checkpointLiveLeaguePublicationV2(
           state: liveLeagueCheckpointsInCompetition.state,
           manifest: liveLeagueCheckpointsInCompetition.manifest,
           rowCount: liveLeagueCheckpointsInCompetition.rowCount,
+          indexPayload: liveLeagueCheckpointsInCompetition.indexPayload,
+          payload: liveLeagueCheckpointsInCompetition.payload,
+          payloadBytes: liveLeagueCheckpointsInCompetition.payloadBytes,
+          payloadSha256: liveLeagueCheckpointsInCompetition.payloadSha256,
         })
         .from(liveLeagueCheckpointsInCompetition)
         .where(
@@ -171,14 +206,56 @@ export async function checkpointLiveLeaguePublicationV2(
         .limit(1)
         .for('update');
       const current = existing[0];
+      let currentIsInvalidFinalized = false;
       if (current && current.state === 'FINALIZED') {
-        return (
-          current.publicationId === read.publication.publicationId ||
-          sameFinalizedPublicationContent(read, current)
+        const scope = {
+          season: read.publication.season,
+          eventId: read.publication.eventId,
+          tournamentId: read.publication.tournamentId,
+          scope: read.publication.scope,
+        } as const;
+        if (
+          storedFinalizedCheckpointIsValid(scope, current)
+        ) {
+          return (
+            current.publicationId === read.publication.publicationId ||
+            sameFinalizedPublicationContent(read, current)
+          );
+        }
+        // A corrupt FINALIZED row is not a fence. Only another validated
+        // FINALIZED publication may repair it; a provisional candidate must
+        // never delete or supersede the durable final state.
+        if (read.publication.state !== 'FINALIZED') return false;
+        currentIsInvalidFinalized = true;
+        const candidateValid = validateLiveLeaguePublicationV2Checkpoint(
+          scope,
+          values.manifest,
+          values.indexPayload,
+          values.payload,
+          {
+            publicationId: read.publication.publicationId,
+            generation: read.publication.generation,
+            state: read.publication.state,
+            rowCount: values.rowCount,
+            payloadBytes: values.payloadBytes,
+            payloadSha256: values.payloadSha256,
+          },
         );
+        if (!candidateValid) return false;
+        await tx
+          .delete(liveLeagueCheckpointsInCompetition)
+          .where(
+            and(
+              eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
+              eq(liveLeagueCheckpointsInCompetition.eventId, read.publication.eventId),
+              eq(liveLeagueCheckpointsInCompetition.tournamentId, read.publication.tournamentId),
+              eq(liveLeagueCheckpointsInCompetition.scopeKind, read.publication.scope),
+            ),
+          );
       }
       if (
         current &&
+        !currentIsInvalidFinalized &&
         !isLiveLeagueCheckpointGenerationCompatible(
           {
             generation: Number(current.generation),

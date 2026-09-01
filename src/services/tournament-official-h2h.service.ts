@@ -25,6 +25,7 @@ import { ValidationError } from '../utils/errors';
 import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
 import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 
 const MAX_H2H_PAGES = 100;
 
@@ -34,6 +35,8 @@ export type OfficialH2HFetchOptions = Readonly<{
   /** Locked page manifests let a minute refresh avoid fetching unrelated pages. */
   matchPages?: readonly number[];
   existingManifests?: readonly OfficialH2HPageManifest[];
+  /** Database ordering time sampled before provider reads by the sync caller. */
+  sourceCheckedAt?: Date;
 }>;
 
 export function resolveOfficialH2HPagesToFetch(
@@ -425,7 +428,7 @@ export async function fetchOfficialH2HSourceSnapshot(
   // finalization gate compares this timestamp with event.data_checked_at; a
   // post-fetch timestamp would allow an in-flight pre-finalization response to
   // masquerade as post-finalization evidence.
-  const sourceCheckedAt = new Date();
+  const sourceCheckedAt = options.sourceCheckedAt ?? new Date();
   const standings: OfficialH2HStanding[] = [];
   let standingsPage = 1;
   let previousStandingsSignature: string | null = null;
@@ -1036,6 +1039,11 @@ export async function syncOfficialH2HTournament(
     );
   }
 
+  // The relational database clock is the ordering authority for finalization
+  // fences. Sample it before any FPL request so a response started before
+  // data_checked_at cannot be blessed merely because the provider returned
+  // after the boundary.
+  const sourceOrdering = await readDatabaseOrderingTimestamp();
   const entryIdsPromise = tournamentEntryRepository.findEntryIdsByTournamentId(
     season,
     tournament.id,
@@ -1059,6 +1067,7 @@ export async function syncOfficialH2HTournament(
       options.forceFull !== true,
   );
   const fetched = await fetchOfficialH2HSourceSnapshot(tournament.leagueId, fplClient, {
+    sourceCheckedAt: sourceOrdering.date,
     ...(pagePlan.mode === 'incremental'
       ? { matchPages: pagePlan.pageNumbers, existingManifests: manifests }
       : {}),

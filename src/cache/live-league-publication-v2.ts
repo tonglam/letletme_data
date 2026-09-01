@@ -535,8 +535,9 @@ function validClassicPayload(
         leagueEntryInputRevision(input) !== row.inputRevision
       )
         return false;
-    } else if (input !== null) {
-      return false;
+    } else {
+      if (row.startedEvent === null || row.startedEvent <= manifest.eventId) return false;
+      if (input !== null) return false;
     }
   }
   for (const key of Object.keys(payload)) {
@@ -559,11 +560,11 @@ function validH2HMatchIndexRow(value: unknown): value is H2HMatchIndexRow {
     value.eventId > 0 &&
     typeof value.groupId === 'number' &&
     Number.isSafeInteger(value.groupId) &&
-    value.groupId > 0 &&
     typeof value.sourceOrder === 'number' &&
     Number.isSafeInteger(value.sourceOrder) &&
     value.sourceOrder >= 0 &&
     (value.phase === 'REGULAR' || value.phase === 'KNOCKOUT') &&
+    (value.phase === 'KNOCKOUT' ? value.groupId >= 0 : value.groupId > 0) &&
     (value.homeEntryId === null ||
       (typeof value.homeEntryId === 'number' &&
         Number.isSafeInteger(value.homeEntryId) &&
@@ -656,11 +657,11 @@ function validH2HMatchPayload(
     value.officialMatchId > 0 &&
     typeof value.groupId === 'number' &&
     Number.isSafeInteger(value.groupId) &&
-    value.groupId > 0 &&
     typeof value.sourceOrder === 'number' &&
     Number.isSafeInteger(value.sourceOrder) &&
     value.sourceOrder >= 0 &&
     (value.phase === 'REGULAR' || value.phase === 'KNOCKOUT') &&
+    (value.phase === 'KNOCKOUT' ? value.groupId >= 0 : value.groupId > 0) &&
     (value.knockoutName === null || typeof value.knockoutName === 'string') &&
     (value.tiebreak === null || typeof value.tiebreak === 'string') &&
     typeof value.isBye === 'boolean' &&
@@ -705,6 +706,7 @@ function validH2HStandingsPayload(
     typeof standings.throughEventId !== 'number' ||
     !Number.isSafeInteger(standings.throughEventId) ||
     standings.throughEventId <= 0 ||
+    standings.throughEventId !== manifest.eventId ||
     (standings.state !== 'READY' &&
       standings.state !== 'UPDATING' &&
       standings.state !== 'UNAVAILABLE') ||
@@ -1160,13 +1162,13 @@ local function removeItems(raw)
     local item = value.items[name]
     if type(item) == 'table' and type(item.key) == 'string' and
        string.sub(item.key, 1, string.len(scopePrefix) + 1) == scopePrefix .. ':' then
-      redis.call('DEL', item.key, item.key .. ':meta')
+      redis.call('UNLINK', item.key, item.key .. ':meta')
     end
   end
 end
 removeItems(active)
 removeItems(previous)
-redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4])
+redis.call('UNLINK', KEYS[1], KEYS[2], KEYS[3], KEYS[4])
 return {'retired'}
 `;
 

@@ -328,8 +328,16 @@ function hasDurableFinalEntryInput(seasonCode: string, entryId: SQL): SQL {
                      AND (
                        (pick.position = 1
                          AND stored_pick.active_chip IS NOT DISTINCT FROM input_head.input_payload->'picksBase'->>'chip'
-                         AND stored_pick.transfers = (input_head.input_payload->'picksBase'->>'transferCount')::numeric
-                         AND stored_pick.transfers_cost = (input_head.input_payload->'picksBase'->>'transferCost')::numeric)
+                         AND stored_pick.transfers = CASE
+                           WHEN jsonb_typeof(input_head.input_payload->'picksBase'->'transferCount') = 'number'
+                           THEN (input_head.input_payload->'picksBase'->>'transferCount')::numeric
+                           ELSE NULL
+                         END
+                         AND stored_pick.transfers_cost = CASE
+                           WHEN jsonb_typeof(input_head.input_payload->'picksBase'->'transferCost') = 'number'
+                           THEN (input_head.input_payload->'picksBase'->>'transferCost')::numeric
+                           ELSE NULL
+                         END)
                        OR
                        (pick.position <> 1
                          AND stored_pick.active_chip IS NULL
@@ -342,12 +350,16 @@ function hasDurableFinalEntryInput(seasonCode: string, entryId: SQL): SQL {
         AND jsonb_typeof(input_head.input_payload->'picksBase'->'chip') IN ('null', 'string')
         AND jsonb_typeof(input_head.input_payload->'picksBase'->'transferCount') = 'number'
         AND jsonb_typeof(input_head.input_payload->'picksBase'->'transferCost') = 'number'
-        AND (
-          input_head.input_payload->'picksBase'->>'transferCount'
-        )::numeric >= 0
-        AND (
-          input_head.input_payload->'picksBase'->>'transferCost'
-        )::numeric >= 0
+        AND CASE
+          WHEN jsonb_typeof(input_head.input_payload->'picksBase'->'transferCount') = 'number'
+          THEN (input_head.input_payload->'picksBase'->>'transferCount')::numeric >= 0
+          ELSE false
+        END
+        AND CASE
+          WHEN jsonb_typeof(input_head.input_payload->'picksBase'->'transferCost') = 'number'
+          THEN (input_head.input_payload->'picksBase'->>'transferCost')::numeric >= 0
+          ELSE false
+        END
         AND (
           jsonb_typeof(input_head.input_payload->'previousTotals') = 'null'
           OR (

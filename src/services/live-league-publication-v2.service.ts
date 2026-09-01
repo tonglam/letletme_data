@@ -41,9 +41,11 @@ import { mapWithConcurrency } from '../utils/async';
 const LIVE_LEAGUE_ALGORITHM_VERSION = 'live-league-v2:classic:1';
 const LIVE_ACTIVE_CADENCE_MS = 30_000;
 const LIVE_LEAGUE_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
+const MAX_RETIREMENT_KEYS = 10_000;
 
 type ClassicRosterRow = {
   tournamentId: number;
+  expectedEntryCount: number;
   entryId: number;
   entryName: string | null;
   playerName: string | null;
@@ -70,6 +72,7 @@ type CompleteClassicRosterRow = ClassicRosterRow & {
 
 type ClassicRoster = {
   readonly tournamentId: number;
+  readonly expectedEntryCount: number;
   readonly rows: readonly ClassicRosterRow[];
 };
 
@@ -150,6 +153,7 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
   const rows = await client<ClassicRosterRow[]>`
     SELECT
       tournament.tournament_id AS "tournamentId",
+      tournament.total_team_num AS "expectedEntryCount",
       roster.entry_id AS "entryId",
       entry.entry_name AS "entryName",
       entry.player_name AS "playerName",
@@ -189,13 +193,19 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
   for (const row of rows) {
     const tournamentId = Number(row.tournamentId);
     const entryId = Number(row.entryId);
+    const expectedEntryCount = Number(row.expectedEntryCount);
     if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) continue;
     if (!Number.isSafeInteger(entryId) || entryId <= 0) continue;
+    if (!Number.isSafeInteger(expectedEntryCount) || expectedEntryCount <= 0) continue;
     const bucket = byTournament.get(tournamentId) ?? [];
-    bucket.push({ ...row, tournamentId, entryId });
+    bucket.push({ ...row, tournamentId, entryId, expectedEntryCount });
     byTournament.set(tournamentId, bucket);
   }
-  return [...byTournament.entries()].map(([tournamentId, rows]) => ({ tournamentId, rows }));
+  return [...byTournament.entries()].map(([tournamentId, rows]) => ({
+    tournamentId,
+    expectedEntryCount: rows[0]?.expectedEntryCount ?? 0,
+    rows,
+  }));
 }
 
 function buildRevisions(
@@ -266,7 +276,15 @@ async function publishClassicRoster(
   roster: ClassicRoster,
   expectedNextCheckAtValue?: Date | string | null,
 ): Promise<'published' | 'unchanged' | 'pending' | 'skipped'> {
-  if (roster.rows.length === 0 || roster.rows.length > 5_000) return 'skipped';
+  if (roster.rows.length === 0 || roster.expectedEntryCount > 5_000) return 'skipped';
+  const entryIds = new Set(roster.rows.map((row) => row.entryId));
+  if (
+    roster.expectedEntryCount <= 0 ||
+    roster.rows.length !== roster.expectedEntryCount ||
+    entryIds.size !== roster.rows.length
+  ) {
+    return 'pending';
+  }
   const completeRows = roster.rows.filter(hasCompleteClassicIdentity);
   if (completeRows.length !== roster.rows.length) return 'pending';
   const eligibleRows = completeRows.filter(
@@ -467,6 +485,12 @@ export async function syncLiveClassicLeaguePublicationsV2(
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
   const rosters = await findClassicRosters(season, eventId);
+  await retireInactiveClassicPublications(
+    season,
+    eventId,
+    new Set(rosters.map(({ tournamentId }) => tournamentId)),
+    redis,
+  );
   const counts = {
     published: 0,
     unchanged: 0,
@@ -561,11 +585,13 @@ type H2HMatchRow = {
   homeEntryId: number | null;
   homeEntryName: string | null;
   homePlayerName: string | null;
+  homeProfileSourceCheckedAt: Date | string | null;
   homeNetPoints: number | null;
   homeIsAverage: boolean;
   awayEntryId: number | null;
   awayEntryName: string | null;
   awayPlayerName: string | null;
+  awayProfileSourceCheckedAt: Date | string | null;
   awayNetPoints: number | null;
   awayIsAverage: boolean;
   sourceCheckedAt: Date | string | null;
@@ -705,20 +731,69 @@ async function scanH2HPublicationKeys(
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
   season: string,
   eventId: number,
-  kind: 'head' | 'match',
+  kind: 'classic' | 'head' | 'match',
 ): Promise<string[]> {
   const pattern =
-    kind === 'head'
-      ? `${h2hScopeKeyPrefix(season, eventId)}:*:h2h-head:active`
-      : `${h2hScopeKeyPrefix(season, eventId)}:*:h2h-match-*:active`;
+    kind === 'classic'
+      ? `${h2hScopeKeyPrefix(season, eventId)}:*:classic:active`
+      : kind === 'head'
+        ? `${h2hScopeKeyPrefix(season, eventId)}:*:h2h-head:active`
+        : `${h2hScopeKeyPrefix(season, eventId)}:*:h2h-match-*:active`;
   const keys: string[] = [];
   let cursor = '0';
   do {
     const result = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', '200');
     cursor = result[0];
     keys.push(...result[1]);
+    if (keys.length > MAX_RETIREMENT_KEYS) {
+      throw new Error('Live league retirement scan exceeded its safety bound');
+    }
   } while (cursor !== '0');
   return keys;
+}
+
+function classicTournamentIdFromKey(key: string, season: string, eventId: number): number | null {
+  const prefix = `${h2hScopeKeyPrefix(season, eventId)}:`;
+  const suffix = ':classic:active';
+  if (!key.startsWith(prefix) || !key.endsWith(suffix)) return null;
+  const tournamentId = key.slice(prefix.length, -suffix.length);
+  return /^\d+$/.test(tournamentId) && Number(tournamentId) > 0 ? Number(tournamentId) : null;
+}
+
+async function retireInactiveClassicPublications(
+  season: FplSeasonRef,
+  eventId: number,
+  activeTournamentIds: ReadonlySet<number>,
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<void> {
+  try {
+    const keys = await scanH2HPublicationKeys(redis, season.seasonCode, eventId, 'classic');
+    const orphanTournamentIds = keys
+      .map((key) => classicTournamentIdFromKey(key, season.seasonCode, eventId))
+      .filter((id): id is number => id !== null && !activeTournamentIds.has(id));
+    if (orphanTournamentIds.length === 0) return;
+    const uniqueOrphans = [...new Set(orphanTournamentIds)];
+    const retired = await mapWithConcurrency(uniqueOrphans, 8, (tournamentId) =>
+      retireLiveLeaguePublicationV2(
+        { season: season.seasonCode, eventId, tournamentId, scope: 'CLASSIC' },
+        redis,
+      ),
+    );
+    logInfo('Inactive Classic league publications retired', {
+      season: season.seasonCode,
+      eventId,
+      tournaments: uniqueOrphans.length,
+      scopes: retired.filter(Boolean).length,
+    });
+  } catch (error) {
+    // Retirement is hygiene only. A bounded scan or exact pointer CAS failure
+    // must never block a live publication for an active tournament.
+    logWarn('Failed to retire inactive Classic league publications', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+  }
 }
 
 async function retireInactiveH2HPublications(
@@ -809,11 +884,13 @@ async function findOfficialH2HMatches(
       battle.home_entry_id AS "homeEntryId",
       home_entry.entry_name AS "homeEntryName",
       home_entry.player_name AS "homePlayerName",
+      home_entry.profile_source_checked_at AS "homeProfileSourceCheckedAt",
       battle.home_net_points AS "homeNetPoints",
       battle.home_is_average AS "homeIsAverage",
       battle.away_entry_id AS "awayEntryId",
       away_entry.entry_name AS "awayEntryName",
       away_entry.player_name AS "awayPlayerName",
+      away_entry.profile_source_checked_at AS "awayProfileSourceCheckedAt",
       battle.away_net_points AS "awayNetPoints",
       battle.away_is_average AS "awayIsAverage",
       battle.source_checked_at AS "sourceCheckedAt",
@@ -846,11 +923,13 @@ async function findOfficialH2HMatches(
       knockout.home_entry_id AS "homeEntryId",
       home_entry.entry_name AS "homeEntryName",
       home_entry.player_name AS "homePlayerName",
+      home_entry.profile_source_checked_at AS "homeProfileSourceCheckedAt",
       knockout.home_net_points AS "homeNetPoints",
       false AS "homeIsAverage",
       knockout.away_entry_id AS "awayEntryId",
       away_entry.entry_name AS "awayEntryName",
       away_entry.player_name AS "awayPlayerName",
+      away_entry.profile_source_checked_at AS "awayProfileSourceCheckedAt",
       knockout.away_net_points AS "awayNetPoints",
       false AS "awayIsAverage",
       knockout.source_checked_at AS "sourceCheckedAt",
@@ -1182,8 +1261,15 @@ function finalInputAvailable(
   entryId: number | null,
   isAverage: boolean,
   inputRead: EntryLivePublicationRead | undefined,
+  profileSourceCheckedAt: Date | string | null,
+  finalizationAt: Date | string | null,
 ): boolean {
-  return entryId === null || isAverage || inputRead?.input.finalResult !== null;
+  return (
+    entryId === null ||
+    isAverage ||
+    (inputRead?.input.finalResult !== null &&
+      isTimestampAtOrAfter(profileSourceCheckedAt, finalizationAt))
+  );
 }
 
 export function hasCompleteH2HOfficialScores(
@@ -1238,8 +1324,20 @@ async function publishH2HMatch(
     inputReady &&
     (global.publication.state !== 'FINALIZED' ||
       (isTimestampAtOrAfter(row.sourceCheckedAt, row.finalizationAt) &&
-        finalInputAvailable(row.homeEntryId, row.homeIsAverage, homeRead) &&
-        finalInputAvailable(row.awayEntryId, row.awayIsAverage, awayRead) &&
+        finalInputAvailable(
+          row.homeEntryId,
+          row.homeIsAverage,
+          homeRead,
+          row.homeProfileSourceCheckedAt,
+          row.finalizationAt,
+        ) &&
+        finalInputAvailable(
+          row.awayEntryId,
+          row.awayIsAverage,
+          awayRead,
+          row.awayProfileSourceCheckedAt,
+          row.finalizationAt,
+        ) &&
         hasCompleteH2HOfficialScores(
           row.homeEntryId,
           row.homeNetPoints,
