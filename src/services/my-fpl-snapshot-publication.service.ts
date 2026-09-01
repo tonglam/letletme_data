@@ -1902,15 +1902,36 @@ async function captureMyFplSnapshotOnce(
     }
 
     const active = await loadActivePublication(tx, season.seasonId, eventId);
+    let activeFinalUsesManagerReviewV2 = false;
+    if (isCompleteMyFplPublication(active) && active.kind === 'FINAL') {
+      const activeEntryPayloadCounts = await tx<{ total_count: number; v2_count: number }[]>`
+        SELECT count(*)::integer AS total_count,
+               count(*) FILTER (
+                 WHERE jsonb_typeof(payload) = 'object'
+                   AND payload->>'contractVersion' = '2'
+               )::integer AS v2_count
+        FROM competition.my_fpl_snapshot_entries
+        WHERE season_id = ${season.seasonId}
+          AND event_id = ${eventId}
+          AND revision = ${active.revision}
+      `;
+      const counts = activeEntryPayloadCounts[0];
+      const expectedEntryRows = active.expectedEntryCount + active.notApplicableEntryCount;
+      activeFinalUsesManagerReviewV2 = Boolean(
+        counts &&
+          expectedEntryRows > 0 &&
+          counts.total_count === expectedEntryRows &&
+          counts.v2_count === expectedEntryRows,
+      );
+    }
     if (
-      isCompleteMyFplPublication(active) &&
-      active.kind === 'FINAL' &&
+      activeFinalUsesManagerReviewV2 &&
       (!overrideActor ||
         !overrideReason ||
         !idempotencyKey ||
-        active.idempotencyKey === idempotencyKey)
+        active?.idempotencyKey === idempotencyKey)
     ) {
-      return { status: 'noop', publication: active };
+      return { status: 'noop', publication: active! };
     }
     if (idempotencyKey) {
       const priorOverride = await loadPublicationByIdempotencyKey(
@@ -1919,7 +1940,12 @@ async function captureMyFplSnapshotOnce(
         eventId,
         idempotencyKey,
       );
-      if (priorOverride) {
+      if (
+        priorOverride &&
+        (!isCompleteMyFplPublication(active) ||
+          activeFinalUsesManagerReviewV2 ||
+          active.revision !== priorOverride.revision)
+      ) {
         return { status: 'noop', publication: priorOverride };
       }
     }
@@ -2529,6 +2555,10 @@ async function captureMyFplSnapshotOnce(
     const transferPointsByElementEvent = new Map(
       transferPointRows.map((row) => [`${row.element_id}:${row.event_id}`, row.total_points]),
     );
+    const transferPointFor = (elementId: number, eventId: number): number | null => {
+      const points = transferPointsByElementEvent.get(`${elementId}:${eventId}`);
+      return points === undefined ? null : points;
+    };
     const transferWindowGain = (row: TransferRow, gameweeks: number): number | null => {
       if (
         row.element_in_id === null ||
@@ -2540,22 +2570,32 @@ async function captureMyFplSnapshotOnce(
       let gain = 0;
       for (let offset = 0; offset < gameweeks; offset += 1) {
         const reviewEventId = row.event_id + offset;
-        gain +=
-          (transferPointsByElementEvent.get(`${row.element_in_id}:${reviewEventId}`) ?? 0) -
-          (transferPointsByElementEvent.get(`${row.element_out_id}:${reviewEventId}`) ?? 0);
+        const incomingPoints = transferPointFor(row.element_in_id, reviewEventId);
+        const outgoingPoints = transferPointFor(row.element_out_id, reviewEventId);
+        if (incomingPoints === null || outgoingPoints === null) {
+          throw new MyFplSnapshotIncompleteError(
+            `Transfer point window is incomplete for entry ${row.entry_id}, event ${row.event_id}, horizon ${gameweeks}`,
+          );
+        }
+        gain += incomingPoints - outgoingPoints;
       }
       return gain;
     };
     for (const row of transferRows) {
       if (row.event_id > resultUpperBound) continue;
       row.element_in_points =
-        row.element_in_id === null
-          ? null
-          : (transferPointsByElementEvent.get(`${row.element_in_id}:${row.event_id}`) ?? 0);
+        row.element_in_id === null ? null : transferPointFor(row.element_in_id, row.event_id);
       row.element_out_points =
-        row.element_out_id === null
-          ? null
-          : (transferPointsByElementEvent.get(`${row.element_out_id}:${row.event_id}`) ?? 0);
+        row.element_out_id === null ? null : transferPointFor(row.element_out_id, row.event_id);
+      if (
+        row.element_in_id !== null &&
+        row.element_out_id !== null &&
+        (row.element_in_points === null || row.element_out_points === null)
+      ) {
+        throw new MyFplSnapshotIncompleteError(
+          `Transfer point observation is incomplete for entry ${row.entry_id}, event ${row.event_id}`,
+        );
+      }
       row.same_gameweek_gain =
         row.element_in_points === null || row.element_out_points === null
           ? null
