@@ -80,23 +80,133 @@ export type QueueAdmission = Readonly<{
   forceCritical: boolean;
 }>;
 
+export type QueueAdmissionMutationInput = Readonly<{
+  queueName: string;
+  mode: QueueAdmissionMode;
+  ttlSeconds: number;
+  reasonCode: string;
+  changedBy: string;
+  forceCritical?: boolean;
+}>;
+
+export type QueueAdmissionCompareAndSetResult = Readonly<{
+  swapped: boolean;
+  admission: QueueAdmission | null;
+}>;
+
 export class QueueDrainOnlyError extends Error {
   readonly status = 503;
   readonly code = 'QUEUE_DRAIN_ONLY';
+  readonly queueName: string;
   readonly retryAfterSeconds: number;
 
   constructor(queueName: string, retryAfterSeconds = 60) {
     super(`Queue ${queueName} is drain-only; new work is temporarily paused`);
     this.name = 'QueueDrainOnlyError';
+    this.queueName = queueName;
     this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
 const SNAPSHOT_PREFIX = 'ops:queue-health:';
 const ADMISSION_PREFIX = 'ops:queue-admission:';
+const CONSUMER_PAUSE_OWNER_PREFIX = 'ops:queue-consumer-pause-owner:';
 const RED_SAMPLE_PREFIX = 'ops:queue-admission-red:';
 const GREEN_SAMPLE_PREFIX = 'ops:queue-admission-green-since:';
 const MONITOR_LEASE_PREFIX = 'ops:queue-monitor-leader:';
+export const QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS = 3_600;
+// A pause acquisition is only an in-flight control transition. Keep its
+// marker short-lived so a process that dies between BullMQ pause and owner
+// finalization cannot hold the queue for the full completed-owner TTL.
+export const QUEUE_CONSUMER_PAUSE_ACQUISITION_TTL_SECONDS = 60;
+export const QUEUE_CONSUMER_PAUSE_OPERATOR = 'operator';
+const QUEUE_CONSUMER_PAUSE_ACQUIRING_PREFIX = 'acquiring:';
+const QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX = 'releasing:';
+
+/**
+ * Consumer pause is a BullMQ queue-level state, so BullMQ itself has no
+ * ownership token that can be checked when a deployment later resumes it.
+ * Keep that ownership in a separate Redis key and fence the release with a
+ * short atomic transition.  The marker is deliberately not part of the
+ * queue payload or business data.
+ */
+export const MARK_QUEUE_CONSUMER_OPERATOR_PAUSE_LUA = `
+local current = redis.call('GET', KEYS[1])
+local releasingPrefix = ARGV[1]
+if current and string.sub(current, 1, string.len(releasingPrefix)) == releasingPrefix then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+`;
+export const CLAIM_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA = `
+local current = redis.call('GET', KEYS[1])
+local owner = ARGV[1]
+local acquiring = ARGV[2]
+if current == owner then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  return 1
+end
+if current and current ~= acquiring then return 0 end
+redis.call('SET', KEYS[1], acquiring, 'EX', ARGV[3])
+return 1
+`;
+export const COMPLETE_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA = `
+local current = redis.call('GET', KEYS[1])
+if current == ARGV[2] then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  return 1
+end
+if current ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+return 1
+`;
+export const ABORT_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+`;
+export const TOUCH_QUEUE_CONSUMER_PAUSE_OWNER_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('EXPIRE', KEYS[1], ARGV[2])
+`;
+export const BEGIN_QUEUE_CONSUMER_PAUSE_RELEASE_LUA = `
+local current = redis.call('GET', KEYS[1])
+local owner = ARGV[1]
+local acquiring = ARGV[2]
+local releasing = ARGV[3]
+if current == owner then
+  redis.call('SET', KEYS[1], releasing, 'EX', ARGV[4])
+  return 1
+end
+if current == acquiring then
+  redis.call('SET', KEYS[1], releasing, 'EX', ARGV[4])
+  return 1
+end
+if current == releasing then
+  redis.call('EXPIRE', KEYS[1], ARGV[4])
+  return 1
+end
+return 0
+`;
+export const COMPLETE_QUEUE_CONSUMER_PAUSE_RELEASE_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+`;
+export const COMPARE_AND_SET_QUEUE_ADMISSION_LUA = `
+local current = redis.call('GET', KEYS[1])
+local expected = ARGV[1]
+if ARGV[4] == 'OPEN' and #KEYS >= 2 and redis.call('HGET', KEYS[2], 'paused') == '1' then
+  return {0, current or ''}
+end
+if expected == '' then
+  if current then return {0, current} end
+elseif not current or current ~= expected then
+  return {0, current or ''}
+end
+local replacement = ARGV[2]
+redis.call('SET', KEYS[1], replacement, 'EX', ARGV[3])
+return {1, replacement}
+`;
 export const QUEUE_HEALTH_RETENTION_LEASE_QUEUE = '__queue-health-retention__';
 export const QUEUE_HEALTH_RETENTION_DAYS = 35;
 export const QUEUE_HEALTH_RETENTION_BATCH_SIZE = 5_000;
@@ -222,6 +332,181 @@ export function queueAdmissionKey(queueName: string): string {
   return `${ADMISSION_PREFIX}${queueName}`;
 }
 
+export function queueConsumerMetaKey(queueName: string): string {
+  return `bull:${queueName}:meta`;
+}
+
+export function queueConsumerPauseOwnerKey(queueName: string): string {
+  const normalized = queueName.trim();
+  if (!normalized) throw new Error('Queue consumer pause owner requires a queue name');
+  return `${CONSUMER_PAUSE_OWNER_PREFIX}${normalized}`;
+}
+
+export function deploymentQueueConsumerPauseOwner(ownerToken: string): string {
+  const normalized = ownerToken.trim();
+  if (!normalized) throw new Error('Queue consumer pause owner requires an owner token');
+  return `deployment:${normalized}`;
+}
+
+export function acquiringQueueConsumerPauseOwner(owner: string): string {
+  const normalized = owner.trim();
+  if (!normalized) throw new Error('Queue consumer pause owner requires an owner token');
+  return `${QUEUE_CONSUMER_PAUSE_ACQUIRING_PREFIX}${normalized}`;
+}
+
+export function releasingQueueConsumerPauseOwner(owner: string): string {
+  return `${QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX}${owner}`;
+}
+
+export type QueueConsumerPauseOwnerState =
+  | 'NONE'
+  | 'DEPLOYMENT'
+  | 'ACQUIRING'
+  | 'OPERATOR'
+  | 'RELEASING';
+
+export function queueConsumerPauseOwnerState(owner: string | null): QueueConsumerPauseOwnerState {
+  if (!owner) return 'NONE';
+  if (owner === QUEUE_CONSUMER_PAUSE_OPERATOR) return 'OPERATOR';
+  if (owner.startsWith(QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX)) return 'RELEASING';
+  if (owner.startsWith(QUEUE_CONSUMER_PAUSE_ACQUIRING_PREFIX)) return 'ACQUIRING';
+  if (owner.startsWith('deployment:')) return 'DEPLOYMENT';
+  return 'NONE';
+}
+
+export async function readQueueConsumerPauseOwner(queueName: string): Promise<string | null> {
+  const redis = await queueRedisSingleton.getClient();
+  return redis.get(queueConsumerPauseOwnerKey(queueName));
+}
+
+export async function claimQueueConsumerPauseAcquisition(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        CLAIM_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        owner,
+        acquiringQueueConsumerPauseOwner(owner),
+        String(QUEUE_CONSUMER_PAUSE_ACQUISITION_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+export async function completeQueueConsumerPauseAcquisition(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        COMPLETE_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        acquiringQueueConsumerPauseOwner(owner),
+        owner,
+        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+export async function abortQueueConsumerPauseAcquisition(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        ABORT_QUEUE_CONSUMER_PAUSE_ACQUISITION_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        acquiringQueueConsumerPauseOwner(owner),
+      ),
+    ) === 1
+  );
+}
+
+export async function touchQueueConsumerPauseOwner(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        TOUCH_QUEUE_CONSUMER_PAUSE_OWNER_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        owner,
+        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+/** Mark a no-token pause as an explicit operator-owned pause. */
+export async function markQueueConsumerOperatorPaused(queueName: string): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  const result = (await redis.eval(
+    MARK_QUEUE_CONSUMER_OPERATOR_PAUSE_LUA,
+    1,
+    queueConsumerPauseOwnerKey(queueName),
+    QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX,
+    QUEUE_CONSUMER_PAUSE_OPERATOR,
+  )) as number | string;
+  return Number(result) === 1;
+}
+
+/**
+ * Move an exact owner to a releasing marker.  A concurrent supported pause
+ * operation cannot overwrite a releasing marker, so it cannot be undone by
+ * the deployment's later BullMQ resume call.
+ */
+export async function beginQueueConsumerPauseRelease(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        BEGIN_QUEUE_CONSUMER_PAUSE_RELEASE_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        owner,
+        acquiringQueueConsumerPauseOwner(owner),
+        releasingQueueConsumerPauseOwner(owner),
+        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+      ),
+    ) === 1
+  );
+}
+
+export async function completeQueueConsumerPauseRelease(
+  queueName: string,
+  owner: string,
+): Promise<boolean> {
+  const redis = await queueRedisSingleton.getClient();
+  return (
+    Number(
+      await redis.eval(
+        COMPLETE_QUEUE_CONSUMER_PAUSE_RELEASE_LUA,
+        1,
+        queueConsumerPauseOwnerKey(queueName),
+        releasingQueueConsumerPauseOwner(owner),
+      ),
+    ) === 1
+  );
+}
+
 export function queueMonitorLeaseKey(queueName: string): string {
   return `${MONITOR_LEASE_PREFIX}${queueName}`;
 }
@@ -282,14 +567,7 @@ export async function readQueueHealthSnapshot(
   }
 }
 
-export async function setQueueAdmission(input: {
-  queueName: string;
-  mode: QueueAdmissionMode;
-  ttlSeconds: number;
-  reasonCode: string;
-  changedBy: string;
-  forceCritical?: boolean;
-}): Promise<QueueAdmission> {
+function validateQueueAdmissionInput(input: QueueAdmissionMutationInput): void {
   if (!(canonicalQueueCatalog as readonly string[]).includes(input.queueName)) {
     throw new Error(`Unknown canonical queue: ${input.queueName}`);
   }
@@ -304,8 +582,11 @@ export async function setQueueAdmission(input: {
   ) {
     throw new Error(`Critical queue ${input.queueName} requires forceCritical=true`);
   }
-  const now = new Date();
-  const admission: QueueAdmission = {
+}
+
+function buildQueueAdmission(input: QueueAdmissionMutationInput, now = new Date()): QueueAdmission {
+  validateQueueAdmissionInput(input);
+  return {
     queueName: input.queueName,
     mode: input.mode,
     expiresAt: new Date(now.getTime() + input.ttlSeconds * 1_000).toISOString(),
@@ -314,6 +595,39 @@ export async function setQueueAdmission(input: {
     changedBy: input.changedBy.slice(0, 120),
     forceCritical: input.forceCritical === true,
   };
+}
+
+function parseQueueAdmissionRaw(raw: string, queueName: string): QueueAdmission {
+  const parsed = JSON.parse(raw) as Partial<QueueAdmission>;
+  if (
+    parsed.queueName !== queueName ||
+    (parsed.mode !== 'OPEN' && parsed.mode !== 'DRAIN_ONLY') ||
+    typeof parsed.expiresAt !== 'string' ||
+    !Number.isFinite(Date.parse(parsed.expiresAt)) ||
+    typeof parsed.reasonCode !== 'string' ||
+    typeof parsed.changedAt !== 'string' ||
+    !Number.isFinite(Date.parse(parsed.changedAt)) ||
+    typeof parsed.changedBy !== 'string' ||
+    typeof parsed.forceCritical !== 'boolean'
+  ) {
+    throw new Error(`Invalid queue admission state for ${queueName}`);
+  }
+  return parsed as QueueAdmission;
+}
+
+function logQueueAdmissionChanged(admission: QueueAdmission): void {
+  logInfo('Queue admission changed', {
+    queue: admission.queueName,
+    mode: admission.mode,
+    reasonCode: admission.reasonCode,
+    expiresAt: admission.expiresAt,
+  });
+}
+
+export async function setQueueAdmission(
+  input: QueueAdmissionMutationInput,
+): Promise<QueueAdmission> {
+  const admission = buildQueueAdmission(input);
   const redis = await queueRedisSingleton.getClient();
   await redis.set(
     queueAdmissionKey(input.queueName),
@@ -321,13 +635,49 @@ export async function setQueueAdmission(input: {
     'EX',
     input.ttlSeconds,
   );
-  logInfo('Queue admission changed', {
-    queue: input.queueName,
-    mode: input.mode,
-    reasonCode: admission.reasonCode,
-    expiresAt: admission.expiresAt,
-  });
+  logQueueAdmissionChanged(admission);
   return admission;
+}
+
+/**
+ * Replace a queue admission only when Redis still contains the exact value
+ * observed by the caller. The absent-key case is also guarded in Lua so a
+ * deployment cannot overwrite an operator gate that arrived between its
+ * read and its write.
+ */
+export async function compareAndSetQueueAdmission(
+  input: QueueAdmissionMutationInput & {
+    expected: QueueAdmission | null;
+    consumerMetaKey?: string;
+  },
+): Promise<QueueAdmissionCompareAndSetResult> {
+  validateQueueAdmissionInput(input);
+  if (input.expected && input.expected.queueName !== input.queueName) {
+    throw new Error('Queue admission compare-and-set expected queue does not match target queue');
+  }
+
+  const now = new Date();
+  const admission = buildQueueAdmission(input, now);
+  const redis = await queueRedisSingleton.getClient();
+  const keys = [queueAdmissionKey(input.queueName)];
+  const args = [
+    input.expected ? JSON.stringify(input.expected) : '',
+    JSON.stringify(admission),
+    String(input.ttlSeconds),
+    input.consumerMetaKey ? 'OPEN' : '',
+  ];
+  if (input.consumerMetaKey) keys.push(input.consumerMetaKey);
+  const result = (await redis.eval(
+    COMPARE_AND_SET_QUEUE_ADMISSION_LUA,
+    keys.length,
+    ...keys,
+    ...args,
+  )) as [number | string, string?];
+  const swapped = Number(result[0]) === 1;
+  const currentRaw = result[1] ?? '';
+  const current = currentRaw ? parseQueueAdmissionRaw(currentRaw, input.queueName) : null;
+  if (swapped) logQueueAdmissionChanged(admission);
+  return { swapped, admission: current };
 }
 
 export async function readQueueAdmission(queueName: string): Promise<QueueAdmission | null> {
@@ -338,7 +688,7 @@ export async function readQueueAdmission(queueName: string): Promise<QueueAdmiss
     const redis = await queueRedisSingleton.getClient();
     const raw = await redis.get(queueAdmissionKey(queueName));
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as QueueAdmission;
+    const parsed = parseQueueAdmissionRaw(raw, queueName);
     if (Date.parse(parsed.expiresAt) <= Date.now()) return null;
     return parsed;
   } catch (error) {

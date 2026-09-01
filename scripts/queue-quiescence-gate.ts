@@ -8,6 +8,10 @@ export type QueueQuiescenceSnapshot = {
   readonly unsettledCascadeIds: readonly string[];
 };
 
+export type ScopedQueueQuiescenceOptions = Readonly<{
+  allowPausedQueueNames?: readonly string[] | ReadonlySet<string>;
+}>;
+
 export function assertQuiescenceCatalogPair(
   hasSyncRuns: boolean,
   hasDatasetPublications: boolean,
@@ -38,8 +42,15 @@ export function blockingRunnableJobCount(queueName: string, counts: RunnableQueu
  * resume, but an executing or structurally-owned job could be orphaned by the
  * schema change and must still block the cut.
  */
-export function scopedBlockingRunnableJobCount(counts: RunnableQueueCounts): number {
-  return (counts.active ?? 0) + (counts.paused ?? 0) + (counts['waiting-children'] ?? 0);
+export function scopedBlockingRunnableJobCount(
+  counts: RunnableQueueCounts,
+  allowPausedJobs = false,
+): number {
+  return (
+    (counts.active ?? 0) +
+    (allowPausedJobs ? 0 : (counts.paused ?? 0)) +
+    (counts['waiting-children'] ?? 0)
+  );
 }
 
 export function cascadeId(key: string): { id: string; settled: boolean } | null {
@@ -105,12 +116,22 @@ export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
  * requiring an unrelated waiting backlog to drain. It is intentionally
  * stricter than simply ignoring queue counts: active, paused, and
  * waiting-children jobs remain blockers, as do all durable database units.
+ * A paused backlog may be exempted only by an explicit deployment allow-list;
+ * the caller must separately verify that each allow-listed queue remains
+ * paused while the gate is running.
  */
-export function assertScopedQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
+export function assertScopedQueueQuiescence(
+  snapshot: QueueQuiescenceSnapshot,
+  options: ScopedQueueQuiescenceOptions = {},
+): void {
   assertDatabaseQuiescence(snapshot);
 
+  const allowedPausedQueueNames = new Set(options.allowPausedQueueNames ?? []);
   const blockers = Object.entries(snapshot.runnableQueues)
-    .filter(([, counts]) => scopedBlockingRunnableJobCount(counts) !== 0)
+    .filter(
+      ([queueName, counts]) =>
+        scopedBlockingRunnableJobCount(counts, allowedPausedQueueNames.has(queueName)) !== 0,
+    )
     .map(([queueName, counts]) => `${queueName}=${JSON.stringify(counts)}`);
   if (blockers.length > 0) {
     throw new Error(`Queues still have active or structural jobs: ${blockers.join(', ')}`);

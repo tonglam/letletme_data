@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, max, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, isNotNull, lte, max, or, sql } from 'drizzle-orm';
 
 import {
   contentAcquisitionGaps,
@@ -1648,6 +1648,110 @@ export async function deferFormalRunForBudget(input: {
   });
 }
 
+/**
+ * Prepare BullMQ jobs while every content queue is paused and the content
+ * worker is stopped. The enqueue confirmation marker may be absent for a
+ * direct scheduler hand-off whose database audit update failed after queue.add
+ * succeeded, so queue membership is established by the caller before this
+ * function is invoked. A queued triggered run has no recurring schedule, so it
+ * stays PENDING and only loses its short execution lease. A scheduled run is
+ * deferred and its schedule lease is released together; otherwise a restarted
+ * scheduler could reclaim the schedule and mark the still-queued run
+ * LEASE_EXPIRED before the original job is allowed to start.
+ */
+export async function prepareQueuedFormalRunsForDeployment(input: {
+  db?: DbHandle;
+  queuedRunIds: ReadonlySet<string>;
+}): Promise<number> {
+  const queuedRunIds = [...new Set(input.queuedRunIds)];
+  if (queuedRunIds.length === 0) return 0;
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+    const clockRows = await tx.execute<{ dbNow: Date | string }>(sql`SELECT now() AS "dbNow"`);
+    const dbNow = dateValue(clockRows[0]?.dbNow);
+    if (!dbNow) throw new Error('Database clock is invalid');
+    const rows = await tx
+      .select({
+        runId: contentAcquisitionRuns.runId,
+        scheduleId: contentAcquisitionRuns.scheduleId,
+      })
+      .from(contentAcquisitionRuns)
+      .where(
+        and(
+          eq(contentAcquisitionRuns.status, 'PENDING'),
+          isNotNull(contentAcquisitionRuns.leaseExpiresAt),
+          inArray(contentAcquisitionRuns.runId, queuedRunIds),
+        ),
+      )
+      .for('update');
+    const deploymentDeferralMetrics = { deferredReason: 'DEPLOYMENT_QUEUE_QUIESCENCE' };
+    const deploymentDeferralHash = sha256CanonicalJson(deploymentDeferralMetrics);
+    let prepared = 0;
+
+    for (const run of rows) {
+      if (run.scheduleId) {
+        const schedule = await tx
+          .update(contentSourceSchedules)
+          .set({
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            nextDueAt: new Date(dbNow.getTime() + 60_000),
+            updatedAt: dbNow,
+          })
+          .where(
+            and(
+              eq(contentSourceSchedules.scheduleId, run.scheduleId),
+              eq(contentSourceSchedules.leaseOwner, run.runId),
+            ),
+          )
+          .returning({ scheduleId: contentSourceSchedules.scheduleId });
+        if (schedule.length !== 1) {
+          throw new Error(`Formal acquisition schedule lease is not owned by run: ${run.runId}`);
+        }
+        await releaseXRunBudgets({ tx, runId: run.runId, dbNow });
+        const deferred = await tx
+          .update(contentAcquisitionRuns)
+          .set({
+            status: 'BUDGET_DEFERRED',
+            failureClass: 'QUEUE_ADMISSION_CLOSED',
+            failureDetailsHash: deploymentDeferralHash,
+            errorSummary:
+              'Formal acquisition deferred while content queues were paused for deployment',
+            runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(deploymentDeferralMetrics)}::jsonb`,
+            completedAt: dbNow,
+            leaseExpiresAt: null,
+            checkpointAdvanced: false,
+          })
+          .where(
+            and(
+              eq(contentAcquisitionRuns.runId, run.runId),
+              eq(contentAcquisitionRuns.status, 'PENDING'),
+            ),
+          )
+          .returning({ runId: contentAcquisitionRuns.runId });
+        if (deferred.length !== 1)
+          throw new Error(`Formal acquisition deferral was lost: ${run.runId}`);
+      } else {
+        const released = await tx
+          .update(contentAcquisitionRuns)
+          .set({ leaseExpiresAt: null })
+          .where(
+            and(
+              eq(contentAcquisitionRuns.runId, run.runId),
+              eq(contentAcquisitionRuns.status, 'PENDING'),
+            ),
+          )
+          .returning({ runId: contentAcquisitionRuns.runId });
+        if (released.length !== 1)
+          throw new Error(`Formal acquisition lease release was lost: ${run.runId}`);
+      }
+      prepared += 1;
+    }
+    return prepared;
+  });
+}
+
 export async function deferFormalRunForCapacity(input: {
   runId: string;
   metrics: Readonly<Record<string, unknown>>;
@@ -1793,7 +1897,7 @@ export async function deferFormalRunForCapacity(input: {
             ...providerPatch,
             failureClass: deferredFailureClass,
             failureDetailsHash: sha256CanonicalJson(metrics),
-            errorSummary: `Host Grok runner ${deferredFailureClass} occurred; X follow-up will retry`,
+            errorSummary: `Formal acquisition ${deferredFailureClass} occurred; X follow-up will retry`,
             runMetrics: metrics,
             enqueueConfirmedAt: null,
             completedAt: null,
@@ -1883,7 +1987,7 @@ export async function deferFormalRunForCapacity(input: {
         ...providerPatch,
         failureClass: deferredFailureClass,
         failureDetailsHash: sha256CanonicalJson(metrics),
-        errorSummary: `Host Grok runner ${deferredFailureClass} occurred before provider start`,
+        errorSummary: `Formal acquisition ${deferredFailureClass} occurred before provider start`,
         runMetrics: metrics,
         completedAt: dbNow,
         leaseExpiresAt: null,
@@ -1916,6 +2020,31 @@ export async function deferFormalRunForCapacity(input: {
         .where(eq(contentSourceEndpoints.endpointId, run.endpointId));
     }
     return true;
+  });
+}
+
+export async function deferFormalRunForAdmission(input: {
+  runId: string;
+  queueName: string;
+  retryAfterSeconds: number;
+  db?: DbHandle;
+}): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(input.retryAfterSeconds) ||
+    input.retryAfterSeconds < 1 ||
+    input.retryAfterSeconds > 15 * 60
+  ) {
+    throw new Error('Queue admission retryAfterSeconds must be an integer from 1 to 900');
+  }
+  return deferFormalRunForCapacity({
+    runId: input.runId,
+    metrics: {
+      deferredReason: 'QUEUE_ADMISSION_CLOSED',
+      queueName: input.queueName,
+    },
+    failureClass: 'QUEUE_ADMISSION_CLOSED',
+    retryDelayMs: input.retryAfterSeconds * 1_000,
+    db: input.db,
   });
 }
 

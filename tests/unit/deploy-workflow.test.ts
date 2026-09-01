@@ -16,6 +16,7 @@ const sourceMediaRolloutWorkflow = readFileSync(
 const pinnedOpenSshAction = readFileSync('.github/actions/pinned-openssh/action.yml', 'utf8');
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
+const formalScheduler = readFileSync('src/content/acquisition/formal-scheduler.ts', 'utf8');
 const dockerfile = readFileSync('Dockerfile', 'utf8');
 const hostRunnerDeployScript = readFileSync('scripts/deploy-host-grok-runner.sh', 'utf8');
 const controlProbeScript = readFileSync('scripts/run-briefing-control-probe.sh', 'utf8');
@@ -121,6 +122,90 @@ describe('release workflow gates', () => {
     expect(contentWorker).not.toContain('scheduler.unref?.()');
   });
 
+  test('defers formal acquisition while deployment admission is closed', () => {
+    expect(contentWorker).toContain('isQueueDrainOnly(contentXScanQueueName)');
+    expect(formalScheduler).toContain('xSchedulingPaused');
+    expect(formalScheduler).toContain('if (error instanceof QueueDrainOnlyError)');
+    expect(formalScheduler).toContain('deferFormalRunForAdmission');
+    expect(deployStateMachine).toContain('--admission-mode');
+    expect(deployStateMachine).toContain('--admission-queue');
+    expect(deployStateMachine).toContain('deadline_seconds=${3:-300}');
+    expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
+  });
+
+  test('pauses every content-worker consumer and drains active work before stopping the producer', () => {
+    expect(queueQuiescence).toContain('export const CONTENT_X_SCAN_QUEUE = contentXScanQueueName');
+    expect(queueQuiescence).toContain(
+      ['CONTENT_CONSUMER_CONTRACT_VERSION = ', quote, 'content-worker-consumer-v1', quote].join(''),
+    );
+    expect(queueQuiescence).toContain('queue.isPaused()');
+    expect(queueQuiescence).toContain('queue.pause()');
+    expect(queueQuiescence).toContain('queue.resume()');
+    expect(queueQuiescence).toContain('parseContentConsumerModeArguments');
+    expect(queueQuiescence).toContain('parseAllowedPausedQueueNames');
+    expect(queueQuiescence).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/);
+    expect(deployStateMachine).toContain('content-x-scan');
+    expect(deployStateMachine).toContain('content-http-acquisition');
+    expect(deployStateMachine).toContain('content-media-transcript');
+    expect(deployStateMachine).toContain('DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES');
+    expect(deployStateMachine).toContain('run_bounded_deploy_probe');
+
+    for (const source of [deployStateMachine, deployScript, workflow]) {
+      expect(source).not.toContain('start_content_x_scan_advisory_fence');
+      expect(source).not.toContain('stop_content_x_scan_advisory_fence');
+      expect(source).not.toContain('hold-briefing-x-capacity-lock');
+    }
+    expect(deployStateMachine).toContain('assert_content_worker_consumers_paused');
+    expect(deployStateMachine).toContain('pause_content_worker_consumers_for_deploy');
+    expect(deployStateMachine).toContain('restore_content_deploy_controls');
+    expect(deployStateMachine).toContain('DEPLOY_CONTENT_WORKER_CONTROL_IMAGE');
+    expect(deployStateMachine).toContain('cleanup_content_worker_control_image');
+    expect(deployStateMachine).toContain(
+      'DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS > 300',
+    );
+    expect(deployScript).toContain('restore_content_deploy_controls');
+    expect(deployScript).toContain('stop_content_worker_for_forward_recovery');
+    expect(workflow).toContain('restore_content_deploy_controls');
+    expect(workflow).toContain('stop_content_worker_for_forward_recovery');
+
+    const localPause = deployScript.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
+    const localAdmission = deployScript.indexOf(
+      'if ! drain_content_worker_queues_for_deploy; then',
+    );
+    const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
+    const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
+    const localPrepare = deployScript.indexOf(
+      'if ! prepare_content_worker_paused_runs_for_deploy; then',
+    );
+    const localRenew = deployScript.indexOf('if ! renew_content_worker_admission; then');
+    expect(localPause).toBeGreaterThan(-1);
+    expect(localPause).toBeLessThan(localAdmission);
+    expect(localAdmission).toBeLessThan(localProbe);
+    expect(localProbe).toBeLessThan(localStop);
+    expect(localStop).toBeLessThan(localPrepare);
+    expect(localPrepare).toBeLessThan(localRenew);
+    expect(deployScript).toContain('DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES');
+
+    const workflowPause = workflow.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
+    const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
+    const workflowStop = workflow.indexOf('if ! compose stop -t 45 content-worker; then');
+    const workflowAdmission = workflow.indexOf('if ! drain_content_worker_queues_for_deploy; then');
+    const workflowPrepare = workflow.indexOf(
+      'if ! prepare_content_worker_paused_runs_for_deploy; then',
+    );
+    const workflowRenew = workflow.indexOf('if ! renew_content_worker_admission; then');
+    expect(workflowPause).toBeGreaterThan(-1);
+    expect(workflowPause).toBeLessThan(workflowAdmission);
+    expect(workflowAdmission).toBeLessThan(workflowProbe);
+    expect(workflowProbe).toBeLessThan(workflowStop);
+    expect(workflowStop).toBeLessThan(workflowPrepare);
+    expect(workflowPrepare).toBeLessThan(workflowRenew);
+    expect(workflow).toContain('content_worker_fenced=true');
+    expect(workflow).toContain(
+      '[ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]',
+    );
+  });
+
   test('keeps the compiled host runner free of runtime logger transports', () => {
     expect(hostGrokRunner).toContain(String.raw`from '../utils/strict-env'`);
     expect(hostGrokRunner).not.toContain(String.raw`from './config'`);
@@ -181,14 +266,17 @@ describe('release workflow gates', () => {
     expect(workflow).toContain(
       'HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300',
     );
-    expect(workflow).toContain('timeout: 20m');
-    expect(workflow).toContain('docker compose stop -t 45 scheduler content-worker media-worker');
-    expect(workflow).toContain('"$old_media_present" "$old_image_id" || true');
+    expect(workflow).toContain('timeout: 30m');
+    expect(workflow).toContain('compose stop -t 45 content-worker');
+    expect(workflow).toContain('compose stop -t 45 scheduler media-worker');
+    expect(workflow).toContain('"$old_media_present" "$old_image_id" && \\');
     expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployStateMachine).toContain(
       'export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"',
     );
+    expect(queueQuiescence).toContain('connect_timeout: 5');
+    expect(queueQuiescence).toContain('statement_timeout: 5_000');
   });
 
   test('allows only session-mode pooler connections for the external backup', () => {
@@ -440,13 +528,17 @@ describe('release workflow gates', () => {
 
   test('does not roll back Data when the optional Briefing provider probe is degraded', () => {
     expect(workflow).toContain('runner_probe_succeeded=false');
-    expect(workflow).toContain('if scripts/run-briefing-control-probe.sh');
+    expect(workflow).toContain(
+      'if run_deploy_command_with_pause_renewal scripts/run-briefing-control-probe.sh',
+    );
     expect(workflow).toContain('dataDeploymentContinues');
     expect(workflow).toContain('[ "$runner_probe_succeeded" = true ]');
     expect(workflow).toContain('finish_stage degraded');
 
     expect(deployScript).toContain('DEPLOY_RUNNER_PROBE_SUCCEEDED=false');
-    expect(deployScript).toContain('if "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"');
+    expect(deployScript).toContain(
+      'if run_deploy_command_with_pause_renewal "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"',
+    );
     expect(deployScript).toContain('dataDeploymentContinues');
     expect(deployScript).toContain('[[ "$DEPLOY_RUNNER_PROBE_SUCCEEDED" = true ]]');
     expect(deployScript).toContain('finish_stage degraded');

@@ -37,6 +37,7 @@ import {
 import { databaseSingleton } from './db/singleton';
 import { redisSingleton } from './cache/singleton';
 import { queueRedisSingleton } from './queues/redis';
+import { isQueueDrainOnly } from './services/queue-governance.service';
 import { getConfig } from './utils/config';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
@@ -206,10 +207,13 @@ async function schedulePendingFormalAcquisition(): Promise<void> {
 
   const schedule = (async () => {
     await ensureFormalXRuntime();
+    const xSchedulingPaused =
+      formalXRuntime !== null && (await isQueueDrainOnly(contentXScanQueueName));
     const result = await scheduleFormalAcquisition({
       fullRolloutEligible: manifestBundle.coverage.fullRolloutEligible,
       flags: formalXRuntime ? flags : { ...flags, xScanEnabled: false, realGrokEnabled: false },
       xBudgetPolicy: xBudgetPolicy ?? undefined,
+      xSchedulingPaused,
       enqueueHttp: enqueueFormalHttpRun,
       enqueueX: enqueueFormalXRun,
     });

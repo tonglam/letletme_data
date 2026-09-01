@@ -103,6 +103,7 @@ DEPLOY_RUNNER_PREVIOUS_TARGET=''
 DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_OLD_MEDIA_PRESENT=false
 DEPLOY_SERVICES_STOPPED=false
+DEPLOY_CONTENT_WORKER_FENCED=false
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -147,8 +148,17 @@ require_files() {
   load_backup_settings
 }
 
-compose() {
+compose_direct() {
   (cd "${PROJECT_DIR}" && "${COMPOSE_CMD[@]}" -f "${COMPOSE_FILE}" "$@")
+}
+
+compose() {
+  if [[ "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE:-false}" = true &&
+    -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_PID:-}" ]]; then
+    run_deploy_command_with_pause_renewal compose_direct "$@"
+  else
+    compose_direct "$@"
+  fi
 }
 
 # Keep local/manual deploys on the same host lock, migration plan and staged
@@ -180,7 +190,18 @@ restore_stopped_services() {
     log_error "Existing services could not be restored; manual recovery is required."
   fi
   if [[ "$restored" = true ]]; then
+    if ! run_deploy_command_with_pause_renewal env \
+      PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
+      scripts/verify-runtime-health.sh; then
+      log_error "Recovered runtime did not become healthy; leaving deployment controls closed."
+      return 1
+    fi
+    if ! restore_content_deploy_controls; then
+      log_error "Recovered runtime is healthy but deployment controls could not be restored."
+      return 1
+    fi
     DEPLOY_SERVICES_STOPPED=false
+    DEPLOY_CONTENT_WORKER_FENCED=false
   fi
 }
 
@@ -190,6 +211,11 @@ deploy() {
     local status=$?
     trap - EXIT
     set +e
+    local controls_restored=true
+    if [[ "$DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED" = true ||
+      -n "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES" ]]; then
+      controls_restored=false
+    fi
     if [[ "$status" -ne 0 ]]; then
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_RUNNER_UPDATED" = true ]]; then
         export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
@@ -198,17 +224,35 @@ deploy() {
           "$DEPLOY_RUNNER_PREVIOUS_TARGET" "$DEPLOY_RUNNER_PREVIOUS_RELEASE" || true
       fi
       if [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_MIGRATION_STARTED" = true ]]; then
-        if ! restore_last_known_healthy_if_ledger_unchanged \
+        if restore_last_known_healthy_if_ledger_unchanged \
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
           "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
           "$DEPLOY_OLD_MEDIA_PRESENT" "$DEPLOY_ROLLBACK_ELIGIBLE" \
-          "$DEPLOY_OLD_IMAGE_ID"; then
+          "$DEPLOY_OLD_IMAGE_ID" && \
+          run_deploy_command_with_pause_renewal env \
+          PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
+          scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
+          controls_restored=true
+        else
           log_error "Rollback eligibility or migration ledger proof failed; leaving the deployment in forward recovery."
+          stop_content_worker_for_forward_recovery || true
         fi
-      elif [[ "$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true ]]; then
-        restore_stopped_services || true
+      elif [[ "$DEPLOY_COMMITTED" = false &&
+        ( "$DEPLOY_SERVICES_STOPPED" = true ||
+          "$DEPLOY_CONTENT_WORKER_FENCED" = true ) &&
+        "$controls_restored" != true ]]; then
+        if restore_stopped_services; then controls_restored=true; fi
+      elif [[ "$DEPLOY_COMMITTED" = false && "$controls_restored" != true ]]; then
+        if restore_content_deploy_controls; then
+          controls_restored=true
+        else
+          log_error "Deployment controls could not be restored while the existing runtime remained in place."
+        fi
       fi
     fi
+    DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
+    stop_content_worker_pause_renewal || true
+    cleanup_content_worker_control_image || true
     release_deploy_lock || true
     exit "$status"
   }
@@ -222,7 +266,8 @@ deploy() {
     log_error "Live Points V2 seed scope is invalid; services were not stopped."
     exit 1
   fi
-  if ! DATABASE_CONNECTION_BUDGET="${DATABASE_CONNECTION_BUDGET:-15}" \
+  if ! env \
+    DATABASE_CONNECTION_BUDGET="${DATABASE_CONNECTION_BUDGET:-15}" \
     COMPOSE_BIN="$COMPOSE_BIN" COMPOSE_FILE="$COMPOSE_FILE" PROJECT_DIR="$PROJECT_DIR" \
     "${PROJECT_DIR}/scripts/check-database-pool-budget.sh"; then
     log_error "Compose runtime pool budget or worker inventory check failed; services were not stopped."
@@ -320,6 +365,19 @@ deploy() {
     exit 1
   fi
   finish_stage
+  if ! pause_content_worker_consumers_for_deploy; then
+    log_error "Could not pause the content-worker consumers before queue quiescence; services were not stopped."
+    exit 1
+  fi
+  if ! drain_content_worker_queues_for_deploy; then
+    log_error "Could not place every content-worker producer into drain-only mode; services were not stopped."
+    exit 1
+  fi
+  if ! start_content_worker_pause_renewal; then
+    log_error "Could not start content-worker control renewal after producer fencing."
+    exit 1
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=true
   start_stage quiescence
   log_info "Validating migration plan before stopping services"
   if ! run_migration_plan; then
@@ -334,8 +392,31 @@ deploy() {
     log_error "Database work is not quiescent; services were not stopped."
     exit 1
   fi
-  if ! compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+  # Pause every queue consumed by content-worker before accepting the scoped
+  # result so delayed and prioritized content jobs cannot become active in the
+  # stop race. Keep the combined worker alive while active work (including HTTP
+  # work) drains; stopping it first would orphan a slow provider job behind the
+  # worker's 30s shutdown controller.
+  DEPLOY_ROLLBACK_ELIGIBLE=false
+  if rollback_runtime_is_eligible \
+    "$old_container" "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_REVISION" \
+    "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
+    DEPLOY_ROLLBACK_ELIGIBLE=true
+  fi
+  if ! wait_for_scoped_queue_quiescence 150 2; then
     log_error "Queue work is not quiescent; services were not stopped."
+    exit 1
+  fi
+  DEPLOY_CONTENT_WORKER_FENCED=true
+  log_info "Stopping content-worker after active content work drained"
+  if ! compose stop -t 45 content-worker; then
+    log_error "Content worker did not stop cleanly after queue drain; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  if ! prepare_content_worker_paused_runs_for_deploy; then
+    log_error "Could not prepare the paused content-worker formal runs; migration was not started."
+    restore_stopped_services
     exit 1
   fi
   log_info "Migration plan and queue quiescence passed before stopping services"
@@ -357,11 +438,6 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! compose stop -t 45 content-worker; then
-    log_error "Content worker did not stop cleanly; migration was not started."
-    restore_stopped_services
-    exit 1
-  fi
   if ! compose stop -t 45 media-worker; then
     log_error "Media worker did not stop cleanly; migration was not started."
     restore_stopped_services
@@ -379,11 +455,16 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped; then
+  final_queue_probe_output=$(mktemp "${TMPDIR:-/tmp}/letletme-data-final-queue-quiescence.XXXXXX")
+  if ! run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10; then
+    cat "$final_queue_probe_output" >&2 || true
+    rm -f "$final_queue_probe_output"
     log_error "Queue work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1
   fi
+  cat "$final_queue_probe_output"
+  rm -f "$final_queue_probe_output"
   log_info "Creating and validating the pre-migration PostgreSQL dump"
   if ! compose --profile migration run --rm -T --interactive=false backup; then
     log_error "Pre-migration backup failed; migration was not started."
@@ -404,9 +485,9 @@ deploy() {
     test -x "${PROJECT_DIR}/scripts/deploy-host-grok-runner.sh"
     test -x "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"
     DEPLOY_RUNNER_UPDATED=true
-    "${PROJECT_DIR}/scripts/deploy-host-grok-runner.sh" \
+    run_deploy_command_with_pause_renewal "${PROJECT_DIR}/scripts/deploy-host-grok-runner.sh" \
       "$runner_image_ref" "$DEPLOY_SHA" "$runner_root"
-    if "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh" \
+    if run_deploy_command_with_pause_renewal "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh" \
       "$ENV_FILE" "$MIGRATION_ENV_FILE" "$DEPLOY_SHA"; then
       DEPLOY_RUNNER_PROBE_SUCCEEDED=true
       finish_stage
@@ -414,7 +495,7 @@ deploy() {
       runner_probe_status=$?
       export CONTENT_GROK_RUNNER_RELEASE_SHA="${DEPLOY_RUNNER_PREVIOUS_RELEASE:-unknown}"
       test -x "${PROJECT_DIR}/scripts/rollback-host-grok-runner.sh"
-      "${PROJECT_DIR}/scripts/rollback-host-grok-runner.sh" \
+      run_deploy_command_with_pause_renewal "${PROJECT_DIR}/scripts/rollback-host-grok-runner.sh" \
         "$runner_root" "$DEPLOY_RUNNER_PREVIOUS_TARGET" "$DEPLOY_RUNNER_PREVIOUS_RELEASE"
       DEPLOY_RUNNER_UPDATED=false
       printf '{"event":"briefing_control_probe","outcome":"degraded","exitCode":%s,"runnerRestored":true,"dataDeploymentContinues":true}\n' \
@@ -487,6 +568,10 @@ deploy() {
     exit 1
   fi
   finish_stage
+  if ! renew_content_worker_admission; then
+    log_error "Content-worker producer admission could not be renewed before service start."
+    exit 1
+  fi
   start_stage serviceReady
   log_info "Starting services"
   # The media worker owns a runtime heartbeat even when source-media
@@ -498,7 +583,8 @@ deploy() {
   start_runtime_services
   log_info "Current service status"
   compose ps
-  if ! PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
+  if ! run_deploy_command_with_pause_renewal env \
+    PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
     scripts/verify-runtime-health.sh; then
     log_error "Runtime health verification failed."
     exit 1
@@ -508,10 +594,15 @@ deploy() {
     [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]] &&
     [[ "$DEPLOY_RUNNER_PROBE_SUCCEEDED" = true ]]; then
     test -x "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh"
-    "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh" "$ENV_FILE" "$MIGRATION_ENV_FILE"
+    run_deploy_command_with_pause_renewal "${PROJECT_DIR}/scripts/rearm-briefing-x-after-probe.sh" \
+      "$ENV_FILE" "$MIGRATION_ENV_FILE"
   elif [[ "$x_scan_setting" =~ ^(1|true|yes|on)$ ]] &&
     [[ "$real_grok_setting" =~ ^(1|true|yes|on)$ ]]; then
     printf '%s\n' '{"event":"briefing_x_rearm","outcome":"skipped","reason":"control-probe-not-successful"}'
+  fi
+  if ! restore_content_deploy_controls; then
+    log_error "Could not restore content-worker admission and consumer state after service readiness."
+    exit 1
   fi
   DEPLOY_COMMITTED=true
 }

@@ -199,15 +199,13 @@ describe('production environment preflight', () => {
     const identityContract = workflow.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
     const stopServices = workflow.indexOf(
-      'APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker',
+      'APP_IMAGE="$IMAGE_REF" compose stop -t 45 api worker',
       identityContract,
     );
     const databaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
     );
-    const redisQuiescence = workflow.indexOf(
-      'bun scripts/assert-queue-quiescence.ts --redis-only --scoped',
-    );
+    const redisQuiescence = workflow.indexOf('wait_for_scoped_queue_quiescence 150 2');
     const migrate = workflow.indexOf('bun run db:migrate');
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
     const roleVerify = workflow.indexOf('bun run db:verify-runtime-logins', migrate);
@@ -229,7 +227,7 @@ describe('production environment preflight', () => {
       stopServices,
     );
     const postStopRedisQuiescence = workflow.indexOf(
-      'bun scripts/assert-queue-quiescence.ts --redis-only --scoped',
+      'run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10',
       stopServices,
     );
     expect(postStopDatabaseQuiescence).toBeGreaterThan(stopServices);
@@ -246,6 +244,10 @@ describe('production environment preflight', () => {
     expect(workflow).toContain('deployment_started=true');
     expect(workflow).toContain('services_stopped=false');
     expect(workflow).toContain('services_stopped=true');
+    expect(workflow).toContain('drain_content_worker_queues_for_deploy');
+    expect(workflow).toContain('prepare_content_worker_paused_runs_for_deploy');
+    expect(workflow).toContain('renew_content_worker_admission');
+    expect(workflow).toContain('restore_content_deploy_controls');
     expect(workflow).not.toContain('restore_before_migration');
     expect(workflow).not.toContain('/usr/local/libexec/vps-maintenance');
     expect(workflow).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
@@ -275,19 +277,17 @@ describe('production environment preflight', () => {
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {
     const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+    const stateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
     const stopServices = deployScript.indexOf('if ! compose stop -t 45 api worker; then');
     const databaseQuiescenceCommand =
       'compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped';
     const redisQuiescenceCommand =
-      'compose run --rm -T --interactive=false api bun scripts/assert-queue-quiescence.ts --redis-only --scoped';
+      'run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10';
     const databaseQuiescenceBeforeStop = deployScript.lastIndexOf(
       databaseQuiescenceCommand,
       stopServices,
     );
-    const redisQuiescenceBeforeStop = deployScript.lastIndexOf(
-      redisQuiescenceCommand,
-      stopServices,
-    );
+    const queueDrainWaitBeforeStop = deployScript.indexOf('wait_for_scoped_queue_quiescence 150 2');
     const databaseQuiescenceAfterStop = deployScript.indexOf(
       databaseQuiescenceCommand,
       stopServices,
@@ -295,9 +295,9 @@ describe('production environment preflight', () => {
     const redisQuiescenceAfterStop = deployScript.indexOf(redisQuiescenceCommand, stopServices);
 
     expect(databaseQuiescenceBeforeStop).toBeGreaterThan(0);
-    expect(redisQuiescenceBeforeStop).toBeGreaterThan(databaseQuiescenceBeforeStop);
+    expect(queueDrainWaitBeforeStop).toBeGreaterThan(databaseQuiescenceBeforeStop);
     expect(databaseQuiescenceBeforeStop).toBeLessThan(stopServices);
-    expect(redisQuiescenceBeforeStop).toBeLessThan(stopServices);
+    expect(queueDrainWaitBeforeStop).toBeLessThan(stopServices);
     expect(databaseQuiescenceAfterStop).toBeGreaterThan(stopServices);
     expect(redisQuiescenceAfterStop).toBeGreaterThan(databaseQuiescenceAfterStop);
 
@@ -322,14 +322,20 @@ describe('production environment preflight', () => {
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(deployScript).not.toContain('db:provision-runtime-logins');
     expect(deployScript).not.toContain('sleep 60');
-    expect(deployScript).toMatch(
-      /if ! compose run --rm -T --interactive=false api bun scripts\/assert-queue-quiescence\.ts --redis-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
-    );
+    expect(deployScript).toContain('drain_content_worker_queues_for_deploy');
+    expect(deployScript).toContain('prepare_content_worker_paused_runs_for_deploy');
+    expect(deployScript).toContain('renew_content_worker_admission');
+    expect(deployScript).toContain('restore_content_deploy_controls');
+    expect(deployScript).toContain('wait_for_scoped_queue_quiescence 150 2');
+    expect(stateMachine).toContain('wait_for_scoped_queue_quiescence()');
+    expect(stateMachine).toContain('--admission-mode');
+    expect(stateMachine).toContain('--admission-queue');
+    expect(stateMachine).not.toContain('set-content-x-scan-admission.ts');
+    expect(stateMachine).toContain('assert-queue-quiescence.ts --redis-only --scoped');
     expect(deployScript).toContain(
       '"$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"',
     );
     expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?start_all_runtime_services/);
-    const stateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
     expect(stateMachine).toContain('runtime_worker_services');
     expect(stateMachine).toContain(String.raw`grep -x 'media-worker' >/dev/null`);
     expect(stateMachine).not.toContain(String.raw`grep -qx 'media-worker'`);
@@ -342,9 +348,7 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('DEPLOY_COMMITTED=false');
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=false');
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=true');
-    expect(deployScript).toContain(
-      '"$DEPLOY_COMMITTED" = false && "$DEPLOY_SERVICES_STOPPED" = true',
-    );
+    expect(deployScript).toContain('"$DEPLOY_COMMITTED" = false &&');
     expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
     expect(deployScript).toContain('run-briefing-control-probe.sh');
