@@ -223,7 +223,9 @@ ALTER TABLE competition.tournament_review_obligations
   ADD CONSTRAINT tournament_review_obligations_correction_check CHECK (
     (correction_reason IS NULL AND correction_change_id IS NULL)
     OR (
-      btrim(correction_reason) <> ''
+      correction_reason IS NOT NULL
+      AND correction_change_id IS NOT NULL
+      AND btrim(correction_reason) <> ''
       AND btrim(correction_change_id) <> ''
     )
   );

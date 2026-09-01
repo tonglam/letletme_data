@@ -409,7 +409,8 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain(
       "jsonb_typeof(publication.payload -> 'manifest') = 'object'",
     );
-    expect(publicationSource).toContain("jsonb_typeof(section -> 'chunkHashes') = 'array'");
+    expect(publicationSource).toContain("jsonb_typeof(section -> 'chunkHashes') <> 'array'");
+    expect(publicationSource).toContain('Keep any attached repair issue on the descendant');
     expect(publicationSource).toContain(
       "(publication.payload -> 'manifest' ->> 'chunkCount')::numeric",
     );

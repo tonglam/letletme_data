@@ -2801,7 +2801,11 @@ export async function requestTournamentReviewCorrection(
           ready_revision = NULL,
           last_error_code = NULL,
           last_failure_fingerprint = NULL,
-          repair_issue_id = NULL,
+          -- Keep any attached repair issue on the descendant. The claimed
+          -- obligation carries this id into finishReviewObligation, which
+          -- resolves it in the same transaction as READY. Clearing it here
+          -- would leave an unresolved setup issue after a successful
+          -- correction.
           correction_reason = ${reason.trim()},
           correction_change_id = ${changeId.trim()},
           updated_at = clock_timestamp()
@@ -4166,7 +4170,18 @@ export async function getTournamentReviewV2OperationalStatus(
                    -- a reason for /jobs/status to fail with a 500.
                    WHEN jsonb_typeof(publication.payload) = 'object'
                     AND jsonb_typeof(publication.payload -> 'manifest') = 'object'
+                    AND jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                    AND (publication.payload -> 'manifest' ->> 'sectionCount') ~ '^[0-9]+$'
                     AND (publication.payload -> 'manifest' ->> 'chunkCount') ~ '^[0-9]+$'
+                    AND jsonb_array_length(publication.payload -> 'manifest' -> 'sections') =
+                      (publication.payload -> 'manifest' ->> 'sectionCount')::numeric
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                      WHERE jsonb_typeof(section) <> 'object'
+                         OR jsonb_typeof(section -> 'sectionKey') <> 'string'
+                         OR jsonb_typeof(section -> 'chunkHashes') <> 'array'
+                    )
                    THEN (
                      (
                        SELECT count(*)::numeric
@@ -4178,19 +4193,9 @@ export async function getTournamentReviewV2OperationalStatus(
                      ) = (publication.payload -> 'manifest' ->> 'chunkCount')::numeric
                      AND NOT EXISTS (
                        SELECT 1
-                       FROM jsonb_array_elements(
-                         CASE
-                           WHEN jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
-                             THEN publication.payload -> 'manifest' -> 'sections'
-                           ELSE '[]'::jsonb
-                         END
-                       ) section
+                       FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
                        CROSS JOIN LATERAL jsonb_array_elements_text(
-                         CASE
-                           WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
-                             THEN section -> 'chunkHashes'
-                           ELSE '[]'::jsonb
-                         END
+                         section -> 'chunkHashes'
                        ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
                        WHERE NOT EXISTS (
                          SELECT 1

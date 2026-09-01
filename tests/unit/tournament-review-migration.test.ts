@@ -131,6 +131,8 @@ describe('My Tournament Review V2 migration', () => {
     expect(hardCutMigration).toContain('repair_issue_id bigint');
     expect(hardCutMigration).toContain('ADD COLUMN IF NOT EXISTS correction_reason text');
     expect(hardCutMigration).toContain('ADD COLUMN IF NOT EXISTS correction_change_id text');
+    expect(hardCutMigration).toContain('correction_reason IS NOT NULL');
+    expect(hardCutMigration).toContain('correction_change_id IS NOT NULL');
     expect(hardCutMigration).toContain(
       'CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks',
     );
