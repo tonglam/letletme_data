@@ -68,7 +68,10 @@ import {
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
-import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
+import {
+  getMyFplSnapshotOperationalStatus,
+  hasFinalMyFplPublication,
+} from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
@@ -679,16 +682,42 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
     claimPriority: 45,
     resolve: async (context) => {
       const plans: SchedulerObligationPlan[] = [];
+      const operationalStatuses = await getMyFplSnapshotOperationalStatus(
+        context.season,
+        context.now,
+      );
+      const statusByEventId = new Map(
+        operationalStatuses.map((status) => [status.eventId, status]),
+      );
       for (const event of context.events) {
         if (!event.finished || !event.dataChecked) continue;
         const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
+        const status = statusByEventId.get(event.id);
+        // Include the current canonical scope fence in the durable identity.
+        // A succeeded FINAL therefore cannot suppress a later correction when
+        // entries or tournament memberships change after publication.
+        const scopeFence = status
+          ? [
+              status.expectedEntryScopeSha256 ?? 'missing-entry-scope',
+              status.expectedTournamentScopeSha256 ?? 'missing-tournament-scope',
+              `na${status.expectedNotApplicableEntryCount ?? 0}`,
+            ].join('-')
+          : 'missing-status';
         plans.push({
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `final-${event.id}-${checkedAt}`,
+          periodKey: `final-${event.id}-${checkedAt}-${scopeFence}`,
           dueAt: context.now,
           eventId: event.id,
           source: 'reconcile',
-          evidence: { snapshotKind: 'FINAL', dataCheckedAt: checkedAt },
+          evidence: {
+            snapshotKind: 'FINAL',
+            dataCheckedAt: checkedAt,
+            expectedEntryCount: status?.expectedEntryCount,
+            expectedEntryScopeSha256: status?.expectedEntryScopeSha256,
+            expectedNotApplicableEntryCount: status?.expectedNotApplicableEntryCount,
+            expectedTournamentCount: status?.expectedTournamentCount,
+            expectedTournamentScopeSha256: status?.expectedTournamentScopeSha256,
+          },
         });
       }
       return plans;

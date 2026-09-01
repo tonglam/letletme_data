@@ -21,6 +21,7 @@ const eligibilityMigration = readFileSync(
   'migrations/0064_my_fpl_entry_eligibility_counts.sql',
   'utf8',
 );
+const integrityMigration = readFileSync('migrations/0088_my_fpl_integrity_contract.sql', 'utf8');
 const resultPicksMigration = readFileSync('migrations/0055_entry_event_result_picks.sql', 'utf8');
 const retainedRevisionMigration = readFileSync(
   'migrations/0038_my_fpl_retained_revision_reads.sql',
@@ -283,7 +284,16 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).toContain('activeFinalScopeMatchesCurrentReadiness');
     expect(worker).toContain('active.entryScopeSha256 === finalizationReadiness.entryScopeSha256');
     expect(worker).toContain(
+      'active.notApplicableEntryCount === finalizationReadiness.notApplicableEntryCount',
+    );
+    expect(worker).toContain(
       'active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256',
+    );
+    expect(scheduler).toContain('getMyFplSnapshotOperationalStatus');
+    expect(scheduler).toContain('periodKey: `final-${event.id}-${checkedAt}-${scopeFence}`');
+    expect(integrityMigration).toContain('expected_not_applicable_entry_count');
+    expect(integrityMigration).toContain(
+      'COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM',
     );
     expect(worker).toContain('isMyFplSnapshotRedisManifestForPublication');
     expect(publicationService).toContain('provisionalEventPointsByElement');

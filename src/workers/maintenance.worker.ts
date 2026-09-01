@@ -409,6 +409,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 readiness: {
                   expectedEntryCount: finalizationReadiness.expectedEntryCount,
                   observedEntryCount: finalizationReadiness.observedEntryCount,
+                  notApplicableEntryCount: finalizationReadiness.notApplicableEntryCount,
                   entryScopeSha256: finalizationReadiness.entryScopeSha256,
                   expectedTournamentCount: finalizationReadiness.expectedTournamentCount,
                   observedTournamentCount: finalizationReadiness.observedTournamentCount,
@@ -435,6 +436,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             active &&
               finalizationReadiness &&
               active.expectedEntryCount === finalizationReadiness.expectedEntryCount &&
+              active.notApplicableEntryCount === finalizationReadiness.notApplicableEntryCount &&
               active.entryScopeSha256 === finalizationReadiness.entryScopeSha256 &&
               active.expectedTournamentCount === finalizationReadiness.expectedTournamentCount &&
               active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256,

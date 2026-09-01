@@ -274,7 +274,12 @@ WITH active AS (
              'sha256'
            ),
            'hex'
-         ) AS expected_entry_scope_sha256
+         ) AS expected_entry_scope_sha256,
+         count(DISTINCT entry.entry_id) FILTER (
+           WHERE entry.entry_id IS NOT NULL
+             AND entry.started_event IS NOT NULL
+             AND entry.started_event > event.event_id
+         )::integer AS expected_not_applicable_entry_count
   FROM fpl.events event
   LEFT JOIN competition.entries entry
     ON entry.season_id = event.season_id
@@ -309,6 +314,7 @@ WITH active AS (
   SELECT entry_scope.season_id,
          entry_scope.event_id,
          entry_scope.expected_entry_scope_sha256,
+         entry_scope.expected_not_applicable_entry_count,
          tournament_scope.expected_tournament_scope_sha256
   FROM canonical_entry_scopes entry_scope
   JOIN canonical_tournament_scopes tournament_scope
@@ -370,6 +376,8 @@ SELECT event.season_id,
        COALESCE(eligible.expected_entry_count, 0)::integer AS expected_entry_count,
        COALESCE(eligible.observed_entry_count, 0)::integer AS observed_entry_count,
        COALESCE(active.not_applicable_entry_count, 0)::integer AS not_applicable_entry_count,
+       COALESCE(canonical_scopes.expected_not_applicable_entry_count, 0)::integer
+         AS expected_not_applicable_entry_count,
        GREATEST(
          COALESCE(eligible.expected_entry_count, 0) - COALESCE(eligible.observed_entry_count, 0),
          0
@@ -382,6 +390,8 @@ SELECT event.season_id,
                    <> COALESCE(tournaments.observed_tournament_count, 0)
               OR active.entry_scope_sha256 IS DISTINCT FROM canonical_scopes.expected_entry_scope_sha256
               OR active.tournament_scope_sha256 IS DISTINCT FROM canonical_scopes.expected_tournament_scope_sha256
+              OR COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM
+                 COALESCE(canonical_scopes.expected_not_applicable_entry_count, 0)
               THEN 'CORRECTION_PENDING'
             ELSE 'COMPLETE' END AS coverage_state,
        canonical_scopes.expected_entry_scope_sha256,

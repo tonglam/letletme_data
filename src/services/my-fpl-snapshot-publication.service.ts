@@ -145,6 +145,7 @@ export type MyFplSnapshotOperationalStatus = Readonly<{
   timelinessState: 'CURRENT' | 'STALE';
   expectedEntryCount: number | null;
   observedEntryCount: number | null;
+  expectedNotApplicableEntryCount: number | null;
   expectedEntryScopeSha256: string | null;
   observedEntryScopeSha256: string | null;
   readyEntryCount: number | null;
@@ -1974,6 +1975,8 @@ export type MyFplFinalizationReadiness = Readonly<{
   dataCheckedAt: string | null;
   expectedEntryCount: number;
   observedEntryCount: number;
+  /** Entries in the season catalog that start after this event. */
+  notApplicableEntryCount: number;
   entryScopeSha256: string | null;
   missingEntryIds: readonly number[];
   /** Eligible entries whose transfer checkpoint is absent or older than the
@@ -2019,6 +2022,7 @@ export async function assessMyFplFinalizationReadiness(
       dataCheckedAt,
       expectedEntryCount: 0,
       observedEntryCount: 0,
+      notApplicableEntryCount: 0,
       entryScopeSha256: null,
       missingEntryIds: [],
       missingTransferEntryIds: [],
@@ -2028,6 +2032,19 @@ export async function assessMyFplFinalizationReadiness(
       reasonCodes,
     };
   }
+
+  // Keep the expensive readiness query restricted to entries that can score
+  // in this event. The excluded count is part of the canonical scope fence,
+  // so a newly onboarded future-start entry cannot make an old FINAL look
+  // complete forever.
+  const notApplicableRows = await client<{ count: number }[]>`
+    SELECT count(*)::integer AS count
+    FROM competition.entries
+    WHERE season_id = ${season.seasonId}
+      AND started_event IS NOT NULL
+      AND started_event > ${eventId}
+  `;
+  const notApplicableEntryCount = Number(notApplicableRows[0]?.count ?? 0);
 
   const entryRows = await client<
     {
@@ -2404,6 +2421,7 @@ export async function assessMyFplFinalizationReadiness(
     dataCheckedAt,
     expectedEntryCount,
     observedEntryCount,
+    notApplicableEntryCount,
     entryScopeSha256,
     missingEntryIds,
     missingTransferEntryIds,
@@ -2445,6 +2463,7 @@ export async function getMyFplSnapshotOperationalStatus(
       invalidation_attempts: number;
       status_expected_entry_count: number | null;
       status_observed_entry_count: number | null;
+      status_expected_not_applicable_entry_count: number | null;
       status_expected_tournament_count: number | null;
       status_observed_tournament_count: number | null;
       status_coverage_state: string | null;
@@ -2471,6 +2490,7 @@ export async function getMyFplSnapshotOperationalStatus(
            COALESCE(invalidation.invalidation_attempts, 0)::integer AS invalidation_attempts
            ,status.expected_entry_count AS status_expected_entry_count
            ,status.observed_entry_count AS status_observed_entry_count
+           ,status.expected_not_applicable_entry_count AS status_expected_not_applicable_entry_count
            ,status.expected_tournament_count AS status_expected_tournament_count
            ,status.observed_tournament_count AS status_observed_tournament_count
            ,status.coverage_state AS status_coverage_state
@@ -2586,6 +2606,7 @@ export async function getMyFplSnapshotOperationalStatus(
       timelinessState: getMyFplSnapshotTimeliness(row.snapshot_date, row.kind, now),
       expectedEntryCount,
       observedEntryCount,
+      expectedNotApplicableEntryCount: row.status_expected_not_applicable_entry_count,
       expectedEntryScopeSha256: row.status_expected_entry_scope_sha256,
       observedEntryScopeSha256: row.status_observed_entry_scope_sha256,
       readyEntryCount: row.ready_entry_count,
