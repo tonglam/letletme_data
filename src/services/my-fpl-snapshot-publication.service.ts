@@ -2203,8 +2203,15 @@ export async function assessMyFplFinalizationReadiness(
       SELECT tournament.tournament_id,
              tournament.total_team_num,
              tournament.group_mode,
+             tournament.group_started_event_id,
+             tournament.group_ended_event_id,
              roster.entry_id,
              (entry.started_event IS NULL OR entry.started_event <= ${eventId}) AS eligible,
+             (
+               tournament.group_mode = 'points_races'
+               AND (tournament.group_started_event_id IS NULL OR tournament.group_started_event_id <= ${eventId})
+               AND (tournament.group_ended_event_id IS NULL OR tournament.group_ended_event_id >= ${eventId})
+             ) AS points_race_active,
              canonical.group_id,
              canonical.canonical_group_count,
              points.entry_id AS points_entry_id,
@@ -2229,6 +2236,9 @@ export async function assessMyFplFinalizationReadiness(
       SELECT tournament_id,
              total_team_num,
              group_mode,
+             group_started_event_id,
+             group_ended_event_id,
+             points_race_active,
              count(DISTINCT entry_id)::integer AS roster_count,
              count(DISTINCT entry_id) FILTER (WHERE eligible)::integer AS eligible_roster_count,
              count(DISTINCT entry_id) FILTER (WHERE group_id IS NOT NULL)::integer
@@ -2245,19 +2255,23 @@ export async function assessMyFplFinalizationReadiness(
                  AND (group_id IS NULL OR points_group_id IS DISTINCT FROM group_id)
              )::integer AS mismatched_points_count
       FROM tournament_members
-      GROUP BY tournament_id, total_team_num, group_mode
+      GROUP BY tournament_id, total_team_num, group_mode,
+               group_started_event_id, group_ended_event_id, points_race_active
     )
     SELECT count(*)::integer AS expected_count,
            count(*) FILTER (
              WHERE roster_count = total_team_num
                AND (
-                 COALESCE(group_mode, '') <> 'points_races'
+               COALESCE(group_mode, '') <> 'points_races'
+               OR (
+                 NOT points_race_active
                  OR (
                    group_count = roster_count
                    AND conflicting_group_count = 0
                    AND points_count = eligible_roster_count
                    AND mismatched_points_count = 0
                  )
+               )
                )
            )::integer AS ready_count
     FROM tournament_state
@@ -2308,6 +2322,7 @@ export async function getMyFplSnapshotOperationalStatus(
       current_entry_count: number;
       missing_active_entry_count: number;
       pending_outbox_count: number;
+      active_outbox_delivered_count: number;
       outbox_attempts: number;
       pending_invalidation_count: number;
       invalidation_attempts: number;
@@ -2331,6 +2346,8 @@ export async function getMyFplSnapshotOperationalStatus(
            coverage.current_entry_count, coverage.not_applicable_entry_count,
            coverage.missing_active_entry_count,
            COALESCE(outbox.pending_outbox_count, 0)::integer AS pending_outbox_count,
+           COALESCE(outbox.active_outbox_delivered_count, 0)::integer
+               AS active_outbox_delivered_count,
            COALESCE(outbox.outbox_attempts, 0)::integer AS outbox_attempts,
            COALESCE(invalidation.pending_invalidation_count, 0)::integer
                AS pending_invalidation_count,
@@ -2372,6 +2389,11 @@ export async function getMyFplSnapshotOperationalStatus(
     ) coverage ON TRUE
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE status IN ('PENDING', 'PROCESSING'))::integer AS pending_outbox_count,
+             count(*) FILTER (
+               WHERE status = 'DELIVERED'
+                 AND publication.revision IS NOT NULL
+                 AND outbox_row.revision = publication.revision
+             )::integer AS active_outbox_delivered_count,
              COALESCE(max(attempts), 0)::integer AS outbox_attempts
       FROM competition.my_fpl_snapshot_publication_outbox outbox_row
       WHERE outbox_row.season_id = event.season_id
@@ -2413,7 +2435,7 @@ export async function getMyFplSnapshotOperationalStatus(
     const finalSla: MyFplSnapshotOperationalStatus['finalSla'] =
       !row.finished || !row.data_checked
         ? 'NOT_DUE'
-        : row.kind === 'FINAL' && coverageComplete
+        : row.kind === 'FINAL' && coverageComplete && row.active_outbox_delivered_count > 0
           ? 'MET'
           : finalDueAt && now.getTime() < finalDueAt.getTime()
             ? 'DUE'
@@ -2586,9 +2608,12 @@ async function captureMyFplSnapshotOnce(
         tournament_id: number;
         total_team_num: number;
         group_mode: string | null;
+        group_started_event_id: number | null;
+        group_ended_event_id: number | null;
       }[]
     >`
-      SELECT tournament_id, total_team_num, group_mode::text
+      SELECT tournament_id, total_team_num, group_mode::text,
+             group_started_event_id, group_ended_event_id
       FROM competition.tournaments
       WHERE season_id = ${season.seasonId}
       ORDER BY tournament_id
@@ -3614,6 +3639,9 @@ async function captureMyFplSnapshotOnce(
                NULL::text AS input_revision,
                NULL::text AS score_revision
         FROM competition.tournament_entries roster
+		JOIN competition.tournaments tournament
+		  ON tournament.season_id = roster.season_id
+		 AND tournament.tournament_id = roster.tournament_id
 		LEFT JOIN competition.entry_event_results result
 		  ON result.season_id = roster.season_id
 		 AND result.entry_id = roster.entry_id
@@ -3631,6 +3659,13 @@ async function captureMyFplSnapshotOnce(
          AND group_result.tournament_id = roster.tournament_id
          AND group_result.event_id = ${eventId}
          AND group_result.entry_id = roster.entry_id
+		 AND (
+		   tournament.group_mode::text <> 'points_races'
+		   OR (
+		     (tournament.group_started_event_id IS NULL OR tournament.group_started_event_id <= ${eventId})
+		     AND (tournament.group_ended_event_id IS NULL OR tournament.group_ended_event_id >= ${eventId})
+		   )
+		 )
         WHERE roster.season_id = ${season.seasonId}
       )
       SELECT current_rows.*, entry.entry_name, entry.player_name,
@@ -3727,9 +3762,24 @@ async function captureMyFplSnapshotOnce(
       }
       for (const configured of configuredTournaments) {
         if (configured.group_mode !== 'points_races') continue;
+        const pointsRaceActive =
+          (configured.group_started_event_id === null ||
+            configured.group_started_event_id <= eventId) &&
+          (configured.group_ended_event_id === null || configured.group_ended_event_id >= eventId);
+        if (!pointsRaceActive) continue;
         for (const membership of tournamentMembership.filter(
           (row) => row.tournament_id === configured.tournament_id,
         )) {
+          const entry = entrySourceById.get(membership.entry_id);
+          if (
+            entry &&
+            !isEntryEligibleForEvent({
+              startedEvent: entry.started_event,
+              eventId,
+            })
+          ) {
+            continue;
+          }
           const key = `${membership.tournament_id}:${membership.entry_id}`;
           const canonicalGroups = canonicalGroupsByMembership.get(key);
           const observed = tournamentRowByMembership.get(key)?.group_id ?? null;

@@ -24,8 +24,10 @@ import {
 import { getSchedulerLaneTargets, listSchedulerLanes } from '../repositories/scheduler-lanes';
 import { schedulerQueueLaneOverride, schedulerRegistry } from '../scheduler/job-registry';
 import {
+  getActiveMyFplPublication,
   getActiveMyFplSnapshotRedisManifest,
   getMyFplSnapshotOperationalStatus,
+  isMyFplSnapshotRedisManifestForPublication,
 } from './my-fpl-snapshot-publication.service';
 import { getTournamentReviewV2OperationalStatus } from './tournament-review-publication.service';
 import { readSchedulerProgress, isSchedulerProgressHealthy } from '../scheduler/scheduler-progress';
@@ -654,33 +656,28 @@ export async function getJobsStatus(
         (snapshot) => snapshot.activeRevision !== null || snapshot.dataChecked || snapshot.finished,
       )
       .sort((left, right) => right.eventId - left.eventId)[0] ?? null;
-  const [myFplFinalizationObligation, myFplRedisManifest] = myFplTarget
+  const [myFplFinalizationObligation, myFplPublication, myFplRedisManifest] = myFplTarget
     ? await Promise.all([
         schedulerObligationStatus({
           jobName: 'my-fpl-finalization',
           scopeKey: `${season.seasonCode}:event:${myFplTarget.eventId}`,
         }).catch(() => ({ latest: null, overdue: false, consecutiveUnsuccessfulCycles: 0 })),
+        getActiveMyFplPublication(season, myFplTarget.eventId).catch(() => null),
         myFplTarget.activeRevision === null
           ? Promise.resolve(null)
           : getActiveMyFplSnapshotRedisManifest(season.seasonCode, myFplTarget.eventId).catch(
               () => null,
             ),
       ])
-    : [{ latest: null, overdue: false, consecutiveUnsuccessfulCycles: 0 }, null];
+    : [{ latest: null, overdue: false, consecutiveUnsuccessfulCycles: 0 }, null, null];
   const myFplRedisParity = Boolean(
     myFplTarget &&
-      myFplTarget.activeRevision !== null &&
-      myFplRedisManifest &&
-      myFplRedisManifest.eventId === myFplTarget.eventId &&
-      myFplRedisManifest.revision === myFplTarget.activeRevision &&
-      myFplRedisManifest.kind === myFplTarget.activeKind &&
-      myFplRedisManifest.contentSha256 === myFplTarget.activeContentSha256 &&
-      myFplRedisManifest.expectedEntryCount === myFplTarget.expectedEntryCount &&
-      myFplRedisManifest.observedEntryCount === myFplTarget.observedEntryCount &&
-      myFplRedisManifest.expectedTournamentCount === myFplTarget.expectedTournamentCount &&
-      myFplRedisManifest.observedTournamentCount === myFplTarget.observedTournamentCount &&
-      myFplRedisManifest.entryScopeSha256 === myFplTarget.observedEntryScopeSha256 &&
-      myFplRedisManifest.tournamentScopeSha256 === myFplTarget.observedTournamentScopeSha256,
+      isMyFplSnapshotRedisManifestForPublication(
+        myFplRedisManifest,
+        myFplPublication,
+        season.seasonCode,
+        myFplTarget.eventId,
+      ),
   );
   const myFplIntegrity = myFplTarget
     ? {

@@ -245,9 +245,13 @@ export const enqueueMyFplSnapshot = (
 ) =>
   enqueueMaintenanceJob(season, MAINTENANCE_JOBS.MY_FPL_SNAPSHOT, source, {
     ...options,
-    attempts: options.attempts ?? MY_FPL_FINALIZATION_BULL_ATTEMPTS,
-    backoffDelayMs: options.backoffDelayMs ?? 60_000,
-    backoffType: options.backoffType ?? 'exponential',
+    attempts:
+      options.attempts ??
+      (options.snapshotKind === 'FINAL' ? MY_FPL_FINALIZATION_BULL_ATTEMPTS : 8),
+    backoffDelayMs:
+      options.backoffDelayMs ?? (options.snapshotKind === 'FINAL' ? 60_000 : 30 * 60_000),
+    backoffType:
+      options.backoffType ?? (options.snapshotKind === 'FINAL' ? 'exponential' : 'fixed'),
   });
 
 export const enqueueMyFplSnapshotOutbox = (

@@ -410,6 +410,9 @@ export const schedulerObligationsInOps = ops.table(
     index('scheduler_obligations_lease_idx')
       .on(table.leaseExpiresAt, table.obligationId)
       .where(sql`lease_expires_at IS NOT NULL AND status IN ('enqueued', 'running')`),
+    index('scheduler_obligations_retry_idx')
+      .on(table.nextAttemptAt, table.obligationId)
+      .where(sql`status = 'retrying'`),
     index('scheduler_obligations_failure_idx')
       .on(table.jobName, table.status, table.updatedAt.desc())
       .where(sql`status IN ('failed', 'irrecoverable')`),
