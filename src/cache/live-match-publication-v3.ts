@@ -1795,6 +1795,8 @@ export async function promotePreviousLiveMatchV3(input: {
   readonly kind: 'desk' | 'detail';
   /** Optional atomic detail fence used when rolling a desk pointer back. */
   readonly observedDetail?: MatchDetailActiveFence | null;
+  /** Future desk repairs must not make the eventless pointer live. */
+  readonly promoteActiveEvent?: boolean;
   readonly redis?: Redis;
 }): Promise<{
   status: 'promoted' | 'changed' | 'unavailable';
@@ -1839,7 +1841,9 @@ export async function promotePreviousLiveMatchV3(input: {
         'Live Match desk rollback verification failed',
         'LIVE_MATCH_REPAIR_FAILED',
       );
-    await setLiveMatchActiveEventV3({ ...scope, redis });
+    if (input.promoteActiveEvent !== false) {
+      await setLiveMatchActiveEventV3({ ...scope, redis });
+    }
     return { status: 'promoted', publication: promoted.publication };
   }
   const previous = await readDetailPointer(redis, scope, 'previous');

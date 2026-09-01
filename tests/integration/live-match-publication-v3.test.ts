@@ -626,6 +626,39 @@ describe('Live Matches V3 Redis publications', () => {
     ).toBe(second.publication.publicationId);
   });
 
+  test('does not promote a future desk rollback into the eventless pointer', async () => {
+    await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'PRE_DEADLINE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'PRE_DEADLINE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV3({ ...scope, redis }),
+      redis,
+    });
+    await setLiveMatchActiveEventV3({
+      season: scope.season,
+      eventId: scope.eventId + 1,
+      redis,
+    });
+
+    const result = await promotePreviousLiveMatchV3({
+      ...scope,
+      kind: 'desk',
+      promoteActiveEvent: false,
+      redis,
+    });
+
+    expect(result.status).toBe('promoted');
+    expect(await redis.get(liveMatchActiveEventKey(scope.season))).toBe(String(scope.eventId + 1));
+  });
+
   test('fences desk rollback when detail changes after compatibility validation', async () => {
     const firstDesk = await publishLiveMatchDeskV3({
       ...scope,

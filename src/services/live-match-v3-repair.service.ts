@@ -16,6 +16,7 @@ import {
 } from '../cache/live-match-publication-v3';
 import { redisSingleton } from '../cache/singleton';
 import { enqueueLiveMatchCheckpoint } from '../jobs/live-data.jobs';
+import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import {
   readLiveMatchDeskCheckpointV3,
@@ -143,6 +144,39 @@ export function assertLiveMatchesV3RepairSeason(
       'LIVE_MATCH_REPAIR_HISTORICAL_SEASON',
     );
   }
+}
+
+/**
+ * PRE_DEADLINE is a publication lifecycle label, not the authoritative FPL
+ * deadline. A queued/repair publication can still carry that label after the
+ * deadline while the first fixture is waiting for kickoff. In that interval
+ * the event is already the active event and a repair must be allowed to move
+ * the eventless pointer. A genuinely future event must remain scoped only.
+ */
+export function shouldPromoteLiveMatchActiveEvent(
+  state: MatchDeskRead['publication']['state'],
+  deadlineTime: string | null,
+  now = new Date(),
+): boolean {
+  if (state !== 'PRE_DEADLINE') return true;
+  const deadlineMs = deadlineTime === null ? Number.NaN : Date.parse(deadlineTime);
+  return Number.isFinite(deadlineMs) && deadlineMs <= now.getTime();
+}
+
+async function resolveRepairActiveEventPromotion(
+  season: Awaited<ReturnType<typeof seasonRepository.requireByCode>>,
+  eventId: number,
+  state: MatchDeskRead['publication']['state'],
+): Promise<boolean> {
+  if (state !== 'PRE_DEADLINE') return true;
+  const event = await eventRepository.findById(season, eventId);
+  if (!event || event.deadlineTime === null || !Number.isFinite(Date.parse(event.deadlineTime))) {
+    throw new ValidationError(
+      'PRE_DEADLINE repair requires an authoritative event deadline',
+      'LIVE_MATCH_REPAIR_EVENT_DEADLINE_MISSING',
+    );
+  }
+  return shouldPromoteLiveMatchActiveEvent(state, event.deadlineTime);
 }
 
 function deskSummary(read: MatchDeskRead | null) {
@@ -331,6 +365,7 @@ async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
 
   if (request.action === 'promote-previous') {
     let observedDetail: MatchDetailActiveFence | null = null;
+    let promoteActiveEvent: boolean | undefined;
     if (request.kind === 'desk') {
       const previous = await readLiveMatchDeskPointerV3({ ...scope, redis }, 'previous');
       if (!previous) {
@@ -340,6 +375,11 @@ async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
         );
       }
       observedDetail = await requireDeskRepairCompatibility(scope, previous, redis);
+      promoteActiveEvent = await resolveRepairActiveEventPromotion(
+        season,
+        request.eventId,
+        previous.publication.state,
+      );
     } else {
       const previous = await readLiveMatchDetailPointerV3({ ...scope, redis }, 'previous');
       if (!previous) {
@@ -354,6 +394,7 @@ async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
       ...scope,
       kind: request.kind,
       observedDetail,
+      ...(promoteActiveEvent === undefined ? {} : { promoteActiveEvent }),
       redis,
     });
     if (result.status !== 'promoted' || !result.publication) {
@@ -396,12 +437,20 @@ async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
     if (request.kind === 'detail') {
       await requireDetailRepairCompatibility(scope, checkpoint as MatchDetailRead, redis);
     }
+    const promoteActiveEvent =
+      request.kind === 'desk'
+        ? await resolveRepairActiveEventPromotion(
+            season,
+            request.eventId,
+            (checkpoint as MatchDeskRead).publication.state,
+          )
+        : undefined;
     const result =
       request.kind === 'desk'
         ? await restoreLiveMatchDeskCheckpointV3({
             checkpoint: checkpoint as MatchDeskRead,
             observedDetail,
-            promoteActiveEvent: (checkpoint as MatchDeskRead).publication.state !== 'PRE_DEADLINE',
+            ...(promoteActiveEvent === undefined ? {} : { promoteActiveEvent }),
             redis,
           })
         : await restoreLiveMatchDetailCheckpointV3({

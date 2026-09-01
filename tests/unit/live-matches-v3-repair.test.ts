@@ -6,6 +6,7 @@ import {
   LIVE_MATCHES_V3_REPAIR_CONFIRMATION,
   isLiveMatchDetailCompatibleWithDesk,
   parseLiveMatchesV3RepairRequest,
+  shouldPromoteLiveMatchActiveEvent,
 } from '../../src/services/live-match-v3-repair.service';
 
 describe('Live Matches V3 repair guardrails', () => {
@@ -19,6 +20,20 @@ describe('Live Matches V3 repair guardrails', () => {
     expect(() =>
       assertLiveMatchesV3RepairSeason('rebuild-current', { isCurrent: false }),
     ).not.toThrow();
+  });
+
+  test('uses the authoritative deadline instead of PRE_DEADLINE alone', () => {
+    const now = new Date('2026-08-29T17:00:00.000Z');
+
+    expect(shouldPromoteLiveMatchActiveEvent('LIVE_ACTIVE', null, now)).toBe(true);
+    expect(shouldPromoteLiveMatchActiveEvent('PRE_DEADLINE', '2026-08-29T17:01:00.000Z', now)).toBe(
+      false,
+    );
+    expect(shouldPromoteLiveMatchActiveEvent('PRE_DEADLINE', '2026-08-29T16:59:00.000Z', now)).toBe(
+      true,
+    );
+    expect(shouldPromoteLiveMatchActiveEvent('PRE_DEADLINE', null, now)).toBe(false);
+    expect(shouldPromoteLiveMatchActiveEvent('PRE_DEADLINE', 'not-a-date', now)).toBe(false);
   });
 
   test('parses an exact read-only scope without write authorization', () => {
