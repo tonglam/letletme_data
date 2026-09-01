@@ -235,6 +235,7 @@ deploy() {
           controls_restored=true
         else
           log_error "Rollback eligibility or migration ledger proof failed; leaving the deployment in forward recovery."
+          stop_content_worker_for_forward_recovery || true
         fi
       elif [[ "$DEPLOY_COMMITTED" = false &&
         ( "$DEPLOY_SERVICES_STOPPED" = true ||
@@ -251,6 +252,7 @@ deploy() {
     fi
     DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
     stop_content_worker_pause_renewal || true
+    cleanup_content_worker_control_image || true
     release_deploy_lock || true
     exit "$status"
   }

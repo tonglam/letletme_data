@@ -158,8 +158,12 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('assert_content_worker_consumers_paused');
     expect(deployStateMachine).toContain('pause_content_worker_consumers_for_deploy');
     expect(deployStateMachine).toContain('restore_content_deploy_controls');
+    expect(deployStateMachine).toContain('DEPLOY_CONTENT_WORKER_CONTROL_IMAGE');
+    expect(deployStateMachine).toContain('cleanup_content_worker_control_image');
     expect(deployScript).toContain('restore_content_deploy_controls');
+    expect(deployScript).toContain('stop_content_worker_for_forward_recovery');
     expect(workflow).toContain('restore_content_deploy_controls');
+    expect(workflow).toContain('stop_content_worker_for_forward_recovery');
 
     const localPause = deployScript.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
     const localAdmission = deployScript.indexOf(

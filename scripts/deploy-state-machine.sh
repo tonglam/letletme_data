@@ -30,6 +30,8 @@ DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE=${DEPLOY_CONTENT_WORKER_PAU
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID:-}
 DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE:-false}
+DEPLOY_CONTENT_WORKER_CONTROL_IMAGE=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE:-}
+DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG:-}
 
 acquire_deploy_lock() {
   mkdir -p "$(dirname "$deploy_lock_path")"
@@ -592,21 +594,51 @@ restore_content_deploy_controls() {
     # acquisition outbox dispatcher. If a consumer cannot be resumed, stop
     # that producer before returning; the Redis admission gate is TTL-bound
     # and must not be the only protection during forward recovery.
-    if ! compose stop -t 45 content-worker; then
-      echo 'deploy admission: content-worker could not be stopped after consumer resume failure; manual producer shutdown is required' >&2
-    else
-      echo 'deploy admission: content-worker producer stopped for forward recovery'
-    fi
+    stop_content_worker_for_forward_recovery || true
     echo 'deploy admission: deployment-owned content-worker consumers remain paused for forward recovery' >&2
     return 1
   fi
   local queue_name
   for queue_name in $DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES; do
+    local status_output
+    if ! status_output=$(set_content_worker_consumer_mode STATUS "$queue_name"); then
+      printf '%s\n' "$status_output" >&2
+      echo "deploy admission: could not verify that $queue_name consumer is open; keeping its producer admission closed" >&2
+      stop_content_worker_for_forward_recovery || true
+      return 1
+    fi
+    if ! printf '%s\n' "$status_output" | grep -F '"paused":false' >/dev/null; then
+      printf '%s\n' "$status_output" >&2
+      echo "deploy admission: $queue_name consumer remains paused; keeping its producer admission closed" >&2
+      stop_content_worker_for_forward_recovery || true
+      return 1
+    fi
     if ! restore_content_worker_queue_admission "$queue_name"; then
       echo "deploy admission: $queue_name producer admission remains closed for forward recovery" >&2
       return 1
     fi
   done
+}
+
+stop_content_worker_for_forward_recovery() {
+  if ! compose stop -t 45 content-worker; then
+    echo 'deploy admission: content-worker could not be stopped for forward recovery; manual producer shutdown is required' >&2
+    return 1
+  fi
+  echo 'deploy admission: content-worker producer stopped for forward recovery'
+}
+
+cleanup_content_worker_control_image() {
+  local temporary_tag=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG:-}
+  [[ -n "$temporary_tag" ]] || return 0
+  if ! docker image rm "$temporary_tag" >/dev/null 2>&1; then
+    echo "deploy admission: could not remove temporary control image tag $temporary_tag" >&2
+    return 1
+  fi
+  DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG=''
+  if [[ "$DEPLOY_CONTENT_WORKER_CONTROL_IMAGE" = "$temporary_tag" ]]; then
+    DEPLOY_CONTENT_WORKER_CONTROL_IMAGE=''
+  fi
 }
 
 run_deploy_probe_command() {
@@ -651,6 +683,7 @@ run_bounded_deploy_probe() {
   local probe_compose_file=${COMPOSE_FILE:-docker-compose.yml}
   local probe_compose_bin=${COMPOSE_BIN:-docker compose}
   local probe_allow_paused_queues=${DEPLOY_CONTENT_WORKER_PAUSED_QUEUES// /,}
+  local probe_app_image=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE:-${APP_IMAGE:-}}
   local probe_consumer_owner_token=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
 
   if [[ "$probe_kind" != queue && "$probe_kind" != consumer && "$probe_kind" != admission ]]; then
@@ -692,7 +725,7 @@ run_bounded_deploy_probe() {
       export DEPLOY_PROBE_PROJECT_DIR="$probe_project_dir"
       export DEPLOY_PROBE_COMPOSE_FILE="$probe_compose_file"
       export DEPLOY_PROBE_COMPOSE_BIN="$probe_compose_bin"
-      export DEPLOY_PROBE_APP_IMAGE="${APP_IMAGE:-}"
+      export DEPLOY_PROBE_APP_IMAGE="$probe_app_image"
       export DEPLOY_PROBE_KIND="$probe_kind"
       export DEPLOY_PROBE_QUEUE="$probe_queue"
       export DEPLOY_PROBE_MODE="$probe_mode"
@@ -723,7 +756,7 @@ run_bounded_deploy_probe() {
       export DEPLOY_PROBE_KIND="$probe_kind"
       export DEPLOY_PROBE_QUEUE="$probe_queue"
       export DEPLOY_PROBE_MODE="$probe_mode"
-      export DEPLOY_PROBE_APP_IMAGE="${APP_IMAGE:-}"
+      export DEPLOY_PROBE_APP_IMAGE="$probe_app_image"
       export DEPLOY_PROBE_ALLOW_PAUSED_QUEUES="$probe_allow_paused_queues"
       export DEPLOY_PROBE_CONSUMER_OWNER_TOKEN="$probe_consumer_owner_token"
       run_deploy_probe_command >"$output_file" 2>&1
@@ -1075,6 +1108,9 @@ restore_runtime_services() {
   local previous_media_present=${4:-auto}
   local previous_image_id=${5:-}
   local resolved_image_id
+  local control_image=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE:-${APP_IMAGE:-letletme-data:local}}
+  local control_image_id=''
+  local control_image_temp_tag=''
   [[ -n "$previous_image" ]] || return 1
   if [[ ! "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
     previous_release_sha=unknown
@@ -1083,6 +1119,22 @@ restore_runtime_services() {
     ! "$previous_runner_release_sha" =~ ^[0-9a-f]{7,128}$ ]]; then
     previous_runner_release_sha=unknown
   fi
+  # A default local deploy builds and rolls back through the same mutable tag.
+  # Preserve the new image before repinning that tag to the old image so the
+  # new control protocol remains available during recovery cleanup.
+  if [[ "$control_image" = "$previous_image" ]]; then
+    control_image_id=$(docker image inspect --format '{{.Id}}' "$control_image" 2>/dev/null || true)
+    if [[ -n "$control_image_id" && "$control_image_id" != "$previous_image_id" ]]; then
+      control_image_temp_tag="letletme-data:deploy-control-${BASHPID:-$$}"
+      if ! docker tag "$control_image_id" "$control_image_temp_tag"; then
+        echo 'could not preserve the target image for deployment control cleanup' >&2
+        return 1
+      fi
+      control_image="$control_image_temp_tag"
+      DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG="$control_image_temp_tag"
+    fi
+  fi
+  DEPLOY_CONTENT_WORKER_CONTROL_IMAGE="$control_image"
   if [[ -n "$previous_image_id" ]]; then
     resolved_image_id=$(docker image inspect --format '{{.Id}}' "$previous_image" 2>/dev/null || true)
     if [[ "$resolved_image_id" != "$previous_image_id" ]]; then
@@ -1099,7 +1151,7 @@ restore_runtime_services() {
       }
     fi
   fi
-  (
+  if ! (
     export APP_IMAGE="$previous_image"
     export DEPLOY_SHA="$previous_release_sha"
     export CONTENT_MANIFEST_GIT_REVISION="$previous_release_sha"
@@ -1111,7 +1163,10 @@ restore_runtime_services() {
     # crash-looping containers that never existed in the old runtime.
     export RUNTIME_ROLLBACK=true
     start_all_runtime_services
-  )
+  ); then
+    return 1
+  fi
+  return 0
 }
 
 restore_last_known_healthy_if_ledger_unchanged() {

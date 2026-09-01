@@ -179,6 +179,50 @@ cat "$event_file"
     });
   }
 
+  function runLocalRollbackShell(): ReturnType<typeof Bun.spawnSync> {
+    const script = String.raw`
+set -euo pipefail
+source scripts/deploy-state-machine.sh
+APP_IMAGE=''
+docker() {
+  if [[ "$1" = image && "$2" = inspect ]]; then
+    if [[ "$3" = --format ]]; then
+      printf '%s\n' sha256:new
+    fi
+    return 0
+  fi
+  if [[ "$1" = tag ]]; then
+    printf 'TAG:%s:%s\n' "$2" "$3"
+    return 0
+  fi
+  if [[ "$1" = run ]]; then
+    return 0
+  fi
+  return 1
+}
+compose() {
+  if [[ "$1" = config && "$2" = --services ]]; then
+    printf '%s\n' scheduler worker content-worker live-picks-worker official-h2h-worker media-worker api
+    return 0
+  fi
+  if [[ "$1" = up ]]; then
+    printf 'UP_IMAGE:%s\n' "$APP_IMAGE"
+    return 0
+  fi
+  return 1
+}
+restore_runtime_services letletme-data:local unknown unknown auto sha256:old
+[[ "$DEPLOY_CONTENT_WORKER_CONTROL_IMAGE" = letletme-data:deploy-control-* ]]
+[[ "$DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG" = letletme-data:deploy-control-* ]]
+printf 'CONTROL_IMAGE:%s\n' "$DEPLOY_CONTENT_WORKER_CONTROL_IMAGE"
+`;
+    return Bun.spawnSync(['bash', '-c', script], {
+      env: process.env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+  }
+
   test('pins the queue and bounded deployment TTL', () => {
     expect(CONTENT_X_SCAN_QUEUE).toBe('content-x-scan');
     expect(DEPLOY_QUEUE_ADMISSION_TTL_SECONDS).toBe(900);
@@ -400,6 +444,47 @@ restore_content_deploy_controls
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').toContain('STATUS');
     expect(result.stdout?.toString() ?? '').not.toContain('RESUME:content-x-scan');
+  });
+
+  test('keeps producer admission closed when an external pause remains', () => {
+    const result = runConsumerControlShell(String.raw`
+touch "$pause_dir/content-x-scan"
+pause_content_worker_consumers_for_deploy
+drain_content_worker_queues_for_deploy
+if restore_content_deploy_controls; then exit 1; fi
+[[ -e "$pause_dir/content-x-scan" ]]
+! grep -F 'OPEN' "$event_file"
+grep -F 'STOP:content-worker' "$event_file"
+`);
+    expect(result.exitCode).toBe(0);
+    const output = `${result.stdout?.toString() ?? ''}\n${result.stderr?.toString() ?? ''}`;
+    expect(output).toContain('content-x-scan consumer remains paused');
+    expect(output).toContain('STOP:content-worker');
+    expect(output).not.toContain('OPEN:content-x-scan');
+  });
+
+  test('uses the preserved target image for control probes', () => {
+    const result = runQueueProbeShell(
+      String.raw`
+[[ "$APP_IMAGE" = target-image ]]
+return 0
+`,
+      {
+        APP_IMAGE: 'runtime-image',
+        DEPLOY_CONTENT_WORKER_CONTROL_IMAGE: 'target-image',
+      },
+    );
+    expect(result.exitCode, result.stderr?.toString() ?? '').toBe(0);
+  });
+
+  test('preserves a target image when local rollback repins the default tag', () => {
+    const result = runLocalRollbackShell();
+    expect(result.exitCode, result.stderr?.toString() ?? '').toBe(0);
+    const output = result.stdout?.toString() ?? '';
+    expect(output).toContain('TAG:sha256:new:letletme-data:deploy-control-');
+    expect(output).toContain('TAG:sha256:old:letletme-data:local');
+    expect(output).toContain('UP_IMAGE:letletme-data:local');
+    expect(output).toContain('CONTROL_IMAGE:letletme-data:deploy-control-');
   });
 
   test('does not claim ownership when an operator pauses after STATUS', () => {

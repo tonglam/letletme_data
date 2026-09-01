@@ -286,6 +286,7 @@ jobs:
                     services_stopped=false
                   else
                     echo "Data deployment failed without an eligible, ledger-safe rollback target; controls remain closed for forward recovery" >&2
+                    stop_content_worker_for_forward_recovery || true
                   fi
                 elif [ "$controls_restored" != true ]; then
                   echo "Data deployment controls remain closed; runtime restoration is deferred until controls can be safely released" >&2
@@ -294,6 +295,9 @@ jobs:
               DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
               if declare -F stop_content_worker_pause_renewal >/dev/null 2>&1; then
                 stop_content_worker_pause_renewal || true
+              fi
+              if declare -F cleanup_content_worker_control_image >/dev/null 2>&1; then
+                cleanup_content_worker_control_image || true
               fi
               if [ "$original_status" -ne 0 ] && [ "$image_pull_attempted" = true ]; then
                 cleanup_failed_image "${IMAGE_REF:-}"
