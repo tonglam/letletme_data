@@ -87,18 +87,24 @@ remove_exact_stopped_container() {
 }
 
 compose_project_name_for_cleanup() {
-  local context=${COMPOSE_PROJECT_NAME:-${PROJECT_DIR:-${VPS_WORKDIR:-}}}
-  context=${context%/}
-  context=${context##*/}
-  if [[ ! "$context" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  local compose_config project
+  # Ask the same Compose invocation used by the deployment for its resolved
+  # project name.  Directory basenames and COMPOSE_PROJECT_NAME do not account
+  # for an explicit `-p/--project-name` in COMPOSE_BIN.
+  if ! compose_config=$(compose config --format json 2>/dev/null); then
+    echo 'deploy preflight: could not resolve Compose configuration for API run cleanup' >&2
+    return 1
+  fi
+  if [[ ! "$compose_config" =~ \"name\"[[:space:]]*:[[:space:]]*\"([a-z0-9][a-z0-9_-]*)\" ]]; then
     echo 'deploy preflight: could not resolve a safe Compose project name for API run cleanup' >&2
     return 1
   fi
-  printf '%s\n' "$context"
+  project=${BASH_REMATCH[1]}
+  printf '%s\n' "$project"
 }
 
 remove_stale_api_run_containers() {
-  local project container_id service oneoff state health host_port container_name
+  local project container_id service oneoff state host_port container_name
   project=$(compose_project_name_for_cleanup)
   while IFS= read -r container_id; do
     [[ -n "$container_id" ]] || continue
@@ -114,20 +120,11 @@ remove_stale_api_run_containers() {
         echo "removing exact stale API one-off $container_name $container_id (state=$state, host_port=3000)"
         docker rm "$container_id" >/dev/null
         ;;
-      running)
-        health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || printf 'unknown')
-        if [[ "$health" != unhealthy ]]; then
-          echo "deploy preflight: refusing to remove API one-off $container_name $container_id (state=$state, health=$health, host_port=3000)" >&2
-          return 1
-        fi
-        echo "removing exact unhealthy API one-off $container_name $container_id (health=$health, host_port=3000)"
-        if ! docker stop -t 10 "$container_id" >/dev/null; then
-          echo "deploy preflight: could not stop unhealthy API one-off $container_name $container_id" >&2
-          return 1
-        fi
-        docker rm "$container_id" >/dev/null
-        ;;
-      restarting|paused)
+      running|restarting|paused)
+        # A `docker compose run --service-ports api ...` operation can be
+        # legitimately active while its overridden command fails the API
+        # healthcheck.  Health is not evidence that an operator-run one-off is
+        # stale; never stop or remove a live process during deploy recovery.
         echo "deploy preflight: refusing to remove API one-off $container_name $container_id (state=$state, host_port=3000)" >&2
         return 1
         ;;
