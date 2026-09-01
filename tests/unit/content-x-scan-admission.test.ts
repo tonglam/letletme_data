@@ -163,6 +163,10 @@ compose() {
     printf '%s\n' "{\"contractVersion\":\"queue-admission-v2\",\"queueName\":\"$admission_queue\",\"mode\":\"$admission_mode\",\"changed\":true}"
     return 0
   fi
+  if [[ "$args" == stop* && "$args" == *"content-worker"* ]]; then
+    printf 'STOP:content-worker\n' >>"$event_file"
+    return 0
+  fi
   return 1
 }
 ${body}
@@ -470,6 +474,7 @@ if restore_content_deploy_controls; then exit 1; fi
 `);
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').toContain('RESUME-FAILED:content-x-scan');
+    expect(result.stdout?.toString() ?? '').toContain('STOP:content-worker');
     expect(result.stdout?.toString() ?? '').not.toContain('OPEN');
   });
 

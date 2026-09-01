@@ -588,6 +588,15 @@ restore_content_deploy_controls() {
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
   stop_content_worker_pause_renewal
   if ! resume_content_worker_consumers_for_deploy; then
+    # The content worker owns both the direct formal scheduler and the
+    # acquisition outbox dispatcher. If a consumer cannot be resumed, stop
+    # that producer before returning; the Redis admission gate is TTL-bound
+    # and must not be the only protection during forward recovery.
+    if ! compose stop -t 45 content-worker; then
+      echo 'deploy admission: content-worker could not be stopped after consumer resume failure; manual producer shutdown is required' >&2
+    else
+      echo 'deploy admission: content-worker producer stopped for forward recovery'
+    fi
     echo 'deploy admission: deployment-owned content-worker consumers remain paused for forward recovery' >&2
     return 1
   fi
