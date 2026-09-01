@@ -299,11 +299,6 @@ describe('Live Points and Live Matches shared observation', () => {
     });
 
     await sync.catch(() => undefined);
-    // Provisional Live Points completion intentionally does not await the
-    // sibling Match publication. Give that already-started promise a turn to
-    // finish before asserting the hand-off.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
     expect(calls).toBe(2);
     expect(publishedDesks[0]).toBeUndefined();
     expect(publishedDesks[1]).toEqual({
@@ -320,6 +315,60 @@ describe('Live Points and Live Matches shared observation', () => {
         },
       },
     });
+  });
+
+  test('waits for provisional Match publication before settling the job', async () => {
+    let releaseMatchPublication!: () => void;
+    const secondMatchPublication = new Promise<void>((resolve) => {
+      releaseMatchPublication = resolve;
+    });
+    let secondMatchStarted!: () => void;
+    const secondMatchStartedPromise = new Promise<void>((resolve) => {
+      secondMatchStarted = resolve;
+    });
+    let matchCalls = 0;
+    let settled = false;
+
+    const sync = syncLiveSnapshotV2(season, 2, {
+      dependencies: {
+        getEventLive: async () => ({ elements: [] }),
+        getFixtures: async () => [],
+        getExpectedFixtureIds: async () => [],
+        getReferenceData: async () => ({ playerById: new Map() }) as never,
+        syncLiveMatches: async () => {
+          matchCalls += 1;
+          if (matchCalls === 2) {
+            secondMatchStarted();
+            await secondMatchPublication;
+          }
+          return {
+            desk: {} as never,
+            deskFixtures: [],
+            deskChanged: false,
+            deskCheckpointScheduled: false,
+          } as never;
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => null,
+        checkpointPublication: async () => false,
+      },
+    });
+    void sync.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await secondMatchStartedPromise;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releaseMatchPublication();
+    await sync.catch(() => undefined);
+    expect(settled).toBe(true);
   });
 
   test('does not finalize the Match sibling before Live Points accepts exact facts', async () => {

@@ -512,13 +512,12 @@ export async function syncLiveSnapshotV2(
       return { result: null, error };
     });
   const settleMatchPublication = async (): Promise<void> => {
-    if (!options.finalizeEvent) return;
     const outcome = await matchPublicationOutcome;
     // At the final boundary both publications are exact durable obligations and
-    // therefore fail closed together. During a provisional poll the desk phase
-    // has already been attempted independently; waiting for the detail sibling
-    // here would put Live Points back behind event-live/Core enrichment.
-    if (outcome.error) throw outcome.error;
+    // therefore fail closed together. During a provisional poll, Match errors
+    // remain non-fatal to Live Points, but the promise is still awaited before
+    // the scheduler can settle the shared job and lose publication evidence.
+    if (options.finalizeEvent && outcome.error) throw outcome.error;
   };
 
   const requireProvisionalMatchDetail = async (): Promise<void> => {

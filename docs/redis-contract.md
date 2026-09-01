@@ -49,27 +49,27 @@ llm:data:v2:fpl:live:<season>:<event>:picks-coverage
 llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:checkpoint-desired
 ```
 
-Live Matches V2 uses an independent namespace. It is fed by the same coherent
+Live Matches V3 uses an independent namespace. It is fed by the same coherent
 fixtures/event-live observation as Live Points, but desk and player detail are
 separate publications so a detail failure cannot remove an available score
 board:
 
 ```text
-llm:data:v2:fpl:live-match:<season>:active-event
+llm:data:v3:fpl:live-match:<season>:active-event
 
-llm:data:v2:fpl:live-match:desk:<season>:<event>:active
-llm:data:v2:fpl:live-match:desk:<season>:<event>:previous
-llm:data:v2:fpl:live-match:desk:<season>:<event>:sequence
-llm:data:v2:fpl:live-match:desk:<season>:<event>:<generation>:desk
+llm:data:v3:fpl:live-match:desk:<season>:<event>:active
+llm:data:v3:fpl:live-match:desk:<season>:<event>:previous
+llm:data:v3:fpl:live-match:desk:<season>:<event>:sequence
+llm:data:v3:fpl:live-match:desk:<season>:<event>:<generation>:desk
 
-llm:data:v2:fpl:live-match:detail:<season>:<event>:active
-llm:data:v2:fpl:live-match:detail:<season>:<event>:previous
-llm:data:v2:fpl:live-match:detail:<season>:<event>:sequence
-llm:data:v2:fpl:live-match:detail:<season>:<event>:<generation>:manifest
-llm:data:v2:fpl:live-match:detail:<season>:<event>:<generation>:<fixture>:<sha256>
+llm:data:v3:fpl:live-match:detail:<season>:<event>:active
+llm:data:v3:fpl:live-match:detail:<season>:<event>:previous
+llm:data:v3:fpl:live-match:detail:<season>:<event>:sequence
+llm:data:v3:fpl:live-match:detail:<season>:<event>:<generation>:manifest
+llm:data:v3:fpl:live-match:detail:<season>:<event>:<generation>:<fixture>:<sha256>
 
-llm:data:v2:fpl:live-match:checkpoint:<season>:<event>:desk|detail
-llm:data:v2:fpl:live-match:checkpoint:<season>:<event>:desk|detail:last
+llm:data:v3:fpl:live-match:checkpoint:<season>:<event>:desk|detail
+llm:data:v3:fpl:live-match:checkpoint:<season>:<event>:desk|detail:last
 ```
 
 The desk contains only fixture identity and score state. Detail is fixture
@@ -96,13 +96,13 @@ Protected diagnosis and recovery use `POST /ops/live-matches-v3/repair` with
 one explicit season/event. An `inspect` request validates active, previous,
 desired, and self-contained PostgreSQL checkpoints for both streams. Write
 requests require an explicit desk/detail kind, a reason of at least 12
-characters, and `confirmation: "LIVE_MATCHES_V2_REPAIR"`; they may only
+characters, and `confirmation: "LIVE_MATCHES_V3_REPAIR"`; they may only
 CAS-promote previous, restore current from the exact checkpoint, or replay the
 latest merged checkpoint obligation. The endpoint is protected by the existing
 ops API-key guard.
 
 The global publication items are exactly `eventLive` and `fixtures`. An entry
-publication contains one complete `input` item. A V2 manifest is scoped to one
+publication contains one complete `input` item. A V3 manifest is scoped to one
 season/event (and, for entry input, one entry), carries a monotonic generation,
 and uses the lifecycle states defined by the V2 contract.
 
@@ -202,7 +202,7 @@ The current key-builder families are:
 llm:data:fpl:core:<season>:...
 llm:data:v2:fpl:live:<season>:<event>:...
 llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:...
-llm:data:v2:fpl:live-match:<season>:<event>:...
+llm:data:v3:fpl:live-match:<season>:<event>:...
 llm:data:fpl:my-fpl:<season>:<event>:active
 fpl:price-changes:hot:<season>:...
 llm:tournament:preview:...

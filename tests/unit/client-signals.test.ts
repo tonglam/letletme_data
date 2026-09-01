@@ -4,6 +4,7 @@ import {
   CLIENT_SIGNAL_MAX_BYTES,
   CLIENT_SIGNAL_MAX_SAMPLES,
   ClientSignalValidationError,
+  clientSignalBucketFor,
   clientSignalRetentionCutoffs,
   parseClientSignalBatch,
 } from '../../src/services/client-signals.service';
@@ -109,6 +110,15 @@ describe('anonymous client signal contract', () => {
     };
 
     expect(parseClientSignalBatch(batch, now).samples).toHaveLength(7);
+  });
+
+  test('keeps full-response byte buckets within the accepted 8 MiB range', () => {
+    expect(clientSignalBucketFor('live_matches_full_bytes', 512 * 1024)).toBe(String(512 * 1024));
+    expect(clientSignalBucketFor('live_matches_full_bytes', 8 * 1024 * 1024)).toBe(
+      String(8 * 1024 * 1024),
+    );
+    expect(clientSignalBucketFor('live_matches_full_bytes', 8 * 1024 * 1024 + 1)).toBe('overflow');
+    expect(clientSignalBucketFor('live_matches_head_bytes', 512 * 1024 + 1)).toBe('overflow');
   });
 
   test('keeps the body budget explicit', () => {

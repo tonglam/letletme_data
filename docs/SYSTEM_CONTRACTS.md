@@ -140,7 +140,7 @@ See [redis-contract.md](redis-contract.md) and
   `POST /ops/live-matches-v3/repair`. Inspect is read-only; any pointer
   promotion, PostgreSQL rebuild, or merged checkpoint replay requires season,
   event, desk/detail kind, a reason, and
-  `confirmation: "LIVE_MATCHES_V2_REPAIR"`. The endpoint cannot select all
+  `confirmation: "LIVE_MATCHES_V3_REPAIR"`. The endpoint cannot select all
   events, delete a namespace, or refetch FPL.
 - Tournament and league finalization remain eligible in the bounded post-match
   window, including after GW38.

@@ -262,7 +262,10 @@ export function parseClientSignalBatch(value: unknown, now = Date.now()): Client
   };
 }
 
-function bucketFor(metric: ClientSignalMetric, value: number | undefined): string {
+export function clientSignalBucketFor(
+  metric: ClientSignalMetric,
+  value: number | undefined,
+): string {
   if (value === undefined) return 'count';
   const thresholds =
     metric === 'cls'
@@ -270,7 +273,10 @@ function bucketFor(metric: ClientSignalMetric, value: number | undefined): strin
       : metric === 'last_good_age_ms'
         ? [10, 30, 50, 60].map((minutes) => minutes * 60 * 1000)
         : BYTE_METRICS.has(metric)
-          ? [4, 8, 16, 32, 64, 90, 128, 256, 512].map((kilobytes) => kilobytes * 1024)
+          ? (metric === 'live_matches_full_bytes'
+              ? [4, 8, 16, 32, 64, 90, 128, 256, 512, 1024, 2048, 4096, 8192]
+              : [4, 8, 16, 32, 64, 90, 128, 256, 512]
+            ).map((kilobytes) => kilobytes * 1024)
           : [100, 250, 500, 800, 1000, 1500, 2000, 3000, 5000, 10000];
   const threshold = thresholds.find((candidate) => value <= candidate);
   return threshold === undefined ? 'overflow' : String(threshold);
@@ -284,7 +290,7 @@ function aggregateBatch(batch: ClientSignalBatchV1): AggregatedSignal[] {
   const grouped = new Map<string, AggregatedSignal>();
   for (const sample of batch.samples) {
     const parsedAt = new Date(sample.observedAt);
-    const bucket = bucketFor(sample.metric, sample.value);
+    const bucket = clientSignalBucketFor(sample.metric, sample.value);
     const start = windowStart(parsedAt);
     const key = [
       start.toISOString(),

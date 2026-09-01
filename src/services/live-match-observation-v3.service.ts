@@ -65,8 +65,8 @@ export async function syncLiveMatchObservationV3(
   );
   const [rawFixtures, core, referenceData] = await Promise.all([
     dependencies.getFixtures(eventId),
-    dependencies.getCore(season.seasonCode),
-    dependencies.getReferenceData(season, eventId),
+    dependencies.getCore(season.seasonCode).catch(() => null),
+    dependencies.getReferenceData(season, eventId).catch(() => undefined),
   ]);
   const currentDesk = observedDesk.read;
   const expectedFixtureIds = core

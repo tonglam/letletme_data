@@ -67,4 +67,37 @@ describe('Live Matches V3 match-only observation', () => {
     );
     expect(dependencies.syncMatches).not.toHaveBeenCalled();
   });
+
+  test('uses the existing desk identity when Core and reference enrichment fail', async () => {
+    let received: Record<string, unknown> | undefined;
+    const existingDesk = {
+      publication: { season: TEST_SEASON.seasonCode, eventId: 12 },
+      fixtures: [{ fixtureId: 19 }],
+      servedFrom: 'REDIS_CURRENT',
+    } as never;
+    const observedDesk = { observed: 'existing-desk-pointer', read: existingDesk };
+    const dependencies: LiveMatchObservationV3Dependencies = {
+      getFixtures: mock(async () => []),
+      getCore: mock(async () => {
+        throw new Error('Core unavailable');
+      }),
+      getDeskFence: mock(async () => observedDesk),
+      getReferenceData: mock(async () => {
+        throw new Error('reference data unavailable');
+      }),
+      syncMatches: mock(async (input) => {
+        received = input as unknown as Record<string, unknown>;
+        return observationResult;
+      }),
+    };
+
+    await syncLiveMatchObservationV3(TEST_SEASON, 12, { dependencies });
+
+    expect(received).toMatchObject({
+      expectedFixtureIds: [19],
+      referenceData: undefined,
+      observedDesk,
+    });
+    expect(dependencies.syncMatches).toHaveBeenCalledTimes(1);
+  });
 });
