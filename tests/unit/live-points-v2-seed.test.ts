@@ -23,6 +23,7 @@ import {
   type LegacyFixtureFactRow,
   type PreviousTotalsRow,
 } from '../../scripts/seed-live-points-v2';
+import { validateFinalizedEventEntry } from '../../scripts/verify-live-points-v2';
 import {
   parseLivePublicationV2Manifest,
   parseLivePublicationV2OrderingFence,
@@ -596,6 +597,32 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(() => parseSeedArguments(['--all-finalized'])).toThrow();
     expect(() => parseSeedArguments(['--season', '2627', '--season', '2627'])).toThrow();
     expect(() => parseSeedArguments(['--event-id', '0'])).toThrow();
+  });
+
+  test('does not require optional per-entry finalResult when the event is finalized', () => {
+    const entry = {
+      publication: {
+        publicationId: 'publication-1',
+        generation: 1,
+        state: 'PROVISIONAL',
+      },
+      servedFrom: 'REDIS_CURRENT',
+      input: {
+        picksBase: {
+          revision: 'picks-revision-1',
+          picks: Array.from({ length: 15 }, (_, index) => ({ element: index + 1 })),
+        },
+      },
+    } as unknown as import('../../src/cache/live-publication-v2').EntryLivePublicationRead;
+    const head = {
+      publicationId: 'publication-1',
+      generation: 1,
+      picksBaseRevision: 'picks-revision-1',
+      rowCount: 15,
+      state: 'COMPLETE',
+    };
+
+    expect(validateFinalizedEventEntry(entry, head)).toEqual([]);
   });
 
   test('treats an existing V2 checkpoint as authoritative over legacy seed validation', () => {
