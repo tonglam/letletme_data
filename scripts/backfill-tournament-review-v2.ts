@@ -1,4 +1,4 @@
-import { databaseSingleton } from '../src/db/singleton';
+import { databaseSingleton, getDbClient } from '../src/db/singleton';
 import {
   getTournamentReviewV2OperationalStatus,
   processTournamentReviewObligations,
@@ -68,6 +68,39 @@ export async function runTournamentReviewBackfill(
       `V2.1 review backfill refused: --season ${args.season} is not the current FPL season`,
     );
   }
+
+  // The destructive reset is a migration-scoped operation. A later service
+  // deploy must not replay it; ordinary newly eligible scopes are handled by
+  // the scheduler after startup. The marker is written only after the full
+  // semantic/integrity gate below passes, so a failed cutover remains safely
+  // retryable on the next deployment.
+  const db = await getDbClient();
+  const [marker] = await db<
+    {
+      backfill_completed_at: Date | string | null;
+    }[]
+  >`
+    SELECT backfill_completed_at
+    FROM ops.tournament_review_v2_1_backup_manifest
+    WHERE season_id = ${season.seasonId}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  if (!marker) {
+    throw new Error('V2.1 review backfill refused: migration 0084 backup manifest is missing');
+  }
+  if (marker.backfill_completed_at !== null) {
+    return {
+      contractVersion: 'my-tournament-review-v2.1',
+      metricVersion: 'settled-review-v2',
+      season: args.season,
+      skipped: true,
+      backfillCompletedAt:
+        marker.backfill_completed_at instanceof Date
+          ? marker.backfill_completed_at.toISOString()
+          : marker.backfill_completed_at,
+    };
+  }
   let batches = 0;
   let reconciled = 0;
   let claimed = 0;
@@ -104,6 +137,16 @@ export async function runTournamentReviewBackfill(
       `V2.1 review backfill incomplete: eligible=${status.eligibleCount} ready=${counts.ready} pending=${counts.pending} waitingSource=${counts.waitingSource} processing=${counts.processing} degraded=${counts.degraded} incoherent=${incoherent} incompleteChunks=${status.publication.readyWithIncompleteChunks}`,
     );
   }
+  const completedRows = await db<{ backfill_completed_at: Date | string }[]>`
+    UPDATE ops.tournament_review_v2_1_backup_manifest
+    SET backfill_completed_at = clock_timestamp()
+    WHERE season_id = ${season.seasonId}
+      AND backfill_completed_at IS NULL
+    RETURNING backfill_completed_at
+  `;
+  if (completedRows.length !== 1) {
+    throw new Error('V2.1 review backfill completion marker was not persisted');
+  }
   return {
     contractVersion: 'my-tournament-review-v2.1',
     metricVersion: 'settled-review-v2',
@@ -114,6 +157,10 @@ export async function runTournamentReviewBackfill(
     claimed,
     published,
     failed,
+    backfillCompletedAt:
+      completedRows[0].backfill_completed_at instanceof Date
+        ? completedRows[0].backfill_completed_at.toISOString()
+        : completedRows[0].backfill_completed_at,
     status,
   };
 }

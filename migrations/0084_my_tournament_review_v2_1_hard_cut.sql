@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
   heads_sha256 text NOT NULL,
   obligations_sha256 text NOT NULL,
   restore_rehearsal_required boolean NOT NULL DEFAULT true,
+  backfill_completed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT tournament_review_v2_1_backup_manifest_sha_check CHECK (
     publications_sha256 ~ '^[0-9a-f]{64}$'
@@ -64,7 +65,7 @@ CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
   )
 );
 REVOKE ALL ON TABLE ops.tournament_review_v2_1_backup_manifest FROM PUBLIC;
-GRANT SELECT ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
+GRANT SELECT, UPDATE ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
 
 DO $migration$
 DECLARE
@@ -219,9 +220,9 @@ BEGIN
         -- the other row keeps a complete terminal record when the duplicate
         -- was only partially observed.
         producer_revision = CASE
-          WHEN canonical.source_checked_at IS NULL THEN legacy.producer_revision
-          WHEN legacy.source_checked_at IS NULL THEN canonical.producer_revision
-          WHEN legacy.source_checked_at > canonical.source_checked_at THEN
+          WHEN canonical.pg_published_at IS NULL THEN legacy.producer_revision
+          WHEN legacy.pg_published_at IS NULL THEN canonical.producer_revision
+          WHEN legacy.pg_published_at > canonical.pg_published_at THEN
             COALESCE(legacy.producer_revision, canonical.producer_revision)
           ELSE COALESCE(canonical.producer_revision, legacy.producer_revision)
         END,
@@ -395,7 +396,13 @@ ALTER TABLE competition.tournament_review_publications
     schema_version <> 'my-tournament-review-v2.1'
     OR (
       (revision = 1 AND correction_reason IS NULL AND correction_change_id IS NULL)
-      OR (revision > 1 AND correction_reason IS NOT NULL AND correction_change_id IS NOT NULL)
+      OR (
+        revision > 1
+        AND correction_reason IS NOT NULL
+        AND correction_change_id IS NOT NULL
+        AND btrim(correction_reason) <> ''
+        AND btrim(correction_change_id) <> ''
+      )
     )
   );
 

@@ -1319,14 +1319,20 @@ run_migration_plan() {
 
 run_tournament_review_hard_cut_backfill() {
   local season=${1:-}
+  local runtime_database_url=${2:-${DATA_RUNTIME_DATABASE_URL:-}}
   if ! [[ "$season" =~ ^[0-9]{4}$ ]]; then
     echo 'deploy review backfill: season must be YYYY' >&2
     return 1
   fi
+  if [[ -z "$runtime_database_url" ]]; then
+    echo 'deploy review backfill: Data runtime DATABASE_URL is required' >&2
+    return 1
+  fi
   echo "deploy review backfill: draining current-season V2.1 scopes for $season"
-  if ! MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES \
+  if ! DATABASE_URL="$runtime_database_url" \
+    MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES \
     compose run --rm -T --interactive=false \
-    -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM \
+    -e DATABASE_URL -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM \
     migration bun run db:backfill-tournament-review-v2 -- \
     --season "$season" --batch-size 100 --max-batches 10000; then
     echo 'deploy review backfill: bounded V2.1 gate failed; services remain stopped' >&2

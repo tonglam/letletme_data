@@ -2785,16 +2785,16 @@ async function resetTournamentReviewScopesForCorrection(
         WHERE obligation.season_id = ${season.seasonId}
           AND obligation.tournament_id = ${tournamentId}
       ) candidate
-      WHERE (${targetEventId}::integer IS NULL OR candidate.event_id = ${targetEventId})
-        AND (
-          -- A service-requested correction names a frozen READY scope. A
-          -- topology repair has no event target and must instead fence the
-          -- earliest existing head even when its obligation is PROCESSING,
-          -- PENDING, WAITING_SOURCE, or DEGRADED. Include a headless
-          -- obligation in the null-target candidate set so an in-flight
-          -- initial publication is fenced before the rebuild proceeds.
-          ${targetEventId}::integer IS NULL
-          OR EXISTS (
+      WHERE (
+        -- A service-requested correction names the repaired event, but that
+        -- event may never have produced a head. In that case fence the first
+        -- later frozen READY scope so every descendant is rebuilt from the
+        -- repaired source facts. A topology repair has no event target and
+        -- instead fences the earliest existing head or in-flight obligation.
+        ${targetEventId}::integer IS NULL
+        OR (
+          candidate.event_id >= ${targetEventId}
+          AND EXISTS (
             SELECT 1
             FROM competition.tournament_review_heads head
             JOIN competition.tournament_review_obligations obligation
@@ -2807,6 +2807,7 @@ async function resetTournamentReviewScopesForCorrection(
               AND obligation.state = 'READY'
           )
         )
+      )
       ORDER BY candidate.event_id
       LIMIT 1
     `;
@@ -3958,6 +3959,37 @@ async function finishReviewObligation(
           AND issue_id = ${obligation.repair_issue_id}
           AND resolved_at IS NULL
       `;
+      // `finishReviewObligation` resolves the attached issue directly so the
+      // READY transition and repair evidence stay atomic. Recompute the
+      // tournament readiness projection here as well; otherwise a successful
+      // repair could leave `insights_ready_at` NULL until an unrelated setup
+      // reconciliation happens.
+      await tx`
+        WITH issue_counts AS (
+          SELECT
+            count(*) FILTER (WHERE resolved_at IS NULL AND severity = 'warning')::integer AS warning_count
+          FROM competition.tournament_setup_issues
+          WHERE season_id = ${obligation.season_id}
+            AND tournament_id = ${obligation.tournament_id}
+        )
+        UPDATE competition.tournaments tournament
+        SET setup_warning_count = issue_counts.warning_count,
+            insights_ready_at = CASE
+              WHEN NOT EXISTS (
+                SELECT 1
+                FROM competition.tournament_setup_issues issue
+                WHERE issue.season_id = tournament.season_id
+                  AND issue.tournament_id = tournament.tournament_id
+                  AND issue.category IN ('insights', 'results')
+                  AND issue.resolved_at IS NULL
+              ) THEN COALESCE(tournament.insights_ready_at, clock_timestamp())
+              ELSE NULL
+            END,
+            updated_at = clock_timestamp()
+        FROM issue_counts
+        WHERE tournament.season_id = ${obligation.season_id}
+          AND tournament.tournament_id = ${obligation.tournament_id}
+      `;
     }
     return true;
   });
@@ -4130,12 +4162,32 @@ export async function processTournamentReviewObligations(
                 changeId: obligation.correction_change_id,
               }
             : undefined;
-        const correction =
+        const queuedCorrection =
           options.correction &&
           options.tournamentId === obligation.tournament_id &&
           options.eventId === obligation.event_id
             ? options.correction
-            : persistedCorrection;
+            : undefined;
+        // The obligation row is the durable authorization for a correction.
+        // Bull payloads are retry metadata and may be stale, duplicated, or
+        // forged by an older producer; they must never create revision >1 on
+        // their own. Headless descendants deliberately publish as initial
+        // revisions even when the repair job carries the parent correction
+        // payload. A mismatching queued value is therefore ignored rather
+        // than allowed to override the persisted provenance.
+        if (
+          queuedCorrection &&
+          (!persistedCorrection ||
+            queuedCorrection.reason !== persistedCorrection.reason ||
+            queuedCorrection.changeId !== persistedCorrection.changeId)
+        ) {
+          logInfo('Ignoring non-durable tournament review correction payload', {
+            seasonId: obligation.season_id,
+            tournamentId: obligation.tournament_id,
+            eventId: obligation.event_id,
+          });
+        }
+        const correction = persistedCorrection;
         const result = correction
           ? await publishTournamentReviewCorrection(
               season,

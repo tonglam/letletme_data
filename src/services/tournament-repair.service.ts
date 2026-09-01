@@ -267,6 +267,31 @@ async function repairTournamentSetupIssueUnlocked(
     season,
     issue.tournamentId,
   );
+
+  // Do not resolve the setup issue before the correction fence is durable. If
+  // the reset/enqueue fails after `sync` clears this row, the repair watchdog
+  // would have no unresolved issue left to retry. The audit result is the
+  // gate: only when this issue key is absent from the repaired set may we
+  // fence immutable review heads first.
+  let correctionEventIds: number[] | null = null;
+  if (reviewCorrection && !persisted.some((candidate) => candidate.issueKey === issue.issueKey)) {
+    correctionEventIds =
+      reviewCorrection.kind === 'tournament'
+        ? await requestTournamentReviewTournamentCorrection(
+            season,
+            issue.tournamentId,
+            reviewCorrection.reason,
+            reviewCorrection.changeId,
+          )
+        : await requestTournamentReviewCorrection(
+            season,
+            issue.tournamentId,
+            reviewCorrection.eventId,
+            reviewCorrection.reason,
+            reviewCorrection.changeId,
+            true,
+          );
+  }
   await tournamentSetupIssueRepository.sync(season, issue.tournamentId, persisted, {
     preserveUnresolvedIssueKeys: existingUnresolved
       .filter((existing) => existing.issueId !== issueId)
@@ -295,23 +320,7 @@ async function repairTournamentSetupIssueUnlocked(
     throw new Error(`Tournament setup repair remains incomplete: ${issue.code}`);
   }
 
-  if (reviewCorrection) {
-    const correctionEventIds =
-      reviewCorrection.kind === 'tournament'
-        ? await requestTournamentReviewTournamentCorrection(
-            season,
-            issue.tournamentId,
-            reviewCorrection.reason,
-            reviewCorrection.changeId,
-          )
-        : await requestTournamentReviewCorrection(
-            season,
-            issue.tournamentId,
-            reviewCorrection.eventId,
-            reviewCorrection.reason,
-            reviewCorrection.changeId,
-            true,
-          );
+  if (correctionEventIds !== null) {
     if (correctionEventIds.length > 0) {
       await Promise.all(
         correctionEventIds.map((correctionEventId) =>

@@ -2137,7 +2137,7 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     ),
     check(
       'tournament_review_publications_correction_check',
-      sql`schema_version <> 'my-tournament-review-v2.1' OR ((revision = 1 AND correction_reason IS NULL AND correction_change_id IS NULL) OR (revision > 1 AND correction_reason IS NOT NULL AND correction_change_id IS NOT NULL))`,
+      sql`schema_version <> 'my-tournament-review-v2.1' OR ((revision = 1 AND correction_reason IS NULL AND correction_change_id IS NULL) OR (revision > 1 AND correction_reason IS NOT NULL AND correction_change_id IS NOT NULL AND btrim(correction_reason) <> '' AND btrim(correction_change_id) <> ''))`,
     ),
   ],
 );
