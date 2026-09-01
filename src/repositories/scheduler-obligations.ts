@@ -1454,6 +1454,11 @@ export async function startSchedulerObligation(input: {
     .set({
       status: 'running',
       nextAttemptAt: null,
+      // Non-terminal failures intentionally release the previous lease while
+      // Bull waits for its backoff. Reclaim it for the retry generation before
+      // the status becomes running again; the lease constraint requires both
+      // fields to be present for in-flight work.
+      leaseOwner: sql`COALESCE(${schedulerObligationsInOps.leaseOwner}, ${randomUUID()})`,
       leaseExpiresAt: sql`clock_timestamp() + ${leaseMs} * interval '1 millisecond'`,
       updatedAt: sql`clock_timestamp()`,
     })

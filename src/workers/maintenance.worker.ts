@@ -577,6 +577,17 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               ? { idempotencyKey: job.data.snapshotIdempotencyKey }
               : {}),
           });
+          // An idempotent FINAL override may resolve to its original inactive
+          // publication after a newer revision has become active. Delivery
+          // evidence must certify the current active publication, not the
+          // historical idempotency result, while retaining the noop outcome.
+          const publicationForDelivery =
+            capture.status === 'noop'
+              ? await getActiveMyFplPublication(season, eventId)
+              : capture.publication;
+          if (!publicationForDelivery) {
+            throw new Error('My FPL snapshot has no active publication for Redis delivery');
+          }
           const redis = await dispatchMyFplSnapshotPublicationOutbox({
             limit: 20,
             eventId,
@@ -594,22 +605,22 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           if (
             !isMyFplSnapshotRedisManifestForPublication(
               activeRedisManifest,
-              capture.publication,
+              publicationForDelivery,
               season.seasonCode,
               eventId,
             )
           ) {
             throw new Error(
-              `My FPL snapshot Redis pointer does not match PostgreSQL publication revision ${capture.publication.revision}`,
+              `My FPL snapshot Redis pointer does not match PostgreSQL publication revision ${publicationForDelivery.revision}`,
             );
           }
           await recordMyFplOutboxRedisEvidence({
             freshnessWindowId: job.data.freshnessWindowId,
             deliveredEvidence: redis.deliveredEvidence,
-            publication: capture.publication,
+            publication: publicationForDelivery,
             redisRevision: activeRedisManifest.revision,
           });
-          return { ...capture, invalidation, redis };
+          return { ...capture, publication: publicationForDelivery, invalidation, redis };
         }
         case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX: {
           // Invalidation receipts are intentionally delivered before normal

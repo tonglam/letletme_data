@@ -41,7 +41,7 @@ WITH entry_hashes AS (
                    array_agg(snapshot_entry.entry_id::text ORDER BY snapshot_entry.entry_id)
                      FILTER (
                        WHERE snapshot_entry.entry_id IS NOT NULL
-                         AND (entry.started_event IS NULL OR entry.started_event <= publication.event_id)
+                         AND NOT snapshot_entry.is_empty
                      )
                  )::text,
                  '[]'
@@ -57,9 +57,6 @@ WITH entry_hashes AS (
     ON snapshot_entry.season_id = publication.season_id
    AND snapshot_entry.event_id = publication.event_id
    AND snapshot_entry.revision = publication.revision
-  LEFT JOIN competition.entries entry
-    ON entry.season_id = snapshot_entry.season_id
-   AND entry.entry_id = snapshot_entry.entry_id
   WHERE publication.entry_scope_sha256 IS NULL
   GROUP BY publication.season_id, publication.event_id, publication.revision
 ), tournament_hashes AS (
@@ -117,8 +114,8 @@ SET manifest = jsonb_build_object(
       'eventId', publication.event_id,
       'revision', publication.revision,
       'snapshotDate', publication.snapshot_date,
-      'sourceCheckedAt', publication.source_checked_at,
-      'publishedAt', publication.published_at,
+      'sourceCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+      'publishedAt', to_char(publication.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
       'kind', publication.kind,
       'contentSha256', publication.content_sha256,
       'expectedEntryCount', publication.expected_entry_count,
@@ -131,8 +128,8 @@ SET manifest = jsonb_build_object(
       'livePublicationId', COALESCE(publication.live_publication_id::text, outbox.manifest->>'livePublicationId'),
       'liveRevision', COALESCE(publication.live_revision, outbox.manifest->>'liveRevision'),
       'algorithmVersion', COALESCE(publication.algorithm_version, outbox.manifest->>'algorithmVersion'),
-      'sourceMinCheckedAt', publication.source_checked_at,
-      'sourceMaxCheckedAt', COALESCE(publication.source_max_checked_at, publication.source_checked_at)
+      'sourceMinCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+      'sourceMaxCheckedAt', to_char(COALESCE(publication.source_max_checked_at, publication.source_checked_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     ),
     status = 'PENDING',
     available_at = clock_timestamp(),
@@ -179,8 +176,8 @@ SELECT gen_random_uuid(),
          'eventId', publication.event_id,
          'revision', publication.revision,
          'snapshotDate', publication.snapshot_date,
-         'sourceCheckedAt', publication.source_checked_at,
-         'publishedAt', publication.published_at,
+         'sourceCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+         'publishedAt', to_char(publication.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
          'kind', publication.kind,
          'contentSha256', publication.content_sha256,
          'expectedEntryCount', publication.expected_entry_count,
@@ -193,8 +190,8 @@ SELECT gen_random_uuid(),
          'livePublicationId', publication.live_publication_id,
          'liveRevision', publication.live_revision,
          'algorithmVersion', publication.algorithm_version,
-         'sourceMinCheckedAt', publication.source_checked_at,
-         'sourceMaxCheckedAt', COALESCE(publication.source_max_checked_at, publication.source_checked_at)
+         'sourceMinCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+         'sourceMaxCheckedAt', to_char(COALESCE(publication.source_max_checked_at, publication.source_checked_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
        ),
        'PENDING',
        clock_timestamp(),
