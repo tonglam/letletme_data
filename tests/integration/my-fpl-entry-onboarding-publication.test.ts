@@ -10,6 +10,7 @@ import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import {
   entryLiveInputFromFplPicks,
   entryLiveV2Key,
+  isEntryPublicationActiveAndCheckpointedV2,
   publishEntryLiveInputV2,
   publishLivePublicationV2,
   readEntryLiveInputV2,
@@ -341,6 +342,7 @@ describe('My FPL onboarding publication correction', () => {
       entryId: ENTRY_IDS[0],
     });
     expect(currentEntry).not.toBeNull();
+    expect(await isEntryPublicationActiveAndCheckpointedV2(currentEntry!.publication)).toBe(true);
     await publishEntryLiveInputV2({
       season: SEASON.seasonCode,
       eventId: EVENT_ID,
@@ -349,6 +351,7 @@ describe('My FPL onboarding publication correction', () => {
       sourceCheckedAt: CAPTURE_NOW,
       generationFloor: currentEntry!.publication.generation,
     });
+    expect(await isEntryPublicationActiveAndCheckpointedV2(currentEntry!.publication)).toBe(false);
     // Removing only the active pointer must therefore stay recoverable/missing
     // instead of taking the marker-only fast path from the older publication.
     const checkpointCache = await redisSingleton.getClient();

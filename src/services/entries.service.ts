@@ -21,6 +21,7 @@ import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../
 import {
   clearEntryCheckpointDesiredV2,
   entryLiveInputFromFplPicks,
+  isEntryPublicationActiveAndCheckpointedV2,
   markEntryPublicationCheckpointedV2,
   publishEntryLiveFinalResultV2,
   publishEntryLiveInputV2,
@@ -138,7 +139,9 @@ export async function checkpointEntryLiveInputV2(
   // Treat that marker as an idempotent success instead of re-writing every
   // already durable entry (or reporting a false missing input).
   if (!desired && candidate.publication.checkpointedAt !== null) {
-    return 'checkpointed';
+    return (await isEntryPublicationActiveAndCheckpointedV2(candidate.publication))
+      ? 'checkpointed'
+      : 'missing';
   }
   // A provider write can publish before its asynchronous durable checkpoint
   // obligation is visible to this worker. Re-create the obligation from the

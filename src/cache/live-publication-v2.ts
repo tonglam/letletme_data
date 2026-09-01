@@ -1018,6 +1018,18 @@ end
 return {'changed'}
 `;
 
+// Marker-only checkpoint success is valid only while the same publication is
+// still the active serving head.  Keep the identity check in Redis Lua so a
+// concurrent promotion cannot interleave between the read and the decision.
+const CHECKPOINT_ENTRY_ACTIVE_FENCE_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {'changed'} end
+local ok, value = pcall(cjson.decode, raw)
+if not ok or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) then return {'changed'} end
+if value.checkpointedAt == nil or value.checkpointedAt == cjson.null then return {'changed'} end
+return {'checkpointed'}
+`;
+
 const CLEAR_CHECKPOINT_DESIRED_SCRIPT = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
@@ -2214,6 +2226,34 @@ export async function markEntryPublicationCheckpointedV2(
     ),
   );
   return result[0] === 'checkpointed' ? parseEntryManifest(result[1] ?? null, scope) : null;
+}
+
+/**
+ * Atomically fence the marker-only checkpoint path to the current active
+ * publication. A caller may have read a checkpointed publication just before
+ * a newer generation was promoted; this Lua check prevents that stale read
+ * from being reported as a durable success.
+ */
+export async function isEntryPublicationActiveAndCheckpointedV2(
+  publication: EntryLivePublicationV2,
+  redisClient?: Redis,
+): Promise<boolean> {
+  const scope = {
+    season: publication.season,
+    eventId: publication.eventId,
+    entryId: publication.entryId,
+  } as const;
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const result = promotionResult(
+    await redis.eval(
+      CHECKPOINT_ENTRY_ACTIVE_FENCE_SCRIPT,
+      1,
+      entryLiveV2Key(scope, 'active'),
+      publication.publicationId,
+      String(publication.generation),
+    ),
+  );
+  return result[0] === 'checkpointed';
 }
 
 /**
