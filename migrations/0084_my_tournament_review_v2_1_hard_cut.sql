@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
     AND obligations_sha256 ~ '^[0-9a-f]{64}$'
   )
 );
+REVOKE ALL ON TABLE ops.tournament_review_v2_1_backup_manifest FROM PUBLIC;
+GRANT SELECT ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
 
 DO $migration$
 DECLARE
@@ -159,7 +161,17 @@ ALTER TABLE competition.tournament_review_obligations
   ADD COLUMN IF NOT EXISTS last_observed_at timestamptz,
   ADD COLUMN IF NOT EXISTS last_noop_at timestamptz,
   ADD COLUMN IF NOT EXISTS last_semantic_change_at timestamptz,
-  ADD COLUMN IF NOT EXISTS repair_issue_id bigint;
+  ADD COLUMN IF NOT EXISTS repair_issue_id bigint,
+  ADD COLUMN IF NOT EXISTS correction_reason text,
+  ADD COLUMN IF NOT EXISTS correction_change_id text;
+ALTER TABLE competition.tournament_review_obligations
+  ADD CONSTRAINT tournament_review_obligations_correction_check CHECK (
+    (correction_reason IS NULL AND correction_change_id IS NULL)
+    OR (
+      btrim(correction_reason) <> ''
+      AND btrim(correction_change_id) <> ''
+    )
+  );
 
 CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks (
   season_id smallint NOT NULL,

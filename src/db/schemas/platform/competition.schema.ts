@@ -2222,6 +2222,8 @@ export const tournamentReviewObligationsInCompetition = competition.table(
       mode: 'date',
     }),
     repairIssueId: bigint('repair_issue_id', { mode: 'number' }),
+    correctionReason: text('correction_reason'),
+    correctionChangeId: text('correction_change_id'),
   },
   (table) => [
     primaryKey({
@@ -2291,6 +2293,10 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     check(
       'tournament_review_obligations_group_assignment_payload_check',
       sql`group_assignment_payload IS NULL OR jsonb_typeof(group_assignment_payload) = 'object'`,
+    ),
+    check(
+      'tournament_review_obligations_correction_check',
+      sql`(correction_reason IS NULL AND correction_change_id IS NULL) OR (btrim(correction_reason) <> '' AND btrim(correction_change_id) <> '')`,
     ),
   ],
 );

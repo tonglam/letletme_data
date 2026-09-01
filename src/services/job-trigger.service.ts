@@ -100,6 +100,14 @@ const COMPATIBILITY_MANUAL_ALIASES: TriggerableJobInfo[] = [
   schedule: 'manual compatibility alias; schedule is owned by the registry',
 }));
 
+const EXPLICIT_MANUAL_JOBS: TriggerableJobInfo[] = [
+  {
+    name: 'tournament-review-correction',
+    description: 'Service-only settled tournament review correction with Change ID provenance',
+    schedule: 'manual correction; no scheduler cadence',
+  },
+];
+
 function requirePlayerPricesChangeDate(input: unknown): string {
   const changeDate =
     input && typeof input === 'object' && !Array.isArray(input)
@@ -495,7 +503,10 @@ export function listTriggerableJobs(): TriggerableJobInfo[] {
       schedule: `${definition.cadence} (${definition.timezone}); catch-up=${definition.catchUpPolicy}`,
     }));
   const byName = new Map(
-    [...registered, ...COMPATIBILITY_MANUAL_ALIASES].map((job) => [job.name, job]),
+    [...registered, ...COMPATIBILITY_MANUAL_ALIASES, ...EXPLICIT_MANUAL_JOBS].map((job) => [
+      job.name,
+      job,
+    ]),
   );
   return [...byName.values()];
 }

@@ -68,7 +68,6 @@ export async function runTournamentReviewBackfill(
   let published = 0;
   let failed = 0;
 
-  let lastClaimed = 0;
   while (batches < args.maxBatches) {
     batches += 1;
     const result = await processTournamentReviewObligations(season, {
@@ -78,8 +77,7 @@ export async function runTournamentReviewBackfill(
     claimed += result.claimed;
     published += result.published;
     failed += result.failed;
-    lastClaimed = result.claimed;
-    if (lastClaimed === 0) break;
+    if (result.claimed === 0) break;
   }
 
   const status = await getTournamentReviewV2OperationalStatus(season);
@@ -97,9 +95,6 @@ export async function runTournamentReviewBackfill(
     throw new Error(
       `V2.1 review backfill incomplete: eligible=${status.eligibleCount} ready=${counts.ready} pending=${counts.pending} waitingSource=${counts.waitingSource} processing=${counts.processing} degraded=${counts.degraded} incoherent=${incoherent} incompleteChunks=${status.publication.readyWithIncompleteChunks}`,
     );
-  }
-  if (batches >= args.maxBatches && lastClaimed > 0) {
-    throw new Error(`V2.1 review backfill exceeded max batches (${args.maxBatches})`);
   }
   return {
     contractVersion: 'my-tournament-review-v2.1',

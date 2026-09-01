@@ -128,6 +128,8 @@ describe('My Tournament Review V2 migration', () => {
     expect(hardCutMigration).toContain('last_noop_at timestamptz');
     expect(hardCutMigration).toContain('last_semantic_change_at timestamptz');
     expect(hardCutMigration).toContain('repair_issue_id bigint');
+    expect(hardCutMigration).toContain('ADD COLUMN IF NOT EXISTS correction_reason text');
+    expect(hardCutMigration).toContain('ADD COLUMN IF NOT EXISTS correction_change_id text');
     expect(hardCutMigration).toContain(
       'CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks',
     );

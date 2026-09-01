@@ -2676,10 +2676,12 @@ export async function requestTournamentReviewCorrection(
         ready_at = NULL,
         degraded_at = NULL,
         ready_revision = NULL,
-        last_error_code = NULL,
-        last_failure_fingerprint = NULL,
-        repair_issue_id = NULL,
-        updated_at = clock_timestamp()
+	        last_error_code = NULL,
+	        last_failure_fingerprint = NULL,
+	        repair_issue_id = NULL,
+	        correction_reason = ${reason.trim()},
+	        correction_change_id = ${changeId.trim()},
+	        updated_at = clock_timestamp()
     WHERE obligation.season_id = ${season.seasonId}
       AND obligation.tournament_id = ${tournamentId}
       AND obligation.event_id = ${eventId}
@@ -3495,6 +3497,8 @@ type ClaimedReviewObligation = {
   execution_attempts: number;
   source_rechecks: number;
   repair_issue_id: number | null;
+  correction_reason: string | null;
+  correction_change_id: string | null;
 };
 
 async function claimTournamentReviewObligations(
@@ -3537,8 +3541,9 @@ async function claimTournamentReviewObligations(
         AND obligation.event_id = candidates.event_id
       RETURNING obligation.season_id, obligation.tournament_id, obligation.event_id,
                 obligation.format, obligation.eligible_at,
-                obligation.execution_attempts, obligation.source_rechecks,
-                obligation.repair_issue_id
+	                obligation.execution_attempts, obligation.source_rechecks,
+	                obligation.repair_issue_id,
+	                obligation.correction_reason, obligation.correction_change_id
     `,
   );
   return { owner, rows };
@@ -3664,7 +3669,8 @@ async function finishReviewObligation(
     UPDATE competition.tournament_review_obligations
     SET state = 'READY', ready_revision = ${result.revision}, ready_at = clock_timestamp(),
         next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
-        last_error_code = NULL, last_failure_fingerprint = NULL, repair_issue_id = NULL,
+	        last_error_code = NULL, last_failure_fingerprint = NULL, repair_issue_id = NULL,
+        correction_reason = NULL, correction_change_id = NULL,
         updated_at = clock_timestamp()
     WHERE season_id = ${obligation.season_id}
       AND tournament_id = ${obligation.tournament_id}
@@ -3849,22 +3855,33 @@ export async function processTournamentReviewObligations(
         continue;
       }
       try {
-        const result =
+        const persistedCorrection =
+          obligation.correction_reason && obligation.correction_change_id
+            ? {
+                mode: 'CORRECTION' as const,
+                reason: obligation.correction_reason,
+                changeId: obligation.correction_change_id,
+              }
+            : undefined;
+        const correction =
           options.correction &&
           options.tournamentId === obligation.tournament_id &&
           options.eventId === obligation.event_id
-            ? await publishTournamentReviewCorrection(
-                season,
-                obligation.tournament_id,
-                obligation.event_id,
-                options.correction.reason,
-                options.correction.changeId,
-              )
-            : await publishTournamentReviewScope(
-                season,
-                obligation.tournament_id,
-                obligation.event_id,
-              );
+            ? options.correction
+            : persistedCorrection;
+        const result = correction
+          ? await publishTournamentReviewCorrection(
+              season,
+              obligation.tournament_id,
+              obligation.event_id,
+              correction.reason,
+              correction.changeId,
+            )
+          : await publishTournamentReviewScope(
+              season,
+              obligation.tournament_id,
+              obligation.event_id,
+            );
         // A lost lease means another worker owns the obligation. The immutable
         // publication is idempotent, but this worker must not claim completion.
         if (!leaseLost.has(key)) {
@@ -4044,7 +4061,7 @@ export async function getTournamentReviewV2OperationalStatus(
           ON publication.season_id = obligation.season_id
          AND publication.tournament_id = obligation.tournament_id
          AND publication.event_id = obligation.event_id
-         AND publication.revision = obligation.ready_revision
+         AND publication.revision = head.revision
         WHERE obligation.season_id = ${season.seasonId}
       )
       SELECT count(*)::integer AS eligible_count,
@@ -4069,13 +4086,10 @@ export async function getTournamentReviewV2OperationalStatus(
                    AND chunks_complete
                  )
              )::integer AS ready_incoherent_count,
-             count(*) FILTER (
-               WHERE state = 'READY'
-                 AND ready_revision IS NOT NULL
-                 AND head_revision = ready_revision
-                 AND head_content_sha256 = publication_content_sha256
-                 AND chunks_complete
-             )::integer AS ready_chunk_complete_count,
+	             count(*) FILTER (
+	               WHERE state = 'READY'
+	                 AND chunks_complete
+	             )::integer AS ready_chunk_complete_count,
              min(eligible_at) FILTER (WHERE state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING')) AS oldest_active_eligible_at,
              min(degraded_at) FILTER (WHERE state = 'DEGRADED') AS oldest_degraded_at,
              max(updated_at) AS latest_updated_at
