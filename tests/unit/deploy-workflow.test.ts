@@ -172,6 +172,7 @@ describe('release workflow gates', () => {
     const localAdmission = deployScript.indexOf(
       'if ! drain_content_worker_queues_for_deploy; then',
     );
+    const localSchedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
     const localPrepare = deployScript.indexOf(
@@ -181,12 +182,15 @@ describe('release workflow gates', () => {
     expect(localPause).toBeGreaterThan(-1);
     expect(localPause).toBeLessThan(localAdmission);
     expect(localAdmission).toBeLessThan(localProbe);
+    expect(localAdmission).toBeLessThan(localSchedulerStop);
+    expect(localSchedulerStop).toBeLessThan(localProbe);
     expect(localProbe).toBeLessThan(localStop);
     expect(localStop).toBeLessThan(localPrepare);
     expect(localPrepare).toBeLessThan(localRenew);
     expect(deployScript).toContain('DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES');
 
     const workflowPause = workflow.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
+    const workflowSchedulerStop = workflow.indexOf('if ! compose stop -t 45 scheduler; then');
     const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const workflowStop = workflow.indexOf('if ! compose stop -t 45 content-worker; then');
     const workflowAdmission = workflow.indexOf('if ! drain_content_worker_queues_for_deploy; then');
@@ -197,10 +201,13 @@ describe('release workflow gates', () => {
     expect(workflowPause).toBeGreaterThan(-1);
     expect(workflowPause).toBeLessThan(workflowAdmission);
     expect(workflowAdmission).toBeLessThan(workflowProbe);
+    expect(workflowAdmission).toBeLessThan(workflowSchedulerStop);
+    expect(workflowSchedulerStop).toBeLessThan(workflowProbe);
     expect(workflowProbe).toBeLessThan(workflowStop);
     expect(workflowStop).toBeLessThan(workflowPrepare);
     expect(workflowPrepare).toBeLessThan(workflowRenew);
     expect(workflow).toContain('content_worker_fenced=true');
+    expect(workflow).toContain('scheduler_stop_attempted=true');
     expect(workflow).toContain(
       '[ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]',
     );
@@ -268,7 +275,8 @@ describe('release workflow gates', () => {
     );
     expect(workflow).toContain('timeout: 30m');
     expect(workflow).toContain('compose stop -t 45 content-worker');
-    expect(workflow).toContain('compose stop -t 45 scheduler media-worker');
+    expect(workflow).toContain('compose stop -t 45 scheduler;');
+    expect(workflow).toContain('compose stop -t 45 media-worker');
     expect(workflow).toContain('"$old_media_present" "$old_image_id" && \\');
     expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');

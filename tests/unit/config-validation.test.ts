@@ -206,6 +206,7 @@ describe('production environment preflight', () => {
       'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
     );
     const redisQuiescence = workflow.indexOf('wait_for_scoped_queue_quiescence 150 2');
+    const schedulerStop = workflow.indexOf('if ! compose stop -t 45 scheduler; then');
     const migrate = workflow.indexOf('bun run db:migrate');
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
     const roleVerify = workflow.indexOf('bun run db:verify-runtime-logins', migrate);
@@ -222,6 +223,8 @@ describe('production environment preflight', () => {
     expect(stopServices).toBeGreaterThan(identityContract);
     expect(databaseQuiescence).toBeLessThan(stopServices);
     expect(redisQuiescence).toBeLessThan(stopServices);
+    expect(schedulerStop).toBeGreaterThan(databaseQuiescence);
+    expect(schedulerStop).toBeLessThan(redisQuiescence);
     const postStopDatabaseQuiescence = workflow.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
       stopServices,
@@ -348,6 +351,8 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('DEPLOY_COMMITTED=false');
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=false');
     expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=true');
+    expect(deployScript).toContain('DEPLOY_SCHEDULER_STOP_ATTEMPTED=false');
+    expect(deployScript).toContain('DEPLOY_SCHEDULER_STOP_ATTEMPTED=true');
     expect(deployScript).toContain('"$DEPLOY_COMMITTED" = false &&');
     expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');
     expect(deployScript).toContain('deploy-host-grok-runner.sh');
