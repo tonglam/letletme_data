@@ -251,6 +251,94 @@ function hasDurableFinalEntryInput(seasonCode: string, entryId: SQL): SQL {
           THEN jsonb_array_length(input_head.input_payload->'picksBase'->'picks') = 15
           ELSE false
         END
+        AND EXISTS (
+          SELECT 1
+          FROM (
+            SELECT
+              jsonb_typeof(raw_pick.value) = 'object' AS is_object,
+              CASE
+                WHEN jsonb_typeof(raw_pick.value->'element') = 'number'
+                THEN (raw_pick.value->>'element')::numeric
+                ELSE NULL
+              END AS element,
+              CASE
+                WHEN jsonb_typeof(raw_pick.value->'position') = 'number'
+                THEN (raw_pick.value->>'position')::numeric
+                ELSE NULL
+              END AS position,
+              CASE
+                WHEN jsonb_typeof(raw_pick.value->'multiplier') = 'number'
+                THEN (raw_pick.value->>'multiplier')::numeric
+                ELSE NULL
+              END AS multiplier,
+              CASE
+                WHEN jsonb_typeof(raw_pick.value->'isCaptain') = 'boolean'
+                THEN (raw_pick.value->>'isCaptain')::boolean
+                ELSE NULL
+              END AS is_captain,
+              CASE
+                WHEN jsonb_typeof(raw_pick.value->'isViceCaptain') = 'boolean'
+                THEN (raw_pick.value->>'isViceCaptain')::boolean
+                ELSE NULL
+              END AS is_vice_captain
+            FROM jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(input_head.input_payload->'picksBase'->'picks') = 'array'
+                THEN input_head.input_payload->'picksBase'->'picks'
+                ELSE '[]'::jsonb
+              END
+            ) AS raw_pick(value)
+          ) AS pick
+          HAVING count(*) = 15
+             AND count(*) FILTER (
+               WHERE pick.is_object
+                 AND pick.element IS NOT NULL
+                 AND pick.element = trunc(pick.element)
+                 AND pick.element > 0
+                 AND pick.element <= 9007199254740991
+                 AND pick.position IS NOT NULL
+                 AND pick.position = trunc(pick.position)
+                 AND pick.position BETWEEN 1 AND 15
+                 AND pick.multiplier IS NOT NULL
+                 AND pick.multiplier = trunc(pick.multiplier)
+                 AND pick.multiplier BETWEEN 0 AND 3
+                 AND pick.is_captain IS NOT NULL
+                 AND pick.is_vice_captain IS NOT NULL
+                 AND NOT (pick.is_captain AND pick.is_vice_captain)
+             ) = 15
+             AND count(DISTINCT pick.element) = 15
+             AND count(DISTINCT pick.position) = 15
+             AND min(pick.position) = 1
+             AND max(pick.position) = 15
+             AND count(*) FILTER (WHERE pick.is_captain) = 1
+             AND count(*) FILTER (WHERE pick.is_vice_captain) = 1
+             AND count(*) FILTER (
+               WHERE pick.is_object
+                 AND EXISTS (
+                   SELECT 1
+                   FROM competition.entry_event_picks AS stored_pick
+                   WHERE stored_pick.season_id = input_head.season_id
+                     AND stored_pick.entry_id = input_head.entry_id
+                     AND stored_pick.event_id = input_head.event_id
+                     AND stored_pick.position = pick.position
+                     AND stored_pick.element_id = pick.element
+                     AND stored_pick.multiplier = pick.multiplier
+                     AND stored_pick.is_captain = pick.is_captain
+                     AND stored_pick.is_vice_captain = pick.is_vice_captain
+                     AND (
+                       (pick.position = 1
+                         AND stored_pick.active_chip IS NOT DISTINCT FROM input_head.input_payload->'picksBase'->>'chip'
+                         AND stored_pick.transfers = (input_head.input_payload->'picksBase'->>'transferCount')::numeric
+                         AND stored_pick.transfers_cost = (input_head.input_payload->'picksBase'->>'transferCost')::numeric)
+                       OR
+                       (pick.position <> 1
+                         AND stored_pick.active_chip IS NULL
+                         AND stored_pick.transfers IS NULL
+                         AND stored_pick.transfers_cost IS NULL)
+                     )
+                 )
+             ) = 15
+        )
         AND jsonb_typeof(input_head.input_payload->'picksBase'->'chip') IN ('null', 'string')
         AND jsonb_typeof(input_head.input_payload->'picksBase'->'transferCount') = 'number'
         AND jsonb_typeof(input_head.input_payload->'picksBase'->'transferCost') = 'number'

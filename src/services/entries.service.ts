@@ -823,7 +823,6 @@ function buildFinalEntryLiveInputFromCheckpoint(
     !Number.isFinite(head.sourceCheckedAt.getTime()) ||
     !Number.isFinite(head.contentUpdatedAt.getTime()) ||
     !Number.isFinite(head.checkpointedAt.getTime()) ||
-    head.checkpointedAt.getTime() < head.sourceCheckedAt.getTime() ||
     durableLiveInputContentHash(rows) !== head.contentSha256
   ) {
     return null;

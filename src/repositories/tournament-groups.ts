@@ -181,6 +181,7 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
               totalNetPoints: sql`excluded.total_net_points`,
               qualified: sql`excluded.qualified`,
               overallRank: sql`excluded.overall_rank`,
+              officialSourceCheckedAt: sql`COALESCE(excluded.official_source_checked_at, ${tournamentGroupsInCompetition.officialSourceCheckedAt})`,
               updatedAt: new Date(),
             },
           });

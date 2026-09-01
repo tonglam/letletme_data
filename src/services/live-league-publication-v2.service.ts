@@ -10,6 +10,7 @@ import {
   readLiveLeaguePublicationV2Pointer,
   liveLeagueV2Key,
   publishLiveLeaguePublicationV2,
+  retireLiveLeaguePublicationV2,
   setLiveLeagueCheckpointDesiredV2,
   type H2HMatchIndexRow,
   type H2HMatchPayload,
@@ -32,8 +33,9 @@ import {
   reconcileLiveLeagueCheckpointV2,
 } from './live-league-checkpoint-v2.service';
 import { rebuildFinalEntryLiveInputsV2 } from './entries.service';
+import { enqueueEntryInfoSyncJob } from '../jobs/entry-sync-enqueue';
 import { contentHash } from '../utils/content-hash';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import { mapWithConcurrency } from '../utils/async';
 
 const LIVE_LEAGUE_ALGORITHM_VERSION = 'live-league-v2:classic:1';
@@ -295,6 +297,36 @@ async function publishClassicRoster(
       );
     }
   }
+  const finalizationAt =
+    completeRows.find((row) => row.finalizationAt !== null)?.finalizationAt ?? null;
+  const entriesNeedingProfileRefresh =
+    global.publication.state === 'FINALIZED'
+      ? eligibleRows
+          .filter((row) => !isTimestampAtOrAfter(row.profileSourceCheckedAt, finalizationAt))
+          .map((row) => row.entryId)
+      : [];
+  if (entriesNeedingProfileRefresh.length > 0 && finalizationAt !== null) {
+    const entryIds = [...new Set(entriesNeedingProfileRefresh)].sort((left, right) => left - right);
+    const entrySetRevision = contentHash(entryIds);
+    try {
+      await enqueueEntryInfoSyncJob(season, 'reconcile', {
+        entryIds,
+        eventId,
+        queueKey: `live-final-profile-${season.seasonCode}-${eventId}`,
+        deduplicationId: `live-final-profile-${season.seasonCode}-${eventId}-${entrySetRevision}`,
+        deduplicationCadenceMs: 60_000,
+      });
+    } catch (error) {
+      // The publication remains pending below. A queue failure must never
+      // replace the last complete board with a falsely finalized identity.
+      logError('Failed to enqueue finalization profile refresh', error, {
+        season: season.seasonCode,
+        eventId,
+        tournamentId: roster.tournamentId,
+        entries: entryIds.length,
+      });
+    }
+  }
   const allFinal =
     global.publication.state !== 'FINALIZED' ||
     eligibleRows.every((row) => {
@@ -302,7 +334,7 @@ async function publishClassicRoster(
       return (
         read?.input.finalResult !== null &&
         read?.input.finalResult !== undefined &&
-        isTimestampAtOrAfter(row.profileSourceCheckedAt, row.finalizationAt)
+        isTimestampAtOrAfter(row.profileSourceCheckedAt, finalizationAt)
       );
     });
   if (inputs.size !== eligibleRows.length || !allFinal) {
@@ -639,6 +671,124 @@ async function findOfficialH2HTournaments(
     );
 }
 
+function h2hScopeKeyPrefix(season: string, eventId: number): string {
+  return `llm:data:v2:fpl:league-live:${season}:${eventId}`;
+}
+
+function h2hHeadTournamentIdFromKey(key: string, season: string, eventId: number): number | null {
+  const prefix = `${h2hScopeKeyPrefix(season, eventId)}:`;
+  const suffix = ':h2h-head:active';
+  if (!key.startsWith(prefix) || !key.endsWith(suffix)) return null;
+  const tournamentId = key.slice(prefix.length, -suffix.length);
+  return /^\d+$/.test(tournamentId) && Number(tournamentId) > 0 ? Number(tournamentId) : null;
+}
+
+function h2hMatchScopeFromKey(
+  key: string,
+  season: string,
+  eventId: number,
+): { tournamentId: number; matchId: number } | null {
+  const prefix = `${h2hScopeKeyPrefix(season, eventId)}:`;
+  const match = key.slice(prefix.length).match(/^(\d+):h2h-match-(\d+):active$/);
+  if (!match) return null;
+  const tournamentId = Number(match[1]);
+  const matchId = Number(match[2]);
+  return Number.isSafeInteger(tournamentId) &&
+    tournamentId > 0 &&
+    Number.isSafeInteger(matchId) &&
+    matchId > 0
+    ? { tournamentId, matchId }
+    : null;
+}
+
+async function scanH2HPublicationKeys(
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  season: string,
+  eventId: number,
+  kind: 'head' | 'match',
+): Promise<string[]> {
+  const pattern =
+    kind === 'head'
+      ? `${h2hScopeKeyPrefix(season, eventId)}:*:h2h-head:active`
+      : `${h2hScopeKeyPrefix(season, eventId)}:*:h2h-match-*:active`;
+  const keys: string[] = [];
+  let cursor = '0';
+  do {
+    const result = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', '200');
+    cursor = result[0];
+    keys.push(...result[1]);
+  } while (cursor !== '0');
+  return keys;
+}
+
+async function retireInactiveH2HPublications(
+  season: FplSeasonRef,
+  eventId: number,
+  activeTournamentIds: ReadonlySet<number>,
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<void> {
+  try {
+    const [headKeys, matchKeys] = await Promise.all([
+      scanH2HPublicationKeys(redis, season.seasonCode, eventId, 'head'),
+      scanH2HPublicationKeys(redis, season.seasonCode, eventId, 'match'),
+    ]);
+    const orphanTournamentIds = new Set(
+      headKeys
+        .map((key) => h2hHeadTournamentIdFromKey(key, season.seasonCode, eventId))
+        .filter((id): id is number => id !== null && !activeTournamentIds.has(id)),
+    );
+    const orphanMatches = matchKeys
+      .map((key) => h2hMatchScopeFromKey(key, season.seasonCode, eventId))
+      .filter(
+        (scope): scope is { tournamentId: number; matchId: number } =>
+          scope !== null && !activeTournamentIds.has(scope.tournamentId),
+      );
+    for (const match of orphanMatches) orphanTournamentIds.add(match.tournamentId);
+    if (orphanTournamentIds.size === 0) return;
+
+    const scopes = [...orphanTournamentIds].flatMap((tournamentId) => [
+      {
+        season: season.seasonCode,
+        eventId,
+        tournamentId,
+        scope: 'H2H_HEAD' as const,
+      },
+      {
+        season: season.seasonCode,
+        eventId,
+        tournamentId,
+        scope: 'H2H_STANDINGS' as const,
+      },
+      ...orphanMatches
+        .filter((match) => match.tournamentId === tournamentId)
+        .map((match) => ({
+          season: season.seasonCode,
+          eventId,
+          tournamentId,
+          scope: 'H2H_MATCH' as const,
+          matchId: match.matchId,
+        })),
+    ]);
+    const retired = await mapWithConcurrency(scopes, 8, async (scope) =>
+      retireLiveLeaguePublicationV2(scope, redis),
+    );
+    logInfo('Inactive H2H league publications retired', {
+      season: season.seasonCode,
+      eventId,
+      tournaments: orphanTournamentIds.size,
+      scopes: retired.filter(Boolean).length,
+    });
+  } catch (error) {
+    // Retirement is a background hygiene pass. A Redis scan or an exact
+    // pointer CAS failure must never block active tournament publication.
+    logWarn('Failed to retire inactive H2H league publications', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+}
+
 async function findOfficialH2HMatches(
   season: FplSeasonRef,
   tournamentId: number,
@@ -742,29 +892,85 @@ async function findOfficialH2HStandings(
 ): Promise<H2HStandingsRead> {
   const client = await getDbClient();
   const rows = await client<H2HStandingRow[]>`
+    WITH roster AS (
+      SELECT
+        groups.entry_id,
+        entry.entry_name,
+        entry.player_name,
+        MAX(groups.official_source_checked_at) AS source_checked_at
+      FROM competition.tournament_groups AS groups
+      LEFT JOIN competition.entries AS entry
+        ON entry.season_id = groups.season_id
+       AND entry.entry_id = groups.entry_id
+      WHERE groups.season_id = ${season.seasonId}
+        AND groups.tournament_id = ${tournamentId}
+        AND groups.entry_id IS NOT NULL
+      GROUP BY groups.entry_id, entry.entry_name, entry.player_name
+    ), official_sides AS (
+      SELECT
+        battle.home_entry_id AS entry_id,
+        battle.home_match_points AS match_points,
+        battle.home_net_points AS points_for
+      FROM competition.tournament_battle_group_results AS battle
+      WHERE battle.season_id = ${season.seasonId}
+        AND battle.tournament_id = ${tournamentId}
+        AND battle.event_id <= ${eventId}
+        AND battle.official_match_id IS NOT NULL
+        AND battle.home_entry_id IS NOT NULL
+      UNION ALL
+      SELECT
+        battle.away_entry_id AS entry_id,
+        battle.away_match_points AS match_points,
+        battle.away_net_points AS points_for
+      FROM competition.tournament_battle_group_results AS battle
+      WHERE battle.season_id = ${season.seasonId}
+        AND battle.tournament_id = ${tournamentId}
+        AND battle.event_id <= ${eventId}
+        AND battle.official_match_id IS NOT NULL
+        AND battle.away_entry_id IS NOT NULL
+    ), aggregates AS (
+      SELECT
+        roster.entry_id AS "entryId",
+        roster.entry_name AS "entryName",
+        roster.player_name AS "playerName",
+        COALESCE(SUM(official_sides.match_points), 0)::integer AS "matchPoints",
+        COUNT(official_sides.match_points)::integer AS played,
+        COUNT(*) FILTER (WHERE official_sides.match_points = 3)::integer AS won,
+        COUNT(*) FILTER (WHERE official_sides.match_points = 1)::integer AS drawn,
+        COUNT(*) FILTER (WHERE official_sides.match_points = 0)::integer AS lost,
+        COALESCE(SUM(official_sides.points_for), 0)::integer AS "pointsFor",
+        roster.source_checked_at AS "sourceCheckedAt"
+      FROM roster
+      LEFT JOIN official_sides ON official_sides.entry_id = roster.entry_id
+      GROUP BY
+        roster.entry_id,
+        roster.entry_name,
+        roster.player_name,
+        roster.source_checked_at
+    ), ranked AS (
+      SELECT
+        aggregates.*,
+        RANK() OVER (ORDER BY aggregates."matchPoints" DESC, aggregates."pointsFor" DESC) AS rank
+      FROM aggregates
+    )
     SELECT
-      groups.entry_id AS "entryId",
-      entry.entry_name AS "entryName",
-      entry.player_name AS "playerName",
-      groups.group_rank AS "rank",
-      groups.group_points AS "matchPoints",
-      groups.played,
-      groups.won,
-      groups.drawn,
-      groups.lost,
-      groups.total_net_points AS "pointsFor",
-      groups.updated_at AS "sourceCheckedAt",
+      ranked."entryId",
+      ranked."entryName",
+      ranked."playerName",
+      ranked.rank,
+      ranked."matchPoints",
+      ranked.played,
+      ranked.won,
+      ranked.drawn,
+      ranked.lost,
+      ranked."pointsFor",
+      ranked."sourceCheckedAt",
       event.data_checked_at AS "finalizationAt"
-    FROM competition.tournament_groups AS groups
+    FROM ranked
     INNER JOIN fpl.events AS event
-      ON event.season_id = groups.season_id
+      ON event.season_id = ${season.seasonId}
      AND event.event_id = ${eventId}
-    LEFT JOIN competition.entries AS entry
-      ON entry.season_id = groups.season_id
-     AND entry.entry_id = groups.entry_id
-    WHERE groups.season_id = ${season.seasonId}
-      AND groups.tournament_id = ${tournamentId}
-    ORDER BY groups.group_rank NULLS LAST, groups.entry_id
+    ORDER BY ranked.rank, ranked."entryId"
   `;
   const normalizedRows = rows.map((row) => ({
     ...row,
@@ -985,7 +1191,9 @@ export function hasCompleteH2HOfficialScores(
   homeNetPoints: number | null,
   awayEntryId: number | null,
   awayNetPoints: number | null,
+  isBye = false,
 ): boolean {
+  if (isBye) return true;
   const scoreAvailable = (entryId: number | null, netPoints: number | null) =>
     entryId === null || (netPoints !== null && Number.isFinite(netPoints));
   return scoreAvailable(homeEntryId, homeNetPoints) && scoreAvailable(awayEntryId, awayNetPoints);
@@ -1037,6 +1245,7 @@ async function publishH2HMatch(
           row.homeNetPoints,
           row.awayEntryId,
           row.awayNetPoints,
+          row.isBye,
         )));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',
@@ -1201,6 +1410,12 @@ export async function syncLiveH2HLeaguePublicationsV2(
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
   const tournaments = await findOfficialH2HTournaments(season);
+  await retireInactiveH2HPublications(
+    season,
+    eventId,
+    new Set(tournaments.map(({ tournamentId }) => tournamentId)),
+    redis,
+  );
   const totals = { matches: 0, published: 0, retained: 0, pending: 0, skipped: 0 };
   let finalReady = true;
   for (const tournament of tournaments) {

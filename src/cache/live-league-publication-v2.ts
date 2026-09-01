@@ -1140,6 +1140,36 @@ if not ok or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV
 return redis.call('DEL', KEYS[1])
 `;
 
+/**
+ * Remove one exact tournament/event publication after its owner leaves the
+ * active set.  The pointer values are read immediately before this CAS-like
+ * Lua call; a concurrent reactivation therefore wins instead of being
+ * deleted by retirement.  The sequence key is deliberately retained so a
+ * later reactivation cannot reuse an old generation.
+ */
+const RETIRE_LUA = `
+local active = redis.call('GET', KEYS[1]) or ''
+local previous = redis.call('GET', KEYS[2]) or ''
+if active ~= ARGV[1] or previous ~= ARGV[2] then return {'changed'} end
+local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
+local function removeItems(raw)
+  if raw == '' then return end
+  local ok, value = pcall(cjson.decode, raw)
+  if not ok or type(value) ~= 'table' or type(value.items) ~= 'table' then return end
+  for _, name in ipairs({'index', 'payload'}) do
+    local item = value.items[name]
+    if type(item) == 'table' and type(item.key) == 'string' and
+       string.sub(item.key, 1, string.len(scopePrefix) + 1) == scopePrefix .. ':' then
+      redis.call('DEL', item.key, item.key .. ':meta')
+    end
+  end
+end
+removeItems(active)
+removeItems(previous)
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4])
+return {'retired'}
+`;
+
 async function allocateGeneration(
   redis: Redis,
   sequenceKey: string,
@@ -1835,6 +1865,28 @@ export async function clearLiveLeagueCheckpointDesiredV2(
       ),
     ) === 1
   );
+}
+
+export async function retireLiveLeaguePublicationV2(
+  scope: LeagueLiveScope,
+  redisClient?: Redis,
+): Promise<boolean> {
+  assertScope(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const activeKey = liveLeagueV2Key(scope, 'active');
+  const previousKey = liveLeagueV2Key(scope, 'previous');
+  const [activeRaw, previousRaw] = await redis.mget(activeKey, previousKey);
+  const result = (await redis.eval(
+    RETIRE_LUA,
+    4,
+    activeKey,
+    previousKey,
+    liveLeagueV2Key(scope, 'desired'),
+    liveLeagueV2Key(scope, 'checkpoint-desired'),
+    activeRaw ?? '',
+    previousRaw ?? '',
+  )) as unknown;
+  return Array.isArray(result) && result[0] === 'retired';
 }
 
 export type LiveLeagueEntryInput = {

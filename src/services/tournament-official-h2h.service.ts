@@ -61,6 +61,8 @@ export type OfficialH2HStanding = RawFPLLeagueStandingsResult & { entry: number 
 export type OfficialH2HSourceSnapshot = {
   standings: OfficialH2HStanding[];
   matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+  /** Timestamp after the complete official standings/matches fetch succeeded. */
+  sourceCheckedAt?: Date;
   /** Exact provider page boundaries, retained for locked-manifest validation. */
   pageMatches?: readonly {
     pageNumber: number;
@@ -550,13 +552,20 @@ export async function fetchOfficialH2HSourceSnapshot(
     durationMs: Math.max(0, Date.now() - startedAt),
     scheduleHash,
   });
-  return { standings, matches, pageMatches: pageSlices, pageManifests };
+  return {
+    standings,
+    matches,
+    sourceCheckedAt: capturedAt,
+    pageMatches: pageSlices,
+    pageManifests,
+  };
 }
 
 export function projectOfficialH2HStandings(
   currentGroups: readonly DbTournamentGroup[],
   standings: readonly OfficialH2HStanding[],
   totalsByEntry?: ReadonlyMap<number, { totalPoints: number; totalTransfersCost: number }>,
+  sourceCheckedAt?: Date,
 ): DbTournamentGroupInsert[] {
   const standingsByEntry = new Map(standings.map((standing) => [standing.entry, standing]));
   return currentGroups.map((group) => {
@@ -576,6 +585,7 @@ export function projectOfficialH2HStandings(
       totalTransfersCost:
         totalsByEntry === undefined ? stored.totalTransfersCost : (totals?.totalTransfersCost ?? 0),
       totalNetPoints: integerOrZero(standing.points_for),
+      ...(sourceCheckedAt === undefined ? {} : { officialSourceCheckedAt: sourceCheckedAt }),
     };
   });
 }
@@ -1288,6 +1298,7 @@ export async function syncOfficialH2HTournament(
     currentGroups,
     standingsSelection.standings,
     totalsByEntry,
+    snapshot.sourceCheckedAt ?? checkedAt,
   );
   const published = await tournamentOfficialH2HRepository.publish(season, tournament.id, {
     ...officialRows,

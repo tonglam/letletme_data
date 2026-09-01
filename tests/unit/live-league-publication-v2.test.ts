@@ -430,6 +430,10 @@ describe('Live League V2 H2H final score fence', () => {
   test('allows the missing score on a bye side with no entry', () => {
     expect(hasCompleteH2HOfficialScores(101, 42, null, null)).toBe(true);
   });
+
+  test('does not require provider scores for a knockout bye', () => {
+    expect(hasCompleteH2HOfficialScores(101, null, null, null, true)).toBe(true);
+  });
 });
 
 describe('Live League V2 H2H match retention', () => {

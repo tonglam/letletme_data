@@ -2304,6 +2304,12 @@ export const tournamentGroupsInCompetition = competition.table(
     overallRank: integer('overall_rank'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    // Official standings observation time. This is deliberately separate from
+    // updated_at, which is also advanced by local maintenance and ranking work.
+    officialSourceCheckedAt: timestamp('official_source_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('tournament_groups_end_event_fk_idx').using(
