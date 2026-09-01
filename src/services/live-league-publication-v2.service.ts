@@ -937,6 +937,20 @@ function readH2HMatchPayload(
   return isH2HMatchPayload(value) ? value : null;
 }
 
+export function selectRetainedH2HMatchPayload(
+  active: H2HMatchPayload | null | undefined,
+  previous: H2HMatchPayload | null | undefined,
+  fallback: H2HMatchPayload,
+): H2HMatchPayload {
+  return (
+    (active?.state === 'READY' ? active : null) ??
+    (previous?.state === 'READY' ? previous : null) ??
+    active ??
+    previous ??
+    fallback
+  );
+}
+
 function finalInputAvailable(
   entryId: number | null,
   isAverage: boolean,
@@ -1012,10 +1026,11 @@ async function publishH2HMatch(
     global.publication.state !== 'FINALIZED'
       ? inputReady || (!active && !previous)
       : finalReadyInput;
-  let selected =
-    (canPublish ? null : readH2HMatchPayload(active, row.officialMatchId)) ??
-    readH2HMatchPayload(previous, row.officialMatchId) ??
-    candidate;
+  const activePayload = readH2HMatchPayload(active, row.officialMatchId);
+  const previousPayload = readH2HMatchPayload(previous, row.officialMatchId);
+  let selected = canPublish
+    ? candidate
+    : selectRetainedH2HMatchPayload(activePayload, previousPayload, candidate);
 
   if (canPublish) {
     const preparedCandidate: H2HPreparedMatch = {
@@ -1056,7 +1071,10 @@ async function publishH2HMatch(
       });
       selected = result.published
         ? candidate
-        : (readH2HMatchPayload(active, row.officialMatchId) ?? candidate);
+        : selectRetainedH2HMatchPayload(activePayload, previousPayload, {
+            ...candidate,
+            state: 'ERROR',
+          });
     } catch (error) {
       logError('Live H2H match publication failed; retaining exact match LKG', error, {
         season: season.seasonCode,
@@ -1064,8 +1082,10 @@ async function publishH2HMatch(
         tournamentId: row.tournamentId,
         officialMatchId: row.officialMatchId,
       });
-      selected = readH2HMatchPayload(active, row.officialMatchId) ??
-        readH2HMatchPayload(previous, row.officialMatchId) ?? { ...candidate, state: 'ERROR' };
+      selected = selectRetainedH2HMatchPayload(activePayload, previousPayload, {
+        ...candidate,
+        state: 'ERROR',
+      });
     }
   }
 

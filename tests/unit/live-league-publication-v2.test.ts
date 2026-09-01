@@ -11,6 +11,7 @@ import { liveLeagueCheckpointIsDue } from '../../src/services/live-league-checkp
 import {
   isH2HTournamentPhaseActive,
   isTimestampAtOrAfter,
+  selectRetainedH2HMatchPayload,
 } from '../../src/services/live-league-publication-v2.service';
 
 const scope: LeagueLiveScope = {
@@ -203,5 +204,26 @@ describe('Live League V2 finalization freshness fences', () => {
     expect(isTimestampAtOrAfter('2026-08-29T23:59:59.000Z', boundary)).toBe(false);
     expect(isTimestampAtOrAfter(null, boundary)).toBe(false);
     expect(isTimestampAtOrAfter('not-a-time', boundary)).toBe(false);
+  });
+});
+
+describe('Live League V2 H2H match retention', () => {
+  const payload = (state: 'READY' | 'PENDING' | 'ERROR') =>
+    ({ state }) as Parameters<typeof selectRetainedH2HMatchPayload>[0] & {
+      state: typeof state;
+    };
+
+  test('retains previous READY when active is a transient failure', () => {
+    const active = payload('PENDING');
+    const previous = payload('READY');
+
+    expect(selectRetainedH2HMatchPayload(active, previous, payload('ERROR'))).toBe(previous);
+  });
+
+  test('uses active READY before previous READY', () => {
+    const active = payload('READY');
+    const previous = payload('READY');
+
+    expect(selectRetainedH2HMatchPayload(active, previous, payload('ERROR'))).toBe(active);
   });
 });
