@@ -44,6 +44,7 @@ function entryLiveInputContentHash(input: EntryLiveInputV2): string {
       revision: input.picksBase.revision,
       picks: input.picksBase.picks,
       chip: input.picksBase.chip,
+      reportedEventPoints: input.picksBase.reportedEventPoints,
       transferCount: input.picksBase.transferCount,
       transferCost: input.picksBase.transferCost,
     },
@@ -58,6 +59,7 @@ function entryLivePicksBaseContentHash(input: EntryLiveInputV2): string {
     revision: input.picksBase.revision,
     picks: input.picksBase.picks,
     chip: input.picksBase.chip,
+    reportedEventPoints: input.picksBase.reportedEventPoints,
     transferCount: input.picksBase.transferCount,
     transferCost: input.picksBase.transferCost,
   });
@@ -75,7 +77,7 @@ function rawPicksFromEntryLiveInput(input: EntryLiveInputV2): RawFPLEntryEventPi
     automatic_subs: [],
     entry_history: {
       event: input.eventId,
-      points: 0,
+      points: input.picksBase.reportedEventPoints,
       total_points: 0,
       rank: null,
       overall_rank: null,

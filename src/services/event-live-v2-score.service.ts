@@ -402,6 +402,7 @@ async function loadEventLiveScoreBatch(
             picks,
             liveByElement,
             fixtures: authority.fixtures as readonly Fixture[],
+            reportedEventPoints: inputRead.input.picksBase.reportedEventPoints,
           })
         : projectOfficialCurrentMultiplierScore({ entryId, picks, liveByElement });
     if (!projected) continue;

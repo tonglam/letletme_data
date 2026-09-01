@@ -142,6 +142,13 @@ export interface EntryLiveInputV2 {
     readonly contentUpdatedAt: string;
     readonly picks: Exactly15Picks;
     readonly chip: string | null;
+    /**
+     * FPL's entry-history event total captured with the picks response.  It is
+     * the only manager-aware score fact available for the Assistant Manager
+     * chip; keeping it in the immutable picks publication prevents the live
+     * projector from publishing a player-only total.
+     */
+    readonly reportedEventPoints: number;
     readonly transferCount: number;
     readonly transferCost: number;
   };
@@ -551,6 +558,8 @@ export function validateEntryLiveInputV2(
     !validIso(picksBase.contentUpdatedAt) ||
     !parseExactly15Picks(picksBase.picks) ||
     (picksBase.chip !== null && typeof picksBase.chip !== 'string') ||
+    typeof picksBase.reportedEventPoints !== 'number' ||
+    !Number.isSafeInteger(picksBase.reportedEventPoints) ||
     typeof picksBase.transferCount !== 'number' ||
     !Number.isSafeInteger(picksBase.transferCount) ||
     picksBase.transferCount < 0 ||
@@ -1865,6 +1874,7 @@ function buildEntryInputFromPicks(
   const picksRevision = contentHash({
     picks: normalized,
     chip: picks.active_chip,
+    reportedEventPoints: picks.entry_history.points,
     transferCount: picks.entry_history.event_transfers,
     transferCost: picks.entry_history.event_transfers_cost,
   });
@@ -1878,6 +1888,7 @@ function buildEntryInputFromPicks(
       contentUpdatedAt: sourceCheckedAt,
       picks: normalized,
       chip: picks.active_chip ?? null,
+      reportedEventPoints: picks.entry_history.points,
       transferCount: picks.entry_history.event_transfers,
       transferCost: picks.entry_history.event_transfers_cost,
     },

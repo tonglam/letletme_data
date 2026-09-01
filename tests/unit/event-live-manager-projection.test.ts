@@ -280,6 +280,27 @@ describe('revision-pinned projected manager score', () => {
     });
   });
 
+  test('uses the revision-pinned event total for the manager chip', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+
+    const result = projectEventLiveManagerScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+      fixtures: [],
+      // The projected player contribution is 12; the extra seven points are
+      // the Assistant Manager contribution carried by entry_history.points.
+      reportedEventPoints: 19,
+    });
+
+    expect(result?.eventPoints).toBe(19);
+    expect(result?.netEventPoints).toBe(19);
+  });
+
   test('fails closed when the manager chip has no manager scoring input', () => {
     const managerPicks = picks();
     managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };

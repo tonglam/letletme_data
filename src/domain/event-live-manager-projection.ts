@@ -218,6 +218,13 @@ export function projectEventLiveManagerScore(input: {
   picks: readonly EventLiveManagerPick[];
   liveByElement: ReadonlyMap<number, EventLive>;
   fixtures: readonly Fixture[];
+  /**
+   * FPL's entry-history event total, captured in the same immutable picks
+   * publication.  Assistant Manager adds points that do not exist in the
+   * player-live rows, so that chip must use this manager-aware fact after the
+   * player lineup has been projected.
+   */
+  reportedEventPoints?: number | null;
 }): ProjectedEventLiveManagerScore | null {
   if (input.picks.length !== 15 || input.picks.some((pick) => pick.entryId !== input.entryId)) {
     return null;
@@ -283,11 +290,18 @@ export function projectEventLiveManagerScore(input: {
   // projector independent of repository ordering so a caller cannot change
   // scoring semantics merely by reordering the 15 picks.
   const chip = picks.find((pick) => pick.position === 1)?.activeChip ?? null;
-  // The manager chip adds a separate manager-scoring fact that is not present
-  // in the player-live input accepted by this projector. Never publish a
-  // partial player-only score for it; the caller must use a source that carries
-  // the manager points explicitly.
-  if (chipIs(chip, 'manager', 'MANAGER')) return null;
+  const managerChip = chipIs(chip, 'manager', 'MANAGER');
+  if (
+    managerChip &&
+    (input.reportedEventPoints === null ||
+      input.reportedEventPoints === undefined ||
+      !Number.isSafeInteger(input.reportedEventPoints))
+  ) {
+    // The manager chip adds a separate manager-scoring fact that is not present
+    // in player-live rows. Never publish a partial player-only score when the
+    // immutable manager-aware source is unavailable.
+    return null;
+  }
   const benchBoost = chipIs(chip, 'bboost', 'BENCH_BOOST');
   const captainMultiplier = chipIs(chip, '3xc', 'TRIPLE_CAPTAIN') ? 3 : 2;
   const starters = picks
@@ -447,11 +461,19 @@ export function projectEventLiveManagerScore(input: {
   }, 0);
   if (!Number.isSafeInteger(points)) return null;
 
+  // For the Assistant Manager chip, entry_history.points is the authoritative
+  // gross event total and includes the manager's separate contribution.  A
+  // value below the player-only projection means the two revisioned sources
+  // cannot describe one coherent observation, so fail closed rather than
+  // publishing a negative manager contribution.
+  const eventPoints = managerChip ? input.reportedEventPoints! : points;
+  if (managerChip && eventPoints < points) return null;
+
   const picksCheckedAt = new Date([...sourceTimestamps][0]!).toISOString();
   return {
     entryId: input.entryId,
-    eventPoints: points,
-    netEventPoints: points - transferCost,
+    eventPoints,
+    netEventPoints: eventPoints - transferCost,
     transferCost,
     picksCheckedAt,
     effectiveLineup: picks.map((pick) => ({
