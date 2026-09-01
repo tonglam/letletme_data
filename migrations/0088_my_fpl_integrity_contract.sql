@@ -262,7 +262,10 @@ WITH active AS (
                COALESCE(
                      to_json(
                    array_agg(entry.entry_id::text ORDER BY entry.entry_id)
-                     FILTER (WHERE entry.entry_id IS NOT NULL)
+                     FILTER (
+                       WHERE entry.entry_id IS NOT NULL
+                         AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)
+                     )
                  )::text,
                  '[]'
                ),
@@ -280,7 +283,6 @@ WITH active AS (
   FROM fpl.events event
   LEFT JOIN competition.entries entry
     ON entry.season_id = event.season_id
-   AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)
   GROUP BY event.season_id, event.event_id
 ), canonical_tournament_scopes AS (
   SELECT event.season_id,

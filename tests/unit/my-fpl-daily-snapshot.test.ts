@@ -296,6 +296,10 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(integrityMigration).toContain(
       'COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM',
     );
+    expect(integrityMigration).toContain(
+      'AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)',
+    );
+    expect(integrityMigration).toContain('ON entry.season_id = event.season_id');
     expect(integrityMigration).toContain('AND NOT snapshot_entry.is_empty');
     expect(integrityMigration).toContain('YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
     expect(schedulerObligations).toContain(
