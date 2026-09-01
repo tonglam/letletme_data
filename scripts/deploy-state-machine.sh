@@ -360,8 +360,10 @@ start_content_worker_pause_renewal() {
   if [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" &&
     -z "$DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES" ]]; then return 0; fi
   if ! [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
-    (( DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS > 900 )); then
-    echo 'deploy admission: pause ownership renewal interval must be a positive value no greater than 15 minutes' >&2
+    (( DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS > 300 )); then
+    # Admission records live for 900 seconds.  Keep a 600-second margin for
+    # the bounded consumer-status and admission-renewal probes themselves.
+    echo 'deploy admission: pause ownership renewal interval must be a positive value no greater than 5 minutes' >&2
     return 1
   fi
   if [[ "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_TERM_TRAP_ACTIVE" != true ]]; then

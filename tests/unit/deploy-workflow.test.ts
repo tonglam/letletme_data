@@ -160,6 +160,9 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('restore_content_deploy_controls');
     expect(deployStateMachine).toContain('DEPLOY_CONTENT_WORKER_CONTROL_IMAGE');
     expect(deployStateMachine).toContain('cleanup_content_worker_control_image');
+    expect(deployStateMachine).toContain(
+      'DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS > 300',
+    );
     expect(deployScript).toContain('restore_content_deploy_controls');
     expect(deployScript).toContain('stop_content_worker_for_forward_recovery');
     expect(workflow).toContain('restore_content_deploy_controls');
@@ -263,7 +266,7 @@ describe('release workflow gates', () => {
     expect(workflow).toContain(
       'HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300',
     );
-    expect(workflow).toContain('timeout: 20m');
+    expect(workflow).toContain('timeout: 30m');
     expect(workflow).toContain('compose stop -t 45 content-worker');
     expect(workflow).toContain('compose stop -t 45 scheduler media-worker');
     expect(workflow).toContain('"$old_media_present" "$old_image_id" && \\');
@@ -272,6 +275,8 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain(
       'export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"',
     );
+    expect(queueQuiescence).toContain('connect_timeout: 5');
+    expect(queueQuiescence).toContain('statement_timeout: 5_000');
   });
 
   test('allows only session-mode pooler connections for the external backup', () => {

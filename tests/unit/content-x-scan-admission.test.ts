@@ -385,6 +385,17 @@ restore_content_deploy_controls
     }
   });
 
+  test('rejects a renewal interval without admission TTL margin', () => {
+    const result = runConsumerControlShell(String.raw`
+DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_INTERVAL_SECONDS=301
+pause_content_worker_consumers_for_deploy
+drain_content_worker_queues_for_deploy
+if start_content_worker_pause_renewal; then exit 1; fi
+`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr?.toString() ?? '').toContain('no greater than 5 minutes');
+  });
+
   test('restores partial control mutations before services stop', () => {
     const result = runConsumerControlShell(String.raw`
 FAIL_DRAIN_QUEUE=content-http-acquisition

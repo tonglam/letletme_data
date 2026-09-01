@@ -506,7 +506,12 @@ async function preparePausedContentRunsForDeployment(argv: readonly string[]): P
   const config = getConfig();
   const queueConnection = resolveQueueRedisConfig(config);
   const queues = contentQueueNames.map((name) => new Queue(name, { connection: queueConnection }));
-  const databaseClient = postgres(config.DATABASE_URL, { max: 1, prepare: false });
+  const databaseClient = postgres(config.DATABASE_URL, {
+    connect_timeout: 5,
+    max: 1,
+    prepare: false,
+    connection: { statement_timeout: 5_000 },
+  });
   try {
     const pauseStates = await Promise.all(
       queues.map(async (queue) => ({ queueName: queue.name, paused: await queue.isPaused() })),

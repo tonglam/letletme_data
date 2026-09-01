@@ -138,9 +138,9 @@ jobs:
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
           fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
           # The runtime verifier allows up to 10.5 minutes for a cold restart;
-          # leave the SSH command enough time for preflight, migration, and
-          # rollback/recovery if readiness never converges.
-          timeout: 20m
+          # leave the SSH command enough time for queue drain, preflight,
+          # migration, and rollback/recovery if readiness never converges.
+          timeout: 30m
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,LIVE_POINTS_V2_SEED_SEASON,LIVE_POINTS_V2_SEED_EVENT_ID,RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS,RETIRE_EXPIRED_CORE_STAGING_SEASON_ID,RETIRE_EXPIRED_CORE_STAGING_ACTIVE_PUBLICATION_ID,RETIRE_EXPIRED_CORE_STAGING_ACTIVE_REVISION
           script: |
             set -euo pipefail
