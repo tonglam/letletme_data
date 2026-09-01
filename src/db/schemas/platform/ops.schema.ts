@@ -388,7 +388,6 @@ export const schedulerObligationsInOps = ops.table(
     runId: uuid('run_id'),
     attempts: integer().default(0).notNull(),
     lastError: text('last_error'),
-    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
     evidence: jsonb().default({}).notNull(),
     completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
@@ -397,6 +396,7 @@ export const schedulerObligationsInOps = ops.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     uniqueIndex('scheduler_obligations_identity_key').on(
