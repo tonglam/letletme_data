@@ -832,7 +832,6 @@ export const liveMatchDeskCheckpointsInFpl = fpl.table(
   {
     seasonId: smallint('season_id').notNull(),
     eventId: integer('event_id').notNull(),
-    contractVersion: text('contract_version').notNull(),
     publicationId: text('publication_id').notNull(),
     generation: bigint('generation', { mode: 'number' }).notNull(),
     state: text().notNull(),
@@ -847,6 +846,7 @@ export const liveMatchDeskCheckpointsInFpl = fpl.table(
     checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
     expectedNextCheckAt: timestamp('expected_next_check_at', { withTimezone: true, mode: 'date' }),
     staleAt: timestamp('stale_at', { withTimezone: true, mode: 'date' }),
+    contractVersion: text('contract_version').notNull(),
   },
   (table) => [
     primaryKey({
@@ -885,7 +885,6 @@ export const liveMatchDetailCheckpointsInFpl = fpl.table(
   {
     seasonId: smallint('season_id').notNull(),
     eventId: integer('event_id').notNull(),
-    contractVersion: text('contract_version').notNull(),
     publicationId: text('publication_id').notNull(),
     generation: bigint('generation', { mode: 'number' }).notNull(),
     state: text().notNull(),
@@ -902,6 +901,7 @@ export const liveMatchDetailCheckpointsInFpl = fpl.table(
     checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
     expectedNextCheckAt: timestamp('expected_next_check_at', { withTimezone: true, mode: 'date' }),
     staleAt: timestamp('stale_at', { withTimezone: true, mode: 'date' }),
+    contractVersion: text('contract_version').notNull(),
   },
   (table) => [
     primaryKey({

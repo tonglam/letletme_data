@@ -73,7 +73,7 @@ const detailFixtures = (bps: number): MatchFixtureDetail[] => [
         position: 3,
         teamId: 10,
         price: 50,
-        totalPoints: 6,
+        totalPoints: 5,
         stats: [
           { identifier: 'bps', value: bps, awardedPoints: 0 },
           { identifier: 'goals_scored', value: 1, awardedPoints: 5 },
