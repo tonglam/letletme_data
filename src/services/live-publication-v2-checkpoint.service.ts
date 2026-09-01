@@ -96,6 +96,11 @@ const rememberFinalCheckpointValidation = (
   }
 };
 
+type RequiredLiveLeagueCheckpointScope = {
+  tournamentId: number;
+  scopeKind: 'CLASSIC' | 'H2H_HEAD' | 'H2H_STANDINGS';
+};
+
 function h2hFinalizationPhaseActive(
   groupStartedEventId: number | null,
   groupEndedEventId: number | null,
@@ -125,6 +130,52 @@ async function hasFinalLiveLeagueCheckpointsV2(
   eventId: number,
 ): Promise<boolean> {
   const db = await getDb();
+  const expectedTournaments = await db
+    .select({
+      tournamentId: tournamentsInCompetition.tournamentId,
+      leagueType: tournamentsInCompetition.leagueType,
+      rosterMode: tournamentsInCompetition.rosterMode,
+      groupMode: tournamentsInCompetition.groupMode,
+      groupStartedEventId: tournamentsInCompetition.groupStartedEventId,
+      groupEndedEventId: tournamentsInCompetition.groupEndedEventId,
+      knockoutStartedEventId: tournamentsInCompetition.knockoutStartedEventId,
+      knockoutEndedEventId: tournamentsInCompetition.knockoutEndedEventId,
+    })
+    .from(tournamentsInCompetition)
+    .where(
+      and(
+        eq(tournamentsInCompetition.seasonId, season.seasonId),
+        eq(tournamentsInCompetition.state, 'active'),
+        eq(tournamentsInCompetition.setupStatus, 'ready'),
+      ),
+    );
+  const requiredScopes: RequiredLiveLeagueCheckpointScope[] = [];
+  for (const tournament of expectedTournaments) {
+    if (tournament.leagueType === 'classic') {
+      requiredScopes.push({ tournamentId: tournament.tournamentId, scopeKind: 'CLASSIC' });
+      continue;
+    }
+    if (
+      tournament.leagueType !== 'h2h' ||
+      tournament.rosterMode !== 'official_sync' ||
+      tournament.groupMode !== 'battle_races' ||
+      !h2hFinalizationPhaseActive(
+        tournament.groupStartedEventId,
+        tournament.groupEndedEventId,
+        tournament.knockoutStartedEventId,
+        tournament.knockoutEndedEventId,
+        eventId,
+      )
+    ) {
+      continue;
+    }
+    requiredScopes.push(
+      { tournamentId: tournament.tournamentId, scopeKind: 'H2H_HEAD' },
+      { tournamentId: tournament.tournamentId, scopeKind: 'H2H_STANDINGS' },
+    );
+  }
+  if (requiredScopes.length === 0) return true;
+
   const rows = await db
     .select({
       tournamentId: liveLeagueCheckpointsInCompetition.tournamentId,
@@ -161,19 +212,12 @@ async function hasFinalLiveLeagueCheckpointsV2(
         eq(tournamentsInCompetition.setupStatus, 'ready'),
       ),
     );
-  for (const row of rows) {
-    if (
-      row.leagueType === 'h2h' &&
-      !h2hFinalizationPhaseActive(
-        row.groupStartedEventId,
-        row.groupEndedEventId,
-        row.knockoutStartedEventId,
-        row.knockoutEndedEventId,
-        eventId,
-      )
-    ) {
-      continue;
-    }
+  const checkpointByScope = new Map(
+    rows.map((row) => [`${row.tournamentId}:${row.scopeKind}`, row] as const),
+  );
+  for (const requiredScope of requiredScopes) {
+    const row = checkpointByScope.get(`${requiredScope.tournamentId}:${requiredScope.scopeKind}`);
+    if (!row || row.state !== 'FINALIZED') return false;
     if (
       row.scopeKind !== 'CLASSIC' &&
       row.scopeKind !== 'H2H_HEAD' &&
@@ -935,9 +979,6 @@ export async function findLivePublicationV2FinalizationTargets(
       WHERE league_tournament.season_id = ${eventsInFpl.seasonId}
         AND league_tournament.state = 'active'
         AND league_tournament.setup_status = 'ready'
-        -- League payload inputs are retained in Redis for 48 hours. Do not
-        -- keep scheduling a scope that can no longer be rebuilt from them.
-        AND ${eventsInFpl.dataCheckedAt} >= clock_timestamp() - interval '48 hours'
         AND (
           (
             league_tournament.league_type = 'classic'

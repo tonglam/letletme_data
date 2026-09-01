@@ -156,7 +156,13 @@ async function upsertEntryEventPickHead(
   const effectiveGeneration = publication?.generation ?? existingHead?.generation ?? 1;
   const effectivePicksBaseRevision =
     publication?.picksBaseRevision ?? existingHead?.picksBaseRevision ?? contentSha256;
-  const effectiveInputPayload = publication?.inputPayload ?? existingHead?.inputPayload ?? null;
+  const contentChanged = existingHead !== undefined && existingHead.contentSha256 !== contentSha256;
+  const effectiveInputPayload =
+    publication?.inputPayload !== undefined
+      ? publication.inputPayload
+      : contentChanged
+        ? null
+        : (existingHead?.inputPayload ?? null);
   await db
     .insert(entryEventPickHeadsInCompetition)
     .values({

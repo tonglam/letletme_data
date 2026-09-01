@@ -17,6 +17,7 @@ import {
 } from '../../src/services/live-league-checkpoint-v2.service';
 import {
   hasCompleteH2HOfficialScores,
+  hasExpectedH2HMatchSet,
   isH2HTournamentPhaseActive,
   isTimestampAtOrAfter,
   selectRetainedH2HMatchPayload,
@@ -402,6 +403,17 @@ describe('Live League V2 H2H phase window', () => {
         7,
       ),
     ).toBe(false);
+  });
+});
+
+describe('Live League V2 H2H match-set completeness', () => {
+  test('rejects a source set that drops a previously published match', () => {
+    expect(hasExpectedH2HMatchSet([11, 12, 13], [11, 13])).toBe(false);
+  });
+
+  test('allows a newly observed match without accepting duplicate source rows', () => {
+    expect(hasExpectedH2HMatchSet([11, 12], [11, 12, 13])).toBe(true);
+    expect(hasExpectedH2HMatchSet([11, 12], [11, 12, 12])).toBe(false);
   });
 });
 

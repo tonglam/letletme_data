@@ -8,6 +8,7 @@ import {
   liveDataQueueName,
 } from '../queues/live-data.queue';
 import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
+import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
 import { syncLiveMatchObservationV3 } from '../services/live-match-observation-v3.service';
@@ -23,6 +24,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
+import { eventRepository } from '../repositories/events';
 import { recordFreshnessObservation } from '../services/data-governance.service';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
@@ -40,6 +42,33 @@ import {
 } from '../utils/scheduler-obligation-fence';
 
 const LIVE_FINALIZATION_RETRY_DELAY_MS = 60_000;
+
+async function enqueueFinalOfficialH2HRefresh(
+  season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
+  eventId: number,
+  obligationGeneration: number | undefined,
+  freshAfter: string | null,
+): Promise<void> {
+  try {
+    await enqueueTournamentOfficialH2H(season, eventId, 'reconcile', {
+      jobId: `live-final-official-h2h-e${eventId}-g${obligationGeneration ?? Date.now()}`,
+      ...(freshAfter ? { freshAfter } : {}),
+    });
+    logInfo('Enqueued official H2H refresh after live finalization', {
+      season: season.seasonCode,
+      eventId,
+      freshAfter,
+    });
+  } catch (error) {
+    // The durable live-finalization obligation remains pending and will retry
+    // this enqueue. Never acknowledge finalization based on a failed handoff.
+    logError('Failed to enqueue official H2H refresh after live finalization', error, {
+      season: season.seasonCode,
+      eventId,
+      freshAfter,
+    });
+  }
+}
 
 /**
  * Live Data Worker
@@ -176,18 +205,43 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         }
       }
     }
+    const classicGlobalIdentityMatches =
+      classicLeagueResult?.globalPublicationId === snapshot.publicationId &&
+      classicLeagueResult?.globalGeneration === snapshot.generation;
+    const h2hGlobalIdentityMatches =
+      h2hLeagueResult?.globalPublicationId === snapshot.publicationId &&
+      h2hLeagueResult?.globalGeneration === snapshot.generation;
+    const leagueFinalReady =
+      snapshot.state === 'FINALIZED' &&
+      classicGlobalIdentityMatches &&
+      h2hGlobalIdentityMatches &&
+      classicLeagueResult?.finalReady === true &&
+      h2hLeagueResult?.finalReady === true;
+
+    if (
+      snapshot.state === 'FINALIZED' &&
+      (!h2hGlobalIdentityMatches || !h2hLeagueResult?.finalReady)
+    ) {
+      const finalizationFreshAfter = await eventRepository.findDataCheckedAtExact(season, eventId);
+      await enqueueFinalOfficialH2HRefresh(
+        season,
+        eventId,
+        job.data.obligationGeneration,
+        finalizationFreshAfter,
+      );
+    }
+
     if (snapshot.state === 'FINALIZED') {
       if (!snapshot.checkpointed) {
         throw new Error(
           `Finalized live publication is not durably checkpointed for event ${eventId}`,
         );
       }
-      const leagueFinalReady =
-        classicLeagueResult?.finalReady === true && h2hLeagueResult?.finalReady === true;
       if (!leagueFinalReady) {
         logInfo('Finalized live publication is waiting for league finalization evidence', {
           season: season.seasonCode,
           eventId,
+          globalIdentityMatches: classicGlobalIdentityMatches && h2hGlobalIdentityMatches,
           classicFinalReady: classicLeagueResult?.finalReady ?? false,
           h2hFinalReady: h2hLeagueResult?.finalReady ?? false,
         });

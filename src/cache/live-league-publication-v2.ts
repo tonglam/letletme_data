@@ -1157,12 +1157,13 @@ local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':ac
 local function removeItems(raw)
   if raw == '' then return end
   local ok, value = pcall(cjson.decode, raw)
-  if not ok or type(value) ~= 'table' or type(value.items) ~= 'table' then return end
+  if not ok or type(value) ~= 'table' or type(value.items) ~= 'table' or
+     type(value.generation) ~= 'number' or value.generation <= 0 then return end
   for _, name in ipairs({'index', 'payload'}) do
     local item = value.items[name]
-    if type(item) == 'table' and type(item.key) == 'string' and
-       string.sub(item.key, 1, string.len(scopePrefix) + 1) == scopePrefix .. ':' then
-      redis.call('UNLINK', item.key, item.key .. ':meta')
+    local expectedKey = scopePrefix .. ':' .. tostring(value.generation) .. ':' .. name
+    if type(item) == 'table' and item.key == expectedKey then
+      redis.call('UNLINK', expectedKey, expectedKey .. ':meta')
     end
   end
 end

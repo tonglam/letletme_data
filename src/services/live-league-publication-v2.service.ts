@@ -65,6 +65,10 @@ type ClassicRosterRow = {
   finalizationAt: Date | string | null;
 };
 
+type ClassicRosterQueryRow = Omit<ClassicRosterRow, 'entryId'> & {
+  entryId: number | null;
+};
+
 type CompleteClassicRosterRow = ClassicRosterRow & {
   entryName: string;
   playerName: string;
@@ -148,9 +152,38 @@ export function isTimestampAtOrAfter(
   return Number.isFinite(valueTime) && Number.isFinite(boundaryTime) && valueTime >= boundaryTime;
 }
 
+async function enqueueFinalizationProfileRefresh(
+  season: FplSeasonRef,
+  eventId: number,
+  tournamentId: number,
+  entryIds: readonly number[],
+): Promise<void> {
+  const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
+  if (uniqueEntryIds.length === 0) return;
+  const entrySetRevision = contentHash(uniqueEntryIds);
+  try {
+    await enqueueEntryInfoSyncJob(season, 'reconcile', {
+      entryIds: uniqueEntryIds,
+      eventId,
+      queueKey: `live-final-profile-${season.seasonCode}-${eventId}`,
+      deduplicationId: `live-final-profile-${season.seasonCode}-${eventId}-${entrySetRevision}`,
+      deduplicationCadenceMs: 60_000,
+    });
+  } catch (error) {
+    // A queue failure must never replace the last complete board with a
+    // falsely finalized identity. The next reconciler pass can enqueue it.
+    logError('Failed to enqueue finalization profile refresh', error, {
+      season: season.seasonCode,
+      eventId,
+      tournamentId,
+      entries: uniqueEntryIds.length,
+    });
+  }
+}
+
 async function findClassicRosters(season: FplSeasonRef, eventId: number): Promise<ClassicRoster[]> {
   const client = await getDbClient();
-  const rows = await client<ClassicRosterRow[]>`
+  const rows = await client<ClassicRosterQueryRow[]>`
     SELECT
       tournament.tournament_id AS "tournamentId",
       tournament.total_team_num AS "expectedEntryCount",
@@ -177,7 +210,7 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
     INNER JOIN fpl.events AS event
       ON event.season_id = tournament.season_id
      AND event.event_id = ${eventId}
-    INNER JOIN competition.tournament_entries AS roster
+    LEFT JOIN competition.tournament_entries AS roster
       ON roster.season_id = tournament.season_id
      AND roster.tournament_id = tournament.tournament_id
     LEFT JOIN competition.entries AS entry
@@ -192,14 +225,15 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
   const byTournament = new Map<number, ClassicRosterRow[]>();
   for (const row of rows) {
     const tournamentId = Number(row.tournamentId);
-    const entryId = Number(row.entryId);
     const expectedEntryCount = Number(row.expectedEntryCount);
     if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) continue;
-    if (!Number.isSafeInteger(entryId) || entryId <= 0) continue;
     if (!Number.isSafeInteger(expectedEntryCount) || expectedEntryCount <= 0) continue;
     const bucket = byTournament.get(tournamentId) ?? [];
-    bucket.push({ ...row, tournamentId, entryId, expectedEntryCount });
     byTournament.set(tournamentId, bucket);
+    if (row.entryId === null) continue;
+    const entryId = Number(row.entryId);
+    if (!Number.isSafeInteger(entryId) || entryId <= 0) continue;
+    bucket.push({ ...row, tournamentId, entryId, expectedEntryCount });
   }
   return [...byTournament.entries()].map(([tournamentId, rows]) => ({
     tournamentId,
@@ -276,7 +310,8 @@ async function publishClassicRoster(
   roster: ClassicRoster,
   expectedNextCheckAtValue?: Date | string | null,
 ): Promise<'published' | 'unchanged' | 'pending' | 'skipped'> {
-  if (roster.rows.length === 0 || roster.expectedEntryCount > 5_000) return 'skipped';
+  if (roster.expectedEntryCount > 5_000) return 'skipped';
+  if (roster.rows.length === 0) return 'pending';
   const entryIds = new Set(roster.rows.map((row) => row.entryId));
   if (
     roster.expectedEntryCount <= 0 ||
@@ -324,26 +359,12 @@ async function publishClassicRoster(
           .map((row) => row.entryId)
       : [];
   if (entriesNeedingProfileRefresh.length > 0 && finalizationAt !== null) {
-    const entryIds = [...new Set(entriesNeedingProfileRefresh)].sort((left, right) => left - right);
-    const entrySetRevision = contentHash(entryIds);
-    try {
-      await enqueueEntryInfoSyncJob(season, 'reconcile', {
-        entryIds,
-        eventId,
-        queueKey: `live-final-profile-${season.seasonCode}-${eventId}`,
-        deduplicationId: `live-final-profile-${season.seasonCode}-${eventId}-${entrySetRevision}`,
-        deduplicationCadenceMs: 60_000,
-      });
-    } catch (error) {
-      // The publication remains pending below. A queue failure must never
-      // replace the last complete board with a falsely finalized identity.
-      logError('Failed to enqueue finalization profile refresh', error, {
-        season: season.seasonCode,
-        eventId,
-        tournamentId: roster.tournamentId,
-        entries: entryIds.length,
-      });
-    }
+    await enqueueFinalizationProfileRefresh(
+      season,
+      eventId,
+      roster.tournamentId,
+      entriesNeedingProfileRefresh,
+    );
   }
   const allFinal =
     global.publication.state !== 'FINALIZED' ||
@@ -650,6 +671,22 @@ export function isH2HTournamentPhaseActive(
     ([start, end]) =>
       (start !== null && eventId >= start && (end === null || eventId <= end)) ||
       (start === null && end !== null && eventId <= end),
+  );
+}
+
+/**
+ * A source response may add a newly scheduled match, but it must never make
+ * an already published canonical match disappear. This is the completeness
+ * fence used before rebuilding a tournament head.
+ */
+export function hasExpectedH2HMatchSet(
+  expectedMatchIds: readonly number[],
+  observedMatchIds: readonly number[],
+): boolean {
+  const observed = new Set(observedMatchIds);
+  return (
+    observed.size === observedMatchIds.length &&
+    expectedMatchIds.every((matchId) => observed.has(matchId))
   );
 }
 
@@ -1351,7 +1388,7 @@ async function publishH2HMatch(
     eventId,
     tournamentId: row.tournamentId,
     officialMatchId: row.officialMatchId,
-    groupId: row.groupId > 0 ? row.groupId : 1,
+    groupId: row.phase === 'KNOCKOUT' ? row.groupId : row.groupId > 0 ? row.groupId : 1,
     sourceOrder: row.sourceOrder,
     phase: row.phase,
     knockoutName: row.knockoutName,
@@ -1519,6 +1556,12 @@ export async function syncLiveH2HLeaguePublicationsV2(
   for (const tournament of tournaments) {
     const tournamentId = tournament.tournamentId;
     const phaseActive = isH2HTournamentPhaseActive(tournament, eventId);
+    const headScope = {
+      season: season.seasonCode,
+      eventId,
+      tournamentId,
+      scope: 'H2H_HEAD' as const,
+    };
     try {
       const sourceMatches = await findOfficialH2HMatches(season, tournamentId, eventId);
       if (sourceMatches.length === 0 || sourceMatches.length > LIVE_LEAGUE_MAX_ENTRIES) {
@@ -1561,6 +1604,40 @@ export async function syncLiveH2HLeaguePublicationsV2(
           );
         }
       }
+      if (global.publication.state === 'FINALIZED') {
+        const finalizationAt =
+          sourceMatches.find((row) => row.finalizationAt !== null)?.finalizationAt ?? null;
+        const entriesNeedingProfileRefresh = sourceMatches.flatMap((row) => {
+          const staleHome =
+            row.homeEntryId !== null &&
+            !isTimestampAtOrAfter(row.homeProfileSourceCheckedAt, finalizationAt);
+          const staleAway =
+            row.awayEntryId !== null &&
+            !isTimestampAtOrAfter(row.awayProfileSourceCheckedAt, finalizationAt);
+          return [
+            ...(staleHome && row.homeEntryId !== null ? [row.homeEntryId] : []),
+            ...(staleAway && row.awayEntryId !== null ? [row.awayEntryId] : []),
+          ];
+        });
+        if (finalizationAt !== null) {
+          await enqueueFinalizationProfileRefresh(
+            season,
+            eventId,
+            tournamentId,
+            entriesNeedingProfileRefresh,
+          );
+        }
+      }
+      const [existingHead, previousHead] = await Promise.all([
+        readLiveLeaguePublicationV2Pointer(headScope, 'active', redis),
+        readLiveLeaguePublicationV2Pointer(headScope, 'previous', redis),
+      ]);
+      const retainedHead = existingHead ?? previousHead;
+      const expectedMatchIds = (retainedHead?.index ?? [])
+        .filter((row): row is H2HMatchIndexRow => 'matchId' in row)
+        .map((row) => row.matchId);
+      const sourceMatchIds = sourceMatches.map((row) => row.officialMatchId);
+      const matchSetComplete = hasExpectedH2HMatchSet(expectedMatchIds, sourceMatchIds);
       const matchScopes = sourceMatches.map((row) =>
         h2hMatchScope(season.seasonCode, eventId, row),
       );
@@ -1592,19 +1669,13 @@ export async function syncLiveH2HLeaguePublicationsV2(
       const standingsRead = await findOfficialH2HStandings(season, eventId, tournamentId);
       const standings = standingsRead.rows;
       const revisions = h2hRevisions(global, prepared, standings);
-      const headScope = {
-        season: season.seasonCode,
-        eventId,
-        tournamentId,
-        scope: 'H2H_HEAD' as const,
-      };
       const standingsScope = {
         season: season.seasonCode,
         eventId,
         tournamentId,
         scope: 'H2H_STANDINGS' as const,
       };
-      const allMatchesFinalReady = prepared.every((match) => match.finalReady);
+      const allMatchesFinalReady = matchSetComplete && prepared.every((match) => match.finalReady);
       let headFinalReady = global.publication.state !== 'FINALIZED';
       if (global.publication.state !== 'FINALIZED' || allMatchesFinalReady) {
         const headPayload = Object.fromEntries(

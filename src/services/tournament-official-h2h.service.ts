@@ -91,6 +91,8 @@ export type OfficialH2HSyncOptions = {
   suppressedEventId?: number | null;
   /** Bypass the minute-page selector for a guarded full reconciliation. */
   forceFull?: boolean;
+  /** Require the provider observation to begin after an event finalization fence. */
+  freshAfter?: Date | string;
 };
 
 type EntryEventTotalsCoverage = {
@@ -1044,6 +1046,16 @@ export async function syncOfficialH2HTournament(
   // data_checked_at cannot be blessed merely because the provider returned
   // after the boundary.
   const sourceOrdering = await readDatabaseOrderingTimestamp();
+  if (options.freshAfter !== undefined) {
+    const freshAfter =
+      options.freshAfter instanceof Date ? options.freshAfter : new Date(options.freshAfter);
+    if (!Number.isFinite(freshAfter.getTime()) || sourceOrdering.date < freshAfter) {
+      throw new ValidationError(
+        'Official H2H refresh started before the finalization boundary.',
+        'TOURNAMENT_OFFICIAL_H2H_FRESHNESS_FENCE',
+      );
+    }
+  }
   const entryIdsPromise = tournamentEntryRepository.findEntryIdsByTournamentId(
     season,
     tournament.id,

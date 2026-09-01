@@ -417,7 +417,11 @@ export const LocalBattleStrategy = {
 export async function syncOfficialH2HTournaments(
   season: FplSeasonRef,
   eventId: number,
-  syncOptions: Readonly<{ forceFull?: boolean; tournamentId?: number }> = {},
+  syncOptions: Readonly<{
+    forceFull?: boolean;
+    tournamentId?: number;
+    freshAfter?: Date | string;
+  }> = {},
 ): Promise<{ eventId: number; updatedGroups: number; updatedResults: number; skipped: number }> {
   const tournaments = (await tournamentInfoRepository.findBattleRaceByEvent(season, eventId))
     .filter(isOfficialH2HTournament)
@@ -437,6 +441,7 @@ export async function syncOfficialH2HTournaments(
       return await OfficialH2HStrategy.sync(season, tournament, eventId, {
         ...scoreOptions,
         forceFull: syncOptions.forceFull === true,
+        ...(syncOptions.freshAfter === undefined ? {} : { freshAfter: syncOptions.freshAfter }),
       });
     } catch (error) {
       if (
