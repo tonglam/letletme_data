@@ -89,10 +89,18 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       throw new Error(`Unknown job name: ${job.name}`);
     }
     if (job.data.matchObservationOnly) {
-      return syncLiveMatchObservationV3(season, eventId, {
+      const result = await syncLiveMatchObservationV3(season, eventId, {
         lifecycleState: job.data.lifecycleState,
         expectedNextCheckAt: job.data.expectedNextCheckAt,
+        // A pre-deadline warmup is deliberately addressable by eventId but
+        // must not advance eventless readers to a future event. Post-deadline
+        // Match-only probes are allowed to advance the active pointer.
+        promoteActiveEvent: job.data.lifecycleState !== 'PRE_DEADLINE',
       });
+      if (result.checkpointObligationFailed) {
+        throw new Error(`Live Match checkpoint obligation was not created for event ${eventId}`);
+      }
+      return result;
     }
     const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,

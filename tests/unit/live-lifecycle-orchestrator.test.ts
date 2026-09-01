@@ -109,6 +109,12 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain(
       'matchObservationOnly: plan.evidence?.matchObservationOnly === true',
     );
+    expect(registrySource).toContain('PICKS_WAIT');
+    const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect');
+    expect(lifecycleSource).toContain('matchObservationOnly: true');
+    expect(lifecycleSource).toContain('expectedNextCheckAt');
+    expect(liveWorkerSource).toContain('checkpointObligationFailed');
   });
 
   test('carries a freshness window from the live-picks root into its child scan', () => {

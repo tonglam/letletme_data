@@ -68,6 +68,8 @@ export interface LiveMatchObservation {
   /** Scheduler state captured with the same observation; never fetched again. */
   readonly lifecycleState?: MatchLifecycleState;
   readonly expectedNextCheckAt?: Date | string | null;
+  /** Pre-deadline warmups must not move the eventless active pointer. */
+  readonly promoteActiveEvent?: boolean;
   readonly observedAt?: Date | string;
   /** Active desk pointer captured before the provider observation began. */
   readonly observedDesk?: MatchDeskActiveFence;
@@ -83,6 +85,7 @@ export interface LiveMatchObservation {
     fixtures: readonly MatchDeskFixture[];
     changed: boolean;
     checkpointScheduled: boolean;
+    checkpointObligationFailed?: boolean;
     /** Exact active pointer after the fixture-phase publication. */
     observedActive: MatchDeskActiveFence;
   }>;
@@ -104,6 +107,8 @@ export interface LiveMatchObservationResult {
   readonly detailChanged: boolean;
   readonly deskCheckpointScheduled: boolean;
   readonly detailCheckpointScheduled: boolean;
+  /** Redis remains available even when the checkpoint obligation write failed. */
+  readonly checkpointObligationFailed?: boolean;
   readonly detailUnavailableReason: string | null;
 }
 
@@ -285,8 +290,8 @@ async function scheduleCheckpoint(
   finalized = false,
   boundary = false,
   enqueueCheckpoint: LiveMatchObservation['enqueueCheckpoint'] = enqueueLiveMatchCheckpoint,
-): Promise<boolean> {
-  if (publication.checkpointedAt !== null) return false;
+): Promise<{ scheduled: boolean; failed: boolean }> {
+  if (publication.checkpointedAt !== null) return { scheduled: false, failed: false };
   try {
     const [lastCheckpointedAt, existingDesired] = await Promise.all([
       readLiveMatchCheckpointLastAtV3({
@@ -317,7 +322,7 @@ async function scheduleCheckpoint(
       !Number.isFinite(lastMs) ||
       Date.now() - lastMs >= CHECKPOINT_INTERVAL_MS ||
       existingDesired?.final === true;
-    if (!due) return false;
+    if (!due) return { scheduled: false, failed: false };
     await enqueueCheckpoint(
       season,
       publication.eventId,
@@ -325,7 +330,7 @@ async function scheduleCheckpoint(
       desired.publicationId,
       desired.generation,
     );
-    return true;
+    return { scheduled: true, failed: false };
   } catch (error) {
     logError('Live Matches V3 checkpoint obligation write failed', error, {
       season: publication.season,
@@ -334,7 +339,7 @@ async function scheduleCheckpoint(
       publicationId: publication.publicationId,
       generation: publication.generation,
     });
-    return false;
+    return { scheduled: false, failed: true };
   }
 }
 
@@ -440,7 +445,7 @@ export async function syncLiveMatchesV3FromObservation(
     deskChanged = published.published;
   }
   if (!desk) throw new Error(`Live Match desk did not publish for event ${input.eventId}`);
-  if (!reusesPublishedDesk) {
+  if (!reusesPublishedDesk && input.promoteActiveEvent !== false) {
     await setLiveMatchActiveEventV3({
       season: input.season.seasonCode,
       eventId: input.eventId,
@@ -448,8 +453,11 @@ export async function syncLiveMatchesV3FromObservation(
     });
   }
 
-  const deskCheckpointScheduled = reusesPublishedDesk
-    ? (input.publishedDesk?.checkpointScheduled ?? false)
+  const deskCheckpoint = reusesPublishedDesk
+    ? {
+        scheduled: input.publishedDesk?.checkpointScheduled ?? false,
+        failed: input.publishedDesk?.checkpointObligationFailed === true,
+      }
     : await scheduleCheckpoint(
         'desk',
         desk,
@@ -462,6 +470,8 @@ export async function syncLiveMatchesV3FromObservation(
             desk.revisions.fixtureIdentity.revision,
         input.enqueueCheckpoint,
       );
+  const deskCheckpointScheduled = deskCheckpoint.scheduled;
+  let checkpointObligationFailed = deskCheckpoint.failed;
   let detail: MatchDetailPublication | null = null;
   let detailChanged = false;
   let detailCheckpointScheduled = false;
@@ -604,8 +614,8 @@ export async function syncLiveMatchesV3FromObservation(
       if (!detail && !detailIsStarted(input.rawFixtures)) detailUnavailableReason = 'PRE_KICKOFF';
       if (!detail && detailUnavailableReason === null)
         detailUnavailableReason = 'DETAIL_NOT_PUBLISHED';
-      if (detail)
-        detailCheckpointScheduled = await scheduleCheckpoint(
+      if (detail) {
+        const detailCheckpoint = await scheduleCheckpoint(
           'detail',
           detail,
           input.redis,
@@ -615,6 +625,9 @@ export async function syncLiveMatchesV3FromObservation(
             currentDetail.publication.fixtureIdentityRevision !== detail.fixtureIdentityRevision,
           input.enqueueCheckpoint,
         );
+        detailCheckpointScheduled = detailCheckpoint.scheduled;
+        checkpointObligationFailed ||= detailCheckpoint.failed;
+      }
     } catch (error) {
       detailUnavailableReason = 'DETAIL_CANDIDATE_INVALID';
       logError('Live Matches V3 detail candidate rejected; keeping desk', error, {
@@ -658,6 +671,7 @@ export async function syncLiveMatchesV3FromObservation(
     detailChanged,
     deskCheckpointScheduled,
     detailCheckpointScheduled,
+    checkpointObligationFailed,
     detailUnavailableReason,
   };
 }

@@ -15,6 +15,7 @@ import type { MatchLifecycleState } from './live-match-v3';
 export interface LiveMatchObservationV3Options {
   readonly lifecycleState?: MatchLifecycleState;
   readonly expectedNextCheckAt?: Date | string | null;
+  readonly promoteActiveEvent?: boolean;
   readonly dependencies?: LiveMatchObservationV3Dependencies;
 }
 
@@ -85,5 +86,6 @@ export async function syncLiveMatchObservationV3(
     observedDesk,
     lifecycleState: options.lifecycleState,
     expectedNextCheckAt: options.expectedNextCheckAt,
+    promoteActiveEvent: options.promoteActiveEvent,
   });
 }

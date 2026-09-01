@@ -285,6 +285,7 @@ async function publishedDeskFromMatchResult(
     fixtures: result.deskFixtures,
     changed: result.deskChanged,
     checkpointScheduled: result.deskCheckpointScheduled,
+    checkpointObligationFailed: result.checkpointObligationFailed,
     observedActive,
   };
 }

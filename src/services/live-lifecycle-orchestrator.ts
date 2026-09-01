@@ -210,7 +210,14 @@ export async function readLifecycleQuietState(
       )
     )
       return null;
-    return { revision: value.revision, unchangedSince };
+    const expectedNextCheckAt =
+      value.expectedNextCheckAt === null
+        ? null
+        : typeof value.expectedNextCheckAt === 'string' &&
+            Number.isFinite(Date.parse(value.expectedNextCheckAt))
+          ? value.expectedNextCheckAt
+          : undefined;
+    return { revision: value.revision, unchangedSince, expectedNextCheckAt };
   } catch (error) {
     logError('Failed to read shared live lifecycle state', error, { seasonCode, eventId });
     return null;
@@ -977,6 +984,54 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
   return { season, currentEvent, fixtures, decision, expectedNextCheckAt: nextRefreshAt };
 }
 
+/**
+ * The direct cron timer historically only considered getCurrentEvent(). That
+ * event is the latest deadline that has passed, so the next event never got a
+ * pre-deadline Match V3 warmup when the standalone registry was not running.
+ * Keep this as a Match-only lane and do not promote the global event pointer:
+ * the current event remains the eventless GraphQL authority until its own
+ * post-deadline/live lane advances it.
+ */
+async function observeUpcomingMatchEventDirect(
+  season: FplSeasonRef,
+  currentEventId: number,
+  now: Date,
+): Promise<void> {
+  const nextEvent = await (await import('./events.service')).getNextEvent(season).catch(() => null);
+  if (!nextEvent || nextEvent.id === currentEventId || !nextEvent.deadlineTime) return;
+  const fixtures = await fixtureRepository.findByEvent(season, nextEvent.id).catch(() => []);
+  const decision = decideLiveLifecycle(nextEvent, fixtures, now);
+  if (decision.state !== 'PRE_DEADLINE' || !decision.shouldObserveMatches) return;
+
+  const quiet = await readLifecycleQuietState(season.seasonCode, nextEvent.id);
+  const expectedNextCheckMs = quiet?.expectedNextCheckAt
+    ? Date.parse(quiet.expectedNextCheckAt)
+    : Number.NaN;
+  if (Number.isFinite(expectedNextCheckMs) && expectedNextCheckMs > now.getTime()) return;
+
+  const pollIntervalMs = resolveLiveLifecycleDelay(
+    decision,
+    season,
+    nextEvent.id,
+    now,
+    quiet?.unchangedSince,
+  );
+  if (pollIntervalMs === null) return;
+  const expectedNextCheckAt = new Date(now.getTime() + pollIntervalMs);
+  await enqueueLiveSnapshot(season, nextEvent.id, 'cron', {
+    now,
+    lifecycleState: 'PRE_DEADLINE',
+    expectedNextCheckAt,
+    matchObservationOnly: true,
+  });
+  await writeLifecycleQuietState(season.seasonCode, nextEvent.id, {
+    revision: quiet?.revision ?? null,
+    unchangedSince: quiet?.unchangedSince ?? now.getTime(),
+    state: 'PRE_DEADLINE',
+    expectedNextCheckAt: expectedNextCheckAt.toISOString(),
+  });
+}
+
 export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleDecision | null> {
   const tick = await persistLiveLifecycleStatus(now);
   if (!tick) return null;
@@ -1026,6 +1081,11 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       });
     }
   }
+  await observeUpcomingMatchEventDirect(season, currentEvent.id, now).catch((error) => {
+    logError('Failed to enqueue upcoming direct Match V3 observation', error, {
+      eventId: currentEvent.id,
+    });
+  });
   logInfo('Live lifecycle tick completed', {
     eventId: currentEvent.id,
     state: decision.state,

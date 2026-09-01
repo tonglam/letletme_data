@@ -1056,6 +1056,13 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         if (!event?.deadlineTime) continue;
         const fixtures = await loadSchedulerFixtures(context, event.id);
         const decision = decideLiveLifecycle(event, fixtures, context.now);
+        // The latest-deadline event owns the active pointer while its first
+        // post-deadline picks probe is still pending. A scheduler pass inside
+        // that one-second window must not skip it and publish the next event,
+        // otherwise eventless readers can be advanced to a future gameweek.
+        if (event.id === context.currentEventId && decision.state === 'PICKS_WAIT') {
+          return [];
+        }
         if (
           decision.state !== 'FINALIZED' &&
           (decision.shouldFetchLive || decision.shouldObserveMatches)

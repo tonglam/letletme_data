@@ -34,6 +34,7 @@ describe('Live Matches V3 match-only observation', () => {
     await syncLiveMatchObservationV3(TEST_SEASON, 12, {
       lifecycleState: 'PRE_DEADLINE',
       expectedNextCheckAt: '2026-09-01T00:02:00.000Z',
+      promoteActiveEvent: false,
       dependencies,
     });
 
@@ -45,6 +46,7 @@ describe('Live Matches V3 match-only observation', () => {
       observedDesk: { observed: 'desk-pointer-before-fetch', read: null },
       lifecycleState: 'PRE_DEADLINE',
       expectedNextCheckAt: '2026-09-01T00:02:00.000Z',
+      promoteActiveEvent: false,
     });
     expect(received).not.toHaveProperty('rawEventLive');
     expect(dependencies.getFixtures).toHaveBeenCalledTimes(1);
