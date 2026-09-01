@@ -585,14 +585,27 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               `My FPL snapshot Redis outbox remains incomplete: failed=${redis.failed}, remaining=${redis.remaining ?? 0}`,
             );
           }
+          const activeRedisManifest = await getActiveMyFplSnapshotRedisManifest(
+            season.seasonCode,
+            eventId,
+          );
+          if (
+            !isMyFplSnapshotRedisManifestForPublication(
+              activeRedisManifest,
+              capture.publication,
+              season.seasonCode,
+              eventId,
+            )
+          ) {
+            throw new Error(
+              `My FPL snapshot Redis pointer does not match PostgreSQL publication revision ${capture.publication.revision}`,
+            );
+          }
           await recordMyFplOutboxRedisEvidence({
             freshnessWindowId: job.data.freshnessWindowId,
             deliveredEvidence: redis.deliveredEvidence,
             publication: capture.publication,
-            redisRevision: redis.deliveredEvidence?.find(
-              (evidence) =>
-                evidence.eventId === eventId && evidence.revision === capture.publication.revision,
-            )?.revision,
+            redisRevision: activeRedisManifest.revision,
           });
           return { ...capture, invalidation, redis };
         }

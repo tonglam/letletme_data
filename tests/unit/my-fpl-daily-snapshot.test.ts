@@ -560,6 +560,32 @@ describe('My FPL daily snapshot publication contract', () => {
     ).toBe(false);
   });
 
+  test('fences FINAL readiness and capture on durable historical/player evidence', () => {
+    expect(publicationService).toContain('fresh_points_count');
+    expect(publicationService).toContain('history_ready_count');
+    expect(publicationService).toContain('past_seasons_checked_at');
+    expect(publicationService).toContain('stats.updated_at >= ${dataCheckedAt}::timestamptz');
+    expect(publicationService).toContain(
+      'final player stats are older than data_checked_at for event',
+    );
+    expect(publicationService).toContain(
+      'points result is stale or inconsistent with the final entry result',
+    );
+  });
+
+  test('fails Redis delivery when the active pointer is not the captured publication', () => {
+    expect(worker).toContain(
+      'const activeRedisManifest = await getActiveMyFplSnapshotRedisManifest',
+    );
+    expect(worker).toContain(
+      'My FPL snapshot Redis pointer does not match PostgreSQL publication revision',
+    );
+    expect(publicationService).toContain('season.season_code AS canonical_season_code');
+    expect(publicationService).toContain(
+      'myFplSnapshotRedisManifestKey(canonicalSeasonCode, currentPublication.eventId)',
+    );
+  });
+
   test('keeps the daily provisional freshness boundary deterministic', () => {
     expect(
       getMyFplSnapshotTimeliness('2026-08-31', 'PROVISIONAL', new Date('2026-09-01T03:59:59.000Z')),

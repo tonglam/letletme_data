@@ -447,6 +447,7 @@ type PickRow = {
   penalties_saved: number | null;
   bonus: number | null;
   bps: number | null;
+  stats_updated_at: Date | string | null;
   expected_goals: string | number | null;
   expected_assists: string | number | null;
   expected_goal_involvements: string | number | null;
@@ -487,6 +488,11 @@ type TournamentRow = {
   tournament_id: number;
   entry_id: number;
   group_id: number | null;
+  group_event_points: number | null;
+  group_event_cost: number | null;
+  group_event_net_points: number | null;
+  group_event_rank: number | null;
+  group_updated_at: Date | string | null;
   current_group_rank: number | null;
   entry_name: string | null;
   player_name: string | null;
@@ -2046,8 +2052,14 @@ export async function assessMyFplFinalizationReadiness(
       points_count: number;
       captain_count: number;
       vice_captain_count: number;
+      fresh_points_count: number;
       previous_overall_points: number | null;
       started_event: number | null;
+      past_seasons_checked_at: Date | string | null;
+      past_seasons_count: number | null;
+      past_seasons_row_count: number;
+      history_expected_count: number;
+      history_ready_count: number;
     }[]
   >`
     SELECT entry.entry_id,
@@ -2069,10 +2081,16 @@ export async function assessMyFplFinalizationReadiness(
            COALESCE(picks.distinct_elements, 0)::integer AS distinct_elements,
            COALESCE(picks.distinct_positions, 0)::integer AS distinct_positions,
            COALESCE(picks.points_count, 0)::integer AS points_count,
+           COALESCE(picks.fresh_points_count, 0)::integer AS fresh_points_count,
            COALESCE(picks.captain_count, 0)::integer AS captain_count,
            COALESCE(picks.vice_captain_count, 0)::integer AS vice_captain_count,
            previous.overall_points AS previous_overall_points,
-           entry.started_event
+           entry.started_event,
+           entry.past_seasons_checked_at,
+           entry.past_seasons_count,
+           COALESCE(past_seasons.row_count, 0)::integer AS past_seasons_row_count,
+           COALESCE(history.expected_count, 0)::integer AS history_expected_count,
+           COALESCE(history.ready_count, 0)::integer AS history_ready_count
     FROM competition.entries entry
     LEFT JOIN competition.entry_event_results result
       ON result.season_id = entry.season_id
@@ -2083,6 +2101,10 @@ export async function assessMyFplFinalizationReadiness(
              count(DISTINCT pick.element_id)::integer AS distinct_elements,
              count(DISTINCT pick.position)::integer AS distinct_positions,
              count(*) FILTER (WHERE stats.total_points IS NOT NULL)::integer AS points_count,
+             count(*) FILTER (
+               WHERE stats.total_points IS NOT NULL
+                 AND stats.updated_at >= ${dataCheckedAt}::timestamptz
+             )::integer AS fresh_points_count,
              count(*) FILTER (WHERE pick.is_captain)::integer AS captain_count,
              count(*) FILTER (WHERE pick.is_vice_captain)::integer AS vice_captain_count
       FROM competition.entry_event_picks pick
@@ -2093,7 +2115,66 @@ export async function assessMyFplFinalizationReadiness(
       WHERE pick.season_id = entry.season_id
         AND pick.entry_id = entry.entry_id
         AND pick.event_id = ${eventId}
-    ) picks ON TRUE
+      ) picks ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT count(*)::integer AS row_count
+      FROM competition.entry_past_seasons past
+      WHERE past.entry_season_id = entry.season_id
+        AND past.entry_id = entry.entry_id
+    ) past_seasons ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT count(*)::integer AS expected_count,
+             count(*) FILTER (
+               WHERE result.source_result_id IS NOT NULL
+                 AND result.rich_synced_at IS NOT NULL
+                 AND result.rich_synced_at >= history_event.data_checked_at
+                 AND result.event_points IS NOT NULL
+                 AND result.event_transfers_cost IS NOT NULL
+                 AND result.event_net_points IS NOT NULL
+                 AND result.event_picks IS NOT NULL
+                 AND jsonb_typeof(result.event_picks) = 'array'
+                 AND jsonb_array_length(result.event_picks) = 15
+                 AND history_picks.pick_count = 15
+                 AND history_picks.distinct_elements = 15
+                 AND history_picks.distinct_positions = 15
+                 AND history_picks.points_count = 15
+                 AND history_picks.fresh_points_count = 15
+                 AND history_picks.captain_count = 1
+                 AND history_picks.vice_captain_count = 1
+             )::integer AS ready_count
+      FROM fpl.events history_event
+      LEFT JOIN competition.entry_event_results result
+        ON result.season_id = entry.season_id
+       AND result.entry_id = entry.entry_id
+       AND result.event_id = history_event.event_id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::integer AS pick_count,
+               count(DISTINCT history_pick.element_id)::integer AS distinct_elements,
+               count(DISTINCT history_pick.position)::integer AS distinct_positions,
+               count(*) FILTER (WHERE history_stats.total_points IS NOT NULL)::integer
+                 AS points_count,
+               count(*) FILTER (
+                 WHERE history_stats.total_points IS NOT NULL
+                   AND history_stats.updated_at >= history_event.data_checked_at
+               )::integer AS fresh_points_count,
+               count(*) FILTER (WHERE history_pick.is_captain)::integer AS captain_count,
+               count(*) FILTER (WHERE history_pick.is_vice_captain)::integer AS vice_captain_count
+        FROM competition.entry_event_picks history_pick
+        LEFT JOIN fpl.player_gameweek_stats history_stats
+          ON history_stats.season_id = history_pick.season_id
+         AND history_stats.event_id = history_pick.event_id
+         AND history_stats.element_id = history_pick.element_id
+        WHERE history_pick.season_id = entry.season_id
+          AND history_pick.entry_id = entry.entry_id
+          AND history_pick.event_id = history_event.event_id
+      ) history_picks ON TRUE
+      WHERE history_event.season_id = entry.season_id
+        AND history_event.event_id >= GREATEST(1, COALESCE(entry.started_event, 1))
+        AND history_event.event_id < ${eventId}
+        AND history_event.finished = true
+        AND history_event.data_checked = true
+        AND history_event.data_checked_at IS NOT NULL
+    ) history ON TRUE
     LEFT JOIN LATERAL (
       SELECT prior.overall_points
       FROM competition.entry_event_results prior
@@ -2118,6 +2199,7 @@ export async function assessMyFplFinalizationReadiness(
   `;
   const missingEntryIds: number[] = [];
   const missingTransferEntryIds: number[] = [];
+  let hasIncompleteEntryHistory = false;
   for (const row of entryRows) {
     const richAt = row.rich_synced_at ? new Date(row.rich_synced_at).getTime() : Number.NaN;
     const transferCheckedAt = row.transfers_source_checked_at
@@ -2144,6 +2226,12 @@ export async function assessMyFplFinalizationReadiness(
       row.overall_points !== null &&
       row.event_net_points !== null &&
       row.overall_points === (row.previous_overall_points ?? 0) + row.event_net_points;
+    const pastSeasonsComplete =
+      row.past_seasons_checked_at !== null &&
+      row.past_seasons_count !== null &&
+      row.past_seasons_count === row.past_seasons_row_count;
+    const historyComplete = row.history_ready_count === row.history_expected_count;
+    if (!pastSeasonsComplete || !historyComplete) hasIncompleteEntryHistory = true;
     const complete =
       row.source_result_id !== null &&
       ranksComplete &&
@@ -2154,6 +2242,7 @@ export async function assessMyFplFinalizationReadiness(
       row.distinct_elements === 15 &&
       row.distinct_positions === 15 &&
       row.points_count === 15 &&
+      row.fresh_points_count === 15 &&
       row.captain_count === 1 &&
       row.vice_captain_count === 1 &&
       parseCanonicalEventPicks(row.event_picks) !== null &&
@@ -2167,6 +2256,8 @@ export async function assessMyFplFinalizationReadiness(
       row.team_value !== null &&
       row.bank !== null &&
       row.event_net_points === row.event_points - row.event_transfers_cost &&
+      pastSeasonsComplete &&
+      historyComplete &&
       (totalReconciles || unrankedFirstEvent);
     if (!complete) missingEntryIds.push(row.entry_id);
   }
@@ -2174,6 +2265,7 @@ export async function assessMyFplFinalizationReadiness(
   const observedEntryCount = expectedEntryCount - missingEntryIds.length;
   const entryScopeSha256 = scopeSha256(entryRows.map((row) => String(row.entry_id)));
   if (missingEntryIds.length > 0) reasonCodes.push('ENTRY_CHECKPOINT_INCOMPLETE');
+  if (hasIncompleteEntryHistory) reasonCodes.push('ENTRY_HISTORY_INCOMPLETE');
 
   const tournamentScopeRows = await client<{ tournament_id: number; entry_id: number }[]>`
     SELECT tournament_id, entry_id
@@ -2214,8 +2306,18 @@ export async function assessMyFplFinalizationReadiness(
              ) AS points_race_active,
              canonical.group_id,
              canonical.canonical_group_count,
+             result.event_points AS result_event_points,
+             result.event_transfers_cost AS result_event_cost,
+             result.event_net_points AS result_event_net_points,
+             result.event_rank AS result_event_rank,
              points.entry_id AS points_entry_id,
-             points.group_id AS points_group_id
+             points.group_id AS points_group_id,
+             points.updated_at AS points_updated_at,
+             points.event_group_rank AS points_event_group_rank,
+             points.event_points AS points_event_points,
+             points.event_cost AS points_event_cost,
+             points.event_net_points AS points_event_net_points,
+             points.event_rank AS points_event_rank
       FROM competition.tournaments tournament
       LEFT JOIN competition.tournament_entries roster
         ON roster.season_id = tournament.season_id
@@ -2226,6 +2328,10 @@ export async function assessMyFplFinalizationReadiness(
       LEFT JOIN canonical_group_assignments canonical
         ON canonical.tournament_id = roster.tournament_id
        AND canonical.entry_id = roster.entry_id
+      LEFT JOIN competition.entry_event_results result
+        ON result.season_id = roster.season_id
+       AND result.entry_id = roster.entry_id
+       AND result.event_id = ${eventId}
       LEFT JOIN competition.tournament_points_group_results points
         ON points.season_id = roster.season_id
        AND points.tournament_id = roster.tournament_id
@@ -2247,7 +2353,18 @@ export async function assessMyFplFinalizationReadiness(
                WHERE canonical_group_count IS NOT NULL AND canonical_group_count > 1
              )::integer AS conflicting_group_count,
              count(DISTINCT points_entry_id) FILTER (
-               WHERE eligible AND points_entry_id IS NOT NULL
+               WHERE eligible
+                 AND points_entry_id IS NOT NULL
+                 AND points_updated_at >= ${dataCheckedAt}::timestamptz
+                 AND points_event_group_rank IS NOT NULL
+                 AND points_event_group_rank > 0
+                 AND result_event_points IS NOT NULL
+                 AND result_event_cost IS NOT NULL
+                 AND result_event_net_points IS NOT NULL
+                 AND points_event_points IS NOT DISTINCT FROM result_event_points
+                 AND points_event_cost IS NOT DISTINCT FROM result_event_cost
+                 AND points_event_net_points IS NOT DISTINCT FROM result_event_net_points
+                 AND points_event_rank IS NOT DISTINCT FROM result_event_rank
              )::integer AS points_count,
              count(DISTINCT points_entry_id) FILTER (
                WHERE eligible
@@ -2911,6 +3028,7 @@ async function captureMyFplSnapshotOnce(
              stats.bonus,
              stats.bps, stats.expected_goals, stats.expected_assists,
              stats.expected_goal_involvements, stats.expected_goals_conceded,
+             stats.updated_at AS stats_updated_at,
              fixture.against_short_name, fixture.was_home, fixture.score,
              fixture.fixture_count
       FROM competition.entry_event_picks pick
@@ -2972,6 +3090,7 @@ async function captureMyFplSnapshotOnce(
              stats.bonus,
              stats.bps, stats.expected_goals, stats.expected_assists,
              stats.expected_goal_involvements, stats.expected_goals_conceded,
+             stats.updated_at AS stats_updated_at,
              NULL::text AS against_short_name, NULL::text AS was_home,
              NULL::text AS score, 0::integer AS fixture_count
       FROM competition.entry_event_picks pick
@@ -3002,6 +3121,7 @@ async function captureMyFplSnapshotOnce(
     }
 
     if (kind === 'FINAL') {
+      const finalFenceAt = new Date(event.data_checked_at!).getTime();
       for (const current of currentResults.values()) {
         const finalPicks = overlayFinalResultPicks(
           current,
@@ -3010,6 +3130,18 @@ async function captureMyFplSnapshotOnce(
         if (!finalPicks) {
           throw new MyFplSnapshotIncompleteError(
             `Entry ${current.entry_id} final result picks are incomplete or changed for event ${eventId}`,
+          );
+        }
+        if (
+          finalPicks.some(
+            (pick) =>
+              pick.total_points === null ||
+              pick.stats_updated_at === null ||
+              new Date(pick.stats_updated_at).getTime() < finalFenceAt,
+          )
+        ) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${current.entry_id} final player stats are older than data_checked_at for event ${eventId}`,
           );
         }
         picksByEntry.set(current.entry_id, finalPicks);
@@ -3036,6 +3168,22 @@ async function captureMyFplSnapshotOnce(
       if (!finalPicks) {
         throw new MyFplSnapshotIncompleteError(
           `Entry ${historicalResult.entry_id} review picks are incomplete for event ${historicalResult.event_id}`,
+        );
+      }
+      const historicalFenceAt = historicalResult.event_data_checked_at
+        ? new Date(historicalResult.event_data_checked_at).getTime()
+        : Number.NaN;
+      if (
+        !Number.isFinite(historicalFenceAt) ||
+        finalPicks.some(
+          (pick) =>
+            pick.total_points === null ||
+            pick.stats_updated_at === null ||
+            new Date(pick.stats_updated_at).getTime() < historicalFenceAt,
+        )
+      ) {
+        throw new MyFplSnapshotIncompleteError(
+          `Entry ${historicalResult.entry_id} historical player stats are older than data_checked_at for event ${historicalResult.event_id}`,
         );
       }
       historicalReviewPicksByEntryEvent.set(key, finalPicks);
@@ -3632,6 +3780,11 @@ async function captureMyFplSnapshotOnce(
                result.overall_rank, result.event_chip::text,
                result.played_captain_element_id AS captain_id,
                group_result.event_group_rank AS current_group_rank,
+               group_result.event_points AS group_event_points,
+               group_result.event_cost AS group_event_cost,
+               group_result.event_net_points AS group_event_net_points,
+               group_result.event_rank AS group_event_rank,
+               group_result.updated_at AS group_updated_at,
                captain.web_name AS captain_web_name,
                captain_team.short_name AS captain_team_short_name,
                result.captain_points, result.team_value, result.bank,
@@ -3745,6 +3898,7 @@ async function captureMyFplSnapshotOnce(
       tournamentRows.map((row) => [`${row.tournament_id}:${row.entry_id}`, row] as const),
     );
     if (kind === 'FINAL') {
+      const finalFenceAt = new Date(event.data_checked_at!).getTime();
       const canonicalGroupRows = await tx<
         { tournament_id: number; entry_id: number; group_id: number }[]
       >`
@@ -3791,6 +3945,28 @@ async function captureMyFplSnapshotOnce(
           ) {
             throw new MyFplSnapshotIncompleteError(
               `Tournament ${configured.tournament_id} entry ${membership.entry_id} points group assignment is stale`,
+            );
+          }
+          const row = tournamentRowByMembership.get(key);
+          const current = currentResults.get(membership.entry_id);
+          const currentGroupRank = row?.current_group_rank;
+          const groupUpdatedAt = row?.group_updated_at
+            ? new Date(row.group_updated_at).getTime()
+            : Number.NaN;
+          if (
+            !row ||
+            !current ||
+            !Number.isSafeInteger(currentGroupRank) ||
+            (currentGroupRank ?? 0) < 1 ||
+            !Number.isFinite(groupUpdatedAt) ||
+            groupUpdatedAt < finalFenceAt ||
+            row.group_event_points !== current.event_points ||
+            row.group_event_cost !== current.event_transfers_cost ||
+            row.group_event_net_points !== current.event_net_points ||
+            row.group_event_rank !== current.event_rank
+          ) {
+            throw new MyFplSnapshotIncompleteError(
+              `Tournament ${configured.tournament_id} entry ${membership.entry_id} points result is stale or inconsistent with the final entry result`,
             );
           }
         }
@@ -4209,6 +4385,7 @@ function rankForBoard(rows: JsonRecord[], key: 'eventNetPoints' | 'previousEvent
 type SnapshotOutboxRow = {
   outbox_id: string;
   season_id: number;
+  canonical_season_code: string;
   event_id: number;
   revision: number;
   source_checked_at: Date | string;
@@ -4404,6 +4581,7 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
     `;
     const rows = await tx<SnapshotOutboxRow[]>`
       SELECT outbox.outbox_id, outbox.season_id, outbox.event_id, outbox.revision,
+             season.season_code AS canonical_season_code,
              outbox.manifest, publication.source_checked_at, publication.published_at
       FROM competition.my_fpl_snapshot_publication_outbox outbox
       JOIN competition.my_fpl_snapshot_publications publication
@@ -4411,6 +4589,8 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
        AND publication.event_id = outbox.event_id
        AND publication.revision = outbox.revision
        AND publication.active = true
+      JOIN fpl.seasons season
+        ON season.season_id = outbox.season_id
       WHERE outbox.status IN ('PENDING', 'PROCESSING')
         AND outbox.available_at <= clock_timestamp()
         AND (
@@ -4419,7 +4599,7 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
           OR outbox.lease_expires_at <= clock_timestamp()
         )
         ${options.eventId ? tx`AND outbox.event_id = ${options.eventId}` : tx``}
-        ${options.seasonCode ? tx`AND outbox.manifest->>'seasonCode' = ${options.seasonCode}` : tx``}
+        ${options.seasonCode ? tx`AND season.season_code = ${options.seasonCode}` : tx``}
       ORDER BY outbox.available_at, outbox.outbox_id
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
@@ -4465,8 +4645,11 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
             hashtextextended(${myFplSnapshotEventLockScope(row.season_id, row.event_id)}, 0)
           )
         `;
-        const ownership = await tx<(MyFplPublicationRow & { active: boolean })[]>`
+        const ownership = await tx<
+          (MyFplPublicationRow & { active: boolean; canonical_season_code: string })[]
+        >`
           SELECT publication.season_id, publication.event_id, publication.revision,
+                 season.season_code AS canonical_season_code,
                  publication.snapshot_date, publication.source_checked_at,
                  publication.published_at, publication.kind,
                  publication.expected_entry_count, publication.ready_entry_count,
@@ -4484,6 +4667,8 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
             ON publication.season_id = outbox.season_id
            AND publication.event_id = outbox.event_id
            AND publication.revision = outbox.revision
+          JOIN fpl.seasons season
+            ON season.season_id = publication.season_id
           WHERE outbox.outbox_id = ${row.outbox_id}::uuid
             AND outbox.lease_owner = ${owner}
           FOR UPDATE
@@ -4501,12 +4686,13 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
         }
 
         const currentPublication = mapMyFplPublication(ownership[0]);
+        const canonicalSeasonCode = ownership[0].canonical_season_code;
         if (
           !isMyFplSnapshotRedisManifestForPublication(
             manifest,
             currentPublication,
-            manifest.seasonCode,
-            manifest.eventId,
+            canonicalSeasonCode,
+            currentPublication.eventId,
           )
         ) {
           throw new Error(
@@ -4517,7 +4703,7 @@ export async function dispatchMyFplSnapshotPublicationOutbox(
         const activation = (await redis.eval(
           MY_FPL_SNAPSHOT_REDIS_ACTIVATE_SCRIPT,
           1,
-          myFplSnapshotRedisManifestKey(manifest.seasonCode, manifest.eventId),
+          myFplSnapshotRedisManifestKey(canonicalSeasonCode, currentPublication.eventId),
           JSON.stringify(manifest),
         )) as [string, string?];
         if (activation[0] === 'stale') {
