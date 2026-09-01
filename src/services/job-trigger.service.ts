@@ -282,21 +282,30 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     'tournament-review-correction': async () => {
       const requested = readTournamentReviewCorrectionInput(input);
       const season = await seasonRepository.findCurrent();
-      await requestTournamentReviewCorrection(
+      const correctionEventIds = await requestTournamentReviewCorrection(
         season,
         requested.tournamentId,
         requested.eventId,
         requested.reason,
         requested.changeId,
       );
-      return enqueueTournamentReview(season, 'manual', {
-        tournamentId: requested.tournamentId,
-        eventId: requested.eventId,
-        reviewMode: 'CORRECTION',
-        reviewCorrectionReason: requested.reason,
-        reviewCorrectionChangeId: requested.changeId,
-        deduplicationId: `tournament-review-correction-${season.seasonCode}-${requested.tournamentId}-${requested.eventId}-${requested.changeId}`,
-      });
+      let lastJobId: string | number | undefined;
+      for (const correctionEventId of correctionEventIds.sort((left, right) => left - right)) {
+        const job = await enqueueTournamentReview(season, 'manual', {
+          tournamentId: requested.tournamentId,
+          eventId: correctionEventId,
+          reviewMode: 'CORRECTION',
+          reviewCorrectionReason: requested.reason,
+          reviewCorrectionChangeId: requested.changeId,
+          deduplicationId: `tournament-review-correction-${season.seasonCode}-${requested.tournamentId}-${correctionEventId}-${requested.changeId}`,
+        });
+        lastJobId = job.id;
+      }
+      return {
+        kind: 'enqueued' as const,
+        jobId: lastJobId,
+        message: `Enqueued ${correctionEventIds.length} tournament review correction job(s)`,
+      };
     },
     'event-current-refresh': () => runManualEventCurrentRefresh(),
     'core-current-reconcile': () => runManualEventCurrentRefresh(),

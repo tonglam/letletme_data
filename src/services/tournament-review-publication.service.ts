@@ -2657,7 +2657,7 @@ export async function requestTournamentReviewCorrection(
   eventId: number,
   reason: string,
   changeId: string,
-): Promise<void> {
+): Promise<number[]> {
   if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) {
     throw new Error('tournamentId must be a positive integer');
   }
@@ -2669,7 +2669,22 @@ export async function requestTournamentReviewCorrection(
   }
   const db = await getDbClient();
   const rows = await db<Array<{ event_id: number }>>`
-    UPDATE competition.tournament_review_obligations obligation
+	  WITH target AS (
+	    SELECT obligation.event_id
+	    FROM competition.tournament_review_obligations obligation
+	    WHERE obligation.season_id = ${season.seasonId}
+	      AND obligation.tournament_id = ${tournamentId}
+	      AND obligation.event_id = ${eventId}
+	      AND obligation.state = 'READY'
+	      AND EXISTS (
+	        SELECT 1
+	        FROM competition.tournament_review_heads head
+	        WHERE head.season_id = obligation.season_id
+	          AND head.tournament_id = obligation.tournament_id
+	          AND head.event_id = obligation.event_id
+	      )
+	  )
+	    UPDATE competition.tournament_review_obligations obligation
     SET state = 'PENDING',
         next_attempt_at = clock_timestamp(),
         execution_attempts = 0,
@@ -2688,21 +2703,22 @@ export async function requestTournamentReviewCorrection(
 	        correction_change_id = ${changeId.trim()},
 	        updated_at = clock_timestamp()
     WHERE obligation.season_id = ${season.seasonId}
-      AND obligation.tournament_id = ${tournamentId}
-      AND obligation.event_id = ${eventId}
-      AND obligation.state = 'READY'
-      AND EXISTS (
-        SELECT 1
-        FROM competition.tournament_review_heads head
+	      AND obligation.tournament_id = ${tournamentId}
+	      AND obligation.event_id >= (SELECT target.event_id FROM target)
+	      AND obligation.state = 'READY'
+	      AND EXISTS (
+	        SELECT 1
+	        FROM competition.tournament_review_heads head
         WHERE head.season_id = obligation.season_id
           AND head.tournament_id = obligation.tournament_id
           AND head.event_id = obligation.event_id
       )
     RETURNING obligation.event_id
-  `;
-  if (rows.length !== 1) {
+	  `;
+  if (rows.length === 0) {
     throw new Error('only an existing READY review scope can be corrected');
   }
+  return rows.map((row) => row.event_id);
 }
 
 export async function reconcileTournamentReviewObligations(
