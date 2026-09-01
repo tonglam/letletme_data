@@ -354,7 +354,12 @@ export function splitTournamentReviewChunks(payload: JsonRecord): ReadonlyArray<
   const format = payload.format;
   if (format === 'POINTS' && isRecord(payload.points)) {
     sections.push(['POINTS_STANDINGS', payload.points.rows]);
-    sections.push(['POINTS_TRAJECTORIES', payload.points.rows]);
+    sections.push([
+      'POINTS_TRAJECTORIES',
+      Array.isArray(payload.points.trajectoryRows)
+        ? payload.points.trajectoryRows
+        : payload.points.rows,
+    ]);
   } else if (format === 'H2H' && isRecord(payload.h2h)) {
     sections.push(['H2H_FIXTURES', payload.h2h.matches]);
     sections.push(['H2H_STANDINGS', payload.h2h.standings]);
@@ -456,7 +461,7 @@ function reviewPublicationManifestPayload(
 ): JsonRecord {
   const output: JsonRecord = { ...payload, manifest };
   if (payload.format === 'POINTS' && isRecord(payload.points)) {
-    const { rows: _rows, ...points } = payload.points;
+    const { rows: _rows, trajectoryRows: _trajectoryRows, ...points } = payload.points;
     output.points = points;
   } else if (payload.format === 'H2H' && isRecord(payload.h2h)) {
     const { matches: _matches, standings: _standings, ...h2h } = payload.h2h;
