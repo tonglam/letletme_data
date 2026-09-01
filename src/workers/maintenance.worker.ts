@@ -29,6 +29,7 @@ import {
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
+  invalidateMyFplSnapshotRedisManifest,
   isManagerReviewV2MyFplPublication,
   requeueDeliveredMyFplSnapshotPublication,
   type MyFplSnapshotOutboxDeliveryEvidence,
@@ -352,6 +353,11 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               });
               return { status: 'noop', publication: active };
             }
+            // A corrupt pointer cannot be overwritten by the activation Lua
+            // (it deliberately fails closed). Clear only the exact active
+            // revision before replaying its durable outbox receipt; a newer
+            // pointer is fenced and remains untouched.
+            await invalidateMyFplSnapshotRedisManifest(season.seasonCode, eventId, active.revision);
             await requeueDeliveredMyFplSnapshotPublication(season, eventId, active.revision);
             const replay = await dispatchMyFplSnapshotPublicationOutbox({
               limit: 1,

@@ -91,6 +91,19 @@ export interface LivePublicationRead {
   readonly servedFrom: 'REDIS_CURRENT' | 'REDIS_PREVIOUS' | 'POSTGRES_CHECKPOINT';
 }
 
+/**
+ * A manager-only score fact is valid only for the exact Live Points V2
+ * publication from which its player subtotal was observed.  This is kept in
+ * the entry input so a later score read cannot silently combine a gross FPL
+ * total with a different live revision.
+ */
+export interface AssistantManagerPointsFact {
+  readonly points: number;
+  readonly livePublicationId: string;
+  readonly liveGeneration: number;
+  readonly liveScoreCoreRevision: string;
+}
+
 export interface Exactly15Pick {
   readonly element: number;
   readonly position: number;
@@ -150,6 +163,8 @@ export interface EntryLiveInputV2 {
      */
     /** Present for manager-chip inputs; older non-manager inputs remain valid. */
     readonly reportedEventPoints?: number;
+    /** Manager-only points bound to one exact Live Points V2 score revision. */
+    readonly assistantManagerPoints?: AssistantManagerPointsFact;
     readonly transferCount: number;
     readonly transferCost: number;
   };
@@ -542,6 +557,22 @@ function parseExactly15Picks(value: unknown): value is Exactly15Picks {
   return positions.size === 15 && captains === 1 && viceCaptains === 1;
 }
 
+function isAssistantManagerPointsFact(value: unknown): value is AssistantManagerPointsFact {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.points === 'number' &&
+    Number.isSafeInteger(value.points) &&
+    value.points >= 0 &&
+    typeof value.livePublicationId === 'string' &&
+    /^[0-9a-f-]{36}$/i.test(value.livePublicationId) &&
+    typeof value.liveGeneration === 'number' &&
+    Number.isSafeInteger(value.liveGeneration) &&
+    value.liveGeneration > 0 &&
+    typeof value.liveScoreCoreRevision === 'string' &&
+    /^[0-9a-f]{64}$/.test(value.liveScoreCoreRevision)
+  );
+}
+
 export function validateEntryLiveInputV2(
   value: unknown,
   scope: EntryScope,
@@ -562,8 +593,8 @@ export function validateEntryLiveInputV2(
     (picksBase.reportedEventPoints !== undefined &&
       (typeof picksBase.reportedEventPoints !== 'number' ||
         !Number.isSafeInteger(picksBase.reportedEventPoints))) ||
-    ((picksBase.chip === 'manager' || picksBase.chip === 'MANAGER') &&
-      picksBase.reportedEventPoints === undefined) ||
+    (picksBase.assistantManagerPoints !== undefined &&
+      !isAssistantManagerPointsFact(picksBase.assistantManagerPoints)) ||
     typeof picksBase.transferCount !== 'number' ||
     !Number.isSafeInteger(picksBase.transferCount) ||
     picksBase.transferCount < 0 ||
@@ -1865,6 +1896,7 @@ function buildEntryInputFromPicks(
   entryId: number,
   picks: RawFPLEntryEventPicksResponse,
   sourceCheckedAt: string,
+  assistantManagerPoints?: AssistantManagerPointsFact,
 ): EntryLiveInputV2 {
   const normalized = picks.picks
     .map((pick) => ({
@@ -1879,6 +1911,7 @@ function buildEntryInputFromPicks(
     picks: normalized,
     chip: picks.active_chip,
     reportedEventPoints: picks.entry_history.points,
+    assistantManagerPoints: assistantManagerPoints ?? null,
     transferCount: picks.entry_history.event_transfers,
     transferCost: picks.entry_history.event_transfers_cost,
   });
@@ -1893,6 +1926,7 @@ function buildEntryInputFromPicks(
       picks: normalized,
       chip: picks.active_chip ?? null,
       reportedEventPoints: picks.entry_history.points,
+      ...(assistantManagerPoints ? { assistantManagerPoints } : {}),
       transferCount: picks.entry_history.event_transfers,
       transferCost: picks.entry_history.event_transfers_cost,
     },
@@ -2301,6 +2335,7 @@ export function entryLiveInputFromFplPicks(
   entryId: number,
   picks: RawFPLEntryEventPicksResponse,
   sourceCheckedAt: Date | string,
+  assistantManagerPoints?: AssistantManagerPointsFact,
 ): EntryLiveInputV2 {
   return buildEntryInputFromPicks(
     season.seasonCode,
@@ -2308,5 +2343,6 @@ export function entryLiveInputFromFplPicks(
     entryId,
     picks,
     sourceDate(sourceCheckedAt),
+    assistantManagerPoints,
   );
 }

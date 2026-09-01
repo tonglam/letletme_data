@@ -219,20 +219,10 @@ export function projectEventLiveManagerScore(input: {
   liveByElement: ReadonlyMap<number, EventLive>;
   fixtures: readonly Fixture[];
   /**
-   * FPL's entry-history event total, captured in the same immutable picks
-   * publication.  Assistant Manager adds points that do not exist in the
-   * player-live rows, so that chip must use this manager-aware fact after the
-   * player lineup has been projected.
+   * Assistant Manager's separate points fact, already reconciled against the
+   * exact Live Points V2 revision that produced `liveByElement`.
    */
-  reportedEventPoints?: number | null;
-  /**
-   * Source boundary of the live publication used for `liveByElement`.
-   * Assistant Manager points are derived from two separate facts, so they
-   * are accepted only when the reported gross total and player-live rows were
-   * observed at the same boundary. Callers must not omit it for a manager-chip
-   * input.
-   */
-  liveSourceCheckedAt?: Date | string | null;
+  assistantManagerPoints?: number | null;
 }): ProjectedEventLiveManagerScore | null {
   if (input.picks.length !== 15 || input.picks.some((pick) => pick.entryId !== input.entryId)) {
     return null;
@@ -301,30 +291,15 @@ export function projectEventLiveManagerScore(input: {
   const managerChip = chipIs(chip, 'manager', 'MANAGER');
   if (
     managerChip &&
-    (input.reportedEventPoints === null ||
-      input.reportedEventPoints === undefined ||
-      !Number.isSafeInteger(input.reportedEventPoints))
+    (input.assistantManagerPoints === null ||
+      input.assistantManagerPoints === undefined ||
+      !Number.isSafeInteger(input.assistantManagerPoints) ||
+      input.assistantManagerPoints < 0)
   ) {
     // The manager chip adds a separate manager-scoring fact that is not present
     // in player-live rows. Never publish a partial player-only score when the
-    // immutable manager-aware source is unavailable.
+    // immutable manager-only source is unavailable.
     return null;
-  }
-  if (managerChip) {
-    const liveSourceTimestamp =
-      input.liveSourceCheckedAt instanceof Date
-        ? input.liveSourceCheckedAt.getTime()
-        : typeof input.liveSourceCheckedAt === 'string'
-          ? Date.parse(input.liveSourceCheckedAt)
-          : Number.NaN;
-    // `reportedEventPoints` is a gross total from the entry-picks response.
-    // Do not subtract a newer/older player subtotal from it: a valid-looking
-    // non-negative delta can still be stale when Assistant Manager is active.
-    // Exact observation equality is the fail-closed boundary until a source
-    // provides a manager-only fact keyed by the live revision.
-    if (!Number.isFinite(liveSourceTimestamp) || liveSourceTimestamp !== [...sourceTimestamps][0]) {
-      return null;
-    }
   }
   const benchBoost = chipIs(chip, 'bboost', 'BENCH_BOOST');
   const captainMultiplier = chipIs(chip, '3xc', 'TRIPLE_CAPTAIN') ? 3 : 2;
@@ -485,19 +460,7 @@ export function projectEventLiveManagerScore(input: {
   }, 0);
   if (!Number.isSafeInteger(points)) return null;
 
-  // `reportedEventPoints` is the whole FPL gross total, not just the
-  // Assistant Manager contribution. Derive the manager-only delta from the
-  // source multipliers before adding it to the projected lineup score. Using
-  // the projected score as the baseline would erase a newly inferred
-  // auto-substitution or vice-captain promotion.
-  const sourceMultiplierPoints = picks.reduce((sum, pick) => {
-    const live = input.liveByElement.get(pick.elementId);
-    if (!live || !Number.isSafeInteger(live.totalPoints)) return Number.NaN;
-    return sum + live.totalPoints * pick.multiplier;
-  }, 0);
-  if (!Number.isSafeInteger(sourceMultiplierPoints)) return null;
-  const managerPoints = managerChip ? input.reportedEventPoints! - sourceMultiplierPoints : 0;
-  if (managerChip && managerPoints < 0) return null;
+  const managerPoints = managerChip ? input.assistantManagerPoints! : 0;
   const eventPoints = points + managerPoints;
 
   const picksCheckedAt = new Date([...sourceTimestamps][0]!).toISOString();

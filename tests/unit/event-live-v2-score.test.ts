@@ -25,23 +25,6 @@ describe('Live Points V2 freshness boundaries', () => {
     ).toBe(false);
   });
 
-  test('requires the same observation for manager-chip gross and live points', () => {
-    expect(
-      eventLiveProjectedPicksAreCoherent(
-        '2026-08-24T00:01:00.000Z',
-        '2026-08-24T00:01:00.000Z',
-        true,
-      ),
-    ).toBe(true);
-    expect(
-      eventLiveProjectedPicksAreCoherent(
-        '2026-08-24T00:00:59.999Z',
-        '2026-08-24T00:01:00.000Z',
-        true,
-      ),
-    ).toBe(false);
-  });
-
   test('requires complete contiguous aggregate coverage', () => {
     expect(
       hasCompleteAggregateCoverage({ eventCount: 3, firstEventId: 2, lastEventId: 4 }, 2, 4),

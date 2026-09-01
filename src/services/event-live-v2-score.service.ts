@@ -111,15 +111,13 @@ export function eventLivePicksAreFresh(
 export function eventLiveProjectedPicksAreCoherent(
   picksCheckedAt: string,
   liveCheckedAt: string,
-  requireExactObservation = false,
 ): boolean {
   const picksTimestamp = Date.parse(picksCheckedAt);
   const liveTimestamp = Date.parse(liveCheckedAt);
   return (
     Number.isFinite(picksTimestamp) &&
     Number.isFinite(liveTimestamp) &&
-    picksTimestamp <= liveTimestamp &&
-    (!requireExactObservation || picksTimestamp === liveTimestamp)
+    picksTimestamp <= liveTimestamp
   );
 }
 
@@ -345,14 +343,26 @@ async function loadEventLiveScoreBatch(
     const inputRead = inputByEntry.get(entryId);
     const rows = rowsByEntry.get(entryId) ?? [];
     if (!inputRead || !picksMatchInput(rows, inputRead.input)) continue;
+    const managerChip =
+      inputRead.input.picksBase.chip === 'manager' || inputRead.input.picksBase.chip === 'MANAGER';
+    const managerFact = inputRead.input.picksBase.assistantManagerPoints;
+    if (
+      managerChip &&
+      (!managerFact ||
+        managerFact.livePublicationId !== authority.publication.publicationId ||
+        managerFact.liveGeneration !== authority.publication.generation ||
+        managerFact.liveScoreCoreRevision !== authority.publication.revisions.scoreCore.revision)
+    ) {
+      // Assistant Manager points are a separate provider fact. A row bound to
+      // another live revision is incomplete, never a reason to mix revisions.
+      continue;
+    }
     // Never combine a newer picks publication with an older live authority;
     // that vector did not exist as one coherent observation.
     if (
       !eventLiveProjectedPicksAreCoherent(
         inputRead.publication.sourceCheckedAt,
         authority.publication.sourceCheckedAt,
-        inputRead.input.picksBase.chip === 'manager' ||
-          inputRead.input.picksBase.chip === 'MANAGER',
       )
     )
       continue;
@@ -406,8 +416,7 @@ async function loadEventLiveScoreBatch(
             picks,
             liveByElement,
             fixtures: authority.fixtures as readonly Fixture[],
-            reportedEventPoints: inputRead.input.picksBase.reportedEventPoints,
-            liveSourceCheckedAt: authority.publication.sourceCheckedAt,
+            assistantManagerPoints: managerFact?.points,
           })
         : projectOfficialCurrentMultiplierScore({ entryId, picks, liveByElement });
     if (!projected) continue;

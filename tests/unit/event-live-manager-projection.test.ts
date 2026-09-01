@@ -292,10 +292,9 @@ describe('revision-pinned projected manager score', () => {
       picks: managerPicks,
       liveByElement,
       fixtures: [],
-      // The projected player contribution is 12; the extra seven points are
-      // the Assistant Manager contribution carried by entry_history.points.
-      reportedEventPoints: 19,
-      liveSourceCheckedAt: checkedAt,
+      // The manager-only fact is already bound to the same Live Points V2
+      // publication by the entry input publisher.
+      assistantManagerPoints: 7,
     });
 
     expect(result?.eventPoints).toBe(19);
@@ -316,11 +315,9 @@ describe('revision-pinned projected manager score', () => {
       picks: managerPicks,
       liveByElement,
       fixtures: [fixture(2, 97, true)],
-      // Source multipliers contribute 11 points; the reported gross total
-      // carries eight Assistant Manager points. The projected auto-sub then
+      // The manager-only fact carries eight points. The projected auto-sub
       // raises the player component to 16, for a final total of 24.
-      reportedEventPoints: 19,
-      liveSourceCheckedAt: checkedAt,
+      assistantManagerPoints: 8,
     });
 
     expect(result?.eventPoints).toBe(24);
@@ -347,7 +344,7 @@ describe('revision-pinned projected manager score', () => {
     ).toBeNull();
   });
 
-  test('fails closed when manager scoring and player live facts have different observations', () => {
+  test('fails closed when the manager-only fact is unavailable', () => {
     const managerPicks = picks();
     managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
     const liveByElement = new Map(
@@ -360,8 +357,7 @@ describe('revision-pinned projected manager score', () => {
         picks: managerPicks,
         liveByElement,
         fixtures: [],
-        reportedEventPoints: 19,
-        liveSourceCheckedAt: new Date(checkedAt.getTime() + 1),
+        assistantManagerPoints: null,
       }),
     ).toBeNull();
   });
