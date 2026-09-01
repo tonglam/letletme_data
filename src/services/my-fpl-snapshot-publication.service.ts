@@ -516,6 +516,21 @@ type EntrySource = {
 
 type JsonRecord = Record<string, unknown>;
 
+/**
+ * Provisional auto-substitution points are the incoming player's base points.
+ * The projected lineup may temporarily give a vice-captain a 2x/3x effective
+ * multiplier, but that captain multiplier must not leak into this diagnostic
+ * metric (the finalized result path uses the same base-point definition).
+ */
+export function projectedEventAutoSubPoints(
+  picks: readonly { element: number; total_points: number | null }[],
+  effectiveLineup: ReadonlyMap<number, { autoSub: boolean }>,
+): number {
+  return picks.reduce((sum, pick) => {
+    return sum + (effectiveLineup.get(pick.element)?.autoSub ? (pick.total_points ?? 0) : 0);
+  }, 0);
+}
+
 const numberValue = (value: unknown, fallback = 0): number => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim() !== '') {
@@ -1154,12 +1169,7 @@ const projectedResult = (
       const effective = effectiveLineup.get(pick.element);
       return sum + (effective?.pickActive === false ? (pick.total_points ?? 0) : 0);
     }, 0),
-    event_auto_sub_points: picks.reduce((sum, pick) => {
-      const effective = effectiveLineup.get(pick.element);
-      return (
-        sum + (effective?.autoSub ? (pick.total_points ?? 0) * effective.effectiveMultiplier : 0)
-      );
-    }, 0),
+    event_auto_sub_points: projectedEventAutoSubPoints(picks, effectiveLineup),
     event_chip: positionOnePick?.active_chip ?? null,
     played_captain_element_id: captain?.element ?? null,
     captain_points: captain

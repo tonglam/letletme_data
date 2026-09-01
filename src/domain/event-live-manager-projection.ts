@@ -225,6 +225,14 @@ export function projectEventLiveManagerScore(input: {
    * player lineup has been projected.
    */
   reportedEventPoints?: number | null;
+  /**
+   * Source boundary of the live publication used for `liveByElement`.
+   * Assistant Manager points are derived from two separate facts, so they
+   * are accepted only when the reported gross total and player-live rows were
+   * observed at the same boundary. Callers must not omit it for a manager-chip
+   * input.
+   */
+  liveSourceCheckedAt?: Date | string | null;
 }): ProjectedEventLiveManagerScore | null {
   if (input.picks.length !== 15 || input.picks.some((pick) => pick.entryId !== input.entryId)) {
     return null;
@@ -301,6 +309,22 @@ export function projectEventLiveManagerScore(input: {
     // in player-live rows. Never publish a partial player-only score when the
     // immutable manager-aware source is unavailable.
     return null;
+  }
+  if (managerChip) {
+    const liveSourceTimestamp =
+      input.liveSourceCheckedAt instanceof Date
+        ? input.liveSourceCheckedAt.getTime()
+        : typeof input.liveSourceCheckedAt === 'string'
+          ? Date.parse(input.liveSourceCheckedAt)
+          : Number.NaN;
+    // `reportedEventPoints` is a gross total from the entry-picks response.
+    // Do not subtract a newer/older player subtotal from it: a valid-looking
+    // non-negative delta can still be stale when Assistant Manager is active.
+    // Exact observation equality is the fail-closed boundary until a source
+    // provides a manager-only fact keyed by the live revision.
+    if (!Number.isFinite(liveSourceTimestamp) || liveSourceTimestamp !== [...sourceTimestamps][0]) {
+      return null;
+    }
   }
   const benchBoost = chipIs(chip, 'bboost', 'BENCH_BOOST');
   const captainMultiplier = chipIs(chip, '3xc', 'TRIPLE_CAPTAIN') ? 3 : 2;

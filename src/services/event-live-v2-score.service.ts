@@ -111,13 +111,15 @@ export function eventLivePicksAreFresh(
 export function eventLiveProjectedPicksAreCoherent(
   picksCheckedAt: string,
   liveCheckedAt: string,
+  requireExactObservation = false,
 ): boolean {
   const picksTimestamp = Date.parse(picksCheckedAt);
   const liveTimestamp = Date.parse(liveCheckedAt);
   return (
     Number.isFinite(picksTimestamp) &&
     Number.isFinite(liveTimestamp) &&
-    picksTimestamp <= liveTimestamp
+    picksTimestamp <= liveTimestamp &&
+    (!requireExactObservation || picksTimestamp === liveTimestamp)
   );
 }
 
@@ -349,6 +351,8 @@ async function loadEventLiveScoreBatch(
       !eventLiveProjectedPicksAreCoherent(
         inputRead.publication.sourceCheckedAt,
         authority.publication.sourceCheckedAt,
+        inputRead.input.picksBase.chip === 'manager' ||
+          inputRead.input.picksBase.chip === 'MANAGER',
       )
     )
       continue;
@@ -403,6 +407,7 @@ async function loadEventLiveScoreBatch(
             liveByElement,
             fixtures: authority.fixtures as readonly Fixture[],
             reportedEventPoints: inputRead.input.picksBase.reportedEventPoints,
+            liveSourceCheckedAt: authority.publication.sourceCheckedAt,
           })
         : projectOfficialCurrentMultiplierScore({ entryId, picks, liveByElement });
     if (!projected) continue;

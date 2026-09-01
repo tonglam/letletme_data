@@ -9,6 +9,7 @@ import {
   myFplSnapshotRedisManifestKey,
   serializeMyFplSnapshotCapture,
   resolveMyFplSnapshotCoverageState,
+  projectedEventAutoSubPoints,
   type MyFplSnapshotPublication,
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
@@ -41,6 +42,15 @@ const tournamentTransfers = readFileSync(
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 
 describe('My FPL daily snapshot publication contract', () => {
+  test('counts projected auto-sub points before captain multipliers', () => {
+    expect(
+      projectedEventAutoSubPoints(
+        [{ element: 7, total_points: 6 }],
+        new Map([[7, { autoSub: true, effectiveMultiplier: 2 }]]),
+      ),
+    ).toBe(6);
+  });
+
   test('persists late-entry eligibility separately from the eligible denominator', () => {
     expect(eligibilityMigration).toContain('not_applicable_entry_count');
     expect(eligibilityMigration).toContain('snapshot_entry.is_empty');

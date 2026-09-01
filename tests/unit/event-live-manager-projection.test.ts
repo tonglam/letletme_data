@@ -295,6 +295,7 @@ describe('revision-pinned projected manager score', () => {
       // The projected player contribution is 12; the extra seven points are
       // the Assistant Manager contribution carried by entry_history.points.
       reportedEventPoints: 19,
+      liveSourceCheckedAt: checkedAt,
     });
 
     expect(result?.eventPoints).toBe(19);
@@ -319,6 +320,7 @@ describe('revision-pinned projected manager score', () => {
       // carries eight Assistant Manager points. The projected auto-sub then
       // raises the player component to 16, for a final total of 24.
       reportedEventPoints: 19,
+      liveSourceCheckedAt: checkedAt,
     });
 
     expect(result?.eventPoints).toBe(24);
@@ -341,6 +343,25 @@ describe('revision-pinned projected manager score', () => {
         picks: managerPicks,
         liveByElement,
         fixtures: [],
+      }),
+    ).toBeNull();
+  });
+
+  test('fails closed when manager scoring and player live facts have different observations', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+
+    expect(
+      projectEventLiveManagerScore({
+        entryId: 101,
+        picks: managerPicks,
+        liveByElement,
+        fixtures: [],
+        reportedEventPoints: 19,
+        liveSourceCheckedAt: new Date(checkedAt.getTime() + 1),
       }),
     ).toBeNull();
   });
