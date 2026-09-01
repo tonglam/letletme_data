@@ -144,6 +144,14 @@ describe('My Tournament Review V2 migration', () => {
     expect(hardCutMigration).toContain('TO letletme_graphql_reader');
   });
 
+  test('migrates durable governance evidence off the retired contract key', () => {
+    expect(hardCutMigration).toContain("SET contract_key = 'my-tournament-review-v2.1'");
+    expect(hardCutMigration).toContain('UPDATE ops.freshness_slo_windows');
+    expect(hardCutMigration).toContain('UPDATE ops.data_governance_cases');
+    expect(hardCutMigration).toContain("status = 'DISMISSED'");
+    expect(hardCutMigration).toContain('conflicting_cases');
+  });
+
   test('allows the hard-cut backfill to target only the current season', () => {
     expect(backfillScript).toContain('const currentSeason = await seasonRepository.findCurrent()');
     expect(backfillScript).toContain('season.seasonId !== currentSeason.seasonId');

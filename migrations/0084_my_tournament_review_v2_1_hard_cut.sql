@@ -150,6 +150,41 @@ BEGIN
 END
 $migration$;
 
+-- The hard cut has no compatibility alias for the retired review contract.
+-- Move durable governance evidence to the V2.1 key while preserving any
+-- already-open V2.1 case when a legacy duplicate occupies the same dedupe
+-- identity.  This keeps freshness windows and repair lanes observable after
+-- the registry switches to the single V2.1 contract.
+UPDATE ops.freshness_slo_windows
+SET contract_key = 'my-tournament-review-v2.1',
+    updated_at = clock_timestamp()
+WHERE contract_key = 'my-tournament-review-v2';
+
+WITH conflicting_cases AS (
+  SELECT legacy.case_id
+  FROM ops.data_governance_cases legacy
+  JOIN ops.data_governance_cases current_case
+    ON current_case.case_kind = legacy.case_kind
+   AND current_case.contract_key = 'my-tournament-review-v2.1'
+   AND current_case.lane = legacy.lane
+   AND current_case.scope_key = legacy.scope_key
+   AND current_case.fingerprint = legacy.fingerprint
+   AND current_case.status IN ('OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW')
+  WHERE legacy.contract_key = 'my-tournament-review-v2'
+    AND legacy.status IN ('OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW')
+)
+UPDATE ops.data_governance_cases legacy
+SET status = 'DISMISSED',
+    last_error = 'Retired review contract superseded by my-tournament-review-v2.1',
+    recovered_at = COALESCE(recovered_at, clock_timestamp()),
+    updated_at = clock_timestamp()
+WHERE legacy.case_id IN (SELECT case_id FROM conflicting_cases);
+
+UPDATE ops.data_governance_cases
+SET contract_key = 'my-tournament-review-v2.1',
+    updated_at = clock_timestamp()
+WHERE contract_key = 'my-tournament-review-v2';
+
 ALTER TABLE competition.tournament_review_publications
   DROP CONSTRAINT IF EXISTS tournament_review_publications_versions_check;
 -- A semantic hash may legitimately recur after an audited correction (A -> B
