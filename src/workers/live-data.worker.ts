@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
@@ -51,7 +52,10 @@ async function enqueueFinalOfficialH2HRefresh(
 ): Promise<void> {
   try {
     await enqueueTournamentOfficialH2H(season, eventId, 'reconcile', {
-      jobId: `live-final-official-h2h-e${eventId}-g${obligationGeneration ?? Date.now()}`,
+      // A failed Bull job is retained for seven days.  Never reuse its ID on
+      // a later finalization pass or BullMQ will deduplicate the retry into the
+      // terminal failed job instead of dispatching a new refresh.
+      jobId: `live-final-official-h2h-e${eventId}-g${obligationGeneration ?? 'unknown'}-${randomUUID()}`,
       ...(freshAfter ? { freshAfter } : {}),
     });
     logInfo('Enqueued official H2H refresh after live finalization', {

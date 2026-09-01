@@ -53,6 +53,11 @@ export type EntryEventPicksPublicationMetadata = {
   readonly checkpointedAt?: Date | string;
 };
 
+export type EntryEventPicksUpsertOptions = {
+  /** Keep the deadline-time V2 input rows immutable during final result sync. */
+  readonly preserveCheckpointedInput?: boolean;
+};
+
 export type EntryEventPickHeadMetadata = {
   readonly entryId?: number;
   readonly publicationId: string;
@@ -247,6 +252,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     picks: RawFPLEntryEventPicksResponse,
     syncedAt: Date,
     publication?: EntryEventPicksPublicationMetadata,
+    options?: EntryEventPicksUpsertOptions,
   ): Promise<boolean> => {
     const existing = await db
       .select({
@@ -272,6 +278,23 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       )
       .for('update');
 
+    const [existingHead] = await db
+      .select({
+        rowCount: entryEventPickHeadsInCompetition.rowCount,
+        state: entryEventPickHeadsInCompetition.state,
+        inputPayload: entryEventPickHeadsInCompetition.inputPayload,
+      })
+      .from(entryEventPickHeadsInCompetition)
+      .where(
+        and(
+          eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+          eq(entryEventPickHeadsInCompetition.entryId, entryId),
+          eq(entryEventPickHeadsInCompetition.eventId, eventId),
+        ),
+      )
+      .for('update')
+      .limit(1);
+
     const candidateContent = normalizedPickContent(picks);
     const candidateByPosition = new Map(
       candidateContent.picks.map((pick) => [pick.position, pick] as const),
@@ -296,6 +319,27 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       existingChip === candidateContent.chip &&
       existingTransfers === candidateContent.transferCount &&
       existingTransferCost === candidateContent.transferCost;
+
+    const storedRowsAreComplete =
+      existing.length === 15 &&
+      new Set(existing.map((row) => row.position)).size === 15 &&
+      existing.every((row) => row.position >= 1 && row.position <= 15);
+    const preserveCheckpointedInput =
+      !sameContent &&
+      publication === undefined &&
+      options?.preserveCheckpointedInput === true &&
+      existingHead?.state === 'COMPLETE' &&
+      existingHead.rowCount === 15 &&
+      existingHead.inputPayload !== null &&
+      existingHead.inputPayload !== undefined &&
+      storedRowsAreComplete;
+
+    if (preserveCheckpointedInput) {
+      // The finalized endpoint can legitimately change multipliers after
+      // automatic substitutions.  Keep the deadline-time rows and head
+      // together; entry_event_results stores the final adjusted picks.
+      return false;
+    }
 
     // A source heartbeat must not rewrite the 15 rows or move their content
     // timestamp.  It may still repair a missing V2 head left by an interrupted
@@ -719,6 +763,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       picks: RawFPLEntryEventPicksResponse,
       syncedAt: Date | string = new Date(),
       publication?: EntryEventPicksPublicationMetadata,
+      options?: EntryEventPicksUpsertOptions,
     ): Promise<void> => {
       try {
         if (!isEntryPicksPayloadForEvent(picks, eventId)) {
@@ -744,11 +789,21 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
               picks,
               exactSyncedAt,
               publication,
+              options,
             )
           : await (
               await getDb()
             ).transaction((tx) =>
-              replaceScope(tx, season, entryId, eventId, picks, exactSyncedAt, publication),
+              replaceScope(
+                tx,
+                season,
+                entryId,
+                eventId,
+                picks,
+                exactSyncedAt,
+                publication,
+                options,
+              ),
             );
         logInfo(changed ? 'Replaced entry event picks' : 'Ignored stale entry event picks', {
           season: season.seasonCode,
