@@ -179,6 +179,30 @@ describe('live lifecycle decisions', () => {
     ).toBe(30_000);
   });
 
+  test('keeps failed picks probes on their retry cadence after the deadline', () => {
+    const season = { seasonId: 1, seasonCode: '2627' };
+    const now = new Date('2026-08-15T09:00:00.000Z');
+    const probe = {
+      state: 'PICKS_PROBE' as const,
+      shouldFetchLive: false,
+      shouldObserveMatches: false,
+      shouldProbePicks: true,
+      shouldSyncPicks: false,
+      recoverStaleFixtures: false,
+      finalizeEvent: false,
+      nextRetryAt: null,
+    };
+
+    expect(
+      resolveLiveLifecycleDelay(
+        { ...probe, nextKickoffAt: new Date('2026-08-15T12:00:00.000Z') },
+        season,
+        1,
+        now,
+      ),
+    ).toBe(resolveLiveLifecycleDelay(probe, season, 1, now));
+  });
+
   test('does not start live polling from a scheduled kickoff alone', () => {
     const decision = decideLiveLifecycle(
       { deadlineTime: '2026-08-15T10:00:00.000Z', finished: false, dataChecked: false },

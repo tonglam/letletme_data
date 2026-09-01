@@ -23,6 +23,7 @@ import {
   readLiveMatchDeskPointerV3,
   readLiveMatchDetailV3,
   readLiveMatchDetailPointerV3,
+  readLiveMatchDeskFenceV3,
   restoreLiveMatchDeskCheckpointV3,
   restoreLiveMatchDetailCheckpointV3,
   markLiveMatchDeskCheckpointedV3,
@@ -319,6 +320,38 @@ describe('Live Matches V3 Redis publications', () => {
       sourceCheckedAt: '2026-08-29T10:00:30.000Z',
       revisions: published.publication.revisions,
     });
+  });
+
+  test('does not let an older desk heartbeat overwrite a newer publication', async () => {
+    const first = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'BETWEEN_FIXTURES',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const observed = await readLiveMatchDeskFenceV3({ ...scope, redis });
+    const newer = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'BETWEEN_FIXTURES',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV3({ ...scope, redis }),
+      redis,
+    });
+
+    expect(
+      await touchLiveMatchDeskV3({
+        publication: first.publication,
+        sourceCheckedAt: '2026-08-29T10:01:00.000Z',
+        expectedNextCheckAt: '2026-08-29T10:05:00.000Z',
+        observedActive: observed,
+        redis,
+      }),
+    ).toBeNull();
+    expect((await readLiveMatchDeskV3({ ...scope, redis }))?.publication.publicationId).toBe(
+      newer.publication.publicationId,
+    );
   });
 
   test('records a Redis checkpoint watermark with the exact publication CAS', async () => {

@@ -71,6 +71,8 @@ export interface LiveSnapshotV2Dependencies {
   readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV3;
   readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV3;
   readonly syncLiveMatches?: typeof syncLiveMatchesV3FromObservation;
+  /** Test/repair seam for the Redis restore; production uses the V2 helper. */
+  readonly restoreLivePublicationCheckpoint?: typeof restoreLivePublicationV2Checkpoint;
   readonly readPublished: (season: string, eventId: number) => Promise<LivePublicationRead | null>;
   readonly readCheckpointed?: (
     season: FplSeasonRef,
@@ -618,7 +620,9 @@ export async function syncLiveSnapshotV2(
     // FINALIZED is an immutable durable boundary. Restore that exact
     // checkpoint before considering any newly fetched provisional candidate;
     // otherwise a fresh generation could supersede final data.
-    const restored = await restoreLivePublicationV2Checkpoint({
+    const restored = await (
+      dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint
+    )({
       checkpoint: durableFloor,
     });
     // A stale response is not proof that the durable FINAL is serving. Even
@@ -640,6 +644,20 @@ export async function syncLiveSnapshotV2(
       trigger: options.trigger ?? 'queue',
     });
     await settleMatchPublication();
+    if (options.finalizeEvent) {
+      const [liveResult, fixturesResult, expectedFixtureIdsResult, referenceDataResult] =
+        await observationPromise;
+      if (liveResult.status === 'rejected') throw liveResult.reason;
+      if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
+      if (expectedFixtureIdsResult.status === 'rejected') throw expectedFixtureIdsResult.reason;
+      if (referenceDataResult.status === 'rejected') throw referenceDataResult.reason;
+      await finalizeAcceptedMatch({
+        rawEventLive: liveResult.value,
+        rawFixtures: fixturesResult.value,
+        referenceData: referenceDataResult.value,
+        expectedFixtureIds: expectedFixtureIdsResult.value,
+      });
+    }
     return {
       eventId,
       changed: false,

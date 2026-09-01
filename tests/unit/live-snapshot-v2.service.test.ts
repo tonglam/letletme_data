@@ -396,6 +396,74 @@ describe('Live Points and Live Matches shared observation', () => {
     expect(finalizeFlags).toEqual([false, false]);
   });
 
+  test('finalizes Match after restoring a durable Live Points FINAL during cutover seed', async () => {
+    const finalPublication = {
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000001',
+      generation: 9,
+      season: season.seasonCode,
+      eventId: 2,
+      state: 'FINALIZED',
+    } as unknown as LivePublicationRead['publication'];
+    const durable = {
+      publication: finalPublication,
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'POSTGRES_CHECKPOINT',
+    } as LivePublicationRead;
+    const finalizeFlags: boolean[] = [];
+    let restoreCalls = 0;
+    const provisionalResult = {
+      season: season.seasonCode,
+      eventId: 2,
+      state: 'GW_REVIEW',
+      desk: { ...finalPublication, state: 'GW_REVIEW' as const },
+      deskFixtures: [],
+      detail: null,
+      deskChanged: false,
+      detailChanged: false,
+      deskCheckpointScheduled: false,
+      detailCheckpointScheduled: false,
+      detailUnavailableReason: null,
+    };
+    const sync = syncLiveSnapshotV2(season, 2, {
+      observedFixtures: [],
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      dependencies: {
+        getEventLive: async () => ({ elements: [] }),
+        getFixtures: async () => {
+          throw new Error('cutover seed must reuse observed fixtures');
+        },
+        getExpectedFixtureIds: async () => [],
+        getReferenceData: async () => ({ playerById: new Map() }) as never,
+        syncLiveMatches: async (observation) => {
+          finalizeFlags.push(observation.finalizeEvent === true);
+          return observation.finalizeEvent
+            ? ({
+                ...provisionalResult,
+                state: 'FINALIZED',
+                desk: { ...provisionalResult.desk, state: 'FINALIZED' as const },
+                detail: { finalized: true },
+              } as never)
+            : (provisionalResult as never);
+        },
+        restoreLivePublicationCheckpoint: async () => {
+          restoreCalls += 1;
+          return { publication: finalPublication, previous: null, published: true };
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => durable,
+        checkpointPublication: async () => false,
+      },
+    });
+
+    const result = await sync;
+    expect(restoreCalls).toBe(1);
+    expect(finalizeFlags).toEqual([false, false, true]);
+    expect(result.state).toBe('FINALIZED');
+  });
+
   test('rejects a final Live Points publication when provisional Match detail is unavailable', async () => {
     const rawFixture: RawFPLFixture = {
       code: 10401,

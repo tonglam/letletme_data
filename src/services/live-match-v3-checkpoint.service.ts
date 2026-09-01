@@ -132,7 +132,7 @@ export interface LiveMatchDeskCheckpointRequest {
   readonly eventId: number;
   readonly publication: MatchDeskPublication;
   readonly fixtures: readonly MatchDeskFixture[];
-  /** Destructive seed-only fence for replacing an old finalized V2 row. */
+  /** Destructive seed-only fence for replacing an old V2 row with V3. */
   readonly allowFinalizedReplacementForCutover?: boolean;
 }
 
@@ -142,7 +142,7 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly publication: MatchDetailPublication;
   readonly fixtures: readonly MatchFixtureDetail[];
   readonly finalized?: boolean;
-  /** Destructive seed-only fence for replacing a price-less old final row. */
+  /** Destructive seed-only fence for replacing an old V2 row with V3. */
   readonly allowFinalizedReplacementForCutover?: boolean;
 }
 
@@ -150,7 +150,7 @@ export async function checkpointLiveMatchScopeV3(input: {
   readonly season: FplSeasonRef;
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
-  /** Only the source-backed destructive V3 cutover may replace an old final row. */
+  /** Only the source-backed destructive V3 cutover may replace an old V2 row. */
   readonly allowFinalizedReplacementForCutover?: boolean;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
   const desired = await readLiveMatchCheckpointDesiredV3({
@@ -322,8 +322,8 @@ export async function checkpointLiveMatchDeskV3(
           )
           OR (
             ${allowFinalizedReplacementForCutover}
-            AND ${liveMatchDeskCheckpointsInFpl.state} = 'FINALIZED'
-            AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDeskCheckpointsInFpl.contractVersion} = 'live-matches-v2'
+            AND excluded.contract_version = 'live-matches-v3'
             AND ${liveMatchDeskCheckpointsInFpl.publicationId} <> excluded.publication_id
           )
         `,
@@ -419,8 +419,8 @@ export async function checkpointLiveMatchDetailV3(
           )
           OR (
             ${allowFinalizedReplacementForCutover}
-            AND ${liveMatchDetailCheckpointsInFpl.state} = 'FINALIZED'
-            AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDetailCheckpointsInFpl.contractVersion} = 'live-matches-v2'
+            AND excluded.contract_version = 'live-matches-v3'
             AND ${liveMatchDetailCheckpointsInFpl.publicationId} <> excluded.publication_id
           )
         `,

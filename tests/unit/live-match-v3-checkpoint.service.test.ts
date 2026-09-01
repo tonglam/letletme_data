@@ -24,7 +24,8 @@ describe('Live Matches V3 final checkpoint fence', () => {
     );
     expect(source).toMatch(/SET LOCAL statement_timeout = '5s'/);
     expect(source).toMatch(/allowFinalizedReplacementForCutover/);
-    expect(source).toMatch(/excluded\.state = 'FINALIZED'/);
+    expect(source).toMatch(/contractVersion} = 'live-matches-v2'/);
+    expect(source).toMatch(/excluded\.contract_version = 'live-matches-v3'/);
   });
 
   test('accepts only the exact final desk/detail revision vector', () => {

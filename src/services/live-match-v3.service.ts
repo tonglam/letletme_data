@@ -414,6 +414,7 @@ export async function syncLiveMatchesV3FromObservation(
       sourceCheckedAt: observedAt,
       expectedNextCheckAt: input.expectedNextCheckAt,
       staleAt,
+      observedActive: input.publishedDesk?.observedActive ?? input.observedDesk,
       redis: input.redis,
     });
     desk = touched ?? null;

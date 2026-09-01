@@ -1076,13 +1076,11 @@ export function resolveLiveLifecycleDelay(
     case 'GW_REVIEW':
       return isUkFinalizationWindow(now) ? GW_REVIEW_FINALIZATION_POLL_MS : GW_REVIEW_POLL_MS;
     case 'PICKS_PROBE':
-      if (!decision.nextKickoffAt) return PICKS_PROBE_POLL_MS;
-      {
-        const untilKickoffMs = decision.nextKickoffAt.getTime() - now.getTime();
-        if (untilKickoffMs <= 5 * 60_000) return PRE_DEADLINE_NEAR_POLL_MS;
-        if (untilKickoffMs <= 30 * 60_000) return PRE_DEADLINE_WARM_POLL_MS;
-        return PRE_DEADLINE_SLOW_POLL_MS;
-      }
+      // A picks probe is already a post-deadline retry lane. Its backoff is
+      // owned by nextRetryAt/PICKS_PROBE_POLL_MS, not by the next fixture
+      // kickoff. Applying pre-deadline tiers here can turn a failed canary
+      // into a fifteen-minute wait and miss the 2/3/5/10-minute retry plan.
+      return PICKS_PROBE_POLL_MS;
     case 'PICKS_SYNC':
       return PICKS_PROBE_POLL_MS;
     case 'PRE_DEADLINE':

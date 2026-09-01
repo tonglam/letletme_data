@@ -524,6 +524,7 @@ return {'published', currentRaw}
 const TOUCH_ONE_LUA = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'missing'} end
+if raw ~= (ARGV[6] or '') then return {'changed'} end
 local ok, value = pcall(cjson.decode, raw)
 if not ok or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) then return {'changed'} end
 local ttl = redis.call('PTTL', KEYS[1])
@@ -1860,10 +1861,13 @@ export async function touchLiveMatchDeskV3(input: {
   readonly sourceCheckedAt: Date | string;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly staleAt?: Date | string | null;
+  /** Exact active desk pointer captured before the upstream observation. */
+  readonly observedActive?: MatchDeskActiveFence;
   readonly redis?: Redis;
 }): Promise<MatchDeskPublication | null> {
   const scope = { season: input.publication.season, eventId: input.publication.eventId } as const;
   const redis = input.redis ?? (await redisSingleton.getClient());
+  const observedActive = input.observedActive ?? (await stableDeskActiveForPromotion(redis, scope));
   const [status, raw] = promotionResult(
     await redis.eval(
       TOUCH_ONE_LUA,
@@ -1874,6 +1878,7 @@ export async function touchLiveMatchDeskV3(input: {
       sourceDate(input.sourceCheckedAt),
       input.expectedNextCheckAt == null ? '' : sourceDate(input.expectedNextCheckAt),
       input.staleAt == null ? '' : sourceDate(input.staleAt),
+      observedActive.observed,
     ),
   );
   if (status !== 'touched') return null;
