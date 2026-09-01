@@ -4,8 +4,11 @@ import {
   liveLeagueV2ItemKey,
   parseLiveLeaguePublicationV2Manifest,
   type LeagueLiveManifest,
+  type LeagueLiveRead,
   type LeagueLiveScope,
 } from '../../src/cache/live-league-publication-v2';
+import { liveLeagueCheckpointIsDue } from '../../src/services/live-league-checkpoint-v2.service';
+import { isH2HTournamentPhaseActive } from '../../src/services/live-league-publication-v2.service';
 
 const scope: LeagueLiveScope = {
   season: '2627',
@@ -105,5 +108,82 @@ describe('Live League V2 manifest contract', () => {
   test('rejects an invalid publication contract version', () => {
     const invalid = { ...manifest(), contractVersion: 'live-points-v1' };
     expect(parseLiveLeaguePublicationV2Manifest(JSON.stringify(invalid), scope)).toBeNull();
+  });
+});
+
+describe('Live League V2 checkpoint cadence', () => {
+  test('coalesces a new non-boundary publication until its due time', () => {
+    const read = {
+      publication: {
+        ...manifest(),
+        times: {
+          ...manifest().times,
+          checkpointedAt: new Date(Date.now() - 11 * 60_000).toISOString(),
+        },
+      },
+      index: [],
+      payload: {},
+      servedFrom: 'REDIS_CURRENT',
+    } as LeagueLiveRead;
+    expect(
+      liveLeagueCheckpointIsDue(read, false, new Date(Date.now() + 60_000).toISOString()),
+    ).toBe(false);
+    expect(liveLeagueCheckpointIsDue(read)).toBe(true);
+  });
+});
+
+describe('Live League V2 H2H phase window', () => {
+  test('does not block finalization before, between, or after configured phases', () => {
+    const tournament = {
+      groupStartedEventId: 1,
+      groupEndedEventId: 10,
+      knockoutStartedEventId: 13,
+      knockoutEndedEventId: 14,
+    };
+
+    expect(isH2HTournamentPhaseActive(tournament, 0)).toBe(false);
+    expect(isH2HTournamentPhaseActive(tournament, 5)).toBe(true);
+    expect(isH2HTournamentPhaseActive(tournament, 11)).toBe(false);
+    expect(isH2HTournamentPhaseActive(tournament, 13)).toBe(true);
+    expect(isH2HTournamentPhaseActive(tournament, 15)).toBe(false);
+  });
+
+  test('keeps an unconfigured official schedule fail-closed', () => {
+    expect(
+      isH2HTournamentPhaseActive(
+        {
+          groupStartedEventId: null,
+          groupEndedEventId: null,
+          knockoutStartedEventId: null,
+          knockoutEndedEventId: null,
+        },
+        6,
+      ),
+    ).toBe(true);
+  });
+
+  test('treats an open-ended phase start as active from the first event', () => {
+    expect(
+      isH2HTournamentPhaseActive(
+        {
+          groupStartedEventId: null,
+          groupEndedEventId: 6,
+          knockoutStartedEventId: null,
+          knockoutEndedEventId: null,
+        },
+        6,
+      ),
+    ).toBe(true);
+    expect(
+      isH2HTournamentPhaseActive(
+        {
+          groupStartedEventId: null,
+          groupEndedEventId: 6,
+          knockoutStartedEventId: null,
+          knockoutEndedEventId: null,
+        },
+        7,
+      ),
+    ).toBe(false);
   });
 });

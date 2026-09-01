@@ -21,12 +21,48 @@ function seasonIdFromCode(season: string): number {
   return 2000 + Number(season.slice(0, 2));
 }
 
-function shouldCheckpoint(candidate: LeagueLiveRead, force: boolean): boolean {
+function shouldCheckpoint(
+  candidate: LeagueLiveRead,
+  force: boolean,
+  notBefore: string | null = null,
+): boolean {
   if (force || candidate.publication.state === 'FINALIZED') return true;
+  if (notBefore !== null) {
+    const earliest = Date.parse(notBefore);
+    if (Number.isFinite(earliest) && Date.now() < earliest) return false;
+  }
   const checkpointedAt = candidate.publication.times.checkpointedAt;
   if (!checkpointedAt) return true;
   const time = Date.parse(checkpointedAt);
   return !Number.isFinite(time) || Date.now() - time >= CHECKPOINT_INTERVAL_MS;
+}
+
+/**
+ * Returns the durable generation floor for one exact Redis publication scope.
+ * This is used only on a cold Redis allocation path; warm publication reads do
+ * not add a PostgreSQL round trip.
+ */
+export async function readLiveLeagueCheckpointGenerationV2(
+  scope: LeagueLiveScope,
+): Promise<number> {
+  if (scope.scope === 'H2H_MATCH') return 0;
+  const db = await getDb();
+  const seasonId = seasonIdFromCode(scope.season);
+  const rows = await db
+    .select({ generation: liveLeagueCheckpointsInCompetition.generation })
+    .from(liveLeagueCheckpointsInCompetition)
+    .where(
+      and(
+        eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
+        eq(liveLeagueCheckpointsInCompetition.eventId, scope.eventId),
+        eq(liveLeagueCheckpointsInCompetition.tournamentId, scope.tournamentId),
+        eq(liveLeagueCheckpointsInCompetition.scopeKind, scope.scope),
+      ),
+    )
+    .orderBy(desc(liveLeagueCheckpointsInCompetition.generation))
+    .limit(1);
+  const generation = Number(rows[0]?.generation ?? 0);
+  return Number.isSafeInteger(generation) && generation > 0 ? generation : 0;
 }
 
 function checkpointValues(read: LeagueLiveRead, checkpointedAt: Date) {
@@ -58,6 +94,39 @@ function checkpointValues(read: LeagueLiveRead, checkpointedAt: Date) {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sameFinalizedPublicationContent(
+  read: LeagueLiveRead,
+  persisted: {
+    readonly state: string;
+    readonly manifest: unknown;
+    readonly rowCount: number;
+  },
+): boolean {
+  // A Redis rebuild may allocate a fresh publication identity.  FINALIZED is
+  // still immutable: accept only the same scope, global vector, revision
+  // vector, counts, and semantic content identity; never replace the durable
+  // row with a different final result.
+  if (persisted.state !== 'FINALIZED' || persisted.rowCount !== read.index.length) return false;
+  if (!isRecord(persisted.manifest)) return false;
+  const stable = (manifest: Record<string, unknown>) => ({
+    contractVersion: manifest.contractVersion,
+    season: manifest.season,
+    eventId: manifest.eventId,
+    tournamentId: manifest.tournamentId,
+    scope: manifest.scope,
+    matchId: manifest.matchId,
+    state: manifest.state,
+    globalRef: manifest.globalRef,
+    revisions: manifest.revisions,
+    counts: manifest.counts,
+  });
+  return canonicalJson(stable(persisted.manifest)) === canonicalJson(stable(read.publication));
+}
+
 /** Persist one self-contained latest publication without blocking its Redis promotion. */
 export async function checkpointLiveLeaguePublicationV2(
   read: LeagueLiveRead,
@@ -75,6 +144,8 @@ export async function checkpointLiveLeaguePublicationV2(
           publicationId: liveLeagueCheckpointsInCompetition.publicationId,
           generation: liveLeagueCheckpointsInCompetition.generation,
           state: liveLeagueCheckpointsInCompetition.state,
+          manifest: liveLeagueCheckpointsInCompetition.manifest,
+          rowCount: liveLeagueCheckpointsInCompetition.rowCount,
         })
         .from(liveLeagueCheckpointsInCompetition)
         .where(
@@ -89,11 +160,14 @@ export async function checkpointLiveLeaguePublicationV2(
         .limit(1)
         .for('update');
       const current = existing[0];
-      if (
-        current &&
-        (current.state === 'FINALIZED' || Number(current.generation) >= read.publication.generation)
-      ) {
-        return current.publicationId === read.publication.publicationId;
+      if (current && current.state === 'FINALIZED') {
+        return (
+          current.publicationId === read.publication.publicationId ||
+          sameFinalizedPublicationContent(read, current)
+        );
+      }
+      if (current && Number(current.generation) >= read.publication.generation) {
+        return false;
       }
       const upserted = await tx
         .insert(liveLeagueCheckpointsInCompetition)
@@ -175,7 +249,7 @@ export async function reconcileLiveLeagueCheckpointV2(scope: LeagueLiveScope): P
   if (!desired) return false;
   const read = await readLiveLeaguePublicationV2(scope, redis);
   if (!read || read.publication.publicationId !== desired.publicationId) return false;
-  if (!liveLeagueCheckpointIsDue(read, desired.force)) return false;
+  if (!liveLeagueCheckpointIsDue(read, desired.force, desired.notBefore)) return false;
   const checkpointed = await checkpointLiveLeaguePublicationV2(read);
   if (!checkpointed) return false;
   const marked = await markLiveLeaguePublicationCheckpointedV2(read.publication, new Date(), redis);
@@ -184,6 +258,10 @@ export async function reconcileLiveLeagueCheckpointV2(scope: LeagueLiveScope): P
   return true;
 }
 
-export function liveLeagueCheckpointIsDue(read: LeagueLiveRead, force = false): boolean {
-  return shouldCheckpoint(read, force);
+export function liveLeagueCheckpointIsDue(
+  read: LeagueLiveRead,
+  force = false,
+  notBefore: string | null = null,
+): boolean {
+  return shouldCheckpoint(read, force, notBefore);
 }

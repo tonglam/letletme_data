@@ -596,8 +596,8 @@ export async function readLivePublicationV2Checkpoint(
 }
 
 /**
- * Return every terminal event whose Live Points, Match desk, or Match detail
- * checkpoint is absent or not FINALIZED.
+ * Return every terminal event whose Live Points, Match desk, Match detail, or
+ * in-window league checkpoint is absent or not FINALIZED.
  *
  * The initial query is set-based and supplies the cheap state fence for every
  * terminal event. A row that looks FINALIZED at the column level still needs
@@ -609,9 +609,92 @@ export async function findLivePublicationV2FinalizationTargets(
   season: FplSeasonRef,
 ): Promise<number[]> {
   const db = await getDb();
+  const leagueFinalizationPending = sql<boolean>`
+    EXISTS (
+      SELECT 1
+      FROM competition.tournaments AS league_tournament
+      WHERE league_tournament.season_id = ${eventsInFpl.seasonId}
+        AND league_tournament.state = 'active'
+        AND league_tournament.setup_status = 'ready'
+        AND (
+          (
+            league_tournament.league_type = 'classic'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM competition.live_league_checkpoints AS league_checkpoint
+              WHERE league_checkpoint.season_id = ${eventsInFpl.seasonId}
+                AND league_checkpoint.event_id = ${eventsInFpl.eventId}
+                AND league_checkpoint.tournament_id = league_tournament.tournament_id
+                AND league_checkpoint.scope_kind = 'CLASSIC'
+                AND league_checkpoint.state = 'FINALIZED'
+            )
+          )
+          OR (
+            league_tournament.league_type = 'h2h'
+            AND league_tournament.roster_mode = 'official_sync'
+            AND league_tournament.group_mode = 'battle_races'
+            AND (
+              (
+                league_tournament.group_started_event_id IS NULL
+                AND league_tournament.group_ended_event_id IS NULL
+                AND league_tournament.knockout_started_event_id IS NULL
+                AND league_tournament.knockout_ended_event_id IS NULL
+              )
+              OR (
+                league_tournament.group_started_event_id IS NOT NULL
+                AND ${eventsInFpl.eventId} >= league_tournament.group_started_event_id
+                AND (
+                  league_tournament.group_ended_event_id IS NULL
+                  OR ${eventsInFpl.eventId} <= league_tournament.group_ended_event_id
+                )
+              )
+              OR (
+                league_tournament.group_started_event_id IS NULL
+                AND league_tournament.group_ended_event_id IS NOT NULL
+                AND ${eventsInFpl.eventId} <= league_tournament.group_ended_event_id
+              )
+              OR (
+                league_tournament.knockout_started_event_id IS NOT NULL
+                AND ${eventsInFpl.eventId} >= league_tournament.knockout_started_event_id
+                AND (
+                  league_tournament.knockout_ended_event_id IS NULL
+                  OR ${eventsInFpl.eventId} <= league_tournament.knockout_ended_event_id
+                )
+              )
+              OR (
+                league_tournament.knockout_started_event_id IS NULL
+                AND league_tournament.knockout_ended_event_id IS NOT NULL
+                AND ${eventsInFpl.eventId} <= league_tournament.knockout_ended_event_id
+              )
+            )
+            AND (
+              NOT EXISTS (
+                SELECT 1
+                FROM competition.live_league_checkpoints AS league_head_checkpoint
+                WHERE league_head_checkpoint.season_id = ${eventsInFpl.seasonId}
+                  AND league_head_checkpoint.event_id = ${eventsInFpl.eventId}
+                  AND league_head_checkpoint.tournament_id = league_tournament.tournament_id
+                  AND league_head_checkpoint.scope_kind = 'H2H_HEAD'
+                  AND league_head_checkpoint.state = 'FINALIZED'
+              )
+              OR NOT EXISTS (
+                SELECT 1
+                FROM competition.live_league_checkpoints AS league_standings_checkpoint
+                WHERE league_standings_checkpoint.season_id = ${eventsInFpl.seasonId}
+                  AND league_standings_checkpoint.event_id = ${eventsInFpl.eventId}
+                  AND league_standings_checkpoint.tournament_id = league_tournament.tournament_id
+                  AND league_standings_checkpoint.scope_kind = 'H2H_STANDINGS'
+                  AND league_standings_checkpoint.state = 'FINALIZED'
+              )
+            )
+          )
+        )
+    )
+  `.as('leagueFinalizationPending');
   const rows = await db
     .select({
       eventId: eventsInFpl.eventId,
+      leagueFinalizationPending,
       livePointsState: livePointsPublicationCheckpointsInCompetition.state,
       deskState: liveMatchDeskCheckpointsInFpl.state,
       deskPublicationId: liveMatchDeskCheckpointsInFpl.publicationId,
@@ -663,6 +746,7 @@ export async function findLivePublicationV2FinalizationTargets(
   const targets: number[] = [];
   for (const row of rows) {
     if (
+      row.leagueFinalizationPending ||
       row.livePointsState !== 'FINALIZED' ||
       row.deskState !== 'FINALIZED' ||
       row.detailState !== 'FINALIZED'

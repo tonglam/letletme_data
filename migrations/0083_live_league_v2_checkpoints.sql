@@ -32,7 +32,8 @@ CREATE TABLE competition.live_league_checkpoints (
     REFERENCES fpl.events (season_id, event_id),
   CONSTRAINT live_league_checkpoints_tournament_fk
     FOREIGN KEY (season_id, tournament_id)
-    REFERENCES competition.tournaments (season_id, tournament_id),
+    REFERENCES competition.tournaments (season_id, tournament_id)
+    ON DELETE CASCADE,
   CONSTRAINT live_league_checkpoints_publication_once
     UNIQUE (season_id, event_id, tournament_id, scope_kind, publication_id),
   CONSTRAINT live_league_checkpoints_scope_kind_valid CHECK (
@@ -52,10 +53,6 @@ CREATE TABLE competition.live_league_checkpoints (
     AND row_count >= 0
     AND payload_bytes >= 0
     AND payload_sha256 ~ '^[0-9a-f]{64}$'
-  ),
-  CONSTRAINT live_league_checkpoints_time_order CHECK (
-    published_at >= source_checked_at
-    AND checkpointed_at >= published_at
   )
 );
 

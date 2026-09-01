@@ -6,6 +6,7 @@ import {
 import {
   leagueEntryInputRevision,
   LIVE_LEAGUE_MAX_ENTRIES,
+  readLiveLeaguePublicationV2PointersV2,
   readLiveLeaguePublicationV2Pointer,
   liveLeagueV2Key,
   publishLiveLeaguePublicationV2,
@@ -17,6 +18,9 @@ import {
   type H2HStandingsPayload,
   type LeagueLiveIndex,
   type LeagueLiveIndexRow,
+  type LeagueLiveManifest,
+  type LeagueLivePointerReadV2,
+  type LeagueLiveRead,
   type LeagueLiveRevisionVector,
 } from '../cache/live-league-publication-v2';
 import { redisSingleton } from '../cache/singleton';
@@ -24,13 +28,16 @@ import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   liveLeagueCheckpointIsDue,
+  readLiveLeagueCheckpointGenerationV2,
   reconcileLiveLeagueCheckpointV2,
 } from './live-league-checkpoint-v2.service';
 import { contentHash } from '../utils/content-hash';
 import { logError, logInfo } from '../utils/logger';
+import { mapWithConcurrency } from '../utils/async';
 
 const LIVE_LEAGUE_ALGORITHM_VERSION = 'live-league-v2:classic:1';
 const LIVE_ACTIVE_CADENCE_MS = 30_000;
+const LIVE_LEAGUE_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
 type ClassicRosterRow = {
   tournamentId: number;
@@ -78,7 +85,33 @@ export type LiveLeaguePublicationSyncResult = {
   readonly unchanged: number;
   readonly pending: number;
   readonly skipped: number;
+  readonly finalReady: boolean;
 };
+
+function checkpointNotBefore(
+  previous: LeagueLiveManifest | null | undefined,
+  force: boolean,
+): string | null {
+  if (force || !previous?.times.checkpointedAt) return null;
+  const checkpointedAt = Date.parse(previous.times.checkpointedAt);
+  if (!Number.isFinite(checkpointedAt)) return null;
+  return new Date(checkpointedAt + LIVE_LEAGUE_CHECKPOINT_INTERVAL_MS).toISOString();
+}
+
+async function scheduleLeagueCheckpoint(
+  publication: LeagueLiveManifest,
+  previous: LeagueLiveManifest | null | undefined,
+  scope: Parameters<typeof liveLeagueV2Key>[0],
+  redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<void> {
+  const force = publication.state === 'FINALIZED';
+  await setLiveLeagueCheckpointDesiredV2(publication, new Date(), {
+    force,
+    notBefore: checkpointNotBefore(previous, force),
+    redis,
+  });
+  await reconcileLiveLeagueCheckpointV2(scope);
+}
 
 function maxIso(values: readonly string[]): string {
   const valid = values
@@ -114,7 +147,9 @@ async function findClassicRosters(season: FplSeasonRef): Promise<ClassicRoster[]
       entry.total_transfers AS "totalTransfers",
       entry.last_event_id AS "lastEventId",
       entry.last_overall_points AS "lastOverallPoints",
-      entry.last_overall_rank AS "lastOverallRank",
+      -- The repository uses zero as the "no previous rank" sentinel. The V2
+      -- publication contract exposes absence as null, never as a fake rank.
+      NULLIF(entry.last_overall_rank, 0) AS "lastOverallRank",
       entry.last_team_value AS "lastTeamValue",
       entry.last_bank AS "lastBank"
     FROM competition.tournaments AS tournament
@@ -205,22 +240,49 @@ async function publishClassicRoster(
   if (roster.rows.length === 0 || roster.rows.length > 5_000) return 'skipped';
   const completeRows = roster.rows.filter(hasCompleteClassicIdentity);
   if (completeRows.length !== roster.rows.length) return 'pending';
+  const eligibleRows = completeRows.filter(
+    (row) => row.startedEvent === null || row.startedEvent <= eventId,
+  );
   const redis = await redisSingleton.getClient();
   const inputs = await readEntryLiveInputsV2(
-    completeRows.map((row) => ({ season: season.seasonCode, eventId, entryId: row.entryId })),
+    eligibleRows.map((row) => ({ season: season.seasonCode, eventId, entryId: row.entryId })),
     redis,
   );
   const allFinal =
     global.publication.state !== 'FINALIZED' ||
-    completeRows.every((row) => {
+    eligibleRows.every((row) => {
       const read = inputs.get(row.entryId);
       return read?.input.finalResult !== null;
     });
-  if (inputs.size !== completeRows.length || !allFinal) {
+  if (inputs.size !== eligibleRows.length || !allFinal) {
     return 'pending';
   }
 
   const index: LeagueLiveIndexRow[] = completeRows.map((row) => {
+    if (row.startedEvent !== null && row.startedEvent > eventId) {
+      return {
+        entryId: row.entryId,
+        availability: 'NO_PICKS',
+        entryName: row.entryName,
+        playerName: row.playerName,
+        region: row.region,
+        startedEvent: row.startedEvent,
+        overallPoints: row.overallPoints,
+        overallRank: row.overallRank,
+        bank: row.bank,
+        teamValue: row.teamValue,
+        totalTransfers: row.totalTransfers,
+        lastEventId: row.lastEventId,
+        lastOverallPoints: row.lastOverallPoints,
+        lastOverallRank: row.lastOverallRank,
+        lastTeamValue: row.lastTeamValue,
+        lastBank: row.lastBank,
+        inputPublicationId: null,
+        inputGeneration: null,
+        inputRevision: null,
+        inputContentUpdatedAt: null,
+      } satisfies LeagueLiveIndexRow;
+    }
     const read = inputs.get(row.entryId);
     if (!read) throw new Error(`Missing complete live input for entry ${row.entryId}`);
     return {
@@ -247,16 +309,20 @@ async function publishClassicRoster(
     };
   });
   const payload = Object.fromEntries(
-    completeRows.map((row) => [String(row.entryId), inputs.get(row.entryId)!.input]),
+    index.map((row) => [
+      String(row.entryId),
+      row.availability === 'NO_PICKS' ? null : inputs.get(row.entryId)!.input,
+    ]),
   );
   const revisions = buildRevisions(roster, global, index, payload);
+  const scope = {
+    season: season.seasonCode,
+    eventId,
+    tournamentId: roster.tournamentId,
+    scope: 'CLASSIC' as const,
+  };
   const result = await publishLiveLeaguePublicationV2({
-    scope: {
-      season: season.seasonCode,
-      eventId,
-      tournamentId: roster.tournamentId,
-      scope: 'CLASSIC',
-    },
+    scope,
     state: global.publication.state,
     sourceCheckedAt: global.publication.sourceCheckedAt,
     contentUpdatedAt: maxIso([
@@ -275,11 +341,12 @@ async function publishClassicRoster(
     counts: {
       expected: index.length,
       published: index.length,
-      ready: index.length,
-      noPicks: 0,
+      ready: index.filter((row) => row.availability === 'READY').length,
+      noPicks: index.filter((row) => row.availability === 'NO_PICKS').length,
     },
     index,
     payload,
+    generationFloorLoader: () => readLiveLeagueCheckpointGenerationV2(scope),
     redis,
   });
   const candidateRead = {
@@ -289,17 +356,11 @@ async function publishClassicRoster(
     servedFrom: 'REDIS_CURRENT' as const,
   };
   if (
-    result.publication.revisions.content === revisions.content &&
-    (result.published ||
-      liveLeagueCheckpointIsDue(candidateRead, result.publication.state === 'FINALIZED'))
+    (result.publication.revisions.content === revisions.content && result.published) ||
+    result.publication.times.checkpointedAt === null ||
+    liveLeagueCheckpointIsDue(candidateRead, result.publication.state === 'FINALIZED')
   ) {
-    await setLiveLeagueCheckpointDesiredV2(result.publication, new Date(), { redis });
-    await reconcileLiveLeagueCheckpointV2({
-      season: season.seasonCode,
-      eventId,
-      tournamentId: roster.tournamentId,
-      scope: 'CLASSIC',
-    });
+    await scheduleLeagueCheckpoint(result.publication, result.previous, scope, redis);
   }
   return result.published ? 'published' : 'unchanged';
 }
@@ -344,6 +405,28 @@ export async function syncLiveClassicLeaguePublicationsV2(
       });
     }
   }
+  const finalReady =
+    global.publication.state !== 'FINALIZED' ||
+    (
+      await Promise.all(
+        rosters.map(async (roster) => {
+          const read = await readLiveLeaguePublicationV2Pointer(
+            {
+              season: season.seasonCode,
+              eventId,
+              tournamentId: roster.tournamentId,
+              scope: 'CLASSIC',
+            },
+            'active',
+            redis,
+          );
+          return (
+            read?.publication.state === 'FINALIZED' &&
+            read.publication.times.checkpointedAt !== null
+          );
+        }),
+      )
+    ).every(Boolean);
   logInfo('Live Classic league publications synchronized', {
     season: season.seasonCode,
     eventId,
@@ -351,12 +434,14 @@ export async function syncLiveClassicLeaguePublicationsV2(
     globalGeneration: global.publication.generation,
     tournaments: rosters.length,
     ...counts,
+    finalReady,
   });
   return {
     globalPublicationId: global.publication.publicationId,
     globalGeneration: global.publication.generation,
     tournaments: rosters.length,
     ...counts,
+    finalReady,
   };
 }
 
@@ -370,6 +455,10 @@ export function liveLeagueClassicPointerKey(
 
 type H2HTournamentRow = {
   tournamentId: number;
+  groupStartedEventId: number | null;
+  groupEndedEventId: number | null;
+  knockoutStartedEventId: number | null;
+  knockoutEndedEventId: number | null;
 };
 
 type H2HMatchRow = {
@@ -406,17 +495,61 @@ type H2HStandingRow = {
   drawn: number | null;
   lost: number | null;
   pointsFor: number | null;
+  sourceCheckedAt: Date | string | null;
+  finalizationAt: Date | string | null;
+};
+
+type H2HStandingsRead = {
+  readonly rows: readonly H2HStandingRow[];
+  readonly sourceCheckedAt: Date | string | null;
+  readonly finalizationAt: Date | string | null;
 };
 
 type H2HPreparedMatch = {
   readonly index: H2HMatchIndexRow;
   readonly payload: H2HMatchPayload;
+  readonly finalReady: boolean;
 };
 
-async function findOfficialH2HTournaments(season: FplSeasonRef): Promise<number[]> {
+type OfficialH2HTournament = {
+  readonly tournamentId: number;
+  readonly groupStartedEventId: number | null;
+  readonly groupEndedEventId: number | null;
+  readonly knockoutStartedEventId: number | null;
+  readonly knockoutEndedEventId: number | null;
+};
+
+export function isH2HTournamentPhaseActive(
+  tournament: Pick<
+    OfficialH2HTournament,
+    'groupStartedEventId' | 'groupEndedEventId' | 'knockoutStartedEventId' | 'knockoutEndedEventId'
+  >,
+  eventId: number,
+): boolean {
+  const phases = [
+    [tournament.groupStartedEventId, tournament.groupEndedEventId],
+    [tournament.knockoutStartedEventId, tournament.knockoutEndedEventId],
+  ] as const;
+  const hasConfiguredPhase = phases.some(([start, end]) => start !== null || end !== null);
+  if (!hasConfiguredPhase) return true;
+  return phases.some(
+    ([start, end]) =>
+      (start !== null && eventId >= start && (end === null || eventId <= end)) ||
+      (start === null && end !== null && eventId <= end),
+  );
+}
+
+async function findOfficialH2HTournaments(
+  season: FplSeasonRef,
+): Promise<readonly OfficialH2HTournament[]> {
   const client = await getDbClient();
   const rows = await client<H2HTournamentRow[]>`
-    SELECT tournament_id AS "tournamentId"
+    SELECT
+      tournament_id AS "tournamentId",
+      group_started_event_id AS "groupStartedEventId",
+      group_ended_event_id AS "groupEndedEventId",
+      knockout_started_event_id AS "knockoutStartedEventId",
+      knockout_ended_event_id AS "knockoutEndedEventId"
     FROM competition.tournaments
     WHERE season_id = ${season.seasonId}
       AND league_type = 'h2h'
@@ -427,8 +560,27 @@ async function findOfficialH2HTournaments(season: FplSeasonRef): Promise<number[
     ORDER BY tournament_id
   `;
   return rows
-    .map((row) => Number(row.tournamentId))
-    .filter((value) => Number.isSafeInteger(value) && value > 0);
+    .map((row) => ({
+      tournamentId: Number(row.tournamentId),
+      groupStartedEventId:
+        row.groupStartedEventId === null ? null : Number(row.groupStartedEventId),
+      groupEndedEventId: row.groupEndedEventId === null ? null : Number(row.groupEndedEventId),
+      knockoutStartedEventId:
+        row.knockoutStartedEventId === null ? null : Number(row.knockoutStartedEventId),
+      knockoutEndedEventId:
+        row.knockoutEndedEventId === null ? null : Number(row.knockoutEndedEventId),
+    }))
+    .filter(
+      (value) =>
+        Number.isSafeInteger(value.tournamentId) &&
+        value.tournamentId > 0 &&
+        [
+          value.groupStartedEventId,
+          value.groupEndedEventId,
+          value.knockoutStartedEventId,
+          value.knockoutEndedEventId,
+        ].every((event) => event === null || (Number.isSafeInteger(event) && event > 0)),
+    );
 }
 
 async function findOfficialH2HMatches(
@@ -521,8 +673,9 @@ async function findOfficialH2HMatches(
 
 async function findOfficialH2HStandings(
   season: FplSeasonRef,
+  eventId: number,
   tournamentId: number,
-): Promise<H2HStandingRow[]> {
+): Promise<H2HStandingsRead> {
   const client = await getDbClient();
   const rows = await client<H2HStandingRow[]>`
     SELECT
@@ -535,8 +688,13 @@ async function findOfficialH2HStandings(
       groups.won,
       groups.drawn,
       groups.lost,
-      groups.total_net_points AS "pointsFor"
+      groups.total_net_points AS "pointsFor",
+      groups.updated_at AS "sourceCheckedAt",
+      event.data_checked_at AS "finalizationAt"
     FROM competition.tournament_groups AS groups
+    INNER JOIN fpl.events AS event
+      ON event.season_id = groups.season_id
+     AND event.event_id = ${eventId}
     LEFT JOIN competition.entries AS entry
       ON entry.season_id = groups.season_id
      AND entry.entry_id = groups.entry_id
@@ -544,7 +702,7 @@ async function findOfficialH2HStandings(
       AND groups.tournament_id = ${tournamentId}
     ORDER BY groups.group_rank NULLS LAST, groups.entry_id
   `;
-  return rows.map((row) => ({
+  const normalizedRows = rows.map((row) => ({
     ...row,
     entryId: Number(row.entryId),
     rank: row.rank === null ? null : Number(row.rank),
@@ -555,6 +713,23 @@ async function findOfficialH2HStandings(
     lost: row.lost === null ? null : Number(row.lost),
     pointsFor: row.pointsFor === null ? null : Number(row.pointsFor),
   }));
+  const latestSourceCheckedAt = normalizedRows.reduce<Date | string | null>((latest, row) => {
+    if (row.sourceCheckedAt === null) return latest;
+    if (latest === null) return row.sourceCheckedAt;
+    const latestTime = latest instanceof Date ? latest.getTime() : Date.parse(latest);
+    const rowTime =
+      row.sourceCheckedAt instanceof Date
+        ? row.sourceCheckedAt.getTime()
+        : Date.parse(row.sourceCheckedAt);
+    return Number.isFinite(rowTime) && (!Number.isFinite(latestTime) || rowTime > latestTime)
+      ? row.sourceCheckedAt
+      : latest;
+  }, null);
+  return {
+    rows: normalizedRows,
+    sourceCheckedAt: latestSourceCheckedAt,
+    finalizationAt: normalizedRows[0]?.finalizationAt ?? null,
+  };
 }
 
 function isoOrFallback(value: Date | string | null, fallback: string): string {
@@ -575,9 +750,13 @@ function h2hSide(
   const input = entryId === null || isAverage ? null : (inputRead?.input ?? null);
   return {
     entryId,
-    entryName: entryId === null || isAverage ? 'Average' : entryName?.trim() || `Entry ${entryId}`,
+    entryName: isAverage
+      ? 'Average'
+      : entryId === null
+        ? 'Bye'
+        : entryName?.trim() || `Entry ${entryId}`,
     playerName: entryId === null || isAverage ? null : playerName,
-    isAverage: entryId === null || isAverage,
+    isAverage,
     officialNetPoints,
     inputPublicationId: inputRead?.publication.publicationId ?? null,
     inputGeneration: inputRead?.publication.generation ?? null,
@@ -587,12 +766,14 @@ function h2hSide(
   };
 }
 
-function isReadyH2HMatch(value: unknown): value is H2HMatchPayload {
+function isH2HMatchPayload(value: unknown): value is H2HMatchPayload {
   return (
     typeof value === 'object' &&
     value !== null &&
     'state' in value &&
-    (value as { readonly state?: unknown }).state === 'READY'
+    ((value as { readonly state?: unknown }).state === 'READY' ||
+      (value as { readonly state?: unknown }).state === 'PENDING' ||
+      (value as { readonly state?: unknown }).state === 'ERROR')
   );
 }
 
@@ -648,9 +829,22 @@ function h2hRevisions(
       payload.away.isAverage,
     ]),
   );
+  const contentMatches = matches.map(({ index, payload }) => ({
+    index,
+    payload: {
+      ...payload,
+      // sourceCheckedAt is an observation heartbeat. It must not create a
+      // new league generation when the official match content is unchanged.
+      sourceCheckedAt: undefined,
+      home: { ...payload.home, inputContentUpdatedAt: undefined },
+      away: { ...payload.away, inputContentUpdatedAt: undefined },
+    },
+  }));
   const content = contentHash({
-    matches,
-    standings,
+    matches: contentMatches,
+    standings: standings.map(
+      ({ sourceCheckedAt: _sourceCheckedAt, finalizationAt: _finalizationAt, ...row }) => row,
+    ),
     global: global.publication.revisions.scoreCore.revision,
     algorithm,
   });
@@ -669,14 +863,58 @@ function h2hRevisions(
   };
 }
 
+function h2hMatchScope(season: string, eventId: number, row: H2HMatchRow) {
+  return {
+    season,
+    eventId,
+    tournamentId: row.tournamentId,
+    scope: 'H2H_MATCH' as const,
+    matchId: row.officialMatchId,
+  };
+}
+
+function h2hMatchIndex(row: H2HMatchRow, state: H2HMatchPayload['state']): H2HMatchIndexRow {
+  return {
+    matchId: row.officialMatchId,
+    eventId: row.eventId,
+    groupId: row.groupId > 0 ? row.groupId : 1,
+    sourceOrder: row.sourceOrder,
+    phase: row.phase,
+    availability: state,
+    homeEntryId: row.homeEntryId,
+    awayEntryId: row.awayEntryId,
+  };
+}
+
+function readH2HMatchPayload(
+  read: LeagueLiveRead | null | undefined,
+  matchId: number,
+): H2HMatchPayload | null {
+  const value = read?.payload[String(matchId)];
+  return isH2HMatchPayload(value) ? value : null;
+}
+
+function finalInputAvailable(
+  entryId: number | null,
+  isAverage: boolean,
+  inputRead: EntryLivePublicationRead | undefined,
+): boolean {
+  return entryId === null || isAverage || inputRead?.input.finalResult !== null;
+}
+
 async function publishH2HMatch(
   season: FplSeasonRef,
   eventId: number,
   global: NonNullable<Awaited<ReturnType<typeof readLivePublicationV2>>>,
   row: H2HMatchRow,
   inputs: ReadonlyMap<number, EntryLivePublicationRead>,
+  activePointer: LeagueLivePointerReadV2 | undefined,
+  previousPointer: LeagueLivePointerReadV2 | undefined,
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  expectedNextCheckAtValue?: Date | string | null,
 ): Promise<H2HPreparedMatch> {
+  const active = activePointer?.read;
+  const previous = previousPointer?.read;
   const fallbackSource = global.publication.sourceCheckedAt;
   const homeRead = row.homeEntryId === null ? undefined : inputs.get(row.homeEntryId);
   const awayRead = row.awayEntryId === null ? undefined : inputs.get(row.awayEntryId);
@@ -696,9 +934,14 @@ async function publishH2HMatch(
     row.awayNetPoints,
     awayRead,
   );
-  const ready =
+  const inputReady =
     (home.entryId === null || home.isAverage || home.input !== null) &&
     (away.entryId === null || away.isAverage || away.input !== null);
+  const finalReadyInput =
+    inputReady &&
+    (global.publication.state !== 'FINALIZED' ||
+      (finalInputAvailable(row.homeEntryId, row.homeIsAverage, homeRead) &&
+        finalInputAvailable(row.awayEntryId, row.awayIsAverage, awayRead)));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',
     season: season.seasonCode,
@@ -711,7 +954,7 @@ async function publishH2HMatch(
     knockoutName: row.knockoutName,
     tiebreak: row.tiebreak,
     isBye: row.isBye,
-    state: ready ? 'READY' : 'PENDING',
+    state: finalReadyInput ? 'READY' : 'PENDING',
     sourceCheckedAt: isoOrFallback(row.sourceCheckedAt, fallbackSource),
     globalRef: {
       publicationId: global.publication.publicationId,
@@ -720,79 +963,77 @@ async function publishH2HMatch(
     home,
     away,
   };
-  const scope = {
-    season: season.seasonCode,
-    eventId,
-    tournamentId: row.tournamentId,
-    scope: 'H2H_MATCH' as const,
-    matchId: row.officialMatchId,
-  };
-  const active = await readLiveLeaguePublicationV2Pointer(scope, 'active', redis);
-  const previous = await readLiveLeaguePublicationV2Pointer(scope, 'previous', redis);
-  let selected = candidate;
-  if (!ready) {
-    selected =
-      [active, previous]
-        .map((read) => read?.payload[String(row.officialMatchId)])
-        .find(isReadyH2HMatch) ?? candidate;
-  }
-  if (ready || (!active && !previous)) {
-    const revisions = h2hRevisions(
-      global,
-      [
-        {
-          index: {
-            matchId: row.officialMatchId,
-            eventId,
-            groupId: row.groupId > 0 ? row.groupId : 1,
-            sourceOrder: row.sourceOrder,
-            phase: row.phase,
-            availability: candidate.state,
-            homeEntryId: row.homeEntryId,
-            awayEntryId: row.awayEntryId,
-          },
-          payload: candidate,
+  const scope = h2hMatchScope(season.seasonCode, eventId, row);
+  const canPublish =
+    global.publication.state !== 'FINALIZED'
+      ? inputReady || (!active && !previous)
+      : finalReadyInput;
+  let selected =
+    (canPublish ? null : readH2HMatchPayload(active, row.officialMatchId)) ??
+    readH2HMatchPayload(previous, row.officialMatchId) ??
+    candidate;
+
+  if (canPublish) {
+    const preparedCandidate: H2HPreparedMatch = {
+      index: h2hMatchIndex(row, candidate.state),
+      payload: candidate,
+      finalReady: finalReadyInput,
+    };
+    const revisions = h2hRevisions(global, [preparedCandidate], []);
+    try {
+      const result = await publishLiveLeaguePublicationV2({
+        scope,
+        state: global.publication.state,
+        sourceCheckedAt: global.publication.sourceCheckedAt,
+        contentUpdatedAt: candidate.sourceCheckedAt,
+        expectedNextCheckAt: expectedNextCheckAt(
+          global.publication.sourceCheckedAt,
+          expectedNextCheckAtValue,
+        ),
+        globalRef: candidate.globalRef,
+        revisions,
+        counts: {
+          expected: 1,
+          published: 1,
+          ready: candidate.state === 'READY' ? 1 : 0,
+          noPicks: 0,
         },
-      ],
-      [],
-    );
-    await publishLiveLeaguePublicationV2({
-      scope,
-      state: global.publication.state,
-      sourceCheckedAt: global.publication.sourceCheckedAt,
-      contentUpdatedAt: candidate.sourceCheckedAt,
-      expectedNextCheckAt: expectedNextCheckAt(global.publication.sourceCheckedAt),
-      globalRef: candidate.globalRef,
-      revisions,
-      counts: { expected: 1, published: 1, ready: candidate.state === 'READY' ? 1 : 0, noPicks: 0 },
-      index: [
-        {
-          matchId: row.officialMatchId,
-          eventId,
-          groupId: row.groupId > 0 ? row.groupId : 1,
-          sourceOrder: row.sourceOrder,
-          phase: row.phase,
-          availability: candidate.state,
-          homeEntryId: row.homeEntryId,
-          awayEntryId: row.awayEntryId,
-        },
-      ],
-      payload: { [String(row.officialMatchId)]: candidate },
-      redis,
-    });
+        index: [h2hMatchIndex(row, candidate.state)],
+        payload: { [String(row.officialMatchId)]: candidate },
+        currentRead: active ?? null,
+        previousRead: previous ?? null,
+        currentPointerRaw: activePointer?.raw,
+        previousPointerRaw: previousPointer?.raw,
+        generationFloor: Math.max(
+          active?.publication.generation ?? 0,
+          previous?.publication.generation ?? 0,
+        ),
+        redis,
+      });
+      selected = result.published
+        ? candidate
+        : (readH2HMatchPayload(active, row.officialMatchId) ?? candidate);
+    } catch (error) {
+      logError('Live H2H match publication failed; retaining exact match LKG', error, {
+        season: season.seasonCode,
+        eventId,
+        tournamentId: row.tournamentId,
+        officialMatchId: row.officialMatchId,
+      });
+      selected = readH2HMatchPayload(active, row.officialMatchId) ??
+        readH2HMatchPayload(previous, row.officialMatchId) ?? { ...candidate, state: 'ERROR' };
+    }
   }
+
+  const selectedFinalReady =
+    finalReadyInput &&
+    selected.state === 'READY' &&
+    selected.globalRef.publicationId === global.publication.publicationId &&
+    selected.globalRef.generation === global.publication.generation;
   return {
-    index: {
-      matchId: row.officialMatchId,
-      eventId,
-      groupId: row.groupId > 0 ? row.groupId : 1,
-      sourceOrder: row.sourceOrder,
-      phase: row.phase,
-      availability: selected.state,
-      homeEntryId: row.homeEntryId,
-      awayEntryId: row.awayEntryId,
-    },
+    index: h2hMatchIndex(row, selected.state),
     payload: selected,
+    finalReady: selectedFinalReady,
   };
 }
 
@@ -836,6 +1077,7 @@ export type LiveH2HLeaguePublicationSyncResult = {
   readonly retained: number;
   readonly pending: number;
   readonly skipped: number;
+  readonly finalReady: boolean;
 };
 
 /**
@@ -847,17 +1089,24 @@ export type LiveH2HLeaguePublicationSyncResult = {
 export async function syncLiveH2HLeaguePublicationsV2(
   season: FplSeasonRef,
   eventId: number,
+  expectedNextCheckAtValue?: Date | string | null,
 ): Promise<LiveH2HLeaguePublicationSyncResult | null> {
   const redis = await redisSingleton.getClient();
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
-  const tournamentIds = await findOfficialH2HTournaments(season);
+  const tournaments = await findOfficialH2HTournaments(season);
   const totals = { matches: 0, published: 0, retained: 0, pending: 0, skipped: 0 };
-  for (const tournamentId of tournamentIds) {
+  let finalReady = true;
+  for (const tournament of tournaments) {
+    const tournamentId = tournament.tournamentId;
+    const phaseActive = isH2HTournamentPhaseActive(tournament, eventId);
     try {
       const sourceMatches = await findOfficialH2HMatches(season, tournamentId, eventId);
       if (sourceMatches.length === 0 || sourceMatches.length > LIVE_LEAGUE_MAX_ENTRIES) {
         totals.skipped += 1;
+        if (global.publication.state === 'FINALIZED' && phaseActive) {
+          finalReady = false;
+        }
         continue;
       }
       const entryIds = [
@@ -871,16 +1120,36 @@ export async function syncLiveH2HLeaguePublicationsV2(
         entryIds.map((entryId) => ({ season: season.seasonCode, eventId, entryId })),
         redis,
       );
-      const prepared: H2HPreparedMatch[] = [];
-      for (const row of sourceMatches) {
-        const match = await publishH2HMatch(season, eventId, global, row, inputs, redis);
-        prepared.push(match);
-        totals.matches += 1;
+      const matchScopes = sourceMatches.map((row) =>
+        h2hMatchScope(season.seasonCode, eventId, row),
+      );
+      const [activeMatches, previousMatches] = await Promise.all([
+        readLiveLeaguePublicationV2PointersV2(matchScopes, 'active', redis),
+        readLiveLeaguePublicationV2PointersV2(matchScopes, 'previous', redis),
+      ]);
+      const prepared = await mapWithConcurrency(sourceMatches, 8, async (row) => {
+        const scope = h2hMatchScope(season.seasonCode, eventId, row);
+        return publishH2HMatch(
+          season,
+          eventId,
+          global,
+          row,
+          inputs,
+          activeMatches.get(liveLeagueV2Key(scope, 'active')),
+          previousMatches.get(liveLeagueV2Key(scope, 'previous')),
+          redis,
+          expectedNextCheckAtValue,
+        );
+      });
+      totals.matches += prepared.length;
+      for (const match of prepared) {
         if (match.payload.state === 'READY') totals.published += 1;
         else if (match.payload.state === 'PENDING') totals.pending += 1;
         else totals.retained += 1;
       }
-      const standings = await findOfficialH2HStandings(season, tournamentId);
+
+      const standingsRead = await findOfficialH2HStandings(season, eventId, tournamentId);
+      const standings = standingsRead.rows;
       const revisions = h2hRevisions(global, prepared, standings);
       const headScope = {
         season: season.seasonCode,
@@ -888,137 +1157,233 @@ export async function syncLiveH2HLeaguePublicationsV2(
         tournamentId,
         scope: 'H2H_HEAD' as const,
       };
-      const headPayload = Object.fromEntries(
-        prepared.map(({ payload }) => [String(payload.officialMatchId), payload]),
-      );
-      const headResult = await publishLiveLeaguePublicationV2({
-        scope: headScope,
-        state: global.publication.state,
-        sourceCheckedAt: global.publication.sourceCheckedAt,
-        contentUpdatedAt: maxIso([
-          global.publication.revisions.scoreCore.contentUpdatedAt,
-          ...prepared.map(({ payload }) => payload.sourceCheckedAt),
-        ]),
-        expectedNextCheckAt: expectedNextCheckAt(global.publication.sourceCheckedAt),
-        globalRef: {
-          publicationId: global.publication.publicationId,
-          generation: global.publication.generation,
-        },
-        revisions,
-        counts: {
-          expected: prepared.length,
-          published: prepared.length,
-          ready: prepared.filter(({ payload }) => payload.state === 'READY').length,
-          noPicks: 0,
-        },
-        index: prepared.map(({ index }) => index),
-        payload: headPayload,
-        redis,
-      });
-      const headRead = {
-        publication: headResult.publication,
-        index: prepared.map(({ index }) => index) as LeagueLiveIndex[],
-        payload: headPayload,
-        servedFrom: 'REDIS_CURRENT' as const,
-      };
-      if (
-        headResult.published ||
-        liveLeagueCheckpointIsDue(headRead, global.publication.state === 'FINALIZED')
-      ) {
-        await setLiveLeagueCheckpointDesiredV2(headResult.publication, new Date(), { redis });
-        await reconcileLiveLeagueCheckpointV2(headScope);
-      }
-
-      const standingsIsFinalized = global.publication.state === 'FINALIZED';
-      const existingStandings =
-        (await readLiveLeaguePublicationV2Pointer(
-          {
-            season: season.seasonCode,
-            eventId,
-            tournamentId,
-            scope: 'H2H_STANDINGS',
-          },
-          'active',
-          redis,
-        )) ??
-        (await readLiveLeaguePublicationV2Pointer(
-          {
-            season: season.seasonCode,
-            eventId,
-            tournamentId,
-            scope: 'H2H_STANDINGS',
-          },
-          'previous',
-          redis,
-        ));
-      // Official H2H standings are a finalization artifact. The live score
-      // publication may advance every 30 seconds, but it must never turn the
-      // mutable groups table into an official READY overlay before the exact
-      // data_checked/finalized global publication exists. An empty or
-      // pre-final source result can also be transient, so keep the last
-      // complete overlay; on a cold scope use UPDATING/UNAVAILABLE instead of
-      // exposing provisional rows or a false READY empty result.
-      if ((!standingsIsFinalized || standings.length === 0) && existingStandings) continue;
-      const standingsRows = standingsIsFinalized ? standings : [];
-      const standingsState: H2HStandingsPayload['state'] = standingsIsFinalized
-        ? standingsRows.length > 0
-          ? 'READY'
-          : 'UNAVAILABLE'
-        : 'UPDATING';
-      const standingsPayloadValue = standingsPayload(
-        season,
-        eventId,
-        tournamentId,
-        global.publication.sourceCheckedAt,
-        standingsRows,
-        standingsState,
-      );
-      const standingsIndex: H2HStandingsIndexRow[] = standingsPayloadValue.rows.map((row) => ({
-        entryId: row.entryId,
-        availability: 'READY',
-      }));
       const standingsScope = {
         season: season.seasonCode,
         eventId,
         tournamentId,
         scope: 'H2H_STANDINGS' as const,
       };
-      const standingsResult = await publishLiveLeaguePublicationV2({
-        scope: standingsScope,
-        state: global.publication.state,
-        sourceCheckedAt: global.publication.sourceCheckedAt,
-        contentUpdatedAt: global.publication.sourceCheckedAt,
-        expectedNextCheckAt: expectedNextCheckAt(global.publication.sourceCheckedAt),
-        globalRef: {
-          publicationId: global.publication.publicationId,
-          generation: global.publication.generation,
-        },
-        revisions,
-        counts: {
-          expected: standingsIndex.length,
-          published: standingsIndex.length,
-          ready: standingsIndex.length,
-          noPicks: 0,
-        },
-        index: standingsIndex,
-        payload: { standings: standingsPayloadValue },
-        redis,
-      });
-      const standingsRead = {
-        publication: standingsResult.publication,
-        index: standingsIndex as LeagueLiveIndex[],
-        payload: { standings: standingsPayloadValue },
-        servedFrom: 'REDIS_CURRENT' as const,
-      };
-      if (
-        standingsResult.published ||
-        liveLeagueCheckpointIsDue(standingsRead, global.publication.state === 'FINALIZED')
-      ) {
-        await setLiveLeagueCheckpointDesiredV2(standingsResult.publication, new Date(), { redis });
-        await reconcileLiveLeagueCheckpointV2(standingsScope);
+      const allMatchesFinalReady = prepared.every((match) => match.finalReady);
+      let headFinalReady = global.publication.state !== 'FINALIZED';
+      if (global.publication.state !== 'FINALIZED' || allMatchesFinalReady) {
+        const headPayload = Object.fromEntries(
+          prepared.map(({ payload }) => [String(payload.officialMatchId), payload]),
+        );
+        const headResult = await publishLiveLeaguePublicationV2({
+          scope: headScope,
+          state: global.publication.state,
+          sourceCheckedAt: global.publication.sourceCheckedAt,
+          contentUpdatedAt: maxIso([
+            global.publication.revisions.scoreCore.contentUpdatedAt,
+            ...prepared.map(({ payload }) => payload.sourceCheckedAt),
+          ]),
+          expectedNextCheckAt: expectedNextCheckAt(
+            global.publication.sourceCheckedAt,
+            expectedNextCheckAtValue,
+          ),
+          globalRef: {
+            publicationId: global.publication.publicationId,
+            generation: global.publication.generation,
+          },
+          revisions,
+          counts: {
+            expected: prepared.length,
+            published: prepared.length,
+            ready: prepared.filter(({ payload }) => payload.state === 'READY').length,
+            noPicks: 0,
+          },
+          index: prepared.map(({ index }) => index),
+          payload: headPayload,
+          generationFloorLoader: () => readLiveLeagueCheckpointGenerationV2(headScope),
+          redis,
+        });
+        const headRead = {
+          publication: headResult.publication,
+          index: prepared.map(({ index }) => index) as LeagueLiveIndex[],
+          payload: headPayload,
+          servedFrom: 'REDIS_CURRENT' as const,
+        };
+        if (
+          headResult.published ||
+          headResult.publication.times.checkpointedAt === null ||
+          liveLeagueCheckpointIsDue(headRead, global.publication.state === 'FINALIZED')
+        ) {
+          await scheduleLeagueCheckpoint(
+            headResult.publication,
+            headResult.previous,
+            headScope,
+            redis,
+          );
+        }
+        if (global.publication.state === 'FINALIZED') {
+          const activeHead = await readLiveLeaguePublicationV2Pointer(headScope, 'active', redis);
+          headFinalReady =
+            activeHead?.publication.state === 'FINALIZED' &&
+            activeHead.publication.times.checkpointedAt !== null;
+        }
+      }
+
+      const standingsIsFinalized = global.publication.state === 'FINALIZED';
+      let standingsFinalReady = !standingsIsFinalized;
+      const existingStandings =
+        (await readLiveLeaguePublicationV2Pointer(standingsScope, 'active', redis)) ??
+        (await readLiveLeaguePublicationV2Pointer(standingsScope, 'previous', redis));
+      const standingsSourceCheckedAt = isoOrFallback(
+        standingsRead.sourceCheckedAt,
+        global.publication.sourceCheckedAt,
+      );
+      const finalizationAt = standingsRead.finalizationAt;
+      const finalizationTime =
+        finalizationAt instanceof Date
+          ? finalizationAt.getTime()
+          : Date.parse(String(finalizationAt ?? ''));
+      const standingsSourceTime =
+        standingsRead.sourceCheckedAt === null
+          ? Number.NaN
+          : standingsRead.sourceCheckedAt instanceof Date
+            ? standingsRead.sourceCheckedAt.getTime()
+            : Date.parse(standingsRead.sourceCheckedAt);
+      const standingsFreshForFinal =
+        Number.isFinite(finalizationTime) &&
+        Number.isFinite(standingsSourceTime) &&
+        standingsSourceTime >= finalizationTime;
+      if (!standingsIsFinalized && existingStandings) {
+        // Keep the existing official overlay untouched while the event is live.
+        // Standings are not derived from live scores.
+      } else if (!standingsIsFinalized && standings.length > 0) {
+        // Seed the official overlay as soon as a live scope is first observed.
+        // It is an independent, updating source and is never derived from live
+        // scores; later live passes retain this overlay until final evidence is
+        // available.
+        const standingsPayloadValue = standingsPayload(
+          season,
+          eventId,
+          tournamentId,
+          standingsSourceCheckedAt,
+          standings,
+          'UPDATING',
+        );
+        const standingsIndex: H2HStandingsIndexRow[] = standingsPayloadValue.rows.map((row) => ({
+          entryId: row.entryId,
+          availability: 'READY',
+        }));
+        const standingsResult = await publishLiveLeaguePublicationV2({
+          scope: standingsScope,
+          state: global.publication.state,
+          sourceCheckedAt: standingsSourceCheckedAt,
+          contentUpdatedAt: standingsSourceCheckedAt,
+          expectedNextCheckAt: expectedNextCheckAt(
+            global.publication.sourceCheckedAt,
+            expectedNextCheckAtValue,
+          ),
+          globalRef: {
+            publicationId: global.publication.publicationId,
+            generation: global.publication.generation,
+          },
+          revisions,
+          counts: {
+            expected: standingsIndex.length,
+            published: standingsIndex.length,
+            ready: standingsIndex.length,
+            noPicks: 0,
+          },
+          index: standingsIndex,
+          payload: { standings: standingsPayloadValue },
+          generationFloorLoader: () => readLiveLeagueCheckpointGenerationV2(standingsScope),
+          redis,
+        });
+        const standingsReadForCheckpoint = {
+          publication: standingsResult.publication,
+          index: standingsIndex as LeagueLiveIndex[],
+          payload: { standings: standingsPayloadValue },
+          servedFrom: 'REDIS_CURRENT' as const,
+        };
+        if (
+          standingsResult.published ||
+          standingsResult.publication.times.checkpointedAt === null ||
+          liveLeagueCheckpointIsDue(standingsReadForCheckpoint, false)
+        ) {
+          await scheduleLeagueCheckpoint(
+            standingsResult.publication,
+            standingsResult.previous,
+            standingsScope,
+            redis,
+          );
+        }
+      } else if (standingsIsFinalized && standingsFreshForFinal && standings.length > 0) {
+        const standingsPayloadValue = standingsPayload(
+          season,
+          eventId,
+          tournamentId,
+          standingsSourceCheckedAt,
+          standings,
+          'READY',
+        );
+        const standingsIndex: H2HStandingsIndexRow[] = standingsPayloadValue.rows.map((row) => ({
+          entryId: row.entryId,
+          availability: 'READY',
+        }));
+        const standingsResult = await publishLiveLeaguePublicationV2({
+          scope: standingsScope,
+          state: global.publication.state,
+          sourceCheckedAt: standingsSourceCheckedAt,
+          contentUpdatedAt: standingsSourceCheckedAt,
+          expectedNextCheckAt: expectedNextCheckAt(
+            global.publication.sourceCheckedAt,
+            expectedNextCheckAtValue,
+          ),
+          globalRef: {
+            publicationId: global.publication.publicationId,
+            generation: global.publication.generation,
+          },
+          revisions,
+          counts: {
+            expected: standingsIndex.length,
+            published: standingsIndex.length,
+            ready: standingsIndex.length,
+            noPicks: 0,
+          },
+          index: standingsIndex,
+          payload: { standings: standingsPayloadValue },
+          generationFloorLoader: () => readLiveLeagueCheckpointGenerationV2(standingsScope),
+          redis,
+        });
+        const standingsReadForCheckpoint = {
+          publication: standingsResult.publication,
+          index: standingsIndex as LeagueLiveIndex[],
+          payload: { standings: standingsPayloadValue },
+          servedFrom: 'REDIS_CURRENT' as const,
+        };
+        if (
+          standingsResult.published ||
+          standingsResult.publication.times.checkpointedAt === null ||
+          liveLeagueCheckpointIsDue(standingsReadForCheckpoint, true)
+        ) {
+          await scheduleLeagueCheckpoint(
+            standingsResult.publication,
+            standingsResult.previous,
+            standingsScope,
+            redis,
+          );
+        }
+        const activeStandings = await readLiveLeaguePublicationV2Pointer(
+          standingsScope,
+          'active',
+          redis,
+        );
+        standingsFinalReady =
+          activeStandings?.publication.state === 'FINALIZED' &&
+          activeStandings.publication.times.checkpointedAt !== null;
+      }
+      if (standingsIsFinalized && (!standingsFreshForFinal || standings.length === 0)) {
+        standingsFinalReady = false;
+      }
+      if (global.publication.state === 'FINALIZED' && phaseActive) {
+        finalReady = finalReady && allMatchesFinalReady && headFinalReady && standingsFinalReady;
       }
     } catch (error) {
       totals.skipped += 1;
+      if (global.publication.state === 'FINALIZED' && phaseActive) finalReady = false;
       logError('Live H2H league publication failed; retaining match/head snapshots', error, {
         season: season.seasonCode,
         eventId,
@@ -1031,13 +1396,15 @@ export async function syncLiveH2HLeaguePublicationsV2(
     eventId,
     globalPublicationId: global.publication.publicationId,
     globalGeneration: global.publication.generation,
-    tournaments: tournamentIds.length,
+    tournaments: tournaments.length,
     ...totals,
+    finalReady,
   });
   return {
     globalPublicationId: global.publication.publicationId,
     globalGeneration: global.publication.generation,
-    tournaments: tournamentIds.length,
+    tournaments: tournaments.length,
     ...totals,
+    finalReady,
   };
 }

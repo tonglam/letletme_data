@@ -906,7 +906,7 @@ export const liveLeagueCheckpointsInCompetition = competition.table(
       columns: [table.seasonId, table.tournamentId],
       foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
       name: 'live_league_checkpoints_tournament_fk',
-    }),
+    }).onDelete('cascade'),
     unique('live_league_checkpoints_publication_once').on(
       table.seasonId,
       table.eventId,
@@ -926,15 +926,11 @@ export const liveLeagueCheckpointsInCompetition = competition.table(
     ),
     check(
       'live_league_checkpoints_identity_valid',
-      sql`event_id > 0 AND tournament_id > 0 AND generation > 0 AND btrim(publication_id) <> '' AND state <> ''`,
+      sql`event_id > 0 AND tournament_id > 0 AND generation > 0 AND btrim(publication_id) <> '' AND btrim(state) <> ''`,
     ),
     check(
       'live_league_checkpoints_payload_valid',
       sql`jsonb_typeof(manifest) = 'object' AND jsonb_typeof(index_payload) = 'array' AND jsonb_typeof(payload) = 'object' AND row_count >= 0 AND payload_bytes >= 0 AND payload_sha256 ~ '^[0-9a-f]{64}$'`,
-    ),
-    check(
-      'live_league_checkpoints_time_order',
-      sql`published_at >= source_checked_at AND checkpointed_at >= published_at`,
     ),
   ],
 );

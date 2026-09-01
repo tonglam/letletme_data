@@ -1304,7 +1304,18 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       }
       for (const plan of resolution.plans) {
         const planKey = schedulerPlanKey(definition, plan);
+        // Live finalization remains an active obligation until the league
+        // publication proves every required durable checkpoint. Revisit this
+        // one plan on every pass so a worker that deferred while evidence was
+        // incomplete can be reclaimed as soon as the next retry is due.
+        const revisitUntilFinalized = definition.name === 'live-finalization';
         if (!wasPlanObserved(planKey)) {
+          postMatchReservations.push({
+            definition: { ...definition, queueName: schedulerLaneName(definition) },
+            plan,
+            planKey,
+          });
+        } else if (revisitUntilFinalized) {
           postMatchReservations.push({
             definition: { ...definition, queueName: schedulerLaneName(definition) },
             plan,

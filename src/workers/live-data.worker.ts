@@ -28,6 +28,7 @@ import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
+  deferSchedulerObligationForWorker,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
 } from '../services/scheduler-obligation-lifecycle.service';
@@ -37,6 +38,8 @@ import {
   inspectSchedulerObligationFence,
   startCurrentSchedulerJob,
 } from '../utils/scheduler-obligation-fence';
+
+const LIVE_FINALIZATION_RETRY_DELAY_MS = 60_000;
 
 /**
  * Live Data Worker
@@ -119,8 +122,13 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     // League boards are a sibling publication. A missing roster input or a
     // transient Redis/DB read must retain the last complete board and must not
     // turn a successful global live observation into a failed live job.
+    let classicLeagueResult: Awaited<ReturnType<typeof syncLiveClassicLeaguePublicationsV2>> = null;
     try {
-      await syncLiveClassicLeaguePublicationsV2(season, eventId, job.data.expectedNextCheckAt);
+      classicLeagueResult = await syncLiveClassicLeaguePublicationsV2(
+        season,
+        eventId,
+        job.data.expectedNextCheckAt,
+      );
     } catch (error) {
       logError(
         'Live Classic league publication pass failed; global publication is retained',
@@ -131,8 +139,13 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         },
       );
     }
+    let h2hLeagueResult: Awaited<ReturnType<typeof syncLiveH2HLeaguePublicationsV2>> = null;
     try {
-      await syncLiveH2HLeaguePublicationsV2(season, eventId);
+      h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
+        season,
+        eventId,
+        job.data.expectedNextCheckAt,
+      );
     } catch (error) {
       logError('Live H2H league publication pass failed; global publication is retained', error, {
         season: season.seasonCode,
@@ -168,6 +181,34 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         throw new Error(
           `Finalized live publication is not durably checkpointed for event ${eventId}`,
         );
+      }
+      const leagueFinalReady =
+        classicLeagueResult?.finalReady === true && h2hLeagueResult?.finalReady === true;
+      if (!leagueFinalReady) {
+        logInfo('Finalized live publication is waiting for league finalization evidence', {
+          season: season.seasonCode,
+          eventId,
+          classicFinalReady: classicLeagueResult?.finalReady ?? false,
+          h2hFinalReady: h2hLeagueResult?.finalReady ?? false,
+        });
+        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            delayMs: LIVE_FINALIZATION_RETRY_DELAY_MS,
+            evidence: {
+              finalization: 'waiting-for-league-evidence',
+              classicFinalReady: classicLeagueResult?.finalReady ?? false,
+              h2hFinalReady: h2hLeagueResult?.finalReady ?? false,
+            },
+          });
+          if (!deferred) {
+            throw new Error(
+              `Live finalization obligation could not be deferred for event ${eventId}`,
+            );
+          }
+        }
+        return snapshot;
       }
       // Final Match obligations are queued for normal recovery, but the final
       // snapshot must not race those jobs on this same two-slot worker before

@@ -28,7 +28,7 @@ export const LIVE_LEAGUE_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 export const LIVE_LEAGUE_MAX_ROW_BYTES = 16 * 1024;
 
 export type LeagueLiveScopeKind = 'CLASSIC' | 'H2H_HEAD' | 'H2H_MATCH' | 'H2H_STANDINGS';
-export type LeagueLiveAvailability = 'READY' | 'PENDING' | 'MISSING' | 'ERROR';
+export type LeagueLiveAvailability = 'READY' | 'PENDING' | 'NO_PICKS' | 'MISSING' | 'ERROR';
 
 export type LeagueLiveScope = {
   readonly season: string;
@@ -201,6 +201,11 @@ export type LeagueLiveRead = {
   readonly servedFrom: 'REDIS_CURRENT' | 'REDIS_PREVIOUS';
 };
 
+export type LeagueLivePointerReadV2 = {
+  readonly raw: string;
+  readonly read: LeagueLiveRead | null;
+};
+
 export type LeagueLiveCheckpointDesired = {
   readonly contractVersion: typeof LIVE_LEAGUE_CONTRACT_VERSION;
   readonly season: string;
@@ -211,6 +216,8 @@ export type LeagueLiveCheckpointDesired = {
   readonly publicationId: string;
   readonly generation: number;
   readonly requestedAt: string;
+  /** Earliest time a non-boundary checkpoint may be attempted. */
+  readonly notBefore: string | null;
   readonly force: boolean;
 };
 
@@ -581,7 +588,11 @@ function validH2HMatchIndexRow(value: unknown): value is H2HMatchIndexRow {
   );
 }
 
-function validH2HMatchSide(value: unknown, manifest: LeagueLiveManifest): value is H2HMatchSide {
+function validH2HMatchSide(
+  value: unknown,
+  manifest: LeagueLiveManifest,
+  isBye: boolean,
+): value is H2HMatchSide {
   if (!isRecord(value)) return false;
   const entryId = value.entryId;
   const realEntry = entryId !== null;
@@ -607,12 +618,22 @@ function validH2HMatchSide(value: unknown, manifest: LeagueLiveManifest): value 
     return false;
   if (!realEntry) {
     return (
-      value.isAverage === true &&
+      (value.isAverage === true ||
+        (isBye && value.isAverage === false && value.entryName === 'Bye')) &&
       value.inputPublicationId === null &&
       value.inputGeneration === null &&
       value.inputRevision === null &&
       value.inputContentUpdatedAt === null &&
       value.input === null
+    );
+  }
+  if (value.input === null) {
+    return (
+      value.isAverage === false &&
+      value.inputPublicationId === null &&
+      value.inputGeneration === null &&
+      value.inputRevision === null &&
+      value.inputContentUpdatedAt === null
     );
   }
   return (
@@ -661,8 +682,8 @@ function validH2HMatchPayload(
     typeof value.globalRef.generation === 'number' &&
     Number.isSafeInteger(value.globalRef.generation) &&
     value.globalRef.generation > 0 &&
-    validH2HMatchSide(value.home, manifest) &&
-    validH2HMatchSide(value.away, manifest) &&
+    validH2HMatchSide(value.home, manifest, value.isBye) &&
+    validH2HMatchSide(value.away, manifest, value.isBye) &&
     (value.state === 'READY'
       ? (value.home.entryId === null || value.home.input !== null) &&
         (value.away.entryId === null || value.away.input !== null)
@@ -794,6 +815,33 @@ function hashSerializedPayload(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+function assertRowBytes(
+  scope: LeagueLiveScope,
+  index: readonly LeagueLiveIndex[],
+  payload: LeagueLivePayload,
+): void {
+  const assertWithinLimit = (name: string, value: unknown): void => {
+    const bytes = Buffer.byteLength(canonicalJson(value), 'utf8');
+    if (bytes > LIVE_LEAGUE_MAX_ROW_BYTES) {
+      throw new CacheError(
+        `Live league ${name} exceeds row limit`,
+        'LIVE_LEAGUE_ROW_LIMIT_EXCEEDED',
+      );
+    }
+  };
+  index.forEach((row, rowIndex) => assertWithinLimit(`index row ${rowIndex}`, row));
+  if (scope.scope === 'H2H_STANDINGS') {
+    const standings = payload.standings;
+    if (isRecord(standings) && Array.isArray(standings.rows)) {
+      standings.rows.forEach((row, rowIndex) =>
+        assertWithinLimit(`standings row ${rowIndex}`, row),
+      );
+    }
+    return;
+  }
+  Object.entries(payload).forEach(([key, value]) => assertWithinLimit(`payload row ${key}`, value));
+}
+
 function item(
   scope: LeagueLiveScope,
   generation: number,
@@ -826,32 +874,35 @@ return {tostring(generation), tostring(now[1]), tostring(now[2])}
 const PROMOTE_LUA = `
 local candidate = cjson.decode(ARGV[1])
 local observed = ARGV[4] or ''
+local currentHealthy = ARGV[5] == '1'
 local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= observed then return {'changed', currentRaw} end
-if candidate.contractVersion ~= 'live-points-v2' or not candidate.items then return {'invalid_candidate'} end
-local function validItem(item, name)
-  return item and item.name == name and item.type == 'string' and type(item.key) == 'string' and type(item.count) == 'number' and item.count >= 0 and type(item.bytes) == 'number' and item.bytes >= 0 and type(item.sha256) == 'string' and string.len(item.sha256) == 64
+local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
+if candidate.contractVersion ~= 'live-points-v2' or not candidate.items or type(candidate.generation) ~= 'number' or candidate.generation <= 0 then return {'invalid_candidate'} end
+local function validItem(item, name, generation)
+  return item and item.name == name and item.type == 'string' and type(item.key) == 'string' and item.key == scopePrefix .. ':' .. tostring(generation) .. ':' .. name and type(item.count) == 'number' and item.count >= 0 and type(item.bytes) == 'number' and item.bytes >= 0 and type(item.sha256) == 'string' and string.len(item.sha256) == 64
 end
 for _, name in ipairs({'index', 'payload'}) do
   local descriptor = candidate.items[name]
-  if not validItem(descriptor, name) then return {'invalid_item'} end
+  if not validItem(descriptor, name, candidate.generation) then return {'invalid_item'} end
   if redis.call('EXISTS', descriptor.key) ~= 1 then return {'missing_stage', descriptor.key} end
   local itemType = redis.call('TYPE', descriptor.key)
   local actualType = type(itemType) == 'table' and itemType['ok'] or itemType
   if actualType ~= 'string' or redis.call('STRLEN', descriptor.key) ~= descriptor.bytes or redis.call('GET', descriptor.key .. ':meta') ~= tostring(descriptor.count) .. '|' .. tostring(descriptor.bytes) .. '|' .. descriptor.sha256 then return {'invalid_stage', descriptor.key} end
 end
 local current = nil
-if currentRaw ~= '' then
+if currentHealthy and currentRaw ~= '' then
   local ok, decoded = pcall(cjson.decode, currentRaw)
   if ok and decoded.contractVersion == 'live-points-v2' and type(decoded.generation) == 'number' then current = decoded end
 end
 if current and current.generation >= candidate.generation then return {'stale', currentRaw} end
 if current and current.state == 'FINALIZED' then return {'stale', currentRaw} end
-if current then
+if current and currentHealthy then
   redis.call('SET', KEYS[2], currentRaw, 'PX', ARGV[2])
   for _, name in ipairs({'index', 'payload'}) do
     local old = current.items and current.items[name]
-    if old and old.key then
+    local expectedOldKey = scopePrefix .. ':' .. tostring(current.generation) .. ':' .. name
+    if old and old.name == name and old.type == 'string' and old.key == expectedOldKey then
       redis.call('PEXPIRE', old.key, ARGV[2])
       redis.call('PEXPIRE', old.key .. ':meta', ARGV[2])
     end
@@ -882,8 +933,24 @@ local nextOk, next = pcall(cjson.decode, ARGV[2])
 if not ok or not nextOk or current.publicationId ~= next.publicationId or current.generation ~= next.generation or current.revisions.content ~= next.revisions.content then
   return {'invalid'}
 end
+local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
+local function validItem(item, name)
+  return item and item.name == name and item.type == 'string' and item.key == scopePrefix .. ':' .. tostring(next.generation) .. ':' .. name
+end
+for _, name in ipairs({'index', 'payload'}) do
+  if not validItem(next.items and next.items[name], name) then return {'invalid'} end
+end
 redis.call('SET', KEYS[1], ARGV[2])
-if next.state == 'FINALIZED' then redis.call('PEXPIRE', KEYS[1], ARGV[3]) else redis.call('PERSIST', KEYS[1]) end
+if next.state == 'FINALIZED' then
+  redis.call('PEXPIRE', KEYS[1], ARGV[3])
+  for _, name in ipairs({'index', 'payload'}) do
+    local item = next.items[name]
+    redis.call('PEXPIRE', item.key, ARGV[3])
+    redis.call('PEXPIRE', item.key .. ':meta', ARGV[3])
+  end
+else
+  redis.call('PERSIST', KEYS[1])
+end
 return {'touched', ARGV[2]}
 `;
 
@@ -893,9 +960,23 @@ if not raw then return {'missing'} end
 local ok, value = pcall(cjson.decode, raw)
 if not ok or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) then return {'changed'} end
 value.times.checkpointedAt = ARGV[3]
+local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
+local function validItem(item, name)
+  return item and item.name == name and item.type == 'string' and item.key == scopePrefix .. ':' .. tostring(value.generation) .. ':' .. name
+end
+if value.state == 'FINALIZED' then
+  for _, name in ipairs({'index', 'payload'}) do
+    if not validItem(value.items and value.items[name], name) then return {'invalid'} end
+  end
+end
 redis.call('SET', KEYS[1], cjson.encode(value))
 if value.state == 'FINALIZED' then
   redis.call('PEXPIRE', KEYS[1], ARGV[4])
+  for _, name in ipairs({'index', 'payload'}) do
+    local item = value.items[name]
+    redis.call('PEXPIRE', item.key, ARGV[4])
+    redis.call('PEXPIRE', item.key .. ':meta', ARGV[4])
+  end
 else
   redis.call('PERSIST', KEYS[1])
 end
@@ -904,15 +985,20 @@ return {'checkpointed', cjson.encode(value)}
 
 const SET_DESIRED_LUA = `
 local existingRaw = redis.call('GET', KEYS[1])
+local desired = cjson.decode(ARGV[3])
 if existingRaw then
   local ok, existing = pcall(cjson.decode, existingRaw)
   if ok and type(existing.generation) == 'number' then
     local generation = tonumber(ARGV[2])
     if existing.generation > generation or (existing.generation == generation and existing.publicationId ~= ARGV[1]) then return {'kept', existingRaw} end
+    if desired.force ~= true and existing.force == true then desired.force = true end
+    if desired.force ~= true and desired.notBefore == cjson.null and type(existing.notBefore) == 'string' then desired.notBefore = existing.notBefore end
   end
 end
-redis.call('SET', KEYS[1], ARGV[3], 'EX', ARGV[4])
-return {'set', ARGV[3]}
+if desired.force == true then desired.notBefore = cjson.null end
+local encoded = cjson.encode(desired)
+redis.call('SET', KEYS[1], encoded, 'EX', ARGV[4])
+return {'set', encoded}
 `;
 
 const CLEAR_DESIRED_LUA = `
@@ -1015,7 +1101,15 @@ type LiveLeaguePublicationInput = {
   readonly index: readonly LeagueLiveIndex[];
   readonly payload: LeagueLivePayload;
   readonly previous?: LeagueLiveManifest | null;
+  /** Optional prevalidated pointer reads supplied by a batched publisher. */
+  readonly currentRead?: LeagueLiveRead | null;
+  readonly previousRead?: LeagueLiveRead | null;
+  /** Raw pointer values supplied with batched reads so promotion needs no second MGET. */
+  readonly currentPointerRaw?: string;
+  readonly previousPointerRaw?: string;
   readonly generationFloor?: number;
+  /** Loaded only when both Redis pointers are missing or corrupt. */
+  readonly generationFloorLoader?: () => Promise<number>;
   readonly redis?: Redis;
 };
 
@@ -1142,9 +1236,32 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
       'LIVE_LEAGUE_PAYLOAD_INVALID',
     );
   }
+  assertRowBytes(input.scope, input.index, input.payload);
   const redis = input.redis ?? (await redisSingleton.getClient());
-  const currentRaw = (await redis.get(liveLeagueV2Key(input.scope, 'active'))) ?? '';
-  const current = parseManifest(currentRaw, input.scope);
+  let currentRaw: string;
+  let previousRaw: string;
+  if (input.currentPointerRaw !== undefined && input.previousPointerRaw !== undefined) {
+    currentRaw = input.currentPointerRaw;
+    previousRaw = input.previousPointerRaw;
+  } else {
+    const pointerRaws = await redis.mget(
+      liveLeagueV2Key(input.scope, 'active'),
+      liveLeagueV2Key(input.scope, 'previous'),
+    );
+    currentRaw = pointerRaws[0] ?? '';
+    previousRaw = pointerRaws[1] ?? '';
+  }
+  const currentPointer = parseManifest(currentRaw, input.scope);
+  const previousPointer = parseManifest(previousRaw, input.scope);
+  const currentRead =
+    input.currentRead === undefined
+      ? await readPointer(redis, input.scope, 'active')
+      : input.currentRead;
+  const previousRead =
+    input.previousRead === undefined
+      ? await readPointer(redis, input.scope, 'previous')
+      : input.previousRead;
+  const current = currentRead?.publication ?? null;
   const contentUpdatedAt = sourceDate(input.contentUpdatedAt ?? input.sourceCheckedAt);
   if (
     current &&
@@ -1178,7 +1295,16 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
   const allocation = await allocateGeneration(
     redis,
     liveLeagueV2Key(input.scope, 'sequence'),
-    Math.max(input.generationFloor ?? 0, input.previous?.generation ?? 0, current?.generation ?? 0),
+    Math.max(
+      input.generationFloor ?? 0,
+      input.previous?.generation ?? 0,
+      previousPointer?.generation ?? 0,
+      currentPointer?.generation ?? 0,
+      current?.generation ?? 0,
+      !currentRead && !previousRead && input.generationFloorLoader
+        ? await input.generationFloorLoader()
+        : 0,
+    ),
   );
   const indexItem = item(input.scope, allocation.generation, 'index', input.index);
   const payloadItem = item(input.scope, allocation.generation, 'payload', input.payload);
@@ -1225,6 +1351,7 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
     String(LIVE_LEAGUE_PREVIOUS_TTL_MS),
     String(input.state === 'FINALIZED' ? LIVE_LEAGUE_FINAL_TTL_MS : 0),
     currentRaw,
+    currentRead ? '1' : '0',
   )) as unknown;
   if (!Array.isArray(result) || typeof result[0] !== 'string')
     throw new CacheError('Invalid live league promotion result', 'LIVE_LEAGUE_PROMOTE_FAILED');
@@ -1244,7 +1371,7 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
     throw new CacheError(`Live league promotion failed: ${status}`, 'LIVE_LEAGUE_PROMOTE_FAILED');
   return {
     publication: manifest,
-    previous: parseManifest(typeof result[1] === 'string' ? result[1] : null, input.scope),
+    previous: currentRead?.publication ?? null,
     published: true,
   };
 }
@@ -1301,21 +1428,15 @@ export async function touchLiveLeaguePublicationV2Heartbeat(
   return touchLiveLeaguePublicationV2(next, currentRaw, redis);
 }
 
-async function readPointer(
-  redis: Redis,
+function decodePointerRead(
   scope: LeagueLiveScope,
   pointer: 'active' | 'previous',
-): Promise<LeagueLiveRead | null> {
+  raw: string | null,
+  values: readonly (string | null)[],
+): LeagueLiveRead | null {
   try {
-    const raw = await redis.get(liveLeagueV2Key(scope, pointer));
     const publication = parseManifest(raw, scope);
     if (!publication) return null;
-    const values = await redis.mget(
-      publication.items.index.key,
-      metadataKey(publication.items.index.key),
-      publication.items.payload.key,
-      metadataKey(publication.items.payload.key),
-    );
     const [indexPayload, indexMetadata, payload, payloadMetadata] = values;
     if (
       indexPayload === null ||
@@ -1349,6 +1470,78 @@ async function readPointer(
   } catch {
     return null;
   }
+}
+
+async function readPointer(
+  redis: Redis,
+  scope: LeagueLiveScope,
+  pointer: 'active' | 'previous',
+): Promise<LeagueLiveRead | null> {
+  try {
+    const raw = await redis.get(liveLeagueV2Key(scope, pointer));
+    const publication = parseManifest(raw, scope);
+    if (!publication) return null;
+    const values = await redis.mget(
+      publication.items.index.key,
+      metadataKey(publication.items.index.key),
+      publication.items.payload.key,
+      metadataKey(publication.items.payload.key),
+    );
+    return decodePointerRead(scope, pointer, raw, values);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads many sibling publications with one pointer MGET and one item MGET.
+ * League publishers use this to avoid one Redis round trip per H2H match.
+ * A corrupt pointer or item set is omitted rather than returned as a partial
+ * publication; callers can then retain an independently validated previous
+ * match or fail that exact scope.
+ */
+export async function readLiveLeaguePublicationV2PointersV2(
+  scopes: readonly LeagueLiveScope[],
+  pointer: 'active' | 'previous',
+  redisClient?: Redis,
+): Promise<ReadonlyMap<string, LeagueLivePointerReadV2>> {
+  for (const scope of scopes) assertScope(scope);
+  const uniqueScopes = [
+    ...new Map(scopes.map((scope) => [liveLeagueV2Key(scope, pointer), scope])).values(),
+  ];
+  if (uniqueScopes.length === 0) return new Map();
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const pointerKeys = uniqueScopes.map((scope) => liveLeagueV2Key(scope, pointer));
+  const pointerRaws = await redis.mget(...pointerKeys);
+  const reads = new Map<string, LeagueLivePointerReadV2>(
+    uniqueScopes.map((scope, index) => [
+      pointerKeys[index],
+      { raw: pointerRaws[index] ?? '', read: null },
+    ]),
+  );
+  const candidates = uniqueScopes.flatMap((scope, index) => {
+    const raw = pointerRaws[index];
+    const publication = parseManifest(raw, scope);
+    return publication ? [{ scope, key: pointerKeys[index], raw, publication }] : [];
+  });
+  if (candidates.length === 0) return reads;
+  const itemKeys = candidates.flatMap(({ publication }) => [
+    publication.items.index.key,
+    metadataKey(publication.items.index.key),
+    publication.items.payload.key,
+    metadataKey(publication.items.payload.key),
+  ]);
+  const itemValues = await redis.mget(...itemKeys);
+  for (const [index, candidate] of candidates.entries()) {
+    const read = decodePointerRead(
+      candidate.scope,
+      pointer,
+      candidate.raw,
+      itemValues.slice(index * 4, index * 4 + 4),
+    );
+    reads.set(candidate.key, { raw: candidate.raw ?? '', read });
+  }
+  return reads;
 }
 
 export async function readLiveLeaguePublicationV2(
@@ -1402,7 +1595,11 @@ export async function markLiveLeaguePublicationCheckpointedV2(
 export async function setLiveLeagueCheckpointDesiredV2(
   publication: LeagueLiveManifest,
   requestedAt: Date | string = new Date(),
-  options: { readonly force?: boolean; readonly redis?: Redis } = {},
+  options: {
+    readonly force?: boolean;
+    readonly notBefore?: Date | string | null;
+    readonly redis?: Redis;
+  } = {},
 ): Promise<LeagueLiveCheckpointDesired> {
   const scope: LeagueLiveScope = {
     season: publication.season,
@@ -1421,6 +1618,10 @@ export async function setLiveLeagueCheckpointDesiredV2(
     publicationId: publication.publicationId,
     generation: publication.generation,
     requestedAt: sourceDate(requestedAt),
+    notBefore:
+      options.notBefore === undefined || options.notBefore === null
+        ? null
+        : sourceDate(options.notBefore),
     force: options.force === true || publication.state === 'FINALIZED',
   };
   const redis = options.redis ?? (await redisSingleton.getClient());
@@ -1464,6 +1665,7 @@ export async function readLiveLeagueCheckpointDesiredV2(
       !Number.isSafeInteger(value.generation) ||
       value.generation <= 0 ||
       !validIso(value.requestedAt) ||
+      (value.notBefore !== null && !validIso(value.notBefore)) ||
       typeof value.force !== 'boolean'
     )
       return null;
