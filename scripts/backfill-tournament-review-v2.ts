@@ -62,6 +62,12 @@ export async function runTournamentReviewBackfill(
 ): Promise<Record<string, unknown>> {
   assertBackfillAuthorization();
   const season = await seasonRepository.requireByCode(args.season);
+  const currentSeason = await seasonRepository.findCurrent();
+  if (!season.isCurrent || season.seasonId !== currentSeason.seasonId) {
+    throw new Error(
+      `V2.1 review backfill refused: --season ${args.season} is not the current FPL season`,
+    );
+  }
   let batches = 0;
   let reconciled = 0;
   let claimed = 0;

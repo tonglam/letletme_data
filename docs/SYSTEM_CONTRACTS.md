@@ -47,10 +47,12 @@ cannot replace or remove the last accepted complete publication.
 The My Tournament Review V2.1 producer checkpoint is exposed only through the
 service-authenticated `GET /jobs/status` response under `tournamentReviewV2`.
 Operators may add `watchEntryId=6953` for a bounded watch list. Data resolves
-that FPL Entry ID to its tournament membership before returning safe
-state/count/head-parity/freshness evidence; it never returns raw provider
-errors, identities, or payloads. The aggregate status remains global and is
-not replaced by the single-entry watch.
+that FPL Entry ID to up to 100 tournament memberships before returning safe
+state/count/head-parity/freshness evidence for every matched tournament; an
+entry ID is never treated as a tournament ID. The response uses
+`watch.tournaments[]` (including an empty `scopes[]` for a newly-created
+membership) and never returns raw provider errors, identities, or payloads.
+The aggregate status remains global and is not replaced by the entry watch.
 
 The scheduler reserves a durable obligation before dispatching a BullMQ job.
 BullMQ is a delivery mechanism and retained history, not the source of

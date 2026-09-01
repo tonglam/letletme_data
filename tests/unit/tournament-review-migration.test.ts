@@ -22,6 +22,7 @@ const hardCutMigration = readFileSync(
   'migrations/0084_my_tournament_review_v2_1_hard_cut.sql',
   'utf8',
 );
+const backfillScript = readFileSync('scripts/backfill-tournament-review-v2.ts', 'utf8');
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
@@ -141,5 +142,11 @@ describe('My Tournament Review V2 migration', () => {
     );
     expect(hardCutMigration).toContain('tournament_review_chunks_writer_update');
     expect(hardCutMigration).toContain('TO letletme_graphql_reader');
+  });
+
+  test('allows the hard-cut backfill to target only the current season', () => {
+    expect(backfillScript).toContain('const currentSeason = await seasonRepository.findCurrent()');
+    expect(backfillScript).toContain('season.seasonId !== currentSeason.seasonId');
+    expect(backfillScript).toContain('--season ${args.season} is not the current FPL season');
   });
 });

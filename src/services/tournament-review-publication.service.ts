@@ -2558,6 +2558,25 @@ async function publishTournamentReviewScopeOnce(
                       items = EXCLUDED.items
       `;
     }
+    // A retried repair may encounter an orphaned sibling left by an older
+    // writer. Replace the revision's chunk set exactly so a READY head cannot
+    // remain permanently incoherent because of an unexpected extra row.
+    const expectedChunkKeys = JSON.stringify(
+      chunks.map((chunk) => ({ section_key: chunk.sectionKey, chunk_index: chunk.chunkIndex })),
+    );
+    await tx`
+      DELETE FROM competition.tournament_review_publication_chunks chunk
+      WHERE chunk.season_id = ${season.seasonId}
+        AND chunk.tournament_id = ${tournamentId}
+        AND chunk.event_id = ${eventId}
+        AND chunk.revision = ${revision}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM jsonb_to_recordset(${expectedChunkKeys}::jsonb) AS expected(section_key text, chunk_index integer)
+          WHERE expected.section_key = chunk.section_key
+            AND expected.chunk_index = chunk.chunk_index
+        )
+    `;
     await tx`
       UPDATE competition.tournament_review_obligations
       SET last_observed_at = clock_timestamp(),
@@ -2691,53 +2710,92 @@ export async function requestTournamentReviewCorrection(
     throw new Error('correction reason and changeId are required');
   }
   const db = await getDbClient();
-  const rows = await db<Array<{ event_id: number }>>`
-	  WITH target AS (
-	    SELECT obligation.event_id
-	    FROM competition.tournament_review_obligations obligation
-	    WHERE obligation.season_id = ${season.seasonId}
-	      AND obligation.tournament_id = ${tournamentId}
-	      AND obligation.event_id = ${eventId}
-	      AND obligation.state = 'READY'
-	      AND EXISTS (
-	        SELECT 1
-	        FROM competition.tournament_review_heads head
-	        WHERE head.season_id = obligation.season_id
-	          AND head.tournament_id = obligation.tournament_id
-	          AND head.event_id = obligation.event_id
-	      )
-	  )
-	    UPDATE competition.tournament_review_obligations obligation
-    SET state = 'PENDING',
-        next_attempt_at = clock_timestamp(),
-        execution_attempts = 0,
-        source_rechecks = 0,
-        lease_owner = NULL,
-        lease_expires_at = NULL,
-        first_attempt_at = NULL,
-        last_attempt_at = NULL,
-        ready_at = NULL,
-        degraded_at = NULL,
-        ready_revision = NULL,
-	        last_error_code = NULL,
-	        last_failure_fingerprint = NULL,
-	        repair_issue_id = NULL,
-	        correction_reason = ${reason.trim()},
-	        correction_change_id = ${changeId.trim()},
-	        updated_at = clock_timestamp()
-    WHERE obligation.season_id = ${season.seasonId}
-	      AND obligation.tournament_id = ${tournamentId}
-	      AND obligation.event_id >= (SELECT target.event_id FROM target)
-	      AND obligation.state = 'READY'
-	      AND EXISTS (
-	        SELECT 1
-	        FROM competition.tournament_review_heads head
-        WHERE head.season_id = obligation.season_id
-          AND head.tournament_id = obligation.tournament_id
-          AND head.event_id = obligation.event_id
-      )
-    RETURNING obligation.event_id
-	  `;
+  const rows = await db.begin(async (tx) => {
+    const targetRows = await tx<Array<{ event_id: number }>>`
+      SELECT obligation.event_id
+      FROM competition.tournament_review_obligations obligation
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = ${tournamentId}
+        AND obligation.event_id = ${eventId}
+        AND obligation.state = 'READY'
+        AND EXISTS (
+          SELECT 1
+          FROM competition.tournament_review_heads head
+          WHERE head.season_id = obligation.season_id
+            AND head.tournament_id = obligation.tournament_id
+            AND head.event_id = obligation.event_id
+        )
+    `;
+    if (targetRows.length === 0) {
+      throw new Error('only an existing READY review scope can be corrected');
+    }
+    const correctionTargetEventId = targetRows[0].event_id;
+    // Publishers take the same scope advisory lock before reading or writing
+    // a head. Lock every descendant before clearing a PROCESSING lease so an
+    // in-flight worker cannot publish the superseded snapshot after this
+    // correction request commits.
+    const descendantRows = await tx<Array<{ event_id: number }>>`
+      SELECT obligation.event_id
+      FROM competition.tournament_review_obligations obligation
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = ${tournamentId}
+        AND obligation.event_id >= ${correctionTargetEventId}
+        AND EXISTS (
+          SELECT 1
+          FROM competition.tournament_review_heads head
+          WHERE head.season_id = obligation.season_id
+            AND head.tournament_id = obligation.tournament_id
+            AND head.event_id = obligation.event_id
+        )
+      ORDER BY obligation.event_id
+    `;
+    for (const descendant of descendantRows) {
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(
+            'review:' || ${season.seasonId}::text || ':' || ${tournamentId}::text || ':' || ${descendant.event_id}::text,
+            0
+          )
+        )
+      `;
+    }
+    const rowsAfterLocks = await tx<Array<{ event_id: number }>>`
+      UPDATE competition.tournament_review_obligations obligation
+      SET state = 'PENDING',
+          next_attempt_at = clock_timestamp(),
+          execution_attempts = 0,
+          source_rechecks = 0,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          first_attempt_at = NULL,
+          last_attempt_at = NULL,
+          ready_at = NULL,
+          degraded_at = NULL,
+          ready_revision = NULL,
+          last_error_code = NULL,
+          last_failure_fingerprint = NULL,
+          repair_issue_id = NULL,
+          correction_reason = ${reason.trim()},
+          correction_change_id = ${changeId.trim()},
+          updated_at = clock_timestamp()
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = ${tournamentId}
+        AND obligation.event_id >= ${correctionTargetEventId}
+        AND obligation.state IN ('READY', 'PROCESSING', 'PENDING', 'WAITING_SOURCE', 'DEGRADED')
+        AND EXISTS (
+          SELECT 1
+          FROM competition.tournament_review_heads head
+          WHERE head.season_id = obligation.season_id
+            AND head.tournament_id = obligation.tournament_id
+            AND head.event_id = obligation.event_id
+        )
+      RETURNING obligation.event_id
+    `;
+    if (rowsAfterLocks.length === 0) {
+      throw new Error('only an existing READY review scope can be corrected');
+    }
+    return rowsAfterLocks;
+  });
   if (rows.length === 0) {
     throw new Error('only an existing READY review scope can be corrected');
   }
@@ -4002,23 +4060,25 @@ export type TournamentReviewV2OperationalStatus = Readonly<{
   latestUpdatedAt: string | null;
   watch: Readonly<{
     watchEntryId: number;
-    tournamentId: number;
-    scopes: ReadonlyArray<
-      Readonly<{
-        eventId: number;
-        format: TournamentReviewFormat;
-        state: TournamentReviewObligationState;
-        eligibleAt: string;
-        nextAttemptAt: string | null;
-        revision: number | null;
-        readyRevision: number | null;
-        publishedAt: string | null;
-        eventDataCheckedAt: string | null;
-        sourceMaxCheckedAt: string | null;
-        updatedAt: string;
-        lastErrorCode: string | null;
-      }>
-    >;
+    tournaments: ReadonlyArray<{
+      tournamentId: number;
+      scopes: ReadonlyArray<
+        Readonly<{
+          eventId: number;
+          format: TournamentReviewFormat;
+          state: TournamentReviewObligationState;
+          eligibleAt: string;
+          nextAttemptAt: string | null;
+          revision: number | null;
+          readyRevision: number | null;
+          publishedAt: string | null;
+          eventDataCheckedAt: string | null;
+          sourceMaxCheckedAt: string | null;
+          updatedAt: string;
+          lastErrorCode: string | null;
+        }>
+      >;
+    }>;
   } | null>;
 }>;
 
@@ -4153,29 +4213,28 @@ export async function getTournamentReviewV2OperationalStatus(
     Number.isInteger(watchEntryId) && (watchEntryId ?? 0) > 0 ? watchEntryId : null;
   const watchedTournamentRows = normalizedWatchEntryId
     ? await db<Array<{ tournament_id: number }>>`
-        SELECT tournament_id
-        FROM competition.tournament_entries
-        WHERE season_id = ${season.seasonId} AND entry_id = ${normalizedWatchEntryId}
-        UNION
-        SELECT tracked_tournament.tournament_id
-        FROM competition.entry_leagues entry_league
-        JOIN LATERAL (
+        WITH memberships AS (
+          SELECT tournament_id
+          FROM competition.tournament_entries
+          WHERE season_id = ${season.seasonId} AND entry_id = ${normalizedWatchEntryId}
+          UNION
           SELECT tournament.tournament_id
-          FROM competition.tournaments tournament
-          WHERE tournament.season_id = entry_league.season_id
-            AND tournament.league_id = entry_league.league_id
-            AND tournament.league_type = entry_league.league_type
-          ORDER BY tournament.tournament_id
-          LIMIT 1
-        ) tracked_tournament ON TRUE
-        WHERE entry_league.season_id = ${season.seasonId}
-          AND entry_league.entry_id = ${normalizedWatchEntryId}
+          FROM competition.entry_leagues entry_league
+          JOIN competition.tournaments tournament
+            ON tournament.season_id = entry_league.season_id
+           AND tournament.league_id = entry_league.league_id
+           AND tournament.league_type = entry_league.league_type
+          WHERE entry_league.season_id = ${season.seasonId}
+            AND entry_league.entry_id = ${normalizedWatchEntryId}
+        )
+        SELECT tournament_id
+        FROM memberships
         ORDER BY tournament_id DESC
-        LIMIT 1
+        LIMIT 100
       `
     : [];
-  const normalizedWatchTournamentId = watchedTournamentRows[0]?.tournament_id ?? null;
-  const watchRows = normalizedWatchTournamentId
+  const watchedTournamentIds = watchedTournamentRows.map((row) => row.tournament_id);
+  const watchRows = watchedTournamentIds.length
     ? await db<TournamentReviewOperationalWatchRow[]>`
         SELECT obligation.tournament_id,
                obligation.event_id,
@@ -4201,9 +4260,8 @@ export async function getTournamentReviewV2OperationalStatus(
          AND publication.event_id = obligation.event_id
          AND publication.revision = head.revision
         WHERE obligation.season_id = ${season.seasonId}
-          AND obligation.tournament_id = ${normalizedWatchTournamentId}
-        ORDER BY obligation.event_id DESC
-        LIMIT 38
+          AND obligation.tournament_id = ANY(${watchedTournamentIds}::int[])
+        ORDER BY obligation.tournament_id DESC, obligation.event_id DESC
       `
     : [];
   const aggregate = aggregateRows[0];
@@ -4211,23 +4269,27 @@ export async function getTournamentReviewV2OperationalStatus(
     const parsed = Number(value ?? 0);
     return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
   };
-  const watch = watchRows.length
+  const watch = watchedTournamentIds.length
     ? {
         watchEntryId: normalizedWatchEntryId as number,
-        tournamentId: watchRows[0].tournament_id,
-        scopes: watchRows.map((row) => ({
-          eventId: row.event_id,
-          format: row.format,
-          state: row.state,
-          eligibleAt: dateIso(row.first_eligible_at) ?? now.toISOString(),
-          nextAttemptAt: dateIso(row.next_attempt_at),
-          revision: integerOrNull(row.active_revision),
-          readyRevision: integerOrNull(row.ready_revision),
-          publishedAt: dateIso(row.published_at),
-          eventDataCheckedAt: dateIso(row.event_data_checked_at),
-          sourceMaxCheckedAt: dateIso(row.source_max_checked_at),
-          updatedAt: dateIso(row.updated_at) ?? now.toISOString(),
-          lastErrorCode: row.last_error_code,
+        tournaments: watchedTournamentIds.map((tournamentId) => ({
+          tournamentId,
+          scopes: watchRows
+            .filter((row) => row.tournament_id === tournamentId)
+            .map((row) => ({
+              eventId: row.event_id,
+              format: row.format,
+              state: row.state,
+              eligibleAt: dateIso(row.first_eligible_at) ?? now.toISOString(),
+              nextAttemptAt: dateIso(row.next_attempt_at),
+              revision: integerOrNull(row.active_revision),
+              readyRevision: integerOrNull(row.ready_revision),
+              publishedAt: dateIso(row.published_at),
+              eventDataCheckedAt: dateIso(row.event_data_checked_at),
+              sourceMaxCheckedAt: dateIso(row.source_max_checked_at),
+              updatedAt: dateIso(row.updated_at) ?? now.toISOString(),
+              lastErrorCode: row.last_error_code,
+            })),
         })),
       }
     : null;
