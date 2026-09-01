@@ -22,7 +22,12 @@ describe('Live Matches V3 checkpoint migration contract', () => {
   });
 
   test('adds a manifest-matching V3 contract fence without relabeling old rows', () => {
-    expect(v3Fence).toContain("ADD COLUMN contract_version text DEFAULT 'live-matches-v2'");
+    expect(v3Fence).toContain(
+      'ADD COLUMN contract_version text DEFAULT ' +
+        String.fromCharCode(39) +
+        'live-matches-v2' +
+        String.fromCharCode(39),
+    );
     expect(
       v3Fence.match(/ADD COLUMN contract_version text DEFAULT 'live-matches-v2'/g),
     ).toHaveLength(2);
