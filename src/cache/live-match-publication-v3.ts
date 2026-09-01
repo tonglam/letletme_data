@@ -2014,7 +2014,8 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
   /**
    * Seed-only fenced CAS for replacing a stale finalized desired marker. The
    * candidate must itself be finalized and forced; normal workers never pass
-   * this field.
+   * this field. It applies to either V3 stream because a cutover must replace
+   * the old finalized desk and detail checkpoints as one scoped operation.
    */
   readonly replaceFinalizedForCutover?: Readonly<{
     readonly expectedPublicationId: string;
@@ -2043,7 +2044,6 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
   const replacement = input.replaceFinalizedForCutover;
   if (replacement !== undefined) {
     if (
-      input.kind !== 'detail' ||
       desired.final !== true ||
       desired.force !== true ||
       typeof replacement.expectedPublicationId !== 'string' ||

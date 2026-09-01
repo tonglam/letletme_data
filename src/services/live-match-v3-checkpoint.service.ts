@@ -132,6 +132,8 @@ export interface LiveMatchDeskCheckpointRequest {
   readonly eventId: number;
   readonly publication: MatchDeskPublication;
   readonly fixtures: readonly MatchDeskFixture[];
+  /** Destructive seed-only fence for replacing an old finalized V2 row. */
+  readonly allowFinalizedReplacementForCutover?: boolean;
 }
 
 export interface LiveMatchDetailCheckpointRequest {
@@ -151,9 +153,6 @@ export async function checkpointLiveMatchScopeV3(input: {
   /** Only the source-backed destructive V3 cutover may replace an old final row. */
   readonly allowFinalizedReplacementForCutover?: boolean;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
-  if (input.allowFinalizedReplacementForCutover === true && input.kind !== 'detail') {
-    throw new Error('Finalized Live Matches replacement is only valid for detail cutover seed');
-  }
   const desired = await readLiveMatchCheckpointDesiredV3({
     kind: input.kind,
     season: input.season.seasonCode,
@@ -193,6 +192,7 @@ export async function checkpointLiveMatchScopeV3(input: {
       eventId: input.eventId,
       publication: current.publication,
       fixtures: current.fixtures,
+      allowFinalizedReplacementForCutover: input.allowFinalizedReplacementForCutover,
     });
     if (!result.checkpointed || !result.checkpointedAt)
       return { checkpointed: false, skipped: false };
@@ -259,6 +259,10 @@ export async function checkpointLiveMatchDeskV3(
 ): Promise<{ checkpointed: boolean; checkpointedAt: Date | null }> {
   const { season, eventId, publication, fixtures } = request;
   publicationIdentityMatches(publication, season, eventId);
+  const allowFinalizedReplacementForCutover = request.allowFinalizedReplacementForCutover === true;
+  if (allowFinalizedReplacementForCutover && publication.state !== 'FINALIZED') {
+    throw new Error('Finalized Live Matches replacement requires a finalized candidate');
+  }
   const bytes = assertDeskPayload(publication, fixtures);
   const checkpointedAt = await checkpointClockInTransaction(async (tx) => {
     const rows = await tx.execute<CheckpointClock>(
@@ -315,6 +319,12 @@ export async function checkpointLiveMatchDeskV3(
           OR (
             ${liveMatchDeskCheckpointsInFpl.state} <> 'FINALIZED'
             AND ${liveMatchDeskCheckpointsInFpl.generation} < excluded.generation
+          )
+          OR (
+            ${allowFinalizedReplacementForCutover}
+            AND ${liveMatchDeskCheckpointsInFpl.state} = 'FINALIZED'
+            AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDeskCheckpointsInFpl.publicationId} <> excluded.publication_id
           )
         `,
       })

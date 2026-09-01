@@ -214,11 +214,23 @@ async function seedOne(seasonCode: string, eventId: number) {
   // Detail carries the desk generation it was calculated from. Persist the
   // matching desk first so a cold read can never restore detail N alongside
   // desk N-1. Both writes remain scope-local and are verified independently.
+  const existingDeskDesired = await readLiveMatchCheckpointDesiredV3({
+    kind: 'desk',
+    season: seasonCode,
+    eventId,
+  });
   const deskDesired = await setLiveMatchCheckpointDesiredV3({
     kind: 'desk',
     publication: desk.publication,
     finalized: desk.publication.state === 'FINALIZED',
     force: true,
+    replaceFinalizedForCutover:
+      existingDeskDesired?.final === true && desk.publication.state === 'FINALIZED'
+        ? {
+            expectedPublicationId: existingDeskDesired.publicationId,
+            expectedGeneration: existingDeskDesired.generation,
+          }
+        : undefined,
   });
   if (
     deskDesired.publicationId !== desk.publication.publicationId ||
@@ -226,7 +238,12 @@ async function seedOne(seasonCode: string, eventId: number) {
   ) {
     throw new Error(`event ${eventId} desk checkpoint obligation was superseded during seed`);
   }
-  const deskCheckpoint = await checkpointLiveMatchScopeV3({ season, eventId, kind: 'desk' });
+  const deskCheckpoint = await checkpointLiveMatchScopeV3({
+    season,
+    eventId,
+    kind: 'desk',
+    allowFinalizedReplacementForCutover: desk.publication.state === 'FINALIZED',
+  });
   if (!deskCheckpoint.checkpointed) {
     throw new Error(`event ${eventId} desk checkpoint did not converge before detail`);
   }

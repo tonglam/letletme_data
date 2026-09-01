@@ -7,7 +7,7 @@
 -- active event rows with V3 publications from complete canonical data.
 
 ALTER TABLE fpl.live_match_desk_checkpoints
-  ADD COLUMN contract_version text;
+  ADD COLUMN contract_version text DEFAULT 'live-matches-v2';
 
 UPDATE fpl.live_match_desk_checkpoints
 SET contract_version = manifest ->> 'contractVersion'
@@ -24,7 +24,7 @@ ALTER TABLE fpl.live_match_desk_checkpoints
   );
 
 ALTER TABLE fpl.live_match_detail_checkpoints
-  ADD COLUMN contract_version text;
+  ADD COLUMN contract_version text DEFAULT 'live-matches-v2';
 
 UPDATE fpl.live_match_detail_checkpoints
 SET contract_version = manifest ->> 'contractVersion'
@@ -39,4 +39,3 @@ ALTER TABLE fpl.live_match_detail_checkpoints
     contract_version = manifest ->> 'contractVersion'
     AND contract_version = ANY (ARRAY['live-matches-v2', 'live-matches-v3']::text[])
   );
-

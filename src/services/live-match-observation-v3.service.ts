@@ -1,7 +1,10 @@
 import { fplClient } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
-import { readLiveMatchDeskV3 } from '../cache/live-match-publication-v3';
+import {
+  readLiveMatchDeskFenceV3,
+  type MatchDeskActiveFence,
+} from '../cache/live-match-publication-v3';
 import { loadLiveReferenceData, type LiveSnapshotReferenceData } from './live-coherent-fetch';
 import {
   syncLiveMatchesV3FromObservation,
@@ -18,10 +21,10 @@ export interface LiveMatchObservationV3Options {
 export interface LiveMatchObservationV3Dependencies {
   readonly getFixtures: (eventId: number) => ReturnType<typeof fplClient.getFixtures>;
   readonly getCore: (season: string) => ReturnType<typeof readCoreSnapshotCache>;
-  readonly getCurrentDesk: (
+  readonly getDeskFence: (
     season: string,
     eventId: number,
-  ) => ReturnType<typeof readLiveMatchDeskV3>;
+  ) => ReturnType<typeof readLiveMatchDeskFenceV3>;
   readonly getReferenceData: (
     season: FplSeasonRef,
     eventId: number,
@@ -32,7 +35,7 @@ export interface LiveMatchObservationV3Dependencies {
 const defaultDependencies: LiveMatchObservationV3Dependencies = {
   getFixtures: (eventId) => fplClient.getFixtures(eventId),
   getCore: (season) => readCoreSnapshotCache(season),
-  getCurrentDesk: (season, eventId) => readLiveMatchDeskV3({ season, eventId }),
+  getDeskFence: (season, eventId) => readLiveMatchDeskFenceV3({ season, eventId }),
   getReferenceData: loadLiveReferenceData,
   syncMatches: syncLiveMatchesV3FromObservation,
 };
@@ -53,12 +56,19 @@ export async function syncLiveMatchObservationV3(
     throw new Error(`Invalid live event ID: ${eventId}`);
   }
   const dependencies = options.dependencies ?? defaultDependencies;
-  const [rawFixtures, core, currentDesk, referenceData] = await Promise.all([
+  // Capture the exact active pointer before starting the provider request. The
+  // Redis bytes are the CAS fence that prevents a slow match-only response
+  // from replacing a newer desk publication.
+  const observedDesk: MatchDeskActiveFence = await dependencies.getDeskFence(
+    season.seasonCode,
+    eventId,
+  );
+  const [rawFixtures, core, referenceData] = await Promise.all([
     dependencies.getFixtures(eventId),
     dependencies.getCore(season.seasonCode),
-    dependencies.getCurrentDesk(season.seasonCode, eventId),
     dependencies.getReferenceData(season, eventId),
   ]);
+  const currentDesk = observedDesk.read;
   const expectedFixtureIds = core
     ? core.fixtures.filter((fixture) => fixture.event === eventId).map((fixture) => fixture.id)
     : currentDesk?.fixtures.map((fixture) => fixture.fixtureId);
@@ -72,6 +82,7 @@ export async function syncLiveMatchObservationV3(
     rawFixtures,
     referenceData,
     expectedFixtureIds,
+    observedDesk,
     lifecycleState: options.lifecycleState,
     expectedNextCheckAt: options.expectedNextCheckAt,
   });

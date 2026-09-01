@@ -13,10 +13,17 @@ const observationResult = {} as LiveMatchObservationResult;
 describe('Live Matches V3 match-only observation', () => {
   test('publishes a fixture-only desk without introducing an event-live dependency', async () => {
     let received: Record<string, unknown> | undefined;
+    const callOrder: string[] = [];
     const dependencies: LiveMatchObservationV3Dependencies = {
-      getFixtures: mock(async () => []),
+      getFixtures: mock(async () => {
+        callOrder.push('fixtures');
+        return [];
+      }),
       getCore: mock(async () => ({ fixtures: [{ id: 19, event: 12 }] }) as never),
-      getCurrentDesk: mock(async () => null),
+      getDeskFence: mock(async () => {
+        callOrder.push('desk-fence');
+        return { observed: 'desk-pointer-before-fetch', read: null };
+      }),
       getReferenceData: mock(async () => ({}) as LiveSnapshotReferenceData),
       syncMatches: mock(async (input) => {
         received = input as unknown as Record<string, unknown>;
@@ -35,20 +42,22 @@ describe('Live Matches V3 match-only observation', () => {
       eventId: 12,
       rawFixtures: [],
       expectedFixtureIds: [19],
+      observedDesk: { observed: 'desk-pointer-before-fetch', read: null },
       lifecycleState: 'PRE_DEADLINE',
       expectedNextCheckAt: '2026-09-01T00:02:00.000Z',
     });
     expect(received).not.toHaveProperty('rawEventLive');
     expect(dependencies.getFixtures).toHaveBeenCalledTimes(1);
     expect(dependencies.getCore).toHaveBeenCalledWith(TEST_SEASON.seasonCode);
-    expect(dependencies.getCurrentDesk).toHaveBeenCalledWith(TEST_SEASON.seasonCode, 12);
+    expect(dependencies.getDeskFence).toHaveBeenCalledWith(TEST_SEASON.seasonCode, 12);
+    expect(callOrder).toEqual(['desk-fence', 'fixtures']);
   });
 
   test('fails closed when neither Core nor the existing desk provides fixture identity', async () => {
     const dependencies: LiveMatchObservationV3Dependencies = {
       getFixtures: mock(async () => []),
       getCore: mock(async () => null),
-      getCurrentDesk: mock(async () => null),
+      getDeskFence: mock(async () => ({ observed: '', read: null })),
       getReferenceData: mock(async () => ({}) as LiveSnapshotReferenceData),
       syncMatches: mock(async () => observationResult),
     };

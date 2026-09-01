@@ -92,7 +92,7 @@ publications set `force: true`, bypass that window, and are fenced against
 supersession. A worker must honor that durable marker even when the previous
 checkpoint is recent.
 
-Protected diagnosis and recovery use `POST /ops/live-matches-v2/repair` with
+Protected diagnosis and recovery use `POST /ops/live-matches-v3/repair` with
 one explicit season/event. An `inspect` request validates active, previous,
 desired, and self-contained PostgreSQL checkpoints for both streams. Write
 requests require an explicit desk/detail kind, a reason of at least 12
