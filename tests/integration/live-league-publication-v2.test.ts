@@ -114,7 +114,11 @@ describe('Live League V2 checkpoint desired marker', () => {
       }),
     );
 
-    const desired = await setLiveLeagueCheckpointDesiredV2(publication, undefined, { redis });
+    const desired = await setLiveLeagueCheckpointDesiredV2(
+      publication,
+      publication.times.publishedAt,
+      { redis },
+    );
 
     expect(desired.publicationId).toBe(publication.publicationId);
     expect(desired.generation).toBe(publication.generation);
