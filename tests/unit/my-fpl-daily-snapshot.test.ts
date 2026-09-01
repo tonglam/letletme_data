@@ -247,6 +247,19 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(governanceService).toContain('retireEmptyMyFplOutboxFreshnessWindows');
   });
 
+  test('rebuilds legacy finals and keeps provisional transfer facts on one authority', () => {
+    expect(publicationService).toContain('isManagerReviewV2MyFplPublication');
+    expect(worker).toContain('activeFinalUsesManagerReviewV2');
+    expect(worker).toContain('redisManifest.revision === active.revision');
+    expect(publicationService).toContain('provisionalEventPointsByElement');
+    expect(publicationService).toContain('Event-live publication is missing transfer points');
+    expect(publicationService).toContain("chip(row.event_chip) === 'FREE_HIT'");
+    expect(publicationService).toContain('pick.event_team_id AS team_id');
+    expect(publicationService).not.toContain(
+      'COALESCE(pick.event_team_id, player.team_id) AS team_id',
+    );
+  });
+
   test('allows the full current-season refresh barrier to settle', () => {
     expect(queueRunBarrier).toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 30 * 60_000');
     expect(queueRunBarrier).not.toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 10 * 60_000');

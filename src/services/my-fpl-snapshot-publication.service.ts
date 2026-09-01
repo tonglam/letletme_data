@@ -425,6 +425,7 @@ type TransferRow = {
   event_id: number;
   event_transfers: number;
   event_transfers_cost: number;
+  event_chip: string | null;
   element_in_id: number | null;
   element_in_web_name: string | null;
   element_in_type: number | null;
@@ -1695,6 +1696,48 @@ export async function getActiveMyFplPublication(
   return loadActivePublication(await getDbClient(), season.seasonId, eventId);
 }
 
+/**
+ * A FINAL publication may have been written by the pre-manager-review
+ * snapshot contract.  The maintenance worker can use this check to skip a
+ * settled event only when every expected entry row is the hard-cut v2 shape;
+ * a legacy FINAL must flow through capture so it is rebuilt before consumers
+ * are allowed to observe it.
+ */
+export async function isManagerReviewV2MyFplPublication(
+  season: FplSeasonRef,
+  eventId: number,
+  publication: MyFplSnapshotPublication | null,
+): Promise<boolean> {
+  if (
+    !publication ||
+    publication.kind !== 'FINAL' ||
+    !isCompleteMyFplPublication(publication) ||
+    publication.seasonId !== season.seasonId ||
+    publication.eventId !== eventId
+  ) {
+    return false;
+  }
+  const rows = await (await getDbClient())<{ total_count: number; v2_count: number }[]>`
+    SELECT count(*)::integer AS total_count,
+           count(*) FILTER (
+             WHERE jsonb_typeof(payload) = 'object'
+               AND payload->>'contractVersion' = '2'
+           )::integer AS v2_count
+    FROM competition.my_fpl_snapshot_entries
+    WHERE season_id = ${season.seasonId}
+      AND event_id = ${eventId}
+      AND revision = ${publication.revision}
+  `;
+  const counts = rows[0];
+  const expectedEntryRows = publication.expectedEntryCount + publication.notApplicableEntryCount;
+  return Boolean(
+    counts &&
+      expectedEntryRows > 0 &&
+      counts.total_count === expectedEntryRows &&
+      counts.v2_count === expectedEntryRows,
+  );
+}
+
 export async function hasFinalMyFplPublication(
   season: FplSeasonRef,
   eventId: number,
@@ -2194,7 +2237,7 @@ async function captureMyFplSnapshotOnce(
       SELECT pick.entry_id, pick.event_id, pick.element_id AS element, pick.position,
              player.web_name, team.short_name AS team_short_name,
              team.name AS team_name, player.element_type,
-             COALESCE(pick.event_team_id, player.team_id) AS team_id,
+             pick.event_team_id AS team_id,
              pick.is_captain, pick.is_vice_captain, pick.active_chip::text,
              pick.transfers, pick.transfers_cost, pick.multiplier, pick.source_updated_at,
              stats.total_points, stats.minutes, stats.goals_scored,
@@ -2215,7 +2258,7 @@ async function captureMyFplSnapshotOnce(
         ON player.season_id = pick.season_id AND player.element_id = pick.element_id
       LEFT JOIN fpl.teams team
         ON team.season_id = pick.season_id
-       AND team.team_id = COALESCE(pick.event_team_id, player.team_id)
+       AND team.team_id = pick.event_team_id
       JOIN fpl.player_gameweek_stats stats
         ON stats.season_id = pick.season_id
        AND stats.event_id = pick.event_id
@@ -2304,6 +2347,7 @@ async function captureMyFplSnapshotOnce(
     // reads the current event's entry_event_results. FINAL uses only the
     // finalized result path and never invokes the projector.
     const projectedScoresByEntry = new Map<number, ProjectedManagerScore>();
+    const provisionalEventPointsByElement = new Map<number, number>();
     let projectedBatch: Awaited<ReturnType<typeof eventLiveV2ScoreService.load>> = null;
     if (kind === 'PROVISIONAL') {
       const activeEntryIds = entries
@@ -2358,6 +2402,9 @@ async function captureMyFplSnapshotOnce(
         throw new MyFplSnapshotIncompleteError(
           `Event-live publication changed during capture for event ${eventId}`,
         );
+      }
+      for (const live of pinnedLiveSnapshot.eventLives) {
+        provisionalEventPointsByElement.set(live.elementId, live.totalPoints);
       }
       overlayProjectedEventLiveStats(eventId, pickRows, pinnedLiveSnapshot.eventLives);
       const pinnedTeamIds = Array.from(
@@ -2454,6 +2501,7 @@ async function captureMyFplSnapshotOnce(
       SELECT transfer.entry_id, transfer.event_id,
              COALESCE(result.event_transfers, 0)::integer AS event_transfers,
              COALESCE(result.event_transfers_cost, 0)::integer AS event_transfers_cost,
+             result.event_chip::text AS event_chip,
              transfer.element_in_id,
              player_in.web_name AS element_in_web_name,
              player_in.element_type AS element_in_type,
@@ -2523,8 +2571,11 @@ async function captureMyFplSnapshotOnce(
         if (row.event_id !== eventId) continue;
         const score = projectedScoresByEntry.get(row.entry_id);
         if (!score) continue;
-        row.event_transfers =
-          pickRows.find((pick) => pick.entry_id === row.entry_id)?.transfers ?? row.event_transfers;
+        const captainPick = pickRows.find(
+          (pick) => pick.entry_id === row.entry_id && pick.position === 1,
+        );
+        row.event_chip = captainPick?.active_chip ?? row.event_chip;
+        row.event_transfers = captainPick?.transfers ?? row.event_transfers;
         row.event_transfers_cost = score.transferCost;
       }
     }
@@ -2556,8 +2607,11 @@ async function captureMyFplSnapshotOnce(
     const transferPointsByElementEvent = new Map(
       transferPointRows.map((row) => [`${row.element_id}:${row.event_id}`, row.total_points]),
     );
-    const transferPointFor = (elementId: number, eventId: number): number | null => {
-      const points = transferPointsByElementEvent.get(`${elementId}:${eventId}`);
+    const transferPointFor = (elementId: number, targetEventId: number): number | null => {
+      if (kind === 'PROVISIONAL' && targetEventId === eventId) {
+        return provisionalEventPointsByElement.get(elementId) ?? null;
+      }
+      const points = transferPointsByElementEvent.get(`${elementId}:${targetEventId}`);
       return points === undefined ? null : points;
     };
     const transferWindowGain = (row: TransferRow, gameweeks: number): number | null => {
@@ -2568,6 +2622,10 @@ async function captureMyFplSnapshotOnce(
       ) {
         return null;
       }
+      // Free Hit players are reverted after the event.  A multi-week
+      // counterfactual treats the incoming player as permanently owned and
+      // would therefore report a gain that never belonged to this transfer.
+      if (gameweeks > 1 && chip(row.event_chip) === 'FREE_HIT') return null;
       let gain = 0;
       for (let offset = 0; offset < gameweeks; offset += 1) {
         const reviewEventId = row.event_id + offset;
@@ -2583,11 +2641,21 @@ async function captureMyFplSnapshotOnce(
       return gain;
     };
     for (const row of transferRows) {
-      if (row.event_id > resultUpperBound) continue;
+      const isCurrentProvisionalTransfer = kind === 'PROVISIONAL' && row.event_id === eventId;
+      if (row.event_id > resultUpperBound && !isCurrentProvisionalTransfer) continue;
       row.element_in_points =
         row.element_in_id === null ? null : transferPointFor(row.element_in_id, row.event_id);
       row.element_out_points =
         row.element_out_id === null ? null : transferPointFor(row.element_out_id, row.event_id);
+      if (
+        isCurrentProvisionalTransfer &&
+        ((row.element_in_id !== null && row.element_in_points === null) ||
+          (row.element_out_id !== null && row.element_out_points === null))
+      ) {
+        throw new MyFplSnapshotIncompleteError(
+          `Event-live publication is missing transfer points for entry ${row.entry_id}, event ${eventId}`,
+        );
+      }
       if (
         row.element_in_id !== null &&
         row.element_out_id !== null &&

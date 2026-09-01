@@ -29,6 +29,7 @@ import {
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
+  isManagerReviewV2MyFplPublication,
   type MyFplSnapshotOutboxDeliveryEvidence,
   type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
@@ -327,8 +328,11 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             Boolean(job.data.snapshotActor) &&
             Boolean(job.data.snapshotReason) &&
             Boolean(job.data.snapshotIdempotencyKey);
-          if (
+          const activeFinalUsesManagerReviewV2 =
             active?.kind === 'FINAL' &&
+            (await isManagerReviewV2MyFplPublication(season, eventId, active));
+          if (
+            activeFinalUsesManagerReviewV2 &&
             (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
           ) {
             const redisManifest = await getActiveMyFplSnapshotRedisManifest(
@@ -345,8 +349,8 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 publication: active,
                 redisRevision: redisManifest.revision,
               });
+              return { status: 'noop', publication: active };
             }
-            return { status: 'noop', publication: active };
           }
 
           // Refresh the mutable inputs for this retry attempt first. For a
