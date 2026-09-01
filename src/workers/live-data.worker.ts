@@ -15,6 +15,10 @@ import {
   checkpointLiveMatchScopeV3,
   hasFinalLiveMatchCheckpointsV3,
 } from '../services/live-match-v3-checkpoint.service';
+import {
+  syncLiveClassicLeaguePublicationsV2,
+  syncLiveH2HLeaguePublicationsV2,
+} from '../services/live-league-publication-v2.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -111,6 +115,29 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     });
     if (snapshot.checkpointObligationFailed) {
       throw new Error(`Live Match checkpoint obligation was not created for event ${eventId}`);
+    }
+    // League boards are a sibling publication. A missing roster input or a
+    // transient Redis/DB read must retain the last complete board and must not
+    // turn a successful global live observation into a failed live job.
+    try {
+      await syncLiveClassicLeaguePublicationsV2(season, eventId, job.data.expectedNextCheckAt);
+    } catch (error) {
+      logError(
+        'Live Classic league publication pass failed; global publication is retained',
+        error,
+        {
+          season: season.seasonCode,
+          eventId,
+        },
+      );
+    }
+    try {
+      await syncLiveH2HLeaguePublicationsV2(season, eventId);
+    } catch (error) {
+      logError('Live H2H league publication pass failed; global publication is retained', error, {
+        season: season.seasonCode,
+        eventId,
+      });
     }
     if (job.data.freshnessWindowId !== undefined && snapshot.publicationId !== null) {
       const sourceCheckedAt = snapshot.sourceCheckedAt ? new Date(snapshot.sourceCheckedAt) : null;

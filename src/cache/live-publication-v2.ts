@@ -2212,6 +2212,82 @@ export async function readEntryLiveInputV2(
   );
 }
 
+/**
+ * Read several entry inputs with two pointer reads and one immutable-item
+ * batch.  League publishing uses this instead of issuing a Redis round trip
+ * for every roster member; the validation and current/previous fallback are
+ * identical to the single-entry reader.
+ */
+export async function readEntryLiveInputsV2(
+  scopes: readonly EntryScope[],
+  redisClient?: Redis,
+): Promise<ReadonlyMap<number, EntryLivePublicationRead>> {
+  if (scopes.length === 0) return new Map();
+  for (const scope of scopes) assertEntryScope(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const pointerValues = await redis.mget(
+    ...scopes.flatMap((scope) => [
+      entryLiveV2Key(scope, 'active'),
+      entryLiveV2Key(scope, 'previous'),
+    ]),
+  );
+  const candidates = scopes.flatMap((scope, scopeIndex) =>
+    (['active', 'previous'] as const).map((pointer, pointerIndex) => ({
+      scope,
+      pointer,
+      publication: parseEntryManifest(pointerValues[scopeIndex * 2 + pointerIndex] ?? null, scope),
+    })),
+  );
+  const itemKeys = [
+    ...new Set(
+      candidates.flatMap((candidate) =>
+        candidate.publication
+          ? [candidate.publication.item.key, itemMetadataKey(candidate.publication.item.key)]
+          : [],
+      ),
+    ),
+  ];
+  const itemValues = itemKeys.length > 0 ? await redis.mget(...itemKeys) : [];
+  const itemMap = new Map(itemKeys.map((key, index) => [key, itemValues[index] ?? null]));
+  const result = new Map<number, EntryLivePublicationRead>();
+  for (const scope of scopes) {
+    const scopeCandidates = candidates.filter(
+      (candidate) => candidate.scope.entryId === scope.entryId,
+    );
+    for (const candidate of scopeCandidates) {
+      const publication = candidate.publication;
+      if (!publication) continue;
+      const payload = itemMap.get(publication.item.key) ?? null;
+      const metadata = itemMap.get(itemMetadataKey(publication.item.key)) ?? null;
+      if (
+        payload === null ||
+        metadata !==
+          `${publication.item.count}|${publication.item.bytes}|${publication.item.sha256}` ||
+        Buffer.byteLength(payload, 'utf8') !== publication.item.bytes ||
+        sha256(payload) !== publication.item.sha256
+      )
+        continue;
+      try {
+        const input = JSON.parse(payload) as unknown;
+        if (
+          !validateEntryLiveInputV2(input, scope) ||
+          itemCount(input.picksBase.picks) !== publication.item.count
+        )
+          continue;
+        result.set(scope.entryId, {
+          publication,
+          input,
+          servedFrom: candidate.pointer === 'active' ? 'REDIS_CURRENT' : 'REDIS_PREVIOUS',
+        });
+        break;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return result;
+}
+
 export async function markEntryPublicationCheckpointedV2(
   publication: EntryLivePublicationV2,
   checkpointedAt: Date | string,

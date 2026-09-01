@@ -855,6 +855,90 @@ export const livePointsPublicationSeedClaimsInCompetition = competition.table(
   ],
 );
 
+/**
+ * Redis-first live league checkpoint.  The payload is self-contained so a
+ * GraphQL cold read can recover one exact tournament/event scope without
+ * joining a roster to a different live revision.  This is a serving
+ * checkpoint, not a second source of business truth: canonical tournament,
+ * entry and FPL rows remain the source records below it.
+ */
+export const liveLeagueCheckpointsInCompetition = competition.table(
+  'live_league_checkpoints',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    scopeKind: text('scope_kind').notNull(),
+    publicationId: text('publication_id').notNull(),
+    generation: bigint('generation', { mode: 'number' }).notNull(),
+    state: text().notNull(),
+    manifest: jsonb().notNull(),
+    indexPayload: jsonb('index_payload').notNull(),
+    payload: jsonb().notNull(),
+    rowCount: integer('row_count').notNull(),
+    payloadBytes: integer('payload_bytes').notNull(),
+    payloadSha256: text('payload_sha256').notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    contentUpdatedAt: timestamp('content_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }).notNull(),
+    checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    expectedNextCheckAt: timestamp('expected_next_check_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.eventId, table.tournamentId, table.scopeKind],
+      name: 'live_league_checkpoints_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'live_league_checkpoints_event_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'live_league_checkpoints_tournament_fk',
+    }),
+    unique('live_league_checkpoints_publication_once').on(
+      table.seasonId,
+      table.eventId,
+      table.tournamentId,
+      table.scopeKind,
+      table.publicationId,
+    ),
+    index('live_league_checkpoints_generation_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.tournamentId,
+      table.generation,
+    ),
+    check(
+      'live_league_checkpoints_scope_kind_valid',
+      sql`scope_kind = ANY (ARRAY['CLASSIC','H2H_HEAD','H2H_STANDINGS']::text[])`,
+    ),
+    check(
+      'live_league_checkpoints_identity_valid',
+      sql`event_id > 0 AND tournament_id > 0 AND generation > 0 AND btrim(publication_id) <> '' AND state <> ''`,
+    ),
+    check(
+      'live_league_checkpoints_payload_valid',
+      sql`jsonb_typeof(manifest) = 'object' AND jsonb_typeof(index_payload) = 'array' AND jsonb_typeof(payload) = 'object' AND row_count >= 0 AND payload_bytes >= 0 AND payload_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'live_league_checkpoints_time_order',
+      sql`published_at >= source_checked_at AND checkpointed_at >= published_at`,
+    ),
+  ],
+);
+
 export const entryEventTransfersInCompetition = competition.table(
   'entry_event_transfers',
   {
