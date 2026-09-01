@@ -461,13 +461,20 @@ export function projectEventLiveManagerScore(input: {
   }, 0);
   if (!Number.isSafeInteger(points)) return null;
 
-  // For the Assistant Manager chip, entry_history.points is the authoritative
-  // gross event total and includes the manager's separate contribution.  A
-  // value below the player-only projection means the two revisioned sources
-  // cannot describe one coherent observation, so fail closed rather than
-  // publishing a negative manager contribution.
-  const eventPoints = managerChip ? input.reportedEventPoints! : points;
-  if (managerChip && eventPoints < points) return null;
+  // `reportedEventPoints` is the whole FPL gross total, not just the
+  // Assistant Manager contribution. Derive the manager-only delta from the
+  // source multipliers before adding it to the projected lineup score. Using
+  // the projected score as the baseline would erase a newly inferred
+  // auto-substitution or vice-captain promotion.
+  const sourceMultiplierPoints = picks.reduce((sum, pick) => {
+    const live = input.liveByElement.get(pick.elementId);
+    if (!live || !Number.isSafeInteger(live.totalPoints)) return Number.NaN;
+    return sum + live.totalPoints * pick.multiplier;
+  }, 0);
+  if (!Number.isSafeInteger(sourceMultiplierPoints)) return null;
+  const managerPoints = managerChip ? input.reportedEventPoints! - sourceMultiplierPoints : 0;
+  if (managerChip && managerPoints < 0) return null;
+  const eventPoints = points + managerPoints;
 
   const picksCheckedAt = new Date([...sourceTimestamps][0]!).toISOString();
   return {

@@ -148,7 +148,8 @@ export interface EntryLiveInputV2 {
      * chip; keeping it in the immutable picks publication prevents the live
      * projector from publishing a player-only total.
      */
-    readonly reportedEventPoints: number;
+    /** Present for manager-chip inputs; older non-manager inputs remain valid. */
+    readonly reportedEventPoints?: number;
     readonly transferCount: number;
     readonly transferCost: number;
   };
@@ -558,8 +559,11 @@ export function validateEntryLiveInputV2(
     !validIso(picksBase.contentUpdatedAt) ||
     !parseExactly15Picks(picksBase.picks) ||
     (picksBase.chip !== null && typeof picksBase.chip !== 'string') ||
-    typeof picksBase.reportedEventPoints !== 'number' ||
-    !Number.isSafeInteger(picksBase.reportedEventPoints) ||
+    (picksBase.reportedEventPoints !== undefined &&
+      (typeof picksBase.reportedEventPoints !== 'number' ||
+        !Number.isSafeInteger(picksBase.reportedEventPoints))) ||
+    ((picksBase.chip === 'manager' || picksBase.chip === 'MANAGER') &&
+      picksBase.reportedEventPoints === undefined) ||
     typeof picksBase.transferCount !== 'number' ||
     !Number.isSafeInteger(picksBase.transferCount) ||
     picksBase.transferCount < 0 ||

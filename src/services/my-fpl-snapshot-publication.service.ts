@@ -2381,7 +2381,13 @@ async function captureMyFplSnapshotOnce(
           (sum, pick) => sum + integerValue(pick.total_points) * pick.multiplier,
           0,
         );
-        if (detailPoints !== current.event_points) {
+        const managerChip = chip(current.event_chip) === 'MANAGER';
+        const managerPoints = managerChip ? current.event_points - detailPoints : 0;
+        if (
+          !Number.isSafeInteger(managerPoints) ||
+          managerPoints < 0 ||
+          detailPoints + managerPoints !== current.event_points
+        ) {
           throw new MyFplSnapshotIncompleteError(
             `Entry ${entryId} final headline/detail mismatch for event ${eventId}`,
           );
@@ -2534,7 +2540,14 @@ async function captureMyFplSnapshotOnce(
               (effectiveByElement.get(pick.element)?.effectiveMultiplier ?? 0),
           0,
         );
-        if (detailPoints !== score.eventPoints) {
+        const managerChip =
+          chip(entryPicks.find((pick) => pick.position === 1)?.active_chip ?? null) === 'MANAGER';
+        const managerPoints = managerChip ? score.eventPoints - detailPoints : 0;
+        if (
+          !Number.isSafeInteger(managerPoints) ||
+          managerPoints < 0 ||
+          detailPoints + managerPoints !== score.eventPoints
+        ) {
           throw new MyFplSnapshotIncompleteError(
             `Entry ${entryId} projected headline/detail mismatch for event ${eventId}`,
           );
@@ -2717,7 +2730,8 @@ async function captureMyFplSnapshotOnce(
           : row.element_in_points - row.element_out_points;
       row.three_gameweek_gain = transferWindowGain(row, 3);
       row.five_gameweek_gain = transferWindowGain(row, 5);
-      row.evaluated_through_event_id = Math.min(resultUpperBound, row.event_id + 4);
+      const evaluationUpperBound = isCurrentProvisionalTransfer ? eventId : resultUpperBound;
+      row.evaluated_through_event_id = Math.min(evaluationUpperBound, row.event_id + 4);
     }
     const transfersByEntry = groupBy(transferRows, (row) => row.entry_id);
 

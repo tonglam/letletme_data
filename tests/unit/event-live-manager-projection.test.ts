@@ -301,6 +301,33 @@ describe('revision-pinned projected manager score', () => {
     expect(result?.netEventPoints).toBe(19);
   });
 
+  test('adds manager points without discarding projected lineup changes', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+    liveByElement.set(3, live(3, 0, 0));
+    liveByElement.set(12, live(12, 5));
+
+    const result = projectEventLiveManagerScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+      fixtures: [fixture(2, 97, true)],
+      // Source multipliers contribute 11 points; the reported gross total
+      // carries eight Assistant Manager points. The projected auto-sub then
+      // raises the player component to 16, for a final total of 24.
+      reportedEventPoints: 19,
+    });
+
+    expect(result?.eventPoints).toBe(24);
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 12)).toMatchObject({
+      autoSub: true,
+      pickActive: true,
+    });
+  });
+
   test('fails closed when the manager chip has no manager scoring input', () => {
     const managerPicks = picks();
     managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
