@@ -24,6 +24,7 @@ import { auditTournamentSetup } from './tournament-audit.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { rebuildTournamentStructure } from './tournament-structure.service';
+import { requestTournamentReviewTournamentCorrection } from './tournament-review-publication.service';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -209,6 +210,16 @@ async function repairTournamentSetupIssueUnlocked(
           scopes: tournamentSetupRebuildScopes(issue.tournamentId),
         },
         () => rebuildTournamentStructure(season, tournament, entrySeeds),
+      );
+      // A topology rebuild can change group membership, phase boundaries, or
+      // bracket edges for every settled event. Reset the earliest existing
+      // review head (and all descendants) with explicit repair provenance so
+      // the immutable snapshots are rebuilt instead of remaining frozen.
+      await requestTournamentReviewTournamentCorrection(
+        season,
+        issue.tournamentId,
+        `Tournament structure repair issue ${issue.issueId}`,
+        `tournament-repair-${season.seasonCode}-${issue.issueId}`,
       );
       break;
     }

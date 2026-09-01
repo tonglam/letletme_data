@@ -175,21 +175,106 @@ BEGIN
     WHERE legacy.slo_key = 'my-tournament-review-v2'
        OR legacy.contract_key = 'my-tournament-review-v2'
   LOOP
-    UPDATE ops.freshness_slo_windows
-    SET eligible_at = LEAST(
-          eligible_at,
-          (SELECT eligible_at FROM ops.freshness_slo_windows WHERE window_id = duplicate_row.legacy_window_id)
+    UPDATE ops.freshness_slo_windows AS canonical
+    SET eligible_at = LEAST(canonical.eligible_at, legacy.eligible_at),
+        due_at = LEAST(canonical.due_at, legacy.due_at),
+        obligation_due_at = CASE
+          WHEN canonical.obligation_due_at IS NULL THEN legacy.obligation_due_at
+          WHEN legacy.obligation_due_at IS NULL THEN canonical.obligation_due_at
+          ELSE GREATEST(canonical.obligation_due_at, legacy.obligation_due_at)
+        END,
+        source_checked_at = CASE
+          WHEN canonical.source_checked_at IS NULL THEN legacy.source_checked_at
+          WHEN legacy.source_checked_at IS NULL THEN canonical.source_checked_at
+          ELSE GREATEST(canonical.source_checked_at, legacy.source_checked_at)
+        END,
+        pg_published_at = CASE
+          WHEN canonical.pg_published_at IS NULL THEN legacy.pg_published_at
+          WHEN legacy.pg_published_at IS NULL THEN canonical.pg_published_at
+          ELSE GREATEST(canonical.pg_published_at, legacy.pg_published_at)
+        END,
+        redis_seen_at = CASE
+          WHEN canonical.redis_seen_at IS NULL THEN legacy.redis_seen_at
+          WHEN legacy.redis_seen_at IS NULL THEN canonical.redis_seen_at
+          ELSE GREATEST(canonical.redis_seen_at, legacy.redis_seen_at)
+        END,
+        graphql_seen_at = CASE
+          WHEN canonical.graphql_seen_at IS NULL THEN legacy.graphql_seen_at
+          WHEN legacy.graphql_seen_at IS NULL THEN canonical.graphql_seen_at
+          ELSE GREATEST(canonical.graphql_seen_at, legacy.graphql_seen_at)
+        END,
+        web_seen_at = CASE
+          WHEN canonical.web_seen_at IS NULL THEN legacy.web_seen_at
+          WHEN legacy.web_seen_at IS NULL THEN canonical.web_seen_at
+          ELSE GREATEST(canonical.web_seen_at, legacy.web_seen_at)
+        END,
+        producer_revision = COALESCE(canonical.producer_revision, legacy.producer_revision),
+        redis_revision = COALESCE(canonical.redis_revision, legacy.redis_revision),
+        graphql_revision = COALESCE(canonical.graphql_revision, legacy.graphql_revision),
+        web_revision = COALESCE(canonical.web_revision, legacy.web_revision),
+        expected_count = CASE
+          WHEN canonical.expected_count IS NULL THEN legacy.expected_count
+          WHEN legacy.expected_count IS NULL THEN canonical.expected_count
+          ELSE GREATEST(canonical.expected_count, legacy.expected_count)
+        END,
+        observed_count = CASE
+          WHEN canonical.observed_count IS NULL THEN legacy.observed_count
+          WHEN legacy.observed_count IS NULL THEN canonical.observed_count
+          ELSE GREATEST(canonical.observed_count, legacy.observed_count)
+        END,
+        not_applicable_count = GREATEST(
+          canonical.not_applicable_count,
+          legacy.not_applicable_count
         ),
-        due_at = LEAST(
-          due_at,
-          (SELECT due_at FROM ops.freshness_slo_windows WHERE window_id = duplicate_row.legacy_window_id)
-        ),
-        evidence = evidence || jsonb_build_object(
+        completeness_status = CASE
+          WHEN CASE legacy.completeness_status
+            WHEN 'INVALID' THEN 4
+            WHEN 'INCOMPLETE' THEN 3
+            WHEN 'COMPLETE' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END > CASE canonical.completeness_status
+            WHEN 'INVALID' THEN 4
+            WHEN 'INCOMPLETE' THEN 3
+            WHEN 'COMPLETE' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END THEN legacy.completeness_status
+          ELSE canonical.completeness_status
+        END,
+        status = CASE
+          WHEN CASE legacy.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END > CASE canonical.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END THEN legacy.status
+          ELSE canonical.status
+        END,
+        breach_code = COALESCE(canonical.breach_code, legacy.breach_code),
+        recovered_at = CASE
+          WHEN canonical.recovered_at IS NULL THEN legacy.recovered_at
+          WHEN legacy.recovered_at IS NULL THEN canonical.recovered_at
+          ELSE GREATEST(canonical.recovered_at, legacy.recovered_at)
+        END,
+        recovery_revision = COALESCE(canonical.recovery_revision, legacy.recovery_revision),
+        created_at = LEAST(canonical.created_at, legacy.created_at),
+        evidence = canonical.evidence || jsonb_build_object(
           'supersededLegacyWindowId', duplicate_row.legacy_window_id,
-          'supersededLegacyEvidence', duplicate_row.legacy_evidence
+          'supersededLegacyEvidence', duplicate_row.legacy_evidence,
+          'supersededLegacyRow', to_jsonb(legacy)
         ),
         updated_at = clock_timestamp()
-    WHERE window_id = duplicate_row.canonical_window_id;
+    FROM ops.freshness_slo_windows AS legacy
+    WHERE canonical.window_id = duplicate_row.canonical_window_id
+      AND legacy.window_id = duplicate_row.legacy_window_id;
     DELETE FROM ops.freshness_slo_windows
     WHERE window_id = duplicate_row.legacy_window_id;
   END LOOP;

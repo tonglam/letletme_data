@@ -2758,6 +2758,120 @@ export async function publishTournamentReviewCorrection(
   });
 }
 
+/** Reset a frozen scope and all later descendants for an explicit, audited
+ * correction. A null target selects the earliest READY scope in a tournament
+ * and is used by topology repair, which can invalidate every later phase. */
+async function resetTournamentReviewScopesForCorrection(
+  season: FplSeasonRef,
+  tournamentId: number,
+  targetEventId: number | null,
+  reason: string,
+  changeId: string,
+  allowEmpty = false,
+): Promise<number[]> {
+  const db = await getDbClient();
+  const rows: Array<{ event_id: number }> = await db.begin(
+    async (tx): Promise<Array<{ event_id: number }>> => {
+      const targetRows = await tx<Array<{ event_id: number }>>`
+      SELECT obligation.event_id
+      FROM competition.tournament_review_obligations obligation
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = ${tournamentId}
+        AND (${targetEventId}::integer IS NULL OR obligation.event_id = ${targetEventId})
+        AND obligation.state = 'READY'
+        AND EXISTS (
+          SELECT 1
+          FROM competition.tournament_review_heads head
+          WHERE head.season_id = obligation.season_id
+            AND head.tournament_id = obligation.tournament_id
+            AND head.event_id = obligation.event_id
+        )
+      ORDER BY obligation.event_id
+      LIMIT 1
+    `;
+      if (targetRows.length === 0) {
+        if (allowEmpty) return [];
+        throw new Error('only an existing READY review scope can be corrected');
+      }
+      const correctionTargetEventId = targetRows[0].event_id;
+      // Publishers take the same scope advisory lock before reading or writing
+      // a head. Lock every descendant before clearing a PROCESSING lease so an
+      // in-flight worker cannot publish the superseded snapshot after this
+      // correction request commits.
+      const descendantRows = await tx<Array<{ event_id: number }>>`
+      SELECT obligation.event_id
+      FROM competition.tournament_review_obligations obligation
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = ${tournamentId}
+        AND obligation.event_id >= ${correctionTargetEventId}
+      ORDER BY obligation.event_id
+    `;
+      for (const descendant of descendantRows) {
+        await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(
+            'review:' || ${season.seasonId}::text || ':' || ${tournamentId}::text || ':' || ${descendant.event_id}::text,
+            0
+          )
+        )
+      `;
+      }
+      const rowsAfterLocks = await tx<Array<{ event_id: number }>>`
+      UPDATE competition.tournament_review_obligations obligation
+      SET state = 'PENDING',
+          next_attempt_at = clock_timestamp(),
+          execution_attempts = 0,
+          source_rechecks = 0,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          first_attempt_at = NULL,
+          last_attempt_at = NULL,
+          ready_at = NULL,
+          degraded_at = NULL,
+          ready_revision = NULL,
+          last_error_code = NULL,
+          last_failure_fingerprint = NULL,
+          -- Keep any attached repair issue on the descendant. The claimed
+          -- obligation carries this id into finishReviewObligation, which
+          -- resolves it in the same transaction as READY. Clearing it here
+          -- would leave an unresolved setup issue after a successful
+          -- correction.
+          -- Only scopes with an existing immutable head are correction
+          -- publications. Headless descendants remain initial publications.
+          correction_reason = CASE WHEN EXISTS (
+            SELECT 1
+            FROM competition.tournament_review_heads head
+            WHERE head.season_id = obligation.season_id
+              AND head.tournament_id = obligation.tournament_id
+              AND head.event_id = obligation.event_id
+          ) THEN ${reason} ELSE NULL END,
+          correction_change_id = CASE WHEN EXISTS (
+            SELECT 1
+            FROM competition.tournament_review_heads head
+            WHERE head.season_id = obligation.season_id
+              AND head.tournament_id = obligation.tournament_id
+              AND head.event_id = obligation.event_id
+          ) THEN ${changeId} ELSE NULL END,
+          updated_at = clock_timestamp()
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = ${tournamentId}
+        AND obligation.event_id >= ${correctionTargetEventId}
+        AND obligation.state IN ('READY', 'PROCESSING', 'PENDING', 'WAITING_SOURCE', 'DEGRADED')
+      RETURNING obligation.event_id
+    `;
+      if (rowsAfterLocks.length === 0) {
+        if (allowEmpty) return [];
+        throw new Error('only an existing READY review scope can be corrected');
+      }
+      return rowsAfterLocks;
+    },
+  );
+  if (rows.length === 0 && !allowEmpty) {
+    throw new Error('only an existing READY review scope can be corrected');
+  }
+  return rows.map((row) => row.event_id);
+}
+
 /** Mark one frozen scope for an explicit, audited correction. Routine source
  * reconciliation never performs this transition; callers must provide both
  * a human-readable reason and an external Change ID before a revision >1 can
@@ -2778,87 +2892,38 @@ export async function requestTournamentReviewCorrection(
   if (!reason.trim() || !changeId.trim()) {
     throw new Error('correction reason and changeId are required');
   }
-  const db = await getDbClient();
-  const rows = await db.begin(async (tx) => {
-    const targetRows = await tx<Array<{ event_id: number }>>`
-      SELECT obligation.event_id
-      FROM competition.tournament_review_obligations obligation
-      WHERE obligation.season_id = ${season.seasonId}
-        AND obligation.tournament_id = ${tournamentId}
-        AND obligation.event_id = ${eventId}
-        AND obligation.state = 'READY'
-        AND EXISTS (
-          SELECT 1
-          FROM competition.tournament_review_heads head
-          WHERE head.season_id = obligation.season_id
-            AND head.tournament_id = obligation.tournament_id
-            AND head.event_id = obligation.event_id
-        )
-    `;
-    if (targetRows.length === 0) {
-      throw new Error('only an existing READY review scope can be corrected');
-    }
-    const correctionTargetEventId = targetRows[0].event_id;
-    // Publishers take the same scope advisory lock before reading or writing
-    // a head. Lock every descendant before clearing a PROCESSING lease so an
-    // in-flight worker cannot publish the superseded snapshot after this
-    // correction request commits.
-    const descendantRows = await tx<Array<{ event_id: number }>>`
-      SELECT obligation.event_id
-      FROM competition.tournament_review_obligations obligation
-      WHERE obligation.season_id = ${season.seasonId}
-        AND obligation.tournament_id = ${tournamentId}
-        AND obligation.event_id >= ${correctionTargetEventId}
-      ORDER BY obligation.event_id
-    `;
-    for (const descendant of descendantRows) {
-      await tx`
-        SELECT pg_advisory_xact_lock(
-          hashtextextended(
-            'review:' || ${season.seasonId}::text || ':' || ${tournamentId}::text || ':' || ${descendant.event_id}::text,
-            0
-          )
-        )
-      `;
-    }
-    const rowsAfterLocks = await tx<Array<{ event_id: number }>>`
-      UPDATE competition.tournament_review_obligations obligation
-      SET state = 'PENDING',
-          next_attempt_at = clock_timestamp(),
-          execution_attempts = 0,
-          source_rechecks = 0,
-          lease_owner = NULL,
-          lease_expires_at = NULL,
-          first_attempt_at = NULL,
-          last_attempt_at = NULL,
-          ready_at = NULL,
-          degraded_at = NULL,
-          ready_revision = NULL,
-          last_error_code = NULL,
-          last_failure_fingerprint = NULL,
-          -- Keep any attached repair issue on the descendant. The claimed
-          -- obligation carries this id into finishReviewObligation, which
-          -- resolves it in the same transaction as READY. Clearing it here
-          -- would leave an unresolved setup issue after a successful
-          -- correction.
-          correction_reason = ${reason.trim()},
-          correction_change_id = ${changeId.trim()},
-          updated_at = clock_timestamp()
-      WHERE obligation.season_id = ${season.seasonId}
-        AND obligation.tournament_id = ${tournamentId}
-        AND obligation.event_id >= ${correctionTargetEventId}
-        AND obligation.state IN ('READY', 'PROCESSING', 'PENDING', 'WAITING_SOURCE', 'DEGRADED')
-      RETURNING obligation.event_id
-    `;
-    if (rowsAfterLocks.length === 0) {
-      throw new Error('only an existing READY review scope can be corrected');
-    }
-    return rowsAfterLocks;
-  });
-  if (rows.length === 0) {
-    throw new Error('only an existing READY review scope can be corrected');
+  return resetTournamentReviewScopesForCorrection(
+    season,
+    tournamentId,
+    eventId,
+    reason.trim(),
+    changeId.trim(),
+  );
+}
+
+/** Reset all settled review scopes affected by a tournament-wide topology
+ * repair. Returning an empty list is valid when the tournament has not
+ * published a review head yet. */
+export async function requestTournamentReviewTournamentCorrection(
+  season: FplSeasonRef,
+  tournamentId: number,
+  reason: string,
+  changeId: string,
+): Promise<number[]> {
+  if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) {
+    throw new Error('tournamentId must be a positive integer');
   }
-  return rows.map((row) => row.event_id);
+  if (!reason.trim() || !changeId.trim()) {
+    throw new Error('correction reason and changeId are required');
+  }
+  return resetTournamentReviewScopesForCorrection(
+    season,
+    tournamentId,
+    null,
+    reason.trim(),
+    changeId.trim(),
+    true,
+  );
 }
 
 export async function reconcileTournamentReviewObligations(
