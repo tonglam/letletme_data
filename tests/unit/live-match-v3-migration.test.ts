@@ -21,15 +21,10 @@ describe('Live Matches V3 checkpoint migration contract', () => {
     }
   });
 
-  test('adds a manifest-matching V3 contract fence without relabeling old rows', () => {
-    expect(v3Fence).toContain(
-      'ADD COLUMN contract_version text DEFAULT ' +
-        String.fromCharCode(39) +
-        'live-matches-v2' +
-        String.fromCharCode(39),
-    );
+  test('destructively purges pre-cutover rows and fences both tables to V3', () => {
+    expect(v3Fence.match(/ADD COLUMN contract_version text;/g)).toHaveLength(2);
     expect(
-      v3Fence.match(/ADD COLUMN contract_version text DEFAULT 'live-matches-v2'/g),
+      v3Fence.match(/WHERE contract_version IS DISTINCT FROM 'live-matches-v3';/g),
     ).toHaveLength(2);
     expect(
       v3Fence.match(/ALTER COLUMN contract_version SET DEFAULT 'live-matches-v3'/g),
@@ -37,10 +32,14 @@ describe('Live Matches V3 checkpoint migration contract', () => {
     expect(v3Fence).toContain(
       `contract_version = manifest ->> ${String.fromCharCode(39)}contractVersion${String.fromCharCode(39)}`,
     );
-    expect(v3Fence).toContain(
-      `${String.fromCharCode(39)}live-matches-v2${String.fromCharCode(39)}, ${String.fromCharCode(39)}live-matches-v3${String.fromCharCode(39)}`,
-    );
+    expect(v3Fence).not.toContain('live-matches-v2');
+    expect(v3Fence).toContain('pre-cutover database');
     expect(v3Fence).toContain('live_match_desk_checkpoints_contract_fence');
     expect(v3Fence).toContain('live_match_detail_checkpoints_contract_fence');
+    expect(
+      v3Fence.match(
+        /contract_version = manifest ->> 'contractVersion'\n    AND contract_version = 'live-matches-v3'/g,
+      ),
+    ).toHaveLength(2);
   });
 });

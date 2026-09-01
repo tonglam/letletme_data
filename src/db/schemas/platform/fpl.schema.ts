@@ -874,7 +874,7 @@ export const liveMatchDeskCheckpointsInFpl = fpl.table(
     ),
     check(
       'live_match_desk_checkpoints_contract_fence',
-      sql`contract_version = manifest ->> 'contractVersion' AND contract_version = ANY (ARRAY['live-matches-v2', 'live-matches-v3']::text[])`,
+      sql`contract_version = manifest ->> 'contractVersion' AND contract_version = 'live-matches-v3'`,
     ),
     check(
       'live_match_desk_checkpoints_payload_valid',
@@ -933,7 +933,7 @@ export const liveMatchDetailCheckpointsInFpl = fpl.table(
     ),
     check(
       'live_match_detail_checkpoints_contract_fence',
-      sql`contract_version = manifest ->> 'contractVersion' AND contract_version = ANY (ARRAY['live-matches-v2', 'live-matches-v3']::text[])`,
+      sql`contract_version = manifest ->> 'contractVersion' AND contract_version = 'live-matches-v3'`,
     ),
     check(
       'live_match_detail_checkpoints_payload_valid',

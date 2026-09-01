@@ -173,8 +173,8 @@ async function seedOne(seasonCode: string, eventId: number) {
   let deskCheckpoint: Awaited<ReturnType<typeof readLiveMatchDeskCheckpointV3>> = null;
   if (desk?.servedFrom === 'REDIS_CURRENT') {
     // Desk is independently authoritative. Checkpoint it even when the
-    // event has no price-bearing detail, so a V2 row cannot hide the V3 desk
-    // behind a generation fence during cutover.
+    // event has no price-bearing detail, so the desk still needs its own
+    // exact V3 checkpoint before the maintenance window can finish.
     const existingDeskDesired = await readLiveMatchCheckpointDesiredV3({
       kind: 'desk',
       season: seasonCode,
@@ -203,7 +203,6 @@ async function seedOne(seasonCode: string, eventId: number) {
       season,
       eventId,
       kind: 'desk',
-      allowV2ReplacementForCutover: true,
     });
     if (!checkpoint.checkpointed) {
       throw new Error(`event ${eventId} desk checkpoint did not converge`);
@@ -291,7 +290,6 @@ async function seedOne(seasonCode: string, eventId: number) {
     season,
     eventId,
     kind: 'detail',
-    allowV2ReplacementForCutover: true,
   });
   if (!checkpoint.checkpointed) {
     throw new Error(`event ${eventId} detail checkpoint did not converge`);

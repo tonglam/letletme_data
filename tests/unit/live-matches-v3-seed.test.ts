@@ -163,7 +163,7 @@ describe('live match V3 cutover seed arguments', () => {
     expect(source).toContain('readLiveMatchDeskPointerV3');
     expect(source).toContain('replaceFinalizedForCutover');
     expect(source).toContain('kind: ' + String.fromCharCode(39) + 'desk' + String.fromCharCode(39));
-    expect(source).toContain('allowV2ReplacementForCutover: true');
+    expect(source).not.toContain('allowV2ReplacementForCutover');
   });
 
   it('uses one synchronized fixtures observation for finalization and sync', () => {

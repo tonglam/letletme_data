@@ -23,11 +23,9 @@ describe('Live Matches V3 final checkpoint fence', () => {
       'utf8',
     );
     expect(source).toMatch(/SET LOCAL statement_timeout = '5s'/);
-    expect(source).toMatch(/allowV2ReplacementForCutover/);
-    expect(source).not.toMatch(/allowV2ReplacementForCutover && publication\.state/);
-    expect(source).not.toMatch(/allowV2ReplacementForCutover && !finalized/);
-    expect(source).toMatch(/contractVersion} = 'live-matches-v2'/);
-    expect(source).toMatch(/excluded\.contract_version = 'live-matches-v3'/);
+    expect(source).not.toMatch(/allowV2ReplacementForCutover/);
+    expect(source).not.toMatch(/live-matches-v2/);
+    expect(source).toMatch(/contractVersion: publication\.contractVersion/);
   });
 
   test('accepts only the exact final desk/detail revision vector', () => {
