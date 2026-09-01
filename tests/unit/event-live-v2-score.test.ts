@@ -4,6 +4,7 @@ import {
   eventLiveHeartbeatIsFresh,
   eventLivePicksAreFresh,
   eventLiveProjectedPicksAreCoherent,
+  derivePreviousTotalsFromResultEvidence,
   hasCompleteAggregateCoverage,
 } from '../../src/services/event-live-v2-score.service';
 import { assistantManagerPointsFactFromProviderObservation } from '../../src/domain/event-live-manager-points';
@@ -35,6 +36,23 @@ describe('Live Points V2 freshness boundaries', () => {
       hasCompleteAggregateCoverage({ eventCount: 2, firstEventId: 2, lastEventId: 4 }, 2, 4),
     ).toBe(false);
     expect(hasCompleteAggregateCoverage(undefined, 1, 1)).toBe(false);
+  });
+
+  test('derives a background capture baseline from canonical result evidence', () => {
+    expect(
+      derivePreviousTotalsFromResultEvidence(2, 3528563, 1, [
+        { entryId: 3528563, eventId: 1, eventNetPoints: 29 },
+      ]),
+    ).toEqual({ totalPoints: 29, throughEventId: 1 });
+    expect(
+      derivePreviousTotalsFromResultEvidence(3, 3528563, 1, [
+        { entryId: 3528563, eventId: 1, eventNetPoints: 29 },
+      ]),
+    ).toBeNull();
+    expect(derivePreviousTotalsFromResultEvidence(2, 3528563, 2, [])).toEqual({
+      totalPoints: 0,
+      throughEventId: null,
+    });
   });
 
   test('derives Assistant Manager points only from provider totals matching the authority', () => {

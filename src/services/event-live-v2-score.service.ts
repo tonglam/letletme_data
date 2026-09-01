@@ -75,6 +75,11 @@ export type EventLiveScorePreloadedInputs = {
   readonly previousResultEvidence?: readonly EntryEventResultRevisionEvidence[];
 };
 
+export type PreviousTotalsFromResultEvidence = Readonly<{
+  totalPoints: number;
+  throughEventId: number | null;
+}>;
+
 /** Age is a delivery-state signal, never an availability expiry for a complete LKG. */
 export const EVENT_LIVE_PICKS_MAX_AGE_MS = 15 * 60_000;
 export const EVENT_LIVE_HEARTBEAT_MAX_AGE_MS = 90_000;
@@ -129,6 +134,42 @@ export function eventLiveHeartbeatIsFresh(
   const liveTimestamp = Date.parse(liveCheckedAt);
   const ageMs = nowMs - liveTimestamp;
   return Number.isFinite(liveTimestamp) && ageMs >= 0 && ageMs <= maxAgeMs;
+}
+
+/**
+ * Derive the baseline used by a background capture from the same finalized
+ * result evidence read by its transaction.  Entry-live Redis inputs can be
+ * older than a later authoritative result correction; using that Redis
+ * baseline would create a score revision that cannot match the capture rows.
+ * A missing event in the contiguous history is deliberately incomplete.
+ */
+export function derivePreviousTotalsFromResultEvidence(
+  eventId: number,
+  entryId: number,
+  entryStartedEvent: number | null,
+  previousResultEvidence: readonly Pick<
+    EntryEventResultRevisionEvidence,
+    'entryId' | 'eventId' | 'eventNetPoints'
+  >[],
+): PreviousTotalsFromResultEvidence | null {
+  const firstScoringEvent = Math.max(1, entryStartedEvent ?? 1);
+  if (eventId === firstScoringEvent) {
+    return { totalPoints: 0, throughEventId: null };
+  }
+  const relevant = previousResultEvidence.filter(
+    (result) =>
+      result.entryId === entryId && result.eventId >= firstScoringEvent && result.eventId < eventId,
+  );
+  const expectedCount = eventId - firstScoringEvent;
+  const eventIds = new Set(relevant.map((result) => result.eventId));
+  if (relevant.length !== expectedCount || eventIds.size !== expectedCount) return null;
+  for (let expectedEventId = firstScoringEvent; expectedEventId < eventId; expectedEventId += 1) {
+    if (!eventIds.has(expectedEventId)) return null;
+  }
+  return {
+    totalPoints: relevant.reduce((sum, result) => sum + (result.eventNetPoints ?? 0), 0),
+    throughEventId: eventId - 1,
+  };
 }
 
 export function eventLiveAuthorityCheckedAt(snapshot: LivePublicationRead): string {
@@ -381,19 +422,41 @@ async function loadEventLiveScoreBatch(
       activeChip: row.activeChip,
     })) satisfies EventLiveManagerPick[];
     const firstScoringEvent = Math.max(1, startedByEntry.get(entryId) ?? 1);
-    const previousTotals = inputRead.input.previousTotals;
-    const previousTotal =
-      eventId === firstScoringEvent
-        ? 0
-        : previousTotals?.throughEventId === eventId - 1
-          ? previousTotals.totalPoints
-          : null;
     const previousEntryResults = previousResultEvidence.filter(
       (result) =>
         result.entryId === entryId &&
         result.eventId >= firstScoringEvent &&
         result.eventId < eventId,
     );
+    // A background capture supplies the rows from its repeatable-read
+    // transaction.  Those rows are the canonical baseline for this score;
+    // do not reuse a stale per-entry Redis previousTotals value.  Interactive
+    // callers still use the published entry input when no preloaded evidence
+    // was supplied.
+    const preloadedPreviousTotals =
+      options.preloadedInputs?.previousResultEvidence === undefined
+        ? undefined
+        : derivePreviousTotalsFromResultEvidence(
+            eventId,
+            entryId,
+            startedByEntry.get(entryId) ?? null,
+            previousResultEvidence,
+          );
+    const previousTotals = inputRead.input.previousTotals;
+    const previousTotal =
+      preloadedPreviousTotals !== undefined
+        ? (preloadedPreviousTotals?.totalPoints ?? null)
+        : eventId === firstScoringEvent
+          ? 0
+          : previousTotals?.throughEventId === eventId - 1
+            ? previousTotals.totalPoints
+            : null;
+    const previousTotalsThroughEventId =
+      preloadedPreviousTotals !== undefined
+        ? (preloadedPreviousTotals?.throughEventId ?? null)
+        : eventId > firstScoringEvent
+          ? eventId - 1
+          : null;
     const inputRevisionData = buildScoreInputRevision({
       algorithmVersion,
       authorityRevision,
@@ -401,7 +464,7 @@ async function loadEventLiveScoreBatch(
       entryStartedEvent: startedByEntry.get(entryId) ?? null,
       picks,
       previousTotal,
-      previousTotalsThroughEventId: eventId > firstScoringEvent ? eventId - 1 : null,
+      previousTotalsThroughEventId,
       previousResultEvidence: previousEntryResults,
     });
     // picksBase.revision is the source contract's content identity. The
