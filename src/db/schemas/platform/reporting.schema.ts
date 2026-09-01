@@ -1036,3 +1036,199 @@ export const tournamentEntryEventSummariesInReporting = reporting
       FROM base
     `,
   );
+
+export const myFplActiveSnapshotStatusInReporting = reporting
+  .view('my_fpl_active_snapshot_status', {
+    seasonId: smallint('season_id'),
+    eventId: integer('event_id'),
+    revision: bigint('revision', { mode: 'number' }),
+    snapshotDate: date('snapshot_date'),
+    kind: text('kind'),
+    finished: boolean('finished'),
+    dataChecked: boolean('data_checked'),
+    dataCheckedAt: timestamp('data_checked_at', { withTimezone: true, mode: 'date' }),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }),
+    finalizationStartedAt: timestamp('finalization_started_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    finalizationDueAt: timestamp('finalization_due_at', { withTimezone: true, mode: 'date' }),
+    expectedEntryCount: integer('expected_entry_count'),
+    observedEntryCount: integer('observed_entry_count'),
+    notApplicableEntryCount: integer('not_applicable_entry_count'),
+    pendingCorrectionEntryCount: integer('pending_correction_entry_count'),
+    expectedTournamentCount: integer('expected_tournament_count'),
+    observedTournamentCount: integer('observed_tournament_count'),
+    coverageState: text('coverage_state'),
+    expectedEntryScopeSha256: text('expected_entry_scope_sha256'),
+    expectedTournamentScopeSha256: text('expected_tournament_scope_sha256'),
+    observedEntryScopeSha256: text('observed_entry_scope_sha256'),
+    observedTournamentScopeSha256: text('observed_tournament_scope_sha256'),
+  })
+  .with({ securityInvoker: true })
+  .as(
+    sql`WITH active AS (
+  SELECT publication.season_id,
+         publication.event_id,
+         publication.revision,
+         publication.snapshot_date,
+         publication.kind,
+         publication.source_checked_at,
+         publication.published_at,
+         publication.expected_entry_count,
+         publication.ready_entry_count,
+         publication.empty_entry_count,
+         publication.not_applicable_entry_count,
+         publication.expected_tournament_count,
+         publication.ready_tournament_count,
+         publication.entry_scope_sha256,
+         publication.tournament_scope_sha256
+  FROM competition.my_fpl_snapshot_publications publication
+  WHERE publication.active
+), canonical_entry_scopes AS (
+  SELECT event.season_id,
+         event.event_id,
+         encode(
+           extensions.digest(
+             convert_to(
+               COALESCE(
+                     to_json(
+                   array_agg(entry.entry_id::text ORDER BY entry.entry_id)
+                     FILTER (WHERE entry.entry_id IS NOT NULL)
+                 )::text,
+                 '[]'
+               ),
+               'UTF8'
+             ),
+             'sha256'
+           ),
+           'hex'
+         ) AS expected_entry_scope_sha256
+  FROM fpl.events event
+  LEFT JOIN competition.entries entry
+    ON entry.season_id = event.season_id
+   AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)
+  GROUP BY event.season_id, event.event_id
+), canonical_tournament_scopes AS (
+  SELECT event.season_id,
+         event.event_id,
+         encode(
+           extensions.digest(
+             convert_to(
+               COALESCE(
+                 to_json(
+                   array_agg(
+                     format('%s:%s', roster.tournament_id, roster.entry_id)
+                     ORDER BY roster.tournament_id, roster.entry_id
+                   ) FILTER (WHERE roster.tournament_id IS NOT NULL)
+                 )::text,
+                 '[]'
+               ),
+               'UTF8'
+             ),
+             'sha256'
+           ),
+           'hex'
+         ) AS expected_tournament_scope_sha256
+  FROM fpl.events event
+  LEFT JOIN competition.tournament_entries roster
+    ON roster.season_id = event.season_id
+  GROUP BY event.season_id, event.event_id
+), canonical_scopes AS (
+  SELECT entry_scope.season_id,
+         entry_scope.event_id,
+         entry_scope.expected_entry_scope_sha256,
+         tournament_scope.expected_tournament_scope_sha256
+  FROM canonical_entry_scopes entry_scope
+  JOIN canonical_tournament_scopes tournament_scope
+    ON tournament_scope.season_id = entry_scope.season_id
+   AND tournament_scope.event_id = entry_scope.event_id
+), eligible AS (
+  SELECT event.season_id,
+         event.event_id,
+         count(DISTINCT entry.entry_id)::integer AS expected_entry_count,
+         count(DISTINCT snapshot_entry.entry_id) FILTER (WHERE snapshot_entry.entry_id IS NOT NULL)::integer
+           AS observed_entry_count
+  FROM fpl.events event
+  LEFT JOIN competition.entries entry
+    ON entry.season_id = event.season_id
+   AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)
+  LEFT JOIN active
+    ON active.season_id = event.season_id
+   AND active.event_id = event.event_id
+  LEFT JOIN competition.my_fpl_snapshot_entries snapshot_entry
+    ON snapshot_entry.season_id = entry.season_id
+   AND snapshot_entry.entry_id = entry.entry_id
+   AND snapshot_entry.event_id = event.event_id
+   AND snapshot_entry.revision = active.revision
+  GROUP BY event.season_id, event.event_id
+), tournaments AS (
+  SELECT event.season_id,
+         event.event_id,
+         count(DISTINCT tournament.tournament_id)::integer AS expected_tournament_count,
+         count(DISTINCT snapshot_aggregate.tournament_id) FILTER (WHERE snapshot_aggregate.tournament_id IS NOT NULL)::integer
+           AS observed_tournament_count
+  FROM fpl.events event
+  LEFT JOIN competition.tournaments tournament
+    ON tournament.season_id = event.season_id
+  LEFT JOIN active
+    ON active.season_id = event.season_id
+   AND active.event_id = event.event_id
+  LEFT JOIN competition.my_fpl_snapshot_tournament_aggregates snapshot_aggregate
+    ON snapshot_aggregate.season_id = event.season_id
+   AND snapshot_aggregate.event_id = event.event_id
+   AND snapshot_aggregate.revision = active.revision
+   AND snapshot_aggregate.tournament_id = tournament.tournament_id
+  GROUP BY event.season_id, event.event_id
+)
+SELECT event.season_id,
+       event.event_id,
+       active.revision,
+       active.snapshot_date,
+       active.kind,
+       event.finished,
+       event.data_checked,
+       event.data_checked_at,
+       active.source_checked_at,
+       active.published_at,
+       CASE WHEN event.data_checked_at IS NULL THEN NULL ELSE event.data_checked_at END
+         AS finalization_started_at,
+       CASE WHEN event.data_checked_at IS NULL THEN NULL
+            ELSE event.data_checked_at + interval '4500 seconds' END
+         AS finalization_due_at,
+       COALESCE(eligible.expected_entry_count, 0)::integer AS expected_entry_count,
+       COALESCE(eligible.observed_entry_count, 0)::integer AS observed_entry_count,
+       COALESCE(active.not_applicable_entry_count, 0)::integer AS not_applicable_entry_count,
+       GREATEST(
+         COALESCE(eligible.expected_entry_count, 0) - COALESCE(eligible.observed_entry_count, 0),
+         0
+       )::integer AS pending_correction_entry_count,
+       COALESCE(tournaments.expected_tournament_count, 0)::integer AS expected_tournament_count,
+       COALESCE(tournaments.observed_tournament_count, 0)::integer AS observed_tournament_count,
+       CASE WHEN active.kind IS NULL THEN 'NO_PUBLICATION'
+            WHEN GREATEST(COALESCE(eligible.expected_entry_count, 0) - COALESCE(eligible.observed_entry_count, 0), 0) > 0
+              OR COALESCE(tournaments.expected_tournament_count, 0)
+                   <> COALESCE(tournaments.observed_tournament_count, 0)
+              OR active.entry_scope_sha256 IS DISTINCT FROM canonical_scopes.expected_entry_scope_sha256
+              OR active.tournament_scope_sha256 IS DISTINCT FROM canonical_scopes.expected_tournament_scope_sha256
+              THEN 'CORRECTION_PENDING'
+            ELSE 'COMPLETE' END AS coverage_state,
+       canonical_scopes.expected_entry_scope_sha256,
+       canonical_scopes.expected_tournament_scope_sha256,
+       active.entry_scope_sha256 AS observed_entry_scope_sha256,
+       active.tournament_scope_sha256 AS observed_tournament_scope_sha256
+FROM fpl.events event
+LEFT JOIN active
+  ON active.season_id = event.season_id
+ AND active.event_id = event.event_id
+LEFT JOIN eligible
+  ON eligible.season_id = event.season_id
+ AND eligible.event_id = event.event_id
+LEFT JOIN tournaments
+  ON tournaments.season_id = event.season_id
+ AND tournaments.event_id = event.event_id
+LEFT JOIN canonical_scopes
+  ON canonical_scopes.season_id = event.season_id
+ AND canonical_scopes.event_id = event.event_id`,
+  );

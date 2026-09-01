@@ -246,13 +246,13 @@ async function seedEntryEventData(entryId: number): Promise<void> {
     INSERT INTO competition.entry_event_results (
       season_id, entry_id, event_id, event_points, event_transfers,
       event_transfers_cost, event_net_points, event_bench_points,
-      event_auto_sub_points, overall_points, overall_rank,
+      event_auto_sub_points, event_rank, overall_points, overall_rank,
       played_captain_element_id, captain_points, automatic_substitutions,
       team_value, bank, rich_synced_at, event_picks
     )
     VALUES (
       ${SEASON.seasonId}, ${entryId}, ${EVENT_ID}, 67, 0,
-      0, 67, 0, 0, 67, 1000,
+      0, 67, 0, 0, 1, 67, 1000,
       ${PLAYER_IDS[0]}, 2, '[]'::jsonb, 1000, 10,
       ${CAPTURE_NOW.toISOString()}::timestamptz,
       ${JSON.stringify(EVENT_PICKS)}::jsonb

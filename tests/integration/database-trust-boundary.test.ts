@@ -15,6 +15,7 @@ type NamedFinding = { name: string };
 type TrigramIndexFinding = { index_name: string; operator_class: string; operator_schema: string };
 
 const REPORTING_RELATIONS = [
+  { name: 'my_fpl_active_snapshot_status', kind: 'v' },
   { name: 'player_season_summaries', kind: 'v' },
   { name: 'player_value_changes', kind: 'v' },
   { name: 'tournament_entry_event_summaries', kind: 'm' },
@@ -410,6 +411,7 @@ describe('database trust boundary', () => {
       schemaUsage: true,
       schemaCreate: false,
       readableRelations: [
+        'my_fpl_active_snapshot_status',
         'player_value_changes',
         'tournament_entry_event_summaries',
         'tournament_selection_stats',
