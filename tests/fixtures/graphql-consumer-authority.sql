@@ -3618,6 +3618,23 @@ SET
   source_max_checked_at = EXCLUDED.source_max_checked_at,
   updated_at = now();
 
+-- The GraphQL reader hard-cut validates that every active publication carries
+-- the canonical entry/tournament scope hashes exposed by the Data-owned
+-- status view. Populate the fixture from that same authority rather than
+-- duplicating hash literals that could drift when the sentinel roster changes.
+UPDATE competition.my_fpl_snapshot_publications AS publication
+SET entry_scope_sha256 = status.expected_entry_scope_sha256,
+    tournament_scope_sha256 = status.expected_tournament_scope_sha256,
+    updated_at = now()
+FROM reporting.my_fpl_active_snapshot_status AS status
+WHERE publication.season_id = status.season_id
+  AND publication.event_id = status.event_id
+  AND publication.revision = status.revision
+  AND publication.season_id = 2026
+  AND publication.event_id = 1
+  AND publication.revision = (SELECT revision FROM graphql_my_fpl_revision)
+  AND publication.active;
+
 -- Revision is an explicit retained authority row in this fixture. Keep the
 -- producer's global sequence ahead of it so the next canonical capture cannot
 -- allocate a revision below the fixture row and leave Redis/SQL on
