@@ -24,7 +24,7 @@ export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
   /**
    * Minimum player identity required by the fixture-grain Live Matches
    * detail publication.  It is optional for the existing Live Points
-   * preparation path; Match V2 fails closed for detail when it is absent.
+   * preparation path; Live Matches V3 fails closed for detail when it is absent.
    */
   readonly playerById?: ReadonlyMap<number, LivePlayerIdentity>;
   /**
@@ -304,7 +304,7 @@ export function validateLiveElementIdentity(
 /**
  * Fetch validation is a single coherent boundary: event-live, fixtures, the
  * expected fixture set and the player/team baseline are all checked before a
- * V2 candidate can be staged. No Redis or PostgreSQL writes happen here.
+ * V3 candidate can be staged. No Redis or PostgreSQL writes happen here.
  */
 export function prepareCoherentLiveSnapshot(
   eventId: number,

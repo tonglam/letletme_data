@@ -103,6 +103,12 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain('decision.state ===');
     expect(registrySource).toContain('FINALIZED');
     expect(registrySource).toContain('resolveLiveLifecycleDelay(');
+    expect(registrySource).toContain(
+      'matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive',
+    );
+    expect(registrySource).toContain(
+      'matchObservationOnly: plan.evidence?.matchObservationOnly === true',
+    );
   });
 
   test('carries a freshness window from the live-picks root into its child scan', () => {
@@ -138,6 +144,39 @@ describe('live lifecycle decisions', () => {
     expect(decideLiveLifecycle(event, fixtures, new Date('2026-08-15T10:00:01.000Z')).state).toBe(
       'PICKS_PROBE',
     );
+  });
+
+  test('tiers pre-deadline polling by the next kickoff', () => {
+    const event = {
+      deadlineTime: '2026-08-15T10:00:00.000Z',
+      finished: false,
+      dataChecked: false,
+    };
+    const makeDecision = (kickoff: string) =>
+      decideLiveLifecycle(
+        event,
+        [
+          {
+            started: false,
+            finished: false,
+            finishedProvisional: false,
+            kickoffTime: new Date(kickoff),
+          },
+        ],
+        new Date('2026-08-15T09:00:00.000Z'),
+      );
+    const season = { seasonId: 1, seasonCode: '2627' };
+    const now = new Date('2026-08-15T09:00:00.000Z');
+
+    expect(
+      resolveLiveLifecycleDelay(makeDecision('2026-08-15T12:00:00.000Z'), season, 1, now),
+    ).toBe(15 * 60_000);
+    expect(
+      resolveLiveLifecycleDelay(makeDecision('2026-08-15T09:20:00.000Z'), season, 1, now),
+    ).toBe(2 * 60_000);
+    expect(
+      resolveLiveLifecycleDelay(makeDecision('2026-08-15T09:05:00.000Z'), season, 1, now),
+    ).toBe(30_000);
   });
 
   test('does not start live polling from a scheduled kickoff alone', () => {

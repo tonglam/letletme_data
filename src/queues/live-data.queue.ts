@@ -3,7 +3,7 @@ import { Queue } from 'bullmq';
 import { getQueueConnection } from '../utils/queue';
 import { liveDataQueueName } from './names';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
-import type { MatchLifecycleState } from '../services/live-match-v2';
+import type { MatchLifecycleState } from '../services/live-match-v3';
 
 export { liveDataQueueName } from './names';
 
@@ -32,6 +32,8 @@ export interface LiveDataJobData {
   lifecycleState?: MatchLifecycleState;
   /** Scheduler deadline used to derive publication freshness windows. */
   expectedNextCheckAt?: string | null;
+  /** Pre-kickoff Match V3 observation; never runs the Live Points producer. */
+  matchObservationOnly?: boolean;
   /** A checkpoint-only job never calls FPL; it consumes Redis publication data. */
   checkpointKind?: 'desk' | 'detail';
   checkpointPublicationId?: string;

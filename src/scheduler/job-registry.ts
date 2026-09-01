@@ -67,7 +67,7 @@ import {
   resolveLiveLifecycleDelay,
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
-import { normalizeMatchLifecycleState } from '../services/live-match-v2';
+import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
@@ -1026,7 +1026,15 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       const quiet = await readLifecycleQuietState(context.season.seasonCode, event.id);
       // The permanent final checkpoint owns the finalized write. This lane
       // keeps the mutable official heartbeat alive for every unsettled state.
-      if (!decision.shouldFetchLive || decision.state === 'FINALIZED') return [];
+      // Match V3 observes the fixture desk before the Live Points source is
+      // eligible to refresh.  Keep this scheduler lane alive for that
+      // pre-kickoff observation; the worker still receives the lifecycle
+      // state so unchanged observations do not fan out to downstream jobs.
+      if (
+        (!decision.shouldFetchLive && !decision.shouldObserveMatches) ||
+        decision.state === 'FINALIZED'
+      )
+        return [];
       const pollIntervalMs = resolveLiveLifecycleDelay(
         decision,
         context.season,
@@ -1047,6 +1055,10 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             lifecycleState: decision.state,
             pollIntervalMs,
             expectedNextCheckAt: new Date(context.now.getTime() + pollIntervalMs).toISOString(),
+            // Match V3 can warm the fixture desk before Live Points is
+            // eligible. Preserve that lane on the durable obligation so the
+            // reconciler cannot accidentally run the all-in-one producer.
+            matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
           },
         },
       ];
@@ -1065,6 +1077,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
           typeof plan.evidence?.expectedNextCheckAt === 'string'
             ? plan.evidence.expectedNextCheckAt
             : null,
+        matchObservationOnly: plan.evidence?.matchObservationOnly === true,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },

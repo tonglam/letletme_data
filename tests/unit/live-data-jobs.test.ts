@@ -13,6 +13,7 @@ const waitingJobs: Array<{
     seasonId: number;
     eventId: number;
     finalizeEvent?: boolean;
+    matchObservationOnly?: boolean;
     checkpointKind?: 'desk' | 'detail';
   };
 }> = [];
@@ -96,6 +97,29 @@ describe('Live Points V2 snapshot enqueue', () => {
     expect(addCalls[0]?.data.finalizeEvent).toBe(true);
   });
 
+  test('keeps Match-only observations independent from full Live Points jobs', async () => {
+    waitingJobs.push({
+      name: 'live-snapshot',
+      data: { seasonId: TEST_SEASON.seasonId, eventId: 12, matchObservationOnly: true },
+    });
+
+    const full = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron');
+    expect(full).not.toBeNull();
+    expect(full?.id).toContain('-v2');
+  });
+
+  test('coalesces a pending Match-only observation without blocking another Match-only tick', async () => {
+    waitingJobs.push({
+      name: 'live-snapshot',
+      data: { seasonId: TEST_SEASON.seasonId, eventId: 12, matchObservationOnly: true },
+    });
+
+    await expect(
+      enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', { matchObservationOnly: true }),
+    ).resolves.toBeNull();
+    expect(addCalls).toHaveLength(0);
+  });
+
   test('uses a deterministic 30-second identity bucket while publication cadence stays in V2', async () => {
     const now = new Date('2026-08-09T12:34:56.000Z');
     expect(liveSnapshotMinuteBucket(now)).toBe('20260809123430');
@@ -103,6 +127,16 @@ describe('Live Points V2 snapshot enqueue', () => {
     const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', { now });
     expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v2');
     expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
+  });
+
+  test('marks a Match-only scheduler job with the V3 identity', async () => {
+    const now = new Date('2026-08-09T12:34:56.000Z');
+    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
+      now,
+      matchObservationOnly: true,
+    });
+    expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v3');
+    expect(addCalls[0]?.data).toMatchObject({ matchObservationOnly: true });
   });
 
   test('active snapshots always use the same V2 lane as ordinary cron snapshots', async () => {
@@ -128,7 +162,7 @@ describe('Live Points V2 snapshot enqueue', () => {
       { successor: true, delayMs: 30_500 },
     );
 
-    expect(job.id).toStartWith('live-match-checkpoint-2627-e12-desk-v2-successor-');
+    expect(job.id).toStartWith('live-match-checkpoint-2627-e12-desk-v3-successor-');
     expect(addCalls[0]).toMatchObject({
       name: 'live-match-checkpoint',
       data: {
@@ -200,7 +234,7 @@ describe('Live Points V2 snapshot enqueue', () => {
       { successor: true, delayMs: 30_000 },
     );
 
-    expect(first.id).toStartWith('live-match-checkpoint-2627-e12-detail-v2-successor-');
+    expect(first.id).toStartWith('live-match-checkpoint-2627-e12-detail-v3-successor-');
     expect(second.id).toBe(first.id);
     expect(addCalls).toHaveLength(1);
   });

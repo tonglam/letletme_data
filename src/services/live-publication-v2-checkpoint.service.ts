@@ -21,7 +21,7 @@ import { createEventLiveRepository } from '../repositories/event-lives';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
 import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
 import { CORE_SNAPSHOT_WRITE_LOCK_KEY } from './core-snapshot-persistence.service';
-import { hasFinalLiveMatchCheckpointsV2 } from './live-match-v2-checkpoint.service';
+import { hasFinalLiveMatchCheckpointsV3 } from './live-match-v3-checkpoint.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import {
   liveV2ItemKey,
@@ -696,7 +696,7 @@ export async function findLivePublicationV2FinalizationTargets(
     ) {
       continue;
     }
-    if (!(await hasFinalLiveMatchCheckpointsV2(season, row.eventId))) {
+    if (!(await hasFinalLiveMatchCheckpointsV3(season, row.eventId))) {
       finalCheckpointValidationCache.delete(key);
       targets.push(row.eventId);
       continue;

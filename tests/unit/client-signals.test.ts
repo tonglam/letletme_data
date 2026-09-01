@@ -93,6 +93,24 @@ describe('anonymous client signal contract', () => {
     });
   });
 
+  test('accepts the bounded Live Matches V3 client telemetry dimensions', () => {
+    const sample = validBatch().samples[0];
+    const batch = {
+      ...validBatch(),
+      samples: [
+        { ...sample, metric: 'live_matches_head_ms', value: 120 },
+        { ...sample, metric: 'live_matches_full_ms', value: 640 },
+        { ...sample, metric: 'live_matches_head_bytes', value: 2048 },
+        { ...sample, metric: 'live_matches_full_bytes', value: 68_000 },
+        { ...sample, metric: 'live_matches_head_result', value: undefined },
+        { ...sample, metric: 'live_matches_full_result', value: undefined },
+        { ...sample, metric: 'live_matches_revision_changed', value: undefined },
+      ],
+    };
+
+    expect(parseClientSignalBatch(batch, now).samples).toHaveLength(7);
+  });
+
   test('keeps the body budget explicit', () => {
     expect(CLIENT_SIGNAL_MAX_BYTES).toBe(16 * 1024);
   });

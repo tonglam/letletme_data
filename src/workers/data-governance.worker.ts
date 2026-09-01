@@ -52,7 +52,7 @@ import {
 import { formatCronDateKey } from '../utils/timezone';
 import { persistLiveLifecycleStatus } from '../services/live-lifecycle-orchestrator';
 import { reconcileCoreAndMarketPublications } from '../services/data-publication-reconciler';
-import { reconcileLiveMatchCheckpointObligationsV2 } from '../services/live-match-v2-reconciler.service';
+import { reconcileLiveMatchCheckpointObligationsV3 } from '../services/live-match-v3-reconciler.service';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import { seasonRepository } from '../repositories/seasons';
 import { publicationOutboxQueueName } from '../queues/names';
@@ -228,7 +228,7 @@ async function processDataGovernanceJob(job: Job<DataGovernanceJobData>): Promis
           seasonCode: job.data.seasonCode,
         };
         const publications = await reconcileCoreAndMarketPublications(season);
-        const liveMatches = await reconcileLiveMatchCheckpointObligationsV2(season);
+        const liveMatches = await reconcileLiveMatchCheckpointObligationsV3(season);
         return { publications, liveMatches };
       }
       case DATA_GOVERNANCE_JOBS.FRESHNESS_OBSERVER: {

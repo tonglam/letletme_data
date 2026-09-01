@@ -10,10 +10,11 @@ import {
 import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
 import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
+import { syncLiveMatchObservationV3 } from '../services/live-match-observation-v3.service';
 import {
-  checkpointLiveMatchScopeV2,
-  hasFinalLiveMatchCheckpointsV2,
-} from '../services/live-match-v2-checkpoint.service';
+  checkpointLiveMatchScopeV3,
+  hasFinalLiveMatchCheckpointsV3,
+} from '../services/live-match-v3-checkpoint.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -69,7 +70,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       if (!job.data.checkpointKind) {
         throw new Error('Live Match checkpoint job is missing checkpoint kind');
       }
-      const result = await checkpointLiveMatchScopeV2({
+      const result = await checkpointLiveMatchScopeV3({
         season,
         eventId,
         kind: job.data.checkpointKind,
@@ -86,6 +87,12 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     }
     if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
       throw new Error(`Unknown job name: ${job.name}`);
+    }
+    if (job.data.matchObservationOnly) {
+      return syncLiveMatchObservationV3(season, eventId, {
+        lifecycleState: job.data.lifecycleState,
+        expectedNextCheckAt: job.data.expectedNextCheckAt,
+      });
     }
     const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,
@@ -130,9 +137,9 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       // desired markers inline once; any duplicate queue jobs then observe an
       // already-cleared marker and become harmless no-ops.
       for (const kind of ['desk', 'detail'] as const) {
-        await checkpointLiveMatchScopeV2({ season, eventId, kind });
+        await checkpointLiveMatchScopeV3({ season, eventId, kind });
       }
-      if (!(await hasFinalLiveMatchCheckpointsV2(season, eventId))) {
+      if (!(await hasFinalLiveMatchCheckpointsV3(season, eventId))) {
         throw new Error(
           `Finalized Live Matches desk/detail are not durably checkpointed for event ${eventId}`,
         );

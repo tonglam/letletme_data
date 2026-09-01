@@ -299,6 +299,10 @@ describe('Live Points and Live Matches shared observation', () => {
     });
 
     await sync.catch(() => undefined);
+    // Provisional Live Points completion intentionally does not await the
+    // sibling Match publication. Give that already-started promise a turn to
+    // finish before asserting the hand-off.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(calls).toBe(2);
     expect(publishedDesks[0]).toBeUndefined();

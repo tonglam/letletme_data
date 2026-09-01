@@ -178,7 +178,14 @@ const EnvSchema = z.object({
   DAY_SETTLING_STABLE_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
   DAY_SETTLING_STABLE_AFTER_MS: boundedIntegerEnv(10 * 60_000, 1_000, 24 * 60 * 60_000),
   PICKS_PROBE_POLL_MS: boundedIntegerEnv(120_000, 1_000, 24 * 60 * 60_000),
-  PRE_DEADLINE_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
+  // Pre-deadline match preparation is tiered by the next kickoff.  The
+  // scheduler should stay quiet while the event is far away, warm the
+  // publication shortly before the first fixture, and use the live cadence
+  // for the final five minutes.  These are separate controls so a change to
+  // one tier cannot silently change the others.
+  PRE_DEADLINE_SLOW_POLL_MS: boundedIntegerEnv(15 * 60_000, 1_000, 24 * 60 * 60_000),
+  PRE_DEADLINE_WARM_POLL_MS: boundedIntegerEnv(2 * 60_000, 1_000, 24 * 60 * 60_000),
+  PRE_DEADLINE_NEAR_POLL_MS: boundedIntegerEnv(30_000, 1_000, 24 * 60 * 60_000),
   GW_REVIEW_POLL_MS: boundedIntegerEnv(10 * 60_000, 1_000, 24 * 60 * 60_000),
   GW_REVIEW_FINALIZATION_POLL_MS: boundedIntegerEnv(2 * 60_000, 1_000, 24 * 60 * 60_000),
   FINALIZED_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),

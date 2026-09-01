@@ -826,12 +826,13 @@ export const playerEventSnapshotPublicationsInFpl = fpl.table(
   ],
 );
 
-/** Redis-first Live Matches V2 compact desk checkpoint. */
+/** Redis-first Live Matches V3 compact desk checkpoint. */
 export const liveMatchDeskCheckpointsInFpl = fpl.table(
   'live_match_desk_checkpoints',
   {
     seasonId: smallint('season_id').notNull(),
     eventId: integer('event_id').notNull(),
+    contractVersion: text('contract_version').notNull(),
     publicationId: text('publication_id').notNull(),
     generation: bigint('generation', { mode: 'number' }).notNull(),
     state: text().notNull(),
@@ -878,12 +879,13 @@ export const liveMatchDeskCheckpointsInFpl = fpl.table(
   ],
 );
 
-/** Redis-first Live Matches V2 compact fixture-detail checkpoint. */
+/** Redis-first Live Matches V3 compact fixture-detail checkpoint. */
 export const liveMatchDetailCheckpointsInFpl = fpl.table(
   'live_match_detail_checkpoints',
   {
     seasonId: smallint('season_id').notNull(),
     eventId: integer('event_id').notNull(),
+    contractVersion: text('contract_version').notNull(),
     publicationId: text('publication_id').notNull(),
     generation: bigint('generation', { mode: 'number' }).notNull(),
     state: text().notNull(),

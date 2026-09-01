@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   isExactFinalLiveMatchCheckpointPair,
   liveMatchCheckpointDue,
-} from '../../src/services/live-match-v2-checkpoint.service';
+} from '../../src/services/live-match-v3-checkpoint.service';
 
 const revision = 'a'.repeat(64);
 const exact = {
@@ -16,10 +16,10 @@ const exact = {
   detailFixtureIdentityRevision: revision,
 } as const;
 
-describe('Live Matches V2 final checkpoint fence', () => {
+describe('Live Matches V3 final checkpoint fence', () => {
   test('bounds every checkpoint transaction to five seconds', () => {
     const source = readFileSync(
-      new URL('../../src/services/live-match-v2-checkpoint.service.ts', import.meta.url),
+      new URL('../../src/services/live-match-v3-checkpoint.service.ts', import.meta.url),
       'utf8',
     );
     expect(source).toMatch(/SET LOCAL statement_timeout = '5s'/);

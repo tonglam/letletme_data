@@ -7,27 +7,27 @@ import {
 import { getDb, type TransactionHandle } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
-  clearLiveMatchCheckpointDesiredV2,
-  isValidLiveMatchDeskPayloadV2,
-  isValidLiveMatchDetailCheckpointPayloadV2,
+  clearLiveMatchCheckpointDesiredV3,
+  isValidLiveMatchDeskPayloadV3,
+  isValidLiveMatchDetailCheckpointPayloadV3,
   LIVE_MATCH_MAX_DESK_BYTES,
   LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES,
   LIVE_MATCH_MAX_FIXTURES,
-  markLiveMatchDeskCheckpointedV2,
-  markLiveMatchDetailCheckpointedV2,
-  parseLiveMatchDeskPublicationV2,
-  parseLiveMatchDetailPublicationV2,
-  readLiveMatchCheckpointLastAtV2,
-  readLiveMatchCheckpointDesiredV2,
-  readLiveMatchDeskV2,
-  readLiveMatchDetailV2,
+  markLiveMatchDeskCheckpointedV3,
+  markLiveMatchDetailCheckpointedV3,
+  parseLiveMatchDeskPublicationV3,
+  parseLiveMatchDetailPublicationV3,
+  readLiveMatchCheckpointLastAtV3,
+  readLiveMatchCheckpointDesiredV3,
+  readLiveMatchDeskV3,
+  readLiveMatchDetailV3,
   type MatchCheckpointDesired,
   type MatchDeskPublication,
   type MatchDeskRead,
   type MatchDetailPublication,
   type MatchDetailRead,
-} from '../cache/live-match-publication-v2';
-import type { MatchDeskFixture, MatchFixtureDetail } from './live-match-v2';
+} from '../cache/live-match-publication-v3';
+import type { MatchDeskFixture, MatchFixtureDetail } from './live-match-v3';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 
 type CheckpointClock = { checkpointed_at: Date | string };
@@ -83,7 +83,7 @@ function assertDeskPayload(
   const payload = canonicalJson(fixtures);
   const bytes = Buffer.byteLength(payload, 'utf8');
   if (
-    !isValidLiveMatchDeskPayloadV2(fixtures, publication.eventId) ||
+    !isValidLiveMatchDeskPayloadV3(fixtures, publication.eventId) ||
     fixtures.length > LIVE_MATCH_MAX_FIXTURES ||
     bytes > LIVE_MATCH_MAX_DESK_BYTES ||
     publication.desk.count !== fixtures.length ||
@@ -103,7 +103,7 @@ function assertDetailPayload(
   const payload = canonicalJson(sorted);
   const bytes = Buffer.byteLength(payload, 'utf8');
   if (
-    !isValidLiveMatchDetailCheckpointPayloadV2(sorted) ||
+    !isValidLiveMatchDetailCheckpointPayloadV3(sorted) ||
     sorted.length > LIVE_MATCH_MAX_FIXTURES ||
     bytes > LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES ||
     publication.fixtures.length !== sorted.length ||
@@ -144,17 +144,17 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly allowFinalizedReplacementForCutover?: boolean;
 }
 
-export async function checkpointLiveMatchScopeV2(input: {
+export async function checkpointLiveMatchScopeV3(input: {
   readonly season: FplSeasonRef;
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
-  /** Only the source-backed destructive V2 cutover may replace an old final row. */
+  /** Only the source-backed destructive V3 cutover may replace an old final row. */
   readonly allowFinalizedReplacementForCutover?: boolean;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
   if (input.allowFinalizedReplacementForCutover === true && input.kind !== 'detail') {
     throw new Error('Finalized Live Matches replacement is only valid for detail cutover seed');
   }
-  const desired = await readLiveMatchCheckpointDesiredV2({
+  const desired = await readLiveMatchCheckpointDesiredV3({
     kind: input.kind,
     season: input.season.seasonCode,
     eventId: input.eventId,
@@ -162,7 +162,7 @@ export async function checkpointLiveMatchScopeV2(input: {
   if (!desired) return { checkpointed: false, skipped: true };
 
   if (!desired.final) {
-    const lastCheckpointedAt = await readLiveMatchCheckpointLastAtV2({
+    const lastCheckpointedAt = await readLiveMatchCheckpointLastAtV3({
       kind: input.kind,
       season: input.season.seasonCode,
       eventId: input.eventId,
@@ -176,7 +176,7 @@ export async function checkpointLiveMatchScopeV2(input: {
   }
 
   if (input.kind === 'desk') {
-    const current = await readLiveMatchDeskV2({
+    const current = await readLiveMatchDeskV3({
       season: input.season.seasonCode,
       eventId: input.eventId,
     });
@@ -188,7 +188,7 @@ export async function checkpointLiveMatchScopeV2(input: {
     ) {
       return { checkpointed: false, skipped: true };
     }
-    const result = await checkpointLiveMatchDeskV2({
+    const result = await checkpointLiveMatchDeskV3({
       season: input.season,
       eventId: input.eventId,
       publication: current.publication,
@@ -196,16 +196,16 @@ export async function checkpointLiveMatchScopeV2(input: {
     });
     if (!result.checkpointed || !result.checkpointedAt)
       return { checkpointed: false, skipped: false };
-    const marked = await markLiveMatchDeskCheckpointedV2(
+    const marked = await markLiveMatchDeskCheckpointedV3(
       current.publication,
       result.checkpointedAt,
     );
     if (!marked) return { checkpointed: false, skipped: false };
-    await clearLiveMatchCheckpointDesiredV2(desired);
+    await clearLiveMatchCheckpointDesiredV3(desired);
     return { checkpointed: true, skipped: false };
   }
 
-  const current = await readLiveMatchDetailV2({
+  const current = await readLiveMatchDetailV3({
     season: input.season.seasonCode,
     eventId: input.eventId,
   });
@@ -217,7 +217,7 @@ export async function checkpointLiveMatchScopeV2(input: {
   ) {
     return { checkpointed: false, skipped: true };
   }
-  const result = await checkpointLiveMatchDetailV2({
+  const result = await checkpointLiveMatchDetailV3({
     season: input.season,
     eventId: input.eventId,
     publication: current.publication,
@@ -227,12 +227,12 @@ export async function checkpointLiveMatchScopeV2(input: {
   });
   if (!result.checkpointed || !result.checkpointedAt)
     return { checkpointed: false, skipped: false };
-  const marked = await markLiveMatchDetailCheckpointedV2(
+  const marked = await markLiveMatchDetailCheckpointedV3(
     current.publication,
     result.checkpointedAt,
   );
   if (!marked) return { checkpointed: false, skipped: false };
-  await clearLiveMatchCheckpointDesiredV2(desired);
+  await clearLiveMatchCheckpointDesiredV3(desired);
   return { checkpointed: true, skipped: false };
 }
 
@@ -254,7 +254,7 @@ async function checkpointClockInTransaction<T>(
  * intentionally outside this short transaction; Redis remains the serving
  * authority when this write is unavailable.
  */
-export async function checkpointLiveMatchDeskV2(
+export async function checkpointLiveMatchDeskV3(
   request: LiveMatchDeskCheckpointRequest,
 ): Promise<{ checkpointed: boolean; checkpointedAt: Date | null }> {
   const { season, eventId, publication, fixtures } = request;
@@ -270,6 +270,7 @@ export async function checkpointLiveMatchDeskV2(
       .values({
         seasonId: season.seasonId,
         eventId,
+        contractVersion: publication.contractVersion,
         publicationId: publication.publicationId,
         generation: publication.generation,
         state: publication.state,
@@ -291,6 +292,7 @@ export async function checkpointLiveMatchDeskV2(
         target: [liveMatchDeskCheckpointsInFpl.seasonId, liveMatchDeskCheckpointsInFpl.eventId],
         set: {
           publicationId: sql`excluded.publication_id`,
+          contractVersion: sql`excluded.contract_version`,
           generation: sql`excluded.generation`,
           state: sql`excluded.state`,
           manifest: sql`excluded.manifest`,
@@ -323,7 +325,7 @@ export async function checkpointLiveMatchDeskV2(
 }
 
 /** Persist one complete fixture-detail candidate with a final fence. */
-export async function checkpointLiveMatchDetailV2(
+export async function checkpointLiveMatchDetailV3(
   request: LiveMatchDetailCheckpointRequest,
 ): Promise<{ checkpointed: boolean; checkpointedAt: Date | null }> {
   const { season, eventId, publication, fixtures } = request;
@@ -353,6 +355,7 @@ export async function checkpointLiveMatchDetailV2(
       .values({
         seasonId: season.seasonId,
         eventId,
+        contractVersion: publication.contractVersion,
         publicationId: publication.publicationId,
         generation: publication.generation,
         state: finalized ? 'FINALIZED' : 'PROVISIONAL',
@@ -378,6 +381,7 @@ export async function checkpointLiveMatchDetailV2(
         target: [liveMatchDetailCheckpointsInFpl.seasonId, liveMatchDetailCheckpointsInFpl.eventId],
         set: {
           publicationId: sql`excluded.publication_id`,
+          contractVersion: sql`excluded.contract_version`,
           generation: sql`excluded.generation`,
           state: sql`excluded.state`,
           observedDeskGeneration: sql`excluded.observed_desk_generation`,
@@ -422,7 +426,7 @@ function sameCheckpointTime(value: string | null, row: Date | null): boolean {
 }
 
 /** Read and fully validate the self-contained desk checkpoint used by protected repair. */
-export async function readLiveMatchDeskCheckpointV2(
+export async function readLiveMatchDeskCheckpointV3(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<MatchDeskRead | null> {
@@ -449,13 +453,14 @@ export async function readLiveMatchDeskCheckpointV2(
   )
     return null;
   const scope = { season: season.seasonCode, eventId } as const;
-  const publication = parseLiveMatchDeskPublicationV2(row.manifest, scope);
+  const publication = parseLiveMatchDeskPublicationV3(row.manifest, scope);
   const fixtures = row.payload;
-  if (!publication || !isValidLiveMatchDeskPayloadV2(fixtures, eventId)) return null;
+  if (!publication || !isValidLiveMatchDeskPayloadV3(fixtures, eventId)) return null;
   const payload = canonicalJson(fixtures);
   const payloadBytes = Buffer.byteLength(payload, 'utf8');
   if (
     row.publicationId !== publication.publicationId ||
+    row.contractVersion !== publication.contractVersion ||
     row.generation !== publication.generation ||
     row.state !== publication.state ||
     canonicalJson(row.revisions) !== canonicalJson(publication.revisions) ||
@@ -476,7 +481,7 @@ export async function readLiveMatchDeskCheckpointV2(
 }
 
 /** Read and fully validate the exact fixture-detail manifest and payload checkpoint. */
-export async function readLiveMatchDetailCheckpointV2(
+export async function readLiveMatchDetailCheckpointV3(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<MatchDetailRead | null> {
@@ -503,13 +508,14 @@ export async function readLiveMatchDetailCheckpointV2(
   )
     return null;
   const scope = { season: season.seasonCode, eventId } as const;
-  const publication = parseLiveMatchDetailPublicationV2(row.manifest, scope);
+  const publication = parseLiveMatchDetailPublicationV3(row.manifest, scope);
   const fixtures = row.payload;
-  if (!publication || !isValidLiveMatchDetailCheckpointPayloadV2(fixtures)) return null;
+  if (!publication || !isValidLiveMatchDetailCheckpointPayloadV3(fixtures)) return null;
   const payload = canonicalJson(fixtures);
   const payloadBytes = Buffer.byteLength(payload, 'utf8');
   if (
     row.publicationId !== publication.publicationId ||
+    row.contractVersion !== publication.contractVersion ||
     row.generation !== publication.generation ||
     row.state !== (publication.finalized ? 'FINALIZED' : 'PROVISIONAL') ||
     row.observedDeskGeneration !== publication.observedDeskGeneration ||
@@ -543,7 +549,7 @@ export async function readLiveMatchDetailCheckpointV2(
 }
 
 /** Lightweight existence read for the reconciler; the serving GraphQL reader owns cold payload reads. */
-export async function hasLiveMatchCheckpointV2(
+export async function hasLiveMatchCheckpointV3(
   season: FplSeasonRef,
   eventId: number,
   kind: 'desk' | 'detail',
@@ -597,13 +603,13 @@ export function isExactFinalLiveMatchCheckpointPair(
  * lightweight joined-row identity is useful as a final fence, but it is not
  * durable proof on its own.
  */
-export async function hasFinalLiveMatchCheckpointsV2(
+export async function hasFinalLiveMatchCheckpointsV3(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<boolean> {
   const [desk, detail] = await Promise.all([
-    readLiveMatchDeskCheckpointV2(season, eventId),
-    readLiveMatchDetailCheckpointV2(season, eventId),
+    readLiveMatchDeskCheckpointV3(season, eventId),
+    readLiveMatchDetailCheckpointV3(season, eventId),
   ]);
   if (!desk || !detail) return false;
   return isExactFinalLiveMatchCheckpointPair({

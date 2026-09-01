@@ -2,29 +2,29 @@ import type { RawFPLEventLiveResponse, RawFPLFixture } from '../types';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   liveMatchActiveEventKey,
-  publishLiveMatchDeskV2,
-  publishLiveMatchDetailV2,
-  readLiveMatchDeskV2,
-  readLiveMatchDetailV2,
-  readLiveMatchCheckpointLastAtV2,
-  readLiveMatchCheckpointDesiredV2,
+  publishLiveMatchDeskV3,
+  publishLiveMatchDetailV3,
+  readLiveMatchDeskV3,
+  readLiveMatchDetailV3,
+  readLiveMatchCheckpointLastAtV3,
+  readLiveMatchCheckpointDesiredV3,
   type MatchDeskActiveFence,
-  restoreLiveMatchDeskCheckpointV2,
-  restoreLiveMatchDetailCheckpointV2,
-  setLiveMatchActiveEventV2,
-  setLiveMatchCheckpointDesiredV2,
-  touchLiveMatchDeskV2,
-  touchLiveMatchDetailV2,
+  restoreLiveMatchDeskCheckpointV3,
+  restoreLiveMatchDetailCheckpointV3,
+  setLiveMatchActiveEventV3,
+  setLiveMatchCheckpointDesiredV3,
+  touchLiveMatchDeskV3,
+  touchLiveMatchDetailV3,
   type MatchDeskRead,
   type MatchDetailActiveFence,
   type MatchDetailRead,
   type MatchDeskPublication,
   type MatchDetailPublication,
-} from '../cache/live-match-publication-v2';
+} from '../cache/live-match-publication-v3';
 import {
-  readLiveMatchDeskCheckpointV2,
-  readLiveMatchDetailCheckpointV2,
-} from './live-match-v2-checkpoint.service';
+  readLiveMatchDeskCheckpointV3,
+  readLiveMatchDetailCheckpointV3,
+} from './live-match-v3-checkpoint.service';
 import { enqueueLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import {
   resolveLiveReferenceDataForDetail,
@@ -39,7 +39,7 @@ import {
   type MatchDeskFixture,
   type MatchFixtureDetail,
   type MatchLifecycleState,
-} from './live-match-v2';
+} from './live-match-v3';
 import { contentHash } from '../utils/content-hash';
 import { logError, logInfo } from '../utils/logger';
 
@@ -86,7 +86,7 @@ export interface LiveMatchObservation {
     /** Exact active pointer after the fixture-phase publication. */
     observedActive: MatchDeskActiveFence;
   }>;
-  readonly redis?: Parameters<typeof readLiveMatchDeskV2>[0]['redis'];
+  readonly redis?: Parameters<typeof readLiveMatchDeskV3>[0]['redis'];
   /** Test/repair seam; production uses the coalescing checkpoint queue. */
   readonly enqueueCheckpoint?: (
     ...args: Parameters<typeof enqueueLiveMatchCheckpoint>
@@ -155,7 +155,7 @@ function sameDetail(
 }
 
 async function readDeskSafely(input: LiveMatchObservation): Promise<MatchDeskRead | null> {
-  const cached = await readLiveMatchDeskV2({
+  const cached = await readLiveMatchDeskV3({
     season: input.season.seasonCode,
     eventId: input.eventId,
     redis: input.redis,
@@ -176,7 +176,7 @@ async function readDeskSafely(input: LiveMatchObservation): Promise<MatchDeskRea
   // durable final is restored into Redis before it is allowed to fence a new
   // provisional observation.
   try {
-    const checkpoint = await readLiveMatchDeskCheckpointV2(input.season, input.eventId);
+    const checkpoint = await readLiveMatchDeskCheckpointV3(input.season, input.eventId);
     if (
       checkpoint &&
       (cached === null ||
@@ -184,8 +184,8 @@ async function readDeskSafely(input: LiveMatchObservation): Promise<MatchDeskRea
         checkpoint.publication.generation > cached.publication.generation)
     ) {
       if (checkpoint.publication.state === 'FINALIZED') {
-        await restoreLiveMatchDeskCheckpointV2({ checkpoint, redis: input.redis });
-        const restored = await readLiveMatchDeskV2({
+        await restoreLiveMatchDeskCheckpointV3({ checkpoint, redis: input.redis });
+        const restored = await readLiveMatchDeskV3({
           season: input.season.seasonCode,
           eventId: input.eventId,
           redis: input.redis,
@@ -207,7 +207,7 @@ async function readDeskSafely(input: LiveMatchObservation): Promise<MatchDeskRea
 }
 
 async function readDetailSafely(input: LiveMatchObservation): Promise<MatchDetailRead | null> {
-  const cached = await readLiveMatchDetailV2({
+  const cached = await readLiveMatchDetailV3({
     season: input.season.seasonCode,
     eventId: input.eventId,
     redis: input.redis,
@@ -223,7 +223,7 @@ async function readDetailSafely(input: LiveMatchObservation): Promise<MatchDetai
     return cached;
 
   try {
-    const checkpoint = await readLiveMatchDetailCheckpointV2(input.season, input.eventId);
+    const checkpoint = await readLiveMatchDetailCheckpointV3(input.season, input.eventId);
     if (
       checkpoint &&
       (cached === null ||
@@ -231,8 +231,8 @@ async function readDetailSafely(input: LiveMatchObservation): Promise<MatchDetai
         checkpoint.publication.generation > cached.publication.generation)
     ) {
       if (checkpoint.publication.finalized) {
-        await restoreLiveMatchDetailCheckpointV2({ checkpoint, redis: input.redis });
-        const restored = await readLiveMatchDetailV2({
+        await restoreLiveMatchDetailCheckpointV3({ checkpoint, redis: input.redis });
+        const restored = await readLiveMatchDetailV3({
           season: input.season.seasonCode,
           eventId: input.eventId,
           redis: input.redis,
@@ -289,20 +289,20 @@ async function scheduleCheckpoint(
   if (publication.checkpointedAt !== null) return false;
   try {
     const [lastCheckpointedAt, existingDesired] = await Promise.all([
-      readLiveMatchCheckpointLastAtV2({
+      readLiveMatchCheckpointLastAtV3({
         kind,
         season: publication.season,
         eventId: publication.eventId,
         redis,
       }),
-      readLiveMatchCheckpointDesiredV2({
+      readLiveMatchCheckpointDesiredV3({
         kind,
         season: publication.season,
         eventId: publication.eventId,
         redis,
       }),
     ]);
-    const desired = await setLiveMatchCheckpointDesiredV2({
+    const desired = await setLiveMatchCheckpointDesiredV3({
       kind,
       publication,
       finalized,
@@ -327,7 +327,7 @@ async function scheduleCheckpoint(
     );
     return true;
   } catch (error) {
-    logError('Live Matches V2 checkpoint obligation write failed', error, {
+    logError('Live Matches V3 checkpoint obligation write failed', error, {
       season: publication.season,
       eventId: publication.eventId,
       kind,
@@ -339,14 +339,14 @@ async function scheduleCheckpoint(
 }
 
 /**
- * Publish the two Match V2 streams from one already-fetched observation. The
+ * Publish the two Live Matches V3 streams from one already-fetched observation. The
  * function never performs provider I/O. PostgreSQL is consulted only when the
  * Redis current/previous pointers are absent, so a recovered Redis namespace
  * can inherit the durable generation fence without putting a DB read on the
  * normal hot path. Desk publication is the gate; detail is best-effort and may
  * remain on its compatible LKG.
  */
-export async function syncLiveMatchesV2FromObservation(
+export async function syncLiveMatchesV3FromObservation(
   input: LiveMatchObservation,
 ): Promise<LiveMatchObservationResult> {
   const finalizationRequested =
@@ -409,7 +409,7 @@ export async function syncLiveMatchesV2FromObservation(
     sameDesk(currentDesk, preparedDesk.fixtures, preparedDesk.state) &&
     currentDesk?.servedFrom === 'REDIS_CURRENT'
   ) {
-    const touched = await touchLiveMatchDeskV2({
+    const touched = await touchLiveMatchDeskV3({
       publication: currentDesk.publication,
       sourceCheckedAt: observedAt,
       expectedNextCheckAt: input.expectedNextCheckAt,
@@ -419,7 +419,7 @@ export async function syncLiveMatchesV2FromObservation(
     desk = touched ?? null;
   }
   if (!desk && !deskIsFinal) {
-    const published = await publishLiveMatchDeskV2({
+    const published = await publishLiveMatchDeskV3({
       season: input.season.seasonCode,
       eventId: input.eventId,
       state: preparedDesk.state,
@@ -440,7 +440,7 @@ export async function syncLiveMatchesV2FromObservation(
   }
   if (!desk) throw new Error(`Live Match desk did not publish for event ${input.eventId}`);
   if (!reusesPublishedDesk) {
-    await setLiveMatchActiveEventV2({
+    await setLiveMatchActiveEventV3({
       season: input.season.seasonCode,
       eventId: input.eventId,
       redis: input.redis,
@@ -554,7 +554,7 @@ export async function syncLiveMatchesV2FromObservation(
           currentDetail?.publication.observedDeskGeneration === desk.generation &&
           currentDetail?.servedFrom === 'REDIS_CURRENT'
         ) {
-          detail = await touchLiveMatchDetailV2({
+          detail = await touchLiveMatchDetailV3({
             publication: currentDetail.publication,
             sourceCheckedAt: observedAt,
             expectedNextCheckAt: input.expectedNextCheckAt,
@@ -569,7 +569,7 @@ export async function syncLiveMatchesV2FromObservation(
             hasStartedLiveMatchDetail(preparedDesk.fixtures, completeDetail) ||
             preparedDesk.state === 'FINALIZED')
         ) {
-          const published = await publishLiveMatchDetailV2({
+          const published = await publishLiveMatchDetailV3({
             season: input.season.seasonCode,
             eventId: input.eventId,
             observedDeskGeneration: desk.generation,
@@ -616,7 +616,7 @@ export async function syncLiveMatchesV2FromObservation(
         );
     } catch (error) {
       detailUnavailableReason = 'DETAIL_CANDIDATE_INVALID';
-      logError('Live Matches V2 detail candidate rejected; keeping desk', error, {
+      logError('Live Matches V3 detail candidate rejected; keeping desk', error, {
         season: input.season.seasonCode,
         eventId: input.eventId,
         deskGeneration: desk.generation,
@@ -636,7 +636,7 @@ export async function syncLiveMatchesV2FromObservation(
     }
   }
 
-  logInfo('Live Matches V2 observation published', {
+  logInfo('Live Matches V3 observation published', {
     season: input.season.seasonCode,
     eventId: input.eventId,
     state: desk.state,

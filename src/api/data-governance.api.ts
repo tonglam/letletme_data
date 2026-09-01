@@ -13,7 +13,7 @@ import {
   type QueueAdmissionMode,
 } from '../services/queue-governance.service';
 import { getJobsStatus, type JobsStatusWindow } from '../services/jobs-status.service';
-import { runLiveMatchesV2Repair } from '../services/live-match-v2-repair.service';
+import { runLiveMatchesV3Repair } from '../services/live-match-v3-repair.service';
 import {
   getHttpStatusFromError,
   getOrCreateRequestId,
@@ -198,11 +198,11 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
     },
   )
   .post(
-    '/live-matches-v2/repair',
+    '/live-matches-v3/repair',
     async ({ request, set, body }) => {
       if (!(await requireOpsKey(request, set))) return { success: false, error: 'Unauthorized' };
       try {
-        const repair = await runLiveMatchesV2Repair({
+        const repair = await runLiveMatchesV3Repair({
           action: body.action,
           season: body.season,
           eventId: body.eventId,
@@ -215,7 +215,7 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
         const status = getHttpStatusFromError(error);
         const requestId = getOrCreateRequestId(request);
         if (status >= 500) {
-          logError('Live Matches V2 operator repair failed', error, { requestId });
+          logError('Live Matches V3 operator repair failed', error, { requestId });
           set.headers['x-request-id'] = requestId;
         }
         set.status = status;

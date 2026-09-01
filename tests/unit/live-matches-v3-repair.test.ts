@@ -1,29 +1,29 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  assertLiveMatchesV2RepairAuthorization,
-  assertLiveMatchesV2RepairSeason,
-  LIVE_MATCHES_V2_REPAIR_CONFIRMATION,
+  assertLiveMatchesV3RepairAuthorization,
+  assertLiveMatchesV3RepairSeason,
+  LIVE_MATCHES_V3_REPAIR_CONFIRMATION,
   isLiveMatchDetailCompatibleWithDesk,
-  parseLiveMatchesV2RepairRequest,
-} from '../../src/services/live-match-v2-repair.service';
+  parseLiveMatchesV3RepairRequest,
+} from '../../src/services/live-match-v3-repair.service';
 
-describe('Live Matches V2 repair guardrails', () => {
+describe('Live Matches V3 repair guardrails', () => {
   test('rejects historical checkpoint replay before enqueueing it', () => {
     expect(() =>
-      assertLiveMatchesV2RepairSeason('replay-checkpoint', { isCurrent: false }),
+      assertLiveMatchesV3RepairSeason('replay-checkpoint', { isCurrent: false }),
     ).toThrow('historical Live Matches checkpoint replay');
     expect(() =>
-      assertLiveMatchesV2RepairSeason('replay-checkpoint', { isCurrent: true }),
+      assertLiveMatchesV3RepairSeason('replay-checkpoint', { isCurrent: true }),
     ).not.toThrow();
     expect(() =>
-      assertLiveMatchesV2RepairSeason('rebuild-current', { isCurrent: false }),
+      assertLiveMatchesV3RepairSeason('rebuild-current', { isCurrent: false }),
     ).not.toThrow();
   });
 
   test('parses an exact read-only scope without write authorization', () => {
     expect(
-      parseLiveMatchesV2RepairRequest({
+      parseLiveMatchesV3RepairRequest({
         action: 'inspect',
         season: '2627',
         eventId: 2,
@@ -37,7 +37,7 @@ describe('Live Matches V2 repair guardrails', () => {
       confirmation: null,
     });
     expect(() =>
-      assertLiveMatchesV2RepairAuthorization({ action: 'inspect', confirmation: null }),
+      assertLiveMatchesV3RepairAuthorization({ action: 'inspect', confirmation: null }),
     ).not.toThrow();
   });
 
@@ -89,7 +89,7 @@ describe('Live Matches V2 repair guardrails', () => {
 
   test('requires kind, reason, and explicit request confirmation for writes', () => {
     expect(() =>
-      parseLiveMatchesV2RepairRequest({
+      parseLiveMatchesV3RepairRequest({
         action: 'rebuild-current',
         season: '2627',
         eventId: 2,
@@ -97,7 +97,7 @@ describe('Live Matches V2 repair guardrails', () => {
       }),
     ).toThrow('exact desk or detail kind');
     expect(() =>
-      parseLiveMatchesV2RepairRequest({
+      parseLiveMatchesV3RepairRequest({
         action: 'rebuild-current',
         season: '2627',
         eventId: 2,
@@ -106,19 +106,19 @@ describe('Live Matches V2 repair guardrails', () => {
       }),
     ).toThrow('at least 12 characters');
     expect(() =>
-      assertLiveMatchesV2RepairAuthorization({ action: 'rebuild-current', confirmation: null }),
-    ).toThrow(LIVE_MATCHES_V2_REPAIR_CONFIRMATION);
+      assertLiveMatchesV3RepairAuthorization({ action: 'rebuild-current', confirmation: null }),
+    ).toThrow(LIVE_MATCHES_V3_REPAIR_CONFIRMATION);
     expect(() =>
-      assertLiveMatchesV2RepairAuthorization({
+      assertLiveMatchesV3RepairAuthorization({
         action: 'rebuild-current',
-        confirmation: LIVE_MATCHES_V2_REPAIR_CONFIRMATION,
+        confirmation: LIVE_MATCHES_V3_REPAIR_CONFIRMATION,
       }),
     ).not.toThrow();
   });
 
   test('rejects unknown request fields instead of widening scope', () => {
     expect(() =>
-      parseLiveMatchesV2RepairRequest({
+      parseLiveMatchesV3RepairRequest({
         action: 'inspect',
         season: '2627',
         eventId: 2,
@@ -126,7 +126,7 @@ describe('Live Matches V2 repair guardrails', () => {
       }),
     ).toThrow('Unsupported Live Matches repair field: allEvents');
     expect(() =>
-      parseLiveMatchesV2RepairRequest({
+      parseLiveMatchesV3RepairRequest({
         action: 'inspect',
         season: '2627',
         eventId: 0,
@@ -136,13 +136,13 @@ describe('Live Matches V2 repair guardrails', () => {
 
   test('accepts a fully confirmed exact write request', () => {
     expect(
-      parseLiveMatchesV2RepairRequest({
+      parseLiveMatchesV3RepairRequest({
         action: 'replay-checkpoint',
         season: '2627',
         eventId: 2,
         kind: 'detail',
         reason: 'restore the retained detail checkpoint',
-        confirmation: LIVE_MATCHES_V2_REPAIR_CONFIRMATION,
+        confirmation: LIVE_MATCHES_V3_REPAIR_CONFIRMATION,
       }),
     ).toEqual({
       action: 'replay-checkpoint',
@@ -150,7 +150,7 @@ describe('Live Matches V2 repair guardrails', () => {
       eventId: 2,
       kind: 'detail',
       reason: 'restore the retained detail checkpoint',
-      confirmation: LIVE_MATCHES_V2_REPAIR_CONFIRMATION,
+      confirmation: LIVE_MATCHES_V3_REPAIR_CONFIRMATION,
     });
   });
 });

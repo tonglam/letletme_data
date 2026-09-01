@@ -50,6 +50,13 @@ const METRICS = [
   'runtime_error',
   'update_failure',
   'last_good_age_ms',
+  'live_matches_head_ms',
+  'live_matches_full_ms',
+  'live_matches_head_bytes',
+  'live_matches_full_bytes',
+  'live_matches_head_result',
+  'live_matches_full_result',
+  'live_matches_revision_changed',
 ] as const;
 const DEVICE_GROUPS = [
   'mobile',
@@ -61,6 +68,32 @@ const DEVICE_GROUPS = [
 ] as const;
 const SAMPLE_SOURCES = ['real', 'synthetic'] as const;
 const RESULTS = ['ok', 'error', 'timeout', 'auth_error', 'stale', 'unavailable'] as const;
+
+const NUMERIC_METRICS = new Set<ClientSignalMetric>([
+  'route_ready_ms',
+  'api_duration_ms',
+  'graphql_proxy_ms',
+  'lcp_ms',
+  'inp_ms',
+  'cls',
+  'last_good_age_ms',
+  'live_matches_head_ms',
+  'live_matches_full_ms',
+  'live_matches_head_bytes',
+  'live_matches_full_bytes',
+]);
+
+const MAX_NUMERIC_VALUES: Partial<Record<ClientSignalMetric, number>> = {
+  live_matches_head_ms: 10_000_000,
+  live_matches_full_ms: 10_000_000,
+  live_matches_head_bytes: 512 * 1024,
+  live_matches_full_bytes: 8 * 1024 * 1024,
+};
+
+const BYTE_METRICS = new Set<ClientSignalMetric>([
+  'live_matches_head_bytes',
+  'live_matches_full_bytes',
+]);
 
 type ValueOf<T extends readonly string[]> = T[number];
 export type ClientSignalClient = ValueOf<typeof CLIENTS>;
@@ -200,17 +233,13 @@ export function parseClientSignalBatch(value: unknown, now = Date.now()): Client
     ) {
       throw new ClientSignalValidationError('value must be a finite non-negative number');
     }
-    const numericMetric = [
-      'route_ready_ms',
-      'api_duration_ms',
-      'graphql_proxy_ms',
-      'lcp_ms',
-      'inp_ms',
-      'cls',
-      'last_good_age_ms',
-    ].includes(sample.metric);
+    const numericMetric = NUMERIC_METRICS.has(sample.metric);
     if (numericMetric && typeof sample.value !== 'number') {
       throw new ClientSignalValidationError(`value is required for ${sample.metric}`);
+    }
+    const maximum = MAX_NUMERIC_VALUES[sample.metric];
+    if (maximum !== undefined && typeof sample.value === 'number' && sample.value > maximum) {
+      throw new ClientSignalValidationError(`value is too large for ${sample.metric}`);
     }
     return {
       observedAt: observedAt.toISOString(),
@@ -240,7 +269,9 @@ function bucketFor(metric: ClientSignalMetric, value: number | undefined): strin
       ? [0.02, 0.05, 0.1, 0.25, 0.5]
       : metric === 'last_good_age_ms'
         ? [10, 30, 50, 60].map((minutes) => minutes * 60 * 1000)
-        : [100, 250, 500, 800, 1000, 1500, 2000, 3000, 5000, 10000];
+        : BYTE_METRICS.has(metric)
+          ? [4, 8, 16, 32, 64, 90, 128, 256, 512].map((kilobytes) => kilobytes * 1024)
+          : [100, 250, 500, 800, 1000, 1500, 2000, 3000, 5000, 10000];
   const threshold = thresholds.find((candidate) => value <= candidate);
   return threshold === undefined ? 'overflow' : String(threshold);
 }
@@ -383,6 +414,8 @@ function representativeBucket(metric: string, bucket: string): number | null {
   if (bucket === 'overflow') {
     if (metric === 'cls') return 0.51;
     if (metric === 'last_good_age_ms') return 60 * 60 * 1000 + 1;
+    if (metric === 'live_matches_head_bytes') return 512 * 1024 + 1;
+    if (metric === 'live_matches_full_bytes') return 8 * 1024 * 1024 + 1;
     return 10_001;
   }
   const parsed = Number(bucket);
@@ -405,18 +438,7 @@ function quantileBucket(accumulator: SummaryAccumulator, quantile: number): stri
 }
 
 function approximateQuantile(accumulator: SummaryAccumulator, quantile: number): number | null {
-  if (
-    ![
-      'route_ready_ms',
-      'api_duration_ms',
-      'graphql_proxy_ms',
-      'lcp_ms',
-      'inp_ms',
-      'cls',
-      'last_good_age_ms',
-    ].includes(accumulator.metric)
-  )
-    return null;
+  if (!NUMERIC_METRICS.has(accumulator.metric as ClientSignalMetric)) return null;
   const bucket = quantileBucket(accumulator, quantile);
   return bucket === null || bucket === 'overflow'
     ? null

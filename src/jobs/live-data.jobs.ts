@@ -3,11 +3,11 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { liveDataQueue, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { logError, logInfo } from '../utils/logger';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
-import type { MatchLifecycleState } from '../services/live-match-v2';
+import type { MatchLifecycleState } from '../services/live-match-v3';
 import {
-  readLiveMatchCheckpointDesiredV2,
-  readLiveMatchCheckpointLastAtV2,
-} from '../cache/live-match-publication-v2';
+  readLiveMatchCheckpointDesiredV3,
+  readLiveMatchCheckpointLastAtV3,
+} from '../cache/live-match-publication-v3';
 
 const LIVE_MATCH_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
@@ -18,6 +18,7 @@ async function hasSupersedingPendingJob(
   season: FplSeasonRef,
   eventId: number,
   finalizeEvent: boolean,
+  matchObservationOnly: boolean,
 ): Promise<boolean> {
   try {
     const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
@@ -26,7 +27,8 @@ async function hasSupersedingPendingJob(
         job.name === LIVE_JOBS.LIVE_SNAPSHOT &&
         job.data.seasonId === season.seasonId &&
         job.data.eventId === eventId &&
-        (finalizeEvent ? job.data.finalizeEvent === true : job.data.finalizeEvent !== true),
+        (finalizeEvent ? job.data.finalizeEvent === true : job.data.finalizeEvent !== true) &&
+        Boolean(job.data.matchObservationOnly) === matchObservationOnly,
     );
   } catch (error) {
     logError('Failed to check pending live-data jobs', error, {
@@ -49,7 +51,7 @@ export async function enqueueLiveActiveSnapshot(
   lifecycleState: MatchLifecycleState = 'LIVE_ACTIVE',
   expectedNextCheckAt: Date | string | null = null,
 ) {
-  // V2 publishes every valid source change to Redis. PostgreSQL checkpointing
+  // Live publication publishes every valid source change to Redis. PostgreSQL checkpointing
   // is decided by the publication service (first/boundary/final or at most
   // once per ten minutes), so the scheduler must not manufacture a second
   // periodic write lane.
@@ -79,7 +81,7 @@ export async function enqueueLiveMatchCheckpoint(
     if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
-    const baseJobId = `live-match-checkpoint-${season.seasonCode}-e${eventId}-${kind}-v2`;
+    const baseJobId = `live-match-checkpoint-${season.seasonCode}-e${eventId}-${kind}-v3`;
     const pending = await queue.getJobs(
       options.successor
         ? ['waiting', 'delayed', 'paused']
@@ -168,7 +170,7 @@ export async function enqueueRemainingLiveMatchCheckpoint(
   eventId: number,
   kind: 'desk' | 'detail',
 ) {
-  const desired = await readLiveMatchCheckpointDesiredV2({
+  const desired = await readLiveMatchCheckpointDesiredV3({
     season: season.seasonCode,
     eventId,
     kind,
@@ -176,7 +178,7 @@ export async function enqueueRemainingLiveMatchCheckpoint(
   if (!desired) return null;
   let delayMs = 0;
   if (!desired.final && !desired.force) {
-    const lastAt = await readLiveMatchCheckpointLastAtV2({
+    const lastAt = await readLiveMatchCheckpointLastAtV3({
       season: season.seasonCode,
       eventId,
       kind,
@@ -213,6 +215,8 @@ export async function enqueueLiveSnapshot(
     lifecycleState?: MatchLifecycleState;
     /** Deadline of the scheduler observation that produced this job. */
     expectedNextCheckAt?: Date | string | null;
+    /** Run only the Match V3 desk observation before Live Points is eligible. */
+    matchObservationOnly?: boolean;
   } = {},
 ) {
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
@@ -254,7 +258,13 @@ export async function enqueueLiveSnapshot(
     }
     if (
       source === 'cron' &&
-      (await hasSupersedingPendingJob(queue, season, eventId, options.finalizeEvent === true))
+      (await hasSupersedingPendingJob(
+        queue,
+        season,
+        eventId,
+        options.finalizeEvent === true,
+        options.matchObservationOnly === true,
+      ))
     ) {
       logInfo('Live snapshot job already pending; skipping enqueue', {
         season: season.seasonCode,
@@ -296,8 +306,9 @@ export async function enqueueLiveSnapshot(
                 ? null
                 : new Date(options.expectedNextCheckAt).toISOString(),
           }),
+      ...(options.matchObservationOnly === true ? { matchObservationOnly: true } : {}),
     };
-    const suffix = 'v2';
+    const suffix = options.matchObservationOnly === true ? 'v3' : 'v2';
     const generatedJobId =
       source === 'cron'
         ? `live-snapshot-${season.seasonCode}-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}-${suffix}`

@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
 const migration = await Bun.file('migrations/0076_live_matches_v2_checkpoints.sql').text();
+const v3Fence = await Bun.file('migrations/0083_live_matches_v3_contract_fence.sql').text();
 
-describe('Live Matches V2 checkpoint migration contract', () => {
+describe('Live Matches V3 checkpoint migration contract', () => {
   test('stores self-contained bounded manifests and payloads', () => {
     expect(migration).toContain('manifest jsonb NOT NULL');
     expect(migration).toMatch(/jsonb_typeof\(manifest\) = 'object'/);
@@ -18,5 +19,17 @@ describe('Live Matches V2 checkpoint migration contract', () => {
       expect(migration).toContain(`${table}_graphql_reader_select`);
       expect(migration).toContain(`ON fpl.${table}\n  FOR SELECT TO letletme_graphql_reader`);
     }
+  });
+
+  test('adds a manifest-matching V3 contract fence without relabeling old rows', () => {
+    expect(v3Fence).toContain('ADD COLUMN contract_version text');
+    expect(v3Fence).toContain(
+      `contract_version = manifest ->> ${String.fromCharCode(39)}contractVersion${String.fromCharCode(39)}`,
+    );
+    expect(v3Fence).toContain(
+      `${String.fromCharCode(39)}live-matches-v2${String.fromCharCode(39)}, ${String.fromCharCode(39)}live-matches-v3${String.fromCharCode(39)}`,
+    );
+    expect(v3Fence).toContain('live_match_desk_checkpoints_contract_fence');
+    expect(v3Fence).toContain('live_match_detail_checkpoints_contract_fence');
   });
 });

@@ -14,11 +14,11 @@ import {
   type LivePublicationState,
 } from '../cache/live-publication-v2';
 import {
-  readLiveMatchDeskFenceV2,
-  readLiveMatchDetailFenceV2,
+  readLiveMatchDeskFenceV3,
+  readLiveMatchDetailFenceV3,
   type MatchDeskActiveFence,
   type MatchDetailActiveFence,
-} from '../cache/live-match-publication-v2';
+} from '../cache/live-match-publication-v3';
 import {
   loadLiveReferenceData,
   prepareCoherentLiveSnapshot,
@@ -30,10 +30,10 @@ import {
   readLivePublicationV2Checkpoint,
 } from './live-publication-v2-checkpoint.service';
 import {
-  syncLiveMatchesV2FromObservation,
+  syncLiveMatchesV3FromObservation,
   type LiveMatchObservationResult,
-} from './live-match-v2.service';
-import type { MatchLifecycleState } from './live-match-v2';
+} from './live-match-v3.service';
+import type { MatchLifecycleState } from './live-match-v3';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
 import { canonicalJson } from '../utils/content-hash';
@@ -68,9 +68,9 @@ export interface LiveSnapshotV2Dependencies {
     season: FplSeasonRef,
     eventId: number,
   ) => Promise<LiveSnapshotReferenceData>;
-  readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2;
-  readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV2;
-  readonly syncLiveMatches?: typeof syncLiveMatchesV2FromObservation;
+  readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV3;
+  readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV3;
+  readonly syncLiveMatches?: typeof syncLiveMatchesV3FromObservation;
   readonly readPublished: (season: string, eventId: number) => Promise<LivePublicationRead | null>;
   readonly readCheckpointed?: (
     season: FplSeasonRef,
@@ -118,10 +118,10 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
       .filter((fixture) => fixture.event === eventId)
       .map((fixture) => fixture.id);
   },
-  readObservedMatchDesk: (input) => readLiveMatchDeskFenceV2(input),
-  readObservedMatchDetail: (input) => readLiveMatchDetailFenceV2(input),
+  readObservedMatchDesk: (input) => readLiveMatchDeskFenceV3(input),
+  readObservedMatchDetail: (input) => readLiveMatchDetailFenceV3(input),
   getReferenceData: (season, eventId) => loadLiveReferenceData(season, eventId),
-  syncLiveMatches: syncLiveMatchesV2FromObservation,
+  syncLiveMatches: syncLiveMatchesV3FromObservation,
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
   readCheckpointed: readLivePublicationV2Checkpoint,
   checkpointPublication: checkpointLivePublicationV2,
@@ -254,8 +254,8 @@ type AcceptedMatchObservation = Readonly<{
 
 async function publishedDeskFromMatchResult(
   result: LiveMatchObservationResult,
-  readObservedMatchDesk?: typeof readLiveMatchDeskFenceV2,
-): Promise<NonNullable<Parameters<typeof syncLiveMatchesV2FromObservation>[0]['publishedDesk']>> {
+  readObservedMatchDesk?: typeof readLiveMatchDeskFenceV3,
+): Promise<NonNullable<Parameters<typeof syncLiveMatchesV3FromObservation>[0]['publishedDesk']>> {
   const observedActive: MatchDeskActiveFence = readObservedMatchDesk
     ? await readObservedMatchDesk({ season: result.season, eventId: result.eventId })
     : {
@@ -289,7 +289,7 @@ async function publishedDeskFromMatchResult(
 
 async function detailFenceForFinalization(
   result: LiveMatchObservationResult,
-  readObservedMatchDetail?: typeof readLiveMatchDetailFenceV2,
+  readObservedMatchDetail?: typeof readLiveMatchDetailFenceV3,
 ): Promise<MatchDetailActiveFence | undefined> {
   if (!readObservedMatchDetail) return undefined;
   const observed = await readObservedMatchDetail({
@@ -434,8 +434,7 @@ export async function syncLiveSnapshotV2(
     .then(async ([fixturesResult, expectedFixtureIdsResult]) => {
       if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
       const observedDesk = await observedMatchDeskPromise;
-      const observedDetail = await observedMatchDetailPromise;
-      return (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
+      return (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
         season,
         eventId,
         rawFixtures: fixturesResult.value,
@@ -448,7 +447,6 @@ export async function syncLiveSnapshotV2(
         lifecycleState: nonFinalMatchLifecycleState,
         expectedNextCheckAt: options.expectedNextCheckAt,
         observedDesk,
-        observedDetail,
       });
     })
     .then((result) => ({ result, error: null as unknown }))
@@ -465,7 +463,7 @@ export async function syncLiveSnapshotV2(
           ? expectedFixtureIdsResult.value
           : undefined;
       if (referenceDataResult.status === 'fulfilled') {
-        const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
+        const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
           season,
           eventId,
           rawFixtures,
@@ -507,21 +505,20 @@ export async function syncLiveSnapshotV2(
       throw new Error('Live Match observation reached an impossible settled state');
     })
     .catch((error: unknown) => {
-      logError('Live Matches V2 sibling publication failed', error, {
+      logError('Live Matches V3 sibling publication failed', error, {
         season: season.seasonCode,
         eventId,
       });
       return { result: null, error };
     });
   const settleMatchPublication = async (): Promise<void> => {
+    if (!options.finalizeEvent) return;
     const outcome = await matchPublicationOutcome;
-    // Live Matches is a sibling publication: a provisional Match failure must
-    // not make an otherwise coherent Live Points publication unavailable. We
-    // still await the sibling so the sync job cannot report completion while
-    // Redis publication work is continuing in the background. At the final
-    // boundary both publications are exact durable obligations and therefore
-    // fail closed together.
-    if (options.finalizeEvent && outcome.error) throw outcome.error;
+    // At the final boundary both publications are exact durable obligations and
+    // therefore fail closed together. During a provisional poll the desk phase
+    // has already been attempted independently; waiting for the detail sibling
+    // here would put Live Points back behind event-live/Core enrichment.
+    if (outcome.error) throw outcome.error;
   };
 
   const requireProvisionalMatchDetail = async (): Promise<void> => {
@@ -558,7 +555,7 @@ export async function syncLiveSnapshotV2(
     const observedDetail = outcome.result
       ? await detailFenceForFinalization(outcome.result, dependencies.readObservedMatchDetail)
       : undefined;
-    const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV2FromObservation)({
+    const result = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
       season,
       eventId,
       rawFixtures: observation.rawFixtures,
