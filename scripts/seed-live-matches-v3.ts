@@ -242,7 +242,7 @@ async function seedOne(seasonCode: string, eventId: number) {
     season,
     eventId,
     kind: 'desk',
-    allowFinalizedReplacementForCutover: desk.publication.state === 'FINALIZED',
+    allowV2ReplacementForCutover: true,
   });
   if (!deskCheckpoint.checkpointed) {
     throw new Error(`event ${eventId} desk checkpoint did not converge before detail`);
@@ -287,7 +287,7 @@ async function seedOne(seasonCode: string, eventId: number) {
     season,
     eventId,
     kind: 'detail',
-    allowFinalizedReplacementForCutover: active.publication.finalized === true,
+    allowV2ReplacementForCutover: true,
   });
   if (!checkpoint.checkpointed) {
     throw new Error(`event ${eventId} detail checkpoint did not converge`);

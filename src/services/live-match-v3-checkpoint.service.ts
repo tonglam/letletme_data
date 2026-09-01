@@ -133,7 +133,7 @@ export interface LiveMatchDeskCheckpointRequest {
   readonly publication: MatchDeskPublication;
   readonly fixtures: readonly MatchDeskFixture[];
   /** Destructive seed-only fence for replacing an old V2 row with V3. */
-  readonly allowFinalizedReplacementForCutover?: boolean;
+  readonly allowV2ReplacementForCutover?: boolean;
 }
 
 export interface LiveMatchDetailCheckpointRequest {
@@ -143,7 +143,7 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly fixtures: readonly MatchFixtureDetail[];
   readonly finalized?: boolean;
   /** Destructive seed-only fence for replacing an old V2 row with V3. */
-  readonly allowFinalizedReplacementForCutover?: boolean;
+  readonly allowV2ReplacementForCutover?: boolean;
 }
 
 export async function checkpointLiveMatchScopeV3(input: {
@@ -151,7 +151,7 @@ export async function checkpointLiveMatchScopeV3(input: {
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
   /** Only the source-backed destructive V3 cutover may replace an old V2 row. */
-  readonly allowFinalizedReplacementForCutover?: boolean;
+  readonly allowV2ReplacementForCutover?: boolean;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
   const desired = await readLiveMatchCheckpointDesiredV3({
     kind: input.kind,
@@ -192,7 +192,7 @@ export async function checkpointLiveMatchScopeV3(input: {
       eventId: input.eventId,
       publication: current.publication,
       fixtures: current.fixtures,
-      allowFinalizedReplacementForCutover: input.allowFinalizedReplacementForCutover,
+      allowV2ReplacementForCutover: input.allowV2ReplacementForCutover,
     });
     if (!result.checkpointed || !result.checkpointedAt)
       return { checkpointed: false, skipped: false };
@@ -223,7 +223,7 @@ export async function checkpointLiveMatchScopeV3(input: {
     publication: current.publication,
     fixtures: current.fixtures,
     finalized: desired.final,
-    allowFinalizedReplacementForCutover: input.allowFinalizedReplacementForCutover,
+    allowV2ReplacementForCutover: input.allowV2ReplacementForCutover,
   });
   if (!result.checkpointed || !result.checkpointedAt)
     return { checkpointed: false, skipped: false };
@@ -259,10 +259,7 @@ export async function checkpointLiveMatchDeskV3(
 ): Promise<{ checkpointed: boolean; checkpointedAt: Date | null }> {
   const { season, eventId, publication, fixtures } = request;
   publicationIdentityMatches(publication, season, eventId);
-  const allowFinalizedReplacementForCutover = request.allowFinalizedReplacementForCutover === true;
-  if (allowFinalizedReplacementForCutover && publication.state !== 'FINALIZED') {
-    throw new Error('Finalized Live Matches replacement requires a finalized candidate');
-  }
+  const allowV2ReplacementForCutover = request.allowV2ReplacementForCutover === true;
   const bytes = assertDeskPayload(publication, fixtures);
   const checkpointedAt = await checkpointClockInTransaction(async (tx) => {
     const rows = await tx.execute<CheckpointClock>(
@@ -321,7 +318,7 @@ export async function checkpointLiveMatchDeskV3(
             AND ${liveMatchDeskCheckpointsInFpl.generation} < excluded.generation
           )
           OR (
-            ${allowFinalizedReplacementForCutover}
+            ${allowV2ReplacementForCutover}
             AND ${liveMatchDeskCheckpointsInFpl.contractVersion} = 'live-matches-v2'
             AND excluded.contract_version = 'live-matches-v3'
             AND ${liveMatchDeskCheckpointsInFpl.publicationId} <> excluded.publication_id
@@ -344,10 +341,7 @@ export async function checkpointLiveMatchDetailV3(
   if (publication.finalized !== finalized) {
     throw new Error('Live Matches detail checkpoint finalization does not match publication');
   }
-  const allowFinalizedReplacementForCutover = request.allowFinalizedReplacementForCutover === true;
-  if (allowFinalizedReplacementForCutover && !finalized) {
-    throw new Error('Finalized Live Matches replacement requires a finalized candidate');
-  }
+  const allowV2ReplacementForCutover = request.allowV2ReplacementForCutover === true;
   const bytes = assertDetailPayload(publication, fixtures);
   if (
     !Number.isSafeInteger(publication.observedDeskGeneration) ||
@@ -418,7 +412,7 @@ export async function checkpointLiveMatchDetailV3(
             AND ${liveMatchDetailCheckpointsInFpl.generation} < excluded.generation
           )
           OR (
-            ${allowFinalizedReplacementForCutover}
+            ${allowV2ReplacementForCutover}
             AND ${liveMatchDetailCheckpointsInFpl.contractVersion} = 'live-matches-v2'
             AND excluded.contract_version = 'live-matches-v3'
             AND ${liveMatchDetailCheckpointsInFpl.publicationId} <> excluded.publication_id
