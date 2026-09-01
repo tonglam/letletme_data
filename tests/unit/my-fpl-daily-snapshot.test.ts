@@ -260,6 +260,14 @@ describe('My FPL daily snapshot publication contract', () => {
     );
   });
 
+  test('replays a delivered manifest when the derived Redis pointer is lost', () => {
+    expect(publicationService).toContain('requeueDeliveredMyFplSnapshotPublication');
+    expect(publicationService).toMatch(/status = 'DELIVERED'/);
+    expect(publicationService).toMatch(/status = 'PENDING'/);
+    expect(worker).toContain('const replay = await dispatchMyFplSnapshotPublicationOutbox');
+    expect(worker).toContain('Redis replay left ${replay.failed}');
+  });
+
   test('allows the full current-season refresh barrier to settle', () => {
     expect(queueRunBarrier).toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 30 * 60_000');
     expect(queueRunBarrier).not.toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 10 * 60_000');

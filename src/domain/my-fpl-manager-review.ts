@@ -33,6 +33,8 @@ export type MyFplManagerReviewGameweekInput = Readonly<{
   eventAutoSubPoints: number;
   eventChip: string;
   eventCaptainPoints: number;
+  /** Extra points awarded by the Assistant Manager chip, outside player picks. */
+  assistantManagerPoints: number;
   /** Whether the selected (non-vice) captain produced no qualifying return. */
   captainBlank: boolean;
   playedCaptainElement: number | null;
@@ -71,6 +73,7 @@ export type MyFplManagerPositionPoints = Readonly<{
   defender: number;
   midfielder: number;
   forward: number;
+  assistantManager: number;
   total: number;
 }>;
 
@@ -103,6 +106,7 @@ export type MyFplManagerGameweekReview = Readonly<{
   lineupBasePoints: number;
   bestElevenPoints: number;
   benchRegretPoints: number | null;
+  assistantManagerPoints: number;
   positionPoints: MyFplManagerPositionPoints;
   captain: MyFplManagerCaptainReview;
   automaticSubstitutions: readonly MyFplManagerAutomaticSubstitution[];
@@ -195,6 +199,7 @@ const emptyPositionPoints = (): MutablePositionPoints => ({
   defender: 0,
   midfielder: 0,
   forward: 0,
+  assistantManager: 0,
   total: 0,
 });
 
@@ -284,6 +289,8 @@ const buildGameweekReview = (
     positionPoints[key] += contribution;
     positionPoints.total += contribution;
   }
+  positionPoints.assistantManager = gameweek.assistantManagerPoints;
+  positionPoints.total += gameweek.assistantManagerPoints;
 
   const captain =
     gameweek.picks.find((pick) => pick.element === gameweek.playedCaptainElement) ?? null;
@@ -319,6 +326,7 @@ const buildGameweekReview = (
       gameweek.status === 'PROVISIONAL' || gameweek.eventChip === 'BENCH_BOOST'
         ? null
         : Math.max(0, bestElevenPoints - lineupBasePoints),
+    assistantManagerPoints: gameweek.assistantManagerPoints,
     positionPoints,
     captain: {
       captainElement: captain?.element ?? null,
@@ -445,7 +453,14 @@ const buildSummary = (timeline: readonly MyFplManagerTimelineRow[]): MyFplManage
         gameweeks: (current?.gameweeks ?? 0) + 1,
       });
     }
-    for (const key of ['goalkeeper', 'defender', 'midfielder', 'forward', 'total'] as const) {
+    for (const key of [
+      'goalkeeper',
+      'defender',
+      'midfielder',
+      'forward',
+      'assistantManager',
+      'total',
+    ] as const) {
       positionPoints[key] += row.review.positionPoints[key];
     }
     if (row.status !== 'FINAL' || row.overallRankDelta === null) {

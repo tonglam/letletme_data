@@ -1022,6 +1022,11 @@ const managerReviewGameweekInput = (
   picks: readonly JsonRecord[],
   status: MyFplSnapshotKind,
 ): MyFplManagerReviewGameweekInput => {
+  const eventChip = chip(result.event_chip);
+  const playerPoints = picks.reduce(
+    (sum, pick) => sum + integerValue(pick.totalPoints) * integerValue(pick.multiplier),
+    0,
+  );
   const playedCaptain = picks.find(
     (pick) => integerValue(pick.element) === result.played_captain_element_id,
   );
@@ -1037,8 +1042,9 @@ const managerReviewGameweekInput = (
     eventNetPoints: result.event_net_points,
     eventBenchPoints: result.event_bench_points ?? 0,
     eventAutoSubPoints: result.event_auto_sub_points ?? 0,
-    eventChip: chip(result.event_chip),
+    eventChip,
     eventCaptainPoints: result.captain_points ?? 0,
+    assistantManagerPoints: eventChip === 'MANAGER' ? result.event_points - playerPoints : 0,
     captainBlank: isBlankManagerCaptain(picks),
     playedCaptainElement: result.played_captain_element_id,
     playedCaptainWebName: typeof playedCaptain?.webName === 'string' ? playedCaptain.webName : null,
@@ -1736,6 +1742,46 @@ export async function isManagerReviewV2MyFplPublication(
       counts.total_count === expectedEntryRows &&
       counts.v2_count === expectedEntryRows,
   );
+}
+
+/**
+ * Redis is a derived pointer, so a missing/corrupt pointer must not force a
+ * new source capture when PostgreSQL already has the active complete
+ * publication.  Re-open its delivered receipt for the normal CAS delivery
+ * path; the worker can then settle the pointer without mixing revisions.
+ */
+export async function requeueDeliveredMyFplSnapshotPublication(
+  season: FplSeasonRef,
+  eventId: number,
+  revision: number,
+): Promise<boolean> {
+  if (!Number.isSafeInteger(revision) || revision <= 0) return false;
+  const rows = await (
+    await getDbClient()
+  ).begin(
+    async (tx) =>
+      tx<{ outbox_id: string }[]>`
+      UPDATE competition.my_fpl_snapshot_publication_outbox outbox
+      SET status = 'PENDING',
+          available_at = clock_timestamp(),
+          delivered_at = NULL,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          last_error = 'Redis manifest missing or invalid; replaying durable publication',
+          updated_at = clock_timestamp()
+      FROM competition.my_fpl_snapshot_publications publication
+      WHERE outbox.season_id = ${season.seasonId}
+        AND outbox.event_id = ${eventId}
+        AND outbox.revision = ${revision}
+        AND outbox.status = 'DELIVERED'
+        AND publication.season_id = outbox.season_id
+        AND publication.event_id = outbox.event_id
+        AND publication.revision = outbox.revision
+        AND publication.active = true
+      RETURNING outbox.outbox_id
+    `,
+  );
+  return rows.length === 1;
 }
 
 export async function hasFinalMyFplPublication(

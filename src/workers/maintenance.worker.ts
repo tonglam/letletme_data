@@ -30,6 +30,7 @@ import {
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
   isManagerReviewV2MyFplPublication,
+  requeueDeliveredMyFplSnapshotPublication,
   type MyFplSnapshotOutboxDeliveryEvidence,
   type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
@@ -348,6 +349,33 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 freshnessWindowId: job.data.freshnessWindowId,
                 publication: active,
                 redisRevision: redisManifest.revision,
+              });
+              return { status: 'noop', publication: active };
+            }
+            await requeueDeliveredMyFplSnapshotPublication(season, eventId, active.revision);
+            const replay = await dispatchMyFplSnapshotPublicationOutbox({
+              limit: 1,
+              seasonCode: season.seasonCode,
+              eventId,
+            });
+            if (replay.failed > 0) {
+              throw new Error(
+                `My FPL snapshot Redis replay left ${replay.failed} delivery receipt(s) for retry`,
+              );
+            }
+            const replayedManifest = await getActiveMyFplSnapshotRedisManifest(
+              season.seasonCode,
+              eventId,
+            );
+            if (
+              replayedManifest?.seasonCode === season.seasonCode &&
+              replayedManifest.eventId === eventId &&
+              replayedManifest.revision === active.revision
+            ) {
+              await recordMyFplOutboxRedisEvidence({
+                freshnessWindowId: job.data.freshnessWindowId,
+                publication: active,
+                redisRevision: replayedManifest.revision,
               });
               return { status: 'noop', publication: active };
             }

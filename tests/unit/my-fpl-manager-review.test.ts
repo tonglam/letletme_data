@@ -64,6 +64,7 @@ const gameweek = (
   eventAutoSubPoints: eventId === 2 ? 12 : 0,
   eventChip: eventId === 2 ? 'WILDCARD' : 'NONE',
   eventCaptainPoints: 18,
+  assistantManagerPoints: 0,
   captainBlank: false,
   playedCaptainElement: 10,
   playedCaptainWebName: 'Player 10',
@@ -228,5 +229,22 @@ describe('My FPL manager review', () => {
     ]);
 
     expect(review.timeline[0]?.review.lineupBasePoints).toBe(49);
+  });
+
+  test('keeps Assistant Manager points in the position breakdown and total', () => {
+    const review = buildMyFplManagerReview(1, [
+      gameweek(1, { eventChip: 'MANAGER', assistantManagerPoints: 7 }),
+    ]);
+
+    expect(review.timeline[0]?.review.assistantManagerPoints).toBe(7);
+    expect(review.timeline[0]?.review.positionPoints.assistantManager).toBe(7);
+    expect(review.timeline[0]?.review.positionPoints.total).toBe(
+      review.timeline[0]!.review.positionPoints.goalkeeper +
+        review.timeline[0]!.review.positionPoints.defender +
+        review.timeline[0]!.review.positionPoints.midfielder +
+        review.timeline[0]!.review.positionPoints.forward +
+        7,
+    );
+    expect(review.summary.positionPoints.assistantManager).toBe(7);
   });
 });
