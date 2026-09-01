@@ -78,9 +78,13 @@ export async function runTournamentReviewBackfill(
   const [marker] = await db<
     {
       backfill_completed_at: Date | string | null;
+      restore_rehearsal_required: boolean;
+      restore_rehearsal_completed_at: Date | string | null;
     }[]
   >`
-    SELECT backfill_completed_at
+    SELECT backfill_completed_at,
+           restore_rehearsal_required,
+           restore_rehearsal_completed_at
     FROM ops.tournament_review_v2_1_backup_manifest
     WHERE season_id = ${season.seasonId}
     ORDER BY created_at DESC
@@ -88,6 +92,9 @@ export async function runTournamentReviewBackfill(
   `;
   if (!marker) {
     throw new Error('V2.1 review backfill refused: migration 0084 backup manifest is missing');
+  }
+  if (marker.restore_rehearsal_required || marker.restore_rehearsal_completed_at === null) {
+    throw new Error('V2.1 review backfill refused: restore rehearsal evidence is missing');
   }
   if (marker.backfill_completed_at !== null) {
     return {

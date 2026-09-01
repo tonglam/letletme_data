@@ -155,6 +155,7 @@ jobs:
             deployment_started=false
             deployment_committed=false
             migration_started=false
+            review_restore_rehearsal_passed=false
             services_start_attempted=false
             services_stopped=false
             old_runtime_rollback_eligible=false
@@ -391,6 +392,9 @@ jobs:
               echo "deploy preflight: DATABASE_URL missing from $migration_env_file"
               exit 1
             fi
+            database_restore_rehearsal_url=${DATABASE_RESTORE_REHEARSAL_URL:-$(read_env_setting DATABASE_RESTORE_REHEARSAL_URL "$migration_env_file")}
+            export DATABASE_RESTORE_REHEARSAL_URL="$database_restore_rehearsal_url"
+            export MIGRATION_DATABASE_URL="$migration_database_url"
             if [ -z "${LIVE_POINTS_V2_SEED_SEASON:-}" ]; then
               LIVE_POINTS_V2_SEED_SEASON=$(read_env_setting LIVE_POINTS_V2_SEED_SEASON "$env_file")
             fi
@@ -580,6 +584,14 @@ jobs:
             cat "$final_queue_probe_output"
             rm -f "$final_queue_probe_output"
             APP_IMAGE="$IMAGE_REF" compose --profile migration run --rm -T --interactive=false backup
+            if [ "$review_hard_cut_pending" = true ]; then
+              if ! run_tournament_review_restore_rehearsal \
+                "$DATABASE_RESTORE_REHEARSAL_URL" "$migration_database_url"; then
+                echo 'deploy: My Tournament Review V2.1 restore rehearsal failed; migration was not started' >&2
+                exit 1
+              fi
+              review_restore_rehearsal_passed=true
+            fi
             finish_stage
 
             x_scan_setting=$(read_env_setting CONTENT_X_SCAN_ENABLED "$env_file" | tr '[:upper:]' '[:lower:]' || true)
@@ -617,12 +629,20 @@ jobs:
 
             migration_started=true
             start_stage migration
-            APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migrate
+            if [ "$review_restore_rehearsal_passed" = true ]; then
+              MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES \
+                APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false \
+                -e MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL migration bun run db:migrate
+            else
+              APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migrate
+            fi
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migration-contract
             finish_stage
             start_stage reviewBackfill
-            if [ "$review_hard_cut_pending" = true ] || [ "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ]; then
+            if [ "$review_hard_cut_pending" = true ] || \
+              [ "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ] || \
+              review_backfill_marker_pending "$data_runtime_database_url"; then
               if ! run_tournament_review_hard_cut_backfill "$LIVE_POINTS_V2_SEED_SEASON" "$data_runtime_database_url"; then
                 echo 'deploy: My Tournament Review V2.1 backfill failed; services remain stopped' >&2
                 exit 1

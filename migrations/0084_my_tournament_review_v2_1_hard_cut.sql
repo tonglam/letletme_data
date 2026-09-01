@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
   heads_sha256 text NOT NULL,
   obligations_sha256 text NOT NULL,
   restore_rehearsal_required boolean NOT NULL DEFAULT true,
+  restore_rehearsal_completed_at timestamptz,
   backfill_completed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT tournament_review_v2_1_backup_manifest_sha_check CHECK (
@@ -90,6 +91,16 @@ BEGIN
     -- current-season data to back up or reset in that case.
     RAISE NOTICE '0084 skipped current-season backup/reset because no current FPL season exists';
     RETURN;
+  END IF;
+
+  -- The deployment runs verify-backup-restore.sh against a disposable
+  -- database before invoking the migration and passes the result as a
+  -- transaction-local setting. Refuse to create the destructive backup/reset
+  -- transaction without that proof; this prevents a direct migration run
+  -- from deleting the only recoverable current-season review rows.
+  IF current_setting('letletme.review_restore_rehearsal', true) IS DISTINCT FROM 'true' THEN
+    RAISE EXCEPTION
+      '0084 restore rehearsal is required before current-season review reset';
   END IF;
 
   -- Copy only the current season.  Historical descriptive-v1 evidence remains
@@ -137,10 +148,11 @@ BEGIN
   INSERT INTO ops.tournament_review_v2_1_backup_manifest (
     season_id, publications_rows, heads_rows, obligations_rows,
     publication_revision_distribution, publications_sha256, heads_sha256,
-    obligations_sha256
+    obligations_sha256, restore_rehearsal_required, restore_rehearsal_completed_at
   ) VALUES (
     current_season, publication_count, head_count, obligation_count,
-    revision_distribution, publication_sha, head_sha, obligation_sha
+    revision_distribution, publication_sha, head_sha, obligation_sha,
+    false, clock_timestamp()
   );
 
   -- Current-season V1/V2 publication identity is intentionally invalidated;

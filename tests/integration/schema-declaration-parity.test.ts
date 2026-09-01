@@ -33,31 +33,6 @@ const SQL_OWNED_DECLARATION_UNREPRESENTABLE_INDEXES = [
   'entry_event_pick_heads_event_entry_idx',
 ] as const;
 
-// The hard-cut backup copies are deliberately SQL-owned. They are immutable
-// recovery evidence, not application tables, so they are excluded from the
-// Drizzle declaration parity comparison while remaining visible in the
-// migration and trust-boundary inventories.
-const SQL_OWNED_DECLARATION_RELATIONS = new Set([
-  'competition:tournament_review_publications_0084_backup',
-  'competition:tournament_review_heads_0084_backup',
-  'competition:tournament_review_obligations_0084_backup',
-  'ops:tournament_review_v2_1_backup_manifest',
-]);
-
-function isSqlOwnedDeclarationRelation(signature: string): boolean {
-  try {
-    const value = JSON.parse(signature) as unknown;
-    return (
-      Array.isArray(value) &&
-      typeof value[0] === 'string' &&
-      typeof value[1] === 'string' &&
-      SQL_OWNED_DECLARATION_RELATIONS.has(`${value[0]}:${value[1]}`)
-    );
-  } catch {
-    return false;
-  }
-}
-
 const SIGNATURE_QUERIES = {
   relations: `
     SELECT jsonb_build_array(namespace.nspname, relation.relname, relation.relkind)::text AS signature
@@ -162,9 +137,7 @@ async function readRows<T extends Record<string, unknown>>(
 
 async function readSignatures(client: postgres.Sql, query: string): Promise<string[]> {
   const rows = await readRows<{ signature: string }>(client, query);
-  return rows
-    .map((row) => row.signature)
-    .filter((signature) => !isSqlOwnedDeclarationRelation(signature));
+  return rows.map((row) => row.signature);
 }
 
 async function readConstraints(client: postgres.Sql): Promise<ConstraintRow[]> {
@@ -272,20 +245,8 @@ parityTest(
             'sync_runs_publication_id_dataset_publications_publication_id_fk',
         ),
       ).toBeDefined();
-      expect(
-        exportedConstraints
-          .filter(
-            (row) =>
-              !SQL_OWNED_DECLARATION_RELATIONS.has(`${row.schema_name}:${row.relation_name}`),
-          )
-          .map(normalizeConstraint),
-      ).toEqual(
-        migratedConstraints
-          .filter(
-            (row) =>
-              !SQL_OWNED_DECLARATION_RELATIONS.has(`${row.schema_name}:${row.relation_name}`),
-          )
-          .map(normalizeConstraint),
+      expect(exportedConstraints.map(normalizeConstraint)).toEqual(
+        migratedConstraints.map(normalizeConstraint),
       );
 
       const migratedIndexes = await readIndexes(migrated);
@@ -314,7 +275,6 @@ parityTest(
         exportedIndexes
           .filter(
             (row) =>
-              !SQL_OWNED_DECLARATION_RELATIONS.has(`${row.schema_name}:${row.relation_name}`) &&
               !sqlOwnedNames.has(row.index_name) &&
               !declarationUnrepresentableNames.has(row.index_name),
           )
@@ -323,7 +283,6 @@ parityTest(
         migratedIndexes
           .filter(
             (row) =>
-              !SQL_OWNED_DECLARATION_RELATIONS.has(`${row.schema_name}:${row.relation_name}`) &&
               !sqlOwnedNames.has(row.index_name) &&
               !declarationUnrepresentableNames.has(row.index_name),
           )

@@ -49,6 +49,7 @@ const APPROVED_BACKDATED_MIGRATIONS = new Map([
 ]);
 const STORAGE_MIGRATION = process.argv.includes('--storage-migration');
 const STORAGE_MIGRATION_APPLY = process.argv.includes('--apply');
+const RESTORE_REHEARSAL_APPROVED = process.env.MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL === 'YES';
 
 if (STORAGE_MIGRATION_APPLY && !STORAGE_MIGRATION) {
   throw new Error('--apply is only valid together with --storage-migration');
@@ -299,6 +300,17 @@ async function applyMigration(migration: Migration): Promise<void> {
   await sql.begin(async (transaction) => {
     await transaction`SELECT set_config('lock_timeout', '5s', true)`;
     await transaction`SELECT set_config('statement_timeout', '15min', true)`;
+    // Migration 0084 reads this transaction-local flag before deleting the
+    // current-season review rows. It is set only after the deployment gate
+    // completes a disposable restore rehearsal, so a direct/manual run fails
+    // closed instead of silently skipping that recovery proof.
+    await transaction`
+      SELECT set_config(
+        'letletme.review_restore_rehearsal',
+        ${RESTORE_REHEARSAL_APPROVED ? 'true' : 'false'},
+        true
+      )
+    `;
     await transaction.unsafe(migration.contents);
     await transaction`
       INSERT INTO ops.schema_migrations (filename, checksum)

@@ -90,6 +90,7 @@ ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
 DEPLOY_REVIEW_HARD_CUT_PENDING=false
+DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=false
 DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
 DEPLOY_OLD_IMAGE_ID=''
@@ -317,6 +318,9 @@ deploy() {
     log_error "DATABASE_URL missing from ${MIGRATION_ENV_FILE}"
     exit 1
   fi
+  database_restore_rehearsal_url=${DATABASE_RESTORE_REHEARSAL_URL:-$(read_env_setting DATABASE_RESTORE_REHEARSAL_URL "${MIGRATION_ENV_FILE}")}
+  export DATABASE_RESTORE_REHEARSAL_URL="${database_restore_rehearsal_url}"
+  export MIGRATION_DATABASE_URL="${migration_database_url}"
   data_runtime_database_url=$(sed -n 's/^DATABASE_URL=//p' "${ENV_FILE}" | sed -e 's/^"//' -e 's/"$//')
   if [[ -z "${data_runtime_database_url}" ]]; then
     log_error "DATABASE_URL missing from ${ENV_FILE}"
@@ -487,6 +491,15 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  if [[ "$DEPLOY_REVIEW_HARD_CUT_PENDING" = true ]]; then
+    if ! run_tournament_review_restore_rehearsal \
+      "$DATABASE_RESTORE_REHEARSAL_URL" "$migration_database_url"; then
+      log_error "My Tournament Review V2.1 restore rehearsal failed; migration was not started."
+      restore_stopped_services
+      exit 1
+    fi
+    DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=true
+  fi
   finish_stage
   x_scan_setting=$(read_env_setting CONTENT_X_SCAN_ENABLED "$ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
   real_grok_setting=$(read_env_setting CONTENT_REAL_GROK_ENABLED "$ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
@@ -524,7 +537,14 @@ deploy() {
   start_stage migration
   DEPLOY_MIGRATION_STARTED=true
   log_info "Running migrations"
-  if ! compose run --rm -T --interactive=false migration bun run db:migrate; then
+  if [[ "$DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED" = true ]]; then
+    if ! MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES \
+      compose run --rm -T --interactive=false \
+      -e MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL migration bun run db:migrate; then
+      log_error "SQL migrations failed after the restore rehearsal; aborting deploy before services start."
+      exit 1
+    fi
+  elif ! compose run --rm -T --interactive=false migration bun run db:migrate; then
     log_error "SQL migrations failed; aborting deploy before services start."
     exit 1
   fi
@@ -535,7 +555,9 @@ deploy() {
   fi
   finish_stage
   start_stage reviewBackfill
-  if [[ "$DEPLOY_REVIEW_HARD_CUT_PENDING" = true || "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ]]; then
+  if [[ "$DEPLOY_REVIEW_HARD_CUT_PENDING" = true ||
+    "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ||
+    "$(review_backfill_marker_pending "$data_runtime_database_url" && printf true || printf false)" = true ]]; then
     if ! run_tournament_review_hard_cut_backfill \
       "$LIVE_POINTS_V2_SEED_SEASON" "$data_runtime_database_url"; then
       log_error "My Tournament Review V2.1 backfill failed; services remain stopped."

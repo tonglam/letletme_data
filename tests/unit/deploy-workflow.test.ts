@@ -337,11 +337,20 @@ describe('release workflow gates', () => {
 
   test('drains the destructive review reset before runtime startup', () => {
     expect(deployStateMachine).toContain('run_tournament_review_hard_cut_backfill');
+    expect(deployStateMachine).toContain('run_tournament_review_restore_rehearsal');
+    expect(deployStateMachine).toContain('DATABASE_RESTORE_REHEARSAL_URL is required');
+    expect(deployStateMachine).toContain('review_backfill_marker_pending');
     expect(deployStateMachine).toContain('Data runtime DATABASE_URL is required');
     expect(deployStateMachine).toContain(
       '-e DATABASE_URL -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM',
     );
     expect(deployScript).toContain('DEPLOY_REVIEW_HARD_CUT_PENDING=true');
+    expect(deployScript).toContain('DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=true');
+    expect(deployScript).toContain('MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES');
+    expect(deployScript).toContain('review_backfill_marker_pending');
+    expect(workflow).toContain('review_restore_rehearsal_passed=true');
+    expect(workflow).toContain('MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES');
+    expect(workflow).toContain('review_backfill_marker_pending');
     expect(deployScript).toContain('migration-scoped gate skipped');
     expect(deployStateMachine).toContain('MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES');
     expect(deployStateMachine).toContain('--batch-size 100 --max-batches 10000');

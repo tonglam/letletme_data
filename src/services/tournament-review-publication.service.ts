@@ -13,6 +13,8 @@ import { logError, logInfo } from '../utils/logger';
  * current-season writer or by downstream readers. */
 export const TOURNAMENT_REVIEW_SCHEMA_VERSION = 'my-tournament-review-v2.1';
 export const TOURNAMENT_REVIEW_METRIC_VERSION = 'settled-review-v2';
+const TOURNAMENT_REVIEW_REACTIVATION_REASON =
+  'scope reactivated after temporary review-window retirement';
 
 export type TournamentReviewFormat = 'POINTS' | 'H2H' | 'KNOCKOUT';
 export type TournamentReviewObligationState =
@@ -417,39 +419,105 @@ function reviewChunksMatchPayload(
   const manifest = isRecord(payload.manifest) ? payload.manifest : null;
   const descriptors = manifest && Array.isArray(manifest.sections) ? manifest.sections : null;
   if (!manifest || !descriptors) return false;
-  const expected = descriptors.flatMap((section) => {
-    if (!isRecord(section) || typeof section.sectionKey !== 'string') return [];
-    const hashes = Array.isArray(section.chunkHashes) ? section.chunkHashes : [];
-    return hashes.map((chunkSha256, chunkIndex) => ({
-      sectionKey: section.sectionKey,
-      chunkIndex,
-      itemCount:
-        chunkIndex === hashes.length - 1
-          ? Number(section.itemCount) - 100 * (hashes.length - 1)
-          : 100,
-      chunkSha256,
-    }));
-  });
-  if (expected.length !== rows.length || Number(manifest.chunkCount) !== rows.length) return false;
+  const sectionCount = Number(manifest.sectionCount);
+  const chunkCount = Number(manifest.chunkCount);
+  if (
+    !Number.isSafeInteger(sectionCount) ||
+    sectionCount < 0 ||
+    !Number.isSafeInteger(chunkCount) ||
+    chunkCount < 0 ||
+    descriptors.length !== sectionCount
+  ) {
+    return false;
+  }
+  const expected = [] as Array<{
+    sectionKey: string;
+    chunkIndex: number;
+    itemCount: number;
+    chunkSha256: string;
+  }>;
+  const sectionKeys = new Set<string>();
+  for (const section of descriptors) {
+    if (
+      !isRecord(section) ||
+      typeof section.sectionKey !== 'string' ||
+      section.sectionKey.length === 0 ||
+      sectionKeys.has(section.sectionKey) ||
+      !Array.isArray(section.chunkHashes)
+    ) {
+      return false;
+    }
+    const itemCount = Number(section.itemCount);
+    const declaredChunkCount = Number(section.chunkCount);
+    const hashes = section.chunkHashes;
+    const expectedChunkCount = Math.max(1, Math.ceil(Math.max(0, itemCount) / 100));
+    if (
+      !Number.isSafeInteger(itemCount) ||
+      itemCount < 0 ||
+      !Number.isSafeInteger(declaredChunkCount) ||
+      declaredChunkCount !== hashes.length ||
+      declaredChunkCount !== expectedChunkCount ||
+      !hashes.every(
+        (chunkSha256): chunkSha256 is string =>
+          typeof chunkSha256 === 'string' && /^[0-9a-f]{64}$/.test(chunkSha256),
+      )
+    ) {
+      return false;
+    }
+    const sectionKey = section.sectionKey;
+    sectionKeys.add(sectionKey);
+    hashes.forEach((chunkSha256, chunkIndex) => {
+      const remaining = itemCount - chunkIndex * 100;
+      expected.push({
+        sectionKey,
+        chunkIndex,
+        itemCount: Math.min(100, Math.max(0, remaining)),
+        chunkSha256,
+      });
+    });
+  }
+  if (expected.length !== rows.length || expected.length !== chunkCount) return false;
+  const expectedKeys = new Set(expected.map((chunk) => `${chunk.sectionKey}:${chunk.chunkIndex}`));
   const actual = new Map(rows.map((row) => [`${row.section_key}:${Number(row.chunk_index)}`, row]));
-  return expected.every((chunk) => {
-    const row = actual.get(`${chunk.sectionKey}:${chunk.chunkIndex}`);
-    const storedItems = row?.items;
-    const storedItemsSha = Array.isArray(storedItems)
-      ? createHash('sha256').update(postgresJsonbCanonicalJson(storedItems), 'utf8').digest('hex')
-      : null;
-    return Boolean(
-      row &&
-        Number.isInteger(chunk.itemCount) &&
-        chunk.itemCount >= 0 &&
-        chunk.itemCount <= 100 &&
-        Number(row.item_count) === chunk.itemCount &&
-        row.chunk_sha256 === chunk.chunkSha256 &&
-        storedItemsSha === chunk.chunkSha256 &&
-        Array.isArray(storedItems) &&
-        storedItems.length === chunk.itemCount,
-    );
-  });
+  if (actual.size !== rows.length) return false;
+  if (
+    [...actual.keys()].some((key) => !expectedKeys.has(key)) ||
+    [...expectedKeys].some((key) => !actual.has(key))
+  ) {
+    return false;
+  }
+  return (
+    expected.every((chunk) => {
+      const row = actual.get(`${chunk.sectionKey}:${chunk.chunkIndex}`);
+      const storedItems = row?.items;
+      const storedItemsSha = Array.isArray(storedItems)
+        ? createHash('sha256').update(postgresJsonbCanonicalJson(storedItems), 'utf8').digest('hex')
+        : null;
+      return Boolean(
+        row &&
+          Number.isInteger(chunk.itemCount) &&
+          chunk.itemCount >= 0 &&
+          chunk.itemCount <= 100 &&
+          Number(row.item_count) === chunk.itemCount &&
+          row.chunk_sha256 === chunk.chunkSha256 &&
+          storedItemsSha === chunk.chunkSha256 &&
+          Array.isArray(storedItems) &&
+          storedItems.length === chunk.itemCount,
+      );
+    }) &&
+    [...sectionKeys].every((sectionKey) => {
+      const descriptor = descriptors.find(
+        (candidate) => isRecord(candidate) && candidate.sectionKey === sectionKey,
+      );
+      if (!descriptor || !isRecord(descriptor)) return false;
+      const itemCount = Number(descriptor.itemCount);
+      const sectionRows = rows.filter((row) => row.section_key === sectionKey);
+      return (
+        sectionRows.length === Number(descriptor.chunkCount) &&
+        sectionRows.reduce((total, row) => total + Number(row.item_count), 0) === itemCount
+      );
+    })
+  );
 }
 
 function orderedReviewChunkHashes(
@@ -3159,6 +3227,7 @@ export async function reconcileTournamentReviewObligations(
              candidate.tournament_payload,
              candidate.format,
              existing.eligible_at AS existing_eligible_at,
+             history.historical_revision,
              existing.metadata_payload AS existing_metadata_payload,
              existing.group_assignment_payload AS existing_group_assignment_payload,
              previous.payload AS existing_payload,
@@ -3230,6 +3299,13 @@ export async function reconcileTournamentReviewObligations(
         ON existing.season_id = ${season.seasonId}
        AND existing.tournament_id = candidate.tournament_id
        AND existing.event_id = candidate.event_id
+      LEFT JOIN LATERAL (
+        SELECT max(publication.revision) AS historical_revision
+        FROM competition.tournament_review_publications publication
+        WHERE publication.season_id = ${season.seasonId}
+          AND publication.tournament_id = candidate.tournament_id
+          AND publication.event_id = candidate.event_id
+      ) history ON true
       LEFT JOIN LATERAL (
         SELECT CASE publication.format
                  WHEN 'POINTS' THEN jsonb_set(
@@ -3316,6 +3392,7 @@ export async function reconcileTournamentReviewObligations(
       SELECT state.tournament_id,
              state.event_id,
              state.format,
+             state.historical_revision,
              state.tournament_payload,
              state.entry_metadata_payload,
              state.group_assignment_payload,
@@ -3532,7 +3609,7 @@ export async function reconcileTournamentReviewObligations(
       ) source ON true
       WHERE state.format IS NOT NULL
     ), valid_candidates AS (
-      SELECT tournament_id, event_id, format, eligible_at, tournament_payload,
+      SELECT tournament_id, event_id, format, eligible_at, historical_revision, tournament_payload,
              entry_metadata_payload, group_assignment_payload
       FROM candidates
     ), stored_scopes AS (
@@ -3581,10 +3658,20 @@ export async function reconcileTournamentReviewObligations(
     ), upserted AS (
     INSERT INTO competition.tournament_review_obligations
       (season_id, tournament_id, event_id, format, state, eligible_at, first_eligible_at, next_attempt_at,
-       metadata_payload, entry_metadata_payload, group_assignment_payload)
+       metadata_payload, entry_metadata_payload, group_assignment_payload,
+       correction_reason, correction_change_id)
     SELECT ${season.seasonId}, tournament_id, event_id, format, 'PENDING', eligible_at, eligible_at,
            GREATEST(eligible_at, ${now.toISOString()}::timestamptz),
-           tournament_payload, entry_metadata_payload, group_assignment_payload
+           tournament_payload, entry_metadata_payload, group_assignment_payload,
+           CASE
+             WHEN historical_revision IS NOT NULL THEN ${TOURNAMENT_REVIEW_REACTIVATION_REASON}
+             ELSE NULL
+           END,
+           CASE
+             WHEN historical_revision IS NOT NULL THEN
+               concat('SYSTEM-REACTIVATION:', ${season.seasonId}::text, ':', tournament_id::text, ':', event_id::text)
+             ELSE NULL
+           END
     FROM valid_candidates
     ON CONFLICT (season_id, tournament_id, event_id) DO UPDATE
     SET format = EXCLUDED.format,

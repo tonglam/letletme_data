@@ -115,6 +115,14 @@ describe('My Tournament Review V2 migration', () => {
     expect(hardCutMigration).toContain('tournament_review_v2_1_backup_manifest');
     expect(hardCutMigration).toContain('publication_revision_distribution jsonb');
     expect(hardCutMigration).toContain('backfill_completed_at timestamptz');
+    expect(hardCutMigration).toContain('restore_rehearsal_required boolean');
+    expect(hardCutMigration).toContain('restore_rehearsal_completed_at timestamptz');
+    expect(hardCutMigration).toContain(
+      String.raw`current_setting('letletme.review_restore_rehearsal', true) IS DISTINCT FROM 'true'`,
+    );
+    expect(hardCutMigration).toContain(
+      'restore rehearsal is required before current-season review reset',
+    );
     expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_heads');
     expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_publications');
     expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_obligations');
@@ -169,6 +177,9 @@ describe('My Tournament Review V2 migration', () => {
     expect(backfillScript).toContain('season.seasonId !== currentSeason.seasonId');
     expect(backfillScript).toContain('--season ${args.season} is not the current FPL season');
     expect(backfillScript).toContain('backfill_completed_at');
+    expect(backfillScript).toContain('restore_rehearsal_required');
+    expect(backfillScript).toContain('restore_rehearsal_completed_at');
+    expect(backfillScript).toContain('restore rehearsal evidence is missing');
     expect(backfillScript).toContain('migration 0084 backup manifest is missing');
   });
 });

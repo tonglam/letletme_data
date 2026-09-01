@@ -2354,6 +2354,206 @@ export const tournamentReviewPublicationChunksInCompetition = competition.table(
   ],
 );
 
+/**
+ * Immutable recovery copies created by migration 0084 before the current
+ * season review rows are reset.  These are deliberately typed rather than
+ * hidden behind a parity-test exemption: the backup is an operational
+ * contract and its shape must remain reviewable alongside the live tables.
+ *
+ * The publication/obligation copies intentionally describe the pre-V2.1
+ * columns that exist at the point where `CREATE TABLE ... LIKE ...` runs.
+ * Later correction/observation columns belong only to the live V2.1 tables.
+ */
+export const tournamentReviewPublications0084BackupInCompetition = competition.table(
+  'tournament_review_publications_0084_backup',
+  {
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    format: text().notNull(),
+    schemaVersion: text('schema_version').default('my-tournament-review-v2').notNull(),
+    metricVersion: text('metric_version').default('descriptive-v1').notNull(),
+    eventDataCheckedAt: timestamp('event_data_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    sourceMinCheckedAt: timestamp('source_min_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    sourceMaxCheckedAt: timestamp('source_max_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    expectedSubjectCount: integer('expected_subject_count').notNull(),
+    readySubjectCount: integer('ready_subject_count').notNull(),
+    notApplicableSubjectCount: integer('not_applicable_subject_count').default(0).notNull(),
+    rowCount: integer('row_count').notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    payload: jsonb().notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.tournamentId, table.eventId, table.revision],
+      name: 'tournament_review_publications_0084_backup_pkey',
+    }),
+    uniqueIndex('tournament_review_publication_season_id_tournament_id_event_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.eventId,
+      table.contentSha256,
+    ),
+    index('tournament_review_publication_season_id_tournament_id_even_idx1').on(
+      table.seasonId,
+      table.tournamentId,
+      table.eventId,
+      table.publishedAt.desc().nullsLast(),
+    ),
+    check('tournament_review_publications_revision_positive', sql`revision > 0`),
+    check(
+      'tournament_review_publications_format_check',
+      sql`format IN ('POINTS', 'H2H', 'KNOCKOUT')`,
+    ),
+    check(
+      'tournament_review_publications_versions_check',
+      sql`schema_version = 'my-tournament-review-v2' AND metric_version = 'descriptive-v1'`,
+    ),
+    check(
+      'tournament_review_publications_counts_check',
+      sql`expected_subject_count >= 0 AND ready_subject_count >= 0 AND not_applicable_subject_count >= 0 AND ready_subject_count + not_applicable_subject_count = expected_subject_count AND row_count >= 0`,
+    ),
+    check('tournament_review_publications_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'`),
+    check(
+      'tournament_review_publications_payload_check',
+      sql`jsonb_typeof(payload) = 'object' AND payload ->> 'schemaVersion' = schema_version AND payload ->> 'metricVersion' = metric_version AND payload ->> 'format' = format AND ((format = 'POINTS' AND payload ? 'points' AND NOT (payload ? 'h2h') AND NOT (payload ? 'knockout')) OR (format = 'H2H' AND payload ? 'h2h' AND NOT (payload ? 'points') AND NOT (payload ? 'knockout')) OR (format = 'KNOCKOUT' AND payload ? 'knockout' AND NOT (payload ? 'points') AND NOT (payload ? 'h2h')))`,
+    ),
+    check(
+      'tournament_review_publications_source_span_check',
+      sql`source_min_checked_at <= event_data_checked_at AND event_data_checked_at <= source_max_checked_at AND source_max_checked_at <= published_at`,
+    ),
+  ],
+);
+
+export const tournamentReviewHeads0084BackupInCompetition = competition.table(
+  'tournament_review_heads_0084_backup',
+  {
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.tournamentId, table.eventId],
+      name: 'tournament_review_heads_0084_backup_pkey',
+    }),
+    index('tournament_review_heads_0084__season_id_tournament_id_event_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.eventId.desc().nullsLast(),
+    ),
+    check('tournament_review_heads_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
+export const tournamentReviewObligations0084BackupInCompetition = competition.table(
+  'tournament_review_obligations_0084_backup',
+  {
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    format: text().notNull(),
+    state: text().default('PENDING').notNull(),
+    eligibleAt: timestamp('eligible_at', { withTimezone: true, mode: 'date' }).notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
+    executionAttempts: integer('execution_attempts').default(0).notNull(),
+    sourceRechecks: integer('source_rechecks').default(0).notNull(),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    firstAttemptAt: timestamp('first_attempt_at', { withTimezone: true, mode: 'date' }),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true, mode: 'date' }),
+    readyAt: timestamp('ready_at', { withTimezone: true, mode: 'date' }),
+    degradedAt: timestamp('degraded_at', { withTimezone: true, mode: 'date' }),
+    readyRevision: bigint('ready_revision', { mode: 'number' }),
+    lastErrorCode: text('last_error_code'),
+    lastFailureFingerprint: text('last_failure_fingerprint'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    metadataPayload: jsonb('metadata_payload'),
+    entryMetadataPayload: jsonb('entry_metadata_payload'),
+    groupAssignmentPayload: jsonb('group_assignment_payload'),
+    firstEligibleAt: timestamp('first_eligible_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.tournamentId, table.eventId],
+      name: 'tournament_review_obligations_0084_backup_pkey',
+    }),
+    index('tournament_review_obligations_next_attempt_at_season_id_tou_idx')
+      .on(table.nextAttemptAt, table.seasonId, table.tournamentId, table.eventId)
+      .where(
+        sql`state IN ('PENDING', 'WAITING_SOURCE', 'DEGRADED') AND next_attempt_at IS NOT NULL`,
+      ),
+    index('tournament_review_obligations_lease_expires_at_season_id_to_idx')
+      .on(table.leaseExpiresAt, table.seasonId, table.tournamentId, table.eventId)
+      .where(sql`state = 'PROCESSING'`),
+    check(
+      'tournament_review_obligations_format_check',
+      sql`format IN ('POINTS', 'H2H', 'KNOCKOUT')`,
+    ),
+    check(
+      'tournament_review_obligations_state_check',
+      sql`state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING', 'READY', 'DEGRADED')`,
+    ),
+    check(
+      'tournament_review_obligations_attempts_check',
+      sql`execution_attempts >= 0 AND source_rechecks >= 0`,
+    ),
+    check(
+      'tournament_review_obligations_lease_check',
+      sql`(lease_owner IS NULL AND lease_expires_at IS NULL) OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)`,
+    ),
+    check(
+      'tournament_review_obligations_ready_check',
+      sql`(state = 'READY' AND ready_at IS NOT NULL AND ready_revision IS NOT NULL) OR (state <> 'READY' AND ready_revision IS NULL)`,
+    ),
+    check(
+      'tournament_review_obligations_fingerprint_check',
+      sql`last_failure_fingerprint IS NULL OR last_failure_fingerprint ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'tournament_review_obligations_metadata_payload_check',
+      sql`metadata_payload IS NULL OR jsonb_typeof(metadata_payload) = 'object'`,
+    ),
+    check(
+      'tournament_review_obligations_entry_metadata_payload_check',
+      sql`entry_metadata_payload IS NULL OR jsonb_typeof(entry_metadata_payload) = 'array'`,
+    ),
+    check(
+      'tournament_review_obligations_group_assignment_payload_check',
+      sql`group_assignment_payload IS NULL OR jsonb_typeof(group_assignment_payload) = 'object'`,
+    ),
+  ],
+);
+
 export const tournamentGroupsInCompetition = competition.table(
   'tournament_groups',
   {

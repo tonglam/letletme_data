@@ -1317,6 +1317,56 @@ run_migration_plan() {
   compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
 }
 
+review_backfill_marker_pending() {
+  local runtime_database_url=${1:-${DATA_RUNTIME_DATABASE_URL:-}}
+  [[ -n "$runtime_database_url" ]] || return 1
+  local marker_state
+  marker_state=$(DATABASE_URL="$runtime_database_url" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL migration bun -e '
+      import postgres from "postgres";
+      const db = postgres(process.env.DATABASE_URL, { max: 1 });
+      const rows = await db`SELECT backfill_completed_at FROM ops.tournament_review_v2_1_backup_manifest ORDER BY created_at DESC LIMIT 1`;
+      process.stdout.write(rows.length === 0 ? "missing" : rows[0].backfill_completed_at === null ? "pending" : "complete");
+      await db.end();
+    ' 2>/dev/null | tail -n 1)
+  [[ "$marker_state" = pending ]]
+}
+
+run_tournament_review_restore_rehearsal() {
+  local rehearsal_url=${1:-${DATABASE_RESTORE_REHEARSAL_URL:-}}
+  local source_url=${2:-${MIGRATION_DATABASE_URL:-}}
+  if [[ -z "$rehearsal_url" ]]; then
+    echo 'deploy review restore rehearsal: DATABASE_RESTORE_REHEARSAL_URL is required for migration 0084' >&2
+    return 1
+  fi
+  if [[ -n "$source_url" && "$rehearsal_url" = "$source_url" ]]; then
+    echo 'deploy review restore rehearsal: target must be a disposable database distinct from the source' >&2
+    return 1
+  fi
+  local dump_path
+  dump_path=$(find "$DATABASE_BACKUP_DIR" -maxdepth 1 -type f -name 'letletme-data-*.dump' \
+    -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 { sub(/^[^ ]+ /, ""); print; exit }')
+  if [[ -z "$dump_path" || ! -s "$dump_path" ]]; then
+    echo 'deploy review restore rehearsal: no complete pre-migration dump found' >&2
+    return 1
+  fi
+  local dump_base=${dump_path%.dump}
+  if [[ ! -s "${dump_base}.sha256" || ! -s "${dump_base}.manifest.json" ]]; then
+    echo 'deploy review restore rehearsal: dump sidecars are missing' >&2
+    return 1
+  fi
+  echo 'deploy review restore rehearsal: restoring the verified pre-migration dump into disposable infrastructure'
+  DATABASE_RESTORE_REHEARSAL_URL="$rehearsal_url" \
+    DATABASE_RESTORE_DUMP_PATH="$dump_path" \
+    compose --profile migration run --rm -T --interactive=false --no-deps \
+    -e DATABASE_RESTORE_REHEARSAL_URL -e DATABASE_RESTORE_DUMP_PATH \
+    --entrypoint sh backup -euc '
+      exec bash /app/scripts/verify-backup-restore.sh \
+        "$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL"
+    '
+}
+
 run_tournament_review_hard_cut_backfill() {
   local season=${1:-}
   local runtime_database_url=${2:-${DATA_RUNTIME_DATABASE_URL:-}}
