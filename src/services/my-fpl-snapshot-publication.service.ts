@@ -494,8 +494,21 @@ type EventResult = {
   team_value: number | null;
   bank: number | null;
   rich_synced_at: Date | string | null;
+  event_data_checked_at: Date | string | null;
   input_revision: string | null;
   score_revision: string | null;
+};
+
+const isFinalFenceEventResult = (
+  row: Pick<EventResult, 'rich_synced_at' | 'event_data_checked_at'>,
+): boolean => {
+  const richSyncedAt = row.rich_synced_at ? new Date(row.rich_synced_at).getTime() : Number.NaN;
+  const dataCheckedAt = row.event_data_checked_at
+    ? new Date(row.event_data_checked_at).getTime()
+    : Number.NaN;
+  return (
+    Number.isFinite(richSyncedAt) && Number.isFinite(dataCheckedAt) && richSyncedAt >= dataCheckedAt
+  );
 };
 
 type EntrySource = {
@@ -1184,6 +1197,7 @@ const projectedResult = (
     // intentionally has no rich result timestamp. Publication provenance is
     // carried separately by the My FPL header.
     rich_synced_at: null,
+    event_data_checked_at: null,
     input_revision: score.inputRevision ?? null,
     score_revision: score.revision,
   };
@@ -1210,7 +1224,8 @@ const projectedScoreUsesCaptureInputs = (
     (row) =>
       row.entry_id === entryId && row.event_id >= firstScoringEvent && row.event_id < eventId,
   );
-  const previousTotal = previousEntryResults.reduce(
+  const fencedPreviousEntryResults = previousEntryResults.filter(isFinalFenceEventResult);
+  const previousTotal = fencedPreviousEntryResults.reduce(
     (sum, row) => sum + (row.event_net_points ?? 0),
     0,
   );
@@ -1233,13 +1248,14 @@ const projectedScoreUsesCaptureInputs = (
     })),
     previousTotal: eventId === firstScoringEvent ? 0 : previousTotal,
     previousTotalsThroughEventId: eventId > firstScoringEvent ? eventId - 1 : null,
-    previousResultEvidence: previousEntryResults.map((row) => ({
+    previousResultEvidence: fencedPreviousEntryResults.map((row) => ({
       entryId: row.entry_id,
       eventId: row.event_id,
       sourceResultId: row.source_result_id,
       eventNetPoints: row.event_net_points,
       richSyncedAt: row.rich_synced_at ? new Date(row.rich_synced_at) : null,
       updatedAt: new Date(row.updated_at),
+      dataCheckedAt: row.event_data_checked_at ? new Date(row.event_data_checked_at) : null,
     })),
   });
   return (
@@ -2081,6 +2097,7 @@ async function captureMyFplSnapshotOnce(
              result.event_chip::text, result.played_captain_element_id, result.captain_points,
              result.event_picks,
              result.automatic_substitutions, result.team_value, result.bank, result.rich_synced_at,
+             result_event.data_checked_at AS event_data_checked_at,
              NULL::text AS input_revision, NULL::text AS score_revision
       FROM competition.entry_event_results result
       JOIN fpl.events result_event
@@ -2448,6 +2465,7 @@ async function captureMyFplSnapshotOnce(
             eventNetPoints: row.event_net_points,
             richSyncedAt: row.rich_synced_at ? new Date(row.rich_synced_at) : null,
             updatedAt: new Date(row.updated_at),
+            dataCheckedAt: row.event_data_checked_at ? new Date(row.event_data_checked_at) : null,
           })),
         },
       });
