@@ -213,7 +213,7 @@ async function hasFinalLiveLeagueCheckpointsV2(
  * rebuild an entry input still exist.  Redis retention is a serving policy,
  * not evidence that a final entry can be reconstructed after a cold rebuild.
  */
-function hasDurableFinalEntryInput(entryId: SQL): SQL {
+function hasDurableFinalEntryInput(seasonCode: string, entryId: SQL): SQL {
   return sql`
     EXISTS (
       SELECT 1
@@ -228,6 +228,59 @@ function hasDurableFinalEntryInput(entryId: SQL): SQL {
         -- cannot reconstruct previous totals or provider-side facts.
         AND input_head.input_payload IS NOT NULL
         AND jsonb_typeof(input_head.input_payload) = 'object'
+        -- Keep the set-based target query aligned with the V2 input validator;
+        -- the recovery worker still performs the complete semantic check.
+        AND input_head.input_payload ?& ARRAY[
+          'contractVersion', 'season', 'eventId', 'entryId', 'picksBase',
+          'previousTotals', 'officialAdjustment', 'finalResult'
+        ]
+        AND input_head.input_payload->>'contractVersion' = 'live-points-v2'
+        AND input_head.input_payload->>'season' = ${seasonCode}
+        AND input_head.input_payload->>'eventId' = ${eventsInFpl.eventId}::text
+        AND input_head.input_payload->>'entryId' = input_head.entry_id::text
+        AND jsonb_typeof(input_head.input_payload->'picksBase') = 'object'
+        AND input_head.input_payload->'picksBase' ?& ARRAY[
+          'revision', 'contentUpdatedAt', 'picks', 'chip', 'transferCount', 'transferCost'
+        ]
+        AND input_head.input_payload->'picksBase'->>'revision' ~ '^[0-9a-f]{64}$'
+        AND jsonb_typeof(input_head.input_payload->'picksBase'->'contentUpdatedAt') = 'string'
+        AND input_head.input_payload->'picksBase'->>'contentUpdatedAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+        AND jsonb_typeof(input_head.input_payload->'picksBase'->'picks') = 'array'
+        AND CASE
+          WHEN jsonb_typeof(input_head.input_payload->'picksBase'->'picks') = 'array'
+          THEN jsonb_array_length(input_head.input_payload->'picksBase'->'picks') = 15
+          ELSE false
+        END
+        AND jsonb_typeof(input_head.input_payload->'picksBase'->'chip') IN ('null', 'string')
+        AND jsonb_typeof(input_head.input_payload->'picksBase'->'transferCount') = 'number'
+        AND jsonb_typeof(input_head.input_payload->'picksBase'->'transferCost') = 'number'
+        AND (
+          input_head.input_payload->'picksBase'->>'transferCount'
+        )::numeric >= 0
+        AND (
+          input_head.input_payload->'picksBase'->>'transferCost'
+        )::numeric >= 0
+        AND (
+          jsonb_typeof(input_head.input_payload->'previousTotals') = 'null'
+          OR (
+            jsonb_typeof(input_head.input_payload->'previousTotals') = 'object'
+            AND input_head.input_payload->'previousTotals'->>'revision' ~ '^[0-9a-f]{64}$'
+          )
+        )
+        AND (
+          jsonb_typeof(input_head.input_payload->'officialAdjustment') = 'null'
+          OR (
+            jsonb_typeof(input_head.input_payload->'officialAdjustment') = 'object'
+            AND input_head.input_payload->'officialAdjustment'->>'revision' ~ '^[0-9a-f]{64}$'
+          )
+        )
+        AND (
+          jsonb_typeof(input_head.input_payload->'finalResult') = 'null'
+          OR (
+            jsonb_typeof(input_head.input_payload->'finalResult') = 'object'
+            AND input_head.input_payload->'finalResult'->>'revision' ~ '^[0-9a-f]{64}$'
+          )
+        )
         AND EXISTS (
           SELECT 1
           FROM competition.entry_event_picks AS input_pick
@@ -809,7 +862,9 @@ export async function findLivePublicationV2FinalizationTargets(
                     AND final_entry.entry_id = final_roster.entry_id
                     AND (final_entry.started_event IS NULL OR final_entry.started_event <= ${eventsInFpl.eventId})
                 )
-                AND NOT (${hasDurableFinalEntryInput(sql.raw('final_roster.entry_id'))})
+                AND NOT (
+                  ${hasDurableFinalEntryInput(season.seasonCode, sql.raw('final_roster.entry_id'))}
+                )
             )
           )
           OR (
@@ -902,7 +957,9 @@ export async function findLivePublicationV2FinalizationTargets(
                   AND knockout.official_match_id IS NOT NULL
               ) AS final_h2h_entry
               WHERE final_h2h_entry.entry_id IS NOT NULL
-                AND NOT (${hasDurableFinalEntryInput(sql.raw('final_h2h_entry.entry_id'))})
+                AND NOT (
+                  ${hasDurableFinalEntryInput(season.seasonCode, sql.raw('final_h2h_entry.entry_id'))}
+                )
             )
           )
         )
