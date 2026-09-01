@@ -400,6 +400,21 @@ describe('My Tournament Review V2 format and retry policy', () => {
     ).not.toBe(tournamentReviewSemanticSha256(first, ['a'.repeat(64)]));
   });
 
+  test('makes correction retries idempotent by Change ID and keeps status JSON fail-closed', () => {
+    expect(publicationSource).toContain(
+      'previousHead[0]?.correction_change_id === correction.changeId',
+    );
+    expect(publicationSource).toContain('previousHead[0]?.correction_reason === correction.reason');
+    expect(publicationSource).toContain("state: 'REUSED'");
+    expect(publicationSource).toContain(
+      "jsonb_typeof(publication.payload -> 'manifest') = 'object'",
+    );
+    expect(publicationSource).toContain("jsonb_typeof(section -> 'chunkHashes') = 'array'");
+    expect(publicationSource).toContain(
+      "(publication.payload -> 'manifest' ->> 'chunkCount')::numeric",
+    );
+  });
+
   test('splits review sections into bounded deterministic chunks', () => {
     const chunks = splitTournamentReviewChunks({
       format: 'POINTS',

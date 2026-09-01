@@ -2326,6 +2326,8 @@ async function publishTournamentReviewScopeOnce(
         publication_content_sha256: string;
         published_at: Date | string;
         obligation_state: TournamentReviewObligationState | null;
+        correction_reason: string | null;
+        correction_change_id: string | null;
         row_count: number;
         expected_subject_count: number;
         ready_subject_count: number;
@@ -2340,6 +2342,8 @@ async function publishTournamentReviewScopeOnce(
              publication.content_sha256 AS publication_content_sha256,
              head.published_at,
              obligation.state AS obligation_state,
+             publication.correction_reason,
+             publication.correction_change_id,
              publication.row_count,
              publication.expected_subject_count,
              publication.ready_subject_count,
@@ -2380,16 +2384,27 @@ async function publishTournamentReviewScopeOnce(
     // A finalized scope is an immutable business snapshot.  Routine source
     // refreshes (or a duplicate scheduler delivery) must not move its head;
     // only the service-only correction entry point below may create revision 2+.
-    if (
-      !correction &&
-      previousHead[0]?.obligation_state === 'READY' &&
+    const previousPublicationIsCoherent =
+      previousHead[0] !== undefined &&
       previousHead[0].publication_content_sha256 === previousHead[0].content_sha256 &&
       reviewChunksMatchPayload(previousHead[0].payload, previousChunks) &&
       tournamentReviewSemanticSha256(
         previousHead[0].payload,
         orderedReviewChunkHashes(previousChunks),
-      ) === previousHead[0].content_sha256
-    ) {
+      ) === previousHead[0].content_sha256;
+    const routineReuse = !correction && previousHead[0]?.obligation_state === 'READY';
+    // A correction command is idempotent by Change ID.  If the transaction
+    // committed the new publication but the worker lost its lease before
+    // marking the obligation READY, a retry must reuse that exact revision
+    // instead of minting another correction revision.
+    const correctionReuse =
+      correction !== undefined &&
+      previousHead[0]?.correction_change_id === correction.changeId &&
+      previousHead[0]?.correction_reason === correction.reason &&
+      (previousHead[0]?.obligation_state === 'PROCESSING' ||
+        previousHead[0]?.obligation_state === 'READY' ||
+        previousHead[0]?.obligation_state === 'PENDING');
+    if (previousPublicationIsCoherent && (routineReuse || correctionReuse)) {
       const publishedAt = asDate(previousHead[0].published_at) ?? new Date();
       await tx`
         UPDATE competition.tournament_review_obligations
@@ -4133,37 +4148,53 @@ export async function getTournamentReviewV2OperationalStatus(
                publication.revision AS publication_revision,
                publication.content_sha256 AS publication_content_sha256,
                COALESCE(
-                 (
-                   publication.payload -> 'manifest' ->> 'chunkCount' ~ '^[0-9]+$'
-                   AND (
-                     SELECT count(*)::integer
-                     FROM competition.tournament_review_publication_chunks chunk
-                     WHERE chunk.season_id = obligation.season_id
-                       AND chunk.tournament_id = obligation.tournament_id
-                       AND chunk.event_id = obligation.event_id
-                       AND chunk.revision = head.revision
-                   ) = (publication.payload -> 'manifest' ->> 'chunkCount')::integer
-                   AND NOT EXISTS (
-                     SELECT 1
-                     FROM jsonb_array_elements(
-                       COALESCE(publication.payload -> 'manifest' -> 'sections', '[]'::jsonb)
-                     ) section,
-                     LATERAL jsonb_array_elements_text(
-                       COALESCE(section -> 'chunkHashes', '[]'::jsonb)
-                     ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
-                     WHERE NOT EXISTS (
-                       SELECT 1
+                 CASE
+                   -- Guard every JSON expansion and numeric conversion. A
+                   -- corrupt manifest is evidence of an incoherent head, not
+                   -- a reason for /jobs/status to fail with a 500.
+                   WHEN jsonb_typeof(publication.payload) = 'object'
+                    AND jsonb_typeof(publication.payload -> 'manifest') = 'object'
+                    AND (publication.payload -> 'manifest' ->> 'chunkCount') ~ '^[0-9]+$'
+                   THEN (
+                     (
+                       SELECT count(*)::numeric
                        FROM competition.tournament_review_publication_chunks chunk
                        WHERE chunk.season_id = obligation.season_id
                          AND chunk.tournament_id = obligation.tournament_id
                          AND chunk.event_id = obligation.event_id
                          AND chunk.revision = head.revision
-                         AND chunk.section_key = section ->> 'sectionKey'
-                         AND chunk.chunk_index = expected.chunk_ordinal - 1
-                         AND chunk.chunk_sha256 = expected.expected_hash
+                     ) = (publication.payload -> 'manifest' ->> 'chunkCount')::numeric
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM jsonb_array_elements(
+                         CASE
+                           WHEN jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                             THEN publication.payload -> 'manifest' -> 'sections'
+                           ELSE '[]'::jsonb
+                         END
+                       ) section
+                       CROSS JOIN LATERAL jsonb_array_elements_text(
+                         CASE
+                           WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
+                             THEN section -> 'chunkHashes'
+                           ELSE '[]'::jsonb
+                         END
+                       ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
+                       WHERE NOT EXISTS (
+                         SELECT 1
+                         FROM competition.tournament_review_publication_chunks chunk
+                         WHERE chunk.season_id = obligation.season_id
+                           AND chunk.tournament_id = obligation.tournament_id
+                           AND chunk.event_id = obligation.event_id
+                           AND chunk.revision = head.revision
+                           AND chunk.section_key = section ->> 'sectionKey'
+                           AND chunk.chunk_index = expected.chunk_ordinal - 1
+                           AND chunk.chunk_sha256 = expected.expected_hash
+                       )
                      )
                    )
-                 ),
+                   ELSE false
+                 END,
                  false
                ) AS chunks_complete
         FROM competition.tournament_review_obligations obligation
