@@ -1354,8 +1354,8 @@ run_tournament_review_restore_rehearsal() {
     echo 'deploy review restore rehearsal: DATABASE_RESTORE_REHEARSAL_URL is required for migration 0084' >&2
     return 1
   fi
-  if [[ -n "$source_url" && "$rehearsal_url" = "$source_url" ]]; then
-    echo 'deploy review restore rehearsal: target must be a disposable database distinct from the source' >&2
+  if [[ -z "$source_url" ]]; then
+    echo 'deploy review restore rehearsal: source database URL is required for identity verification' >&2
     return 1
   fi
   local dump_path
@@ -1370,14 +1370,17 @@ run_tournament_review_restore_rehearsal() {
     echo 'deploy review restore rehearsal: dump sidecars are missing' >&2
     return 1
   fi
+  local container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"
   echo 'deploy review restore rehearsal: restoring the verified pre-migration dump into disposable infrastructure'
   DATABASE_RESTORE_REHEARSAL_URL="$rehearsal_url" \
-    DATABASE_RESTORE_DUMP_PATH="$dump_path" \
+    DATABASE_RESTORE_SOURCE_URL="$source_url" \
+    DATABASE_RESTORE_DUMP_PATH="$container_dump_path" \
     compose --profile migration run --rm -T --interactive=false --no-deps \
     -e DATABASE_RESTORE_REHEARSAL_URL -e DATABASE_RESTORE_DUMP_PATH \
+    -e DATABASE_RESTORE_SOURCE_URL \
     --entrypoint sh backup -euc '
       exec bash /app/scripts/verify-backup-restore.sh \
-        "$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL"
+        "$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL" "$DATABASE_RESTORE_SOURCE_URL"
     '
 }
 

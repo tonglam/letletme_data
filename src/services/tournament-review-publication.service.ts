@@ -2863,17 +2863,30 @@ async function resetTournamentReviewScopesForCorrection(
         ${targetEventId}::integer IS NULL
         OR (
           candidate.event_id >= ${targetEventId}
-          AND EXISTS (
-            SELECT 1
-            FROM competition.tournament_review_heads head
-            JOIN competition.tournament_review_obligations obligation
-              ON obligation.season_id = head.season_id
-             AND obligation.tournament_id = head.tournament_id
-             AND obligation.event_id = head.event_id
-            WHERE head.season_id = ${season.seasonId}
-              AND head.tournament_id = ${tournamentId}
-              AND head.event_id = candidate.event_id
-              AND obligation.state = 'READY'
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM competition.tournament_review_heads head
+              JOIN competition.tournament_review_obligations obligation
+                ON obligation.season_id = head.season_id
+               AND obligation.tournament_id = head.tournament_id
+               AND obligation.event_id = head.event_id
+              WHERE head.season_id = ${season.seasonId}
+                AND head.tournament_id = ${tournamentId}
+                AND head.event_id = candidate.event_id
+                AND obligation.state = 'READY'
+            )
+            OR (
+              candidate.event_id = ${targetEventId}
+              AND EXISTS (
+                SELECT 1
+                FROM competition.tournament_review_obligations obligation
+                WHERE obligation.season_id = ${season.seasonId}
+                  AND obligation.tournament_id = ${tournamentId}
+                  AND obligation.event_id = candidate.event_id
+                  AND obligation.state = 'PROCESSING'
+              )
+            )
           )
         )
       )
