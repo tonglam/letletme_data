@@ -41,6 +41,13 @@ function schedulerRegistryNames(): readonly string[] {
 }
 
 describe('runtime inventory documentation contract', () => {
+  test('does not advertise the retired live league finalization marker', () => {
+    const redisContract = read('docs/redis-contract.md');
+    expect(redisContract).not.toContain('league-live:<season>:<event>:finalization-desired');
+    expect(redisContract).toContain('ops.scheduler_obligations');
+    expect(redisContract).toContain('checkpoint-desired');
+  });
+
   test('documents every executable queue name', () => {
     const source = read('src/queues/names.ts');
     const queueNames = [

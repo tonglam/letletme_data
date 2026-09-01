@@ -616,6 +616,9 @@ export async function findLivePublicationV2FinalizationTargets(
       WHERE league_tournament.season_id = ${eventsInFpl.seasonId}
         AND league_tournament.state = 'active'
         AND league_tournament.setup_status = 'ready'
+        -- League payload inputs are retained in Redis for 48 hours. Do not
+        -- keep scheduling a scope that can no longer be rebuilt from them.
+        AND ${eventsInFpl.dataCheckedAt} >= clock_timestamp() - interval '48 hours'
         AND (
           (
             league_tournament.league_type = 'classic'

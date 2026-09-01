@@ -63,17 +63,16 @@ llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-standings:active|p
 llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-head:<generation>:index|payload
 llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-match-<matchId>:<generation>:index|payload
 llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-standings:<generation>:index|payload
-
-llm:data:v2:fpl:league-live:<season>:<event>:finalization-desired
 ```
 
 `index` and `payload` are immutable siblings and are accepted only when their
 manifest metadata, byte length, and SHA-256 agree. Active pointers have no TTL
 during live operation; previous pointers/items retain 24 hours, finalized
-siblings retain 48 hours, and the finalization marker retains seven days.
-Data alone promotes and checkpoints these keys. GraphQL is read-only and must
-select one coherent current/previous/checkpoint publication; it never builds a
-league board by reading entry inputs one at a time.
+siblings retain 48 hours. Data alone promotes these keys. Finalization retry
+state is durable in `ops.scheduler_obligations`; the latest checkpoint desired
+publication is retained in the scope's `checkpoint-desired` key. GraphQL is
+read-only and must select one coherent current/previous/checkpoint publication;
+it never builds a league board by reading entry inputs one at a time.
 
 Live Matches V3 uses an independent namespace. It is fed by the same coherent
 fixtures/event-live observation as Live Points, but desk and player detail are

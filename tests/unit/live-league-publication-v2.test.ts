@@ -8,7 +8,10 @@ import {
   type LeagueLiveScope,
 } from '../../src/cache/live-league-publication-v2';
 import { liveLeagueCheckpointIsDue } from '../../src/services/live-league-checkpoint-v2.service';
-import { isH2HTournamentPhaseActive } from '../../src/services/live-league-publication-v2.service';
+import {
+  isH2HTournamentPhaseActive,
+  isTimestampAtOrAfter,
+} from '../../src/services/live-league-publication-v2.service';
 
 const scope: LeagueLiveScope = {
   season: '2627',
@@ -185,5 +188,20 @@ describe('Live League V2 H2H phase window', () => {
         7,
       ),
     ).toBe(false);
+  });
+});
+
+describe('Live League V2 finalization freshness fences', () => {
+  test('accepts source evidence at or after the event finalization boundary', () => {
+    const boundary = '2026-08-30T00:00:00.000Z';
+    expect(isTimestampAtOrAfter(boundary, boundary)).toBe(true);
+    expect(isTimestampAtOrAfter('2026-08-30T00:00:01.000Z', boundary)).toBe(true);
+  });
+
+  test('rejects stale, missing, and invalid source evidence', () => {
+    const boundary = '2026-08-30T00:00:00.000Z';
+    expect(isTimestampAtOrAfter('2026-08-29T23:59:59.000Z', boundary)).toBe(false);
+    expect(isTimestampAtOrAfter(null, boundary)).toBe(false);
+    expect(isTimestampAtOrAfter('not-a-time', boundary)).toBe(false);
   });
 });

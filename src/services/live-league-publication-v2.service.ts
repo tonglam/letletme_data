@@ -56,6 +56,8 @@ type ClassicRosterRow = {
   lastOverallRank: number | null;
   lastTeamValue: number | null;
   lastBank: number | null;
+  profileUpdatedAt: Date | string | null;
+  finalizationAt: Date | string | null;
 };
 
 type CompleteClassicRosterRow = ClassicRosterRow & {
@@ -130,7 +132,17 @@ function expectedNextCheckAt(sourceCheckedAt: string, provided?: Date | string |
   return new Date(source.getTime() + LIVE_ACTIVE_CADENCE_MS).toISOString();
 }
 
-async function findClassicRosters(season: FplSeasonRef): Promise<ClassicRoster[]> {
+export function isTimestampAtOrAfter(
+  value: Date | string | null,
+  boundary: Date | string | null,
+): boolean {
+  if (value === null || boundary === null) return false;
+  const valueTime = value instanceof Date ? value.getTime() : Date.parse(value);
+  const boundaryTime = boundary instanceof Date ? boundary.getTime() : Date.parse(boundary);
+  return Number.isFinite(valueTime) && Number.isFinite(boundaryTime) && valueTime >= boundaryTime;
+}
+
+async function findClassicRosters(season: FplSeasonRef, eventId: number): Promise<ClassicRoster[]> {
   const client = await getDbClient();
   const rows = await client<ClassicRosterRow[]>`
     SELECT
@@ -151,8 +163,13 @@ async function findClassicRosters(season: FplSeasonRef): Promise<ClassicRoster[]
       -- publication contract exposes absence as null, never as a fake rank.
       NULLIF(entry.last_overall_rank, 0) AS "lastOverallRank",
       entry.last_team_value AS "lastTeamValue",
-      entry.last_bank AS "lastBank"
+      entry.last_bank AS "lastBank",
+      entry.updated_at AS "profileUpdatedAt",
+      event.data_checked_at AS "finalizationAt"
     FROM competition.tournaments AS tournament
+    INNER JOIN fpl.events AS event
+      ON event.season_id = tournament.season_id
+     AND event.event_id = ${eventId}
     INNER JOIN competition.tournament_entries AS roster
       ON roster.season_id = tournament.season_id
      AND roster.tournament_id = tournament.tournament_id
@@ -185,7 +202,7 @@ function buildRevisions(
   payload: Record<string, unknown>,
 ): LeagueLiveRevisionVector {
   if (!global) throw new Error('Cannot build a league publication without global publication');
-  const identity = roster.rows.map((row) => ({
+  const identity = index.map((row) => ({
     entryId: row.entryId,
     entryName: row.entryName,
     playerName: row.playerName,
@@ -209,12 +226,21 @@ function buildRevisions(
   }));
   const algorithm = contentHash(LIVE_LEAGUE_ALGORITHM_VERSION);
   return {
-    roster: contentHash(roster.rows.map(({ tournamentId: _tournamentId, ...row }) => row)),
+    roster: contentHash(
+      roster.rows.map(
+        ({
+          tournamentId: _tournamentId,
+          profileUpdatedAt: _profileUpdatedAt,
+          finalizationAt: _finalizationAt,
+          ...row
+        }) => row,
+      ),
+    ),
     scoreCore: global.publication.revisions.scoreCore.revision,
     fixtureIdentity: global.publication.revisions.fixtureIdentity.revision,
     entryInputSet: contentHash(entryInputSet),
     identity: contentHash(identity),
-    officialRank: contentHash(roster.rows.map((row) => [row.entryId, row.overallRank])),
+    officialRank: contentHash(index.map((row) => [row.entryId, row.overallRank])),
     rules: global.publication.revisions.rules.revision,
     algorithm,
     schedule: null,
@@ -252,7 +278,11 @@ async function publishClassicRoster(
     global.publication.state !== 'FINALIZED' ||
     eligibleRows.every((row) => {
       const read = inputs.get(row.entryId);
-      return read?.input.finalResult !== null;
+      return (
+        read?.input.finalResult !== null &&
+        read?.input.finalResult !== undefined &&
+        isTimestampAtOrAfter(row.profileUpdatedAt, row.finalizationAt)
+      );
     });
   if (inputs.size !== eligibleRows.length || !allFinal) {
     return 'pending';
@@ -285,6 +315,7 @@ async function publishClassicRoster(
     }
     const read = inputs.get(row.entryId);
     if (!read) throw new Error(`Missing complete live input for entry ${row.entryId}`);
+    const finalResult = read.input.finalResult;
     return {
       entryId: row.entryId,
       availability: 'READY',
@@ -292,7 +323,10 @@ async function publishClassicRoster(
       playerName: row.playerName,
       region: row.region,
       startedEvent: row.startedEvent,
-      overallPoints: row.overallPoints,
+      overallPoints:
+        global.publication.state === 'FINALIZED'
+          ? (finalResult?.score.totalPoints ?? null)
+          : row.overallPoints,
       overallRank: row.overallRank,
       bank: row.bank,
       teamValue: row.teamValue,
@@ -379,7 +413,7 @@ export async function syncLiveClassicLeaguePublicationsV2(
   const redis = await redisSingleton.getClient();
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
-  const rosters = await findClassicRosters(season);
+  const rosters = await findClassicRosters(season, eventId);
   const counts = {
     published: 0,
     unchanged: 0,
@@ -482,6 +516,7 @@ type H2HMatchRow = {
   awayNetPoints: number | null;
   awayIsAverage: boolean;
   sourceCheckedAt: Date | string | null;
+  finalizationAt: Date | string | null;
 };
 
 type H2HStandingRow = {
@@ -610,8 +645,12 @@ async function findOfficialH2HMatches(
       away_entry.player_name AS "awayPlayerName",
       battle.away_net_points AS "awayNetPoints",
       battle.away_is_average AS "awayIsAverage",
-      battle.source_checked_at AS "sourceCheckedAt"
+      battle.source_checked_at AS "sourceCheckedAt",
+      event.data_checked_at AS "finalizationAt"
     FROM competition.tournament_battle_group_results AS battle
+    INNER JOIN fpl.events AS event
+      ON event.season_id = battle.season_id
+     AND event.event_id = battle.event_id
     LEFT JOIN competition.entries AS home_entry
       ON home_entry.season_id = battle.season_id
      AND home_entry.entry_id = battle.home_entry_id
@@ -643,8 +682,12 @@ async function findOfficialH2HMatches(
       away_entry.player_name AS "awayPlayerName",
       knockout.away_net_points AS "awayNetPoints",
       false AS "awayIsAverage",
-      knockout.source_checked_at AS "sourceCheckedAt"
+      knockout.source_checked_at AS "sourceCheckedAt",
+      event.data_checked_at AS "finalizationAt"
     FROM competition.tournament_knockout_results AS knockout
+    INNER JOIN fpl.events AS event
+      ON event.season_id = knockout.season_id
+     AND event.event_id = knockout.event_id
     LEFT JOIN competition.entries AS home_entry
       ON home_entry.season_id = knockout.season_id
      AND home_entry.entry_id = knockout.home_entry_id
@@ -940,7 +983,8 @@ async function publishH2HMatch(
   const finalReadyInput =
     inputReady &&
     (global.publication.state !== 'FINALIZED' ||
-      (finalInputAvailable(row.homeEntryId, row.homeIsAverage, homeRead) &&
+      (isTimestampAtOrAfter(row.sourceCheckedAt, row.finalizationAt) &&
+        finalInputAvailable(row.homeEntryId, row.homeIsAverage, homeRead) &&
         finalInputAvailable(row.awayEntryId, row.awayIsAverage, awayRead)));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',
@@ -1233,20 +1277,10 @@ export async function syncLiveH2HLeaguePublicationsV2(
         global.publication.sourceCheckedAt,
       );
       const finalizationAt = standingsRead.finalizationAt;
-      const finalizationTime =
-        finalizationAt instanceof Date
-          ? finalizationAt.getTime()
-          : Date.parse(String(finalizationAt ?? ''));
-      const standingsSourceTime =
-        standingsRead.sourceCheckedAt === null
-          ? Number.NaN
-          : standingsRead.sourceCheckedAt instanceof Date
-            ? standingsRead.sourceCheckedAt.getTime()
-            : Date.parse(standingsRead.sourceCheckedAt);
-      const standingsFreshForFinal =
-        Number.isFinite(finalizationTime) &&
-        Number.isFinite(standingsSourceTime) &&
-        standingsSourceTime >= finalizationTime;
+      const standingsFreshForFinal = isTimestampAtOrAfter(
+        standingsRead.sourceCheckedAt,
+        finalizationAt,
+      );
       if (!standingsIsFinalized && existingStandings) {
         // Keep the existing official overlay untouched while the event is live.
         // Standings are not derived from live scores.
