@@ -214,9 +214,7 @@ export async function checkpointLiveLeaguePublicationV2(
           tournamentId: read.publication.tournamentId,
           scope: read.publication.scope,
         } as const;
-        if (
-          storedFinalizedCheckpointIsValid(scope, current)
-        ) {
+        if (storedFinalizedCheckpointIsValid(scope, current)) {
           return (
             current.publicationId === read.publication.publicationId ||
             sameFinalizedPublicationContent(read, current)
