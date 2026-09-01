@@ -3618,6 +3618,23 @@ SET
   source_max_checked_at = EXCLUDED.source_max_checked_at,
   updated_at = now();
 
+-- The GraphQL reader hard-cut validates that every active publication carries
+-- the canonical entry/tournament scope hashes exposed by the Data-owned
+-- status view. Populate the fixture from that same authority rather than
+-- duplicating hash literals that could drift when the sentinel roster changes.
+UPDATE competition.my_fpl_snapshot_publications AS publication
+SET entry_scope_sha256 = status.expected_entry_scope_sha256,
+    tournament_scope_sha256 = status.expected_tournament_scope_sha256,
+    updated_at = now()
+FROM reporting.my_fpl_active_snapshot_status AS status
+WHERE publication.season_id = status.season_id
+  AND publication.event_id = status.event_id
+  AND publication.revision = status.revision
+  AND publication.season_id = 2026
+  AND publication.event_id = 1
+  AND publication.revision = (SELECT revision FROM graphql_my_fpl_revision)
+  AND publication.active;
+
 -- Revision is an explicit retained authority row in this fixture. Keep the
 -- producer's global sequence ahead of it so the next canonical capture cannot
 -- allocate a revision below the fixture row and leave Redis/SQL on
@@ -3971,16 +3988,22 @@ SET manifest = jsonb_build_object(
       'eventId', publication.event_id,
       'revision', publication.revision,
       'snapshotDate', publication.snapshot_date,
-      'sourceCheckedAt', publication.source_checked_at,
-      'publishedAt', publication.published_at,
+      'sourceCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+      'publishedAt', to_char(publication.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
       'kind', publication.kind,
       'contentSha256', publication.content_sha256,
+      'expectedEntryCount', publication.expected_entry_count,
+      'observedEntryCount', publication.ready_entry_count + publication.empty_entry_count,
+      'expectedTournamentCount', publication.expected_tournament_count,
+      'observedTournamentCount', publication.ready_tournament_count,
+      'entryScopeSha256', publication.entry_scope_sha256,
+      'tournamentScopeSha256', publication.tournament_scope_sha256,
       'scoreSource', publication.score_source,
       'livePublicationId', NULL,
       'liveRevision', NULL,
       'algorithmVersion', NULL,
-      'sourceMinCheckedAt', publication.source_min_checked_at,
-      'sourceMaxCheckedAt', publication.source_max_checked_at
+      'sourceMinCheckedAt', to_char(publication.source_min_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+      'sourceMaxCheckedAt', to_char(publication.source_max_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     ),
     status = 'PENDING',
     available_at = publication.published_at,
@@ -4023,16 +4046,22 @@ SELECT
     'eventId', publication.event_id,
     'revision', publication.revision,
     'snapshotDate', publication.snapshot_date,
-    'sourceCheckedAt', publication.source_checked_at,
-    'publishedAt', publication.published_at,
+    'sourceCheckedAt', to_char(publication.source_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'publishedAt', to_char(publication.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     'kind', publication.kind,
     'contentSha256', publication.content_sha256,
+    'expectedEntryCount', publication.expected_entry_count,
+    'observedEntryCount', publication.ready_entry_count + publication.empty_entry_count,
+    'expectedTournamentCount', publication.expected_tournament_count,
+    'observedTournamentCount', publication.ready_tournament_count,
+    'entryScopeSha256', publication.entry_scope_sha256,
+    'tournamentScopeSha256', publication.tournament_scope_sha256,
     'scoreSource', publication.score_source,
     'livePublicationId', NULL,
     'liveRevision', NULL,
     'algorithmVersion', NULL,
-    'sourceMinCheckedAt', publication.source_min_checked_at,
-    'sourceMaxCheckedAt', publication.source_max_checked_at
+    'sourceMinCheckedAt', to_char(publication.source_min_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'sourceMaxCheckedAt', to_char(publication.source_max_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
   ),
   'PENDING',
   publication.published_at,
