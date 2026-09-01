@@ -985,53 +985,6 @@ export async function deferSchedulerObligationByIdentity(input: {
 }
 
 /**
- * A worker may finish its Bull attempt successfully after observing that a
- * durable prerequisite is still pending. Keep the exact scheduler generation
- * dispatchable without counting an expected wait as a failed attempt. The
- * generation fence prevents an older worker from deferring a newer generation.
- */
-export async function deferSchedulerObligationForWorker(input: {
-  obligationId: string;
-  generation: number;
-  delayMs?: number;
-  evidence?: Record<string, unknown>;
-  db?: DbHandle;
-}): Promise<boolean> {
-  const db = input.db ?? (await getDb());
-  const delayMs = Math.max(1_000, Math.floor(input.delayMs ?? 60_000));
-  if (!Number.isSafeInteger(input.generation) || input.generation < 0) {
-    throw new Error('Scheduler generation must be a non-negative integer');
-  }
-  if (!Number.isSafeInteger(delayMs)) throw new Error('Scheduler defer delay must be an integer');
-  const updated = await db
-    .update(schedulerObligationsInOps)
-    .set({
-      status: 'pending',
-      dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      bullJobId: null,
-      runId: null,
-      lastError: null,
-      evidence:
-        input.evidence === undefined
-          ? undefined
-          : sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(input.evidence)}::jsonb`,
-      completedAt: null,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(schedulerObligationsInOps.obligationId, input.obligationId),
-        eq(schedulerObligationsInOps.generation, input.generation),
-        eq(schedulerObligationsInOps.status, 'running'),
-      ),
-    )
-    .returning({ obligationId: schedulerObligationsInOps.obligationId });
-  return updated.length === 1;
-}
-
-/**
  * Admission control must defer a claimed obligation instead of failing it.
  * The owner/generation/status fence makes the operation safe when a worker
  * observes DRAIN_ONLY concurrently with another scheduler recovery pass.
