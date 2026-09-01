@@ -281,7 +281,14 @@ async function repairTournamentSetupIssueUnlocked(
   ) {
     await enqueueTournamentReview(season, 'reconcile', {
       tournamentId: issue.tournamentId,
-      ...(issue.eventId === null || issue.eventId === undefined ? {} : { eventId: issue.eventId }),
+      // Structure repair can change group membership, phase boundaries, or a
+      // bracket edge. Rebuild every settled scope rather than assuming the
+      // issue's observed event is the only affected publication.
+      ...(issue.code === 'STRUCTURE_INTEGRITY_FAILED' ||
+      issue.eventId === null ||
+      issue.eventId === undefined
+        ? {}
+        : { eventId: issue.eventId }),
       deduplicationId: `tournament-review-repair-${season.seasonCode}-${issue.tournamentId}-${issue.eventId ?? 'all'}`,
     });
   }

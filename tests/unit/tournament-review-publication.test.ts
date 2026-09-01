@@ -420,10 +420,30 @@ describe('My Tournament Review V2 format and retry policy', () => {
       format: 'POINTS',
       points: {
         rows: Array.from({ length: 205 }, (_, index) => ({ entryId: index + 1 })),
+        trajectoryRows: Array.from({ length: 205 }, (_, index) => ({ entryId: 205 - index })),
       },
     });
     expect(chunks.map((chunk) => chunk.itemCount)).toEqual([100, 100, 5, 100, 100, 5]);
     expect(chunks.every((chunk) => chunk.itemCount <= 100)).toBe(true);
     expect(chunks[0].chunkSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('publishes a distinct rank-ordered trajectory section', () => {
+    const chunks = splitTournamentReviewChunks({
+      format: 'POINTS',
+      points: {
+        rows: [{ entryId: 1 }, { entryId: 2 }],
+        trajectoryRows: [{ entryId: 2 }, { entryId: 1 }],
+      },
+    });
+    expect(chunks.filter((chunk) => chunk.sectionKey === 'POINTS_STANDINGS')[0]?.items).toEqual([
+      { entryId: 1 },
+      { entryId: 2 },
+    ]);
+    expect(chunks.filter((chunk) => chunk.sectionKey === 'POINTS_TRAJECTORIES')[0]?.items).toEqual([
+      { entryId: 2 },
+      { entryId: 1 },
+    ]);
+    expect(chunks[0]?.chunkSha256).not.toBe(chunks[2]?.chunkSha256);
   });
 });

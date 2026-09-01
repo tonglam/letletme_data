@@ -1036,6 +1036,17 @@ async function buildPointsPayload(
     overallPoints: row.overall_points,
     overallRank: row.overall_rank,
   }));
+  // The trajectory section is a deliberate projection of the same frozen
+  // roster, ordered by current rank and then rank movement.  It is not a
+  // second copy of the roster-order standings section: consumers can render
+  // rank movement (previousRank -> rank) without changing the settled values
+  // or inventing a second source of truth.
+  const trajectoryRows = [...pointRows].sort(
+    (left, right) =>
+      sortRank(left.rank, right.rank) ||
+      sortRank(left.previousRank, right.previousRank) ||
+      left.entryId - right.entryId,
+  );
   const grossPoints = applicable.map((row) => integer(row.event_points));
   const netPoints = applicable.map((row) => integer(row.event_net_points));
   return {
@@ -1066,6 +1077,7 @@ async function buildPointsPayload(
           0,
         ),
         rows: pointRows,
+        trajectoryRows,
       },
     },
     rowCount: pointRows.length,
