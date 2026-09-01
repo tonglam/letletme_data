@@ -1319,9 +1319,12 @@ run_migration_plan() {
 
 review_backfill_marker_pending() {
   local runtime_database_url=${1:-${DATA_RUNTIME_DATABASE_URL:-}}
-  [[ -n "$runtime_database_url" ]] || return 1
-  local marker_state
-  marker_state=$(DATABASE_URL="$runtime_database_url" \
+  if [[ -z "$runtime_database_url" ]]; then
+    echo 'deploy review backfill: Data runtime DATABASE_URL is required to inspect the durable marker' >&2
+    return 2
+  fi
+  local marker_output marker_state
+  if ! marker_output=$(DATABASE_URL="$runtime_database_url" \
     compose run --rm -T --interactive=false \
     -e DATABASE_URL migration bun -e '
       import postgres from "postgres";
@@ -1329,8 +1332,19 @@ review_backfill_marker_pending() {
       const rows = await db`SELECT backfill_completed_at FROM ops.tournament_review_v2_1_backup_manifest ORDER BY created_at DESC LIMIT 1`;
       process.stdout.write(rows.length === 0 ? "missing" : rows[0].backfill_completed_at === null ? "pending" : "complete");
       await db.end();
-    ' 2>/dev/null | tail -n 1)
-  [[ "$marker_state" = pending ]]
+    ' 2>/dev/null); then
+    echo 'deploy review backfill: durable marker probe failed; refusing to skip the backfill' >&2
+    return 2
+  fi
+  marker_state=$(printf '%s\n' "$marker_output" | tail -n 1)
+  case "$marker_state" in
+    pending|missing) return 0 ;;
+    complete) return 1 ;;
+    *)
+      echo "deploy review backfill: unexpected durable marker state '$marker_state'" >&2
+      return 2
+      ;;
+  esac
 }
 
 run_tournament_review_restore_rehearsal() {

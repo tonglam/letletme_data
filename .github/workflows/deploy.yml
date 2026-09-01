@@ -640,9 +640,22 @@ jobs:
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun run db:migration-contract
             finish_stage
             start_stage reviewBackfill
+            review_backfill_pending=false
             if [ "$review_hard_cut_pending" = true ] || \
-              [ "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ] || \
-              review_backfill_marker_pending "$data_runtime_database_url"; then
+              [ "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ]; then
+              review_backfill_pending=true
+            else
+              if review_backfill_marker_pending "$data_runtime_database_url"; then
+                review_backfill_pending=true
+              else
+                review_backfill_marker_status=$?
+                if [ "$review_backfill_marker_status" -eq 2 ]; then
+                  echo 'deploy: unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped' >&2
+                  exit 1
+                fi
+              fi
+            fi
+            if [ "$review_backfill_pending" = true ]; then
               if ! run_tournament_review_hard_cut_backfill "$LIVE_POINTS_V2_SEED_SEASON" "$data_runtime_database_url"; then
                 echo 'deploy: My Tournament Review V2.1 backfill failed; services remain stopped' >&2
                 exit 1

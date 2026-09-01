@@ -555,9 +555,22 @@ deploy() {
   fi
   finish_stage
   start_stage reviewBackfill
+  review_backfill_pending=false
   if [[ "$DEPLOY_REVIEW_HARD_CUT_PENDING" = true ||
-    "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ||
-    "$(review_backfill_marker_pending "$data_runtime_database_url" && printf true || printf false)" = true ]]; then
+    "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ]]; then
+    review_backfill_pending=true
+  else
+    if review_backfill_marker_pending "$data_runtime_database_url"; then
+      review_backfill_pending=true
+    else
+      review_backfill_marker_status=$?
+      if [[ "$review_backfill_marker_status" -eq 2 ]]; then
+        log_error "Unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped."
+        exit 1
+      fi
+    fi
+  fi
+  if [[ "$review_backfill_pending" = true ]]; then
     if ! run_tournament_review_hard_cut_backfill \
       "$LIVE_POINTS_V2_SEED_SEASON" "$data_runtime_database_url"; then
       log_error "My Tournament Review V2.1 backfill failed; services remain stopped."

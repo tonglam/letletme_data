@@ -236,6 +236,19 @@ describe('release workflow gates', () => {
     expect(hostGrokRunner).not.toContain(String.raw`from '../utils/logger'`);
   });
 
+  test('fails closed when the durable review backfill marker cannot be read', () => {
+    expect(deployStateMachine).toContain(
+      'durable marker probe failed; refusing to skip the backfill',
+    );
+    expect(deployStateMachine).toContain('pending|missing) return 0');
+    expect(deployScript).toContain(
+      'Unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped.',
+    );
+    expect(workflow).toContain(
+      'unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped',
+    );
+  });
+
   test('isolates the durable media worker and includes it in deployment gates', () => {
     const mediaServiceStart = composeFile.indexOf('  media-worker:');
     const mediaService = composeFile.slice(mediaServiceStart);
