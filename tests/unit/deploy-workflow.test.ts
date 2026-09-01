@@ -312,6 +312,10 @@ describe('release workflow gates', () => {
     expect(workflowV2Seed).toContain('DATABASE_URL="$data_runtime_database_url"');
     expect(workflowV2Seed).toContain('-e DATABASE_URL api');
     expect(workflowV2Seed).not.toContain('-e "DATABASE_URL=$');
+    expect(workflowV2Seed).toContain(
+      'bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized',
+    );
+    expect(workflowV2Seed).not.toContain('bun run db:cutover-seed-live-match-v2');
   });
 
   test('keeps the read-only backup container able to normalize its writable mount', () => {

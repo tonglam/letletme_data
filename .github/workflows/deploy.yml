@@ -645,7 +645,7 @@ jobs:
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
               --all-finalized
             APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false \
-              api bun run db:cutover-seed-live-match-v2 -- --execute --all-finalized \
+              api bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized \
               --season "$LIVE_POINTS_V2_SEED_SEASON" \
               --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"
             finish_stage
