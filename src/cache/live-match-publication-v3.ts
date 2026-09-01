@@ -1620,6 +1620,8 @@ function samePublicationItem(
 /** Restore the exact desk publication identity from a validated PostgreSQL checkpoint. */
 export async function restoreLiveMatchDeskCheckpointV3(input: {
   readonly checkpoint: MatchDeskRead;
+  /** Optional active-detail fence, required by operator desk rebuilds. */
+  readonly observedDetail?: MatchDetailActiveFence | null;
   readonly redis?: Redis;
 }): Promise<{ publication: MatchDeskPublication; published: boolean }> {
   const { publication, fixtures } = input.checkpoint;
@@ -1665,8 +1667,8 @@ export async function restoreLiveMatchDeskCheckpointV3(input: {
       active.validated?.publication.publicationId ?? '',
       active.validated ? String(active.validated.publication.generation) : '',
       'restore',
-      '0',
-      '',
+      input.observedDetail ? '1' : '0',
+      input.observedDetail?.observed ?? '',
     ),
   );
   if (status === 'changed' || status === 'detail_changed') {

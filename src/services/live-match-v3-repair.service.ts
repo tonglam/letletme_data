@@ -385,12 +385,24 @@ async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
         'LIVE_MATCH_REPAIR_CHECKPOINT_MISSING',
       );
     }
+    let observedDetail: MatchDetailActiveFence | null = null;
+    if (request.kind === 'desk') {
+      observedDetail = await requireDeskRepairCompatibility(
+        scope,
+        checkpoint as MatchDeskRead,
+        redis,
+      );
+    }
     if (request.kind === 'detail') {
       await requireDetailRepairCompatibility(scope, checkpoint as MatchDetailRead, redis);
     }
     const result =
       request.kind === 'desk'
-        ? await restoreLiveMatchDeskCheckpointV3({ checkpoint: checkpoint as MatchDeskRead, redis })
+        ? await restoreLiveMatchDeskCheckpointV3({
+            checkpoint: checkpoint as MatchDeskRead,
+            observedDetail,
+            redis,
+          })
         : await restoreLiveMatchDetailCheckpointV3({
             checkpoint: checkpoint as MatchDetailRead,
             redis,
