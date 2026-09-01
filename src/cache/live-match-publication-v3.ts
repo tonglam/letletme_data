@@ -1622,6 +1622,8 @@ export async function restoreLiveMatchDeskCheckpointV3(input: {
   readonly checkpoint: MatchDeskRead;
   /** Optional active-detail fence, required by operator desk rebuilds. */
   readonly observedDetail?: MatchDetailActiveFence | null;
+  /** Future/pre-deadline repairs must not make the eventless pointer live. */
+  readonly promoteActiveEvent?: boolean;
   readonly redis?: Redis;
 }): Promise<{ publication: MatchDeskPublication; published: boolean }> {
   const { publication, fixtures } = input.checkpoint;
@@ -1690,7 +1692,9 @@ export async function restoreLiveMatchDeskCheckpointV3(input: {
       'LIVE_MATCH_CHECKPOINT_RESTORE_FAILED',
     );
   }
-  await setLiveMatchActiveEventV3({ ...scope, redis });
+  if (input.promoteActiveEvent !== false) {
+    await setLiveMatchActiveEventV3({ ...scope, redis });
+  }
   return { publication: current.publication, published: status === 'published' };
 }
 

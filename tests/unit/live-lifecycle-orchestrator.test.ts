@@ -124,6 +124,7 @@ describe('live lifecycle decisions', () => {
     );
     expect(lifecycleSource).toContain('expectedNextCheckAt');
     expect(liveWorkerSource).toContain('checkpointObligationFailed');
+    expect(liveWorkerSource).toContain('if (snapshot.checkpointObligationFailed)');
     expect(liveWorkerSource).toContain('promoteActiveEvent: job.data.promoteActiveEvent === true');
   });
 

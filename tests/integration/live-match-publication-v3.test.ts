@@ -727,6 +727,31 @@ describe('Live Matches V3 Redis publications', () => {
     expect(await redis.pttl(checkpoint.publication.desk.key)).toBe(activeItemTtl);
   });
 
+  test('does not promote the eventless pointer when restoring a pre-deadline desk', async () => {
+    await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'PRE_DEADLINE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const checkpoint = await readLiveMatchDeskPointerV3({ ...scope, redis }, 'active');
+    if (!checkpoint) throw new Error('pre-deadline desk checkpoint is missing');
+    await setLiveMatchActiveEventV3({
+      season: scope.season,
+      eventId: scope.eventId + 1,
+      redis,
+    });
+
+    await restoreLiveMatchDeskCheckpointV3({
+      checkpoint,
+      promoteActiveEvent: false,
+      redis,
+    });
+
+    expect(await redis.get(liveMatchActiveEventKey(scope.season))).toBe(String(scope.eventId + 1));
+  });
+
   test('restores exact detail manifest and immutable item key from checkpoint', async () => {
     const desk = await publishLiveMatchDeskV3({
       ...scope,

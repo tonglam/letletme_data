@@ -106,6 +106,8 @@ export interface LiveSnapshotV2SyncResult {
   readonly fixtureCount: number;
   readonly checkpointScheduled: boolean;
   readonly checkpointed: boolean;
+  /** Match desk/detail checkpoint creation failed after the Redis publication. */
+  readonly checkpointObligationFailed: boolean;
 }
 
 const defaultDependencies: LiveSnapshotV2Dependencies = {
@@ -516,6 +518,9 @@ export async function syncLiveSnapshotV2(
     });
   const settleMatchPublication = async (): Promise<void> => {
     const outcome = await matchPublicationOutcome;
+    if (outcome.result?.checkpointObligationFailed === true) {
+      matchCheckpointObligationFailed = true;
+    }
     // At the final boundary both publications are exact durable obligations and
     // therefore fail closed together. During a provisional poll, Match errors
     // remain non-fatal to Live Points, but the promise is still awaited before
@@ -571,6 +576,9 @@ export async function syncLiveSnapshotV2(
       observedDetail,
       publishedDesk,
     });
+    if (result.checkpointObligationFailed === true) {
+      matchCheckpointObligationFailed = true;
+    }
     if (result.desk.state !== 'FINALIZED' || result.detail?.finalized !== true) {
       throw new Error(
         `Live Match final publication was not complete for event ${eventId}; desk=${result.desk.state}; detail=${result.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
@@ -578,6 +586,7 @@ export async function syncLiveSnapshotV2(
     }
   };
 
+  let matchCheckpointObligationFailed = false;
   const durableRead = await durableReadPromise;
   const durableFloor = durableRead.value;
   const recoveringFinalCheckpoint =
@@ -607,6 +616,7 @@ export async function syncLiveSnapshotV2(
         fixtureCount: current.fixtures.length,
         checkpointScheduled: false,
         checkpointed: current.publication.checkpointedAt !== null,
+        checkpointObligationFailed: matchCheckpointObligationFailed,
       };
     }
   }
@@ -672,6 +682,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: durableFloor.fixtures.length,
       checkpointScheduled: false,
       checkpointed: true,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -730,6 +741,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: current.fixtures.length,
       checkpointScheduled: desired !== null,
       checkpointed: false,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -770,6 +782,7 @@ export async function syncLiveSnapshotV2(
         fixtureCount: current.fixtures.length,
         checkpointScheduled: desired !== null,
         checkpointed: false,
+        checkpointObligationFailed: matchCheckpointObligationFailed,
       };
     }
 
@@ -807,6 +820,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: current.fixtures.length,
       checkpointScheduled: !checkpointed && desired !== null,
       checkpointed,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
   // This timestamp is evidence that the coherent fetch and all completeness
@@ -891,6 +905,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: prepared.fixtures.length,
       checkpointScheduled: desired !== null,
       checkpointed: publication.checkpointedAt !== null || checkpointed,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -924,6 +939,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: current?.fixtures.length ?? 0,
       checkpointScheduled: false,
       checkpointed: promoted.publication.checkpointedAt !== null,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
   if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
@@ -964,6 +980,7 @@ export async function syncLiveSnapshotV2(
       fixtureCount: prepared.fixtures.length,
       checkpointScheduled: desired !== null,
       checkpointed: false,
+      checkpointObligationFailed: matchCheckpointObligationFailed,
     };
   }
 
@@ -1003,5 +1020,6 @@ export async function syncLiveSnapshotV2(
     fixtureCount: prepared.fixtures.length,
     checkpointScheduled: desired !== null,
     checkpointed,
+    checkpointObligationFailed: matchCheckpointObligationFailed,
   };
 }

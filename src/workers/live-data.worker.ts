@@ -109,6 +109,9 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       trigger: source,
       sourceRunId: job.data.runId,
     });
+    if (snapshot.checkpointObligationFailed) {
+      throw new Error(`Live Match checkpoint obligation was not created for event ${eventId}`);
+    }
     if (job.data.freshnessWindowId !== undefined && snapshot.publicationId !== null) {
       const sourceCheckedAt = snapshot.sourceCheckedAt ? new Date(snapshot.sourceCheckedAt) : null;
       if (sourceCheckedAt && Number.isFinite(sourceCheckedAt.getTime())) {

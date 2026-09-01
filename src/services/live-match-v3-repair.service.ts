@@ -401,6 +401,7 @@ async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
         ? await restoreLiveMatchDeskCheckpointV3({
             checkpoint: checkpoint as MatchDeskRead,
             observedDetail,
+            promoteActiveEvent: (checkpoint as MatchDeskRead).publication.state !== 'PRE_DEADLINE',
             redis,
           })
         : await restoreLiveMatchDetailCheckpointV3({
