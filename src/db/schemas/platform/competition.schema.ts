@@ -1728,6 +1728,8 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       mode: 'date',
     }),
     notApplicableEntryCount: integer('not_applicable_entry_count').default(0).notNull(),
+    entryScopeSha256: text('entry_scope_sha256'),
+    tournamentScopeSha256: text('tournament_scope_sha256'),
   },
   (table) => [
     index('my_fpl_snapshot_publications_gc_idx').on(
@@ -1771,6 +1773,14 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
       sql`not_applicable_entry_count >= 0`,
     ),
     check('my_fpl_snapshot_publications_hash_check', sql`content_sha256 ~ '^[0-9a-f]{64}$'::text`),
+    check(
+      'my_fpl_snapshot_publications_entry_scope_hash_check',
+      sql`entry_scope_sha256 IS NULL OR entry_scope_sha256 ~ '^[0-9a-f]{64}$'::text`,
+    ),
+    check(
+      'my_fpl_snapshot_publications_tournament_scope_hash_check',
+      sql`tournament_scope_sha256 IS NULL OR tournament_scope_sha256 ~ '^[0-9a-f]{64}$'::text`,
+    ),
     check(
       'my_fpl_snapshot_publications_score_source_check',
       sql`score_source IS NULL OR score_source IN ('FPL_EVENT_LIVE', 'FPL_FINAL_RESULT')`,

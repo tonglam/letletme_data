@@ -6,11 +6,14 @@ import {
   isAuthoritativeUnrankedFirstEventResult,
   isRetryableMyFplCaptureContention,
   isMatchingProvisionalMyFplPublication,
+  isMyFplSnapshotRedisManifestForPublication,
   myFplSnapshotRedisManifestKey,
   serializeMyFplSnapshotCapture,
   resolveMyFplSnapshotCoverageState,
+  getMyFplSnapshotTimeliness,
   projectedEventAutoSubPoints,
   type MyFplSnapshotPublication,
+  type MyFplSnapshotRedisManifest,
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
@@ -18,6 +21,7 @@ const eligibilityMigration = readFileSync(
   'migrations/0064_my_fpl_entry_eligibility_counts.sql',
   'utf8',
 );
+const integrityMigration = readFileSync('migrations/0088_my_fpl_integrity_contract.sql', 'utf8');
 const resultPicksMigration = readFileSync('migrations/0055_entry_event_result_picks.sql', 'utf8');
 const retainedRevisionMigration = readFileSync(
   'migrations/0038_my_fpl_retained_revision_reads.sql',
@@ -29,7 +33,9 @@ const publicationService = readFileSync(
 );
 const governanceService = readFileSync('src/services/data-governance.service.ts', 'utf8');
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
+const maintenanceJobs = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
 const worker = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
+const schedulerObligations = readFileSync('src/repositories/scheduler-obligations.ts', 'utf8');
 const entryWorker = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
 const queueRunBarrier = readFileSync('src/services/queue-run-barrier.ts', 'utf8');
 const transaction = readFileSync('src/db/singleton.ts', 'utf8');
@@ -123,6 +129,8 @@ describe('My FPL daily snapshot publication contract', () => {
       algorithmVersion: 'live-points-v2-algorithm-1',
       sourceMinCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
       sourceMaxCheckedAt: new Date('2026-08-23T02:05:00.000Z'),
+      entryScopeSha256: 'c'.repeat(64),
+      tournamentScopeSha256: 'd'.repeat(64),
     };
     let calls = 0;
     let release!: () => void;
@@ -274,7 +282,31 @@ describe('My FPL daily snapshot publication contract', () => {
   test('rebuilds legacy finals and keeps provisional transfer facts on one authority', () => {
     expect(publicationService).toContain('isManagerReviewV2MyFplPublication');
     expect(worker).toContain('activeFinalUsesManagerReviewV2');
-    expect(worker).toContain('redisManifest.revision === active.revision');
+    expect(worker).toContain('activeFinalScopeMatchesCurrentReadiness');
+    expect(worker).toContain('active.entryScopeSha256 === finalizationReadiness.entryScopeSha256');
+    expect(worker).toContain(
+      'active.notApplicableEntryCount === finalizationReadiness.notApplicableEntryCount',
+    );
+    expect(worker).toContain(
+      'active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256',
+    );
+    expect(scheduler).toContain('getMyFplSnapshotOperationalStatus');
+    expect(scheduler).toContain('periodKey: `final-${event.id}-${checkedAt}-${scopeFence}`');
+    expect(integrityMigration).toContain('expected_not_applicable_entry_count');
+    expect(integrityMigration).toContain(
+      'COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM',
+    );
+    expect(integrityMigration).toContain(
+      'AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)',
+    );
+    expect(integrityMigration).toContain('ON entry.season_id = event.season_id');
+    expect(integrityMigration).toContain('AND NOT snapshot_entry.is_empty');
+    expect(integrityMigration).toContain('YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+    expect(schedulerObligations).toContain(
+      'leaseOwner: sql`COALESCE(${schedulerObligationsInOps.leaseOwner}, ${randomUUID()})`',
+    );
+    expect(worker).toContain('const publicationForDelivery');
+    expect(worker).toContain('isMyFplSnapshotRedisManifestForPublication');
     expect(publicationService).toContain('provisionalEventPointsByElement');
     expect(publicationService).toContain('Event-live publication is missing transfer points');
     expect(publicationService).toMatch(/chip\(row\.event_chip\) === 'FREE_HIT'/);
@@ -290,9 +322,10 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toMatch(/status = 'PENDING'/);
     expect(worker).toContain('const replay = await dispatchMyFplSnapshotPublicationOutbox');
     expect(worker).toContain('Redis replay left ${replay.failed}');
+    expect(worker).toContain('My FPL snapshot Redis outbox remains incomplete');
   });
 
-  test('allows the full current-season refresh barrier to settle', () => {
+  test('keeps provisional refreshes separate from the zero-provider-request finalizer', () => {
     expect(queueRunBarrier).toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 30 * 60_000');
     expect(queueRunBarrier).not.toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 10 * 60_000');
     expect(worker).toContain('renewSchedulerObligation');
@@ -301,30 +334,26 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).not.toContain('await Promise.all([\n          enqueueCoreSnapshotJob');
     expect(worker).toContain('eventRepository.findLatestFinalized(season)');
     expect(worker).toContain('eventId: entryInfoTargetEventId');
-    expect(worker).toContain(
-      'const finalFreshAfter = resolveFinalizationFreshAfter(finalizationEvent)',
-    );
-    expect(worker).toContain(
-      'const freshAfter = finalFreshAfter ?? (await resolveJobFreshAfter(job))',
-    );
     expect(worker).toMatch(
       /enqueueEntryTransfersSyncJob\(season, source, \{[\s\S]{0,120}freshAfter,/,
     );
-    expect(worker).toMatch(
-      /enqueueTournamentTransfersPre\(season, eventId, source, \{[\s\S]{0,120}freshAfter,/,
-    );
+    expect(worker).toContain('assessMyFplFinalizationReadiness');
+    expect(worker).toMatch(/status: 'waiting-dependencies'/);
+    expect(worker).not.toContain('enqueueTournamentEventResults');
+    expect(worker).not.toContain('enqueueTournamentEventPicks');
+    expect(worker).not.toContain('enqueueTournamentTransfersPre');
     expect(entryWorker).toContain('findEntryIdsNeedingSourceRefresh');
     expect(tournamentWorker).toContain('job.name === TOURNAMENT_JOBS.TRANSFERS_PRE');
     expect(tournamentWorker).toContain('const freshAfter = await resolveJobFreshAfter(job)');
     expect(tournamentWorker).toContain('perEntryMutationScopes: true');
     expect(tournamentTransfers).toContain('findEntryIdsNeedingSourceRefresh');
     expect(tournamentTransfers).toContain('requiredUnits: entryIds.length');
-    expect(worker).toMatch(
-      /if \(snapshotKind === 'FINAL'\) \{[\s\S]{0,500}enqueueTournamentEventResults/,
+    expect(scheduler).toMatch(/executionLanes: \['my-fpl-orchestration'\]/);
+    expect(scheduler).toMatch(
+      /name: 'my-fpl-finalization',[\s\S]{0,300}queueName: 'my-fpl-orchestration'/,
     );
-    expect(worker.search(/if \(snapshotKind === 'FINAL'\) \{/)).toBeLessThan(
-      worker.indexOf('enqueueTournamentEventResults(season, eventId, source'),
-    );
+    expect(maintenanceJobs).toMatch(/options\?\.snapshotKind === 'FINAL'/);
+    expect(worker).toMatch(/'my-fpl-orchestration', 'publication-outbox'/);
   });
 
   test('decides same-day provisional noops only after normalized content hashing', () => {
@@ -423,6 +452,8 @@ describe('My FPL daily snapshot publication contract', () => {
       algorithmVersion: 'live-points-v2-algorithm-1',
       sourceMinCheckedAt: new Date('2026-08-23T02:00:00.000Z'),
       sourceMaxCheckedAt: new Date('2026-08-23T02:05:00.000Z'),
+      entryScopeSha256: 'c'.repeat(64),
+      tournamentScopeSha256: 'd'.repeat(64),
     };
     expect(
       isMatchingProvisionalMyFplPublication(active, {
@@ -435,6 +466,8 @@ describe('My FPL daily snapshot publication contract', () => {
         algorithmVersion: active.algorithmVersion,
         sourceMinCheckedAt: active.sourceMinCheckedAt!.toISOString(),
         sourceMaxCheckedAt: active.sourceMaxCheckedAt!.toISOString(),
+        entryScopeSha256: active.entryScopeSha256!,
+        tournamentScopeSha256: active.tournamentScopeSha256!,
       }),
     ).toBe(true);
     expect(
@@ -448,6 +481,8 @@ describe('My FPL daily snapshot publication contract', () => {
         algorithmVersion: active.algorithmVersion,
         sourceMinCheckedAt: active.sourceMinCheckedAt!.toISOString(),
         sourceMaxCheckedAt: active.sourceMaxCheckedAt!.toISOString(),
+        entryScopeSha256: active.entryScopeSha256!,
+        tournamentScopeSha256: active.tournamentScopeSha256!,
       }),
     ).toBe(false);
     expect(
@@ -461,12 +496,138 @@ describe('My FPL daily snapshot publication contract', () => {
         algorithmVersion: null,
         sourceMinCheckedAt: active.sourceMinCheckedAt!.toISOString(),
         sourceMaxCheckedAt: active.sourceMaxCheckedAt!.toISOString(),
+        entryScopeSha256: active.entryScopeSha256!,
+        tournamentScopeSha256: active.tournamentScopeSha256!,
       }),
     ).toBe(false);
     expect(resolveMyFplSnapshotCoverageState(null, 0)).toBe('NO_PUBLICATION');
     expect(resolveMyFplSnapshotCoverageState('FINAL', 1)).toBe('IMMUTABLE_FINAL');
     expect(resolveMyFplSnapshotCoverageState('PROVISIONAL', 1)).toBe('CORRECTION_PENDING');
     expect(resolveMyFplSnapshotCoverageState('PROVISIONAL', 0)).toBe('COMPLETE');
+  });
+
+  test('requires Redis noop evidence to match every active publication field', () => {
+    const publication: MyFplSnapshotPublication = {
+      seasonId: 2026,
+      eventId: 2,
+      revision: 9,
+      snapshotDate: '2026-08-25',
+      sourceCheckedAt: new Date('2026-08-24T02:00:00.000Z'),
+      publishedAt: new Date('2026-08-25T00:00:00.000Z'),
+      kind: 'FINAL',
+      expectedEntryCount: 2,
+      readyEntryCount: 2,
+      emptyEntryCount: 0,
+      notApplicableEntryCount: 0,
+      expectedTournamentCount: 1,
+      readyTournamentCount: 1,
+      contentSha256: 'a'.repeat(64),
+      entryScopeSha256: 'b'.repeat(64),
+      tournamentScopeSha256: 'c'.repeat(64),
+      scoreSource: 'FPL_FINAL_RESULT',
+      livePublicationId: null,
+      liveRevision: null,
+      algorithmVersion: null,
+      sourceMinCheckedAt: new Date('2026-08-24T02:00:00.000Z'),
+      sourceMaxCheckedAt: new Date('2026-08-24T02:05:00.000Z'),
+    };
+    const manifest: MyFplSnapshotRedisManifest = {
+      dataset: 'fpl:my-fpl',
+      seasonCode: '2627',
+      eventId: 2,
+      revision: 9,
+      snapshotDate: publication.snapshotDate,
+      sourceCheckedAt: publication.sourceCheckedAt.toISOString(),
+      publishedAt: publication.publishedAt.toISOString(),
+      kind: publication.kind,
+      contentSha256: publication.contentSha256,
+      expectedEntryCount: publication.expectedEntryCount,
+      observedEntryCount: publication.readyEntryCount + publication.emptyEntryCount,
+      expectedTournamentCount: publication.expectedTournamentCount,
+      observedTournamentCount: publication.readyTournamentCount,
+      entryScopeSha256: publication.entryScopeSha256!,
+      tournamentScopeSha256: publication.tournamentScopeSha256!,
+      scoreSource: publication.scoreSource,
+      livePublicationId: publication.livePublicationId,
+      liveRevision: publication.liveRevision,
+      algorithmVersion: publication.algorithmVersion,
+      sourceMinCheckedAt: publication.sourceMinCheckedAt!.toISOString(),
+      sourceMaxCheckedAt: publication.sourceMaxCheckedAt!.toISOString(),
+    };
+    expect(isMyFplSnapshotRedisManifestForPublication(manifest, publication, '2627', 2)).toBe(true);
+    expect(
+      isMyFplSnapshotRedisManifestForPublication(
+        { ...manifest, contentSha256: 'd'.repeat(64) },
+        publication,
+        '2627',
+        2,
+      ),
+    ).toBe(false);
+    expect(
+      isMyFplSnapshotRedisManifestForPublication(
+        { ...manifest, observedEntryCount: 1 },
+        publication,
+        '2627',
+        2,
+      ),
+    ).toBe(false);
+    expect(
+      isMyFplSnapshotRedisManifestForPublication(
+        { ...manifest, sourceCheckedAt: '2026-08-24T02:00:01.000Z' },
+        publication,
+        '2627',
+        2,
+      ),
+    ).toBe(false);
+  });
+
+  test('fences FINAL readiness and capture on durable historical/player evidence', () => {
+    expect(publicationService).toContain('fresh_points_count');
+    expect(publicationService).toContain('history_ready_count');
+    expect(publicationService).toContain('past_seasons_checked_at');
+    expect(publicationService).toContain('stats.updated_at >= ${dataCheckedAt}::timestamptz');
+    expect(publicationService).toContain(
+      'final player stats are older than data_checked_at for event',
+    );
+    expect(publicationService).toContain(
+      'points result is stale or inconsistent with the final entry result',
+    );
+  });
+
+  test('fails Redis delivery when the active pointer is not the captured publication', () => {
+    expect(worker).toContain(
+      'const activeRedisManifest = await getActiveMyFplSnapshotRedisManifest',
+    );
+    expect(worker).toContain(
+      'My FPL snapshot Redis pointer does not match PostgreSQL publication revision',
+    );
+    expect(publicationService).toContain('season.season_code AS canonical_season_code');
+    expect(publicationService).toContain(
+      'myFplSnapshotRedisManifestKey(canonicalSeasonCode, currentPublication.eventId)',
+    );
+  });
+
+  test('keeps the daily provisional freshness boundary deterministic', () => {
+    expect(
+      getMyFplSnapshotTimeliness('2026-08-31', 'PROVISIONAL', new Date('2026-09-01T03:59:59.000Z')),
+    ).toBe('CURRENT');
+    expect(
+      getMyFplSnapshotTimeliness('2026-08-31', 'PROVISIONAL', new Date('2026-09-01T04:00:00.000Z')),
+    ).toBe('STALE');
+    expect(
+      getMyFplSnapshotTimeliness('2026-08-31', 'FINAL', new Date('2026-09-05T00:00:00.000Z')),
+    ).toBe('CURRENT');
+    expect(getMyFplSnapshotTimeliness(null, null, new Date('2026-09-01T00:00:00.000Z'))).toBe(
+      'STALE',
+    );
+  });
+
+  test('checks the Redis outbox manifest against the locked PostgreSQL publication', () => {
+    expect(publicationService).toContain('publication.entry_scope_sha256');
+    expect(publicationService).toContain(
+      'My FPL Redis manifest does not match the active PostgreSQL publication',
+    );
+    expect(publicationService).toContain('mapMyFplPublication(ownership[0])');
   });
 
   test('serializes tournament result and transfer writes', () => {

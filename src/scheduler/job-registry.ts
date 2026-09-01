@@ -68,7 +68,10 @@ import {
   shouldRefreshOfficialH2H,
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
-import { hasFinalMyFplPublication } from '../services/my-fpl-snapshot-publication.service';
+import {
+  getMyFplSnapshotOperationalStatus,
+  hasFinalMyFplPublication,
+} from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
@@ -91,10 +94,9 @@ export type CatchUpPolicy =
   | 'none';
 
 /**
- * Some definitions retain a legacy queueName for payload/migration
- * compatibility even though lane-v2 sends them to a dedicated queue. Keep
- * those overrides in the registry module so scheduler and status/catalog
- * paths cannot disagree about the effective lane.
+ * Keep scheduler-owned queue overrides in the registry module so scheduler
+ * admission, recovery, and status/catalog paths cannot disagree about the
+ * effective lane.
  */
 export function schedulerQueueLaneOverride(jobName: string): string | undefined {
   return jobName === 'my-fpl-finalization' ? 'my-fpl-orchestration' : undefined;
@@ -667,31 +669,55 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
-    queueName: 'maintenance',
+    queueName: 'my-fpl-orchestration',
     successPredicate: 'final My FPL revision replaces the provisional revision',
-    executionLanes: [
-      'queue:data-sync',
-      'queue:entry-sync',
-      'queue:tournament-sync',
-      'queue:league-sync',
-      'post-match-results',
-    ],
+    // FINAL is a read-only readiness check plus capture/outbox operation. It
+    // must not wait behind provider refresh or the global tournament cascade;
+    // missing checkpoints are deferred by the worker and repaired by their
+    // own authoritative obligations.
+    executionLanes: ['my-fpl-orchestration'],
     // A final checkpoint supersedes an older pending provisional snapshot.
     // The eventual provisional worker then observes the active FINAL revision
     // and exits without publishing stale authority.
     claimPriority: 45,
     resolve: async (context) => {
       const plans: SchedulerObligationPlan[] = [];
+      const operationalStatuses = await getMyFplSnapshotOperationalStatus(
+        context.season,
+        context.now,
+      );
+      const statusByEventId = new Map(
+        operationalStatuses.map((status) => [status.eventId, status]),
+      );
       for (const event of context.events) {
         if (!event.finished || !event.dataChecked) continue;
         const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
+        const status = statusByEventId.get(event.id);
+        // Include the current canonical scope fence in the durable identity.
+        // A succeeded FINAL therefore cannot suppress a later correction when
+        // entries or tournament memberships change after publication.
+        const scopeFence = status
+          ? [
+              status.expectedEntryScopeSha256 ?? 'missing-entry-scope',
+              status.expectedTournamentScopeSha256 ?? 'missing-tournament-scope',
+              `na${status.expectedNotApplicableEntryCount ?? 0}`,
+            ].join('-')
+          : 'missing-status';
         plans.push({
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `final-${event.id}-${checkedAt}`,
+          periodKey: `final-${event.id}-${checkedAt}-${scopeFence}`,
           dueAt: context.now,
           eventId: event.id,
           source: 'reconcile',
-          evidence: { snapshotKind: 'FINAL', dataCheckedAt: checkedAt },
+          evidence: {
+            snapshotKind: 'FINAL',
+            dataCheckedAt: checkedAt,
+            expectedEntryCount: status?.expectedEntryCount,
+            expectedEntryScopeSha256: status?.expectedEntryScopeSha256,
+            expectedNotApplicableEntryCount: status?.expectedNotApplicableEntryCount,
+            expectedTournamentCount: status?.expectedTournamentCount,
+            expectedTournamentScopeSha256: status?.expectedTournamentScopeSha256,
+          },
         });
       }
       return plans;
@@ -1738,8 +1764,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Entry transfers obligation has no event checkpoint');
+        const event = context.events.find((candidate) => candidate.id === eventId);
         const job = await enqueueEntryTransfersSyncJob(context.season, 'catchup', {
           eventId,
+          // A transfer scan can run before FPL marks the event final. When the
+          // finalization fence is already present, carry it into the existing
+          // rate-limited job so a pre-fence checkpoint cannot satisfy the
+          // FINAL readiness gate.
+          ...(event?.dataCheckedAt ? { freshAfter: event.dataCheckedAt.toISOString() } : {}),
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,

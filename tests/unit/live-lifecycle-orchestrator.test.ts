@@ -104,7 +104,9 @@ describe('live lifecycle decisions', () => {
     const maintenanceSource = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
     expect(maintenanceSource).toContain('isPublicationOutbox');
     const maintenanceWorkerSource = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
-    expect(maintenanceWorkerSource).toMatch(/\['maintenance', 'publication-outbox'\]/);
+    expect(maintenanceWorkerSource).toMatch(
+      /\['maintenance', 'my-fpl-orchestration', 'publication-outbox'\]/,
+    );
     const lifecycleRepositorySource = readFileSync('src/repositories/live-window.ts', 'utf8');
     expect(lifecycleRepositorySource).toContain('excluded.observed_at');
     const registrySource = readFileSync('src/scheduler/job-registry.ts', 'utf8');

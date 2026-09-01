@@ -396,6 +396,7 @@ export const schedulerObligationsInOps = ops.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     uniqueIndex('scheduler_obligations_identity_key').on(
@@ -409,12 +410,15 @@ export const schedulerObligationsInOps = ops.table(
     index('scheduler_obligations_lease_idx')
       .on(table.leaseExpiresAt, table.obligationId)
       .where(sql`lease_expires_at IS NOT NULL AND status IN ('enqueued', 'running')`),
+    index('scheduler_obligations_retry_idx')
+      .on(table.nextAttemptAt, table.obligationId)
+      .where(sql`status = 'retrying'`),
     index('scheduler_obligations_failure_idx')
       .on(table.jobName, table.status, table.updatedAt.desc())
       .where(sql`status IN ('failed', 'irrecoverable')`),
     check(
       'scheduler_obligations_status_check',
-      sql`status = ANY (ARRAY['pending'::text, 'enqueued'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'skipped'::text, 'irrecoverable'::text])`,
+      sql`status = ANY (ARRAY['pending'::text, 'enqueued'::text, 'running'::text, 'retrying'::text, 'succeeded'::text, 'failed'::text, 'skipped'::text, 'irrecoverable'::text])`,
     ),
     check(
       'scheduler_obligations_source_check',
@@ -424,7 +428,7 @@ export const schedulerObligationsInOps = ops.table(
     check('scheduler_obligations_attempts_check', sql`attempts >= 0`),
     check(
       'scheduler_obligations_last_error_status_check',
-      sql`last_error IS NULL OR status IN ('failed'::text, 'irrecoverable'::text)`,
+      sql`last_error IS NULL OR status IN ('retrying'::text, 'failed'::text, 'irrecoverable'::text)`,
     ),
     check(
       'scheduler_obligations_evidence_object_check',

@@ -12,6 +12,7 @@ import {
 import { logError, logInfo } from '../utils/logger';
 import { getConfig } from '../utils/config';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
+import { MY_FPL_FINALIZATION_BULL_ATTEMPTS } from '../domain/data-contracts';
 
 export type MaintenanceEnqueueOptions = Readonly<{
   jobId?: string;
@@ -32,6 +33,7 @@ export type MaintenanceEnqueueOptions = Readonly<{
   freshAfter?: string;
   attempts?: number;
   backoffDelayMs?: number;
+  backoffType?: 'fixed' | 'exponential';
   deduplicationId?: string;
   lane?: Exclude<MaintenanceLane, 'maintenance'>;
 }>;
@@ -56,7 +58,7 @@ export const MAINTENANCE_JOB_LANES = {
 
 export function maintenanceLaneForJob(
   jobName: MaintenanceJobName,
-  options?: Pick<MaintenanceEnqueueOptions, 'lane'>,
+  options?: Pick<MaintenanceEnqueueOptions, 'lane' | 'snapshotKind'>,
 ): MaintenanceLane {
   const expectedLane = MAINTENANCE_JOB_LANES[jobName];
   // Publication receipts are correctness-critical and must not be queued
@@ -66,7 +68,14 @@ export function maintenanceLaneForJob(
   const isPublicationOutbox =
     jobName === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX ||
     jobName === MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX;
-  if (!getConfig().QUEUE_LANES_V2_ENABLED && !isPublicationOutbox) return 'maintenance';
+  const isFinalMyFplSnapshot =
+    jobName === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT && options?.snapshotKind === 'FINAL';
+  // FINAL is a read-only capture and must have a dedicated consumer even
+  // while the other lane-v2 queues are disabled. It cannot share the legacy
+  // maintenance queue with unrelated refreshes.
+  if (!getConfig().QUEUE_LANES_V2_ENABLED && !isPublicationOutbox && !isFinalMyFplSnapshot) {
+    return 'maintenance';
+  }
   if (options?.lane && options.lane !== expectedLane) {
     throw new Error(
       `Maintenance job ${jobName} must stay on lane ${expectedLane}; received ${options.lane}`,
@@ -121,7 +130,12 @@ export async function enqueueMaintenanceJob(
       ...(options.attempts === undefined ? {} : { attempts: options.attempts }),
       ...(options.backoffDelayMs === undefined
         ? {}
-        : { backoff: { type: 'fixed' as const, delay: options.backoffDelayMs } }),
+        : {
+            backoff: {
+              type: options.backoffType ?? ('fixed' as const),
+              delay: options.backoffDelayMs,
+            },
+          }),
       ...(options.deduplicationId === undefined
         ? {}
         : { deduplication: { id: options.deduplicationId } }),
@@ -231,8 +245,13 @@ export const enqueueMyFplSnapshot = (
 ) =>
   enqueueMaintenanceJob(season, MAINTENANCE_JOBS.MY_FPL_SNAPSHOT, source, {
     ...options,
-    attempts: options.attempts ?? 8,
-    backoffDelayMs: options.backoffDelayMs ?? 30 * 60_000,
+    attempts:
+      options.attempts ??
+      (options.snapshotKind === 'FINAL' ? MY_FPL_FINALIZATION_BULL_ATTEMPTS : 8),
+    backoffDelayMs:
+      options.backoffDelayMs ?? (options.snapshotKind === 'FINAL' ? 60_000 : 30 * 60_000),
+    backoffType:
+      options.backoffType ?? (options.snapshotKind === 'FINAL' ? 'exponential' : 'fixed'),
   });
 
 export const enqueueMyFplSnapshotOutbox = (

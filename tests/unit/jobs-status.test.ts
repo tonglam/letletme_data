@@ -125,6 +125,7 @@ describe('safeSchedulerObligationLatest', () => {
       generation: 4,
       attempts: 2,
       lastError: 'provider https://example.invalid/entry/123 failed token=secret',
+      nextAttemptAt: null,
     });
 
     expect(result).toEqual({
@@ -133,6 +134,7 @@ describe('safeSchedulerObligationLatest', () => {
       dueAt: new Date('2026-08-27T03:00:00.000Z'),
       generation: 4,
       attempts: 2,
+      nextAttemptAt: null,
       lastErrorCode: 'TRANSIENT_INFRA',
     });
     expect(result).not.toHaveProperty('lastError');
