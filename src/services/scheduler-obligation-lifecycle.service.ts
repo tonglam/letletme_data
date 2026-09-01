@@ -1,6 +1,7 @@
 import {
   completeSchedulerObligation as completeSchedulerObligationRecord,
   completeSchedulerObligationByBullJobId as completeSchedulerObligationByBullJobIdRecord,
+  deferSchedulerObligationForWorker as deferSchedulerObligationForWorkerRecord,
   failSchedulerObligation as failSchedulerObligationRecord,
   failSchedulerObligationByBullJobId as failSchedulerObligationByBullJobIdRecord,
   getSchedulerObligation,
@@ -20,6 +21,7 @@ type CompletionEvidence = Pick<
 type SchedulerObligationLifecycleDependencies = Readonly<{
   complete: typeof completeSchedulerObligationRecord;
   completeByBullJobId: typeof completeSchedulerObligationByBullJobIdRecord;
+  deferForWorker: typeof deferSchedulerObligationForWorkerRecord;
   fail: typeof failSchedulerObligationRecord;
   failByBullJobId: typeof failSchedulerObligationByBullJobIdRecord;
   getById: typeof getSchedulerObligation;
@@ -84,6 +86,7 @@ export function createSchedulerObligationLifecycle(
   const dependencies: SchedulerObligationLifecycleDependencies = {
     complete: completeSchedulerObligationRecord,
     completeByBullJobId: completeSchedulerObligationByBullJobIdRecord,
+    deferForWorker: deferSchedulerObligationForWorkerRecord,
     fail: failSchedulerObligationRecord,
     failByBullJobId: failSchedulerObligationByBullJobIdRecord,
     getById: getSchedulerObligation,
@@ -279,6 +282,7 @@ export function createSchedulerObligationLifecycle(
   return {
     completeSchedulerObligation: complete,
     completeSchedulerObligationByBullJobId: completeByBullJobId,
+    deferSchedulerObligationForWorker: dependencies.deferForWorker,
     failSchedulerObligation: fail,
     failSchedulerObligationByBullJobId: failByBullJobId,
     recordCheckpointFreshnessEvidence,
@@ -290,6 +294,8 @@ const schedulerObligationLifecycle = createSchedulerObligationLifecycle();
 export const completeSchedulerObligation = schedulerObligationLifecycle.completeSchedulerObligation;
 export const completeSchedulerObligationByBullJobId =
   schedulerObligationLifecycle.completeSchedulerObligationByBullJobId;
+export const deferSchedulerObligationForWorker =
+  schedulerObligationLifecycle.deferSchedulerObligationForWorker;
 export const failSchedulerObligation = schedulerObligationLifecycle.failSchedulerObligation;
 export const failSchedulerObligationByBullJobId =
   schedulerObligationLifecycle.failSchedulerObligationByBullJobId;

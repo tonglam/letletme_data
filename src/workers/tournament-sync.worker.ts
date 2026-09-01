@@ -586,6 +586,9 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 return {
                   value: await syncOfficialH2HTournaments(season, eventId, {
                     forceFull: job.data.officialH2HMode === 'full-reconcile',
+                    ...(job.data.freshAfter === undefined
+                      ? {}
+                      : { freshAfter: job.data.freshAfter }),
                     ...(job.data.tournamentId === undefined
                       ? {}
                       : { tournamentId: job.data.tournamentId }),

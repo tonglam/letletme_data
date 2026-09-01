@@ -673,6 +673,7 @@ export const entryEventPickHeadsInCompetition = competition.table(
     }).notNull(),
     checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
     state: text().notNull().default('COMPLETE'),
+    inputPayload: jsonb('input_payload'),
   },
   (table) => [
     primaryKey({
@@ -694,6 +695,10 @@ export const entryEventPickHeadsInCompetition = competition.table(
     check(
       'entry_event_pick_heads_identity_valid',
       sql`entry_id > 0 AND event_id > 0 AND generation > 0 AND row_count = 15 AND state = 'COMPLETE' AND picks_base_revision ~ '^[0-9a-f]{64}$' AND content_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'entry_event_pick_heads_input_payload_valid',
+      sql`input_payload IS NULL OR (jsonb_typeof(input_payload) = 'object' AND pg_column_size(input_payload) <= 131072)`,
     ),
     check('entry_event_pick_heads_time_order', sql`checkpointed_at >= source_checked_at`),
   ],
@@ -851,6 +856,86 @@ export const livePointsPublicationSeedClaimsInCompetition = competition.table(
     check(
       'live_points_publication_seed_claims_identity_valid',
       sql`event_id > 0 AND expected_active_sha256 ~ '^[0-9a-f]{64}$' AND candidate_event_live_sha256 ~ '^[0-9a-f]{64}$' AND candidate_fixtures_sha256 ~ '^[0-9a-f]{64}$' AND candidate_state = ANY (ARRAY['PRE_DEADLINE','PICKS_WAIT','PICKS_PROBE','PICKS_SYNC','LIVE_ACTIVE','BETWEEN_FIXTURES','DAY_SETTLING','GW_REVIEW','FINALIZED']::text[])`,
+    ),
+  ],
+);
+
+/**
+ * Redis-first live league checkpoint.  The payload is self-contained so a
+ * GraphQL cold read can recover one exact tournament/event scope without
+ * joining a roster to a different live revision.  This is a serving
+ * checkpoint, not a second source of business truth: canonical tournament,
+ * entry and FPL rows remain the source records below it.
+ */
+export const liveLeagueCheckpointsInCompetition = competition.table(
+  'live_league_checkpoints',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    scopeKind: text('scope_kind').notNull(),
+    publicationId: text('publication_id').notNull(),
+    generation: bigint('generation', { mode: 'number' }).notNull(),
+    state: text().notNull(),
+    manifest: jsonb().notNull(),
+    indexPayload: jsonb('index_payload').notNull(),
+    payload: jsonb().notNull(),
+    rowCount: integer('row_count').notNull(),
+    payloadBytes: integer('payload_bytes').notNull(),
+    payloadSha256: text('payload_sha256').notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
+    contentUpdatedAt: timestamp('content_updated_at', {
+      withTimezone: true,
+      mode: 'date',
+    }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' }).notNull(),
+    checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    expectedNextCheckAt: timestamp('expected_next_check_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.eventId, table.tournamentId, table.scopeKind],
+      name: 'live_league_checkpoints_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'live_league_checkpoints_event_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'live_league_checkpoints_tournament_fk',
+    }).onDelete('cascade'),
+    unique('live_league_checkpoints_publication_once').on(
+      table.seasonId,
+      table.eventId,
+      table.tournamentId,
+      table.scopeKind,
+      table.publicationId,
+    ),
+    index('live_league_checkpoints_generation_idx').on(
+      table.seasonId,
+      table.eventId,
+      table.tournamentId,
+      table.generation,
+    ),
+    check(
+      'live_league_checkpoints_scope_kind_valid',
+      sql`scope_kind = ANY (ARRAY['CLASSIC','H2H_HEAD','H2H_STANDINGS']::text[])`,
+    ),
+    check(
+      'live_league_checkpoints_identity_valid',
+      sql`event_id > 0 AND tournament_id > 0 AND generation > 0 AND btrim(publication_id) <> '' AND btrim(state) <> ''`,
+    ),
+    check(
+      'live_league_checkpoints_payload_valid',
+      sql`jsonb_typeof(manifest) = 'object' AND jsonb_typeof(index_payload) = 'array' AND jsonb_typeof(payload) = 'object' AND row_count >= 0 AND payload_bytes >= 0 AND payload_sha256 ~ '^[0-9a-f]{64}$'`,
     ),
   ],
 );
@@ -2219,6 +2304,12 @@ export const tournamentGroupsInCompetition = competition.table(
     overallRank: integer('overall_rank'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    // Official standings observation time. This is deliberately separate from
+    // updated_at, which is also advanced by local maintenance and ranking work.
+    officialSourceCheckedAt: timestamp('official_source_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('tournament_groups_end_event_fk_idx').using(
@@ -2321,6 +2412,12 @@ export const entriesInCompetition = competition.table(
       mode: 'date',
     }),
     pastSeasonsCount: integer('past_seasons_count'),
+    // Migration 0086 appends this source-specific timestamp after the legacy
+    // columns so the declaration remains in catalog ordinal parity.
+    profileSourceCheckedAt: timestamp('profile_source_checked_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
   },
   (table) => [
     index('tournament_review_entries_reconcile_idx').on(

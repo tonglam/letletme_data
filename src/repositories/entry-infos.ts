@@ -141,6 +141,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
       summary: RawFPLEntrySummary,
       lastEventId?: number | null,
       snapshotSyncedThroughEventId?: number | null,
+      profileSourceCheckedAt?: Date,
     ): Promise<DbEntryInfo> => {
       try {
         const db = await getDbInstance();
@@ -161,6 +162,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
           lastBank: 0,
           lastEventId: lastEventId ?? 0,
           snapshotSyncedThroughEventId: snapshotSyncedThroughEventId ?? null,
+          profileSourceCheckedAt: profileSourceCheckedAt ?? new Date(),
           teamValue: currentTeamValue,
           totalTransfers: summary.last_deadline_total_transfers ?? null,
           lastEntryName: null,
@@ -196,6 +198,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
                   )
                 END
               `,
+              profileSourceCheckedAt: insert.profileSourceCheckedAt,
               lastBank: sql`COALESCE(${entriesInCompetition.bank}, 0)`,
               lastEntryName: sql`
                 CASE

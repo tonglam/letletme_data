@@ -30,20 +30,42 @@ export type EventLiveManagerPickRow = {
   activeChip: string | null;
 };
 
+export type EntryLiveInputPickRow = {
+  entryId: number;
+  position: number;
+  elementId: number;
+  multiplier: number;
+  isCaptain: boolean;
+  isViceCaptain: boolean;
+  activeChip: string | null;
+  transfers: number | null;
+  transfersCost: number | null;
+};
+
 export type EntryEventPicksPublicationMetadata = {
   readonly publicationId?: string;
   readonly generation?: number;
   readonly picksBaseRevision?: string;
+  /** Complete V2 semantic input retained for lossless final recovery. */
+  readonly inputPayload?: unknown;
   readonly contentUpdatedAt?: Date | string;
   /** Durable completion time for a Redis-first V2 checkpoint. */
   readonly checkpointedAt?: Date | string;
 };
 
+export type EntryEventPicksUpsertOptions = {
+  /** Keep the deadline-time V2 input rows immutable during final result sync. */
+  readonly preserveCheckpointedInput?: boolean;
+};
+
 export type EntryEventPickHeadMetadata = {
+  readonly entryId?: number;
   readonly publicationId: string;
   readonly generation: number;
   readonly picksBaseRevision: string;
   readonly contentSha256: string;
+  /** Complete V2 semantic input retained for lossless final recovery. */
+  readonly inputPayload: unknown | null;
   readonly rowCount: number;
   readonly sourceCheckedAt: Date;
   readonly contentUpdatedAt: Date;
@@ -97,6 +119,7 @@ async function upsertEntryEventPickHead(
       generation: entryEventPickHeadsInCompetition.generation,
       picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
       contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+      inputPayload: entryEventPickHeadsInCompetition.inputPayload,
       rowCount: entryEventPickHeadsInCompetition.rowCount,
       sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
       contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
@@ -138,6 +161,13 @@ async function upsertEntryEventPickHead(
   const effectiveGeneration = publication?.generation ?? existingHead?.generation ?? 1;
   const effectivePicksBaseRevision =
     publication?.picksBaseRevision ?? existingHead?.picksBaseRevision ?? contentSha256;
+  const contentChanged = existingHead !== undefined && existingHead.contentSha256 !== contentSha256;
+  const effectiveInputPayload =
+    publication?.inputPayload !== undefined
+      ? publication.inputPayload
+      : contentChanged
+        ? null
+        : (existingHead?.inputPayload ?? null);
   await db
     .insert(entryEventPickHeadsInCompetition)
     .values({
@@ -148,6 +178,7 @@ async function upsertEntryEventPickHead(
       generation: effectiveGeneration,
       picksBaseRevision: effectivePicksBaseRevision,
       contentSha256,
+      inputPayload: effectiveInputPayload,
       rowCount: 15,
       sourceCheckedAt: syncedAt,
       contentUpdatedAt,
@@ -165,6 +196,7 @@ async function upsertEntryEventPickHead(
         generation: effectiveGeneration,
         picksBaseRevision: effectivePicksBaseRevision,
         contentSha256,
+        inputPayload: effectiveInputPayload,
         rowCount: 15,
         sourceCheckedAt: syncedAt,
         contentUpdatedAt,
@@ -220,6 +252,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     picks: RawFPLEntryEventPicksResponse,
     syncedAt: Date,
     publication?: EntryEventPicksPublicationMetadata,
+    options?: EntryEventPicksUpsertOptions,
   ): Promise<boolean> => {
     const existing = await db
       .select({
@@ -245,6 +278,23 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       )
       .for('update');
 
+    const [existingHead] = await db
+      .select({
+        rowCount: entryEventPickHeadsInCompetition.rowCount,
+        state: entryEventPickHeadsInCompetition.state,
+        inputPayload: entryEventPickHeadsInCompetition.inputPayload,
+      })
+      .from(entryEventPickHeadsInCompetition)
+      .where(
+        and(
+          eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+          eq(entryEventPickHeadsInCompetition.entryId, entryId),
+          eq(entryEventPickHeadsInCompetition.eventId, eventId),
+        ),
+      )
+      .for('update')
+      .limit(1);
+
     const candidateContent = normalizedPickContent(picks);
     const candidateByPosition = new Map(
       candidateContent.picks.map((pick) => [pick.position, pick] as const),
@@ -269,6 +319,27 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       existingChip === candidateContent.chip &&
       existingTransfers === candidateContent.transferCount &&
       existingTransferCost === candidateContent.transferCost;
+
+    const storedRowsAreComplete =
+      existing.length === 15 &&
+      new Set(existing.map((row) => row.position)).size === 15 &&
+      existing.every((row) => row.position >= 1 && row.position <= 15);
+    const preserveCheckpointedInput =
+      !sameContent &&
+      publication === undefined &&
+      options?.preserveCheckpointedInput === true &&
+      existingHead?.state === 'COMPLETE' &&
+      existingHead.rowCount === 15 &&
+      existingHead.inputPayload !== null &&
+      existingHead.inputPayload !== undefined &&
+      storedRowsAreComplete;
+
+    if (preserveCheckpointedInput) {
+      // The finalized endpoint can legitimately change multipliers after
+      // automatic substitutions.  Keep the deadline-time rows and head
+      // together; entry_event_results stores the final adjusted picks.
+      return false;
+    }
 
     // A source heartbeat must not rewrite the 15 rows or move their content
     // timestamp.  It may still repair a missing V2 head left by an interrupted
@@ -509,6 +580,58 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       }
     },
 
+    findLiveInputPickRowsByEventAndEntryIds: async (
+      season: FplSeasonRef,
+      eventId: number,
+      entryIds: readonly number[],
+    ): Promise<EntryLiveInputPickRow[]> => {
+      if (entryIds.length === 0) return [];
+      try {
+        const db = await getDbInstance();
+        const rows: EntryLiveInputPickRow[] = [];
+        for (const chunk of chunkArray(Array.from(new Set(entryIds)), 1000)) {
+          rows.push(
+            ...(await db
+              .select({
+                entryId: entryEventPicksInCompetition.entryId,
+                position: entryEventPicksInCompetition.position,
+                elementId: entryEventPicksInCompetition.elementId,
+                multiplier: entryEventPicksInCompetition.multiplier,
+                isCaptain: entryEventPicksInCompetition.isCaptain,
+                isViceCaptain: entryEventPicksInCompetition.isViceCaptain,
+                activeChip: entryEventPicksInCompetition.activeChip,
+                transfers: entryEventPicksInCompetition.transfers,
+                transfersCost: entryEventPicksInCompetition.transfersCost,
+              })
+              .from(entryEventPicksInCompetition)
+              .where(
+                and(
+                  eq(entryEventPicksInCompetition.seasonId, season.seasonId),
+                  eq(entryEventPicksInCompetition.eventId, eventId),
+                  inArray(entryEventPicksInCompetition.entryId, chunk),
+                ),
+              )
+              .orderBy(
+                asc(entryEventPicksInCompetition.entryId),
+                asc(entryEventPicksInCompetition.position),
+              )),
+          );
+        }
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve durable live input pick rows', error, {
+          season: season.seasonCode,
+          eventId,
+          entries: entryIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve durable live input pick rows',
+          'ENTRY_EVENT_PICKS_LIVE_INPUT_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findEntryIdsByEvent: async (
       season: FplSeasonRef,
       eventId: number,
@@ -552,6 +675,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
             generation: entryEventPickHeadsInCompetition.generation,
             picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
             contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+            inputPayload: entryEventPickHeadsInCompetition.inputPayload,
             rowCount: entryEventPickHeadsInCompetition.rowCount,
             sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
             contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
@@ -582,6 +706,56 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       }
     },
 
+    findHeadsByEventAndEntryIds: async (
+      season: FplSeasonRef,
+      eventId: number,
+      entryIds: readonly number[],
+    ): Promise<EntryEventPickHeadMetadata[]> => {
+      if (entryIds.length === 0) return [];
+      try {
+        const db = await getDbInstance();
+        const rows: EntryEventPickHeadMetadata[] = [];
+        for (const chunk of chunkArray(Array.from(new Set(entryIds)), 1000)) {
+          rows.push(
+            ...(await db
+              .select({
+                publicationId: entryEventPickHeadsInCompetition.publicationId,
+                generation: entryEventPickHeadsInCompetition.generation,
+                picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+                contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+                inputPayload: entryEventPickHeadsInCompetition.inputPayload,
+                rowCount: entryEventPickHeadsInCompetition.rowCount,
+                sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+                contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
+                checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
+                state: entryEventPickHeadsInCompetition.state,
+                entryId: entryEventPickHeadsInCompetition.entryId,
+              })
+              .from(entryEventPickHeadsInCompetition)
+              .where(
+                and(
+                  eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+                  eq(entryEventPickHeadsInCompetition.eventId, eventId),
+                  inArray(entryEventPickHeadsInCompetition.entryId, chunk),
+                ),
+              )),
+          );
+        }
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve durable live input heads', error, {
+          season: season.seasonCode,
+          eventId,
+          entries: entryIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve durable live input heads',
+          'ENTRY_EVENT_PICKS_LIVE_INPUT_HEAD_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertFromPicks: async (
       season: FplSeasonRef,
       entryId: number,
@@ -589,6 +763,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       picks: RawFPLEntryEventPicksResponse,
       syncedAt: Date | string = new Date(),
       publication?: EntryEventPicksPublicationMetadata,
+      options?: EntryEventPicksUpsertOptions,
     ): Promise<void> => {
       try {
         if (!isEntryPicksPayloadForEvent(picks, eventId)) {
@@ -614,11 +789,21 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
               picks,
               exactSyncedAt,
               publication,
+              options,
             )
           : await (
               await getDb()
             ).transaction((tx) =>
-              replaceScope(tx, season, entryId, eventId, picks, exactSyncedAt, publication),
+              replaceScope(
+                tx,
+                season,
+                entryId,
+                eventId,
+                picks,
+                exactSyncedAt,
+                publication,
+                options,
+              ),
             );
         logInfo(changed ? 'Replaced entry event picks' : 'Ignored stale entry event picks', {
           season: season.seasonCode,

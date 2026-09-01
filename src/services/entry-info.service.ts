@@ -1,4 +1,5 @@
 import { fplClient } from '../clients/fpl';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { createEntryHistoryInfoRepository } from '../repositories/entry-history-infos';
@@ -62,6 +63,12 @@ export async function syncEntryInfo(
   logInfo('Starting entry info sync', {
     season: season.seasonCode,
   });
+  const db = await getDb();
+  // Capture the source observation boundary before initiating any FPL reads.
+  // The database clock is the ordering authority for the finalization fence;
+  // sampling it after the reads could incorrectly bless a response that was
+  // observed before the authoritative event data was finalized.
+  const profileSourceCheckedAt = (await readDatabaseOrderingTimestamp(db)).date;
   // Capture season authority before any upstream reads. A rollover during the
   // parallel FPL requests must fail the fenced commit rather than pairing old
   // payloads with the new season.
@@ -90,7 +97,6 @@ export async function syncEntryInfo(
   );
   const lastEventId = currentEvent ? currentEvent.id - 1 : null;
 
-  const db = await getDb();
   const transactionStartedAt = performance.now();
   const saved = await db.transaction(async (tx) => {
     await acquireEntrySeasonWriteFence(tx, season, [entryId]);
@@ -108,6 +114,7 @@ export async function syncEntryInfo(
       summary,
       lastEventId,
       snapshotSyncedThroughEventId,
+      profileSourceCheckedAt,
     );
     await Promise.all([
       entryHistoryInfoRepository.upsertFromHistory(season, entryId, history),

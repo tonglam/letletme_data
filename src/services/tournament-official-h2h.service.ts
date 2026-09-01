@@ -25,6 +25,7 @@ import { ValidationError } from '../utils/errors';
 import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
 import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 
 const MAX_H2H_PAGES = 100;
 
@@ -34,6 +35,8 @@ export type OfficialH2HFetchOptions = Readonly<{
   /** Locked page manifests let a minute refresh avoid fetching unrelated pages. */
   matchPages?: readonly number[];
   existingManifests?: readonly OfficialH2HPageManifest[];
+  /** Database ordering time sampled before provider reads by the sync caller. */
+  sourceCheckedAt?: Date;
 }>;
 
 export function resolveOfficialH2HPagesToFetch(
@@ -61,6 +64,13 @@ export type OfficialH2HStanding = RawFPLLeagueStandingsResult & { entry: number 
 export type OfficialH2HSourceSnapshot = {
   standings: OfficialH2HStanding[];
   matches: Array<RawFPLLeagueH2HMatch & { sourceOrder: number }>;
+  /**
+   * Timestamp captured before the first provider request. This is an ordering
+   * fence: a fetch that started before FPL marked an event data_checked must
+   * not later be promoted as fresh final standings merely because the network
+   * response arrived after finalization.
+   */
+  sourceCheckedAt?: Date;
   /** Exact provider page boundaries, retained for locked-manifest validation. */
   pageMatches?: readonly {
     pageNumber: number;
@@ -81,6 +91,8 @@ export type OfficialH2HSyncOptions = {
   suppressedEventId?: number | null;
   /** Bypass the minute-page selector for a guarded full reconciliation. */
   forceFull?: boolean;
+  /** Require the provider observation to begin after an event finalization fence. */
+  freshAfter?: Date | string;
 };
 
 type EntryEventTotalsCoverage = {
@@ -414,6 +426,11 @@ export async function fetchOfficialH2HSourceSnapshot(
   options: OfficialH2HFetchOptions = {},
 ): Promise<OfficialH2HSourceSnapshot> {
   const startedAt = Date.now();
+  // Capture the source observation boundary before any provider read. The
+  // finalization gate compares this timestamp with event.data_checked_at; a
+  // post-fetch timestamp would allow an in-flight pre-finalization response to
+  // masquerade as post-finalization evidence.
+  const sourceCheckedAt = options.sourceCheckedAt ?? new Date();
   const standings: OfficialH2HStanding[] = [];
   let standingsPage = 1;
   let previousStandingsSignature: string | null = null;
@@ -550,13 +567,20 @@ export async function fetchOfficialH2HSourceSnapshot(
     durationMs: Math.max(0, Date.now() - startedAt),
     scheduleHash,
   });
-  return { standings, matches, pageMatches: pageSlices, pageManifests };
+  return {
+    standings,
+    matches,
+    sourceCheckedAt,
+    pageMatches: pageSlices,
+    pageManifests,
+  };
 }
 
 export function projectOfficialH2HStandings(
   currentGroups: readonly DbTournamentGroup[],
   standings: readonly OfficialH2HStanding[],
   totalsByEntry?: ReadonlyMap<number, { totalPoints: number; totalTransfersCost: number }>,
+  sourceCheckedAt?: Date,
 ): DbTournamentGroupInsert[] {
   const standingsByEntry = new Map(standings.map((standing) => [standing.entry, standing]));
   return currentGroups.map((group) => {
@@ -576,6 +600,7 @@ export function projectOfficialH2HStandings(
       totalTransfersCost:
         totalsByEntry === undefined ? stored.totalTransfersCost : (totals?.totalTransfersCost ?? 0),
       totalNetPoints: integerOrZero(standing.points_for),
+      ...(sourceCheckedAt === undefined ? {} : { officialSourceCheckedAt: sourceCheckedAt }),
     };
   });
 }
@@ -1016,6 +1041,21 @@ export async function syncOfficialH2HTournament(
     );
   }
 
+  // The relational database clock is the ordering authority for finalization
+  // fences. Sample it before any FPL request so a response started before
+  // data_checked_at cannot be blessed merely because the provider returned
+  // after the boundary.
+  const sourceOrdering = await readDatabaseOrderingTimestamp();
+  if (options.freshAfter !== undefined) {
+    const freshAfter =
+      options.freshAfter instanceof Date ? options.freshAfter : new Date(options.freshAfter);
+    if (!Number.isFinite(freshAfter.getTime()) || sourceOrdering.date < freshAfter) {
+      throw new ValidationError(
+        'Official H2H refresh started before the finalization boundary.',
+        'TOURNAMENT_OFFICIAL_H2H_FRESHNESS_FENCE',
+      );
+    }
+  }
   const entryIdsPromise = tournamentEntryRepository.findEntryIdsByTournamentId(
     season,
     tournament.id,
@@ -1039,6 +1079,7 @@ export async function syncOfficialH2HTournament(
       options.forceFull !== true,
   );
   const fetched = await fetchOfficialH2HSourceSnapshot(tournament.leagueId, fplClient, {
+    sourceCheckedAt: sourceOrdering.date,
     ...(pagePlan.mode === 'incremental'
       ? { matchPages: pagePlan.pageNumbers, existingManifests: manifests }
       : {}),
@@ -1073,7 +1114,13 @@ export async function syncOfficialH2HTournament(
         );
       }
     }
-    snapshot = { standings: fetched.standings, matches: merged, pageManifests: manifests };
+    snapshot = {
+      standings: fetched.standings,
+      matches: merged,
+      sourceCheckedAt: fetched.sourceCheckedAt,
+      pageMatches: fetched.pageMatches,
+      pageManifests: manifests,
+    };
   }
   const entryIds = await entryIdsPromise;
   const entryIdSet = new Set(entryIds);
@@ -1288,6 +1335,7 @@ export async function syncOfficialH2HTournament(
     currentGroups,
     standingsSelection.standings,
     totalsByEntry,
+    snapshot.sourceCheckedAt ?? checkedAt,
   );
   const published = await tournamentOfficialH2HRepository.publish(season, tournament.id, {
     ...officialRows,

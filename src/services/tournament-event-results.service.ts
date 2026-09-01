@@ -281,6 +281,8 @@ export async function syncTournamentEventResultsForEntryIds(
               eventId,
               picks,
               sourceOrdering.exact,
+              undefined,
+              { preserveCheckpointedInput: true },
             );
           }),
           ENTRY_PERSIST_TIMEOUT_MS,

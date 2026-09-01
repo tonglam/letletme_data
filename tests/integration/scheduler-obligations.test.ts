@@ -9,6 +9,7 @@ import {
   claimSchedulerObligations,
   completeSchedulerObligation,
   confirmSchedulerObligationEnqueued,
+  deferSchedulerObligationForWorker,
   failSchedulerObligation,
   findDueSchedulerObligationCandidates,
   findDueSchedulerJobNames,
@@ -1478,6 +1479,114 @@ describe('scheduler obligation generation fencing', () => {
     expect(claimed?.obligation).toMatchObject({
       periodKey: 'event-1-final-14',
       generation: 1,
+    });
+  });
+
+  test('reopens an old live-finalization success while league evidence is still missing', async () => {
+    const sql = await getDbClient();
+    const dueAt = new Date('2026-08-23T12:00:00Z');
+    const authorityAtMs = Date.parse('2026-08-23T11:00:00Z');
+    const scheduleAnchorMs = Date.parse('2026-08-22T18:00:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, completed_at, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'live-finalization',
+        'integration:event:live-finalization',
+        'case-a',
+        '30-second post-match finalization reconciliation',
+        'UTC',
+        'succeeded',
+        'catchup',
+        ${dueAt.toISOString()}::timestamptz,
+        2,
+        2,
+        '2026-08-23T12:01:00Z'::timestamptz,
+        jsonb_build_object(
+          'resultSlot', 'final-checkpoint',
+          'resultAuthorityAtMs', ${authorityAtMs}::bigint,
+          'resultScheduleAnchorMs', ${scheduleAnchorMs}::bigint
+        )
+      )
+    `;
+
+    const result = await reconcilePostMatchSchedulerObligations({
+      reservations: [
+        {
+          definition: {
+            name: 'live-finalization',
+            cadence: '30-second post-match finalization reconciliation',
+            timezone: 'UTC',
+          },
+          plan: {
+            scopeKey: 'integration:event:live-finalization',
+            periodKey: 'case-a',
+            dueAt,
+            source: 'catchup',
+            eventId: 1,
+            evidence: {
+              resultSlot: 'final-checkpoint',
+              resultAuthorityAtMs: authorityAtMs,
+              resultScheduleAnchorMs: scheduleAnchorMs,
+            },
+          },
+        },
+      ],
+      boundaries: [],
+    });
+
+    expect(result.reservations[0]).toMatchObject({
+      status: 'pending',
+      generation: 3,
+      evidence: expect.objectContaining({ reactivatedForFinalization: true }),
+    });
+  });
+
+  test('defers a running worker generation without consuming a scheduler attempt', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, bull_job_id, run_id, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'live-finalization',
+        'integration:event:worker-deferral',
+        'case-b',
+        '30-second post-match finalization reconciliation',
+        'UTC',
+        'running',
+        'catchup',
+        clock_timestamp(),
+        4,
+        1,
+        'live-finalization-bull',
+        '40000000-0000-4000-8000-000000000001'::uuid,
+        jsonb_build_object('resultSlot', 'final-checkpoint')
+      )
+    `;
+
+    expect(
+      await deferSchedulerObligationForWorker({
+        obligationId: OBLIGATION_ID,
+        generation: 4,
+        delayMs: 60_000,
+        evidence: { finalization: 'waiting-for-league-evidence' },
+      }),
+    ).toBe(true);
+    const [row] = await sql<Array<{ status: string; attempts: number; evidence: unknown }>>`
+      SELECT status, attempts, evidence
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(row).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      evidence: expect.objectContaining({ finalization: 'waiting-for-league-evidence' }),
     });
   });
 

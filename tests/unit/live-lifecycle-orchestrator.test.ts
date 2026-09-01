@@ -94,6 +94,13 @@ describe('live lifecycle decisions', () => {
     const liveWorkerSource = readFileSync('src/workers/live-data.worker.ts', 'utf8');
     expect(liveWorkerSource).toContain('expectedNextCheckAt: job.data.expectedNextCheckAt');
     expect(liveWorkerSource).toContain('if (result.checkpointed)');
+    expect(liveWorkerSource).toContain('randomUUID()');
+    expect(readFileSync('src/repositories/entry-event-picks.ts', 'utf8')).toContain(
+      'preserveCheckpointedInput',
+    );
+    expect(readFileSync('src/services/tournament-event-results.service.ts', 'utf8')).toContain(
+      '{ preserveCheckpointedInput: true }',
+    );
     const maintenanceSource = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
     expect(maintenanceSource).toContain('isPublicationOutbox');
     const maintenanceWorkerSource = readFileSync('src/workers/maintenance.worker.ts', 'utf8');

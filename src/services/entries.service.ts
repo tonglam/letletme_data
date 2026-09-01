@@ -1,8 +1,12 @@
 import { fplClient } from '../clients/fpl';
+import type Redis from 'ioredis';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
+import type { DbEntryEventResult } from '../db/schemas/platform.types';
 import {
   createEntryEventPicksRepository,
   entryEventPicksRepository,
+  type EntryEventPickHeadMetadata,
+  type EntryLiveInputPickRow,
 } from '../repositories/entry-event-picks';
 import {
   entryEventTransfersRepository,
@@ -27,6 +31,7 @@ import {
   publishEntryLiveInputV2,
   readEntryCheckpointDesiredV2,
   readEntryLiveInputV2,
+  validateEntryLiveInputV2,
   readLivePublicationV2,
   setEntryCheckpointDesiredV2,
   type AssistantManagerPointsFact,
@@ -175,6 +180,7 @@ export async function checkpointEntryLiveInputV2(
         publicationId: candidate.publication.publicationId,
         generation: candidate.publication.generation,
         picksBaseRevision: candidate.input.picksBase.revision,
+        inputPayload: candidate.input,
         contentUpdatedAt: candidate.input.picksBase.contentUpdatedAt,
         checkpointedAt,
       },
@@ -749,4 +755,241 @@ function normalizeFinalAutomaticSubs(
     substitutions.push({ inElement, outElement });
   }
   return substitutions;
+}
+
+function durableLiveInputContentHash(rows: readonly EntryLiveInputPickRow[]): string {
+  const first = rows.find((row) => row.position === 1);
+  return contentHash({
+    picks: rows
+      .map((row) => ({
+        element: row.elementId,
+        position: row.position,
+        multiplier: row.multiplier,
+        isCaptain: row.isCaptain,
+        isViceCaptain: row.isViceCaptain,
+      }))
+      .sort((left, right) => left.position - right.position),
+    chip: first?.activeChip ?? null,
+    transferCount: first?.transfers,
+    transferCost: first?.transfersCost,
+  });
+}
+
+function durableRowsMatchEntryLiveInput(
+  rows: readonly EntryLiveInputPickRow[],
+  input: EntryLiveInputV2,
+): boolean {
+  if (rows.length !== 15) return false;
+  const picksByPosition = new Map(input.picksBase.picks.map((pick) => [pick.position, pick]));
+  const first = rows.find((row) => row.position === 1);
+  return Boolean(
+    first &&
+      rows.every((row) => {
+        const pick = picksByPosition.get(row.position);
+        return (
+          pick !== undefined &&
+          pick.element === row.elementId &&
+          pick.multiplier === row.multiplier &&
+          pick.isCaptain === row.isCaptain &&
+          pick.isViceCaptain === row.isViceCaptain &&
+          (row.position === 1
+            ? row.activeChip === input.picksBase.chip &&
+              row.transfers === input.picksBase.transferCount &&
+              row.transfersCost === input.picksBase.transferCost
+            : row.activeChip === null && row.transfers === null && row.transfersCost === null)
+        );
+      }),
+  );
+}
+
+function buildFinalEntryLiveInputFromCheckpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  entryId: number,
+  rows: readonly EntryLiveInputPickRow[],
+  head: EntryEventPickHeadMetadata,
+  result: DbEntryEventResult | undefined,
+  dataCheckedAt: Date,
+): EntryLiveInputV2 | null {
+  if (!result) return null;
+  if (
+    (head.entryId !== undefined && head.entryId !== entryId) ||
+    head.state !== 'COMPLETE' ||
+    head.rowCount !== 15 ||
+    !Number.isSafeInteger(head.generation) ||
+    head.generation <= 0 ||
+    !/^[0-9a-f]{64}$/.test(head.picksBaseRevision) ||
+    !/^[0-9a-f]{64}$/.test(head.contentSha256) ||
+    !Number.isFinite(head.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(head.contentUpdatedAt.getTime()) ||
+    !Number.isFinite(head.checkpointedAt.getTime()) ||
+    durableLiveInputContentHash(rows) !== head.contentSha256
+  ) {
+    return null;
+  }
+  const first = rows.find((row) => row.position === 1);
+  if (
+    rows.length !== 15 ||
+    !first ||
+    first.transfers === null ||
+    first.transfersCost === null ||
+    !Number.isSafeInteger(first.transfers) ||
+    first.transfers < 0 ||
+    !Number.isSafeInteger(first.transfersCost) ||
+    first.transfersCost < 0
+  ) {
+    return null;
+  }
+  if (head.inputPayload === null || head.inputPayload === undefined) return null;
+  if (
+    !validateEntryLiveInputV2(head.inputPayload, {
+      season: season.seasonCode,
+      eventId,
+      entryId,
+    }) ||
+    head.inputPayload.picksBase.revision !== head.picksBaseRevision ||
+    !durableRowsMatchEntryLiveInput(rows, head.inputPayload)
+  ) {
+    // A pick head without the complete V2 payload cannot prove the original
+    // reported points, previous totals, or Assistant Manager fact.  Keep
+    // final recovery pending instead of manufacturing a new input revision.
+    return null;
+  }
+  const baseInput = head.inputPayload;
+  const finalPicks = normalizeFinalPicks(result.eventPicks, entryId, eventId);
+  const automaticSubs = finalPicks
+    ? normalizeFinalAutomaticSubs(
+        result.automaticSubstitutions,
+        new Set(finalPicks.map((pick) => pick.element)),
+      )
+    : null;
+  const richSyncedAt = result.richSyncedAt;
+  if (
+    !finalPicks ||
+    !automaticSubs ||
+    !richSyncedAt ||
+    !Number.isFinite(richSyncedAt.getTime()) ||
+    richSyncedAt.getTime() < dataCheckedAt.getTime()
+  ) {
+    return null;
+  }
+  const dataCheckedAtIso = dataCheckedAt.toISOString();
+  const multipliers = finalPicks.map((pick) => ({
+    element: pick.element,
+    multiplier: pick.multiplier,
+  }));
+  const score = {
+    eventPoints: result.eventPoints,
+    totalPoints: result.overallPoints,
+  };
+  const officialAdjustmentRevision = contentHash({
+    dataCheckedAt: dataCheckedAtIso,
+    multipliers,
+    automaticSubs,
+  });
+  const finalResultRevision = contentHash({
+    dataCheckedAt: dataCheckedAtIso,
+    score,
+    picks: finalPicks,
+    automaticSubs,
+  });
+  const input: EntryLiveInputV2 = {
+    ...baseInput,
+    officialAdjustment: {
+      revision: officialAdjustmentRevision,
+      multipliers,
+      automaticSubs,
+    },
+    finalResult: {
+      revision: finalResultRevision,
+      score,
+      picks: finalPicks,
+      automaticSubs,
+    },
+  };
+  return validateEntryLiveInputV2(input, { season: season.seasonCode, eventId, entryId })
+    ? input
+    : null;
+}
+
+/**
+ * Rebuild only missing FINAL entry inputs from the durable V2 pick head and
+ * finalized entry result. This is a finalization recovery path; the live
+ * provider lane continues to read and publish Redis without a database read.
+ */
+export async function rebuildFinalEntryLiveInputsV2(
+  season: FplSeasonRef,
+  eventId: number,
+  entryIds: readonly number[],
+  dataCheckedAt: Date | string,
+  redis?: Redis,
+): Promise<number> {
+  const uniqueEntryIds = [...new Set(entryIds)].filter(
+    (entryId) => Number.isSafeInteger(entryId) && entryId > 0,
+  );
+  if (uniqueEntryIds.length === 0) return 0;
+  const boundary =
+    dataCheckedAt instanceof Date ? new Date(dataCheckedAt) : new Date(dataCheckedAt);
+  if (!Number.isFinite(boundary.getTime())) return 0;
+  const resultsRepository = createEntryEventResultsRepository();
+  const [pickRows, heads, results] = await Promise.all([
+    entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
+      season,
+      eventId,
+      uniqueEntryIds,
+    ),
+    entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds),
+    resultsRepository.findByEventAndEntryIds(season, eventId, uniqueEntryIds),
+  ]);
+  const rowsByEntry = new Map<number, EntryLiveInputPickRow[]>();
+  for (const row of pickRows) {
+    const bucket = rowsByEntry.get(row.entryId) ?? [];
+    bucket.push(row);
+    rowsByEntry.set(row.entryId, bucket);
+  }
+  const headsByEntry = new Map<number, EntryEventPickHeadMetadata>();
+  for (const head of heads) {
+    if (head.entryId !== undefined) headsByEntry.set(head.entryId, head);
+  }
+  const resultsByEntry = new Map(results.map((result) => [result.entryId, result]));
+  let rebuilt = 0;
+  for (const entryId of uniqueEntryIds) {
+    const head = headsByEntry.get(entryId);
+    const result = resultsByEntry.get(entryId);
+    if (!head || !result) continue;
+    const input = buildFinalEntryLiveInputFromCheckpoint(
+      season,
+      eventId,
+      entryId,
+      rowsByEntry.get(entryId) ?? [],
+      head,
+      result,
+      boundary,
+    );
+    if (!input) continue;
+    try {
+      const publication = await publishEntryLiveInputV2({
+        season: season.seasonCode,
+        eventId,
+        entryId,
+        input,
+        sourceCheckedAt: result.richSyncedAt!,
+        generationFloor: head.generation,
+        redis,
+      });
+      if (
+        publication.publication.state === 'FINAL' &&
+        publication.publication.entryId === entryId
+      ) {
+        rebuilt += 1;
+      }
+    } catch (error) {
+      logError('Failed to rebuild final V2 entry input from checkpoint', error, {
+        season: season.seasonCode,
+        eventId,
+        entryId,
+      });
+    }
+  }
+  return rebuilt;
 }

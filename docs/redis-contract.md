@@ -49,6 +49,31 @@ llm:data:v2:fpl:live:<season>:<event>:picks-coverage
 llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:checkpoint-desired
 ```
 
+Live league V2 publications are Data-owned, immutable tournament/event read
+models. Classic has one complete board; H2H has one composite head, one
+official standings overlay, and independently replaceable match scopes:
+
+```text
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:classic:active|previous|sequence|desired|checkpoint-desired
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:classic:<generation>:index|payload
+
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-head:active|previous|sequence|desired|checkpoint-desired
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-match-<matchId>:active|previous|sequence|desired|checkpoint-desired
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-standings:active|previous|sequence|desired|checkpoint-desired
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-head:<generation>:index|payload
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-match-<matchId>:<generation>:index|payload
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-standings:<generation>:index|payload
+```
+
+`index` and `payload` are immutable siblings and are accepted only when their
+manifest metadata, byte length, and SHA-256 agree. Active pointers have no TTL
+during live operation; previous pointers/items retain 24 hours, finalized
+siblings retain 48 hours. Data alone promotes these keys. Finalization retry
+state is durable in `ops.scheduler_obligations`; the latest checkpoint desired
+publication is retained in the scope's `checkpoint-desired` key. GraphQL is
+read-only and must select one coherent current/previous/checkpoint publication;
+it never builds a league board by reading entry inputs one at a time.
+
 Live Matches V3 uses an independent namespace. It is fed by the same coherent
 fixtures/event-live observation as Live Points, but desk and player detail are
 separate publications so a detail failure cannot remove an available score
@@ -206,6 +231,7 @@ llm:data:fpl:core:<season>:...
 llm:data:v2:fpl:live:<season>:<event>:...
 llm:data:v2:fpl:entry-live:<season>:<event>:<entry>:...
 llm:data:v3:fpl:live-match:<season>:<event>:...
+llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:...
 llm:data:fpl:my-fpl:<season>:<event>:active
 fpl:price-changes:hot:<season>:...
 llm:tournament:preview:...
