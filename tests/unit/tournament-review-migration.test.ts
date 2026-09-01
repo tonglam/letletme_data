@@ -19,7 +19,7 @@ const sourceFloorMigration = readFileSync(
   'utf8',
 );
 const hardCutMigration = readFileSync(
-  'migrations/0083_my_tournament_review_v2_1_hard_cut.sql',
+  'migrations/0084_my_tournament_review_v2_1_hard_cut.sql',
   'utf8',
 );
 
@@ -110,7 +110,7 @@ describe('My Tournament Review V2 migration', () => {
   });
 
   test('backs up and resets the current season before introducing V2.1 chunks', () => {
-    expect(hardCutMigration).toContain('tournament_review_publications_0083_backup');
+    expect(hardCutMigration).toContain('tournament_review_publications_0084_backup');
     expect(hardCutMigration).toContain('tournament_review_v2_1_backup_manifest');
     expect(hardCutMigration).toContain('publication_revision_distribution jsonb');
     expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_heads');

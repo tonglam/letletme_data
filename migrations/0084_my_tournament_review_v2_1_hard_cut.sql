@@ -11,11 +11,11 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0083_backup
+CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0084_backup
   (LIKE competition.tournament_review_publications INCLUDING ALL);
-CREATE TABLE IF NOT EXISTS competition.tournament_review_heads_0083_backup
+CREATE TABLE IF NOT EXISTS competition.tournament_review_heads_0084_backup
   (LIKE competition.tournament_review_heads INCLUDING ALL);
-CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0083_backup
+CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0084_backup
   (LIKE competition.tournament_review_obligations INCLUDING ALL);
 
 CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
@@ -55,33 +55,33 @@ BEGIN
   LIMIT 1;
 
   IF current_season IS NULL THEN
-    RAISE EXCEPTION '0083 requires one current FPL season';
+    RAISE EXCEPTION '0084 requires one current FPL season';
   END IF;
 
   -- Copy only the current season.  Historical descriptive-v1 evidence remains
   -- in the live tables and is never exposed by the V2.1 reader.
-  INSERT INTO competition.tournament_review_publications_0083_backup
+  INSERT INTO competition.tournament_review_publications_0084_backup
   SELECT * FROM competition.tournament_review_publications
   WHERE season_id = current_season;
-  INSERT INTO competition.tournament_review_heads_0083_backup
+  INSERT INTO competition.tournament_review_heads_0084_backup
   SELECT * FROM competition.tournament_review_heads
   WHERE season_id = current_season;
-  INSERT INTO competition.tournament_review_obligations_0083_backup
+  INSERT INTO competition.tournament_review_obligations_0084_backup
   SELECT * FROM competition.tournament_review_obligations
   WHERE season_id = current_season;
 
   SELECT count(*) INTO publication_count
-  FROM competition.tournament_review_publications_0083_backup;
+  FROM competition.tournament_review_publications_0084_backup;
   SELECT count(*) INTO head_count
-  FROM competition.tournament_review_heads_0083_backup;
+  FROM competition.tournament_review_heads_0084_backup;
   SELECT count(*) INTO obligation_count
-  FROM competition.tournament_review_obligations_0083_backup;
+  FROM competition.tournament_review_obligations_0084_backup;
 
   SELECT COALESCE(jsonb_object_agg(revision::text, revision_count), '{}'::jsonb)
     INTO revision_distribution
   FROM (
     SELECT revision, count(*)::bigint AS revision_count
-    FROM competition.tournament_review_publications_0083_backup
+    FROM competition.tournament_review_publications_0084_backup
     GROUP BY revision
     ORDER BY revision
   ) revisions;
@@ -90,15 +90,15 @@ BEGIN
   SELECT encode(digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id, revision)::text, '[]'), 'sha256'), 'hex')
     INTO publication_sha
-  FROM competition.tournament_review_publications_0083_backup row;
+  FROM competition.tournament_review_publications_0084_backup row;
   SELECT encode(digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
     INTO head_sha
-  FROM competition.tournament_review_heads_0083_backup row;
+  FROM competition.tournament_review_heads_0084_backup row;
   SELECT encode(digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
     INTO obligation_sha
-  FROM competition.tournament_review_obligations_0083_backup row;
+  FROM competition.tournament_review_obligations_0084_backup row;
 
   INSERT INTO ops.tournament_review_v2_1_backup_manifest (
     season_id, publications_rows, heads_rows, obligations_rows,

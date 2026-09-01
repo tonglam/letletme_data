@@ -162,6 +162,10 @@ describe('tournament lifecycle invariants', () => {
 
   test('resumes before terminalizing a post-publication warning', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    const maintenanceJobs = await import('../../src/jobs/maintenance.jobs');
+    const enqueueReviewSpy = spyOn(maintenanceJobs, 'enqueueTournamentReview').mockResolvedValue(
+      undefined,
+    );
     const { finalizePublishedTournamentSetup } = await import(
       '../../src/services/tournament-setup.service'
     );
@@ -183,6 +187,12 @@ describe('tournament lifecycle invariants', () => {
       null,
       1,
     );
+    expect(enqueueReviewSpy).toHaveBeenCalledWith(TEST_SEASON, 'api', {
+      tournamentId: 900_122,
+      attempts: 3,
+      backoffDelayMs: 60_000,
+      deduplicationId: `tournament-review-bootstrap-${TEST_SEASON.seasonCode}-900122`,
+    });
   });
 
   test('returns exact roster diffs for joins, departures, simultaneous changes, and duplicates', () => {
