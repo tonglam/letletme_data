@@ -19,6 +19,7 @@ async function hasSupersedingPendingJob(
   eventId: number,
   finalizeEvent: boolean,
   matchObservationOnly: boolean,
+  promoteActiveEvent: boolean,
 ): Promise<boolean> {
   try {
     const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
@@ -28,7 +29,8 @@ async function hasSupersedingPendingJob(
         job.data.seasonId === season.seasonId &&
         job.data.eventId === eventId &&
         (finalizeEvent ? job.data.finalizeEvent === true : job.data.finalizeEvent !== true) &&
-        Boolean(job.data.matchObservationOnly) === matchObservationOnly,
+        Boolean(job.data.matchObservationOnly) === matchObservationOnly &&
+        (!promoteActiveEvent || job.data.promoteActiveEvent === true),
     );
   } catch (error) {
     logError('Failed to check pending live-data jobs', error, {
@@ -217,6 +219,8 @@ export async function enqueueLiveSnapshot(
     expectedNextCheckAt?: Date | string | null;
     /** Run only the Match V3 desk observation before Live Points is eligible. */
     matchObservationOnly?: boolean;
+    /** Explicit event-pointer intent preserved across Match lifecycle normalization. */
+    promoteActiveEvent?: boolean;
   } = {},
 ) {
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
@@ -264,6 +268,7 @@ export async function enqueueLiveSnapshot(
         eventId,
         options.finalizeEvent === true,
         options.matchObservationOnly === true,
+        options.promoteActiveEvent === true,
       ))
     ) {
       logInfo('Live snapshot job already pending; skipping enqueue', {
@@ -307,6 +312,9 @@ export async function enqueueLiveSnapshot(
                 : new Date(options.expectedNextCheckAt).toISOString(),
           }),
       ...(options.matchObservationOnly === true ? { matchObservationOnly: true } : {}),
+      ...(options.promoteActiveEvent !== undefined
+        ? { promoteActiveEvent: options.promoteActiveEvent }
+        : {}),
     };
     const suffix = options.matchObservationOnly === true ? 'v3' : 'v2';
     const generatedJobId =

@@ -13,6 +13,8 @@ import {
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
+const quote = String.fromCharCode(39);
+
 describe('live lifecycle decisions', () => {
   test('settles only fenced backoff roots and retries unfenced repairs', () => {
     expect(
@@ -109,12 +111,20 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain(
       'matchObservationOnly: plan.evidence?.matchObservationOnly === true',
     );
+    expect(registrySource).toContain('promoteActiveEvent:');
+    expect(registrySource).toContain('plan.evidence?.promoteActiveEvent === true');
     expect(registrySource).toContain('PICKS_WAIT');
     const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
     expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect');
     expect(lifecycleSource).toContain('matchObservationOnly: true');
+    expect(lifecycleSource).toContain('if (!tick)');
+    expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect(season, null, now)');
+    expect(lifecycleSource).toContain(
+      'promoteActiveEvent: decision.state !== ' + quote + 'PRE_DEADLINE' + quote,
+    );
     expect(lifecycleSource).toContain('expectedNextCheckAt');
     expect(liveWorkerSource).toContain('checkpointObligationFailed');
+    expect(liveWorkerSource).toContain('promoteActiveEvent: job.data.promoteActiveEvent === true');
   });
 
   test('carries a freshness window from the live-picks root into its child scan', () => {

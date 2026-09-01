@@ -14,6 +14,7 @@ const waitingJobs: Array<{
     eventId: number;
     finalizeEvent?: boolean;
     matchObservationOnly?: boolean;
+    promoteActiveEvent?: boolean;
     checkpointKind?: 'desk' | 'detail';
   };
 }> = [];
@@ -137,6 +138,20 @@ describe('Live Points V2 snapshot enqueue', () => {
     });
     expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v3');
     expect(addCalls[0]?.data).toMatchObject({ matchObservationOnly: true });
+  });
+
+  test('carries active-event promotion intent through a post-deadline Match-only job', async () => {
+    const now = new Date('2026-08-09T12:34:56.000Z');
+    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'cron', {
+      now,
+      matchObservationOnly: true,
+      promoteActiveEvent: true,
+    });
+    expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v3');
+    expect(addCalls[0]?.data).toMatchObject({
+      matchObservationOnly: true,
+      promoteActiveEvent: true,
+    });
   });
 
   test('active snapshots always use the same V2 lane as ordinary cron snapshots', async () => {

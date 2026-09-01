@@ -994,7 +994,7 @@ export async function persistLiveLifecycleStatus(now = new Date()) {
  */
 async function observeUpcomingMatchEventDirect(
   season: FplSeasonRef,
-  currentEventId: number,
+  currentEventId: number | null,
   now: Date,
 ): Promise<void> {
   const nextEvent = await (await import('./events.service')).getNextEvent(season).catch(() => null);
@@ -1023,6 +1023,7 @@ async function observeUpcomingMatchEventDirect(
     lifecycleState: 'PRE_DEADLINE',
     expectedNextCheckAt,
     matchObservationOnly: true,
+    promoteActiveEvent: false,
   });
   await writeLifecycleQuietState(season.seasonCode, nextEvent.id, {
     revision: quiet?.revision ?? null,
@@ -1034,7 +1035,15 @@ async function observeUpcomingMatchEventDirect(
 
 export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleDecision | null> {
   const tick = await persistLiveLifecycleStatus(now);
-  if (!tick) return null;
+  if (!tick) {
+    const season = await seasonRepository.findCurrent();
+    await observeUpcomingMatchEventDirect(season, null, now).catch((error) => {
+      logError('Failed to enqueue upcoming direct Match V3 observation', error, {
+        eventId: null,
+      });
+    });
+    return null;
+  }
   const { season, currentEvent, fixtures, decision, expectedNextCheckAt } = tick;
 
   // The deadline canary and pre-start retry lane are the only coordinator
@@ -1068,6 +1077,9 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
           lifecycleState: normalizeMatchLifecycleState(decision.state),
           expectedNextCheckAt,
           now,
+          ...(decision.shouldObserveMatches && !decision.shouldFetchLive
+            ? { promoteActiveEvent: decision.state !== 'PRE_DEADLINE' }
+            : {}),
         });
       }
     }

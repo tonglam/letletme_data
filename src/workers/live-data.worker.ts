@@ -92,10 +92,10 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       const result = await syncLiveMatchObservationV3(season, eventId, {
         lifecycleState: job.data.lifecycleState,
         expectedNextCheckAt: job.data.expectedNextCheckAt,
-        // A pre-deadline warmup is deliberately addressable by eventId but
-        // must not advance eventless readers to a future event. Post-deadline
-        // Match-only probes are allowed to advance the active pointer.
-        promoteActiveEvent: job.data.lifecycleState !== 'PRE_DEADLINE',
+        // Preserve the broader scheduler decision explicitly: PICKS_PROBE is
+        // normalized to the Match PRE_DEADLINE state for publication schema,
+        // but it is post-deadline and may advance the eventless pointer.
+        promoteActiveEvent: job.data.promoteActiveEvent === true,
       });
       if (result.checkpointObligationFailed) {
         throw new Error(`Live Match checkpoint obligation was not created for event ${eventId}`);

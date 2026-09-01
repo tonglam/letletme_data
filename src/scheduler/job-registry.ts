@@ -1109,6 +1109,10 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             // eligible. Preserve that lane on the durable obligation so the
             // reconciler cannot accidentally run the all-in-one producer.
             matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
+            promoteActiveEvent:
+              decision.shouldObserveMatches &&
+              !decision.shouldFetchLive &&
+              decision.state !== 'PRE_DEADLINE',
           },
         },
       ];
@@ -1128,6 +1132,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             ? plan.evidence.expectedNextCheckAt
             : null,
         matchObservationOnly: plan.evidence?.matchObservationOnly === true,
+        ...(plan.evidence?.promoteActiveEvent === true ? { promoteActiveEvent: true } : {}),
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },

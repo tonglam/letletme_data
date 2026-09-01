@@ -34,6 +34,8 @@ export interface LiveDataJobData {
   expectedNextCheckAt?: string | null;
   /** Pre-kickoff Match V3 observation; never runs the Live Points producer. */
   matchObservationOnly?: boolean;
+  /** Whether this Match-only observation may advance the eventless pointer. */
+  promoteActiveEvent?: boolean;
   /** A checkpoint-only job never calls FPL; it consumes Redis publication data. */
   checkpointKind?: 'desk' | 'detail';
   checkpointPublicationId?: string;
