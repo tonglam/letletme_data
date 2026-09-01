@@ -161,9 +161,11 @@ and `expectedNextCheckAt`. The standalone scheduler owns the 30-second lifecycle
 the separate post-match finalization obligation. Redis is promoted before PostgreSQL checkpointing,
 so a database outage does not remove the last complete page response.
 
-Live Matches V3 is a sibling of that observation, not a second provider poll. It promotes a compact
-desk when fixtures are valid and promotes fixture-grain player detail only when the event-live result
-and player identity are valid. A fixtures-only success therefore advances the score desk while the
+Live Matches V3 is a sibling of that observation during a full snapshot, reusing its accepted
+fixtures/event-live pair rather than issuing a second provider poll. During the pre-deadline
+upcoming-event warm-up, the standalone `matchObservationOnly` lane intentionally performs one
+fixtures-only provider request for the upcoming event; it does not fetch event-live and does not
+replace the full observation. A valid fixtures-only success advances the score desk while the
 previous compatible detail remains available and marked degraded. The warm checkpoint path is
 `Redis current -> Redis previous -> process LKG -> bounded PostgreSQL cold fallback`; no page request
 calls FPL, Data API, a queue, or PostgreSQL.

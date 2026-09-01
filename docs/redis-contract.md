@@ -101,12 +101,15 @@ CAS-promote previous, restore current from the exact checkpoint, or replay the
 latest merged checkpoint obligation. The endpoint is protected by the existing
 ops API-key guard.
 
-The global publication items are exactly `eventLive` and `fixtures`. An entry
-publication contains one complete `input` item. A V3 manifest is scoped to one
-season/event (and, for entry input, one entry), carries a monotonic generation,
-and uses the lifecycle states defined by the V2 contract.
+The Live Points V2 global publication items are exactly `eventLive` and
+`fixtures`. A Live Points V2 entry publication contains one complete `input`
+item. Those global and entry manifests remain V2 and are still read by the V2
+publication parser; this document's V3 manifest rules apply only to the Live
+Matches desk/detail namespace described above.
 
-An active manifest contains the V2 contract version, publication identity,
+An active Live Matches V3 manifest is scoped to one season/event, carries a
+monotonic generation, and uses the lifecycle states defined by its own
+contract. It contains the V3 contract version, publication identity,
 generation, scope, lifecycle state, source/publish/checkpoint timestamps,
 revision vector, and item metadata. Each item contains `name`, `key`, `type`,
 `count`, `bytes`, and `sha256`. Readers validate field sets, scope, key prefix,
