@@ -665,7 +665,6 @@ export const entryEventPickHeadsInCompetition = competition.table(
     generation: bigint('generation', { mode: 'number' }).notNull(),
     picksBaseRevision: text('picks_base_revision').notNull(),
     contentSha256: text('content_sha256').notNull(),
-    inputPayload: jsonb('input_payload'),
     rowCount: smallint('row_count').notNull(),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
     contentUpdatedAt: timestamp('content_updated_at', {
@@ -674,6 +673,7 @@ export const entryEventPickHeadsInCompetition = competition.table(
     }).notNull(),
     checkpointedAt: timestamp('checkpointed_at', { withTimezone: true, mode: 'date' }).notNull(),
     state: text().notNull().default('COMPLETE'),
+    inputPayload: jsonb('input_payload'),
   },
   (table) => [
     primaryKey({
