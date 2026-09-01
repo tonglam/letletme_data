@@ -147,10 +147,10 @@ describe('My Tournament Review V2 migration', () => {
   });
 
   test('migrates durable governance evidence off the retired contract key', () => {
-    expect(hardCutMigration).toContain("SET contract_key = 'my-tournament-review-v2.1'");
+    expect(hardCutMigration).toContain('SET contract_key = \x27my-tournament-review-v2.1\x27');
     expect(hardCutMigration).toContain('UPDATE ops.freshness_slo_windows');
     expect(hardCutMigration).toContain('UPDATE ops.data_governance_cases');
-    expect(hardCutMigration).toContain("status = 'DISMISSED'");
+    expect(hardCutMigration).toContain('status = \x27DISMISSED\x27');
     expect(hardCutMigration).toContain('conflicting_cases');
   });
 

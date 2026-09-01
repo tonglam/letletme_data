@@ -2293,7 +2293,7 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     ),
     check(
       'tournament_review_obligations_correction_check',
-      sql`(correction_reason IS NULL AND correction_change_id IS NULL) OR (btrim(correction_reason) <> '' AND btrim(correction_change_id) <> '')`,
+      sql`(correction_reason IS NULL AND correction_change_id IS NULL) OR (correction_reason IS NOT NULL AND correction_change_id IS NOT NULL AND btrim(correction_reason) <> '' AND btrim(correction_change_id) <> '')`,
     ),
   ],
 );
@@ -2347,8 +2347,9 @@ export const tournamentReviewPublicationChunksInCompetition = competition.table(
     }).onDelete('cascade'),
     check(
       'tournament_review_publication_chunks_count_check',
-      sql`chunk_index >= 0 AND item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array' AND jsonb_array_length(items) = item_count`,
+      sql`item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array' AND jsonb_array_length(items) = item_count`,
     ),
+    check('tournament_review_publication_chunks_index_check', sql`chunk_index >= 0`),
     check('tournament_review_publication_chunks_sha_check', sql`chunk_sha256 ~ '^[0-9a-f]{64}$'`),
   ],
 );

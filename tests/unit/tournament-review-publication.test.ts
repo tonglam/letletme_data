@@ -405,14 +405,16 @@ describe('My Tournament Review V2 format and retry policy', () => {
       'previousHead[0]?.correction_change_id === correction.changeId',
     );
     expect(publicationSource).toContain('previousHead[0]?.correction_reason === correction.reason');
-    expect(publicationSource).toContain("state: 'REUSED'");
+    expect(publicationSource).toContain('state: \x27REUSED\x27');
     expect(publicationSource).toContain(
-      "jsonb_typeof(publication.payload -> 'manifest') = 'object'",
+      'jsonb_typeof(publication.payload -> \x27manifest\x27) = \x27object\x27',
     );
-    expect(publicationSource).toContain("jsonb_typeof(section -> 'chunkHashes') <> 'array'");
+    expect(publicationSource).toContain(
+      'jsonb_typeof(section -> \x27chunkHashes\x27) <> \x27array\x27',
+    );
     expect(publicationSource).toContain('Keep any attached repair issue on the descendant');
     expect(publicationSource).toContain(
-      "(publication.payload -> 'manifest' ->> 'chunkCount')::numeric",
+      '(publication.payload -> \x27manifest\x27 ->> \x27chunkCount\x27)::numeric',
     );
   });
 

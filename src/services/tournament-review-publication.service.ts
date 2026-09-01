@@ -2501,8 +2501,15 @@ async function publishTournamentReviewScopeOnce(
       manifestPayload,
       chunks.map((chunk) => chunk.chunkSha256),
     );
-    const existing = await tx<Array<{ revision: number | string; published_at: Date | string }>>`
-      SELECT revision, published_at
+    const existing = await tx<
+      Array<{
+        revision: number | string;
+        published_at: Date | string;
+        content_sha256: string;
+        payload: JsonRecord | null;
+      }>
+    >`
+      SELECT revision, published_at, content_sha256, payload
       FROM competition.tournament_review_publications
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
@@ -2511,6 +2518,41 @@ async function publishTournamentReviewScopeOnce(
       ORDER BY revision DESC
       LIMIT 1
     `;
+    const existingChunks = existing[0]
+      ? await tx<
+          Array<{
+            section_key: string;
+            chunk_index: number | string;
+            item_count: number | string;
+            chunk_sha256: string;
+            items: unknown;
+          }>
+        >`
+          SELECT section_key, chunk_index, item_count, chunk_sha256, items
+          FROM competition.tournament_review_publication_chunks
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournamentId}
+            AND event_id = ${eventId}
+            AND revision = ${existing[0].revision}
+        `
+      : [];
+    const existingPublicationIsCoherent =
+      existing[0] !== undefined &&
+      existing[0].content_sha256 === contentSha256 &&
+      reviewChunksMatchPayload(existing[0].payload, existingChunks) &&
+      tournamentReviewSemanticSha256(
+        existing[0].payload,
+        orderedReviewChunkHashes(existingChunks),
+      ) === existing[0].content_sha256;
+    if (existing[0] && !correction && !existingPublicationIsCoherent) {
+      // A stored row with a matching hash is not enough to prove integrity:
+      // payload or chunk JSON may have been damaged while the hash columns
+      // remained unchanged.  Do not reuse or mutate that immutable revision;
+      // require an explicit, audited correction to replace it.
+      throw new TournamentReviewPublicationError(
+        'stored review publication is incoherent; explicit correction required',
+      );
+    }
     let revision: number;
     let publishedAt: Date;
     let state: 'PUBLISHED' | 'REUSED';
@@ -2518,7 +2560,7 @@ async function publishTournamentReviewScopeOnce(
     // returns to an earlier semantic hash (A -> B -> A).  Do not reuse the
     // earlier revision: allocate a new monotonically increasing revision so
     // the reason/Change ID remains attached to a durable publication row.
-    if (existing[0] && !correction) {
+    if (existing[0] && !correction && existingPublicationIsCoherent) {
       revision = Number(existing[0].revision);
       publishedAt = asDate(existing[0].published_at) ?? new Date();
       state = 'REUSED';
@@ -2767,13 +2809,6 @@ export async function requestTournamentReviewCorrection(
       WHERE obligation.season_id = ${season.seasonId}
         AND obligation.tournament_id = ${tournamentId}
         AND obligation.event_id >= ${correctionTargetEventId}
-        AND EXISTS (
-          SELECT 1
-          FROM competition.tournament_review_heads head
-          WHERE head.season_id = obligation.season_id
-            AND head.tournament_id = obligation.tournament_id
-            AND head.event_id = obligation.event_id
-        )
       ORDER BY obligation.event_id
     `;
     for (const descendant of descendantRows) {
@@ -2813,13 +2848,6 @@ export async function requestTournamentReviewCorrection(
         AND obligation.tournament_id = ${tournamentId}
         AND obligation.event_id >= ${correctionTargetEventId}
         AND obligation.state IN ('READY', 'PROCESSING', 'PENDING', 'WAITING_SOURCE', 'DEGRADED')
-        AND EXISTS (
-          SELECT 1
-          FROM competition.tournament_review_heads head
-          WHERE head.season_id = obligation.season_id
-            AND head.tournament_id = obligation.tournament_id
-            AND head.event_id = obligation.event_id
-        )
       RETURNING obligation.event_id
     `;
     if (rowsAfterLocks.length === 0) {
@@ -4128,6 +4156,16 @@ type TournamentReviewOperationalAggregateRow = {
   latest_updated_at: Date | string | null;
 };
 
+type TournamentReviewOperationalSemanticRow = {
+  state: TournamentReviewObligationState;
+  ready_revision: number | string | null;
+  head_revision: number | string | null;
+  head_content_sha256: string | null;
+  publication_content_sha256: string | null;
+  payload: JsonRecord | null;
+  chunks: unknown;
+};
+
 type TournamentReviewOperationalWatchRow = {
   tournament_id: number;
   event_id: number;
@@ -4257,6 +4295,105 @@ export async function getTournamentReviewV2OperationalStatus(
              max(updated_at) AS latest_updated_at
       FROM joined
     `;
+  const count = (value: number | string | null | undefined): number => {
+    const parsed = Number(value ?? 0);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  };
+  // The aggregate query above deliberately stays narrow for state counts, but
+  // a READY head is only coherent after recomputing the same semantic digest
+  // used by the producer.  Load the small publication manifest and its bounded
+  // sibling chunks separately, then verify both the stored chunk JSON and the
+  // ordered semantic hash in this process.  This keeps /jobs/status fail-closed
+  // when a payload or chunk is tampered with while its stored hash columns are
+  // left untouched.
+  const semanticRows = await db<TournamentReviewOperationalSemanticRow[]>`
+    SELECT obligation.state,
+           obligation.ready_revision,
+           head.revision AS head_revision,
+           head.content_sha256 AS head_content_sha256,
+           publication.content_sha256 AS publication_content_sha256,
+           publication.payload,
+           COALESCE(
+             (
+               SELECT jsonb_agg(
+                 jsonb_build_object(
+                   'section_key', chunk.section_key,
+                   'chunk_index', chunk.chunk_index,
+                   'item_count', chunk.item_count,
+                   'chunk_sha256', chunk.chunk_sha256,
+                   'items', chunk.items
+                 )
+                 ORDER BY chunk.section_key, chunk.chunk_index
+               )
+               FROM competition.tournament_review_publication_chunks chunk
+               WHERE chunk.season_id = obligation.season_id
+                 AND chunk.tournament_id = obligation.tournament_id
+                 AND chunk.event_id = obligation.event_id
+                 AND chunk.revision = head.revision
+             ),
+             '[]'::jsonb
+           ) AS chunks
+    FROM competition.tournament_review_obligations obligation
+    LEFT JOIN competition.tournament_review_heads head
+      ON head.season_id = obligation.season_id
+     AND head.tournament_id = obligation.tournament_id
+     AND head.event_id = obligation.event_id
+    LEFT JOIN competition.tournament_review_publications publication
+      ON publication.season_id = head.season_id
+     AND publication.tournament_id = head.tournament_id
+     AND publication.event_id = head.event_id
+     AND publication.revision = head.revision
+    WHERE obligation.season_id = ${season.seasonId}
+      AND obligation.state = 'READY'
+  `;
+  const storedChunkRows = (
+    value: unknown,
+  ): Array<{
+    section_key: string;
+    chunk_index: number | string;
+    item_count: number | string;
+    chunk_sha256: string;
+    items: unknown;
+  }> => {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (!isRecord(item) || typeof item.section_key !== 'string') return [];
+      return [
+        {
+          section_key: item.section_key,
+          chunk_index: item.chunk_index as number | string,
+          item_count: item.item_count as number | string,
+          chunk_sha256: String(item.chunk_sha256 ?? ''),
+          items: item.items,
+        },
+      ];
+    });
+  };
+  const readyCount = count(aggregateRows[0]?.ready_count);
+  let readyCoherentCount = 0;
+  let readyChunkCompleteCount = 0;
+  if (semanticRows.length === readyCount) {
+    for (const row of semanticRows) {
+      const chunks = storedChunkRows(row.chunks);
+      const chunksComplete = reviewChunksMatchPayload(row.payload, chunks);
+      if (chunksComplete) readyChunkCompleteCount += 1;
+      const semanticSha =
+        chunksComplete && row.payload
+          ? tournamentReviewSemanticSha256(row.payload, orderedReviewChunkHashes(chunks))
+          : null;
+      if (
+        chunksComplete &&
+        integerOrNull(row.ready_revision) !== null &&
+        integerOrNull(row.ready_revision) === integerOrNull(row.head_revision) &&
+        row.head_content_sha256 !== null &&
+        row.head_content_sha256 === row.publication_content_sha256 &&
+        semanticSha === row.head_content_sha256
+      ) {
+        readyCoherentCount += 1;
+      }
+    }
+  }
+  const readyIncoherentCount = Math.max(0, readyCount - readyCoherentCount);
   const normalizedWatchEntryId =
     Number.isInteger(watchEntryId) && (watchEntryId ?? 0) > 0 ? watchEntryId : null;
   const watchedTournamentRows = normalizedWatchEntryId
@@ -4313,10 +4450,6 @@ export async function getTournamentReviewV2OperationalStatus(
       `
     : [];
   const aggregate = aggregateRows[0];
-  const count = (value: number | string | null | undefined): number => {
-    const parsed = Number(value ?? 0);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
-  };
   const watch = watchedTournamentIds.length
     ? {
         watchEntryId: normalizedWatchEntryId as number,
@@ -4355,12 +4488,9 @@ export async function getTournamentReviewV2OperationalStatus(
       degraded: count(aggregate?.degraded_count),
     },
     publication: {
-      readyWithCoherentHead: count(aggregate?.ready_coherent_count),
-      readyWithIncoherentHead: count(aggregate?.ready_incoherent_count),
-      readyWithIncompleteChunks: Math.max(
-        0,
-        count(aggregate?.ready_count) - count(aggregate?.ready_chunk_complete_count),
-      ),
+      readyWithCoherentHead: readyCoherentCount,
+      readyWithIncoherentHead: readyIncoherentCount,
+      readyWithIncompleteChunks: Math.max(0, readyCount - readyChunkCompleteCount),
     },
     oldestActiveEligibleAt: dateIso(aggregate?.oldest_active_eligible_at),
     oldestDegradedAt: dateIso(aggregate?.oldest_degraded_at),

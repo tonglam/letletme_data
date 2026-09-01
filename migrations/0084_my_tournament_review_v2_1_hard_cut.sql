@@ -155,10 +155,53 @@ $migration$;
 -- already-open V2.1 case when a legacy duplicate occupies the same dedupe
 -- identity.  This keeps freshness windows and repair lanes observable after
 -- the registry switches to the single V2.1 contract.
+DO $migration$
+DECLARE
+  duplicate_row record;
+BEGIN
+  -- `slo_key` is the identity column.  Merge an old row into an already
+  -- migrated V2.1 row before changing the key, otherwise the unique identity
+  -- constraint would abort the cutover halfway through the governance table.
+  FOR duplicate_row IN
+    SELECT legacy.window_id AS legacy_window_id,
+           canonical.window_id AS canonical_window_id,
+           legacy.evidence AS legacy_evidence
+    FROM ops.freshness_slo_windows legacy
+    JOIN ops.freshness_slo_windows canonical
+      ON canonical.slo_key = 'my-tournament-review-v2.1'
+     AND canonical.scope_key = legacy.scope_key
+     AND canonical.period_key = legacy.period_key
+     AND canonical.window_id <> legacy.window_id
+    WHERE legacy.slo_key = 'my-tournament-review-v2'
+       OR legacy.contract_key = 'my-tournament-review-v2'
+  LOOP
+    UPDATE ops.freshness_slo_windows
+    SET eligible_at = LEAST(
+          eligible_at,
+          (SELECT eligible_at FROM ops.freshness_slo_windows WHERE window_id = duplicate_row.legacy_window_id)
+        ),
+        due_at = LEAST(
+          due_at,
+          (SELECT due_at FROM ops.freshness_slo_windows WHERE window_id = duplicate_row.legacy_window_id)
+        ),
+        evidence = evidence || jsonb_build_object(
+          'supersededLegacyWindowId', duplicate_row.legacy_window_id,
+          'supersededLegacyEvidence', duplicate_row.legacy_evidence
+        ),
+        updated_at = clock_timestamp()
+    WHERE window_id = duplicate_row.canonical_window_id;
+    DELETE FROM ops.freshness_slo_windows
+    WHERE window_id = duplicate_row.legacy_window_id;
+  END LOOP;
+END
+$migration$;
+
 UPDATE ops.freshness_slo_windows
-SET contract_key = 'my-tournament-review-v2.1',
+SET slo_key = 'my-tournament-review-v2.1',
+    contract_key = 'my-tournament-review-v2.1',
     updated_at = clock_timestamp()
-WHERE contract_key = 'my-tournament-review-v2';
+WHERE slo_key = 'my-tournament-review-v2'
+   OR contract_key = 'my-tournament-review-v2';
 
 WITH conflicting_cases AS (
   SELECT legacy.case_id
@@ -248,9 +291,10 @@ CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks (
     REFERENCES competition.tournament_review_publications
       (season_id, tournament_id, event_id, revision) ON DELETE CASCADE,
   CONSTRAINT tournament_review_publication_chunks_count_check CHECK (
-    chunk_index >= 0 AND item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array'
+    item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array'
     AND jsonb_array_length(items) = item_count
   ),
+  CONSTRAINT tournament_review_publication_chunks_index_check CHECK (chunk_index >= 0),
   CONSTRAINT tournament_review_publication_chunks_sha_check CHECK (
     chunk_sha256 ~ '^[0-9a-f]{64}$'
   )
