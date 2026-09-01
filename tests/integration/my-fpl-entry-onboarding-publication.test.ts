@@ -9,8 +9,10 @@ import type { EventLive } from '../../src/domain/event-lives';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import {
   entryLiveInputFromFplPicks,
+  entryLiveV2Key,
   publishEntryLiveInputV2,
   publishLivePublicationV2,
+  readEntryLiveInputV2,
 } from '../../src/cache/live-publication-v2';
 import { checkpointEntryLiveInputV2 } from '../../src/services/entries.service';
 import { getDbClient } from '../../src/db/singleton';
@@ -329,6 +331,34 @@ describe('My FPL onboarding publication correction', () => {
     // fenced, a later audit should be a marker-only idempotent success.
     expect(await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0])).toBe('checkpointed');
     expect(await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0])).toBe('checkpointed');
+
+    // A previous fallback is not proof that the current active generation was
+    // durably checkpointed. Publish a newer, uncheckpointed generation so the
+    // previous pointer is a valid but older checkpointed fallback.
+    const currentEntry = await readEntryLiveInputV2({
+      season: SEASON.seasonCode,
+      eventId: EVENT_ID,
+      entryId: ENTRY_IDS[0],
+    });
+    expect(currentEntry).not.toBeNull();
+    await publishEntryLiveInputV2({
+      season: SEASON.seasonCode,
+      eventId: EVENT_ID,
+      entryId: ENTRY_IDS[0],
+      input: currentEntry!.input,
+      sourceCheckedAt: CAPTURE_NOW,
+      generationFloor: currentEntry!.publication.generation,
+    });
+    // Removing only the active pointer must therefore stay recoverable/missing
+    // instead of taking the marker-only fast path from the older publication.
+    const checkpointCache = await redisSingleton.getClient();
+    await checkpointCache.unlink(
+      entryLiveV2Key(
+        { season: SEASON.seasonCode, eventId: EVENT_ID, entryId: ENTRY_IDS[0] },
+        'active',
+      ),
+    );
+    expect(await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0])).toBe('missing');
     const first = await captureMyFplSnapshot(SEASON, EVENT_ID, 'PROVISIONAL', {
       snapshotDate: SNAPSHOT_DATE,
       now: CAPTURE_NOW,

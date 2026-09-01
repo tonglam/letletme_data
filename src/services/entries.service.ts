@@ -132,7 +132,13 @@ export async function checkpointEntryLiveInputV2(
   // legitimately observe an active publication with no pending obligation.
   // Treat that marker as an idempotent success instead of re-writing every
   // already durable entry (or reporting a false missing input).
-  if (!desired && candidate.publication.checkpointedAt !== null) return 'checkpointed';
+  if (
+    !desired &&
+    candidate.servedFrom === 'REDIS_CURRENT' &&
+    candidate.publication.checkpointedAt !== null
+  ) {
+    return 'checkpointed';
+  }
   // A provider write can publish before its asynchronous durable checkpoint
   // obligation is visible to this worker. Re-create the obligation from the
   // one active candidate so the normal generation/identity checks and
