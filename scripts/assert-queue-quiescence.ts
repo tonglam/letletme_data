@@ -531,7 +531,6 @@ async function preparePausedContentRunsForDeployment(argv: readonly string[]): P
         and(
           eq(contentAcquisitionRuns.status, 'PENDING'),
           isNotNull(contentAcquisitionRuns.leaseExpiresAt),
-          isNotNull(contentAcquisitionRuns.enqueueConfirmedAt),
         ),
       );
     const queuesByName = new Map(queues.map((queue) => [queue.name, queue]));

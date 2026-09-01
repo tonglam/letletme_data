@@ -176,6 +176,7 @@ describe('queue consumer pause ownership', () => {
   test('prepares only exact queued pending formal-run leases during deployment preparation', async () => {
     const db = await getDb();
     const deliveredRunId = randomUUID();
+    const unconfirmedQueuedRunId = randomUUID();
     const undeliveredRunId = randomUUID();
     const now = new Date();
     const leaseExpiresAt = new Date(now.getTime() + 60_000);
@@ -191,6 +192,14 @@ describe('queue consumer pause ownership', () => {
           enqueueConfirmedAt: now,
         },
         {
+          runId: unconfirmedQueuedRunId,
+          windowStart: now,
+          windowEnd: leaseExpiresAt,
+          idempotencyKey: `codex-deployment-lease-${unconfirmedQueuedRunId}`,
+          status: 'PENDING',
+          leaseExpiresAt,
+        },
+        {
           runId: undeliveredRunId,
           windowStart: now,
           windowEnd: leaseExpiresAt,
@@ -202,9 +211,9 @@ describe('queue consumer pause ownership', () => {
       expect(
         await prepareQueuedFormalRunsForDeployment({
           db,
-          queuedRunIds: new Set([deliveredRunId]),
+          queuedRunIds: new Set([deliveredRunId, unconfirmedQueuedRunId]),
         }),
-      ).toBe(1);
+      ).toBe(2);
       const runs = await db
         .select({
           runId: contentAcquisitionRuns.runId,
@@ -213,6 +222,14 @@ describe('queue consumer pause ownership', () => {
         .from(contentAcquisitionRuns)
         .where(eq(contentAcquisitionRuns.runId, deliveredRunId));
       expect(runs).toEqual([{ runId: deliveredRunId, leaseExpiresAt: null }]);
+      const unconfirmedRuns = await db
+        .select({
+          runId: contentAcquisitionRuns.runId,
+          leaseExpiresAt: contentAcquisitionRuns.leaseExpiresAt,
+        })
+        .from(contentAcquisitionRuns)
+        .where(eq(contentAcquisitionRuns.runId, unconfirmedQueuedRunId));
+      expect(unconfirmedRuns).toEqual([{ runId: unconfirmedQueuedRunId, leaseExpiresAt: null }]);
       const pendingRuns = await db
         .select({
           runId: contentAcquisitionRuns.runId,
@@ -225,6 +242,9 @@ describe('queue consumer pause ownership', () => {
       await db
         .delete(contentAcquisitionRuns)
         .where(eq(contentAcquisitionRuns.runId, deliveredRunId));
+      await db
+        .delete(contentAcquisitionRuns)
+        .where(eq(contentAcquisitionRuns.runId, unconfirmedQueuedRunId));
       await db
         .delete(contentAcquisitionRuns)
         .where(eq(contentAcquisitionRuns.runId, undeliveredRunId));

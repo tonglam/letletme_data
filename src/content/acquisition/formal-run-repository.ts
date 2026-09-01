@@ -1649,12 +1649,15 @@ export async function deferFormalRunForBudget(input: {
 }
 
 /**
- * Prepare confirmed BullMQ jobs while every content queue is paused and the
- * content worker is stopped. A queued triggered run has no recurring schedule,
- * so it stays PENDING and only loses its short execution lease. A scheduled
- * run is deferred and its schedule lease is released together; otherwise a
- * restarted scheduler could reclaim the schedule and mark the still-queued
- * run LEASE_EXPIRED before the original job is allowed to start.
+ * Prepare BullMQ jobs while every content queue is paused and the content
+ * worker is stopped. The enqueue confirmation marker may be absent for a
+ * direct scheduler hand-off whose database audit update failed after queue.add
+ * succeeded, so queue membership is established by the caller before this
+ * function is invoked. A queued triggered run has no recurring schedule, so it
+ * stays PENDING and only loses its short execution lease. A scheduled run is
+ * deferred and its schedule lease is released together; otherwise a restarted
+ * scheduler could reclaim the schedule and mark the still-queued run
+ * LEASE_EXPIRED before the original job is allowed to start.
  */
 export async function prepareQueuedFormalRunsForDeployment(input: {
   db?: DbHandle;
@@ -1678,7 +1681,6 @@ export async function prepareQueuedFormalRunsForDeployment(input: {
         and(
           eq(contentAcquisitionRuns.status, 'PENDING'),
           isNotNull(contentAcquisitionRuns.leaseExpiresAt),
-          isNotNull(contentAcquisitionRuns.enqueueConfirmedAt),
           inArray(contentAcquisitionRuns.runId, queuedRunIds),
         ),
       )
