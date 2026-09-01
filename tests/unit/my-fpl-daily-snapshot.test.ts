@@ -253,7 +253,7 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).toContain('redisManifest.revision === active.revision');
     expect(publicationService).toContain('provisionalEventPointsByElement');
     expect(publicationService).toContain('Event-live publication is missing transfer points');
-    expect(publicationService).toContain("chip(row.event_chip) === 'FREE_HIT'");
+    expect(publicationService).toMatch(/chip\(row\.event_chip\) === 'FREE_HIT'/);
     expect(publicationService).toContain('pick.event_team_id AS team_id');
     expect(publicationService).not.toContain(
       'COALESCE(pick.event_team_id, player.team_id) AS team_id',
