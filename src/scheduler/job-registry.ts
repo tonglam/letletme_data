@@ -91,10 +91,9 @@ export type CatchUpPolicy =
   | 'none';
 
 /**
- * Some definitions retain a legacy queueName for payload/migration
- * compatibility even though lane-v2 sends them to a dedicated queue. Keep
- * those overrides in the registry module so scheduler and status/catalog
- * paths cannot disagree about the effective lane.
+ * Keep scheduler-owned queue overrides in the registry module so scheduler
+ * admission, recovery, and status/catalog paths cannot disagree about the
+ * effective lane.
  */
 export function schedulerQueueLaneOverride(jobName: string): string | undefined {
   return jobName === 'my-fpl-finalization' ? 'my-fpl-orchestration' : undefined;
@@ -667,15 +666,13 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
-    queueName: 'maintenance',
+    queueName: 'my-fpl-orchestration',
     successPredicate: 'final My FPL revision replaces the provisional revision',
-    executionLanes: [
-      'queue:data-sync',
-      'queue:entry-sync',
-      'queue:tournament-sync',
-      'queue:league-sync',
-      'post-match-results',
-    ],
+    // FINAL is a read-only readiness check plus capture/outbox operation. It
+    // must not wait behind provider refresh or the global tournament cascade;
+    // missing checkpoints are deferred by the worker and repaired by their
+    // own authoritative obligations.
+    executionLanes: ['my-fpl-orchestration'],
     // A final checkpoint supersedes an older pending provisional snapshot.
     // The eventual provisional worker then observes the active FINAL revision
     // and exits without publishing stale authority.

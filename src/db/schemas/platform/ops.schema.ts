@@ -388,6 +388,7 @@ export const schedulerObligationsInOps = ops.table(
     runId: uuid('run_id'),
     attempts: integer().default(0).notNull(),
     lastError: text('last_error'),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }),
     evidence: jsonb().default({}).notNull(),
     completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
@@ -414,7 +415,7 @@ export const schedulerObligationsInOps = ops.table(
       .where(sql`status IN ('failed', 'irrecoverable')`),
     check(
       'scheduler_obligations_status_check',
-      sql`status = ANY (ARRAY['pending'::text, 'enqueued'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'skipped'::text, 'irrecoverable'::text])`,
+      sql`status = ANY (ARRAY['pending'::text, 'enqueued'::text, 'running'::text, 'retrying'::text, 'succeeded'::text, 'failed'::text, 'skipped'::text, 'irrecoverable'::text])`,
     ),
     check(
       'scheduler_obligations_source_check',
@@ -424,7 +425,7 @@ export const schedulerObligationsInOps = ops.table(
     check('scheduler_obligations_attempts_check', sql`attempts >= 0`),
     check(
       'scheduler_obligations_last_error_status_check',
-      sql`last_error IS NULL OR status IN ('failed'::text, 'irrecoverable'::text)`,
+      sql`last_error IS NULL OR status IN ('retrying'::text, 'failed'::text, 'irrecoverable'::text)`,
     ),
     check(
       'scheduler_obligations_evidence_object_check',

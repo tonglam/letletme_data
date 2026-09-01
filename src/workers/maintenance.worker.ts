@@ -18,19 +18,17 @@ import {
   enqueueEntryResultsSyncJob,
   enqueueEntryTransfersSyncJob,
 } from '../jobs/entry-sync-enqueue';
-import {
-  enqueueTournamentEventPicks,
-  enqueueTournamentEventResults,
-  enqueueTournamentRosterSync,
-  enqueueTournamentTransfersPre,
-} from '../jobs/tournament-sync.jobs';
+import { enqueueTournamentRosterSync } from '../jobs/tournament-sync.jobs';
 import {
   captureMyFplSnapshot,
+  assessMyFplFinalizationReadiness,
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
   invalidateMyFplSnapshotRedisManifest,
   isManagerReviewV2MyFplPublication,
+  isMyFplSnapshotRedisManifestForPublication,
+  MyFplSnapshotIncompleteError,
   requeueDeliveredMyFplSnapshotPublication,
   type MyFplSnapshotOutboxDeliveryEvidence,
   type MyFplSnapshotPublication,
@@ -47,7 +45,11 @@ import {
   type MaintenanceLane,
   type MaintenanceJobData,
 } from '../queues/maintenance.queue';
-import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
+import {
+  deferSchedulerObligationForWorker,
+  markSchedulerObligationRetrying,
+  renewSchedulerObligation,
+} from '../repositories/scheduler-obligations';
 import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
@@ -58,7 +60,6 @@ import { getQueueConnection } from '../utils/queue';
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
-import { resolveFinalizationFreshAfter } from '../domain/entry-sync';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { createQueueRunAttemptId } from '../utils/queue-run-id';
@@ -73,6 +74,12 @@ import {
   startCurrentSchedulerJob,
 } from '../utils/scheduler-obligation-fence';
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
+
+function nextMaintenanceRetryAt(job: Job<MaintenanceJobData>): Date {
+  const attemptsMade = Math.max(1, job.attemptsMade);
+  const delayMs = Math.min(300_000, 60_000 * 2 ** Math.max(0, attemptsMade - 1));
+  return new Date(Date.now() + delayMs);
+}
 
 /**
  * A My FPL outbox job can deliver more than one event revision in one batch.
@@ -215,6 +222,12 @@ function maintenanceCompletionEvidence(jobName: string, result: unknown): Record
   };
 }
 
+function maintenanceResultDeferredSchedulerObligation(jobName: string, result: unknown): boolean {
+  if (jobName !== MAINTENANCE_JOBS.MY_FPL_SNAPSHOT) return false;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+  return (result as Record<string, unknown>).status === 'waiting-dependencies';
+}
+
 function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
   const fence = inspectSchedulerObligationFence(job.data);
   if (fence.kind !== 'complete') return () => undefined;
@@ -330,11 +343,61 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             Boolean(job.data.snapshotActor) &&
             Boolean(job.data.snapshotReason) &&
             Boolean(job.data.snapshotIdempotencyKey);
+          // A previously published FINAL is not sufficient evidence by itself:
+          // the eligible scope can grow after that revision was written. Run
+          // the canonical readiness gate before the idempotent no-op path so a
+          // stale final header cannot hide a newly onboarded team.
+          const finalizationReadiness =
+            snapshotKind === 'FINAL'
+              ? await assessMyFplFinalizationReadiness(season, eventId)
+              : null;
+          if (finalizationReadiness && !finalizationReadiness.ready) {
+            const fence = inspectSchedulerObligationFence(job.data);
+            if (fence.kind !== 'complete') {
+              // A manually enqueued FINAL has no scheduler obligation to
+              // defer. Treat an incomplete readiness contract as a visible
+              // execution failure instead of allowing Bull's completed event
+              // to acknowledge a job that did not publish anything.
+              throw new MyFplSnapshotIncompleteError(
+                `My FPL FINAL prerequisites are incomplete: ${
+                  finalizationReadiness.reasonCodes.join(',') || 'unknown'
+                }`,
+              );
+            }
+            await deferSchedulerObligationForWorker({
+              obligationId: fence.obligationId,
+              generation: fence.generation,
+              delayMs: 60_000,
+              evidence: {
+                eventId,
+                readiness: {
+                  expectedEntryCount: finalizationReadiness.expectedEntryCount,
+                  observedEntryCount: finalizationReadiness.observedEntryCount,
+                  entryScopeSha256: finalizationReadiness.entryScopeSha256,
+                  expectedTournamentCount: finalizationReadiness.expectedTournamentCount,
+                  observedTournamentCount: finalizationReadiness.observedTournamentCount,
+                  tournamentScopeSha256: finalizationReadiness.tournamentScopeSha256,
+                  missingEntryIds: finalizationReadiness.missingEntryIds.slice(0, 100),
+                  reasonCodes: finalizationReadiness.reasonCodes,
+                },
+              },
+            });
+            return { status: 'waiting-dependencies', readiness: finalizationReadiness };
+          }
           const activeFinalUsesManagerReviewV2 =
             active?.kind === 'FINAL' &&
             (await isManagerReviewV2MyFplPublication(season, eventId, active));
+          const activeFinalScopeMatchesCurrentReadiness = Boolean(
+            active &&
+              finalizationReadiness &&
+              active.expectedEntryCount === finalizationReadiness.expectedEntryCount &&
+              active.entryScopeSha256 === finalizationReadiness.entryScopeSha256 &&
+              active.expectedTournamentCount === finalizationReadiness.expectedTournamentCount &&
+              active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256,
+          );
           if (
             activeFinalUsesManagerReviewV2 &&
+            activeFinalScopeMatchesCurrentReadiness &&
             (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
           ) {
             const redisManifest = await getActiveMyFplSnapshotRedisManifest(
@@ -342,9 +405,12 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               eventId,
             );
             if (
-              redisManifest?.seasonCode === season.seasonCode &&
-              redisManifest.eventId === eventId &&
-              redisManifest.revision === active.revision
+              isMyFplSnapshotRedisManifestForPublication(
+                redisManifest,
+                active,
+                season.seasonCode,
+                eventId,
+              )
             ) {
               await recordMyFplOutboxRedisEvidence({
                 freshnessWindowId: job.data.freshnessWindowId,
@@ -374,9 +440,12 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               eventId,
             );
             if (
-              replayedManifest?.seasonCode === season.seasonCode &&
-              replayedManifest.eventId === eventId &&
-              replayedManifest.revision === active.revision
+              isMyFplSnapshotRedisManifestForPublication(
+                replayedManifest,
+                active,
+                season.seasonCode,
+                eventId,
+              )
             ) {
               await recordMyFplOutboxRedisEvidence({
                 freshnessWindowId: job.data.freshnessWindowId,
@@ -387,107 +456,70 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             }
           }
 
-          // Refresh the mutable inputs for this retry attempt first. For a
-          // FINAL capture, FPL's data_checked timestamp is the immutable
-          // authority fence: using the coordinator wall clock would force a
-          // full provider fan-out on every retry even though the source is
-          // already frozen. Fall back to the normal ordering timestamp when
-          // the event has no usable finalization fence, preserving fail-closed
-          // behavior for malformed or stale jobs.
-          const finalizationEvent =
-            snapshotKind === 'FINAL' ? await eventRepository.findById(season, eventId) : null;
-          const finalFreshAfter = resolveFinalizationFreshAfter(finalizationEvent);
-          const freshAfter = finalFreshAfter ?? (await resolveJobFreshAfter(job));
-          if (finalFreshAfter && job.data.freshAfter !== finalFreshAfter) {
-            const updatedData = { ...job.data, freshAfter: finalFreshAfter };
-            await job.updateData(updatedData);
-            job.data = updatedData;
-          }
-          const attemptKey = createQueueRunAttemptId();
-          const source = snapshotKind === 'FINAL' ? 'reconcile' : 'catchup';
-          const entryInfoTargetEventId =
-            (await eventRepository.findLatestFinalized(season))?.id ?? 0;
-          await runQueueRunPhase(attemptKey, [
-            enqueueCoreSnapshotJob(season, source, {
-              jobId: `my-fpl-${attemptKey}-core`,
-              runId: attemptKey,
-              removeOnSettle: false,
-            }),
-            enqueuePlayerStatsSyncJob(season, source, {
-              eventId,
-              jobId: `my-fpl-${attemptKey}-player-stats`,
-              runId: attemptKey,
-              removeOnSettle: false,
-            }),
-            enqueueEntryInfoSyncJob(season, source, {
-              eventId: entryInfoTargetEventId,
-              jobId: `my-fpl-${attemptKey}-entry-info`,
-              runId: attemptKey,
-              queueKey: `my-fpl-${attemptKey}-entry-info`,
-              removeOnSettle: false,
-            }),
-          ]);
-
-          await runQueueRunPhase(attemptKey, [
-            enqueueEntryPicksSyncJob(season, source, {
-              eventId,
-              jobId: `my-fpl-${attemptKey}-entry-picks`,
-              runId: attemptKey,
-              queueKey: `my-fpl-${attemptKey}-entry-picks`,
-              removeOnSettle: false,
-            }),
-            enqueueEntryResultsSyncJob(season, source, {
-              eventId,
-              freshAfter,
-              jobId: `my-fpl-${attemptKey}-entry-results`,
-              runId: attemptKey,
-              queueKey: `my-fpl-${attemptKey}-entry-results`,
-              removeOnSettle: false,
-            }),
-            enqueueEntryTransfersSyncJob(season, source, {
-              eventId,
-              freshAfter,
-              jobId: `my-fpl-${attemptKey}-entry-transfers`,
-              runId: attemptKey,
-              queueKey: `my-fpl-${attemptKey}-entry-transfers`,
-              removeOnSettle: false,
-            }),
-          ]);
-
-          await runQueueRunPhase(attemptKey, [
-            enqueueTournamentRosterSync(season, source, {
-              finalizedEventId: eventId,
-              jobId: `my-fpl-${attemptKey}-tournament-roster`,
-              runId: attemptKey,
-            }),
-          ]);
-
-          // The daily review snapshot calculates its tournament projection
-          // directly from the same pinned entry scores used by the personal
-          // payload. The tournament result cascade is a finalized-event
-          // workflow (including transfers-post), so running it for a live
-          // event can never satisfy its authority fence and strands the daily
-          // publication barrier. Only FINAL captures enter those phases.
-          if (snapshotKind === 'FINAL') {
+          if (snapshotKind !== 'FINAL') {
+            // Refresh the mutable inputs for this retry attempt first. For a
+            // FINAL capture, FPL's data_checked timestamp is the immutable
+            // authority fence: using the coordinator wall clock would force a
+            // full provider fan-out on every retry even though the source is
+            // already frozen. Fall back to the normal ordering timestamp when
+            // the event has no usable finalization fence, preserving fail-closed
+            // behavior for malformed or stale jobs.
+            const freshAfter = await resolveJobFreshAfter(job);
+            const attemptKey = createQueueRunAttemptId();
+            const source = 'catchup';
+            const entryInfoTargetEventId =
+              (await eventRepository.findLatestFinalized(season))?.id ?? 0;
             await runQueueRunPhase(attemptKey, [
-              enqueueTournamentEventResults(season, eventId, source, {
-                freshAfter,
-                jobId: `my-fpl-${attemptKey}-tournament-results`,
+              enqueueCoreSnapshotJob(season, source, {
+                jobId: `my-fpl-${attemptKey}-core`,
                 runId: attemptKey,
+                removeOnSettle: false,
+              }),
+              enqueuePlayerStatsSyncJob(season, source, {
+                eventId,
+                jobId: `my-fpl-${attemptKey}-player-stats`,
+                runId: attemptKey,
+                removeOnSettle: false,
+              }),
+              enqueueEntryInfoSyncJob(season, source, {
+                eventId: entryInfoTargetEventId,
+                jobId: `my-fpl-${attemptKey}-entry-info`,
+                runId: attemptKey,
+                queueKey: `my-fpl-${attemptKey}-entry-info`,
+                removeOnSettle: false,
               }),
             ]);
 
             await runQueueRunPhase(attemptKey, [
-              enqueueTournamentEventPicks(season, eventId, source, {
-                jobId: `my-fpl-${attemptKey}-tournament-picks`,
+              enqueueEntryPicksSyncJob(season, source, {
+                eventId,
+                jobId: `my-fpl-${attemptKey}-entry-picks`,
                 runId: attemptKey,
+                queueKey: `my-fpl-${attemptKey}-entry-picks`,
+                removeOnSettle: false,
+              }),
+              enqueueEntryResultsSyncJob(season, source, {
+                eventId,
+                freshAfter,
+                jobId: `my-fpl-${attemptKey}-entry-results`,
+                runId: attemptKey,
+                queueKey: `my-fpl-${attemptKey}-entry-results`,
+                removeOnSettle: false,
+              }),
+              enqueueEntryTransfersSyncJob(season, source, {
+                eventId,
+                freshAfter,
+                jobId: `my-fpl-${attemptKey}-entry-transfers`,
+                runId: attemptKey,
+                queueKey: `my-fpl-${attemptKey}-entry-transfers`,
+                removeOnSettle: false,
               }),
             ]);
 
             await runQueueRunPhase(attemptKey, [
-              enqueueTournamentTransfersPre(season, eventId, source, {
-                freshAfter,
-                jobId: `my-fpl-${attemptKey}-tournament-transfers`,
+              enqueueTournamentRosterSync(season, source, {
+                finalizedEventId: eventId,
+                jobId: `my-fpl-${attemptKey}-tournament-roster`,
                 runId: attemptKey,
               }),
             ]);
@@ -504,6 +536,11 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             eventId,
             seasonCode: season.seasonCode,
           });
+          if (redis.failed > 0 || (redis.remaining ?? 0) > 0) {
+            throw new Error(
+              `My FPL snapshot Redis outbox remains incomplete: failed=${redis.failed}, remaining=${redis.remaining ?? 0}`,
+            );
+          }
           await recordMyFplOutboxRedisEvidence({
             freshnessWindowId: job.data.freshnessWindowId,
             deliveredEvidence: redis.deliveredEvidence,
@@ -583,7 +620,7 @@ export function createMaintenanceWorker(): WorkerRuntime {
   };
   const lanes: MaintenanceLane[] = getConfig().QUEUE_LANES_V2_ENABLED
     ? (Object.keys(MAINTENANCE_LANE_QUEUE_NAMES) as MaintenanceLane[])
-    : ['maintenance', 'publication-outbox'];
+    : ['maintenance', 'my-fpl-orchestration', 'publication-outbox'];
   const workers: Worker<MaintenanceJobData>[] = [];
   const queueEvents: QueueEvents[] = [];
   const monitorTargets: WorkerRuntime['monitorTargets'] = [];
@@ -600,6 +637,11 @@ export function createMaintenanceWorker(): WorkerRuntime {
     const events = new QueueEvents(queueName, { connection });
     worker.on('completed', (job, result) => {
       logInfo('Maintenance job completed', { jobId: job.id, name: job.name, lane });
+      // The worker has already atomically deferred the scheduler obligation
+      // when a FINAL prerequisite is missing. Bull reports this as a normal
+      // completion, but it must not overwrite the persisted PENDING state as
+      // SUCCEEDED.
+      if (maintenanceResultDeferredSchedulerObligation(job.name, result)) return;
       if (job.id !== undefined) {
         const fence = inspectSchedulerObligationFence(job.data);
         const evidence = {
@@ -635,6 +677,13 @@ export function createMaintenanceWorker(): WorkerRuntime {
           obligationId: fence.obligationId,
           generation: fence.generation,
           error,
+        }).catch(() => undefined);
+      } else if (job && !isTerminalJobFailure(job, error) && fence?.kind === 'complete') {
+        void markSchedulerObligationRetrying({
+          obligationId: fence.obligationId,
+          generation: fence.generation,
+          error,
+          nextAttemptAt: nextMaintenanceRetryAt(job),
         }).catch(() => undefined);
       } else if (
         job?.id !== undefined &&

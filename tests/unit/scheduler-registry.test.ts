@@ -85,6 +85,7 @@ describe('standalone scheduler registry', () => {
 
   test('serializes post-match stages and lets My FPL reserve every child queue lane', () => {
     const byName = new Map(registry.map((definition) => [definition.name, definition]));
+    expect(byName.get('my-fpl-finalization')?.queueName).toBe('my-fpl-orchestration');
     expect(schedulerExecutionLanes(byName.get('entry-results')!)).toEqual([
       'post-match-results',
       'queue:entry-sync',
@@ -96,6 +97,9 @@ describe('standalone scheduler registry', () => {
       'queue:league-sync',
       'queue:tournament-sync',
     ]);
+    expect(schedulerExecutionLanes(byName.get('my-fpl-finalization')!)).toEqual([
+      'my-fpl-orchestration',
+    ]);
     expect(schedulerExecutionLanes(byName.get('entry-picks')!)).toEqual(['queue:entry-sync']);
 
     const postMatchOrder = orderSchedulerDefinitionsForClaim(registry)
@@ -106,7 +110,6 @@ describe('standalone scheduler registry', () => {
       'entry-results',
       'tournament-event-results',
       'league-event-results',
-      'my-fpl-finalization',
       'my-fpl-snapshot',
     ]);
   });

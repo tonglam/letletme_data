@@ -17,6 +17,7 @@ export type SchedulerObligationStatus =
   | 'pending'
   | 'enqueued'
   | 'running'
+  | 'retrying'
   | 'succeeded'
   | 'failed'
   | 'skipped'
@@ -39,6 +40,8 @@ export type SchedulerObligation = Readonly<{
   completedAt: Date | null;
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
+  lastError?: string | null;
+  nextAttemptAt?: Date | null;
   evidence: Record<string, unknown>;
 }>;
 
@@ -158,6 +161,8 @@ function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerOb
     completedAt: row.completedAt,
     leaseOwner: row.leaseOwner,
     leaseExpiresAt: row.leaseExpiresAt,
+    lastError: row.lastError,
+    nextAttemptAt: row.nextAttemptAt,
     evidence: (row.evidence ?? {}) as Record<string, unknown>,
   };
 }
@@ -918,7 +923,7 @@ export async function hasEarlierInFlightSchedulerObligation(input: {
       and(
         eq(schedulerObligationsInOps.jobName, input.jobName),
         sql`${schedulerObligationsInOps.periodKey} < ${input.beforePeriodKey}`,
-        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
       ),
     )
     .limit(1);
@@ -1068,6 +1073,55 @@ export async function deferSchedulerObligationForAdmission(input: {
   return result.length === 1;
 }
 
+/**
+ * A worker that has started but finds an upstream prerequisite incomplete
+ * must return the durable obligation to pending without consuming an
+ * execution attempt.  The exact generation fence prevents a late worker from
+ * deferring a newer generation.
+ */
+export async function deferSchedulerObligationForWorker(input: {
+  obligationId: string;
+  generation: number;
+  delayMs?: number;
+  evidence?: Record<string, unknown>;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  const delayMs = Math.max(1_000, Math.floor(input.delayMs ?? 60_000));
+  if (!Number.isSafeInteger(input.generation) || input.generation < 0) {
+    throw new Error('Scheduler generation must be a non-negative integer');
+  }
+  if (!Number.isSafeInteger(delayMs)) throw new Error('Scheduler defer delay must be an integer');
+  const result = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'pending',
+      dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      bullJobId: null,
+      runId: null,
+      lastError: null,
+      nextAttemptAt: null,
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+        ...(input.evidence ?? {}),
+        deferredForPrerequisite: true,
+        deferredAt: new Date().toISOString(),
+        deferDelayMs: delayMs,
+      })}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligationId),
+        eq(schedulerObligationsInOps.generation, input.generation),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return result.length === 1;
+}
+
 export async function claimSchedulerObligations(
   input: {
     limit?: number;
@@ -1156,7 +1210,7 @@ export async function claimSchedulerObligations(
         .where(
           and(
             inArray(schedulerObligationsInOps.jobName, inFlightConflictJobNames),
-            inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+            inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
           ),
         )
         .limit(1);
@@ -1442,6 +1496,7 @@ export async function startSchedulerObligation(input: {
     .update(schedulerObligationsInOps)
     .set({
       status: 'running',
+      nextAttemptAt: null,
       leaseExpiresAt: sql`clock_timestamp() + ${leaseMs} * interval '1 millisecond'`,
       updatedAt: sql`clock_timestamp()`,
     })
@@ -1449,7 +1504,7 @@ export async function startSchedulerObligation(input: {
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligationId),
         eq(schedulerObligationsInOps.generation, input.generation),
-        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
       ),
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });
@@ -1490,7 +1545,47 @@ export async function renewSchedulerObligation(input: {
         input.generation === undefined
           ? undefined
           : eq(schedulerObligationsInOps.generation, input.generation),
-        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
+      ),
+    )
+    .returning({ obligationId: schedulerObligationsInOps.obligationId });
+  return updated.length === 1;
+}
+
+export async function markSchedulerObligationRetrying(input: {
+  obligationId: string;
+  generation: number;
+  error: unknown;
+  nextAttemptAt: Date;
+  db?: DbHandle;
+}): Promise<boolean> {
+  if (!Number.isSafeInteger(input.generation) || input.generation < 0) {
+    throw new Error('Scheduler obligation generation must be a non-negative safe integer');
+  }
+  if (!Number.isFinite(input.nextAttemptAt.getTime())) {
+    throw new Error('Scheduler retry timestamp must be valid');
+  }
+  const db = input.db ?? (await getDb());
+  const classified = summarizeDataError(input.error);
+  const summary = `${classified.errorClass}:${classified.errorCode} ${classified.summary}`.slice(
+    0,
+    1_000,
+  );
+  const updated = await db
+    .update(schedulerObligationsInOps)
+    .set({
+      status: 'retrying',
+      lastError: summary,
+      nextAttemptAt: input.nextAttemptAt,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligationId),
+        eq(schedulerObligationsInOps.generation, input.generation),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
       ),
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });
@@ -1516,6 +1611,7 @@ export async function completeSchedulerObligation(input: {
         completedAt: sql`clock_timestamp()`,
         leaseOwner: null,
         leaseExpiresAt: null,
+        nextAttemptAt: null,
         lastError: input.status === 'irrecoverable' ? (input.lastError ?? null) : null,
         updatedAt: sql`clock_timestamp()`,
       })
@@ -1525,7 +1621,7 @@ export async function completeSchedulerObligation(input: {
           input.generation === undefined
             ? undefined
             : eq(schedulerObligationsInOps.generation, input.generation),
-          inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+          inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
         ),
       )
       .returning({
@@ -1608,13 +1704,14 @@ export async function completeSchedulerObligationByBullJobId(input: {
         completedAt: sql`clock_timestamp()`,
         leaseOwner: null,
         leaseExpiresAt: null,
+        nextAttemptAt: null,
         lastError: null,
         updatedAt: sql`clock_timestamp()`,
       })
       .where(
         and(
           eq(schedulerObligationsInOps.bullJobId, String(input.bullJobId)),
-          inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+          inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
         ),
       )
       .returning({
@@ -1645,7 +1742,7 @@ export async function failSchedulerObligationByBullJobId(input: {
     .where(
       and(
         eq(schedulerObligationsInOps.bullJobId, String(input.bullJobId)),
-        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
       ),
     )
     .limit(1);
@@ -1661,7 +1758,7 @@ export async function failSchedulerObligation(input: {
   obligationId: string;
   owner?: string;
   generation?: number;
-  expectedStatus?: Extract<SchedulerObligationStatus, 'enqueued' | 'running'>;
+  expectedStatus?: Extract<SchedulerObligationStatus, 'enqueued' | 'running' | 'retrying'>;
   error: unknown;
   retryDelayMs?: number;
   db?: DbHandle;
@@ -1691,6 +1788,7 @@ export async function failSchedulerObligation(input: {
       lastError: summary,
       leaseOwner: null,
       leaseExpiresAt: null,
+      nextAttemptAt: null,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -1703,7 +1801,7 @@ export async function failSchedulerObligation(input: {
         input.expectedStatus === undefined
           ? undefined
           : eq(schedulerObligationsInOps.status, input.expectedStatus),
-        inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        inArray(schedulerObligationsInOps.status, ['enqueued', 'running', 'retrying']),
       ),
     )
     .returning({
@@ -1717,6 +1815,7 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
   total: number;
   overdue: number;
   failed: number;
+  retrying: number;
   running: number;
   irrecoverable: number;
   succeeded: number;
@@ -1726,15 +1825,17 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
     total: number | string;
     overdue: number | string;
     failed: number | string;
+    retrying: number | string;
     running: number | string;
     irrecoverable: number | string;
     succeeded: number | string;
   }>(sql`
     SELECT
       count(*)::integer AS total,
-      count(*) FILTER (WHERE due_at <= clock_timestamp() AND status IN ('pending', 'failed'))::integer AS overdue,
+      count(*) FILTER (WHERE due_at <= clock_timestamp() AND status IN ('pending', 'failed', 'retrying'))::integer AS overdue,
       count(*) FILTER (WHERE status = 'failed')::integer AS failed,
-      count(*) FILTER (WHERE status IN ('enqueued', 'running'))::integer AS running,
+      count(*) FILTER (WHERE status = 'retrying')::integer AS retrying,
+      count(*) FILTER (WHERE status IN ('enqueued', 'running', 'retrying'))::integer AS running,
       count(*) FILTER (WHERE status = 'irrecoverable')::integer AS irrecoverable,
       count(*) FILTER (WHERE status = 'succeeded')::integer AS succeeded
     FROM ops.scheduler_obligations
@@ -1744,6 +1845,7 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
     total: Number(row?.total ?? 0),
     overdue: Number(row?.overdue ?? 0),
     failed: Number(row?.failed ?? 0),
+    retrying: Number(row?.retrying ?? 0),
     running: Number(row?.running ?? 0),
     irrecoverable: Number(row?.irrecoverable ?? 0),
     succeeded: Number(row?.succeeded ?? 0),
@@ -1762,6 +1864,7 @@ export async function schedulerObligationStatus(input: {
     generation: number;
     attempts: number;
     lastError: string | null;
+    nextAttemptAt: Date | null;
   } | null;
   overdue: boolean;
   consecutiveUnsuccessfulCycles: number;
@@ -1776,6 +1879,7 @@ export async function schedulerObligationStatus(input: {
       generation: schedulerObligationsInOps.generation,
       attempts: schedulerObligationsInOps.attempts,
       lastError: schedulerObligationsInOps.lastError,
+      nextAttemptAt: schedulerObligationsInOps.nextAttemptAt,
       scheduledDueAtMs: sql<
         string | null
       >`${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs'`,
@@ -1814,6 +1918,7 @@ export async function schedulerObligationStatus(input: {
         generation: rows[0].generation,
         attempts: rows[0].attempts,
         lastError: rows[0].lastError,
+        nextAttemptAt: rows[0].nextAttemptAt,
       }
     : null;
   let consecutiveUnsuccessfulCycles = 0;
@@ -1832,7 +1937,8 @@ export async function schedulerObligationStatus(input: {
       consecutiveUnsuccessfulCycles += 1;
     }
   }
-  const latestIsOverdueState = latest?.status === 'pending' || latest?.status === 'failed';
+  const latestIsOverdueState =
+    latest?.status === 'pending' || latest?.status === 'failed' || latest?.status === 'retrying';
   return {
     latest,
     overdue: Boolean(latest && latest.dueAt.getTime() <= Date.now() && latestIsOverdueState),

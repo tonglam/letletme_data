@@ -19,6 +19,18 @@ import {
   contentQueueNames,
 } from '../queues/names';
 
+/**
+ * My FPL finalization has one time contract shared by Data, GraphQL and Ops.
+ * Keep the numbers here so a status endpoint cannot drift from the worker's
+ * scheduler policy.
+ */
+export const MY_FPL_FINALIZATION_DISPATCH_WITHIN_MS = 15 * 60_000;
+export const MY_FPL_FINALIZATION_EXECUTION_BUDGET_MS = 60 * 60_000;
+export const MY_FPL_FINALIZATION_TOTAL_SLA_MS = 4_500_000;
+export const MY_FPL_FINALIZATION_DEPENDENCY_RETRY_MS = 60_000;
+export const MY_FPL_FINALIZATION_BULL_ATTEMPTS = 3;
+export const MY_FPL_SNAPSHOT_OUTBOX_RETRY_DELAYS_MS = [30_000, 120_000, 300_000] as const;
+
 export type ContractVisibility =
   | 'public'
   | 'internal-only'
@@ -214,9 +226,10 @@ export const dataContractRegistry = [
       'my-fpl-snapshot-outbox',
       'post-match-consolidation',
     ],
-    dispatchWithinMs: 15 * 60_000,
-    executionBudgetMs: 60 * 60_000,
-    integrity: 'scope manifest complete and FINAL matches provisional scope',
+    dispatchWithinMs: MY_FPL_FINALIZATION_DISPATCH_WITHIN_MS,
+    executionBudgetMs: MY_FPL_FINALIZATION_EXECUTION_BUDGET_MS,
+    integrity:
+      'current eligible scope, identity/rank/picks/transfers checkpoints and tournament scope are complete; FINAL matches the observed scope',
     freshnessEvidence: 'checkpoint',
     freshnessJobs: [
       'my-fpl-snapshot',
@@ -233,7 +246,11 @@ export const dataContractRegistry = [
       // be reported as consumer-ready.
       redis: 'active snapshot manifest and publication outbox',
     },
-    retry: { maxGenerations: 6, policy: 'latest snapshot target wins' },
+    retry: {
+      maxGenerations: 6,
+      policy:
+        'three Bull execution attempts with 60/120 second backoff; prerequisite waits defer without consuming an attempt',
+    },
     compensator: 'snapshot rebuild and outbox reconcile',
     visibility: 'public',
   },

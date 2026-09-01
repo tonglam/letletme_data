@@ -23,7 +23,10 @@ import {
 } from '../repositories/scheduler-obligations';
 import { getSchedulerLaneTargets, listSchedulerLanes } from '../repositories/scheduler-lanes';
 import { schedulerQueueLaneOverride, schedulerRegistry } from '../scheduler/job-registry';
-import { getMyFplSnapshotOperationalStatus } from './my-fpl-snapshot-publication.service';
+import {
+  getActiveMyFplSnapshotRedisManifest,
+  getMyFplSnapshotOperationalStatus,
+} from './my-fpl-snapshot-publication.service';
 import { getTournamentReviewV2OperationalStatus } from './tournament-review-publication.service';
 import { readSchedulerProgress, isSchedulerProgressHealthy } from '../scheduler/scheduler-progress';
 import { readQueueAdmission, readQueueHealthSnapshot } from './queue-governance.service';
@@ -90,6 +93,7 @@ export function safeSchedulerObligationLatest(
     dueAt: latest.dueAt,
     generation: latest.generation,
     attempts: latest.attempts,
+    nextAttemptAt: latest.nextAttemptAt,
     lastErrorCode: safeSchedulerLaneErrorCode(latest.lastError),
   };
 }
@@ -644,6 +648,67 @@ export async function getJobsStatus(
       };
     }),
   );
+  const myFplTarget =
+    [...myFplSnapshots]
+      .filter(
+        (snapshot) => snapshot.activeRevision !== null || snapshot.dataChecked || snapshot.finished,
+      )
+      .sort((left, right) => right.eventId - left.eventId)[0] ?? null;
+  const [myFplFinalizationObligation, myFplRedisManifest] = myFplTarget
+    ? await Promise.all([
+        schedulerObligationStatus({
+          jobName: 'my-fpl-finalization',
+          scopeKey: `${season.seasonCode}:event:${myFplTarget.eventId}`,
+        }).catch(() => ({ latest: null, overdue: false, consecutiveUnsuccessfulCycles: 0 })),
+        myFplTarget.activeRevision === null
+          ? Promise.resolve(null)
+          : getActiveMyFplSnapshotRedisManifest(season.seasonCode, myFplTarget.eventId).catch(
+              () => null,
+            ),
+      ])
+    : [{ latest: null, overdue: false, consecutiveUnsuccessfulCycles: 0 }, null];
+  const myFplRedisParity = Boolean(
+    myFplTarget &&
+      myFplTarget.activeRevision !== null &&
+      myFplRedisManifest &&
+      myFplRedisManifest.eventId === myFplTarget.eventId &&
+      myFplRedisManifest.revision === myFplTarget.activeRevision &&
+      myFplRedisManifest.kind === myFplTarget.activeKind &&
+      myFplRedisManifest.contentSha256 === myFplTarget.activeContentSha256 &&
+      myFplRedisManifest.expectedEntryCount === myFplTarget.expectedEntryCount &&
+      myFplRedisManifest.observedEntryCount === myFplTarget.observedEntryCount &&
+      myFplRedisManifest.expectedTournamentCount === myFplTarget.expectedTournamentCount &&
+      myFplRedisManifest.observedTournamentCount === myFplTarget.observedTournamentCount &&
+      myFplRedisManifest.entryScopeSha256 === myFplTarget.observedEntryScopeSha256 &&
+      myFplRedisManifest.tournamentScopeSha256 === myFplTarget.observedTournamentScopeSha256,
+  );
+  const myFplIntegrity = myFplTarget
+    ? {
+        eventId: myFplTarget.eventId,
+        settlementState: myFplTarget.settlementState,
+        coverageState: myFplTarget.coverageState,
+        timelinessState: myFplTarget.timelinessState,
+        finalizationDueAt: myFplTarget.finalizationDueAt,
+        activeRevision: myFplTarget.activeRevision,
+        activeKind: myFplTarget.activeKind,
+        activeContentSha256: myFplTarget.activeContentSha256,
+        expectedEntryCount: myFplTarget.expectedEntryCount,
+        observedEntryCount: myFplTarget.observedEntryCount,
+        expectedTournamentCount: myFplTarget.expectedTournamentCount,
+        observedTournamentCount: myFplTarget.observedTournamentCount,
+        expectedEntryScopeSha256: myFplTarget.expectedEntryScopeSha256,
+        observedEntryScopeSha256: myFplTarget.observedEntryScopeSha256,
+        expectedTournamentScopeSha256: myFplTarget.expectedTournamentScopeSha256,
+        observedTournamentScopeSha256: myFplTarget.observedTournamentScopeSha256,
+        redisRevision: myFplRedisManifest?.revision ?? null,
+        redisParity: myFplRedisParity,
+        schedulerObligation: {
+          latest: safeSchedulerObligationLatest(myFplFinalizationObligation.latest),
+          overdue: myFplFinalizationObligation.overdue,
+          consecutiveUnsuccessfulCycles: myFplFinalizationObligation.consecutiveUnsuccessfulCycles,
+        },
+      }
+    : null;
   return {
     generatedAt: new Date().toISOString(),
     season: season.seasonCode,
@@ -687,6 +752,7 @@ export async function getJobsStatus(
     },
     obligations,
     myFplSnapshots,
+    myFplIntegrity,
     tournamentReviewV2,
     publicationConsistency,
     fplAdmission,
