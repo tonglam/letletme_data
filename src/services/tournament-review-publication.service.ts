@@ -405,6 +405,7 @@ function reviewChunksMatchPayload(
     chunk_index: number | string;
     item_count: number | string;
     chunk_sha256: string;
+    items: unknown;
   }>,
 ): boolean {
   if (!payload) return false;
@@ -428,13 +429,20 @@ function reviewChunksMatchPayload(
   const actual = new Map(rows.map((row) => [`${row.section_key}:${Number(row.chunk_index)}`, row]));
   return expected.every((chunk) => {
     const row = actual.get(`${chunk.sectionKey}:${chunk.chunkIndex}`);
+    const storedItems = row?.items;
+    const storedItemsSha = Array.isArray(storedItems)
+      ? createHash('sha256').update(postgresJsonbCanonicalJson(storedItems), 'utf8').digest('hex')
+      : null;
     return Boolean(
       row &&
         Number.isInteger(chunk.itemCount) &&
         chunk.itemCount >= 0 &&
         chunk.itemCount <= 100 &&
         Number(row.item_count) === chunk.itemCount &&
-        row.chunk_sha256 === chunk.chunkSha256,
+        row.chunk_sha256 === chunk.chunkSha256 &&
+        storedItemsSha === chunk.chunkSha256 &&
+        Array.isArray(storedItems) &&
+        storedItems.length === chunk.itemCount,
     );
   });
 }
@@ -2339,9 +2347,10 @@ async function publishTournamentReviewScopeOnce(
             chunk_index: number | string;
             item_count: number | string;
             chunk_sha256: string;
+            items: unknown;
           }>
         >`
-          SELECT section_key, chunk_index, item_count, chunk_sha256
+          SELECT section_key, chunk_index, item_count, chunk_sha256, items
           FROM competition.tournament_review_publication_chunks
           WHERE season_id = ${season.seasonId}
             AND tournament_id = ${tournamentId}
@@ -2454,7 +2463,7 @@ async function publishTournamentReviewScopeOnce(
     let revision: number;
     let publishedAt: Date;
     let state: 'PUBLISHED' | 'REUSED';
-    if (existing[0] && !correction) {
+    if (existing[0]) {
       revision = Number(existing[0].revision);
       publishedAt = asDate(existing[0].published_at) ?? new Date();
       state = 'REUSED';
@@ -2631,6 +2640,62 @@ export async function publishTournamentReviewCorrection(
     reason: reason.trim(),
     changeId: changeId.trim(),
   });
+}
+
+/** Mark one frozen scope for an explicit, audited correction. Routine source
+ * reconciliation never performs this transition; callers must provide both
+ * a human-readable reason and an external Change ID before a revision >1 can
+ * be published. */
+export async function requestTournamentReviewCorrection(
+  season: FplSeasonRef,
+  tournamentId: number,
+  eventId: number,
+  reason: string,
+  changeId: string,
+): Promise<void> {
+  if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) {
+    throw new Error('tournamentId must be a positive integer');
+  }
+  if (!Number.isSafeInteger(eventId) || eventId < 1 || eventId > 38) {
+    throw new Error('eventId must be between 1 and 38');
+  }
+  if (!reason.trim() || !changeId.trim()) {
+    throw new Error('correction reason and changeId are required');
+  }
+  const db = await getDbClient();
+  const rows = await db<Array<{ event_id: number }>>`
+    UPDATE competition.tournament_review_obligations obligation
+    SET state = 'PENDING',
+        next_attempt_at = clock_timestamp(),
+        execution_attempts = 0,
+        source_rechecks = 0,
+        lease_owner = NULL,
+        lease_expires_at = NULL,
+        first_attempt_at = NULL,
+        last_attempt_at = NULL,
+        ready_at = NULL,
+        degraded_at = NULL,
+        ready_revision = NULL,
+        last_error_code = NULL,
+        last_failure_fingerprint = NULL,
+        repair_issue_id = NULL,
+        updated_at = clock_timestamp()
+    WHERE obligation.season_id = ${season.seasonId}
+      AND obligation.tournament_id = ${tournamentId}
+      AND obligation.event_id = ${eventId}
+      AND obligation.state = 'READY'
+      AND EXISTS (
+        SELECT 1
+        FROM competition.tournament_review_heads head
+        WHERE head.season_id = obligation.season_id
+          AND head.tournament_id = obligation.tournament_id
+          AND head.event_id = obligation.event_id
+      )
+    RETURNING obligation.event_id
+  `;
+  if (rows.length !== 1) {
+    throw new Error('only an existing READY review scope can be corrected');
+  }
 }
 
 export async function reconcileTournamentReviewObligations(
@@ -2838,7 +2903,7 @@ export async function reconcileTournamentReviewObligations(
              existing.group_assignment_payload AS existing_group_assignment_payload,
              previous.payload AS existing_payload,
              CASE
-               WHEN existing.metadata_payload IS NOT NULL
+             WHEN existing.metadata_payload IS NOT NULL
                 AND existing.metadata_payload IS DISTINCT FROM candidate.tournament_payload
                  THEN GREATEST(
                    candidate.tournament_updated_at,
@@ -3273,8 +3338,11 @@ export async function reconcileTournamentReviewObligations(
           competition.tournament_review_obligations.group_assignment_payload
         ),
         state = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN 'PENDING'
           ELSE competition.tournament_review_obligations.state
         END,
@@ -3283,8 +3351,11 @@ export async function reconcileTournamentReviewObligations(
           EXCLUDED.eligible_at
         ),
         next_attempt_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN GREATEST(EXCLUDED.eligible_at, ${now.toISOString()}::timestamptz)
           ELSE COALESCE(
             competition.tournament_review_obligations.next_attempt_at,
@@ -3292,73 +3363,107 @@ export async function reconcileTournamentReviewObligations(
           )
         END,
         execution_attempts = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN 0
           ELSE competition.tournament_review_obligations.execution_attempts
         END,
         source_rechecks = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN 0
           ELSE competition.tournament_review_obligations.source_rechecks
         END,
         lease_owner = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.lease_owner
         END,
         lease_expires_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.lease_expires_at
         END,
         first_attempt_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.first_attempt_at
         END,
         last_attempt_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.last_attempt_at
         END,
         ready_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.ready_at
         END,
         degraded_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.degraded_at
         END,
         ready_revision = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.ready_revision
         END,
         last_error_code = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.last_error_code
         END,
         last_failure_fingerprint = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.last_failure_fingerprint
         END,
         updated_at = clock_timestamp()
-    WHERE competition.tournament_review_obligations.state <> 'PROCESSING'
+      WHERE competition.tournament_review_obligations.state <> 'PROCESSING'
+      AND competition.tournament_review_obligations.state <> 'READY'
       AND (
         competition.tournament_review_obligations.metadata_payload IS NULL
         OR competition.tournament_review_obligations.entry_metadata_payload IS NULL
@@ -3389,6 +3494,7 @@ type ClaimedReviewObligation = {
   eligible_at: Date | string;
   execution_attempts: number;
   source_rechecks: number;
+  repair_issue_id: number | null;
 };
 
 async function claimTournamentReviewObligations(
@@ -3431,7 +3537,8 @@ async function claimTournamentReviewObligations(
         AND obligation.event_id = candidates.event_id
       RETURNING obligation.season_id, obligation.tournament_id, obligation.event_id,
                 obligation.format, obligation.eligible_at,
-                obligation.execution_attempts, obligation.source_rechecks
+                obligation.execution_attempts, obligation.source_rechecks,
+                obligation.repair_issue_id
     `,
   );
   return { owner, rows };
@@ -3467,9 +3574,15 @@ function reviewRepairIssue(
   // Keep the persisted issue safe and stable. The source error text is useful
   // inside the Data process, but it may contain provider/table details and is
   // deliberately not copied into the repair queue or the public status API.
-  const structureFailure = /roster|group|bracket|knockout|match|winner|format|structure/i.test(
-    error.message,
-  );
+  // A missing/stale/mismatched match score is a results issue: the existing
+  // repair worker must refresh the derived result rows before it can retry
+  // publication.  Only roster/group/bracket topology failures use the
+  // structure repair path; broad "match"/"winner" matching caused stale
+  // source rows to be misrouted and deleted accepted result evidence.
+  const structureFailure =
+    /roster|group assignment|entry changed groups|bracket|participant.*(outside|coverage|invalid)|side contract|structure/i.test(
+      error.message,
+    );
   const code = structureFailure ? 'STRUCTURE_INTEGRITY_FAILED' : 'TOURNAMENT_RESULTS_INCOMPLETE';
   return {
     issueKey: setupIssueKey(code, obligation.event_id),
@@ -3559,7 +3672,22 @@ async function finishReviewObligation(
       AND state = 'PROCESSING' AND lease_owner = ${owner}
     RETURNING event_id
   `;
-  return rows.length === 1;
+  if (rows.length !== 1) return false;
+  if (obligation.repair_issue_id !== null) {
+    // Resolve only the issue attached to this obligation. A broad
+    // tournament-level sync here could hide an unrelated open setup issue.
+    await db`
+      UPDATE competition.tournament_setup_issues
+      SET resolved_at = clock_timestamp(),
+          next_repair_at = NULL,
+          updated_at = clock_timestamp()
+      WHERE season_id = ${obligation.season_id}
+        AND tournament_id = ${obligation.tournament_id}
+        AND issue_id = ${obligation.repair_issue_id}
+        AND resolved_at IS NULL
+    `;
+  }
+  return true;
 }
 
 async function failReviewObligation(
@@ -3599,9 +3727,6 @@ async function failReviewObligation(
     code,
     `${obligation.tournament_id}:${obligation.event_id}:${sourceFailure ? 'source' : 'execution'}`,
   );
-  const repairIssueId = sourceFailure
-    ? await enqueueTournamentReviewRepair(season, obligation, error, nextAt)
-    : null;
   const db = await getDbClient();
   const rows = await db<Array<{ event_id: number }>>`
     UPDATE competition.tournament_review_obligations
@@ -3609,7 +3734,6 @@ async function failReviewObligation(
         next_attempt_at = ${nextAt?.toISOString() ?? null}::timestamptz,
         execution_attempts = execution_attempts + ${sourceFailure ? 0 : 1},
         source_rechecks = source_rechecks + ${sourceFailure ? 1 : 0},
-        repair_issue_id = COALESCE(${repairIssueId}, repair_issue_id),
         degraded_at = CASE WHEN ${degraded} THEN COALESCE(degraded_at, clock_timestamp()) ELSE degraded_at END,
         lease_owner = NULL,
         lease_expires_at = NULL,
@@ -3622,6 +3746,26 @@ async function failReviewObligation(
       AND state = 'PROCESSING' AND lease_owner = ${owner}
     RETURNING event_id
   `;
+  // Ownership is the admission boundary for the repair side effect.  A
+  // reclaimed/stale worker must not create or enqueue a repair after another
+  // worker has taken the lease.  Persist the failure transition first, then
+  // attach the deduplicated issue to the still-current failure row.
+  if (rows.length !== 1) return false;
+  if (sourceFailure) {
+    const repairIssueId = await enqueueTournamentReviewRepair(season, obligation, error, nextAt);
+    if (repairIssueId !== null) {
+      await db`
+        UPDATE competition.tournament_review_obligations
+        SET repair_issue_id = ${repairIssueId},
+            updated_at = clock_timestamp()
+        WHERE season_id = ${obligation.season_id}
+          AND tournament_id = ${obligation.tournament_id}
+          AND event_id = ${obligation.event_id}
+          AND state = ${state}
+          AND last_failure_fingerprint = ${fingerprint}
+      `;
+    }
+  }
   logError('Tournament review obligation failed', error, {
     seasonId: obligation.season_id,
     tournamentId: obligation.tournament_id,
@@ -3630,12 +3774,18 @@ async function failReviewObligation(
     state,
     nextAttemptAt: nextAt?.toISOString() ?? null,
   });
-  return rows.length === 1;
+  return true;
 }
 
 export async function processTournamentReviewObligations(
   season: FplSeasonRef,
-  options: { now?: Date; limit?: number; tournamentId?: number; eventId?: number } = {},
+  options: {
+    now?: Date;
+    limit?: number;
+    tournamentId?: number;
+    eventId?: number;
+    correction?: TournamentReviewCorrection;
+  } = {},
 ): Promise<{ reconciled: number; claimed: number; published: number; failed: number }> {
   const now = options.now ?? new Date();
   const target = { tournamentId: options.tournamentId, eventId: options.eventId };
@@ -3699,11 +3849,22 @@ export async function processTournamentReviewObligations(
         continue;
       }
       try {
-        const result = await publishTournamentReviewScope(
-          season,
-          obligation.tournament_id,
-          obligation.event_id,
-        );
+        const result =
+          options.correction &&
+          options.tournamentId === obligation.tournament_id &&
+          options.eventId === obligation.event_id
+            ? await publishTournamentReviewCorrection(
+                season,
+                obligation.tournament_id,
+                obligation.event_id,
+                options.correction.reason,
+                options.correction.changeId,
+              )
+            : await publishTournamentReviewScope(
+                season,
+                obligation.tournament_id,
+                obligation.event_id,
+              );
         // A lost lease means another worker owns the obligation. The immutable
         // publication is idempotent, but this worker must not claim completion.
         if (!leaseLost.has(key)) {

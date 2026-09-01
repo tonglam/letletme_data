@@ -44,11 +44,13 @@ cannot replace or remove the last accepted complete publication.
 5. Product clients read through GraphQL; Web remains the identity/mutation
    boundary.
 
-The My Tournament Review V2 producer checkpoint is exposed only through the
+The My Tournament Review V2.1 producer checkpoint is exposed only through the
 service-authenticated `GET /jobs/status` response under `tournamentReviewV2`.
-Operators may add `tournamentId=6953` for a bounded watch list; this reports
-state/count/head-parity/freshness evidence, never raw provider errors or
-payloads.
+Operators may add `watchEntryId=6953` for a bounded watch list. Data resolves
+that FPL Entry ID to its tournament membership before returning safe
+state/count/head-parity/freshness evidence; it never returns raw provider
+errors, identities, or payloads. The aggregate status remains global and is
+not replaced by the single-entry watch.
 
 The scheduler reserves a durable obligation before dispatching a BullMQ job.
 BullMQ is a delivery mechanism and retained history, not the source of

@@ -7,9 +7,24 @@
 -- runbook restores these backup tables into a disposable database before the
 -- migration is allowed to proceed in production.
 
-BEGIN;
+CREATE SCHEMA IF NOT EXISTS extensions;
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+DO $$
+DECLARE
+  installed_schema text;
+BEGIN
+  SELECT namespace.nspname
+    INTO installed_schema
+  FROM pg_extension extension_row
+  JOIN pg_namespace namespace ON namespace.oid = extension_row.extnamespace
+  WHERE extension_row.extname = 'pgcrypto';
+
+  IF installed_schema IS NULL THEN
+    EXECUTE 'CREATE EXTENSION pgcrypto WITH SCHEMA extensions';
+  ELSIF installed_schema <> 'extensions' THEN
+    EXECUTE 'ALTER EXTENSION pgcrypto SET SCHEMA extensions';
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0084_backup
   (LIKE competition.tournament_review_publications INCLUDING ALL);
@@ -19,7 +34,7 @@ CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0084_backup
   (LIKE competition.tournament_review_obligations INCLUDING ALL);
 
 CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
-  backup_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  backup_id uuid PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
   season_id smallint NOT NULL,
   publications_rows bigint NOT NULL,
   heads_rows bigint NOT NULL,
@@ -87,15 +102,15 @@ BEGIN
   ) revisions;
 
   -- Canonical JSON over deterministic row ordering is the backup checksum.
-  SELECT encode(digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
+  SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id, revision)::text, '[]'), 'sha256'), 'hex')
     INTO publication_sha
   FROM competition.tournament_review_publications_0084_backup row;
-  SELECT encode(digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
+  SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
     INTO head_sha
   FROM competition.tournament_review_heads_0084_backup row;
-  SELECT encode(digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
+  SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
     INTO obligation_sha
   FROM competition.tournament_review_obligations_0084_backup row;
@@ -119,6 +134,9 @@ $migration$;
 
 ALTER TABLE competition.tournament_review_publications
   DROP CONSTRAINT IF EXISTS tournament_review_publications_versions_check;
+ALTER TABLE competition.tournament_review_publications
+  ALTER COLUMN schema_version SET DEFAULT 'my-tournament-review-v2.1',
+  ALTER COLUMN metric_version SET DEFAULT 'settled-review-v2';
 ALTER TABLE competition.tournament_review_publications
   ADD CONSTRAINT tournament_review_publications_versions_check CHECK (
     (schema_version = 'my-tournament-review-v2' AND metric_version = 'descriptive-v1')
@@ -160,9 +178,8 @@ CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks (
     (season_id, tournament_id, event_id, revision)
     REFERENCES competition.tournament_review_publications
       (season_id, tournament_id, event_id, revision) ON DELETE CASCADE,
-  CONSTRAINT tournament_review_publication_chunks_index_check CHECK (chunk_index >= 0),
   CONSTRAINT tournament_review_publication_chunks_count_check CHECK (
-    item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array'
+    chunk_index >= 0 AND item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array'
     AND jsonb_array_length(items) = item_count
   ),
   CONSTRAINT tournament_review_publication_chunks_sha_check CHECK (
@@ -212,5 +229,3 @@ COMMENT ON COLUMN competition.tournament_review_publications.content_sha256 IS
   'Physical column retained for history; V2.1 consumers expose it as semanticSha256.';
 COMMENT ON TABLE competition.tournament_review_publication_chunks IS
   'Immutable <=100-item sections for settled-review-v2 publications.';
-
-COMMIT;

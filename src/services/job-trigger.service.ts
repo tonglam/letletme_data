@@ -35,9 +35,11 @@ import {
   enqueuePostMatchConsolidation,
   enqueueMyFplSnapshot,
   enqueueMyFplSnapshotOutbox,
+  enqueueTournamentReview,
   enqueueTournamentTrendsRepair,
 } from '../jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
+import { requestTournamentReviewCorrection } from './tournament-review-publication.service';
 
 export type TriggerableJobInfo = {
   name: string;
@@ -132,6 +134,64 @@ function readMarketSourceDay(input: unknown): string | undefined {
   return sourceDay;
 }
 
+type TournamentReviewCorrectionInput = {
+  tournamentId: number;
+  eventId: number;
+  mode: 'CORRECTION';
+  reason: string;
+  changeId: string;
+};
+
+function readTournamentReviewCorrectionInput(input: unknown): TournamentReviewCorrectionInput {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ValidationError(
+      'Tournament review correction input must be an object',
+      'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+    );
+  }
+  const value = input as Record<string, unknown>;
+  const readPositiveInt = (key: 'tournamentId' | 'eventId', max?: number): number => {
+    const candidate = value[key];
+    if (
+      typeof candidate !== 'number' ||
+      !Number.isSafeInteger(candidate) ||
+      candidate <= 0 ||
+      (max !== undefined && candidate > max)
+    ) {
+      throw new ValidationError(
+        `Tournament review correction ${key} must be a positive integer`,
+        'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+      );
+    }
+    return candidate;
+  };
+  const tournamentId = readPositiveInt('tournamentId');
+  const eventId = readPositiveInt('eventId', 38);
+  if (value.mode !== 'CORRECTION') {
+    throw new ValidationError(
+      'Tournament review correction mode must be CORRECTION',
+      'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+    );
+  }
+  const readText = (key: 'reason' | 'changeId'): string => {
+    const candidate = value[key];
+    if (typeof candidate !== 'string' || candidate.trim() === '') {
+      throw new ValidationError(
+        `Tournament review correction ${key} is required`,
+        'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+      );
+    }
+    return candidate.trim();
+  };
+  return {
+    tournamentId,
+    eventId,
+    mode: 'CORRECTION',
+    reason: readText('reason'),
+    changeId: readText('changeId'),
+  };
+}
+
 type MyFplManualSnapshotInput = {
   eventId?: number;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
@@ -211,6 +271,25 @@ function requireManualFinalOverride(input: MyFplManualSnapshotInput): void {
 
 function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
+    'tournament-review-correction': async () => {
+      const requested = readTournamentReviewCorrectionInput(input);
+      const season = await seasonRepository.findCurrent();
+      await requestTournamentReviewCorrection(
+        season,
+        requested.tournamentId,
+        requested.eventId,
+        requested.reason,
+        requested.changeId,
+      );
+      return enqueueTournamentReview(season, 'manual', {
+        tournamentId: requested.tournamentId,
+        eventId: requested.eventId,
+        reviewMode: 'CORRECTION',
+        reviewCorrectionReason: requested.reason,
+        reviewCorrectionChangeId: requested.changeId,
+        deduplicationId: `tournament-review-correction-${season.seasonCode}-${requested.tournamentId}-${requested.eventId}-${requested.changeId}`,
+      });
+    },
     'event-current-refresh': () => runManualEventCurrentRefresh(),
     'core-current-reconcile': () => runManualEventCurrentRefresh(),
     'core-snapshot-sync': async () => {
@@ -430,6 +509,9 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
   }
   if (name === 'player-values-sync' || name === 'market-daily') {
     readMarketSourceDay(input);
+  }
+  if (name === 'tournament-review-correction') {
+    readTournamentReviewCorrectionInput(input);
   }
   const jobMap = buildJobMap(input);
   const job = jobMap[name];

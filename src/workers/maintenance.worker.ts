@@ -6,7 +6,10 @@ import { purgeClientSignalRetention } from '../services/client-signals.service';
 import { repairPlayerSeasonSummaries } from '../services/player-season-summaries.service';
 import { runPlayerMarketFreshnessWatchdog } from '../jobs/player-market-freshness.jobs';
 import { repairTournamentTrendScopes } from '../jobs/tournament-trends-repair.jobs';
-import { processTournamentReviewObligations } from '../services/tournament-review-publication.service';
+import {
+  processTournamentReviewObligations,
+  type TournamentReviewCorrection,
+} from '../services/tournament-review-publication.service';
 import { runLaunchMonitor } from '../jobs/launch.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { reconcileUnderstatOrphanedRuns } from '../services/understat-recovery.service';
@@ -313,6 +316,16 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           return runPostMatchConsolidation();
         case MAINTENANCE_JOBS.TOURNAMENT_REVIEW: {
           const season = await requireCurrentSeasonForJob(job.data);
+          const correction: TournamentReviewCorrection | undefined =
+            job.data.reviewMode === 'CORRECTION' &&
+            job.data.reviewCorrectionReason &&
+            job.data.reviewCorrectionChangeId
+              ? {
+                  mode: 'CORRECTION',
+                  reason: job.data.reviewCorrectionReason,
+                  changeId: job.data.reviewCorrectionChangeId,
+                }
+              : undefined;
           return processTournamentReviewObligations(season, {
             // Creation-triggered jobs carry a precise tournament target so a
             // custom tournament can bootstrap its historical bundles now,
@@ -320,6 +333,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             limit: job.data.tournamentId ? 100 : 20,
             tournamentId: job.data.tournamentId,
             eventId: job.data.eventId,
+            ...(correction ? { correction } : {}),
           });
         }
         case MAINTENANCE_JOBS.UNDERSTAT_ORPHAN_RECONCILER:

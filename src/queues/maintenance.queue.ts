@@ -67,6 +67,10 @@ export type MaintenanceJobData = {
   /** Optional tournament-scoped review bootstrap target. */
   tournamentId?: number;
   eventId?: number;
+  /** Service-only explicit settled-review correction provenance. */
+  reviewMode?: 'CORRECTION';
+  reviewCorrectionReason?: string;
+  reviewCorrectionChangeId?: string;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
   snapshotActor?: string;
   snapshotReason?: string;
