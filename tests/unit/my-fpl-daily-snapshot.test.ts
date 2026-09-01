@@ -9,6 +9,7 @@ import {
   myFplSnapshotRedisManifestKey,
   serializeMyFplSnapshotCapture,
   resolveMyFplSnapshotCoverageState,
+  projectedEventAutoSubPoints,
   type MyFplSnapshotPublication,
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
@@ -41,6 +42,15 @@ const tournamentTransfers = readFileSync(
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
 
 describe('My FPL daily snapshot publication contract', () => {
+  test('counts projected auto-sub points before captain multipliers', () => {
+    expect(
+      projectedEventAutoSubPoints(
+        [{ element: 7, total_points: 6 }],
+        new Map([[7, { autoSub: true, effectiveMultiplier: 2 }]]),
+      ),
+    ).toBe(6);
+  });
+
   test('persists late-entry eligibility separately from the eligible denominator', () => {
     expect(eligibilityMigration).toContain('not_applicable_entry_count');
     expect(eligibilityMigration).toContain('snapshot_entry.is_empty');
@@ -202,6 +212,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('entryPicks.length === 15');
     expect(publicationService).toContain('entryPicks.every((pick) => pick.total_points !== null');
     expect(publicationService).toContain('same transaction as the immutable');
+    expect(publicationService).toContain('contractVersion: 2');
+    expect(publicationService).toContain('buildMyFplManagerReview');
   });
 
   test('binds final picks to the immutable result row', () => {
@@ -245,6 +257,27 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(governanceService).toContain('retireEmptyMyFplOutboxFreshnessWindows');
   });
 
+  test('rebuilds legacy finals and keeps provisional transfer facts on one authority', () => {
+    expect(publicationService).toContain('isManagerReviewV2MyFplPublication');
+    expect(worker).toContain('activeFinalUsesManagerReviewV2');
+    expect(worker).toContain('redisManifest.revision === active.revision');
+    expect(publicationService).toContain('provisionalEventPointsByElement');
+    expect(publicationService).toContain('Event-live publication is missing transfer points');
+    expect(publicationService).toMatch(/chip\(row\.event_chip\) === 'FREE_HIT'/);
+    expect(publicationService).toContain('pick.event_team_id AS team_id');
+    expect(publicationService).not.toContain(
+      'COALESCE(pick.event_team_id, player.team_id) AS team_id',
+    );
+  });
+
+  test('replays a delivered manifest when the derived Redis pointer is lost', () => {
+    expect(publicationService).toContain('requeueDeliveredMyFplSnapshotPublication');
+    expect(publicationService).toMatch(/status = 'DELIVERED'/);
+    expect(publicationService).toMatch(/status = 'PENDING'/);
+    expect(worker).toContain('const replay = await dispatchMyFplSnapshotPublicationOutbox');
+    expect(worker).toContain('Redis replay left ${replay.failed}');
+  });
+
   test('allows the full current-season refresh barrier to settle', () => {
     expect(queueRunBarrier).toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 30 * 60_000');
     expect(queueRunBarrier).not.toContain('QUEUE_RUN_WAIT_TIMEOUT_MS = 10 * 60_000');
@@ -272,6 +305,12 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(tournamentWorker).toContain('perEntryMutationScopes: true');
     expect(tournamentTransfers).toContain('findEntryIdsNeedingSourceRefresh');
     expect(tournamentTransfers).toContain('requiredUnits: entryIds.length');
+    expect(worker).toMatch(
+      /if \(snapshotKind === 'FINAL'\) \{[\s\S]{0,500}enqueueTournamentEventResults/,
+    );
+    expect(worker.search(/if \(snapshotKind === 'FINAL'\) \{/)).toBeLessThan(
+      worker.indexOf('enqueueTournamentEventResults(season, eventId, source'),
+    );
   });
 
   test('decides same-day provisional noops only after normalized content hashing', () => {

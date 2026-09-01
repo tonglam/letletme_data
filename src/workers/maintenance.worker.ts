@@ -29,6 +29,9 @@ import {
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
+  invalidateMyFplSnapshotRedisManifest,
+  isManagerReviewV2MyFplPublication,
+  requeueDeliveredMyFplSnapshotPublication,
   type MyFplSnapshotOutboxDeliveryEvidence,
   type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
@@ -327,8 +330,11 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             Boolean(job.data.snapshotActor) &&
             Boolean(job.data.snapshotReason) &&
             Boolean(job.data.snapshotIdempotencyKey);
-          if (
+          const activeFinalUsesManagerReviewV2 =
             active?.kind === 'FINAL' &&
+            (await isManagerReviewV2MyFplPublication(season, eventId, active));
+          if (
+            activeFinalUsesManagerReviewV2 &&
             (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
           ) {
             const redisManifest = await getActiveMyFplSnapshotRedisManifest(
@@ -345,8 +351,40 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 publication: active,
                 redisRevision: redisManifest.revision,
               });
+              return { status: 'noop', publication: active };
             }
-            return { status: 'noop', publication: active };
+            // A corrupt pointer cannot be overwritten by the activation Lua
+            // (it deliberately fails closed). Clear only the exact active
+            // revision before replaying its durable outbox receipt; a newer
+            // pointer is fenced and remains untouched.
+            await invalidateMyFplSnapshotRedisManifest(season.seasonCode, eventId, active.revision);
+            await requeueDeliveredMyFplSnapshotPublication(season, eventId, active.revision);
+            const replay = await dispatchMyFplSnapshotPublicationOutbox({
+              limit: 1,
+              seasonCode: season.seasonCode,
+              eventId,
+            });
+            if (replay.failed > 0) {
+              throw new Error(
+                `My FPL snapshot Redis replay left ${replay.failed} delivery receipt(s) for retry`,
+              );
+            }
+            const replayedManifest = await getActiveMyFplSnapshotRedisManifest(
+              season.seasonCode,
+              eventId,
+            );
+            if (
+              replayedManifest?.seasonCode === season.seasonCode &&
+              replayedManifest.eventId === eventId &&
+              replayedManifest.revision === active.revision
+            ) {
+              await recordMyFplOutboxRedisEvidence({
+                freshnessWindowId: job.data.freshnessWindowId,
+                publication: active,
+                redisRevision: replayedManifest.revision,
+              });
+              return { status: 'noop', publication: active };
+            }
           }
 
           // Refresh the mutable inputs for this retry attempt first. For a
@@ -424,28 +462,36 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             }),
           ]);
 
-          await runQueueRunPhase(attemptKey, [
-            enqueueTournamentEventResults(season, eventId, source, {
-              freshAfter,
-              jobId: `my-fpl-${attemptKey}-tournament-results`,
-              runId: attemptKey,
-            }),
-          ]);
+          // The daily review snapshot calculates its tournament projection
+          // directly from the same pinned entry scores used by the personal
+          // payload. The tournament result cascade is a finalized-event
+          // workflow (including transfers-post), so running it for a live
+          // event can never satisfy its authority fence and strands the daily
+          // publication barrier. Only FINAL captures enter those phases.
+          if (snapshotKind === 'FINAL') {
+            await runQueueRunPhase(attemptKey, [
+              enqueueTournamentEventResults(season, eventId, source, {
+                freshAfter,
+                jobId: `my-fpl-${attemptKey}-tournament-results`,
+                runId: attemptKey,
+              }),
+            ]);
 
-          await runQueueRunPhase(attemptKey, [
-            enqueueTournamentEventPicks(season, eventId, source, {
-              jobId: `my-fpl-${attemptKey}-tournament-picks`,
-              runId: attemptKey,
-            }),
-          ]);
+            await runQueueRunPhase(attemptKey, [
+              enqueueTournamentEventPicks(season, eventId, source, {
+                jobId: `my-fpl-${attemptKey}-tournament-picks`,
+                runId: attemptKey,
+              }),
+            ]);
 
-          await runQueueRunPhase(attemptKey, [
-            enqueueTournamentTransfersPre(season, eventId, source, {
-              freshAfter,
-              jobId: `my-fpl-${attemptKey}-tournament-transfers`,
-              runId: attemptKey,
-            }),
-          ]);
+            await runQueueRunPhase(attemptKey, [
+              enqueueTournamentTransfersPre(season, eventId, source, {
+                freshAfter,
+                jobId: `my-fpl-${attemptKey}-tournament-transfers`,
+                runId: attemptKey,
+              }),
+            ]);
+          }
           const capture = await captureMyFplSnapshot(season, eventId, snapshotKind, {
             ...(job.data.snapshotActor ? { actor: job.data.snapshotActor } : {}),
             ...(job.data.snapshotReason ? { reason: job.data.snapshotReason } : {}),

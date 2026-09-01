@@ -280,6 +280,53 @@ describe('revision-pinned projected manager score', () => {
     });
   });
 
+  test('uses the revision-pinned event total for the manager chip', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+
+    const result = projectEventLiveManagerScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+      fixtures: [],
+      // The manager-only fact is already bound to the same Live Points V2
+      // publication by the entry input publisher.
+      assistantManagerPoints: 7,
+    });
+
+    expect(result?.eventPoints).toBe(19);
+    expect(result?.netEventPoints).toBe(19);
+  });
+
+  test('adds manager points without discarding projected lineup changes', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+    liveByElement.set(3, live(3, 0, 0));
+    liveByElement.set(12, live(12, 5));
+
+    const result = projectEventLiveManagerScore({
+      entryId: 101,
+      picks: managerPicks,
+      liveByElement,
+      fixtures: [fixture(2, 97, true)],
+      // The manager-only fact carries eight points. The projected auto-sub
+      // raises the player component to 16, for a final total of 24.
+      assistantManagerPoints: 8,
+    });
+
+    expect(result?.eventPoints).toBe(24);
+    expect(result?.effectiveLineup.find((pick) => pick.elementId === 12)).toMatchObject({
+      autoSub: true,
+      pickActive: true,
+    });
+  });
+
   test('fails closed when the manager chip has no manager scoring input', () => {
     const managerPicks = picks();
     managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
@@ -293,6 +340,24 @@ describe('revision-pinned projected manager score', () => {
         picks: managerPicks,
         liveByElement,
         fixtures: [],
+      }),
+    ).toBeNull();
+  });
+
+  test('fails closed when the manager-only fact is unavailable', () => {
+    const managerPicks = picks();
+    managerPicks[0] = { ...managerPicks[0], activeChip: 'manager' };
+    const liveByElement = new Map(
+      managerPicks.map((pick) => [pick.elementId, live(pick.elementId, 1)]),
+    );
+
+    expect(
+      projectEventLiveManagerScore({
+        entryId: 101,
+        picks: managerPicks,
+        liveByElement,
+        fixtures: [],
+        assistantManagerPoints: null,
       }),
     ).toBeNull();
   });
