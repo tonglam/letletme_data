@@ -5,7 +5,7 @@
 - `letletme_data` is the producer and sole writer for LetLetMe business data. It is a Bun/TypeScript ESM service using Elysia for its internal API, BullMQ for delivery, PostgreSQL for durable state, Drizzle as a typed schema mapping, Zod at input/config boundaries, and Redis for rebuildable publications and coordination.
 - Preserve the layer flow: provider clients and boundary validation -> transformers/domain -> services -> repositories -> PostgreSQL; scheduler/jobs -> queues -> workers execute the same services. Keep route handlers and job definitions thin. `src/cache` may publish read models but must not become canonical storage.
 - The production image builds `src/index.ts`, `src/worker.ts`, `src/scheduler.ts`, `src/live-picks-worker.ts`, `src/official-h2h-worker.ts`, `src/content-worker.ts`, and `src/media-worker.ts`. Starting only the API can enqueue work but cannot prove completion.
-- Data owns the `fpl`, `competition`, `understat`, `bridge`, `reporting`, and `ops` schemas, `llm:data:*` publications, BullMQ namespaces, and bounded coordination state. GraphQL owns public read shaping and `llm:gql:*`; Web owns identity and `bauth`; clients must not bypass those boundaries.
+- Data owns the `fpl`, `competition`, `understat`, `bridge`, `reporting`, `content`, and `ops` schemas, `llm:data:*` publications, BullMQ namespaces, and bounded coordination state. GraphQL owns public read shaping and `llm:gql:*`; Web owns identity and `bauth`; clients must not bypass those boundaries.
 
 ## Authority and invariants
 
