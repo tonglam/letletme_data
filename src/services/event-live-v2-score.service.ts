@@ -72,7 +72,12 @@ export type EventLiveScoreBatch = {
 export type EventLiveScorePreloadedInputs = {
   readonly pickRows: readonly EventLiveManagerPickRow[];
   readonly entryInfos: readonly { id: number; startedEvent: number | null }[];
-  readonly previousResultEvidence?: readonly EntryEventResultRevisionEvidence[];
+  readonly previousResultEvidence?: readonly EventLiveScorePreviousResultEvidence[];
+};
+
+export type EventLiveScorePreviousResultEvidence = EntryEventResultRevisionEvidence & {
+  /** The final-fence timestamp for the result event, supplied by capture SQL. */
+  readonly dataCheckedAt?: Date | null;
 };
 
 export type PreviousTotalsFromResultEvidence = Readonly<{
@@ -136,6 +141,18 @@ export function eventLiveHeartbeatIsFresh(
   return Number.isFinite(liveTimestamp) && ageMs >= 0 && ageMs <= maxAgeMs;
 }
 
+function resultEvidenceIsAfterFinalFence(
+  result: Pick<EntryEventResultRevisionEvidence, 'richSyncedAt'> & {
+    readonly dataCheckedAt?: Date | null;
+  },
+): boolean {
+  const richSyncedAt = result.richSyncedAt?.getTime() ?? Number.NaN;
+  const dataCheckedAt = result.dataCheckedAt?.getTime() ?? Number.NaN;
+  return (
+    Number.isFinite(richSyncedAt) && Number.isFinite(dataCheckedAt) && richSyncedAt >= dataCheckedAt
+  );
+}
+
 /**
  * Derive the baseline used by a background capture from the same finalized
  * result evidence read by its transaction.  Entry-live Redis inputs can be
@@ -147,10 +164,12 @@ export function derivePreviousTotalsFromResultEvidence(
   eventId: number,
   entryId: number,
   entryStartedEvent: number | null,
-  previousResultEvidence: readonly Pick<
+  previousResultEvidence: readonly (Pick<
     EntryEventResultRevisionEvidence,
-    'entryId' | 'eventId' | 'eventNetPoints'
-  >[],
+    'entryId' | 'eventId' | 'eventNetPoints' | 'richSyncedAt'
+  > & {
+    readonly dataCheckedAt?: Date | null;
+  })[],
 ): PreviousTotalsFromResultEvidence | null {
   const firstScoringEvent = Math.max(1, entryStartedEvent ?? 1);
   if (eventId === firstScoringEvent) {
@@ -158,7 +177,10 @@ export function derivePreviousTotalsFromResultEvidence(
   }
   const relevant = previousResultEvidence.filter(
     (result) =>
-      result.entryId === entryId && result.eventId >= firstScoringEvent && result.eventId < eventId,
+      result.entryId === entryId &&
+      result.eventId >= firstScoringEvent &&
+      result.eventId < eventId &&
+      resultEvidenceIsAfterFinalFence(result),
   );
   const expectedCount = eventId - firstScoringEvent;
   const eventIds = new Set(relevant.map((result) => result.eventId));
@@ -236,6 +258,7 @@ export function buildScoreInputRevision(input: {
     readonly eventNetPoints: number | null;
     readonly richSyncedAt: Date | null;
     readonly updatedAt: Date;
+    readonly dataCheckedAt?: Date | null;
   }[];
 }): { inputRevision: string; picksRevision: string; previousTotalsRevision: string } {
   const canonicalPicks = [...input.picks].sort(
@@ -263,6 +286,7 @@ export function buildScoreInputRevision(input: {
         eventId: result.eventId,
         sourceResultId: result.sourceResultId,
         eventNetPoints: result.eventNetPoints,
+        dataCheckedAt: result.dataCheckedAt?.toISOString() ?? null,
       }))
       .sort((left, right) => left.eventId - right.eventId || left.entryId - right.entryId),
   });
@@ -422,11 +446,13 @@ async function loadEventLiveScoreBatch(
       activeChip: row.activeChip,
     })) satisfies EventLiveManagerPick[];
     const firstScoringEvent = Math.max(1, startedByEntry.get(entryId) ?? 1);
+    const usesPreloadedEvidence = options.preloadedInputs?.previousResultEvidence !== undefined;
     const previousEntryResults = previousResultEvidence.filter(
       (result) =>
         result.entryId === entryId &&
         result.eventId >= firstScoringEvent &&
-        result.eventId < eventId,
+        result.eventId < eventId &&
+        (!usesPreloadedEvidence || resultEvidenceIsAfterFinalFence(result)),
     );
     // A background capture supplies the rows from its repeatable-read
     // transaction.  Those rows are the canonical baseline for this score;

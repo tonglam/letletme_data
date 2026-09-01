@@ -41,12 +41,24 @@ describe('Live Points V2 freshness boundaries', () => {
   test('derives a background capture baseline from canonical result evidence', () => {
     expect(
       derivePreviousTotalsFromResultEvidence(2, 3528563, 1, [
-        { entryId: 3528563, eventId: 1, eventNetPoints: 29 },
+        {
+          entryId: 3528563,
+          eventId: 1,
+          eventNetPoints: 29,
+          richSyncedAt: new Date('2026-08-27T02:41:55.999Z'),
+          dataCheckedAt: new Date('2026-08-25T06:11:02.952Z'),
+        },
       ]),
     ).toEqual({ totalPoints: 29, throughEventId: 1 });
     expect(
       derivePreviousTotalsFromResultEvidence(3, 3528563, 1, [
-        { entryId: 3528563, eventId: 1, eventNetPoints: 29 },
+        {
+          entryId: 3528563,
+          eventId: 1,
+          eventNetPoints: 29,
+          richSyncedAt: new Date('2026-08-24T02:41:55.999Z'),
+          dataCheckedAt: new Date('2026-08-25T06:11:02.952Z'),
+        },
       ]),
     ).toBeNull();
     expect(derivePreviousTotalsFromResultEvidence(2, 3528563, 2, [])).toEqual({
@@ -88,6 +100,17 @@ describe('Live Points V2 freshness boundaries', () => {
         } as unknown as RawFPLEventLiveResponse,
         observation,
       ),
+    ).toBeNull();
+    expect(
+      derivePreviousTotalsFromResultEvidence(2, 3528563, 1, [
+        {
+          entryId: 3528563,
+          eventId: 1,
+          eventNetPoints: 29,
+          richSyncedAt: new Date('2026-08-24T02:41:55.999Z'),
+          dataCheckedAt: new Date('2026-08-25T06:11:02.952Z'),
+        },
+      ]),
     ).toBeNull();
   });
 });
