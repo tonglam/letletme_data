@@ -729,8 +729,15 @@ export async function runPicksProbeAndSync(
       if (!isStablePicksResponse(payload, eventId)) {
         throw new Error(`Entry ${entryId} picks are not a complete event ${eventId} payload`);
       }
+      const managerChip = payload.active_chip === 'manager' || payload.active_chip === 'MANAGER';
+      // Manager points must be derived from a provider event-live observation,
+      // never from the cached player subtotal in the Redis publication. The
+      // persistence fence compares this response with the same live revision
+      // before attaching the manager-only fact.
+      const providerEventLive = managerChip ? await fplClient.getEventLive(eventId) : undefined;
       await persistEntryEventPicksResponse(season, entryId, eventId, payload, undefined, {
         liveObservation,
+        providerEventLive,
       });
       return entryId;
     }),

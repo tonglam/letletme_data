@@ -12,11 +12,12 @@ import { createEntryEventResultsRepository } from '../repositories/entry-event-r
 import { eventRepository } from '../repositories/events';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
+import { assistantManagerPointsFactFromProviderObservation } from '../domain/event-live-manager-points';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { contentHash } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import type { RawFPLEntryEventPicksResponse } from '../types';
+import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
 import {
   clearEntryCheckpointDesiredV2,
   entryLiveInputFromFplPicks,
@@ -77,30 +78,6 @@ function sameLiveScoreObservation(left: LiveObservation, right: LiveObservation)
     left.publication.generation === right.publication.generation &&
     left.publication.revisions.scoreCore.revision === right.publication.revisions.scoreCore.revision
   );
-}
-
-function assistantManagerPointsFactFromObservation(
-  picks: RawFPLEntryEventPicksResponse,
-  observation: LiveObservation,
-): AssistantManagerPointsFact | null {
-  const liveByElement = new Map(observation.eventLives.map((row) => [row.elementId, row] as const));
-  let playerPoints = 0;
-  for (const pick of picks.picks) {
-    const live = liveByElement.get(pick.element);
-    if (!live || !Number.isSafeInteger(live.totalPoints)) return null;
-    if (!Number.isSafeInteger(pick.multiplier) || pick.multiplier < 0 || pick.multiplier > 3) {
-      return null;
-    }
-    playerPoints += live.totalPoints * pick.multiplier;
-  }
-  const points = picks.entry_history.points - playerPoints;
-  if (!Number.isSafeInteger(points) || points < 0) return null;
-  return {
-    points,
-    livePublicationId: observation.publication.publicationId,
-    liveGeneration: observation.publication.generation,
-    liveScoreCoreRevision: observation.publication.revisions.scoreCore.revision,
-  };
 }
 
 /**
@@ -241,7 +218,11 @@ export async function persistEntryEventPicksResponse(
   eventId: number,
   picks: RawFPLEntryEventPicksResponse,
   syncedAt?: Date | string,
-  options?: { readonly liveObservation?: LiveObservation | null },
+  options?: {
+    readonly liveObservation?: LiveObservation | null;
+    /** Provider event-live response sharing the picks capture boundary. */
+    readonly providerEventLive?: RawFPLEventLiveResponse | null;
+  },
 ) {
   // The live provider lane must not wait for PostgreSQL merely to obtain a
   // timestamp. When the caller has no source boundary, capture completion
@@ -257,20 +238,30 @@ export async function persistEntryEventPicksResponse(
   }
   let assistantManagerPoints: AssistantManagerPointsFact | undefined;
   const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
-  if (managerChip && options?.liveObservation) {
+  if (managerChip) {
     const currentObservation = await readLivePublicationV2({
       season: season.seasonCode,
       eventId,
     });
     if (
       !currentObservation ||
-      !sameLiveScoreObservation(options.liveObservation, currentObservation)
+      (options?.liveObservation &&
+        !sameLiveScoreObservation(options.liveObservation, currentObservation))
     ) {
       throw new Error(
         `Live observation changed while reading manager entry ${entryId}, event ${eventId}`,
       );
     }
-    const fact = assistantManagerPointsFactFromObservation(picks, currentObservation);
+    if (!options?.providerEventLive) {
+      throw new Error(
+        `Manager points require a provider event-live observation for entry ${entryId}, event ${eventId}`,
+      );
+    }
+    const fact = assistantManagerPointsFactFromProviderObservation(
+      picks,
+      options.providerEventLive,
+      currentObservation,
+    );
     if (!fact) {
       throw new Error(
         `Manager points cannot be reconciled to the live observation for entry ${entryId}, event ${eventId}`,
@@ -464,16 +455,21 @@ export async function syncEntryEventPicks(season: FplSeasonRef, entryId: number,
   try {
     logInfo('Starting entry event picks sync', { entryId, eventId });
     // Capture the current live revision before the provider request. When the
-    // response carries Assistant Manager, persist() re-reads this publication
-    // after the request and rejects a revision change instead of deriving a
-    // manager delta from mixed observations.
+    // response carries Assistant Manager, the provider event-live response
+    // below is fetched after the picks response and is compared with the
+    // current Redis authority before persist() binds a manager-only fact. The
+    // cached publication is therefore a revision fence, never the source of
+    // the player subtotal.
     const liveObservation = await readLivePublicationV2({
       season: season.seasonCode,
       eventId,
     });
     const picks = await fplClient.getEntryEventPicks(entryId, eventId);
+    const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
+    const providerEventLive = managerChip ? await fplClient.getEventLive(eventId) : undefined;
     await persistEntryEventPicksResponse(season, entryId, eventId, picks, new Date(), {
       liveObservation,
+      providerEventLive,
     });
     logInfo('Entry event picks sync completed', { entryId, eventId });
     return { entryId, eventId };
@@ -579,6 +575,7 @@ export async function syncEntryEventResults(
         eventId,
         picks,
         richSyncStartedAt.exact,
+        { providerEventLive: live },
       );
       const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
         season,
