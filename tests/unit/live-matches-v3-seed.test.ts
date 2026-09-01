@@ -160,7 +160,7 @@ describe('live match V3 cutover seed arguments', () => {
     expect(detailCheckpoint).toBeGreaterThan(deskCheckpoint);
     expect(source).toContain('readLiveMatchDeskPointerV3');
     expect(source).toContain('replaceFinalizedForCutover');
-    expect(source).toContain('kind: \'desk\'');
+    expect(source).toContain("kind: 'desk'");
     expect(source).toContain(
       'allowFinalizedReplacementForCutover: active.publication.finalized === true',
     );
