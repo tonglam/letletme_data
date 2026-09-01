@@ -115,6 +115,10 @@ const RED_SAMPLE_PREFIX = 'ops:queue-admission-red:';
 const GREEN_SAMPLE_PREFIX = 'ops:queue-admission-green-since:';
 const MONITOR_LEASE_PREFIX = 'ops:queue-monitor-leader:';
 export const QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS = 3_600;
+// A pause acquisition is only an in-flight control transition. Keep its
+// marker short-lived so a process that dies between BullMQ pause and owner
+// finalization cannot hold the queue for the full completed-owner TTL.
+export const QUEUE_CONSUMER_PAUSE_ACQUISITION_TTL_SECONDS = 60;
 export const QUEUE_CONSUMER_PAUSE_OPERATOR = 'operator';
 const QUEUE_CONSUMER_PAUSE_ACQUIRING_PREFIX = 'acquiring:';
 const QUEUE_CONSUMER_PAUSE_RELEASING_PREFIX = 'releasing:';
@@ -388,7 +392,7 @@ export async function claimQueueConsumerPauseAcquisition(
         queueConsumerPauseOwnerKey(queueName),
         owner,
         acquiringQueueConsumerPauseOwner(owner),
-        String(QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS),
+        String(QUEUE_CONSUMER_PAUSE_ACQUISITION_TTL_SECONDS),
       ),
     ) === 1
   );

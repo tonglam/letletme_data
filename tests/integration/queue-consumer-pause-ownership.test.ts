@@ -18,6 +18,7 @@ import {
   queueConsumerPauseOwnerKey,
   readQueueConsumerPauseOwner,
   releasingQueueConsumerPauseOwner,
+  QUEUE_CONSUMER_PAUSE_ACQUISITION_TTL_SECONDS,
   QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS,
 } from '../../src/services/queue-governance.service';
 import { prepareQueuedFormalRunsForDeployment } from '../../src/content/acquisition/formal-run-repository';
@@ -48,11 +49,15 @@ afterAll(async () => {
 
 describe('queue consumer pause ownership', () => {
   test('reserves before pause, completes idempotently, and fences release', async () => {
+    const redis = await queueRedisSingleton.getClient();
     expect(await claimQueueConsumerPauseAcquisition(QUEUE_NAME, OWNER)).toBe(true);
     expect(await claimQueueConsumerPauseAcquisition(QUEUE_NAME, OTHER_OWNER)).toBe(false);
     expect(await readQueueConsumerPauseOwner(QUEUE_NAME)).toBe(
       acquiringQueueConsumerPauseOwner(OWNER),
     );
+    const acquisitionTtl = await redis.ttl(OWNER_KEY);
+    expect(acquisitionTtl).toBeGreaterThan(0);
+    expect(acquisitionTtl).toBeLessThanOrEqual(QUEUE_CONSUMER_PAUSE_ACQUISITION_TTL_SECONDS);
 
     expect(await completeQueueConsumerPauseAcquisition(QUEUE_NAME, OWNER)).toBe(true);
     expect(await completeQueueConsumerPauseAcquisition(QUEUE_NAME, OWNER)).toBe(true);
@@ -131,7 +136,12 @@ describe('queue consumer pause ownership', () => {
     const acquiring = acquiringQueueConsumerPauseOwner(OWNER);
     try {
       await queue.resume();
-      await redis.set(CONTROL_OWNER_KEY, acquiring, 'EX', QUEUE_CONSUMER_PAUSE_OWNER_TTL_SECONDS);
+      await redis.set(
+        CONTROL_OWNER_KEY,
+        acquiring,
+        'EX',
+        QUEUE_CONSUMER_PAUSE_ACQUISITION_TTL_SECONDS,
+      );
 
       const result = Bun.spawnSync(
         [
