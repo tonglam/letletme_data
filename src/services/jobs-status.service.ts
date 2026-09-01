@@ -182,7 +182,7 @@ export type JobsStatusWindow = '15m' | '1h' | '6h' | '24h' | '3d' | '7d' | '28d'
 
 export async function getJobsStatus(
   window: JobsStatusWindow = '1h',
-  watchTournamentId?: number,
+  watchEntryId?: number,
 ): Promise<Record<string, unknown>> {
   const season = await seasonRepository.findCurrent();
   const windowMs: Record<JobsStatusWindow, number> = {
@@ -230,15 +230,20 @@ export async function getJobsStatus(
     readRuntimeHeartbeat('livePicksWorker'),
     readRuntimeHeartbeat('officialH2HWorker'),
     getMyFplSnapshotOperationalStatus(season),
-    getTournamentReviewV2OperationalStatus(season, watchTournamentId).catch(() => ({
-      schemaVersion: 'my-tournament-review-v2' as const,
-      metricVersion: 'unavailable',
+    getTournamentReviewV2OperationalStatus(season, watchEntryId).catch(() => ({
+      schemaVersion: 'my-tournament-review-v2.1' as const,
+      metricVersion: 'settled-review-v2',
       season: season.seasonCode,
       checkedAt: new Date().toISOString(),
       eligibleCount: 0,
       stateCounts: { pending: 0, waitingSource: 0, processing: 0, ready: 0, degraded: 0 },
-      publication: { readyWithCoherentHead: 0, readyWithIncoherentHead: 0 },
-      oldestPendingEligibleAt: null,
+      publication: {
+        readyWithCoherentHead: 0,
+        readyWithIncoherentHead: 0,
+        readyWithIncompleteChunks: 0,
+      },
+      oldestActiveEligibleAt: null,
+      oldestDegradedAt: null,
       latestUpdatedAt: null,
       watch: null,
       unavailable: true,

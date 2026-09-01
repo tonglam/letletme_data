@@ -2063,8 +2063,8 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     eventId: integer('event_id').notNull(),
     revision: bigint('revision', { mode: 'number' }).notNull(),
     format: text().notNull(),
-    schemaVersion: text('schema_version').default('my-tournament-review-v2').notNull(),
-    metricVersion: text('metric_version').default('descriptive-v1').notNull(),
+    schemaVersion: text('schema_version').default('my-tournament-review-v2.1').notNull(),
+    metricVersion: text('metric_version').default('settled-review-v2').notNull(),
     eventDataCheckedAt: timestamp('event_data_checked_at', {
       withTimezone: true,
       mode: 'date',
@@ -2083,6 +2083,8 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     rowCount: integer('row_count').notNull(),
     contentSha256: text('content_sha256').notNull(),
     payload: jsonb().notNull(),
+    correctionReason: text('correction_reason'),
+    correctionChangeId: text('correction_change_id'),
     publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
@@ -2124,7 +2126,7 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     ),
     check(
       'tournament_review_publications_versions_check',
-      sql`schema_version = 'my-tournament-review-v2' AND metric_version = 'descriptive-v1'`,
+      sql`(schema_version = 'my-tournament-review-v2' AND metric_version = 'descriptive-v1') OR (schema_version = 'my-tournament-review-v2.1' AND metric_version = 'settled-review-v2')`,
     ),
     check(
       'tournament_review_publications_counts_check',
@@ -2138,6 +2140,10 @@ export const tournamentReviewPublicationsInCompetition = competition.table(
     check(
       'tournament_review_publications_source_span_check',
       sql`source_min_checked_at <= event_data_checked_at AND event_data_checked_at <= source_max_checked_at AND source_max_checked_at <= published_at`,
+    ),
+    check(
+      'tournament_review_publications_correction_check',
+      sql`schema_version <> 'my-tournament-review-v2.1' OR ((revision = 1 AND correction_reason IS NULL AND correction_change_id IS NULL) OR (revision > 1 AND correction_reason IS NOT NULL AND correction_change_id IS NOT NULL))`,
     ),
   ],
 );
@@ -2209,6 +2215,13 @@ export const tournamentReviewObligationsInCompetition = competition.table(
     metadataPayload: jsonb('metadata_payload'),
     entryMetadataPayload: jsonb('entry_metadata_payload'),
     groupAssignmentPayload: jsonb('group_assignment_payload'),
+    lastObservedAt: timestamp('last_observed_at', { withTimezone: true, mode: 'date' }),
+    lastNoopAt: timestamp('last_noop_at', { withTimezone: true, mode: 'date' }),
+    lastSemanticChangeAt: timestamp('last_semantic_change_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    repairIssueId: bigint('repair_issue_id', { mode: 'number' }),
   },
   (table) => [
     primaryKey({
@@ -2279,6 +2292,61 @@ export const tournamentReviewObligationsInCompetition = competition.table(
       'tournament_review_obligations_group_assignment_payload_check',
       sql`group_assignment_payload IS NULL OR jsonb_typeof(group_assignment_payload) = 'object'`,
     ),
+  ],
+);
+
+/** Immutable bounded sections consumed by the V2.1 GraphQL section reader. */
+export const tournamentReviewPublicationChunksInCompetition = competition.table(
+  'tournament_review_publication_chunks',
+  {
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    sectionKey: text('section_key').notNull(),
+    chunkIndex: integer('chunk_index').notNull(),
+    itemCount: integer('item_count').notNull(),
+    chunkSha256: text('chunk_sha256').notNull(),
+    items: jsonb().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.seasonId,
+        table.tournamentId,
+        table.eventId,
+        table.revision,
+        table.sectionKey,
+        table.chunkIndex,
+      ],
+      name: 'tournament_review_publication_chunks_pkey',
+    }),
+    index('tournament_review_publication_chunks_lookup_idx').on(
+      table.seasonId,
+      table.tournamentId,
+      table.eventId,
+      table.revision,
+      table.sectionKey,
+      table.chunkIndex,
+    ),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId, table.eventId, table.revision],
+      foreignColumns: [
+        tournamentReviewPublicationsInCompetition.seasonId,
+        tournamentReviewPublicationsInCompetition.tournamentId,
+        tournamentReviewPublicationsInCompetition.eventId,
+        tournamentReviewPublicationsInCompetition.revision,
+      ],
+      name: 'tournament_review_publication_chunks_publication_fk',
+    }).onDelete('cascade'),
+    check(
+      'tournament_review_publication_chunks_count_check',
+      sql`chunk_index >= 0 AND item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array' AND jsonb_array_length(items) = item_count`,
+    ),
+    check('tournament_review_publication_chunks_sha_check', sql`chunk_sha256 ~ '^[0-9a-f]{64}$'`),
   ],
 );
 

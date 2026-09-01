@@ -313,7 +313,14 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           return runPostMatchConsolidation();
         case MAINTENANCE_JOBS.TOURNAMENT_REVIEW: {
           const season = await requireCurrentSeasonForJob(job.data);
-          return processTournamentReviewObligations(season, { limit: 20 });
+          return processTournamentReviewObligations(season, {
+            // Creation-triggered jobs carry a precise tournament target so a
+            // custom tournament can bootstrap its historical bundles now,
+            // without waiting for the five-minute global scan.
+            limit: job.data.tournamentId ? 100 : 20,
+            tournamentId: job.data.tournamentId,
+            eventId: job.data.eventId,
+          });
         }
         case MAINTENANCE_JOBS.UNDERSTAT_ORPHAN_RECONCILER:
           return reconcileUnderstatOrphanedRuns();

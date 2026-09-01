@@ -7,6 +7,7 @@ import {
 import { getTournamentBackfillWindow } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
+import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -268,6 +269,21 @@ async function repairTournamentSetupIssueUnlocked(
     // successfully here would consume the deterministic job while the issue
     // only became eligible for the six-attempt/5-minute retry policy.
     throw new Error(`Tournament setup repair remains incomplete: ${issue.code}`);
+  }
+
+  // A repaired source/structure issue is the explicit hand-off back into the
+  // settled review lane. Scope it to the corrected event whenever the issue
+  // carries one; the global reconciliation remains the safety net for issues
+  // whose repair changed the tournament window rather than one result row.
+  if (
+    issue.code === 'TOURNAMENT_RESULTS_INCOMPLETE' ||
+    issue.code === 'STRUCTURE_INTEGRITY_FAILED'
+  ) {
+    await enqueueTournamentReview(season, 'reconcile', {
+      tournamentId: issue.tournamentId,
+      ...(issue.eventId === null || issue.eventId === undefined ? {} : { eventId: issue.eventId }),
+      deduplicationId: `tournament-review-repair-${season.seasonCode}-${issue.tournamentId}-${issue.eventId ?? 'all'}`,
+    });
   }
 }
 

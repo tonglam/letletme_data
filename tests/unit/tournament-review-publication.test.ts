@@ -12,6 +12,8 @@ import {
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
   tournamentReviewSourceSpan,
+  tournamentReviewSemanticSha256,
+  splitTournamentReviewChunks,
 } from '../../src/services/tournament-review-publication.service';
 import {
   effectiveTournamentReviewEntryStartEventId,
@@ -373,5 +375,40 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(knockoutSource).toContain('bracketMatchWasFetched');
     expect(knockoutSource).toContain('WHEN ${bracketMatchWasFetched}');
     expect(knockoutSource).toContain('THEN ${tournamentKnockoutsInCompetition.updatedAt}');
+  });
+
+  test('semantic hash ignores observation clocks but changes with business values', () => {
+    const first = {
+      schemaVersion: 'my-tournament-review-v2.1',
+      metricVersion: 'settled-review-v2',
+      points: { rows: [{ entryId: 6953, grossPoints: 70, updatedAt: '2026-08-30T10:00:00Z' }] },
+      freshness: { sourceMaxCheckedAt: '2026-08-30T10:01:00Z' },
+    };
+    const second = {
+      ...first,
+      points: { rows: [{ entryId: 6953, grossPoints: 70, updatedAt: '2026-09-01T10:00:00Z' }] },
+      freshness: { sourceMaxCheckedAt: '2026-09-01T10:01:00Z' },
+    };
+    expect(tournamentReviewSemanticSha256(first, ['a'.repeat(64)])).toBe(
+      tournamentReviewSemanticSha256(second, ['a'.repeat(64)]),
+    );
+    expect(
+      tournamentReviewSemanticSha256(
+        { ...second, points: { rows: [{ entryId: 6953, grossPoints: 71 }] } },
+        ['a'.repeat(64)],
+      ),
+    ).not.toBe(tournamentReviewSemanticSha256(first, ['a'.repeat(64)]));
+  });
+
+  test('splits review sections into bounded deterministic chunks', () => {
+    const chunks = splitTournamentReviewChunks({
+      format: 'POINTS',
+      points: {
+        rows: Array.from({ length: 205 }, (_, index) => ({ entryId: index + 1 })),
+      },
+    });
+    expect(chunks.map((chunk) => chunk.itemCount)).toEqual([100, 100, 5, 100, 100, 5]);
+    expect(chunks.every((chunk) => chunk.itemCount <= 100)).toBe(true);
+    expect(chunks[0].chunkSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 });

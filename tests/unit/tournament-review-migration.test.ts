@@ -18,6 +18,10 @@ const sourceFloorMigration = readFileSync(
   'migrations/0082_tournament_review_source_floor_requeue.sql',
   'utf8',
 );
+const hardCutMigration = readFileSync(
+  'migrations/0083_my_tournament_review_v2_1_hard_cut.sql',
+  'utf8',
+);
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
@@ -103,5 +107,37 @@ describe('My Tournament Review V2 migration', () => {
     expect(sourceFloorMigration).not.toContain(
       'DELETE FROM competition.tournament_review_publications',
     );
+  });
+
+  test('backs up and resets the current season before introducing V2.1 chunks', () => {
+    expect(hardCutMigration).toContain('tournament_review_publications_0083_backup');
+    expect(hardCutMigration).toContain('tournament_review_v2_1_backup_manifest');
+    expect(hardCutMigration).toContain('publication_revision_distribution jsonb');
+    expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_heads');
+    expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_publications');
+    expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_obligations');
+    expect(hardCutMigration).toContain('current_season');
+  });
+
+  test('defines correction provenance, observation timestamps, and bounded chunk integrity', () => {
+    expect(hardCutMigration).toContain('correction_reason text');
+    expect(hardCutMigration).toContain('correction_change_id text');
+    expect(hardCutMigration).toContain('schema_version <>');
+    expect(hardCutMigration).toContain('my-tournament-review-v2.1');
+    expect(hardCutMigration).toContain('last_observed_at timestamptz');
+    expect(hardCutMigration).toContain('last_noop_at timestamptz');
+    expect(hardCutMigration).toContain('last_semantic_change_at timestamptz');
+    expect(hardCutMigration).toContain('repair_issue_id bigint');
+    expect(hardCutMigration).toContain(
+      'CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks',
+    );
+    expect(hardCutMigration).toContain('item_count BETWEEN 0 AND 100');
+    expect(hardCutMigration).toContain('jsonb_array_length(items) = item_count');
+    expect(hardCutMigration).toContain('chunk_sha256 ~');
+    expect(hardCutMigration).toContain(
+      'GRANT UPDATE ON TABLE competition.tournament_review_publication_chunks',
+    );
+    expect(hardCutMigration).toContain('tournament_review_chunks_writer_update');
+    expect(hardCutMigration).toContain('TO letletme_graphql_reader');
   });
 });
