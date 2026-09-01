@@ -104,6 +104,7 @@ DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_OLD_MEDIA_PRESENT=false
 DEPLOY_SERVICES_STOPPED=false
 DEPLOY_CONTENT_WORKER_FENCED=false
+DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -202,6 +203,7 @@ restore_stopped_services() {
     fi
     DEPLOY_SERVICES_STOPPED=false
     DEPLOY_CONTENT_WORKER_FENCED=false
+    DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
   fi
 }
 
@@ -239,7 +241,8 @@ deploy() {
         fi
       elif [[ "$DEPLOY_COMMITTED" = false &&
         ( "$DEPLOY_SERVICES_STOPPED" = true ||
-          "$DEPLOY_CONTENT_WORKER_FENCED" = true ) &&
+          "$DEPLOY_CONTENT_WORKER_FENCED" = true ||
+          "$DEPLOY_SCHEDULER_STOP_ATTEMPTED" = true ) &&
         "$controls_restored" != true ]]; then
         if restore_stopped_services; then controls_restored=true; fi
       elif [[ "$DEPLOY_COMMITTED" = false && "$controls_restored" != true ]]; then
@@ -403,6 +406,17 @@ deploy() {
     "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
     DEPLOY_ROLLBACK_ELIGIBLE=true
   fi
+  # The scheduler must stop before the scoped wait; otherwise it can keep
+  # claiming/enqueuing work while the gate is waiting for the active set to
+  # drain. Record the attempt before Docker is called so a partial stop is
+  # recovered through the existing last-known-healthy runtime path.
+  DEPLOY_SCHEDULER_STOP_ATTEMPTED=true
+  log_info "Stopping scheduler before waiting for scoped queue quiescence"
+  if ! compose stop -t 45 scheduler; then
+    log_error "Scheduler did not stop cleanly; services were not stopped."
+    restore_stopped_services
+    exit 1
+  fi
   if ! wait_for_scoped_queue_quiescence 150 2; then
     log_error "Queue work is not quiescent; services were not stopped."
     exit 1
@@ -430,11 +444,6 @@ deploy() {
   DEPLOY_SERVICES_STOPPED=true
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."
-    restore_stopped_services
-    exit 1
-  fi
-  if ! compose stop -t 45 scheduler; then
-    log_error "Scheduler did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi

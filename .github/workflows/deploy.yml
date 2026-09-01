@@ -162,6 +162,7 @@ jobs:
             runner_previous_target=""
             runner_previous_release=""
             content_worker_fenced=false
+            scheduler_stop_attempted=false
             controls_restored=true
             image_id_for_ref() {
               local image_ref=${1:-}
@@ -242,7 +243,8 @@ jobs:
                   ss -ltnp '( sport = :3000 )' 2>/dev/null || true
                 fi
                 if [ "$migration_started" = false ]; then
-                  if { [ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]; } && \
+                  if { [ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ] || \
+                    [ "$scheduler_stop_attempted" = true ]; } && \
                     [ "$old_runtime_rollback_eligible" = true ]; then
                     if [ -n "$old_revision" ]; then
                       git reset --hard "$old_revision" || true
@@ -258,6 +260,7 @@ jobs:
                       controls_restored=true
                       content_worker_fenced=false
                       services_stopped=false
+                      scheduler_stop_attempted=false
                     else
                       echo "Data deployment recovery did not reach a healthy runtime; controls remain closed" >&2
                     fi
@@ -265,6 +268,8 @@ jobs:
                     echo "Data deployment failed with no eligible rollback target; leaving services stopped for forward recovery" >&2
                   elif [ "$content_worker_fenced" = true ]; then
                     echo "Data deployment failed after fencing content-worker with no eligible rollback target; leaving the deployment in forward recovery" >&2
+                  elif [ "$scheduler_stop_attempted" = true ]; then
+                    echo "Data deployment failed after stopping scheduler with no eligible rollback target; leaving the deployment in forward recovery" >&2
                   elif [ "$controls_restored" != true ]; then
                     if restore_content_deploy_controls; then
                       controls_restored=true
@@ -284,6 +289,7 @@ jobs:
                     controls_restored=true
                     content_worker_fenced=false
                     services_stopped=false
+                    scheduler_stop_attempted=false
                   else
                     echo "Data deployment failed without an eligible, ledger-safe rollback target; controls remain closed for forward recovery" >&2
                     stop_content_worker_for_forward_recovery || true
@@ -516,6 +522,16 @@ jobs:
               "$old_release_sha" "$old_image_id"; then
               old_runtime_rollback_eligible=true
             fi
+            # The scheduler must stop before the scoped wait; otherwise it can
+            # keep claiming/enqueuing work while the gate waits for the active
+            # set to drain. Record the attempt before Docker is called so a
+            # partial stop is covered by the existing rollback path.
+            scheduler_stop_attempted=true
+            echo "deploy preflight: stopping scheduler before waiting for scoped queue quiescence"
+            if ! compose stop -t 45 scheduler; then
+              echo 'deploy preflight: scheduler did not stop cleanly; services were not stopped' >&2
+              exit 1
+            fi
             if ! wait_for_scoped_queue_quiescence 150 2; then
               echo "deploy preflight: queue work is not quiescent; services were not stopped" >&2
               exit 1
@@ -542,7 +558,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" compose stop -t 45 api worker
             # content-worker was drained and stopped before the final
             # database/Redis quiescence probes below; no old producer remains.
-            APP_IMAGE="$IMAGE_REF" compose stop -t 45 scheduler media-worker
+            APP_IMAGE="$IMAGE_REF" compose stop -t 45 media-worker
             APP_IMAGE="$IMAGE_REF" compose stop -t 45 live-picks-worker official-h2h-worker
             remove_exact_stopped_container api
             wait_for_port_3000_free 30 2
