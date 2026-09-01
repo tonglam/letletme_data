@@ -164,7 +164,7 @@ describe('tournament lifecycle invariants', () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
     const maintenanceJobs = await import('../../src/jobs/maintenance.jobs');
     const enqueueReviewSpy = spyOn(maintenanceJobs, 'enqueueTournamentReview').mockResolvedValue(
-      undefined,
+      {} as never,
     );
     const { finalizePublishedTournamentSetup } = await import(
       '../../src/services/tournament-setup.service'
