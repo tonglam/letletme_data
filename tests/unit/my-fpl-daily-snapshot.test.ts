@@ -240,6 +240,20 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
   });
 
+  test('bounds immutable child inserts without weakening publication atomicity', () => {
+    expect(publicationService).toContain('MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE = 100');
+    expect(publicationService).toContain('for (const entryBatch of batches(');
+    expect(publicationService).toContain('for (const tournamentBatch of batches(');
+    expect(publicationService).toContain('for (const aggregateBatch of batches(');
+    const quote = String.fromCharCode(39);
+    expect(publicationService).toContain(
+      'client.begin(' + quote + 'isolation level repeatable read' + quote,
+    );
+    expect(publicationService).not.toContain('JSON.stringify(entryInsertRows)}::jsonb');
+    expect(publicationService).not.toContain('JSON.stringify(tournamentInsertRows)}::jsonb');
+    expect(publicationService).not.toContain('JSON.stringify(aggregateInsertRows)}::jsonb');
+  });
+
   test('uses the daily 10:45 obligation, finalization reconciliation, and outbox retry worker', () => {
     expect(scheduler).toContain('name: MAINTENANCE_JOBS.MY_FPL_SNAPSHOT');
     expect(scheduler).toContain('my-fpl-finalization');
