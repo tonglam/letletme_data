@@ -124,9 +124,20 @@ export async function checkpointEntryLiveInputV2(
 ): Promise<'checkpointed' | 'missing'> {
   const scope = { season: season.seasonCode, eventId, entryId } as const;
   let desired = await readEntryCheckpointDesiredV2(scope);
-  if (!desired) return 'missing';
   const candidate = await readEntryLiveInputV2(scope);
   if (!candidate) return 'missing';
+
+  // A successful checkpoint clears the desired pointer after the Redis
+  // manifest has been fenced to the exact durable head.  Audits can therefore
+  // legitimately observe an active publication with no pending obligation.
+  // Treat that marker as an idempotent success instead of re-writing every
+  // already durable entry (or reporting a false missing input).
+  if (!desired && candidate.publication.checkpointedAt !== null) return 'checkpointed';
+  // A provider write can publish before its asynchronous durable checkpoint
+  // obligation is visible to this worker. Re-create the obligation from the
+  // one active candidate so the normal generation/identity checks and
+  // PostgreSQL fence below can complete the exact publication.
+  if (!desired) desired = await setEntryCheckpointDesiredV2(candidate.publication);
 
   if (candidate.publication.generation < desired.generation) return 'missing';
   if (

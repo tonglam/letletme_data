@@ -12,6 +12,7 @@ import {
   publishEntryLiveInputV2,
   publishLivePublicationV2,
 } from '../../src/cache/live-publication-v2';
+import { checkpointEntryLiveInputV2 } from '../../src/services/entries.service';
 import { getDbClient } from '../../src/db/singleton';
 import {
   captureMyFplSnapshot,
@@ -323,6 +324,11 @@ describe('My FPL onboarding publication correction', () => {
   test('keeps the old active revision until all new-entry data is complete', async () => {
     const sql = await getDbClient();
     await seedEntry(ENTRY_IDS[0], true);
+    // The source publisher may have no pending desired pointer yet. The first
+    // audit must reconstruct that obligation; once the exact durable head is
+    // fenced, a later audit should be a marker-only idempotent success.
+    expect(await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0])).toBe('checkpointed');
+    expect(await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0])).toBe('checkpointed');
     const first = await captureMyFplSnapshot(SEASON, EVENT_ID, 'PROVISIONAL', {
       snapshotDate: SNAPSHOT_DATE,
       now: CAPTURE_NOW,
