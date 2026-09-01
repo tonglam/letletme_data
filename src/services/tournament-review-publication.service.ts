@@ -323,6 +323,10 @@ type ReviewPublicationManifest = Readonly<{
     itemCount: number;
     chunkCount: number;
     chunkHashes: ReadonlyArray<string>;
+    // Preserve the producer's exact boundaries. GraphQL section-page cache
+    // witnesses use these counts to derive a trusted row offset; recomputing
+    // fixed-width 100-row boundaries would be incorrect for short chunks.
+    chunkItemCounts: ReadonlyArray<number>;
   }>;
 }>;
 
@@ -345,6 +349,9 @@ function reviewPublicationManifest(chunks: ReadonlyArray<ReviewChunk>): ReviewPu
         chunkHashes: sectionChunks
           .sort((left, right) => left.chunkIndex - right.chunkIndex)
           .map((chunk) => chunk.chunkSha256),
+        chunkItemCounts: sectionChunks
+          .sort((left, right) => left.chunkIndex - right.chunkIndex)
+          .map((chunk) => chunk.itemCount),
       })),
   };
 }
@@ -444,20 +451,29 @@ function reviewChunksMatchPayload(
       typeof section.sectionKey !== 'string' ||
       section.sectionKey.length === 0 ||
       sectionKeys.has(section.sectionKey) ||
-      !Array.isArray(section.chunkHashes)
+      !Array.isArray(section.chunkHashes) ||
+      !Array.isArray(section.chunkItemCounts)
     ) {
       return false;
     }
     const itemCount = Number(section.itemCount);
     const declaredChunkCount = Number(section.chunkCount);
     const hashes = section.chunkHashes;
-    const expectedChunkCount = Math.max(1, Math.ceil(Math.max(0, itemCount) / 100));
+    const itemCounts = section.chunkItemCounts;
     if (
       !Number.isSafeInteger(itemCount) ||
       itemCount < 0 ||
       !Number.isSafeInteger(declaredChunkCount) ||
       declaredChunkCount !== hashes.length ||
-      declaredChunkCount !== expectedChunkCount ||
+      declaredChunkCount !== itemCounts.length ||
+      itemCounts.some(
+        (count) => !Number.isSafeInteger(Number(count)) || Number(count) < 0 || Number(count) > 100,
+      ) ||
+      (itemCount === 0 && (declaredChunkCount !== 1 || Number(itemCounts[0]) !== 0)) ||
+      (itemCount > 0 &&
+        (declaredChunkCount < 1 ||
+          itemCounts.some((count) => Number(count) <= 0) ||
+          itemCounts.reduce((total, count) => total + Number(count), 0) !== itemCount)) ||
       !hashes.every(
         (chunkSha256): chunkSha256 is string =>
           typeof chunkSha256 === 'string' && /^[0-9a-f]{64}$/.test(chunkSha256),
@@ -468,11 +484,10 @@ function reviewChunksMatchPayload(
     const sectionKey = section.sectionKey;
     sectionKeys.add(sectionKey);
     hashes.forEach((chunkSha256, chunkIndex) => {
-      const remaining = itemCount - chunkIndex * 100;
       expected.push({
         sectionKey,
         chunkIndex,
-        itemCount: Math.min(100, Math.max(0, remaining)),
+        itemCount: Number(itemCounts[chunkIndex]),
         chunkSha256,
       });
     });
@@ -4471,6 +4486,19 @@ export async function getTournamentReviewV2OperationalStatus(
                       WHERE jsonb_typeof(section) <> 'object'
                          OR jsonb_typeof(section -> 'sectionKey') <> 'string'
                          OR jsonb_typeof(section -> 'chunkHashes') <> 'array'
+                         OR jsonb_typeof(section -> 'chunkItemCounts') <> 'array'
+                         OR jsonb_array_length(section -> 'chunkHashes') IS DISTINCT FROM
+                            jsonb_array_length(section -> 'chunkItemCounts')
+                         OR EXISTS (
+                           SELECT 1
+                           FROM jsonb_array_elements_text(section -> 'chunkItemCounts') item_count
+                           WHERE item_count.value !~ '^[0-9]+$'
+                              OR CASE
+                                   WHEN item_count.value ~ '^[0-9]+$'
+                                   THEN item_count.value::numeric NOT BETWEEN 0 AND 100
+                                   ELSE true
+                                 END
+                         )
                     )
                    THEN (
                      (
@@ -4487,6 +4515,9 @@ export async function getTournamentReviewV2OperationalStatus(
                        CROSS JOIN LATERAL jsonb_array_elements_text(
                          section -> 'chunkHashes'
                        ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
+                       CROSS JOIN LATERAL jsonb_array_elements_text(
+                         section -> 'chunkItemCounts'
+                       ) WITH ORDINALITY expected_count(expected_item_count, count_ordinal)
                        WHERE NOT EXISTS (
                          SELECT 1
                          FROM competition.tournament_review_publication_chunks chunk
@@ -4497,6 +4528,8 @@ export async function getTournamentReviewV2OperationalStatus(
                            AND chunk.section_key = section ->> 'sectionKey'
                            AND chunk.chunk_index = expected.chunk_ordinal - 1
                            AND chunk.chunk_sha256 = expected.expected_hash
+                           AND expected_count.count_ordinal = expected.chunk_ordinal
+                           AND chunk.item_count::numeric = expected_count.expected_item_count::numeric
                        )
                      )
                    )
