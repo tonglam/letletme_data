@@ -89,6 +89,7 @@ load_v2_seed_scope() {
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
+DEPLOY_REVIEW_HARD_CUT_PENDING=false
 DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
 DEPLOY_OLD_IMAGE_ID=''
@@ -383,9 +384,14 @@ deploy() {
   DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=true
   start_stage quiescence
   log_info "Validating migration plan before stopping services"
-  if ! run_migration_plan; then
+  migration_plan_output=$(run_migration_plan) || {
+    printf '%s\n' "$migration_plan_output" >&2 || true
     log_error "Migration plan failed; services were not stopped."
     exit 1
+  }
+  printf '%s\n' "$migration_plan_output"
+  if printf '%s\n' "$migration_plan_output" | grep -Fq '0084_my_tournament_review_v2_1_hard_cut.sql'; then
+    DEPLOY_REVIEW_HARD_CUT_PENDING=true
   fi
   DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)
   [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
@@ -529,10 +535,14 @@ deploy() {
   fi
   finish_stage
   start_stage reviewBackfill
-  if ! run_tournament_review_hard_cut_backfill \
-    "$LIVE_POINTS_V2_SEED_SEASON" "$data_runtime_database_url"; then
-    log_error "My Tournament Review V2.1 backfill failed; services remain stopped."
-    exit 1
+  if [[ "$DEPLOY_REVIEW_HARD_CUT_PENDING" = true || "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ]]; then
+    if ! run_tournament_review_hard_cut_backfill \
+      "$LIVE_POINTS_V2_SEED_SEASON" "$data_runtime_database_url"; then
+      log_error "My Tournament Review V2.1 backfill failed; services remain stopped."
+      exit 1
+    fi
+  else
+    log_info "My Tournament Review V2.1 backfill already completed; migration-scoped gate skipped"
   fi
   finish_stage
   start_stage roleVerify

@@ -114,6 +114,7 @@ describe('My Tournament Review V2 migration', () => {
     expect(hardCutMigration).toContain('tournament_review_publications_0084_backup');
     expect(hardCutMigration).toContain('tournament_review_v2_1_backup_manifest');
     expect(hardCutMigration).toContain('publication_revision_distribution jsonb');
+    expect(hardCutMigration).toContain('backfill_completed_at timestamptz');
     expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_heads');
     expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_publications');
     expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_obligations');
@@ -167,5 +168,7 @@ describe('My Tournament Review V2 migration', () => {
     expect(backfillScript).toContain('const currentSeason = await seasonRepository.findCurrent()');
     expect(backfillScript).toContain('season.seasonId !== currentSeason.seasonId');
     expect(backfillScript).toContain('--season ${args.season} is not the current FPL season');
+    expect(backfillScript).toContain('backfill_completed_at');
+    expect(backfillScript).toContain('migration 0084 backup manifest is missing');
   });
 });
