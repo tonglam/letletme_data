@@ -223,6 +223,34 @@ async function loadSchedulerFixtures(context: SchedulerContext, eventId: number)
   return (await allFixtures).filter((fixture) => fixture.event === eventId);
 }
 
+/**
+ * Live Matches must observe the next scheduled event before its deadline. The
+ * scheduler's canonical current event intentionally means the latest event
+ * whose deadline has passed, so it cannot be the sole input for the
+ * pre-deadline Match-only lane.
+ */
+export function selectLiveSnapshotEventIds(
+  context: Pick<SchedulerContext, 'currentEventId' | 'events' | 'now'>,
+): readonly number[] {
+  const candidates = [
+    ...(context.currentEventId ? [context.currentEventId] : []),
+    ...context.events
+      .filter(
+        (event) =>
+          event.id !== context.currentEventId &&
+          event.deadlineTime !== null &&
+          event.deadlineTime.getTime() > context.now.getTime(),
+      )
+      .sort(
+        (left, right) =>
+          (left.deadlineTime?.getTime() ?? Number.POSITIVE_INFINITY) -
+          (right.deadlineTime?.getTime() ?? Number.POSITIVE_INFINITY),
+      )
+      .map((event) => event.id),
+  ];
+  return [...new Set(candidates)];
+}
+
 function utc8DueAt(date: Date, hour: number, minute: number): Date {
   const key = formatCronDateKey(date);
   return new Date(
@@ -1016,13 +1044,28 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
     successPredicate:
       'live snapshot checked; Redis publication current and checkpoint obligation reconciled',
     resolve: async (context) => {
-      if (!context.currentEventId) return [];
-      const currentEvent = context.events.find((event) => event.id === context.currentEventId);
-      if (!currentEvent?.deadlineTime) return [];
-      const event = await loadSchedulerEvent(context, context.currentEventId);
-      if (!event) return [];
-      const fixtures = await loadSchedulerFixtures(context, event.id);
-      const decision = decideLiveLifecycle(event, fixtures, context.now);
+      let selected:
+        | {
+            readonly event: NonNullable<Awaited<ReturnType<typeof loadSchedulerEvent>>>;
+            readonly fixtures: Awaited<ReturnType<typeof loadSchedulerFixtures>>;
+            readonly decision: ReturnType<typeof decideLiveLifecycle>;
+          }
+        | undefined;
+      for (const eventId of selectLiveSnapshotEventIds(context)) {
+        const event = await loadSchedulerEvent(context, eventId);
+        if (!event?.deadlineTime) continue;
+        const fixtures = await loadSchedulerFixtures(context, event.id);
+        const decision = decideLiveLifecycle(event, fixtures, context.now);
+        if (
+          decision.state !== 'FINALIZED' &&
+          (decision.shouldFetchLive || decision.shouldObserveMatches)
+        ) {
+          selected = { event, fixtures, decision };
+          break;
+        }
+      }
+      if (!selected) return [];
+      const { event, decision } = selected;
       const quiet = await readLifecycleQuietState(context.season.seasonCode, event.id);
       // The permanent final checkpoint owns the finalized write. This lane
       // keeps the mutable official heartbeat alive for every unsettled state.

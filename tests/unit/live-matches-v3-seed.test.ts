@@ -156,8 +156,10 @@ describe('live match V3 cutover seed arguments', () => {
     );
     const deskCheckpoint = source.search(/kind: 'desk'/);
     const detailCheckpoint = source.search(/kind: 'detail'/);
+    const missingDetailBranch = source.indexOf('if (!active)');
     expect(deskCheckpoint).toBeGreaterThan(-1);
     expect(detailCheckpoint).toBeGreaterThan(deskCheckpoint);
+    expect(missingDetailBranch).toBeGreaterThan(deskCheckpoint);
     expect(source).toContain('readLiveMatchDeskPointerV3');
     expect(source).toContain('replaceFinalizedForCutover');
     expect(source).toContain('kind: ' + String.fromCharCode(39) + 'desk' + String.fromCharCode(39));

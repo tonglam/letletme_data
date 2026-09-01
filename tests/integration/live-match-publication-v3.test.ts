@@ -21,6 +21,7 @@ import {
   readLiveMatchCheckpointLastAtV3,
   readLiveMatchDeskV3,
   readLiveMatchDeskPointerV3,
+  readLiveMatchDetailFenceV3,
   readLiveMatchDetailV3,
   readLiveMatchDetailPointerV3,
   readLiveMatchDeskFenceV3,
@@ -623,6 +624,55 @@ describe('Live Matches V3 Redis publications', () => {
       (await readLiveMatchDeskPointerV3({ ...scope, redis }, 'previous'))?.publication
         .publicationId,
     ).toBe(second.publication.publicationId);
+  });
+
+  test('fences desk rollback when detail changes after compatibility validation', async () => {
+    const firstDesk = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const secondDesk = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      previous: await readLiveMatchDeskV3({ ...scope, redis }),
+      redis,
+    });
+    await publishLiveMatchDetailV3({
+      ...scope,
+      observedDeskGeneration: secondDesk.publication.generation,
+      fixtureIdentityRevision: secondDesk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(35),
+      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      redis,
+    });
+    const observedDetail = await readLiveMatchDetailFenceV3({ ...scope, redis });
+    await publishLiveMatchDetailV3({
+      ...scope,
+      observedDeskGeneration: secondDesk.publication.generation,
+      fixtureIdentityRevision: secondDesk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(40),
+      sourceCheckedAt: '2026-08-29T10:01:00.000Z',
+      previous: await readLiveMatchDetailV3({ ...scope, redis }),
+      redis,
+    });
+
+    const result = await promotePreviousLiveMatchV3({
+      ...scope,
+      kind: 'desk',
+      observedDetail,
+      redis,
+    });
+
+    expect(result).toMatchObject({ status: 'changed', publication: null });
+    expect((await readLiveMatchDeskV3({ ...scope, redis }))?.publication.publicationId).toBe(
+      secondDesk.publication.publicationId,
+    );
+    expect(firstDesk.publication.publicationId).not.toBe(secondDesk.publication.publicationId);
   });
 
   test('never rolls a finalized desk back to previous', async () => {

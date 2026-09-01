@@ -873,6 +873,10 @@ export const liveMatchDeskCheckpointsInFpl = fpl.table(
       sql`event_id > 0 AND generation > 0 AND publication_id ~ '^[0-9a-f-]{36}$' AND state = ANY (ARRAY['PRE_DEADLINE','LIVE_ACTIVE','BETWEEN_FIXTURES','DAY_SETTLING','GW_REVIEW','FINALIZED']::text[])`,
     ),
     check(
+      'live_match_desk_checkpoints_contract_fence',
+      sql`contract_version = manifest ->> 'contractVersion' AND contract_version = ANY (ARRAY['live-matches-v2', 'live-matches-v3']::text[])`,
+    ),
+    check(
       'live_match_desk_checkpoints_payload_valid',
       sql`jsonb_typeof(manifest) = 'object' AND pg_column_size(manifest) <= 131072 AND jsonb_typeof(revisions) = 'object' AND jsonb_typeof(payload) = 'array' AND row_count = jsonb_array_length(payload) AND row_count BETWEEN 0 AND 32 AND payload_bytes BETWEEN 0 AND 131072 AND payload_sha256 ~ '^[0-9a-f]{64}$'`,
     ),
@@ -926,6 +930,10 @@ export const liveMatchDetailCheckpointsInFpl = fpl.table(
     check(
       'live_match_detail_checkpoints_identity_valid',
       sql`event_id > 0 AND generation > 0 AND observed_desk_generation > 0 AND publication_id ~ '^[0-9a-f-]{36}$' AND fixture_identity_revision ~ '^[0-9a-f]{64}$' AND state = ANY (ARRAY['PROVISIONAL','FINALIZED']::text[])`,
+    ),
+    check(
+      'live_match_detail_checkpoints_contract_fence',
+      sql`contract_version = manifest ->> 'contractVersion' AND contract_version = ANY (ARRAY['live-matches-v2', 'live-matches-v3']::text[])`,
     ),
     check(
       'live_match_detail_checkpoints_payload_valid',

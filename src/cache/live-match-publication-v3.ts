@@ -400,6 +400,11 @@ end
 local validatedId = ARGV[5] or ''
 local validatedGeneration = tonumber(ARGV[6] or '')
 local repairMode = ARGV[7] or ''
+if ARGV[8] == '1' then
+  local observedDetail = ARGV[9] or ''
+  local currentDetailRaw = redis.call('GET', KEYS[4]) or ''
+  if currentDetailRaw ~= observedDetail then return {'detail_changed'} end
+end
 if validatedId ~= '' and (not current or current.publicationId ~= validatedId or current.generation ~= validatedGeneration) then return {'changed'} end
 if current and current.state == 'FINALIZED' and validatedId ~= '' then return {'stale', currentRaw} end
 if current and current.generation >= candidate.generation and (repairMode == '' or (repairMode == 'restore' and validatedId ~= '')) then return {'stale', currentRaw} end
@@ -1412,16 +1417,19 @@ export async function publishLiveMatchDeskV3(input: {
   const [status, currentRaw] = promotionResult(
     await redis.eval(
       PROMOTE_DESK_LUA,
-      3,
+      4,
       liveMatchDeskKey(scope, 'active'),
       liveMatchDeskKey(scope, 'previous'),
       liveMatchDeskKey(scope, 'sequence'),
+      liveMatchDetailKey(scope, 'active'),
       JSON.stringify(publication),
       promotionActive.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
       String(LIVE_MATCH_FINAL_TTL_MS),
       promotionActive.validated ? promotionActive.validated.publication.publicationId : '',
       promotionActive.validated ? String(promotionActive.validated.publication.generation) : '',
+      '0',
+      '',
     ),
   );
   if (status === 'stale') {
@@ -1430,7 +1438,7 @@ export async function publishLiveMatchDeskV3(input: {
       throw new CacheError('Stale desk publication is invalid', 'LIVE_MATCH_PROMOTE_FAILED');
     return { publication: current, previous: current, published: false };
   }
-  if (status === 'changed')
+  if (status === 'changed' || status === 'detail_changed')
     throw new CacheError(
       'Live Match desk current changed during promotion',
       'LIVE_MATCH_PROMOTE_CHANGED',
@@ -1645,10 +1653,11 @@ export async function restoreLiveMatchDeskCheckpointV3(input: {
   const [status] = promotionResult(
     await redis.eval(
       PROMOTE_DESK_LUA,
-      3,
+      4,
       liveMatchDeskKey(scope, 'active'),
       liveMatchDeskKey(scope, 'previous'),
       liveMatchDeskKey(scope, 'sequence'),
+      liveMatchDetailKey(scope, 'active'),
       JSON.stringify(publication),
       active.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
@@ -1656,9 +1665,11 @@ export async function restoreLiveMatchDeskCheckpointV3(input: {
       active.validated?.publication.publicationId ?? '',
       active.validated ? String(active.validated.publication.generation) : '',
       'restore',
+      '0',
+      '',
     ),
   );
-  if (status === 'changed') {
+  if (status === 'changed' || status === 'detail_changed') {
     throw new CacheError(
       'Live Match desk changed during checkpoint restore',
       'LIVE_MATCH_CHECKPOINT_RESTORE_CHANGED',
@@ -1776,6 +1787,8 @@ export async function promotePreviousLiveMatchV3(input: {
   readonly season: string;
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
+  /** Optional atomic detail fence used when rolling a desk pointer back. */
+  readonly observedDetail?: MatchDetailActiveFence | null;
   readonly redis?: Redis;
 }): Promise<{
   status: 'promoted' | 'changed' | 'unavailable';
@@ -1791,10 +1804,11 @@ export async function promotePreviousLiveMatchV3(input: {
     const [status] = promotionResult(
       await redis.eval(
         PROMOTE_DESK_LUA,
-        3,
+        4,
         liveMatchDeskKey(scope, 'active'),
         liveMatchDeskKey(scope, 'previous'),
         liveMatchDeskKey(scope, 'sequence'),
+        liveMatchDetailKey(scope, 'active'),
         JSON.stringify(previous.publication),
         active.observed,
         String(LIVE_MATCH_PREVIOUS_TTL_MS),
@@ -1802,9 +1816,12 @@ export async function promotePreviousLiveMatchV3(input: {
         active.validated?.publication.publicationId ?? '',
         active.validated ? String(active.validated.publication.generation) : '',
         'rollback',
+        input.observedDetail ? '1' : '0',
+        input.observedDetail?.observed ?? '',
       ),
     );
-    if (status === 'changed' || status === 'stale') return { status: 'changed', publication: null };
+    if (status === 'changed' || status === 'detail_changed' || status === 'stale')
+      return { status: 'changed', publication: null };
     if (status !== 'published')
       throw new CacheError(
         `Live Match desk rollback failed: ${status}`,

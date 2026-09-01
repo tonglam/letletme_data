@@ -170,6 +170,53 @@ async function seedOne(seasonCode: string, eventId: number) {
   });
 
   const desk = await readLiveMatchDeskPointerV3({ season: seasonCode, eventId }, 'active');
+  let deskCheckpoint: Awaited<ReturnType<typeof readLiveMatchDeskCheckpointV3>> = null;
+  if (desk?.servedFrom === 'REDIS_CURRENT') {
+    // Desk is independently authoritative. Checkpoint it even when the
+    // event has no price-bearing detail, so a V2 row cannot hide the V3 desk
+    // behind a generation fence during cutover.
+    const existingDeskDesired = await readLiveMatchCheckpointDesiredV3({
+      kind: 'desk',
+      season: seasonCode,
+      eventId,
+    });
+    const desired = await setLiveMatchCheckpointDesiredV3({
+      kind: 'desk',
+      publication: desk.publication,
+      finalized: desk.publication.state === 'FINALIZED',
+      force: true,
+      replaceFinalizedForCutover:
+        existingDeskDesired?.final === true && desk.publication.state === 'FINALIZED'
+          ? {
+              expectedPublicationId: existingDeskDesired.publicationId,
+              expectedGeneration: existingDeskDesired.generation,
+            }
+          : undefined,
+    });
+    if (
+      desired.publicationId !== desk.publication.publicationId ||
+      desired.generation !== desk.publication.generation
+    ) {
+      throw new Error(`event ${eventId} desk checkpoint obligation was superseded during seed`);
+    }
+    const checkpoint = await checkpointLiveMatchScopeV3({
+      season,
+      eventId,
+      kind: 'desk',
+      allowV2ReplacementForCutover: true,
+    });
+    if (!checkpoint.checkpointed) {
+      throw new Error(`event ${eventId} desk checkpoint did not converge`);
+    }
+    deskCheckpoint = await readLiveMatchDeskCheckpointV3(season, eventId);
+    if (
+      !deskCheckpoint ||
+      deskCheckpoint.publication.publicationId !== desk.publication.publicationId ||
+      deskCheckpoint.publication.generation !== desk.publication.generation
+    ) {
+      throw new Error(`event ${eventId} desk checkpoint is not the matching V3 publication`);
+    }
+  }
   const active = await readLiveMatchDetailPointerV3({ season: seasonCode, eventId }, 'active');
   if (!active) {
     // A blank gameweek, a genuinely pre-deadline event, or a settled gap
@@ -189,8 +236,8 @@ async function seedOne(seasonCode: string, eventId: number) {
         season: seasonCode,
         eventId,
         status: 'no-player-detail',
-        generation: null,
-        checkpointed: false,
+        generation: deskCheckpoint?.publication.generation ?? null,
+        checkpointed: deskCheckpoint !== null,
       } as const;
     }
     throw new Error(`event ${eventId} did not produce a V3 detail publication`);
@@ -211,50 +258,7 @@ async function seedOne(seasonCode: string, eventId: number) {
     throw new Error(`event ${eventId} detail is not aligned with the current V3 desk publication`);
   }
 
-  // Detail carries the desk generation it was calculated from. Persist the
-  // matching desk first so a cold read can never restore detail N alongside
-  // desk N-1. Both writes remain scope-local and are verified independently.
-  const existingDeskDesired = await readLiveMatchCheckpointDesiredV3({
-    kind: 'desk',
-    season: seasonCode,
-    eventId,
-  });
-  const deskDesired = await setLiveMatchCheckpointDesiredV3({
-    kind: 'desk',
-    publication: desk.publication,
-    finalized: desk.publication.state === 'FINALIZED',
-    force: true,
-    replaceFinalizedForCutover:
-      existingDeskDesired?.final === true && desk.publication.state === 'FINALIZED'
-        ? {
-            expectedPublicationId: existingDeskDesired.publicationId,
-            expectedGeneration: existingDeskDesired.generation,
-          }
-        : undefined,
-  });
-  if (
-    deskDesired.publicationId !== desk.publication.publicationId ||
-    deskDesired.generation !== desk.publication.generation
-  ) {
-    throw new Error(`event ${eventId} desk checkpoint obligation was superseded during seed`);
-  }
-  const deskCheckpoint = await checkpointLiveMatchScopeV3({
-    season,
-    eventId,
-    kind: 'desk',
-    allowV2ReplacementForCutover: true,
-  });
-  if (!deskCheckpoint.checkpointed) {
-    throw new Error(`event ${eventId} desk checkpoint did not converge before detail`);
-  }
-  const durableDesk = await readLiveMatchDeskCheckpointV3(season, eventId);
-  if (
-    !durableDesk ||
-    durableDesk.publication.publicationId !== desk.publication.publicationId ||
-    durableDesk.publication.generation !== desk.publication.generation
-  ) {
-    throw new Error(`event ${eventId} desk checkpoint is not the matching V3 publication`);
-  }
+  if (!deskCheckpoint) throw new Error(`event ${eventId} desk checkpoint is missing before detail`);
 
   // Force one exact durable write for this cutover publication. This is a
   // source-backed seed, not a legacy reader: the new runtime only accepts the

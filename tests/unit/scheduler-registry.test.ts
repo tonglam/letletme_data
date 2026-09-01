@@ -7,6 +7,7 @@ import {
   officialH2HDefinition,
   resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
+  selectLiveSnapshotEventIds,
   resolveLiveFinalizationCatchupPlans,
   resolvePostMatchResultPlans,
   playerPricesDefinition,
@@ -29,6 +30,27 @@ import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('standalone scheduler registry', () => {
   const registry = createSchedulerRegistry();
+
+  test('includes the next deadline event for pre-deadline Match observations', () => {
+    const now = new Date('2026-08-23T12:00:00.000Z');
+    expect(
+      selectLiveSnapshotEventIds({
+        now,
+        currentEventId: 3,
+        events: [
+          { id: 3, deadlineTime: new Date('2026-08-20T12:00:00.000Z') },
+          { id: 4, deadlineTime: new Date('2026-08-30T12:00:00.000Z') },
+          { id: 5, deadlineTime: new Date('2026-09-06T12:00:00.000Z') },
+        ],
+      }),
+    ).toEqual([3, 4, 5]);
+    expect(
+      selectLiveSnapshotEventIds({
+        now,
+        events: [{ id: 4, deadlineTime: new Date('2026-08-30T12:00:00.000Z') }],
+      }),
+    ).toEqual([4]);
+  });
 
   test('keeps picks and transfers on the same event-checkpoint window', () => {
     const picks = registry.find((definition) => definition.name === 'entry-picks');
