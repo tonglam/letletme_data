@@ -86,6 +86,61 @@ remove_exact_stopped_container() {
   esac
 }
 
+compose_project_name_for_cleanup() {
+  local context=${COMPOSE_PROJECT_NAME:-${PROJECT_DIR:-${VPS_WORKDIR:-}}}
+  context=${context%/}
+  context=${context##*/}
+  if [[ ! "$context" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    echo 'deploy preflight: could not resolve a safe Compose project name for API run cleanup' >&2
+    return 1
+  fi
+  printf '%s\n' "$context"
+}
+
+remove_stale_api_run_containers() {
+  local project container_id service oneoff state health host_port container_name
+  project=$(compose_project_name_for_cleanup)
+  while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] || continue
+    service=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)
+    oneoff=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$container_id" 2>/dev/null || true)
+    [[ "$service" = api && "$oneoff" = True ]] || continue
+    container_name=$(docker inspect --format '{{.Name}}' "$container_id" 2>/dev/null || printf '%s' "$container_id")
+    host_port=$(docker inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq $port "3000/tcp"}}{{range $binding := $bindings}}{{printf "%s\n" $binding.HostPort}}{{end}}{{end}}{{end}}' "$container_id" 2>/dev/null || true)
+    [[ "$host_port" = 3000 ]] || continue
+    state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+    case "$state" in
+      created|exited|dead)
+        echo "removing exact stale API one-off $container_name $container_id (state=$state, host_port=3000)"
+        docker rm "$container_id" >/dev/null
+        ;;
+      running)
+        health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || printf 'unknown')
+        if [[ "$health" != unhealthy ]]; then
+          echo "deploy preflight: refusing to remove API one-off $container_name $container_id (state=$state, health=$health, host_port=3000)" >&2
+          return 1
+        fi
+        echo "removing exact unhealthy API one-off $container_name $container_id (health=$health, host_port=3000)"
+        if ! docker stop -t 10 "$container_id" >/dev/null; then
+          echo "deploy preflight: could not stop unhealthy API one-off $container_name $container_id" >&2
+          return 1
+        fi
+        docker rm "$container_id" >/dev/null
+        ;;
+      restarting|paused)
+        echo "deploy preflight: refusing to remove API one-off $container_name $container_id (state=$state, host_port=3000)" >&2
+        return 1
+        ;;
+      *)
+        echo "deploy preflight: unknown API one-off state=$state id=$container_id; refusing cleanup" >&2
+        return 1
+        ;;
+    esac
+  done < <(docker ps -aq \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.service=api' 2>/dev/null || true)
+}
+
 wait_for_port_3000_free() {
   local attempts=${1:-30}
   local delay=${2:-2}
@@ -1340,6 +1395,7 @@ start_runtime_services() {
     # is external; otherwise the safety check prevents the retry from ever
     # recreating the required host port mapping.
     remove_exact_stopped_container api
+    remove_stale_api_run_containers
     wait_for_port_3000_free 30 2
     compose up -d --remove-orphans --no-build api
   }

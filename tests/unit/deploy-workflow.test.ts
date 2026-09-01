@@ -122,6 +122,21 @@ describe('release workflow gates', () => {
     expect(contentWorker).not.toContain('scheduler.unref?.()');
   });
 
+  test('cleans only exact unhealthy or stopped API one-off containers before the port gate', () => {
+    expect(deployStateMachine).toContain('remove_stale_api_run_containers()');
+    expect(deployStateMachine).toContain('label=com.docker.compose.service=api');
+    expect(deployStateMachine).toContain('com.docker.compose.oneoff');
+    expect(deployStateMachine).toContain('host_port=3000');
+    expect(deployStateMachine).toContain('health\" != unhealthy');
+    expect(deployStateMachine).toContain('refusing to remove API one-off');
+    expect(deployScript).toContain(
+      'remove_exact_stopped_container api\n  remove_stale_api_run_containers\n  wait_for_port_3000_free',
+    );
+    expect(workflow).toContain(
+      'remove_exact_stopped_container api\n            remove_stale_api_run_containers\n            wait_for_port_3000_free',
+    );
+  });
+
   test('defers formal acquisition while deployment admission is closed', () => {
     expect(contentWorker).toContain('isQueueDrainOnly(contentXScanQueueName)');
     expect(formalScheduler).toContain('xSchedulingPaused');
