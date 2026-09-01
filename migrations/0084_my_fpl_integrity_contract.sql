@@ -104,6 +104,123 @@ WHERE publication.season_id = entry_hashes.season_id
   AND publication.event_id = tournament_hashes.event_id
   AND publication.revision = tournament_hashes.revision;
 
+-- Rebuild the durable receipt for every active revision after the scope hard
+-- cut. A publication created before this migration can still have a delivered
+-- outbox row (and Redis pointer) whose manifest predates the count/hash
+-- contract. Requeue that exact revision through the normal dispatcher so the
+-- last accepted snapshot stays available without a source capture or direct
+-- Redis write.
+UPDATE competition.my_fpl_snapshot_publication_outbox AS outbox
+SET manifest = jsonb_build_object(
+      'dataset', 'fpl:my-fpl',
+      'seasonCode', season.season_code,
+      'eventId', publication.event_id,
+      'revision', publication.revision,
+      'snapshotDate', publication.snapshot_date,
+      'sourceCheckedAt', publication.source_checked_at,
+      'publishedAt', publication.published_at,
+      'kind', publication.kind,
+      'contentSha256', publication.content_sha256,
+      'expectedEntryCount', publication.expected_entry_count,
+      'observedEntryCount', publication.ready_entry_count + publication.empty_entry_count,
+      'expectedTournamentCount', publication.expected_tournament_count,
+      'observedTournamentCount', publication.ready_tournament_count,
+      'entryScopeSha256', publication.entry_scope_sha256,
+      'tournamentScopeSha256', publication.tournament_scope_sha256,
+      'scoreSource', COALESCE(publication.score_source, outbox.manifest->>'scoreSource'),
+      'livePublicationId', COALESCE(publication.live_publication_id::text, outbox.manifest->>'livePublicationId'),
+      'liveRevision', COALESCE(publication.live_revision, outbox.manifest->>'liveRevision'),
+      'algorithmVersion', COALESCE(publication.algorithm_version, outbox.manifest->>'algorithmVersion'),
+      'sourceMinCheckedAt', publication.source_checked_at,
+      'sourceMaxCheckedAt', COALESCE(publication.source_max_checked_at, publication.source_checked_at)
+    ),
+    status = 'PENDING',
+    available_at = clock_timestamp(),
+    delivered_at = NULL,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_error = NULL,
+    updated_at = clock_timestamp()
+FROM competition.my_fpl_snapshot_publications AS publication
+JOIN fpl.seasons AS season
+  ON season.season_id = publication.season_id
+WHERE outbox.season_id = publication.season_id
+  AND outbox.event_id = publication.event_id
+  AND outbox.revision = publication.revision
+  AND publication.active
+  AND publication.entry_scope_sha256 IS NOT NULL
+  AND publication.tournament_scope_sha256 IS NOT NULL
+  AND (
+    publication.kind = 'FINAL'
+    OR (
+      COALESCE(publication.score_source, outbox.manifest->>'scoreSource') = 'FPL_EVENT_LIVE'
+      AND COALESCE(publication.live_publication_id::text, outbox.manifest->>'livePublicationId') ~
+        '^[0-9a-fA-F-]{36}$'
+      AND COALESCE(publication.live_revision, outbox.manifest->>'liveRevision') IS NOT NULL
+      AND COALESCE(publication.algorithm_version, outbox.manifest->>'algorithmVersion') =
+        'live-points-v2-algorithm-1'
+    )
+  );
+
+-- A legacy active publication may predate the outbox receipt entirely. Add a
+-- receipt only when its complete manifest can be reconstructed from durable
+-- publication fields; the dispatcher remains the sole Redis writer.
+INSERT INTO competition.my_fpl_snapshot_publication_outbox (
+  outbox_id, season_id, event_id, revision, manifest, status, available_at,
+  created_at, updated_at
+)
+SELECT gen_random_uuid(),
+       publication.season_id,
+       publication.event_id,
+       publication.revision,
+       jsonb_build_object(
+         'dataset', 'fpl:my-fpl',
+         'seasonCode', season.season_code,
+         'eventId', publication.event_id,
+         'revision', publication.revision,
+         'snapshotDate', publication.snapshot_date,
+         'sourceCheckedAt', publication.source_checked_at,
+         'publishedAt', publication.published_at,
+         'kind', publication.kind,
+         'contentSha256', publication.content_sha256,
+         'expectedEntryCount', publication.expected_entry_count,
+         'observedEntryCount', publication.ready_entry_count + publication.empty_entry_count,
+         'expectedTournamentCount', publication.expected_tournament_count,
+         'observedTournamentCount', publication.ready_tournament_count,
+         'entryScopeSha256', publication.entry_scope_sha256,
+         'tournamentScopeSha256', publication.tournament_scope_sha256,
+         'scoreSource', publication.score_source,
+         'livePublicationId', publication.live_publication_id,
+         'liveRevision', publication.live_revision,
+         'algorithmVersion', publication.algorithm_version,
+         'sourceMinCheckedAt', publication.source_checked_at,
+         'sourceMaxCheckedAt', COALESCE(publication.source_max_checked_at, publication.source_checked_at)
+       ),
+       'PENDING',
+       clock_timestamp(),
+       clock_timestamp(),
+       clock_timestamp()
+FROM competition.my_fpl_snapshot_publications AS publication
+JOIN fpl.seasons AS season
+  ON season.season_id = publication.season_id
+LEFT JOIN competition.my_fpl_snapshot_publication_outbox AS outbox
+  ON outbox.season_id = publication.season_id
+ AND outbox.event_id = publication.event_id
+ AND outbox.revision = publication.revision
+WHERE publication.active
+  AND outbox.outbox_id IS NULL
+  AND publication.entry_scope_sha256 IS NOT NULL
+  AND publication.tournament_scope_sha256 IS NOT NULL
+  AND (
+    publication.kind = 'FINAL'
+    OR (
+      publication.score_source = 'FPL_EVENT_LIVE'
+      AND publication.live_publication_id IS NOT NULL
+      AND publication.live_revision IS NOT NULL
+      AND publication.algorithm_version = 'live-points-v2-algorithm-1'
+    )
+  );
+
 ALTER TABLE competition.my_fpl_snapshot_publications
   DROP CONSTRAINT IF EXISTS my_fpl_snapshot_publications_entry_scope_hash_check,
   DROP CONSTRAINT IF EXISTS my_fpl_snapshot_publications_tournament_scope_hash_check;

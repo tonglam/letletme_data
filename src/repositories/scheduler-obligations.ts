@@ -1076,8 +1076,11 @@ export async function deferSchedulerObligationForAdmission(input: {
 /**
  * A worker that has started but finds an upstream prerequisite incomplete
  * must return the durable obligation to pending without consuming an
- * execution attempt.  The exact generation fence prevents a late worker from
- * deferring a newer generation.
+ * execution attempt. The exact generation fence prevents a late worker from
+ * deferring a newer generation. A deferred Bull job is already terminal from
+ * Bull's perspective, so allocate a fresh scheduler generation here; the next
+ * claim then receives a new deterministic Bull identity instead of being
+ * deduplicated against the completed prerequisite check.
  */
 export async function deferSchedulerObligationForWorker(input: {
   obligationId: string;
@@ -1097,6 +1100,7 @@ export async function deferSchedulerObligationForWorker(input: {
     .set({
       status: 'pending',
       dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
+      generation: sql`${schedulerObligationsInOps.generation} + 1`,
       leaseOwner: null,
       leaseExpiresAt: null,
       bullJobId: null,

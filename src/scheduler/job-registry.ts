@@ -1735,8 +1735,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Entry transfers obligation has no event checkpoint');
+        const event = context.events.find((candidate) => candidate.id === eventId);
         const job = await enqueueEntryTransfersSyncJob(context.season, 'catchup', {
           eventId,
+          // A transfer scan can run before FPL marks the event final. When the
+          // finalization fence is already present, carry it into the existing
+          // rate-limited job so a pre-fence checkpoint cannot satisfy the
+          // FINAL readiness gate.
+          ...(event?.dataCheckedAt ? { freshAfter: event.dataCheckedAt.toISOString() } : {}),
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,

@@ -77,7 +77,21 @@ const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 
 function nextMaintenanceRetryAt(job: Job<MaintenanceJobData>): Date {
   const attemptsMade = Math.max(1, job.attemptsMade);
-  const delayMs = Math.min(300_000, 60_000 * 2 ** Math.max(0, attemptsMade - 1));
+  const configuredBackoff = job.opts.backoff;
+  const backoff =
+    typeof configuredBackoff === 'number'
+      ? { type: 'fixed', delay: configuredBackoff }
+      : configuredBackoff && typeof configuredBackoff === 'object'
+        ? configuredBackoff
+        : null;
+  const baseDelayMs =
+    backoff && typeof backoff.delay === 'number' && Number.isFinite(backoff.delay)
+      ? Math.max(0, backoff.delay)
+      : 0;
+  const delayMs =
+    backoff?.type === 'exponential'
+      ? baseDelayMs * 2 ** Math.max(0, attemptsMade - 1)
+      : baseDelayMs;
   return new Date(Date.now() + delayMs);
 }
 
@@ -352,6 +366,28 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               ? await assessMyFplFinalizationReadiness(season, eventId)
               : null;
           if (finalizationReadiness && !finalizationReadiness.ready) {
+            let transferRefreshEnqueued = false;
+            if (
+              snapshotKind === 'FINAL' &&
+              finalizationReadiness.dataCheckedAt &&
+              finalizationReadiness.missingTransferEntryIds.length > 0
+            ) {
+              // The normal post-deadline transfer obligation can finish before
+              // FPL exposes data_checked. Refresh only the stale/missing IDs
+              // after that immutable fence; never start a second full scan.
+              const transferRefreshScope =
+                finalizationReadiness.entryScopeSha256 ?? 'unknown-entry-scope';
+              await enqueueEntryTransfersSyncJob(season, 'catchup', {
+                entryIds: [...finalizationReadiness.missingTransferEntryIds],
+                eventId,
+                freshAfter: finalizationReadiness.dataCheckedAt,
+                queueKey: `my-fpl-finalization-transfers-${season.seasonId}-${eventId}-${transferRefreshScope}`,
+                deduplicationId: `my-fpl-finalization-transfers-${season.seasonId}-${eventId}-${finalizationReadiness.dataCheckedAt}-${transferRefreshScope}`,
+                deduplicationCadenceMs: 60_000,
+                removeOnSettle: false,
+              });
+              transferRefreshEnqueued = true;
+            }
             const fence = inspectSchedulerObligationFence(job.data);
             if (fence.kind !== 'complete') {
               // A manually enqueued FINAL has no scheduler obligation to
@@ -378,11 +414,19 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                   observedTournamentCount: finalizationReadiness.observedTournamentCount,
                   tournamentScopeSha256: finalizationReadiness.tournamentScopeSha256,
                   missingEntryIds: finalizationReadiness.missingEntryIds.slice(0, 100),
+                  missingTransferEntryIds: finalizationReadiness.missingTransferEntryIds.slice(
+                    0,
+                    100,
+                  ),
                   reasonCodes: finalizationReadiness.reasonCodes,
                 },
               },
             });
-            return { status: 'waiting-dependencies', readiness: finalizationReadiness };
+            return {
+              status: 'waiting-dependencies',
+              readiness: finalizationReadiness,
+              transferRefreshEnqueued,
+            };
           }
           const activeFinalUsesManagerReviewV2 =
             active?.kind === 'FINAL' &&

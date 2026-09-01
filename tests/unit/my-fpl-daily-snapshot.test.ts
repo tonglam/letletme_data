@@ -317,7 +317,7 @@ describe('My FPL daily snapshot publication contract', () => {
       /enqueueEntryTransfersSyncJob\(season, source, \{[\s\S]{0,120}freshAfter,/,
     );
     expect(worker).toContain('assessMyFplFinalizationReadiness');
-    expect(worker).toMatch(/return \{ status: 'waiting-dependencies', readiness/);
+    expect(worker).toMatch(/status: 'waiting-dependencies'/);
     expect(worker).not.toContain('enqueueTournamentEventResults');
     expect(worker).not.toContain('enqueueTournamentEventPicks');
     expect(worker).not.toContain('enqueueTournamentTransfersPre');

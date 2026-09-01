@@ -44,6 +44,7 @@
   "matchLinksInBridge",
   "matchesInUnderstat",
   "mutationScopesInOps",
+  "myFplActiveSnapshotStatusInReporting",
   "myFplSnapshotEntriesInCompetition",
   "myFplSnapshotInvalidationOutboxInCompetition",
   "myFplSnapshotPublicationOutboxInCompetition",

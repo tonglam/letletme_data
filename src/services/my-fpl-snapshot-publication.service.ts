@@ -1970,6 +1970,10 @@ export type MyFplFinalizationReadiness = Readonly<{
   observedEntryCount: number;
   entryScopeSha256: string | null;
   missingEntryIds: readonly number[];
+  /** Eligible entries whose transfer checkpoint is absent or older than the
+   * immutable FPL data_checked fence.  The finalizer may repair only these
+   * IDs through the existing rate-limited entry-transfer job. */
+  missingTransferEntryIds: readonly number[];
   expectedTournamentCount: number;
   observedTournamentCount: number;
   tournamentScopeSha256: string | null;
@@ -2011,6 +2015,7 @@ export async function assessMyFplFinalizationReadiness(
       observedEntryCount: 0,
       entryScopeSha256: null,
       missingEntryIds: [],
+      missingTransferEntryIds: [],
       expectedTournamentCount: 0,
       observedTournamentCount: 0,
       tournamentScopeSha256: null,
@@ -2112,6 +2117,7 @@ export async function assessMyFplFinalizationReadiness(
     ORDER BY entry.entry_id
   `;
   const missingEntryIds: number[] = [];
+  const missingTransferEntryIds: number[] = [];
   for (const row of entryRows) {
     const richAt = row.rich_synced_at ? new Date(row.rich_synced_at).getTime() : Number.NaN;
     const transferCheckedAt = row.transfers_source_checked_at
@@ -2119,6 +2125,11 @@ export async function assessMyFplFinalizationReadiness(
       : Number.NaN;
     const checkedAt = new Date(dataCheckedAt).getTime();
     const firstScoringEvent = Math.max(1, row.started_event ?? 1);
+    const transferCheckpointComplete =
+      (row.transfers_synced_through_event_id ?? 0) >= eventId &&
+      Number.isFinite(transferCheckedAt) &&
+      transferCheckedAt >= checkedAt;
+    if (!transferCheckpointComplete) missingTransferEntryIds.push(row.entry_id);
     const unrankedFirstEvent =
       firstScoringEvent === eventId &&
       row.previous_overall_points === null &&
@@ -2138,9 +2149,7 @@ export async function assessMyFplFinalizationReadiness(
       ranksComplete &&
       Number.isFinite(richAt) &&
       richAt >= checkedAt &&
-      (row.transfers_synced_through_event_id ?? 0) >= eventId &&
-      Number.isFinite(transferCheckedAt) &&
-      transferCheckedAt >= checkedAt &&
+      transferCheckpointComplete &&
       row.pick_count === 15 &&
       row.distinct_elements === 15 &&
       row.distinct_positions === 15 &&
@@ -2266,6 +2275,7 @@ export async function assessMyFplFinalizationReadiness(
     observedEntryCount,
     entryScopeSha256,
     missingEntryIds,
+    missingTransferEntryIds,
     expectedTournamentCount,
     observedTournamentCount,
     tournamentScopeSha256,
@@ -2541,6 +2551,73 @@ async function captureMyFplSnapshotOnce(
     }
 
     const active = await loadActivePublication(tx, season.seasonId, eventId);
+
+    // Read the current canonical scopes inside the capture transaction before
+    // considering an idempotent FINAL no-op.  The worker performs the same
+    // readiness check outside this transaction, but a newly onboarded entry
+    // or roster mutation can race that read; the transaction-level guard must
+    // not let an old FINAL hide the changed denominator.
+    const entries = await tx<EntrySource[]>`
+      SELECT entry_id, entry_name, player_name, region, started_event,
+             overall_points, overall_rank, bank, team_value, total_transfers,
+             transfers_synced_through_event_id, transfers_source_checked_at,
+             past_seasons_checked_at,
+             past_seasons_count
+      FROM competition.entries
+      WHERE season_id = ${season.seasonId}
+      ORDER BY entry_id
+    `;
+    if (entries.length === 0) {
+      throw new MyFplSnapshotIncompleteError('No current-season entries are available');
+    }
+    const entrySourceById = new Map(entries.map((entry) => [entry.entry_id, entry] as const));
+    const entryEligibility = countEntryEligibility(
+      entries.map((entry) => ({ startedEvent: entry.started_event, eventId })),
+    );
+    const expectedEntryCount = entryEligibility.eligibleCount;
+    const notApplicableEntryCount = entryEligibility.notApplicableCount;
+    const entryScopeSha256 = scopeSha256(
+      entries
+        .filter((entry) => isEntryEligibleForEvent({ startedEvent: entry.started_event, eventId }))
+        .map((entry) => String(entry.entry_id)),
+    );
+    const configuredTournaments = await tx<
+      {
+        tournament_id: number;
+        total_team_num: number;
+        group_mode: string | null;
+      }[]
+    >`
+      SELECT tournament_id, total_team_num, group_mode::text
+      FROM competition.tournaments
+      WHERE season_id = ${season.seasonId}
+      ORDER BY tournament_id
+    `;
+    const tournamentMembership = await tx<{ tournament_id: number; entry_id: number }[]>`
+      SELECT tournament_id, entry_id
+      FROM competition.tournament_entries
+      WHERE season_id = ${season.seasonId}
+      ORDER BY tournament_id, entry_id
+    `;
+    const tournamentScopeSha256 = scopeSha256(
+      tournamentMembership.map((row) => `${row.tournament_id}:${row.entry_id}`),
+    );
+    const tournamentIds = configuredTournaments.map((row) => row.tournament_id);
+    const membershipCounts = new Map<number, number>();
+    for (const membership of tournamentMembership) {
+      membershipCounts.set(
+        membership.tournament_id,
+        (membershipCounts.get(membership.tournament_id) ?? 0) + 1,
+      );
+    }
+    for (const tournament of configuredTournaments) {
+      const membershipCount = membershipCounts.get(tournament.tournament_id) ?? 0;
+      if (membershipCount !== tournament.total_team_num) {
+        throw new MyFplSnapshotIncompleteError(
+          `Tournament ${tournament.tournament_id} roster is incomplete: expected ${tournament.total_team_num}, got ${membershipCount}`,
+        );
+      }
+    }
     let activeFinalUsesManagerReviewV2 = false;
     if (isCompleteMyFplPublication(active) && active.kind === 'FINAL') {
       const activeEntryPayloadCounts = await tx<{ total_count: number; v2_count: number }[]>`
@@ -2563,8 +2640,17 @@ async function captureMyFplSnapshotOnce(
           counts.v2_count === expectedEntryRows,
       );
     }
+    const activeFinalScopeMatchesCurrentScope = Boolean(
+      active &&
+        active.expectedEntryCount === expectedEntryCount &&
+        active.notApplicableEntryCount === notApplicableEntryCount &&
+        active.entryScopeSha256 === entryScopeSha256 &&
+        active.expectedTournamentCount === tournamentIds.length &&
+        active.tournamentScopeSha256 === tournamentScopeSha256,
+    );
     if (
       activeFinalUsesManagerReviewV2 &&
+      activeFinalScopeMatchesCurrentScope &&
       (!overrideActor ||
         !overrideReason ||
         !idempotencyKey ||
@@ -2588,26 +2674,6 @@ async function captureMyFplSnapshotOnce(
         return { status: 'noop', publication: priorOverride };
       }
     }
-
-    const entries = await tx<EntrySource[]>`
-      SELECT entry_id, entry_name, player_name, region, started_event,
-             overall_points, overall_rank, bank, team_value, total_transfers,
-             transfers_synced_through_event_id, transfers_source_checked_at,
-             past_seasons_checked_at,
-             past_seasons_count
-      FROM competition.entries
-      WHERE season_id = ${season.seasonId}
-      ORDER BY entry_id
-    `;
-    if (entries.length === 0) {
-      throw new MyFplSnapshotIncompleteError('No current-season entries are available');
-    }
-    const entrySourceById = new Map(entries.map((entry) => [entry.entry_id, entry] as const));
-    const entryEligibility = countEntryEligibility(
-      entries.map((entry) => ({ startedEvent: entry.started_event, eventId })),
-    );
-    const expectedEntryCount = entryEligibility.eligibleCount;
-    const notApplicableEntryCount = entryEligibility.notApplicableCount;
 
     // Provisional scores never read the current event result. Final scores read
     // the current event only after the final fence has passed.
@@ -3533,48 +3599,6 @@ async function captureMyFplSnapshotOnce(
       }
     }
 
-    const configuredTournaments = await tx<
-      {
-        tournament_id: number;
-        total_team_num: number;
-        group_mode: string | null;
-      }[]
-    >`
-      SELECT tournament_id, total_team_num, group_mode::text
-      FROM competition.tournaments
-      WHERE season_id = ${season.seasonId}
-      ORDER BY tournament_id
-    `;
-    const tournamentMembership = await tx<{ tournament_id: number; entry_id: number }[]>`
-      SELECT tournament_id, entry_id
-      FROM competition.tournament_entries
-      WHERE season_id = ${season.seasonId}
-      ORDER BY tournament_id, entry_id
-    `;
-    const entryScopeSha256 = scopeSha256(
-      entries
-        .filter((entry) => isEntryEligibleForEvent({ startedEvent: entry.started_event, eventId }))
-        .map((entry) => String(entry.entry_id)),
-    );
-    const tournamentScopeSha256 = scopeSha256(
-      tournamentMembership.map((row) => `${row.tournament_id}:${row.entry_id}`),
-    );
-    const tournamentIds = configuredTournaments.map((row) => row.tournament_id);
-    const membershipCounts = new Map<number, number>();
-    for (const membership of tournamentMembership) {
-      membershipCounts.set(
-        membership.tournament_id,
-        (membershipCounts.get(membership.tournament_id) ?? 0) + 1,
-      );
-    }
-    for (const tournament of configuredTournaments) {
-      const membershipCount = membershipCounts.get(tournament.tournament_id) ?? 0;
-      if (membershipCount !== tournament.total_team_num) {
-        throw new MyFplSnapshotIncompleteError(
-          `Tournament ${tournament.tournament_id} roster is incomplete: expected ${tournament.total_team_num}, got ${membershipCount}`,
-        );
-      }
-    }
     const tournamentRows = await tx<TournamentRow[]>`
       WITH current_rows AS (
         SELECT roster.tournament_id, roster.entry_id,
