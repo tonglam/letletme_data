@@ -3654,6 +3654,7 @@ INSERT INTO competition.my_fpl_snapshot_entries (
   0,
   TRUE,
   jsonb_build_object(
+      'contractVersion', 2,
       'entry', jsonb_build_object(
       'id', 1,
       'entryName', 'GraphQL contract sentinel',
@@ -3669,10 +3670,54 @@ INSERT INTO competition.my_fpl_snapshot_entries (
       'pastSeasonsCheckedAt', '2026-08-10T00:00:00.000Z',
       'pastSeasonsCount', 0
     ),
-    'history', jsonb_build_array(),
     'pastSeasons', jsonb_build_array(),
     'gameweek', jsonb_build_object('state', 'EMPTY', 'eventId', 1, 'result', NULL),
-    'transfers', jsonb_build_array()
+    'review', jsonb_build_object(
+      'throughEventId', 1,
+      'timeline', jsonb_build_array(),
+      'summary', jsonb_build_object(
+        'gameweeksReviewed', 0,
+        'provisionalGameweeks', 0,
+        'totalNetPoints', 0,
+        'averageNetPoints', 0,
+        'medianNetPoints', 0,
+        'bestGameweekId', NULL,
+        'bestNetPoints', NULL,
+        'worstGameweekId', NULL,
+        'worstNetPoints', NULL,
+        'totalHitPoints', 0,
+        'hitGameweeks', 0,
+        'totalBenchPoints', 0,
+        'averageBenchPoints', 0,
+        'zeroBenchGameweeks', 0,
+        'highBenchGameweeks', 0,
+        'totalAutoSubPoints', 0,
+        'autoSubGameweeks', 0,
+        'totalCaptainPoints', 0,
+        'uniqueCaptains', 0,
+        'captainBlankGameweeks', 0,
+        'topCaptainWebName', NULL,
+        'topCaptainGameweeks', 0,
+        'topCaptainRate', 0,
+        'bestOverallRank', NULL,
+        'worstOverallRank', NULL,
+        'overallRankChange', NULL,
+        'currentImprovementStreak', 0,
+        'longestImprovementStreak', 0,
+        'formations', jsonb_build_array(),
+        'positionPoints', jsonb_build_object(
+          'goalkeeper', 0,
+          'defender', 0,
+          'midfielder', 0,
+          'forward', 0,
+          'assistantManager', 0,
+          'total', 0
+        ),
+        'chips', jsonb_build_array()
+      ),
+      'holdings', jsonb_build_array(),
+      'transfers', jsonb_build_array()
+    )
   )
 )
 ON CONFLICT (season_id, event_id, revision, entry_id) DO UPDATE

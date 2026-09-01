@@ -562,6 +562,10 @@ export async function findMissingEntryLiveInputIds(
   options: { readonly repairCheckpoint?: boolean } = {},
 ): Promise<number[]> {
   const repairCheckpoint = options.repairCheckpoint !== false;
+  const liveObservation = await readLivePublicationV2({
+    season: season.seasonCode,
+    eventId,
+  }).catch(() => null);
   const results = await mapWithConcurrency(entryIds, 32, async (entryId) => {
     const scope = {
       season: season.seasonCode,
@@ -573,6 +577,17 @@ export async function findMissingEntryLiveInputIds(
       readEntryCheckpointDesiredV2(scope),
     ]);
     if (input) {
+      const chip = input.input.picksBase.chip;
+      const managerFact = input.input.picksBase.assistantManagerPoints;
+      const managerObservationChanged =
+        (chip === 'manager' || chip === 'MANAGER') &&
+        liveObservation !== null &&
+        (!managerFact ||
+          managerFact.livePublicationId !== liveObservation.publication.publicationId ||
+          managerFact.liveGeneration !== liveObservation.publication.generation ||
+          managerFact.liveScoreCoreRevision !==
+            liveObservation.publication.revisions.scoreCore.revision);
+      if (managerObservationChanged) return entryId;
       if (!repairCheckpoint) return null;
       if (!desired && input.publication.checkpointedAt !== null) return null;
       // Redis already contains the complete input. Retry only the durable
@@ -706,11 +721,24 @@ export async function runPicksProbeAndSync(
   }
   const canaryResults = await Promise.allSettled(
     canaries.map(async (entryId) => {
+      const liveObservation = await readLivePublicationV2({
+        season: season.seasonCode,
+        eventId,
+      });
       const payload = await fplClient.getEntryEventPicks(entryId, eventId);
       if (!isStablePicksResponse(payload, eventId)) {
         throw new Error(`Entry ${entryId} picks are not a complete event ${eventId} payload`);
       }
-      await persistEntryEventPicksResponse(season, entryId, eventId, payload);
+      const managerChip = payload.active_chip === 'manager' || payload.active_chip === 'MANAGER';
+      // Manager points must be derived from a provider event-live observation,
+      // never from the cached player subtotal in the Redis publication. The
+      // persistence fence compares this response with the same live revision
+      // before attaching the manager-only fact.
+      const providerEventLive = managerChip ? await fplClient.getEventLive(eventId) : undefined;
+      await persistEntryEventPicksResponse(season, entryId, eventId, payload, undefined, {
+        liveObservation,
+        providerEventLive,
+      });
       return entryId;
     }),
   );

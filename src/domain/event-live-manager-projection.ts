@@ -218,6 +218,11 @@ export function projectEventLiveManagerScore(input: {
   picks: readonly EventLiveManagerPick[];
   liveByElement: ReadonlyMap<number, EventLive>;
   fixtures: readonly Fixture[];
+  /**
+   * Assistant Manager's separate points fact, already reconciled against the
+   * exact Live Points V2 revision that produced `liveByElement`.
+   */
+  assistantManagerPoints?: number | null;
 }): ProjectedEventLiveManagerScore | null {
   if (input.picks.length !== 15 || input.picks.some((pick) => pick.entryId !== input.entryId)) {
     return null;
@@ -283,11 +288,19 @@ export function projectEventLiveManagerScore(input: {
   // projector independent of repository ordering so a caller cannot change
   // scoring semantics merely by reordering the 15 picks.
   const chip = picks.find((pick) => pick.position === 1)?.activeChip ?? null;
-  // The manager chip adds a separate manager-scoring fact that is not present
-  // in the player-live input accepted by this projector. Never publish a
-  // partial player-only score for it; the caller must use a source that carries
-  // the manager points explicitly.
-  if (chipIs(chip, 'manager', 'MANAGER')) return null;
+  const managerChip = chipIs(chip, 'manager', 'MANAGER');
+  if (
+    managerChip &&
+    (input.assistantManagerPoints === null ||
+      input.assistantManagerPoints === undefined ||
+      !Number.isSafeInteger(input.assistantManagerPoints) ||
+      input.assistantManagerPoints < 0)
+  ) {
+    // The manager chip adds a separate manager-scoring fact that is not present
+    // in player-live rows. Never publish a partial player-only score when the
+    // immutable manager-only source is unavailable.
+    return null;
+  }
   const benchBoost = chipIs(chip, 'bboost', 'BENCH_BOOST');
   const captainMultiplier = chipIs(chip, '3xc', 'TRIPLE_CAPTAIN') ? 3 : 2;
   const starters = picks
@@ -447,11 +460,14 @@ export function projectEventLiveManagerScore(input: {
   }, 0);
   if (!Number.isSafeInteger(points)) return null;
 
+  const managerPoints = managerChip ? input.assistantManagerPoints! : 0;
+  const eventPoints = points + managerPoints;
+
   const picksCheckedAt = new Date([...sourceTimestamps][0]!).toISOString();
   return {
     entryId: input.entryId,
-    eventPoints: points,
-    netEventPoints: points - transferCost,
+    eventPoints,
+    netEventPoints: eventPoints - transferCost,
     transferCost,
     picksCheckedAt,
     effectiveLineup: picks.map((pick) => ({
