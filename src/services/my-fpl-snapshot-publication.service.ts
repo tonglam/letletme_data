@@ -2396,7 +2396,7 @@ export async function assessMyFplFinalizationReadiness(
            count(*) FILTER (
              WHERE roster_count = total_team_num
                AND (
-               COALESCE(group_mode, '') <> 'points_races'
+               group_mode IS DISTINCT FROM 'points_races'
                OR (
                  NOT points_race_active
                  OR (

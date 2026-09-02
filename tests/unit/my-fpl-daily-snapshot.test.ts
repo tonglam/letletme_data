@@ -594,6 +594,11 @@ describe('My FPL daily snapshot publication contract', () => {
     );
   });
 
+  test('does not cast a nullable tournament group enum through an invalid empty value', () => {
+    expect(publicationService).toContain(String.raw`group_mode IS DISTINCT FROM 'points_races'`);
+    expect(publicationService).not.toContain(String.raw`COALESCE(group_mode, '')`);
+  });
+
   test('fails Redis delivery when the active pointer is not the captured publication', () => {
     expect(worker).toContain(
       'const activeRedisManifest = await getActiveMyFplSnapshotRedisManifest',
