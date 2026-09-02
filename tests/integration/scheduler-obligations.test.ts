@@ -36,6 +36,7 @@ const IMMUTABLE_DEADLINE_OBLIGATION_ID = '30000000-0000-4000-8000-000000000008';
 const IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000009';
 const IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000010';
 const ACCEPTED_BACKOFF_OBLIGATION_ID = '30000000-0000-4000-8000-000000000011';
+const RETRYING_START_OBLIGATION_ID = '30000000-0000-4000-8000-000000000012';
 const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
 const ACCEPTED_BACKOFF_SCOPE_KEY = 'integration:event:accepted-backoff';
 const ACCEPTED_BACKOFF_CASE_FINGERPRINT = 'integration:live-picks-backoff:breach';
@@ -55,7 +56,8 @@ async function cleanup(): Promise<void> {
       ${IMMUTABLE_DEADLINE_OBLIGATION_ID}::uuid,
       ${IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID}::uuid,
       ${IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID}::uuid,
-      ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid
+      ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid,
+      ${RETRYING_START_OBLIGATION_ID}::uuid
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
@@ -452,6 +454,50 @@ describe('scheduler obligation generation fencing', () => {
       rejected = true;
     }
     expect(rejected).toBe(true);
+  });
+
+  test('clears a retry error before transitioning an obligation to running', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, last_error, next_attempt_at, evidence
+      )
+      VALUES (
+        ${RETRYING_START_OBLIGATION_ID}::uuid,
+        'my-fpl-snapshot',
+        'integration:retrying-start',
+        'event-2-retry',
+        'integration',
+        'UTC',
+        'retrying',
+        'reconcile',
+        clock_timestamp(),
+        0,
+        1,
+        'TRANSIENT_INFRA:statement timeout',
+        clock_timestamp() + interval '1 minute',
+        '{}'::jsonb
+      )
+    `;
+
+    expect(
+      await startSchedulerObligation({
+        obligationId: RETRYING_START_OBLIGATION_ID,
+        generation: 0,
+      }),
+    ).toBe(true);
+
+    const rows = await sql<
+      Array<{ status: string; last_error: string | null; next_attempt_at: Date | null }>
+    >`
+      SELECT status, last_error, next_attempt_at
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${RETRYING_START_OBLIGATION_ID}::uuid
+    `;
+    expect(rows[0]?.status).toBe('running');
+    expect(rows[0]?.last_error).toBeNull();
+    expect(rows[0]?.next_attempt_at).toBeNull();
   });
 
   test('accepts enqueue acknowledgement after a fast worker crosses its fence', async () => {
