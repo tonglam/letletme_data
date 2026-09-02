@@ -493,6 +493,21 @@ function reviewChunksMatchPayload(
     });
   }
   if (expected.length !== rows.length || expected.length !== chunkCount) return false;
+  const requiredSectionKeys =
+    payload.format === 'POINTS'
+      ? new Set(['POINTS_STANDINGS', 'POINTS_TRAJECTORIES'])
+      : payload.format === 'H2H'
+        ? new Set(['H2H_STANDINGS', 'H2H_FIXTURES'])
+        : payload.format === 'KNOCKOUT'
+          ? new Set(['KNOCKOUT_BRACKET'])
+          : null;
+  if (
+    !requiredSectionKeys ||
+    sectionKeys.size !== requiredSectionKeys.size ||
+    [...requiredSectionKeys].some((sectionKey) => !sectionKeys.has(sectionKey))
+  ) {
+    return false;
+  }
   const expectedKeys = new Set(expected.map((chunk) => `${chunk.sectionKey}:${chunk.chunkIndex}`));
   const actual = new Map(rows.map((row) => [`${row.section_key}:${Number(row.chunk_index)}`, row]));
   if (actual.size !== rows.length) return false;
