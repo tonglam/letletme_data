@@ -236,6 +236,19 @@ describe('release workflow gates', () => {
     expect(hostGrokRunner).not.toContain(String.raw`from '../utils/logger'`);
   });
 
+  test('fails closed when the durable review backfill marker cannot be read', () => {
+    expect(deployStateMachine).toContain(
+      'durable marker probe failed; refusing to skip the backfill',
+    );
+    expect(deployStateMachine).toContain('pending|missing) return 0');
+    expect(deployScript).toContain(
+      'Unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped.',
+    );
+    expect(workflow).toContain(
+      'unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped',
+    );
+  });
+
   test('isolates the durable media worker and includes it in deployment gates', () => {
     const mediaServiceStart = composeFile.indexOf('  media-worker:');
     const mediaService = composeFile.slice(mediaServiceStart);
@@ -333,6 +346,63 @@ describe('release workflow gates', () => {
       'bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized',
     );
     expect(workflowV2Seed).not.toContain('bun run db:cutover-seed-live-match-v2');
+  });
+
+  test('drains the destructive review reset before runtime startup', () => {
+    expect(deployStateMachine).toContain('run_tournament_review_hard_cut_backfill');
+    expect(deployStateMachine).toContain('run_tournament_review_restore_rehearsal');
+    expect(deployStateMachine).toContain('DATABASE_RESTORE_REHEARSAL_URL is required');
+    expect(deployStateMachine).toContain('review_backfill_marker_pending');
+    expect(deployStateMachine).toContain(
+      'restore_rehearsal_required = false AND restore_rehearsal_completed_at IS NOT NULL',
+    );
+    expect(deployStateMachine).toContain('const hasIncomplete = rows.some');
+    expect(deployStateMachine).toContain(
+      'hasIncomplete || rows.length === 0 ? "pending" : "complete"',
+    );
+    expect(deployStateMachine).not.toContain('ORDER BY created_at ASC LIMIT 1');
+    expect(deployStateMachine).not.toContain('WHERE season_id = ${current[0].season_id}');
+    expect(deployStateMachine).toContain('Data runtime DATABASE_URL is required');
+    expect(deployStateMachine).toContain(
+      '-e DATABASE_URL -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM',
+    );
+    expect(deployScript).toContain('DEPLOY_REVIEW_HARD_CUT_PENDING=true');
+    expect(deployScript).toContain('DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=true');
+    expect(deployScript).toContain('MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES');
+    expect(deployScript).toContain('review_backfill_marker_pending');
+    expect(workflow).toContain('review_restore_rehearsal_passed=true');
+    expect(workflow).toContain('MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES');
+    expect(workflow).toContain('review_backfill_marker_pending');
+    expect(deployScript).toContain('migration-scoped gate skipped');
+    expect(deployStateMachine).toContain('MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES');
+    expect(deployStateMachine).toContain('--batch-size 100 --max-batches 10000');
+    const localBackfill = deployScript.indexOf('run_tournament_review_hard_cut_backfill');
+    const localRoleVerify = deployScript.indexOf('start_stage roleVerify');
+    const workflowBackfill = workflow.indexOf('run_tournament_review_hard_cut_backfill');
+    const workflowRoleVerify = workflow.indexOf('start_stage roleVerify');
+    expect(localBackfill).toBeGreaterThan(-1);
+    expect(localBackfill).toBeLessThan(localRoleVerify);
+    expect(workflowBackfill).toBeGreaterThan(-1);
+    expect(workflowBackfill).toBeLessThan(workflowRoleVerify);
+  });
+
+  test('verifies restore target identity and translates host backup paths into the container mount', () => {
+    expect(deployStateMachine).toContain(
+      'source database URL is required for identity verification',
+    );
+    expect(deployStateMachine).toContain('DATABASE_RESTORE_SOURCE_URL="$source_url"');
+    expect(deployStateMachine).toContain('local container_dump_path');
+    expect(deployStateMachine).toContain(
+      'container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"',
+    );
+    expect(deployStateMachine).toContain(
+      '"$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL" "$DATABASE_RESTORE_SOURCE_URL"',
+    );
+    const restoreScript = readFileSync('scripts/verify-backup-restore.sh', 'utf8');
+    expect(restoreScript).toContain('identity_query=');
+    expect(restoreScript).toContain('source_identity=$(psql');
+    expect(restoreScript).toContain('target_identity=$(psql');
+    expect(restoreScript).toContain('same database identity as the source');
   });
 
   test('keeps the read-only backup container able to normalize its writable mount', () => {

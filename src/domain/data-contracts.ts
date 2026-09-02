@@ -256,8 +256,8 @@ export const dataContractRegistry = [
     visibility: 'public',
   },
   {
-    contractKey: 'my-tournament-review-v2',
-    dataset: 'competition:my-tournament-review-v2',
+    contractKey: 'my-tournament-review-v2.1',
+    dataset: 'competition:my-tournament-review-v2.1',
     lifecycleStages: ['active', 'review', 'finished', 'idle'],
     eligibility: 'finished + data_checked event and setup-ready tournament phase',
     queueLane: myFplOrchestrationQueueName,

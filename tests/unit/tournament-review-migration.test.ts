@@ -18,6 +18,11 @@ const sourceFloorMigration = readFileSync(
   'migrations/0082_tournament_review_source_floor_requeue.sql',
   'utf8',
 );
+const hardCutMigration = readFileSync(
+  'migrations/0090_my_tournament_review_v2_1_hard_cut.sql',
+  'utf8',
+);
+const backfillScript = readFileSync('scripts/backfill-tournament-review-v2.ts', 'utf8');
 
 describe('My Tournament Review V2 migration', () => {
   test('defines immutable publication, atomic head and durable obligation layers', () => {
@@ -103,5 +108,87 @@ describe('My Tournament Review V2 migration', () => {
     expect(sourceFloorMigration).not.toContain(
       'DELETE FROM competition.tournament_review_publications',
     );
+  });
+
+  test('backs up and resets the current season before introducing V2.1 chunks', () => {
+    expect(hardCutMigration).toContain('tournament_review_publications_0090_backup');
+    expect(hardCutMigration).toContain('tournament_review_v2_1_backup_manifest');
+    expect(hardCutMigration).toContain('publication_revision_distribution jsonb');
+    expect(hardCutMigration).toContain('backfill_completed_at timestamptz');
+    expect(hardCutMigration).toContain('restore_rehearsal_required boolean');
+    expect(hardCutMigration).toContain('restore_rehearsal_completed_at timestamptz');
+    expect(hardCutMigration).toContain(
+      String.raw`current_setting('letletme.review_restore_rehearsal', true) IS DISTINCT FROM 'true'`,
+    );
+    expect(hardCutMigration).toContain(
+      'restore rehearsal is required before current-season review reset',
+    );
+    expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_heads');
+    expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_publications');
+    expect(hardCutMigration).toContain('DELETE FROM competition.tournament_review_obligations');
+    expect(hardCutMigration).toContain('current_season');
+  });
+
+  test('defines correction provenance, observation timestamps, and bounded chunk integrity', () => {
+    expect(hardCutMigration).toContain(
+      'CREATE OR REPLACE FUNCTION extensions.strip_review_operational_metadata(input_value jsonb)',
+    );
+    expect(hardCutMigration).toContain(
+      'extensions.strip_review_operational_metadata(object_entry.child)',
+    );
+    expect(hardCutMigration).toContain(
+      'REVOKE ALL ON FUNCTION extensions.strip_review_operational_metadata(jsonb) FROM PUBLIC',
+    );
+    expect(hardCutMigration).toContain('correction_reason text');
+    expect(hardCutMigration).toContain('correction_change_id text');
+    expect(hardCutMigration).toContain('schema_version <>');
+    expect(hardCutMigration).toContain('my-tournament-review-v2.1');
+    expect(hardCutMigration).toContain('last_observed_at timestamptz');
+    expect(hardCutMigration).toContain('last_noop_at timestamptz');
+    expect(hardCutMigration).toContain('last_semantic_change_at timestamptz');
+    expect(hardCutMigration).toContain('repair_issue_id bigint');
+    expect(hardCutMigration).toContain('ADD COLUMN IF NOT EXISTS correction_reason text');
+    expect(hardCutMigration).toContain('ADD COLUMN IF NOT EXISTS correction_change_id text');
+    expect(hardCutMigration).toContain('correction_reason IS NOT NULL');
+    expect(hardCutMigration).toContain('correction_change_id IS NOT NULL');
+    expect(hardCutMigration).toContain(
+      'CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks',
+    );
+    expect(hardCutMigration).toContain('item_count BETWEEN 0 AND 100');
+    expect(hardCutMigration).toContain('jsonb_array_length(items) = item_count');
+    expect(hardCutMigration).toContain('chunk_sha256 ~');
+    expect(hardCutMigration).toContain(
+      'GRANT UPDATE ON TABLE competition.tournament_review_publication_chunks',
+    );
+    expect(hardCutMigration).toContain('tournament_review_chunks_writer_update');
+    expect(hardCutMigration).toContain('TO letletme_graphql_reader');
+  });
+
+  test('migrates durable governance evidence off the retired contract key', () => {
+    expect(hardCutMigration).toContain('SET contract_key = \x27my-tournament-review-v2.1\x27');
+    expect(hardCutMigration).toContain('UPDATE ops.freshness_slo_windows');
+    expect(hardCutMigration).toContain('UPDATE ops.data_governance_cases');
+    expect(hardCutMigration).toContain('status = \x27DISMISSED\x27');
+    expect(hardCutMigration).toContain('conflicting_cases');
+  });
+
+  test('merges terminal freshness evidence before deleting duplicate windows', () => {
+    expect(hardCutMigration).toContain('recovery_revision = CASE');
+    expect(hardCutMigration).toContain('evidence = legacy.evidence || canonical.evidence');
+    expect(hardCutMigration).toContain(
+      'source_day = COALESCE(canonical.source_day, legacy.source_day)',
+    );
+    expect(hardCutMigration).toContain('ELSE LEAST(canonical.recovered_at, legacy.recovered_at)');
+  });
+
+  test('allows the hard-cut backfill to target only the current season', () => {
+    expect(backfillScript).toContain('const currentSeason = await seasonRepository.findCurrent()');
+    expect(backfillScript).toContain('season.seasonId !== currentSeason.seasonId');
+    expect(backfillScript).toContain('--season ${args.season} is not the current FPL season');
+    expect(backfillScript).toContain('backfill_completed_at');
+    expect(backfillScript).toContain('restore_rehearsal_required');
+    expect(backfillScript).toContain('restore_rehearsal_completed_at');
+    expect(backfillScript).toContain('restore rehearsal evidence is missing');
+    expect(backfillScript).toContain('migration 0090 backup manifest is missing');
   });
 });

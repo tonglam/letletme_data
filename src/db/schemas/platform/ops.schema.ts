@@ -358,6 +358,45 @@ export const schemaMigrationsInOps = ops.table(
   ],
 );
 
+/** Durable cutover evidence for the destructive My Tournament Review 0090
+ * reset.  This row is application state, so keep it in the typed catalog
+ * rather than allowing a SQL-only parity exception. */
+export const tournamentReviewV21BackupManifestInOps = ops.table(
+  'tournament_review_v2_1_backup_manifest',
+  {
+    backupId: uuid('backup_id')
+      .default(sql`extensions.gen_random_uuid()`)
+      .primaryKey()
+      .notNull(),
+    seasonId: smallint('season_id').notNull(),
+    publicationsRows: bigint('publications_rows', { mode: 'number' }).notNull(),
+    headsRows: bigint('heads_rows', { mode: 'number' }).notNull(),
+    obligationsRows: bigint('obligations_rows', { mode: 'number' }).notNull(),
+    publicationRevisionDistribution: jsonb('publication_revision_distribution').notNull(),
+    publicationsSha256: text('publications_sha256').notNull(),
+    headsSha256: text('heads_sha256').notNull(),
+    obligationsSha256: text('obligations_sha256').notNull(),
+    restoreRehearsalRequired: boolean('restore_rehearsal_required').default(true).notNull(),
+    restoreRehearsalCompletedAt: timestamp('restore_rehearsal_completed_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    backfillCompletedAt: timestamp('backfill_completed_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (_table) => [
+    check(
+      'tournament_review_v2_1_backup_manifest_sha_check',
+      sql`publications_sha256 ~ '^[0-9a-f]{64}$' AND heads_sha256 ~ '^[0-9a-f]{64}$' AND obligations_sha256 ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
 export const mutationScopesInOps = ops.table(
   'mutation_scopes',
   {

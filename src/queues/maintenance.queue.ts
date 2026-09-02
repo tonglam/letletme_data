@@ -64,7 +64,13 @@ export type MaintenanceJobData = {
   /** Actual standalone market-daily Bull identity observed by the watchdog. */
   playerValuesBullJobId?: string;
   entryId?: number;
+  /** Optional tournament-scoped review bootstrap target. */
+  tournamentId?: number;
   eventId?: number;
+  /** Service-only explicit settled-review correction provenance. */
+  reviewMode?: 'CORRECTION';
+  reviewCorrectionReason?: string;
+  reviewCorrectionChangeId?: string;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
   snapshotActor?: string;
   snapshotReason?: string;

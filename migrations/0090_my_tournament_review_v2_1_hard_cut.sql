@@ -1,0 +1,795 @@
+-- My Tournament Review V2.1 hard cut.
+--
+-- This migration is intentionally destructive for the current season, but it
+-- is recoverable: the three review tables are copied to immutable backup
+-- tables and a manifest records row counts, revision distribution and a
+-- checksum before the old head/obligation rows are retired.  The deployment
+-- runbook restores these backup tables into a disposable database before the
+-- migration is allowed to proceed in production.
+
+CREATE SCHEMA IF NOT EXISTS extensions;
+
+-- Keep the database-side publication witness in lockstep with the Data and
+-- GraphQL semantic hash implementations.  Review operational metadata may be
+-- nested inside the immutable manifest shell; strip it recursively before
+-- hashing so an observation timestamp can never create a semantic revision.
+-- The function is argument-only, immutable, and never exposes table data.
+CREATE OR REPLACE FUNCTION extensions.strip_review_operational_metadata(input_value jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+STRICT
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+  object_entry record;
+  array_entry record;
+  output jsonb;
+BEGIN
+  IF jsonb_typeof(input_value) = 'object' THEN
+    output := '{}'::jsonb;
+    FOR object_entry IN
+      SELECT key, value AS child
+      FROM jsonb_each(input_value)
+      WHERE key NOT IN (
+        'freshness',
+        'observation',
+        'observedAt',
+        'lastObservedAt',
+        'publishedAt',
+        'updatedAt',
+        'createdAt'
+      )
+      ORDER BY key
+    LOOP
+      output := output || jsonb_build_object(
+        object_entry.key,
+        extensions.strip_review_operational_metadata(object_entry.child)
+      );
+    END LOOP;
+    RETURN output;
+  END IF;
+
+  IF jsonb_typeof(input_value) = 'array' THEN
+    output := '[]'::jsonb;
+    FOR array_entry IN
+      SELECT item.value AS child
+      FROM jsonb_array_elements(input_value) WITH ORDINALITY AS item(value, ordinal)
+      ORDER BY item.ordinal
+    LOOP
+      output := output || jsonb_build_array(
+        extensions.strip_review_operational_metadata(array_entry.child)
+      );
+    END LOOP;
+    RETURN output;
+  END IF;
+
+  RETURN input_value;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION extensions.strip_review_operational_metadata(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION extensions.strip_review_operational_metadata(jsonb)
+  TO letletme_graphql_reader, letletme_data_writer;
+
+-- `eligible_at` remains the source-change watermark.  Keep the first time a
+-- scope became eligible separately so repeated source retries cannot move the
+-- 24-hour degradation horizon forward forever.
+ALTER TABLE competition.tournament_review_obligations
+  ADD COLUMN IF NOT EXISTS first_eligible_at timestamptz;
+UPDATE competition.tournament_review_obligations
+SET first_eligible_at = eligible_at
+WHERE first_eligible_at IS NULL;
+ALTER TABLE competition.tournament_review_obligations
+  ALTER COLUMN first_eligible_at SET DEFAULT clock_timestamp(),
+  ALTER COLUMN first_eligible_at SET NOT NULL;
+
+DO $$
+DECLARE
+  installed_schema text;
+BEGIN
+  SELECT namespace.nspname
+    INTO installed_schema
+  FROM pg_extension extension_row
+  JOIN pg_namespace namespace ON namespace.oid = extension_row.extnamespace
+  WHERE extension_row.extname = 'pgcrypto';
+
+  IF installed_schema IS NULL THEN
+    EXECUTE 'CREATE EXTENSION pgcrypto WITH SCHEMA extensions';
+  ELSIF installed_schema <> 'extensions' THEN
+    EXECUTE 'ALTER EXTENSION pgcrypto SET SCHEMA extensions';
+  END IF;
+END $$;
+
+-- Do not use `LIKE ... INCLUDING ALL` here.  PostgreSQL derives copied index
+-- names from the destination relation and preserves source constraint names;
+-- that makes the catalog produced by a migrated database differ from the
+-- checked-in Drizzle declaration on some server versions.  The backup shape
+-- is deliberately the pre-reset shape, so spell it out with stable names and
+-- keep the parity contract deterministic.
+CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0090_backup (
+  season_id smallint NOT NULL,
+  tournament_id integer NOT NULL,
+  event_id integer NOT NULL,
+  revision bigint NOT NULL,
+  format text NOT NULL,
+  schema_version text NOT NULL DEFAULT 'my-tournament-review-v2',
+  metric_version text NOT NULL DEFAULT 'descriptive-v1',
+  event_data_checked_at timestamptz NOT NULL,
+  source_min_checked_at timestamptz NOT NULL,
+  source_max_checked_at timestamptz NOT NULL,
+  expected_subject_count integer NOT NULL,
+  ready_subject_count integer NOT NULL,
+  not_applicable_subject_count integer NOT NULL DEFAULT 0,
+  row_count integer NOT NULL,
+  content_sha256 text NOT NULL,
+  payload jsonb NOT NULL,
+  published_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_publications_0090_backup_pkey
+    PRIMARY KEY (season_id, tournament_id, event_id, revision),
+  CONSTRAINT tournament_review_publications_revision_positive
+    CHECK (revision > 0),
+  CONSTRAINT tournament_review_publications_format_check
+    CHECK (format IN ('POINTS', 'H2H', 'KNOCKOUT')),
+  CONSTRAINT tournament_review_publications_versions_check
+    CHECK (
+      schema_version = 'my-tournament-review-v2'
+      AND metric_version = 'descriptive-v1'
+    ),
+  CONSTRAINT tournament_review_publications_counts_check
+    CHECK (
+      expected_subject_count >= 0
+      AND ready_subject_count >= 0
+      AND not_applicable_subject_count >= 0
+      AND ready_subject_count + not_applicable_subject_count = expected_subject_count
+      AND row_count >= 0
+    ),
+  CONSTRAINT tournament_review_publications_hash_check
+    CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT tournament_review_publications_payload_check
+    CHECK (
+      jsonb_typeof(payload) = 'object'
+      AND payload ->> 'schemaVersion' = schema_version
+      AND payload ->> 'metricVersion' = metric_version
+      AND payload ->> 'format' = format
+      AND (
+        (format = 'POINTS' AND payload ? 'points' AND NOT (payload ? 'h2h') AND NOT (payload ? 'knockout'))
+        OR (format = 'H2H' AND payload ? 'h2h' AND NOT (payload ? 'points') AND NOT (payload ? 'knockout'))
+        OR (format = 'KNOCKOUT' AND payload ? 'knockout' AND NOT (payload ? 'points') AND NOT (payload ? 'h2h'))
+      )
+    ),
+  CONSTRAINT tournament_review_publications_source_span_check
+    CHECK (
+      source_min_checked_at <= event_data_checked_at
+      AND event_data_checked_at <= source_max_checked_at
+      AND source_max_checked_at <= published_at
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tournament_review_publication_season_id_tournament_id_event_idx
+  ON competition.tournament_review_publications_0090_backup
+    (season_id, tournament_id, event_id, content_sha256);
+CREATE INDEX IF NOT EXISTS tournament_review_publication_season_id_tournament_id_even_idx1
+  ON competition.tournament_review_publications_0090_backup
+    (season_id, tournament_id, event_id, published_at DESC NULLS LAST);
+
+CREATE TABLE IF NOT EXISTS competition.tournament_review_heads_0090_backup (
+  season_id smallint NOT NULL,
+  tournament_id integer NOT NULL,
+  event_id integer NOT NULL,
+  revision bigint NOT NULL,
+  content_sha256 text NOT NULL,
+  published_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_heads_0090_backup_pkey
+    PRIMARY KEY (season_id, tournament_id, event_id),
+  CONSTRAINT tournament_review_heads_hash_check
+    CHECK (content_sha256 ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS tournament_review_heads_0090__season_id_tournament_id_event_idx
+  ON competition.tournament_review_heads_0090_backup
+    (season_id, tournament_id, event_id DESC NULLS LAST);
+
+CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0090_backup (
+  season_id smallint NOT NULL,
+  tournament_id integer NOT NULL,
+  event_id integer NOT NULL,
+  format text NOT NULL,
+  state text NOT NULL DEFAULT 'PENDING',
+  eligible_at timestamptz NOT NULL,
+  next_attempt_at timestamptz,
+  execution_attempts integer NOT NULL DEFAULT 0,
+  source_rechecks integer NOT NULL DEFAULT 0,
+  lease_owner text,
+  lease_expires_at timestamptz,
+  first_attempt_at timestamptz,
+  last_attempt_at timestamptz,
+  ready_at timestamptz,
+  degraded_at timestamptz,
+  ready_revision bigint,
+  last_error_code text,
+  last_failure_fingerprint text,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  metadata_payload jsonb,
+  entry_metadata_payload jsonb,
+  group_assignment_payload jsonb,
+  first_eligible_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_obligations_0090_backup_pkey
+    PRIMARY KEY (season_id, tournament_id, event_id),
+  CONSTRAINT tournament_review_obligations_format_check
+    CHECK (format IN ('POINTS', 'H2H', 'KNOCKOUT')),
+  CONSTRAINT tournament_review_obligations_state_check
+    CHECK (state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING', 'READY', 'DEGRADED')),
+  CONSTRAINT tournament_review_obligations_attempts_check
+    CHECK (execution_attempts >= 0 AND source_rechecks >= 0),
+  CONSTRAINT tournament_review_obligations_lease_check
+    CHECK (
+      (lease_owner IS NULL AND lease_expires_at IS NULL)
+      OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+    ),
+  CONSTRAINT tournament_review_obligations_ready_check
+    CHECK (
+      (state = 'READY' AND ready_at IS NOT NULL AND ready_revision IS NOT NULL)
+      OR (state <> 'READY' AND ready_revision IS NULL)
+    ),
+  CONSTRAINT tournament_review_obligations_fingerprint_check
+    CHECK (
+      last_failure_fingerprint IS NULL
+      OR last_failure_fingerprint ~ '^[0-9a-f]{64}$'
+    ),
+  CONSTRAINT tournament_review_obligations_metadata_payload_check
+    CHECK (metadata_payload IS NULL OR jsonb_typeof(metadata_payload) = 'object'),
+  CONSTRAINT tournament_review_obligations_entry_metadata_payload_check
+    CHECK (entry_metadata_payload IS NULL OR jsonb_typeof(entry_metadata_payload) = 'array'),
+  CONSTRAINT tournament_review_obligations_group_assignment_payload_check
+    CHECK (group_assignment_payload IS NULL OR jsonb_typeof(group_assignment_payload) = 'object')
+);
+CREATE INDEX IF NOT EXISTS tournament_review_obligations_next_attempt_at_season_id_tou_idx
+  ON competition.tournament_review_obligations_0090_backup
+    (next_attempt_at, season_id, tournament_id, event_id)
+  WHERE state IN ('PENDING', 'WAITING_SOURCE', 'DEGRADED')
+    AND next_attempt_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tournament_review_obligations_lease_expires_at_season_id_to_idx
+  ON competition.tournament_review_obligations_0090_backup
+    (lease_expires_at, season_id, tournament_id, event_id)
+  WHERE state = 'PROCESSING';
+
+CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
+  backup_id uuid PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  season_id smallint NOT NULL,
+  publications_rows bigint NOT NULL,
+  heads_rows bigint NOT NULL,
+  obligations_rows bigint NOT NULL,
+  publication_revision_distribution jsonb NOT NULL,
+  publications_sha256 text NOT NULL,
+  heads_sha256 text NOT NULL,
+  obligations_sha256 text NOT NULL,
+  restore_rehearsal_required boolean NOT NULL DEFAULT true,
+  restore_rehearsal_completed_at timestamptz,
+  backfill_completed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_v2_1_backup_manifest_sha_check CHECK (
+    publications_sha256 ~ '^[0-9a-f]{64}$'
+    AND heads_sha256 ~ '^[0-9a-f]{64}$'
+    AND obligations_sha256 ~ '^[0-9a-f]{64}$'
+  )
+);
+REVOKE ALL ON TABLE ops.tournament_review_v2_1_backup_manifest FROM PUBLIC;
+GRANT SELECT ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
+GRANT UPDATE (backfill_completed_at)
+  ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
+
+-- A schema-only deployment can apply 0090 before the first current season is
+-- seeded.  Once that season is present, the runtime writer must be able to
+-- convert the season-0 sentinel into a per-season marker without receiving
+-- arbitrary INSERT access to the backup manifest.  Keep that transition in a
+-- narrowly validated SECURITY DEFINER function owned by the migration role.
+CREATE OR REPLACE FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker(
+  requested_season_id smallint,
+  rehearsal_completed_at timestamptz
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+  IF requested_season_id <= 0 THEN
+    RAISE EXCEPTION 'backup marker season must be positive';
+  END IF;
+  IF rehearsal_completed_at IS NULL THEN
+    RAISE EXCEPTION 'backup marker restore rehearsal timestamp is required';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM fpl.seasons
+    WHERE season_id = requested_season_id
+      AND is_current
+  ) THEN
+    RAISE EXCEPTION 'backup marker season must be current';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM ops.tournament_review_v2_1_backup_manifest
+    WHERE season_id = requested_season_id
+  ) THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO ops.tournament_review_v2_1_backup_manifest (
+    season_id, publications_rows, heads_rows, obligations_rows,
+    publication_revision_distribution, publications_sha256, heads_sha256,
+    obligations_sha256, restore_rehearsal_required,
+    restore_rehearsal_completed_at, backfill_completed_at
+  ) VALUES (
+    requested_season_id, 0, 0, 0, '{}'::jsonb,
+    encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+    encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+    encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+    false, rehearsal_completed_at, NULL
+  );
+  RETURN true;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker(smallint, timestamptz)
+  FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker(smallint, timestamptz)
+  TO letletme_data_writer;
+
+DO $migration$
+DECLARE
+  current_season smallint;
+  publication_count bigint;
+  head_count bigint;
+  obligation_count bigint;
+  publication_sha text;
+  head_sha text;
+  obligation_sha text;
+  revision_distribution jsonb;
+BEGIN
+  SELECT season_id INTO current_season
+  FROM fpl.seasons
+  WHERE is_current
+  ORDER BY season_id DESC
+  LIMIT 1;
+
+  IF current_season IS NULL THEN
+    -- Schema-only CI/restore databases may be empty before the first FPL
+    -- season is seeded. Record a durable sentinel so deployment can prove the
+    -- migration completed while a later first season can bootstrap its own
+    -- per-season marker before backfill.
+    INSERT INTO ops.tournament_review_v2_1_backup_manifest (
+      season_id, publications_rows, heads_rows, obligations_rows,
+      publication_revision_distribution, publications_sha256, heads_sha256,
+      obligations_sha256, restore_rehearsal_required,
+      restore_rehearsal_completed_at, backfill_completed_at
+    )
+    SELECT 0, 0, 0, 0, '{}'::jsonb,
+           encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+           encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+           encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+           false, clock_timestamp(), clock_timestamp()
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM ops.tournament_review_v2_1_backup_manifest
+      WHERE season_id = 0
+    );
+    RAISE NOTICE '0090 recorded an empty-database cutover marker';
+    RETURN;
+  END IF;
+
+  -- The deployment runs verify-backup-restore.sh against a disposable
+  -- database before invoking the migration and passes the result as a
+  -- transaction-local setting. Refuse to create the destructive backup/reset
+  -- transaction without that proof; this prevents a direct migration run
+  -- from deleting the only recoverable current-season review rows.
+  IF current_setting('letletme.review_restore_rehearsal', true) IS DISTINCT FROM 'true' THEN
+    RAISE EXCEPTION
+      '0090 restore rehearsal is required before current-season review reset';
+  END IF;
+
+  -- Copy only the current season.  Historical descriptive-v1 evidence remains
+  -- in the live tables and is never exposed by the V2.1 reader.
+  INSERT INTO competition.tournament_review_publications_0090_backup
+  SELECT * FROM competition.tournament_review_publications
+  WHERE season_id = current_season;
+  INSERT INTO competition.tournament_review_heads_0090_backup
+  SELECT * FROM competition.tournament_review_heads
+  WHERE season_id = current_season;
+  INSERT INTO competition.tournament_review_obligations_0090_backup
+  SELECT * FROM competition.tournament_review_obligations
+  WHERE season_id = current_season;
+
+  SELECT count(*) INTO publication_count
+  FROM competition.tournament_review_publications_0090_backup;
+  SELECT count(*) INTO head_count
+  FROM competition.tournament_review_heads_0090_backup;
+  SELECT count(*) INTO obligation_count
+  FROM competition.tournament_review_obligations_0090_backup;
+
+  SELECT COALESCE(jsonb_object_agg(revision::text, revision_count), '{}'::jsonb)
+    INTO revision_distribution
+  FROM (
+    SELECT revision, count(*)::bigint AS revision_count
+    FROM competition.tournament_review_publications_0090_backup
+    GROUP BY revision
+    ORDER BY revision
+  ) revisions;
+
+  -- Canonical JSON over deterministic row ordering is the backup checksum.
+  SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
+      tournament_id, event_id, revision)::text, '[]'), 'sha256'), 'hex')
+    INTO publication_sha
+  FROM competition.tournament_review_publications_0090_backup row;
+  SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
+      tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
+    INTO head_sha
+  FROM competition.tournament_review_heads_0090_backup row;
+  SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
+      tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
+    INTO obligation_sha
+  FROM competition.tournament_review_obligations_0090_backup row;
+
+  INSERT INTO ops.tournament_review_v2_1_backup_manifest (
+    season_id, publications_rows, heads_rows, obligations_rows,
+    publication_revision_distribution, publications_sha256, heads_sha256,
+    obligations_sha256, restore_rehearsal_required, restore_rehearsal_completed_at
+  ) VALUES (
+    current_season, publication_count, head_count, obligation_count,
+    revision_distribution, publication_sha, head_sha, obligation_sha,
+    false, clock_timestamp()
+  );
+
+  -- Current-season V1/V2 publication identity is intentionally invalidated;
+  -- obligations are re-seeded by the bounded V2.1 bootstrap job.
+  DELETE FROM competition.tournament_review_heads WHERE season_id = current_season;
+  DELETE FROM competition.tournament_review_publications WHERE season_id = current_season;
+  DELETE FROM competition.tournament_review_obligations WHERE season_id = current_season;
+END
+$migration$;
+
+-- The hard cut has no compatibility alias for the retired review contract.
+-- Move durable governance evidence to the V2.1 key while preserving any
+-- already-open V2.1 case when a legacy duplicate occupies the same dedupe
+-- identity.  This keeps freshness windows and repair lanes observable after
+-- the registry switches to the single V2.1 contract.
+DO $migration$
+DECLARE
+  duplicate_row record;
+BEGIN
+  -- `slo_key` is the identity column.  Merge an old row into an already
+  -- migrated V2.1 row before changing the key, otherwise the unique identity
+  -- constraint would abort the cutover halfway through the governance table.
+  FOR duplicate_row IN
+    SELECT legacy.window_id AS legacy_window_id,
+           canonical.window_id AS canonical_window_id,
+           legacy.evidence AS legacy_evidence
+    FROM ops.freshness_slo_windows legacy
+    JOIN ops.freshness_slo_windows canonical
+      ON canonical.slo_key = 'my-tournament-review-v2.1'
+     AND canonical.scope_key = legacy.scope_key
+     AND canonical.period_key = legacy.period_key
+     AND canonical.window_id <> legacy.window_id
+    WHERE legacy.slo_key = 'my-tournament-review-v2'
+       OR legacy.contract_key = 'my-tournament-review-v2'
+  LOOP
+    UPDATE ops.freshness_slo_windows AS canonical
+    SET -- The duplicate rows are one logical SLO window.  Keep the earliest
+        -- eligibility boundary, then merge every monotonic observation and
+        -- terminal result before deleting the legacy identity.  In
+        -- particular, a canonical PENDING row must not erase a legacy MET or
+        -- BREACHED result that already has completion/recovery evidence.
+        eligible_at = LEAST(canonical.eligible_at, legacy.eligible_at),
+        due_at = LEAST(canonical.due_at, legacy.due_at),
+        event_id = COALESCE(canonical.event_id, legacy.event_id),
+        source_day = COALESCE(canonical.source_day, legacy.source_day),
+        obligation_due_at = CASE
+          WHEN canonical.obligation_due_at IS NULL THEN legacy.obligation_due_at
+          WHEN legacy.obligation_due_at IS NULL THEN canonical.obligation_due_at
+          ELSE GREATEST(canonical.obligation_due_at, legacy.obligation_due_at)
+        END,
+        source_checked_at = CASE
+          WHEN canonical.source_checked_at IS NULL THEN legacy.source_checked_at
+          WHEN legacy.source_checked_at IS NULL THEN canonical.source_checked_at
+          ELSE GREATEST(canonical.source_checked_at, legacy.source_checked_at)
+        END,
+        pg_published_at = CASE
+          WHEN canonical.pg_published_at IS NULL THEN legacy.pg_published_at
+          WHEN legacy.pg_published_at IS NULL THEN canonical.pg_published_at
+          ELSE GREATEST(canonical.pg_published_at, legacy.pg_published_at)
+        END,
+        redis_seen_at = CASE
+          WHEN canonical.redis_seen_at IS NULL THEN legacy.redis_seen_at
+          WHEN legacy.redis_seen_at IS NULL THEN canonical.redis_seen_at
+          ELSE GREATEST(canonical.redis_seen_at, legacy.redis_seen_at)
+        END,
+        graphql_seen_at = CASE
+          WHEN canonical.graphql_seen_at IS NULL THEN legacy.graphql_seen_at
+          WHEN legacy.graphql_seen_at IS NULL THEN canonical.graphql_seen_at
+          ELSE GREATEST(canonical.graphql_seen_at, legacy.graphql_seen_at)
+        END,
+        web_seen_at = CASE
+          WHEN canonical.web_seen_at IS NULL THEN legacy.web_seen_at
+          WHEN legacy.web_seen_at IS NULL THEN canonical.web_seen_at
+          ELSE GREATEST(canonical.web_seen_at, legacy.web_seen_at)
+        END,
+        -- Revisions follow the milestone that observed them.  Falling back to
+        -- the other row keeps a complete terminal record when the duplicate
+        -- was only partially observed.
+        producer_revision = CASE
+          WHEN canonical.pg_published_at IS NULL THEN legacy.producer_revision
+          WHEN legacy.pg_published_at IS NULL THEN canonical.producer_revision
+          WHEN legacy.pg_published_at > canonical.pg_published_at THEN
+            COALESCE(legacy.producer_revision, canonical.producer_revision)
+          ELSE COALESCE(canonical.producer_revision, legacy.producer_revision)
+        END,
+        redis_revision = CASE
+          WHEN canonical.redis_seen_at IS NULL THEN legacy.redis_revision
+          WHEN legacy.redis_seen_at IS NULL THEN canonical.redis_revision
+          WHEN legacy.redis_seen_at > canonical.redis_seen_at THEN
+            COALESCE(legacy.redis_revision, canonical.redis_revision)
+          ELSE COALESCE(canonical.redis_revision, legacy.redis_revision)
+        END,
+        graphql_revision = CASE
+          WHEN canonical.graphql_seen_at IS NULL THEN legacy.graphql_revision
+          WHEN legacy.graphql_seen_at IS NULL THEN canonical.graphql_revision
+          WHEN legacy.graphql_seen_at > canonical.graphql_seen_at THEN
+            COALESCE(legacy.graphql_revision, canonical.graphql_revision)
+          ELSE COALESCE(canonical.graphql_revision, legacy.graphql_revision)
+        END,
+        web_revision = CASE
+          WHEN canonical.web_seen_at IS NULL THEN legacy.web_revision
+          WHEN legacy.web_seen_at IS NULL THEN canonical.web_revision
+          WHEN legacy.web_seen_at > canonical.web_seen_at THEN
+            COALESCE(legacy.web_revision, canonical.web_revision)
+          ELSE COALESCE(canonical.web_revision, legacy.web_revision)
+        END,
+        expected_count = CASE
+          WHEN canonical.expected_count IS NULL THEN legacy.expected_count
+          WHEN legacy.expected_count IS NULL THEN canonical.expected_count
+          ELSE GREATEST(canonical.expected_count, legacy.expected_count)
+        END,
+        observed_count = CASE
+          WHEN canonical.observed_count IS NULL THEN legacy.observed_count
+          WHEN legacy.observed_count IS NULL THEN canonical.observed_count
+          ELSE GREATEST(canonical.observed_count, legacy.observed_count)
+        END,
+        not_applicable_count = GREATEST(
+          canonical.not_applicable_count,
+          legacy.not_applicable_count
+        ),
+        completeness_status = CASE
+          WHEN CASE legacy.completeness_status
+            WHEN 'INVALID' THEN 4
+            WHEN 'INCOMPLETE' THEN 3
+            WHEN 'COMPLETE' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END > CASE canonical.completeness_status
+            WHEN 'INVALID' THEN 4
+            WHEN 'INCOMPLETE' THEN 3
+            WHEN 'COMPLETE' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END THEN legacy.completeness_status
+          ELSE canonical.completeness_status
+        END,
+        status = CASE
+          WHEN CASE legacy.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END > CASE canonical.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END THEN legacy.status
+          ELSE canonical.status
+        END,
+        -- Prefer the breach code attached to the row whose terminal status
+        -- wins; retain the other code when the winning row is incomplete.
+        breach_code = CASE
+          WHEN CASE legacy.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END > CASE canonical.status
+            WHEN 'INVALID' THEN 4
+            WHEN 'BREACHED' THEN 3
+            WHEN 'MET' THEN 2
+            WHEN 'NOT_APPLICABLE' THEN 1
+            ELSE 0
+          END THEN COALESCE(legacy.breach_code, canonical.breach_code)
+          ELSE COALESCE(canonical.breach_code, legacy.breach_code)
+        END,
+        recovered_at = CASE
+          WHEN canonical.recovered_at IS NULL THEN legacy.recovered_at
+          WHEN legacy.recovered_at IS NULL THEN canonical.recovered_at
+          ELSE LEAST(canonical.recovered_at, legacy.recovered_at)
+        END,
+        recovery_revision = CASE
+          WHEN canonical.recovered_at IS NULL THEN legacy.recovery_revision
+          WHEN legacy.recovered_at IS NULL THEN canonical.recovery_revision
+          WHEN legacy.recovered_at < canonical.recovered_at THEN
+            COALESCE(legacy.recovery_revision, canonical.recovery_revision)
+          ELSE COALESCE(canonical.recovery_revision, legacy.recovery_revision)
+        END,
+        created_at = LEAST(canonical.created_at, legacy.created_at),
+        -- Merge both evidence objects at the top level, then retain a
+        -- namespaced copy of the retired row for audit/recovery inspection.
+        evidence = legacy.evidence || canonical.evidence || jsonb_build_object(
+          'supersededLegacyWindowId', duplicate_row.legacy_window_id,
+          'supersededLegacyEvidence', duplicate_row.legacy_evidence,
+          'supersededLegacyRow', to_jsonb(legacy)
+        ),
+        updated_at = clock_timestamp()
+    FROM ops.freshness_slo_windows AS legacy
+    WHERE canonical.window_id = duplicate_row.canonical_window_id
+      AND legacy.window_id = duplicate_row.legacy_window_id;
+    DELETE FROM ops.freshness_slo_windows
+    WHERE window_id = duplicate_row.legacy_window_id;
+  END LOOP;
+END
+$migration$;
+
+UPDATE ops.freshness_slo_windows
+SET slo_key = 'my-tournament-review-v2.1',
+    contract_key = 'my-tournament-review-v2.1',
+    updated_at = clock_timestamp()
+WHERE slo_key = 'my-tournament-review-v2'
+   OR contract_key = 'my-tournament-review-v2';
+
+WITH conflicting_cases AS (
+  SELECT legacy.case_id
+  FROM ops.data_governance_cases legacy
+  JOIN ops.data_governance_cases current_case
+    ON current_case.case_kind = legacy.case_kind
+   AND current_case.contract_key = 'my-tournament-review-v2.1'
+   AND current_case.lane = legacy.lane
+   AND current_case.scope_key = legacy.scope_key
+   AND current_case.fingerprint = legacy.fingerprint
+   AND current_case.status IN ('OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW')
+  WHERE legacy.contract_key = 'my-tournament-review-v2'
+    AND legacy.status IN ('OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW')
+)
+UPDATE ops.data_governance_cases legacy
+SET status = 'DISMISSED',
+    last_error = 'Retired review contract superseded by my-tournament-review-v2.1',
+    recovered_at = COALESCE(recovered_at, clock_timestamp()),
+    updated_at = clock_timestamp()
+WHERE legacy.case_id IN (SELECT case_id FROM conflicting_cases);
+
+UPDATE ops.data_governance_cases
+SET contract_key = 'my-tournament-review-v2.1',
+    updated_at = clock_timestamp()
+WHERE contract_key = 'my-tournament-review-v2';
+
+ALTER TABLE competition.tournament_review_publications
+  DROP CONSTRAINT IF EXISTS tournament_review_publications_versions_check;
+-- A semantic hash may legitimately recur after an audited correction (A -> B
+-- -> A).  Revision, not hash, is the immutable audit identity; remove the V1
+-- uniqueness fence before the V2.1 writer can allocate that next revision.
+DROP INDEX IF EXISTS competition.tournament_review_publications_content_unique;
+ALTER TABLE competition.tournament_review_publications
+  ALTER COLUMN schema_version SET DEFAULT 'my-tournament-review-v2.1',
+  ALTER COLUMN metric_version SET DEFAULT 'settled-review-v2';
+ALTER TABLE competition.tournament_review_publications
+  ADD CONSTRAINT tournament_review_publications_versions_check CHECK (
+    (schema_version = 'my-tournament-review-v2' AND metric_version = 'descriptive-v1')
+    OR (schema_version = 'my-tournament-review-v2.1' AND metric_version = 'settled-review-v2')
+  );
+
+ALTER TABLE competition.tournament_review_publications
+  ADD COLUMN IF NOT EXISTS correction_reason text,
+  ADD COLUMN IF NOT EXISTS correction_change_id text;
+ALTER TABLE competition.tournament_review_publications
+  ADD CONSTRAINT tournament_review_publications_correction_check CHECK (
+    schema_version <> 'my-tournament-review-v2.1'
+    OR (
+      (revision = 1 AND correction_reason IS NULL AND correction_change_id IS NULL)
+      OR (
+        revision > 1
+        AND correction_reason IS NOT NULL
+        AND correction_change_id IS NOT NULL
+        AND btrim(correction_reason) <> ''
+        AND btrim(correction_change_id) <> ''
+      )
+    )
+  );
+
+ALTER TABLE competition.tournament_review_obligations
+  ADD COLUMN IF NOT EXISTS last_observed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS last_noop_at timestamptz,
+  ADD COLUMN IF NOT EXISTS last_semantic_change_at timestamptz,
+  ADD COLUMN IF NOT EXISTS repair_issue_id bigint,
+  ADD COLUMN IF NOT EXISTS correction_reason text,
+  ADD COLUMN IF NOT EXISTS correction_change_id text;
+ALTER TABLE competition.tournament_review_obligations
+  ADD CONSTRAINT tournament_review_obligations_correction_check CHECK (
+    (correction_reason IS NULL AND correction_change_id IS NULL)
+    OR (
+      correction_reason IS NOT NULL
+      AND correction_change_id IS NOT NULL
+      AND btrim(correction_reason) <> ''
+      AND btrim(correction_change_id) <> ''
+    )
+  );
+
+CREATE TABLE IF NOT EXISTS competition.tournament_review_publication_chunks (
+  season_id smallint NOT NULL,
+  tournament_id integer NOT NULL,
+  event_id integer NOT NULL,
+  revision bigint NOT NULL,
+  section_key text NOT NULL,
+  chunk_index integer NOT NULL,
+  item_count integer NOT NULL,
+  chunk_sha256 text NOT NULL,
+  items jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_publication_chunks_pkey PRIMARY KEY
+    (season_id, tournament_id, event_id, revision, section_key, chunk_index),
+  CONSTRAINT tournament_review_publication_chunks_publication_fk FOREIGN KEY
+    (season_id, tournament_id, event_id, revision)
+    REFERENCES competition.tournament_review_publications
+      (season_id, tournament_id, event_id, revision) ON DELETE CASCADE,
+  CONSTRAINT tournament_review_publication_chunks_count_check CHECK (
+    item_count BETWEEN 0 AND 100 AND jsonb_typeof(items) = 'array'
+    AND jsonb_array_length(items) = item_count
+  ),
+  CONSTRAINT tournament_review_publication_chunks_index_check CHECK (chunk_index >= 0),
+  CONSTRAINT tournament_review_publication_chunks_sha_check CHECK (
+    chunk_sha256 ~ '^[0-9a-f]{64}$'
+  )
+);
+
+CREATE INDEX IF NOT EXISTS tournament_review_publication_chunks_lookup_idx
+  ON competition.tournament_review_publication_chunks
+    (season_id, tournament_id, event_id, revision, section_key, chunk_index);
+
+REVOKE ALL ON TABLE competition.tournament_review_publication_chunks FROM PUBLIC;
+GRANT SELECT, INSERT, DELETE ON TABLE competition.tournament_review_publication_chunks
+  TO letletme_data_writer;
+GRANT UPDATE ON TABLE competition.tournament_review_publication_chunks
+  TO letletme_data_writer;
+GRANT SELECT ON TABLE competition.tournament_review_publication_chunks
+  TO letletme_graphql_reader;
+ALTER TABLE competition.tournament_review_publication_chunks ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tournament_review_chunks_writer_insert ON
+  competition.tournament_review_publication_chunks;
+DROP POLICY IF EXISTS tournament_review_chunks_writer_select ON
+  competition.tournament_review_publication_chunks;
+DROP POLICY IF EXISTS tournament_review_chunks_writer_delete ON
+  competition.tournament_review_publication_chunks;
+DROP POLICY IF EXISTS tournament_review_chunks_writer_update ON
+  competition.tournament_review_publication_chunks;
+DROP POLICY IF EXISTS tournament_review_chunks_reader_select ON
+  competition.tournament_review_publication_chunks;
+CREATE POLICY tournament_review_chunks_writer_insert ON
+  competition.tournament_review_publication_chunks FOR INSERT TO letletme_data_writer
+  WITH CHECK (true);
+CREATE POLICY tournament_review_chunks_writer_select ON
+  competition.tournament_review_publication_chunks FOR SELECT TO letletme_data_writer
+  USING (true);
+CREATE POLICY tournament_review_chunks_writer_delete ON
+  competition.tournament_review_publication_chunks FOR DELETE TO letletme_data_writer
+  USING (true);
+CREATE POLICY tournament_review_chunks_writer_update ON
+  competition.tournament_review_publication_chunks FOR UPDATE TO letletme_data_writer
+  USING (true) WITH CHECK (true);
+CREATE POLICY tournament_review_chunks_reader_select ON
+  competition.tournament_review_publication_chunks FOR SELECT TO letletme_graphql_reader
+  USING (true);
+
+COMMENT ON COLUMN competition.tournament_review_publications.content_sha256 IS
+  'Physical column retained for history; V2.1 consumers expose it as semanticSha256.';
+COMMENT ON TABLE competition.tournament_review_publication_chunks IS
+  'Immutable <=100-item sections for settled-review-v2 publications.';

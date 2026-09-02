@@ -14,6 +14,7 @@ import {
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
+import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -123,6 +124,23 @@ export async function finalizePublishedTournamentSetup(
   // terminally marked ready.
   await tournamentRosterRepository.markReadyAndResume(season, tournamentId);
   await tournamentInfoRepository.markSetupResult(season, tournamentId, 'ready', null, warningCount);
+  // A custom tournament must enter the settled-review pipeline immediately
+  // after setup becomes READY. The targeted worker reconciles all eligible
+  // historical events for this tournament in one bounded batch; the global
+  // five-minute scan remains the durable safety net.
+  try {
+    await enqueueTournamentReview(season, 'api', {
+      tournamentId,
+      attempts: 3,
+      backoffDelayMs: 60_000,
+      deduplicationId: `tournament-review-bootstrap-${season.seasonCode}-${tournamentId}`,
+    });
+  } catch (error) {
+    logError('Failed to enqueue targeted tournament review bootstrap', error, {
+      tournamentId,
+      season: season.seasonCode,
+    });
+  }
 }
 
 export async function setupTournamentStructure(

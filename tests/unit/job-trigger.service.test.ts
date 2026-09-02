@@ -13,6 +13,7 @@ describe('job-trigger service', () => {
     expect(jobs.length).toBeGreaterThan(0);
     expect(jobs.some((job) => job.name === 'core-snapshot-sync')).toBe(true);
     expect(jobs.some((job) => job.name === 'player-prices')).toBe(true);
+    expect(jobs.some((job) => job.name === 'tournament-review-correction')).toBe(true);
     expect(jobs.every((job) => job.name && job.description && job.schedule)).toBe(true);
   });
 

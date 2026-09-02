@@ -257,17 +257,47 @@ The worker is downstream of finalization. It will not publish an event until
 selected format's source rows are complete and fresh through that timestamp. A
 source-not-ready result increments `source_rechecks` without consuming an
 execution attempt; source delays retry at 60s/180s/600s. Execution failures
-retry at 60s/300s/900s. After those bounded attempts the obligation is
-`DEGRADED` and is repaired every 15 minutes for up to 24 hours from
-eligibility.
+retry at 60s/300s/900s. After those bounded attempts the obligation remains
+`WAITING_SOURCE` or `PENDING` and is repaired every 15 minutes until the
+24-hour eligibility horizon; only then does it become `DEGRADED` and move to
+an hourly retry.
 
 Success evidence is the committed immutable publication plus the matching
 atomic head and `READY` obligation. A BullMQ completion record alone is not
 success evidence. The publication transaction uses repeatable-read plus a
 scope advisory lock, content hashes the JSON payload, reuses identical content,
-and advances only that tournament/event head. Custom tournaments use this same
-backfill after `setup_status = 'ready'`; no second creation-time scheduler is
-required.
+and advances only that tournament/event head. Custom tournaments enqueue a
+targeted bootstrap immediately after `setup_status = 'ready'`, then use this
+same bounded backfill; the global five-minute scan remains the safety net.
+
+### V2.1 hard-cut backfill gate
+
+After migration `0090` removes the current-season review rows, the release
+must drain them with the bounded backfill command below while the review lane
+is quiesced:
+
+Before migration `0090` is applied, the deploy lane must restore the verified
+pre-migration dump into the disposable `DATABASE_RESTORE_REHEARSAL_URL`
+database. The migration receives a transaction-local approval only after that
+restore, ledger-tail, and key-count check succeeds; a direct migration run
+without the rehearsal fails closed before deleting any review row.
+
+```sh
+MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES \
+  bun scripts/backfill-tournament-review-v2.ts \
+  --season YYYY --batch-size 100 --max-batches 10000
+```
+
+The command runs the normal reconciliation/publisher in batches of at most 100
+scopes, then fails closed unless every eligible scope is `READY`, every head is
+coherent, and no publication has incomplete chunks. It is intentionally
+separate from the five-minute scheduler's batch of 20: the scheduler is the
+steady-state repair loop, while this command is the one-time post-reset gate.
+Do not reopen the review page or switch the GraphQL slot until this command
+returns a complete status object. A source or execution failure leaves the
+obligation in its durable retry state and produces a non-zero exit for the
+release operator to investigate; it is never silently treated as a successful
+partial backfill.
 
 ## Gate definitions
 

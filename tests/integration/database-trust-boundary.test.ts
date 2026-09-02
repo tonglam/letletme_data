@@ -349,6 +349,7 @@ describe('database trust boundary', () => {
       'season_imports',
       'sync_items',
       'sync_runs',
+      'tournament_review_v2_1_backup_manifest',
     ]);
 
     const [writerReportingBoundary] = await sql<

@@ -35,9 +35,11 @@ import {
   enqueuePostMatchConsolidation,
   enqueueMyFplSnapshot,
   enqueueMyFplSnapshotOutbox,
+  enqueueTournamentReview,
   enqueueTournamentTrendsRepair,
 } from '../jobs/maintenance.jobs';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
+import { requestTournamentReviewCorrection } from './tournament-review-publication.service';
 
 export type TriggerableJobInfo = {
   name: string;
@@ -98,6 +100,14 @@ const COMPATIBILITY_MANUAL_ALIASES: TriggerableJobInfo[] = [
   schedule: 'manual compatibility alias; schedule is owned by the registry',
 }));
 
+const EXPLICIT_MANUAL_JOBS: TriggerableJobInfo[] = [
+  {
+    name: 'tournament-review-correction',
+    description: 'Service-only settled tournament review correction with Change ID provenance',
+    schedule: 'manual correction; no scheduler cadence',
+  },
+];
+
 function requirePlayerPricesChangeDate(input: unknown): string {
   const changeDate =
     input && typeof input === 'object' && !Array.isArray(input)
@@ -130,6 +140,64 @@ function readMarketSourceDay(input: unknown): string | undefined {
     );
   }
   return sourceDay;
+}
+
+type TournamentReviewCorrectionInput = {
+  tournamentId: number;
+  eventId: number;
+  mode: 'CORRECTION';
+  reason: string;
+  changeId: string;
+};
+
+function readTournamentReviewCorrectionInput(input: unknown): TournamentReviewCorrectionInput {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ValidationError(
+      'Tournament review correction input must be an object',
+      'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+    );
+  }
+  const value = input as Record<string, unknown>;
+  const readPositiveInt = (key: 'tournamentId' | 'eventId', max?: number): number => {
+    const candidate = value[key];
+    if (
+      typeof candidate !== 'number' ||
+      !Number.isSafeInteger(candidate) ||
+      candidate <= 0 ||
+      (max !== undefined && candidate > max)
+    ) {
+      throw new ValidationError(
+        `Tournament review correction ${key} must be a positive integer`,
+        'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+      );
+    }
+    return candidate;
+  };
+  const tournamentId = readPositiveInt('tournamentId');
+  const eventId = readPositiveInt('eventId', 38);
+  if (value.mode !== 'CORRECTION') {
+    throw new ValidationError(
+      'Tournament review correction mode must be CORRECTION',
+      'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+    );
+  }
+  const readText = (key: 'reason' | 'changeId'): string => {
+    const candidate = value[key];
+    if (typeof candidate !== 'string' || candidate.trim() === '') {
+      throw new ValidationError(
+        `Tournament review correction ${key} is required`,
+        'TOURNAMENT_REVIEW_CORRECTION_INVALID',
+      );
+    }
+    return candidate.trim();
+  };
+  return {
+    tournamentId,
+    eventId,
+    mode: 'CORRECTION',
+    reason: readText('reason'),
+    changeId: readText('changeId'),
+  };
 }
 
 type MyFplManualSnapshotInput = {
@@ -211,6 +279,34 @@ function requireManualFinalOverride(input: MyFplManualSnapshotInput): void {
 
 function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
+    'tournament-review-correction': async () => {
+      const requested = readTournamentReviewCorrectionInput(input);
+      const season = await seasonRepository.findCurrent();
+      const correctionEventIds = await requestTournamentReviewCorrection(
+        season,
+        requested.tournamentId,
+        requested.eventId,
+        requested.reason,
+        requested.changeId,
+      );
+      let lastJobId: string | number | undefined;
+      for (const correctionEventId of correctionEventIds.sort((left, right) => left - right)) {
+        const job = await enqueueTournamentReview(season, 'manual', {
+          tournamentId: requested.tournamentId,
+          eventId: correctionEventId,
+          reviewMode: 'CORRECTION',
+          reviewCorrectionReason: requested.reason,
+          reviewCorrectionChangeId: requested.changeId,
+          deduplicationId: `tournament-review-correction-${season.seasonCode}-${requested.tournamentId}-${correctionEventId}-${requested.changeId}`,
+        });
+        lastJobId = job.id;
+      }
+      return {
+        kind: 'enqueued' as const,
+        jobId: lastJobId,
+        message: `Enqueued ${correctionEventIds.length} tournament review correction job(s)`,
+      };
+    },
     'event-current-refresh': () => runManualEventCurrentRefresh(),
     'core-current-reconcile': () => runManualEventCurrentRefresh(),
     'core-snapshot-sync': async () => {
@@ -416,7 +512,10 @@ export function listTriggerableJobs(): TriggerableJobInfo[] {
       schedule: `${definition.cadence} (${definition.timezone}); catch-up=${definition.catchUpPolicy}`,
     }));
   const byName = new Map(
-    [...registered, ...COMPATIBILITY_MANUAL_ALIASES].map((job) => [job.name, job]),
+    [...registered, ...COMPATIBILITY_MANUAL_ALIASES, ...EXPLICIT_MANUAL_JOBS].map((job) => [
+      job.name,
+      job,
+    ]),
   );
   return [...byName.values()];
 }
@@ -430,6 +529,9 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
   }
   if (name === 'player-values-sync' || name === 'market-daily') {
     readMarketSourceDay(input);
+  }
+  if (name === 'tournament-review-correction') {
+    readTournamentReviewCorrectionInput(input);
   }
   const jobMap = buildJobMap(input);
   const job = jobMap[name];
@@ -474,6 +576,18 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
         ? `Job '${name}' is already pending (${jobId})`
         : `Job '${name}' is pending reconciliation`,
     };
+  }
+
+  // Some service-only adapters return a complete typed trigger result rather
+  // than a BullMQ Job object. Preserve that result verbatim so correction
+  // requests retain their enqueue count and last job id at the HTTP boundary.
+  if (
+    result &&
+    typeof result === 'object' &&
+    'kind' in result &&
+    (result as { kind?: unknown }).kind === 'enqueued'
+  ) {
+    return result as JobTriggerResult;
   }
 
   logInfo(`Manual job enqueued: ${name}`);

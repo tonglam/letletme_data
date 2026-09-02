@@ -2,8 +2,9 @@
 
 set -euo pipefail
 
-dump_path=${1:?usage: verify-backup-restore.sh /absolute/path/to/file.dump}
-target_url=${2:?usage: verify-backup-restore.sh /absolute/path/to/file.dump postgresql://...}
+dump_path=${1:?usage: verify-backup-restore.sh /container/path/to/file.dump}
+target_url=${2:?usage: verify-backup-restore.sh /container/path/to/file.dump postgresql://target postgresql://source}
+source_url=${3:?usage: verify-backup-restore.sh /container/path/to/file.dump postgresql://target postgresql://source}
 dump_dir=$(dirname "$dump_path")
 dump_base=$(basename "$dump_path" .dump)
 checksum_path="$dump_dir/${dump_base}.sha256"
@@ -28,6 +29,15 @@ test -n "$manifest_major"
 test -n "$manifest_ledger_tail"
 pg_restore --list "$dump_path" >/dev/null
 psql "$target_url" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null
+identity_query="SELECT current_database() || '|' || COALESCE(inet_server_addr()::text, 'local') || '|' || COALESCE(inet_server_port()::text, '0') || '|' || (SELECT oid::text FROM pg_database WHERE datname = current_database())"
+source_identity=$(psql "$source_url" -v ON_ERROR_STOP=1 -Atqc "$identity_query")
+target_identity=$(psql "$target_url" -v ON_ERROR_STOP=1 -Atqc "$identity_query")
+test -n "$source_identity"
+test -n "$target_identity"
+if [[ "$source_identity" = "$target_identity" ]]; then
+  echo 'backup restore rehearsal target has the same database identity as the source' >&2
+  exit 1
+fi
 pg_restore --clean --if-exists --no-owner --no-acl --dbname="$target_url" "$dump_path"
 target_major=$(psql "$target_url" -Atqc 'SHOW server_version_num')
 target_major=$((target_major / 10000))

@@ -4,11 +4,18 @@ import type postgres from 'postgres';
 import { getDbClient, withDatabaseTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { GroupMode, KnockoutMode, LeagueType } from '../domain/tournament';
+import { setupIssueKey, type TournamentSetupIssueInput } from '../domain/tournament-setup-issue';
+import { tournamentSetupIssueRepository } from '../repositories/tournament-setup-issues';
 import { postgresJsonbCanonicalJson } from '../utils/content-hash';
 import { logError, logInfo } from '../utils/logger';
 
-export const TOURNAMENT_REVIEW_SCHEMA_VERSION = 'my-tournament-review-v2';
-export const TOURNAMENT_REVIEW_METRIC_VERSION = 'descriptive-v1';
+/** Hard-cut review contract.  V1 is deliberately not accepted by the
+ * current-season writer or by downstream readers. */
+export const TOURNAMENT_REVIEW_SCHEMA_VERSION = 'my-tournament-review-v2.1';
+export const TOURNAMENT_REVIEW_METRIC_VERSION = 'settled-review-v2';
+const TOURNAMENT_REVIEW_REACTIVATION_REASON =
+  'scope reactivated after temporary review-window retirement';
+const TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE = 100;
 
 export type TournamentReviewFormat = 'POINTS' | 'H2H' | 'KNOCKOUT';
 export type TournamentReviewObligationState =
@@ -42,7 +49,17 @@ export type TournamentReviewPublicationResult = Readonly<{
   state: 'PUBLISHED' | 'REUSED';
 }>;
 
+export type TournamentReviewCorrection = Readonly<{
+  mode: 'CORRECTION';
+  reason: string;
+  changeId: string;
+}>;
+
 type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 type TournamentRow = {
   tournament_id: number;
@@ -152,8 +169,9 @@ export function resolveTournamentReviewFormat(
 }
 
 /** Delays after a failed attempt. Source rechecks do not consume execution
- * attempts; after the bounded fast path the obligation enters DEGRADED and
- * is repaired on the 15-minute cadence until its 24-hour horizon. */
+ * attempts; after the bounded fast path the obligation keeps its active state
+ * and is repaired on the 15-minute cadence until its 24-hour horizon. Only
+ * after that horizon does it enter DEGRADED and continue hourly. */
 export function tournamentReviewRetryDelayMs(
   kind: 'source' | 'execution',
   failureNumber: number,
@@ -248,6 +266,328 @@ function eventReviewPayload(
       sourceMaxCheckedAt: freshness.sourceMax.toISOString(),
     },
   };
+}
+
+/** Canonical business identity for an immutable review.  Observation,
+ * fetch/update and publication clocks are operational evidence, never
+ * content identity; excluding them makes repeated scheduler polls no-ops. */
+function stripReviewOperationalMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripReviewOperationalMetadata);
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const stripped: Record<string, unknown> = {};
+    for (const key of Object.keys(record)) {
+      if (
+        key === 'freshness' ||
+        key === 'observation' ||
+        key === 'observedAt' ||
+        key === 'lastObservedAt' ||
+        key === 'publishedAt' ||
+        key === 'updatedAt' ||
+        key === 'createdAt'
+      ) {
+        continue;
+      }
+      stripped[key] = stripReviewOperationalMetadata(record[key]);
+    }
+    return stripped;
+  }
+  return value;
+}
+
+export function tournamentReviewSemanticSha256(
+  payload: unknown,
+  orderedChunkHashes: readonly string[] = [],
+): string {
+  return createHash('sha256')
+    .update(
+      `${postgresJsonbCanonicalJson(stripReviewOperationalMetadata(payload))}\n${orderedChunkHashes.join('\n')}`,
+      'utf8',
+    )
+    .digest('hex');
+}
+
+type ReviewChunk = Readonly<{
+  sectionKey: string;
+  chunkIndex: number;
+  items: unknown[];
+  itemCount: number;
+  chunkSha256: string;
+}>;
+
+type ReviewPublicationManifest = Readonly<{
+  sectionCount: number;
+  chunkCount: number;
+  sections: ReadonlyArray<{
+    sectionKey: string;
+    itemCount: number;
+    chunkCount: number;
+    chunkHashes: ReadonlyArray<string>;
+    // Preserve the producer's exact boundaries. GraphQL section-page cache
+    // witnesses use these counts to derive a trusted row offset; recomputing
+    // fixed-width 100-row boundaries would be incorrect for short chunks.
+    chunkItemCounts: ReadonlyArray<number>;
+  }>;
+}>;
+
+function reviewPublicationManifest(chunks: ReadonlyArray<ReviewChunk>): ReviewPublicationManifest {
+  const sections = new Map<string, ReviewChunk[]>();
+  for (const chunk of chunks) {
+    const section = sections.get(chunk.sectionKey) ?? [];
+    section.push(chunk);
+    sections.set(chunk.sectionKey, section);
+  }
+  return {
+    sectionCount: sections.size,
+    chunkCount: chunks.length,
+    sections: [...sections.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([sectionKey, sectionChunks]) => ({
+        sectionKey,
+        itemCount: sectionChunks.reduce((total, chunk) => total + chunk.itemCount, 0),
+        chunkCount: sectionChunks.length,
+        chunkHashes: sectionChunks
+          .sort((left, right) => left.chunkIndex - right.chunkIndex)
+          .map((chunk) => chunk.chunkSha256),
+        chunkItemCounts: sectionChunks
+          .sort((left, right) => left.chunkIndex - right.chunkIndex)
+          .map((chunk) => chunk.itemCount),
+      })),
+  };
+}
+
+/** Split the immutable sections into bounded rows.  Empty sections still get
+ * one zero-item chunk so the manifest can prove that the section was checked
+ * and intentionally contains no rows. */
+export function splitTournamentReviewChunks(payload: JsonRecord): ReadonlyArray<ReviewChunk> {
+  const sections: Array<[string, unknown]> = [];
+  const format = payload.format;
+  if (format === 'POINTS' && isRecord(payload.points)) {
+    sections.push(['POINTS_STANDINGS', payload.points.rows]);
+    sections.push([
+      'POINTS_TRAJECTORIES',
+      Array.isArray(payload.points.trajectoryRows)
+        ? payload.points.trajectoryRows
+        : payload.points.rows,
+    ]);
+  } else if (format === 'H2H' && isRecord(payload.h2h)) {
+    sections.push(['H2H_FIXTURES', payload.h2h.matches]);
+    sections.push(['H2H_STANDINGS', payload.h2h.standings]);
+  } else if (format === 'KNOCKOUT' && isRecord(payload.knockout)) {
+    sections.push(['KNOCKOUT_BRACKET', payload.knockout.matches]);
+  }
+  const chunks: ReviewChunk[] = [];
+  for (const [sectionKey, raw] of sections) {
+    const items = Array.isArray(raw) ? raw : [];
+    if (items.length === 0) {
+      chunks.push({
+        sectionKey,
+        chunkIndex: 0,
+        items: [],
+        itemCount: 0,
+        chunkSha256: createHash('sha256')
+          .update(postgresJsonbCanonicalJson([]), 'utf8')
+          .digest('hex'),
+      });
+      continue;
+    }
+    for (let offset = 0, chunkIndex = 0; offset < items.length; offset += 100, chunkIndex += 1) {
+      const slice = items.slice(offset, offset + 100);
+      chunks.push({
+        sectionKey,
+        chunkIndex,
+        items: slice,
+        itemCount: slice.length,
+        chunkSha256: createHash('sha256')
+          .update(postgresJsonbCanonicalJson(slice), 'utf8')
+          .digest('hex'),
+      });
+    }
+  }
+  return chunks;
+}
+
+function isSafeReviewManifestCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Reuse a READY publication only when its complete sibling set is present and
+ * every stored descriptor still matches the payload-derived chunk.  A missing
+ * or tampered chunk therefore fails closed and re-enters the normal publish /
+ * repair path instead of being reported as a successful no-op.
+ */
+function reviewChunksMatchPayload(
+  payload: JsonRecord | null | undefined,
+  rows: ReadonlyArray<{
+    section_key: string;
+    chunk_index: number | string;
+    item_count: number | string;
+    chunk_sha256: string;
+    items: unknown;
+  }>,
+): boolean {
+  if (!payload) return false;
+  const manifest = isRecord(payload.manifest) ? payload.manifest : null;
+  const descriptors = manifest && Array.isArray(manifest.sections) ? manifest.sections : null;
+  if (!manifest || !descriptors) return false;
+  const sectionCount = manifest.sectionCount;
+  const chunkCount = manifest.chunkCount;
+  if (
+    !isSafeReviewManifestCount(sectionCount) ||
+    !isSafeReviewManifestCount(chunkCount) ||
+    descriptors.length !== sectionCount
+  ) {
+    return false;
+  }
+  const expected = [] as Array<{
+    sectionKey: string;
+    chunkIndex: number;
+    itemCount: number;
+    chunkSha256: string;
+  }>;
+  const sectionKeys = new Set<string>();
+  for (const section of descriptors) {
+    if (
+      !isRecord(section) ||
+      typeof section.sectionKey !== 'string' ||
+      section.sectionKey.length === 0 ||
+      sectionKeys.has(section.sectionKey) ||
+      !Array.isArray(section.chunkHashes) ||
+      !Array.isArray(section.chunkItemCounts)
+    ) {
+      return false;
+    }
+    const itemCount = section.itemCount;
+    const declaredChunkCount = section.chunkCount;
+    const hashes = section.chunkHashes;
+    const itemCounts = section.chunkItemCounts;
+    if (
+      !isSafeReviewManifestCount(itemCount) ||
+      !isSafeReviewManifestCount(declaredChunkCount) ||
+      declaredChunkCount !== hashes.length ||
+      declaredChunkCount !== itemCounts.length ||
+      !itemCounts.every(isSafeReviewManifestCount) ||
+      itemCounts.some((count) => count > 100) ||
+      (itemCount === 0 && (declaredChunkCount !== 1 || itemCounts[0] !== 0)) ||
+      (itemCount > 0 &&
+        (declaredChunkCount < 1 ||
+          itemCounts.some((count) => count <= 0) ||
+          itemCounts.reduce((total, count) => total + count, 0) !== itemCount)) ||
+      !hashes.every(
+        (chunkSha256): chunkSha256 is string =>
+          typeof chunkSha256 === 'string' && /^[0-9a-f]{64}$/.test(chunkSha256),
+      )
+    ) {
+      return false;
+    }
+    const sectionKey = section.sectionKey;
+    sectionKeys.add(sectionKey);
+    hashes.forEach((chunkSha256, chunkIndex) => {
+      expected.push({
+        sectionKey,
+        chunkIndex,
+        itemCount: itemCounts[chunkIndex],
+        chunkSha256,
+      });
+    });
+  }
+  if (expected.length !== rows.length || expected.length !== chunkCount) return false;
+  const requiredSectionKeys =
+    payload.format === 'POINTS'
+      ? new Set(['POINTS_STANDINGS', 'POINTS_TRAJECTORIES'])
+      : payload.format === 'H2H'
+        ? new Set(['H2H_STANDINGS', 'H2H_FIXTURES'])
+        : payload.format === 'KNOCKOUT'
+          ? new Set(['KNOCKOUT_BRACKET'])
+          : null;
+  if (
+    !requiredSectionKeys ||
+    sectionKeys.size !== requiredSectionKeys.size ||
+    [...requiredSectionKeys].some((sectionKey) => !sectionKeys.has(sectionKey))
+  ) {
+    return false;
+  }
+  const expectedKeys = new Set(expected.map((chunk) => `${chunk.sectionKey}:${chunk.chunkIndex}`));
+  const actual = new Map(rows.map((row) => [`${row.section_key}:${Number(row.chunk_index)}`, row]));
+  if (actual.size !== rows.length) return false;
+  if (
+    [...actual.keys()].some((key) => !expectedKeys.has(key)) ||
+    [...expectedKeys].some((key) => !actual.has(key))
+  ) {
+    return false;
+  }
+  return (
+    expected.every((chunk) => {
+      const row = actual.get(`${chunk.sectionKey}:${chunk.chunkIndex}`);
+      const storedItems = row?.items;
+      const storedItemsSha = Array.isArray(storedItems)
+        ? createHash('sha256').update(postgresJsonbCanonicalJson(storedItems), 'utf8').digest('hex')
+        : null;
+      return Boolean(
+        row &&
+          Number.isInteger(chunk.itemCount) &&
+          chunk.itemCount >= 0 &&
+          chunk.itemCount <= 100 &&
+          Number(row.item_count) === chunk.itemCount &&
+          row.chunk_sha256 === chunk.chunkSha256 &&
+          storedItemsSha === chunk.chunkSha256 &&
+          Array.isArray(storedItems) &&
+          storedItems.length === chunk.itemCount,
+      );
+    }) &&
+    [...sectionKeys].every((sectionKey) => {
+      const descriptor = descriptors.find(
+        (candidate) => isRecord(candidate) && candidate.sectionKey === sectionKey,
+      );
+      if (!descriptor || !isRecord(descriptor)) return false;
+      if (
+        !isSafeReviewManifestCount(descriptor.itemCount) ||
+        !isSafeReviewManifestCount(descriptor.chunkCount)
+      ) {
+        return false;
+      }
+      const itemCount = descriptor.itemCount;
+      const sectionRows = rows.filter((row) => row.section_key === sectionKey);
+      return (
+        sectionRows.length === descriptor.chunkCount &&
+        sectionRows.reduce((total, row) => total + Number(row.item_count), 0) === itemCount
+      );
+    })
+  );
+}
+
+function orderedReviewChunkHashes(
+  rows: ReadonlyArray<{ section_key: string; chunk_index: number | string; chunk_sha256: string }>,
+): string[] {
+  return [...rows]
+    .sort(
+      (left, right) =>
+        left.section_key.localeCompare(right.section_key) ||
+        Number(left.chunk_index) - Number(right.chunk_index),
+    )
+    .map((row) => row.chunk_sha256);
+}
+
+/** Remove large row arrays from the publication identity.  The immutable
+ * siblings are the sole row representation; this JSON keeps only the
+ * aggregate/header shell plus the exact section manifest. */
+function reviewPublicationManifestPayload(
+  payload: JsonRecord,
+  manifest: ReviewPublicationManifest,
+): JsonRecord {
+  const output: JsonRecord = { ...payload, manifest };
+  if (payload.format === 'POINTS' && isRecord(payload.points)) {
+    const { rows: _rows, trajectoryRows: _trajectoryRows, ...points } = payload.points;
+    output.points = points;
+  } else if (payload.format === 'H2H' && isRecord(payload.h2h)) {
+    const { matches: _matches, standings: _standings, ...h2h } = payload.h2h;
+    output.h2h = h2h;
+  } else if (payload.format === 'KNOCKOUT' && isRecord(payload.knockout)) {
+    const { matches: _matches, ...knockout } = payload.knockout;
+    output.knockout = knockout;
+  }
+  return output;
 }
 
 type PointsSourceRow = {
@@ -801,6 +1141,17 @@ async function buildPointsPayload(
     overallPoints: row.overall_points,
     overallRank: row.overall_rank,
   }));
+  // The trajectory section is a deliberate projection of the same frozen
+  // roster, ordered by current rank and then rank movement.  It is not a
+  // second copy of the roster-order standings section: consumers can render
+  // rank movement (previousRank -> rank) without changing the settled values
+  // or inventing a second source of truth.
+  const trajectoryRows = [...pointRows].sort(
+    (left, right) =>
+      sortRank(left.rank, right.rank) ||
+      sortRank(left.previousRank, right.previousRank) ||
+      left.entryId - right.entryId,
+  );
   const grossPoints = applicable.map((row) => integer(row.event_points));
   const netPoints = applicable.map((row) => integer(row.event_net_points));
   return {
@@ -831,6 +1182,7 @@ async function buildPointsPayload(
           0,
         ),
         rows: pointRows,
+        trajectoryRows,
       },
     },
     rowCount: pointRows.length,
@@ -2067,6 +2419,7 @@ async function publishTournamentReviewScopeOnce(
   season: FplSeasonRef,
   tournamentId: number,
   eventId: number,
+  correction?: TournamentReviewCorrection,
 ): Promise<TournamentReviewPublicationResult> {
   const client = await getDbClient();
   return client.begin('isolation level repeatable read', async (tx) => {
@@ -2081,21 +2434,149 @@ async function publishTournamentReviewScopeOnce(
     if (!eventDataCheckedAt)
       throw new TournamentReviewSourceNotReadyError('data_checked_at missing');
     const previousHead = await tx<
-      Array<{ event_name: string | null; tournament_payload: JsonRecord | null }>
+      Array<{
+        event_name: string | null;
+        tournament_payload: JsonRecord | null;
+        payload: JsonRecord | null;
+        revision: number | string;
+        content_sha256: string;
+        publication_content_sha256: string;
+        published_at: Date | string;
+        obligation_state: TournamentReviewObligationState | null;
+        correction_reason: string | null;
+        correction_change_id: string | null;
+        row_count: number;
+        expected_subject_count: number;
+        ready_subject_count: number;
+        not_applicable_subject_count: number;
+      }>
     >`
       SELECT publication.payload #>> '{event,name}' AS event_name,
-             publication.payload #> '{tournament}' AS tournament_payload
+             publication.payload #> '{tournament}' AS tournament_payload,
+             publication.payload,
+             head.revision,
+             head.content_sha256,
+             publication.content_sha256 AS publication_content_sha256,
+             head.published_at,
+             obligation.state AS obligation_state,
+             publication.correction_reason,
+             publication.correction_change_id,
+             publication.row_count,
+             publication.expected_subject_count,
+             publication.ready_subject_count,
+             publication.not_applicable_subject_count
       FROM competition.tournament_review_heads head
       JOIN competition.tournament_review_publications publication
         ON publication.season_id = head.season_id
        AND publication.tournament_id = head.tournament_id
        AND publication.event_id = head.event_id
        AND publication.revision = head.revision
+      LEFT JOIN competition.tournament_review_obligations obligation
+        ON obligation.season_id = head.season_id
+       AND obligation.tournament_id = head.tournament_id
+       AND obligation.event_id = head.event_id
       WHERE head.season_id = ${season.seasonId}
         AND head.tournament_id = ${tournamentId}
         AND head.event_id = ${eventId}
       LIMIT 1
     `;
+    // A correction Change ID is a durable idempotency key, not merely a
+    // property of the current head.  Once a later correction has advanced the
+    // head, replaying an older command must not mint another revision carrying
+    // the already-consumed ID.  The reset path below performs the same check
+    // before it clears descendants; this guard also protects service-only
+    // callers that invoke the publisher directly.
+    const consumedCorrection = correction
+      ? await tx<Array<{ revision: number | string; correction_reason: string | null }>>`
+          SELECT revision, correction_reason
+          FROM competition.tournament_review_publications
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournamentId}
+            AND event_id = ${eventId}
+            AND correction_change_id = ${correction.changeId}
+          ORDER BY revision DESC
+          LIMIT 1
+        `
+      : [];
+    if (
+      correction &&
+      consumedCorrection.length > 0 &&
+      (previousHead[0]?.correction_change_id !== correction.changeId ||
+        previousHead[0]?.correction_reason !== correction.reason)
+    ) {
+      throw new TournamentReviewPublicationError(
+        'correction Change ID was already consumed by another review revision',
+      );
+    }
+    const previousChunks = previousHead[0]
+      ? await tx<
+          Array<{
+            section_key: string;
+            chunk_index: number | string;
+            item_count: number | string;
+            chunk_sha256: string;
+            items: unknown;
+          }>
+        >`
+          SELECT section_key, chunk_index, item_count, chunk_sha256, items
+          FROM competition.tournament_review_publication_chunks
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournamentId}
+            AND event_id = ${eventId}
+            AND revision = ${previousHead[0].revision}
+        `
+      : [];
+    // A finalized scope is an immutable business snapshot.  Routine source
+    // refreshes (or a duplicate scheduler delivery) must not move its head;
+    // only the service-only correction entry point below may create revision 2+.
+    const previousPublicationIsCoherent =
+      previousHead[0] !== undefined &&
+      previousHead[0].publication_content_sha256 === previousHead[0].content_sha256 &&
+      reviewChunksMatchPayload(previousHead[0].payload, previousChunks) &&
+      tournamentReviewSemanticSha256(
+        previousHead[0].payload,
+        orderedReviewChunkHashes(previousChunks),
+      ) === previousHead[0].content_sha256;
+    if (correction && consumedCorrection.length > 0 && !previousPublicationIsCoherent) {
+      throw new TournamentReviewPublicationError(
+        'previously consumed correction Change ID points at an incoherent head',
+      );
+    }
+    const routineReuse = !correction && previousHead[0]?.obligation_state === 'READY';
+    // A correction command is idempotent by Change ID.  If the transaction
+    // committed the new publication but the worker lost its lease before
+    // marking the obligation READY, a retry must reuse that exact revision
+    // instead of minting another correction revision.
+    const correctionReuse =
+      correction !== undefined &&
+      previousHead[0]?.correction_change_id === correction.changeId &&
+      previousHead[0]?.correction_reason === correction.reason &&
+      previousPublicationIsCoherent;
+    if (previousPublicationIsCoherent && (routineReuse || correctionReuse)) {
+      const publishedAt = asDate(previousHead[0].published_at) ?? new Date();
+      await tx`
+        UPDATE competition.tournament_review_obligations
+        SET last_observed_at = clock_timestamp(),
+            last_noop_at = clock_timestamp()
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+          AND event_id = ${eventId}
+      `;
+      return {
+        seasonId: season.seasonId,
+        tournamentId,
+        eventId,
+        revision: Number(previousHead[0].revision),
+        format,
+        contentSha256: previousHead[0].content_sha256,
+        rowCount: previousHead[0].row_count,
+        expectedSubjectCount: previousHead[0].expected_subject_count,
+        readySubjectCount: previousHead[0].ready_subject_count,
+        notApplicableSubjectCount: previousHead[0].not_applicable_subject_count,
+        publishedAt,
+        state: 'REUSED',
+      };
+    }
     // events.upsertBatch refreshes updated_at on every core sync. Include the
     // event row timestamp only for a new head or a payload-relevant name
     // correction, otherwise routine event refreshes would mint revisions.
@@ -2139,11 +2620,32 @@ async function publishTournamentReviewScopeOnce(
         sourceMaxCheckedAt: freshness.sourceMax.toISOString(),
       },
     };
-    const contentSha256 = createHash('sha256')
-      .update(postgresJsonbCanonicalJson(payload), 'utf8')
-      .digest('hex');
-    const existing = await tx<Array<{ revision: number | string; published_at: Date | string }>>`
-      SELECT revision, published_at
+    const chunks = splitTournamentReviewChunks(payload);
+    // Keep the durable publication row small enough for metadata reads while
+    // retaining the producer's full payload during the transition.  The
+    // section manifest is the exact contract used to prove chunk cardinality
+    // and ordered hashes at the reader and Ops boundaries.
+    const payloadWithManifest = {
+      ...payload,
+      manifest: reviewPublicationManifest(chunks),
+    };
+    const manifestPayload = reviewPublicationManifestPayload(
+      payloadWithManifest,
+      payloadWithManifest.manifest,
+    );
+    const contentSha256 = tournamentReviewSemanticSha256(
+      manifestPayload,
+      chunks.map((chunk) => chunk.chunkSha256),
+    );
+    const existing = await tx<
+      Array<{
+        revision: number | string;
+        published_at: Date | string;
+        content_sha256: string;
+        payload: JsonRecord | null;
+      }>
+    >`
+      SELECT revision, published_at, content_sha256, payload
       FROM competition.tournament_review_publications
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
@@ -2152,10 +2654,49 @@ async function publishTournamentReviewScopeOnce(
       ORDER BY revision DESC
       LIMIT 1
     `;
+    const existingChunks = existing[0]
+      ? await tx<
+          Array<{
+            section_key: string;
+            chunk_index: number | string;
+            item_count: number | string;
+            chunk_sha256: string;
+            items: unknown;
+          }>
+        >`
+          SELECT section_key, chunk_index, item_count, chunk_sha256, items
+          FROM competition.tournament_review_publication_chunks
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournamentId}
+            AND event_id = ${eventId}
+            AND revision = ${existing[0].revision}
+        `
+      : [];
+    const existingPublicationIsCoherent =
+      existing[0] !== undefined &&
+      existing[0].content_sha256 === contentSha256 &&
+      reviewChunksMatchPayload(existing[0].payload, existingChunks) &&
+      tournamentReviewSemanticSha256(
+        existing[0].payload,
+        orderedReviewChunkHashes(existingChunks),
+      ) === existing[0].content_sha256;
+    if (existing[0] && !correction && !existingPublicationIsCoherent) {
+      // A stored row with a matching hash is not enough to prove integrity:
+      // payload or chunk JSON may have been damaged while the hash columns
+      // remained unchanged.  Do not reuse or mutate that immutable revision;
+      // require an explicit, audited correction to replace it.
+      throw new TournamentReviewPublicationError(
+        'stored review publication is incoherent; explicit correction required',
+      );
+    }
     let revision: number;
     let publishedAt: Date;
     let state: 'PUBLISHED' | 'REUSED';
-    if (existing[0]) {
+    // A correction is an audited event even when the rebuilt business content
+    // returns to an earlier semantic hash (A -> B -> A).  Do not reuse the
+    // earlier revision: allocate a new monotonically increasing revision so
+    // the reason/Change ID remains attached to a durable publication row.
+    if (existing[0] && !correction && existingPublicationIsCoherent) {
       revision = Number(existing[0].revision);
       publishedAt = asDate(existing[0].published_at) ?? new Date();
       state = 'REUSED';
@@ -2171,13 +2712,23 @@ async function publishTournamentReviewScopeOnce(
       if (!Number.isSafeInteger(revision) || revision <= 0) {
         throw new TournamentReviewPublicationError('review revision allocation failed');
       }
+      if (revision === 1 && correction) {
+        throw new TournamentReviewPublicationError(
+          'initial review publication cannot be a correction',
+        );
+      }
+      if (revision > 1 && !correction) {
+        throw new TournamentReviewPublicationError(
+          'a READY review can advance only through an explicit correction',
+        );
+      }
       const inserted = await tx<Array<{ published_at: Date | string }>>`
         INSERT INTO competition.tournament_review_publications (
           season_id, tournament_id, event_id, revision, format,
           schema_version, metric_version, event_data_checked_at,
           source_min_checked_at, source_max_checked_at,
           expected_subject_count, ready_subject_count, not_applicable_subject_count,
-          row_count, content_sha256, payload
+          row_count, content_sha256, payload, correction_reason, correction_change_id
         ) VALUES (
           ${season.seasonId}, ${tournamentId}, ${eventId}, ${revision}, ${format},
           ${TOURNAMENT_REVIEW_SCHEMA_VERSION}, ${TOURNAMENT_REVIEW_METRIC_VERSION},
@@ -2186,12 +2737,63 @@ async function publishTournamentReviewScopeOnce(
           ${freshness.sourceMax.toISOString()}::timestamptz,
           ${built.expectedSubjectCount}, ${built.readySubjectCount},
           ${built.notApplicableSubjectCount}, ${built.rowCount}, ${contentSha256},
-          ${JSON.stringify(payload)}::jsonb
+          ${JSON.stringify(manifestPayload)}::jsonb,
+          ${correction?.reason ?? null}, ${correction?.changeId ?? null}
         ) RETURNING published_at
       `;
       publishedAt = asDate(inserted[0]?.published_at) ?? new Date();
       state = 'PUBLISHED';
     }
+    // Chunks and publication/head are written under the same transaction and
+    // advisory lock.  A crash before commit leaves no visible sibling set;
+    // a repeated job safely recreates missing chunks for an existing revision.
+    for (const chunk of chunks) {
+      await tx`
+        INSERT INTO competition.tournament_review_publication_chunks (
+          season_id, tournament_id, event_id, revision, section_key, chunk_index,
+          item_count, chunk_sha256, items
+        ) VALUES (
+          ${season.seasonId}, ${tournamentId}, ${eventId}, ${revision},
+          ${chunk.sectionKey}, ${chunk.chunkIndex}, ${chunk.itemCount},
+          ${chunk.chunkSha256}, ${JSON.stringify(chunk.items)}::jsonb
+        )
+        ON CONFLICT (season_id, tournament_id, event_id, revision, section_key, chunk_index)
+        DO UPDATE SET item_count = EXCLUDED.item_count,
+                      chunk_sha256 = EXCLUDED.chunk_sha256,
+                      items = EXCLUDED.items
+      `;
+    }
+    // A retried repair may encounter an orphaned sibling left by an older
+    // writer. Replace the revision's chunk set exactly so a READY head cannot
+    // remain permanently incoherent because of an unexpected extra row.
+    const expectedChunkKeys = JSON.stringify(
+      chunks.map((chunk) => ({ section_key: chunk.sectionKey, chunk_index: chunk.chunkIndex })),
+    );
+    await tx`
+      DELETE FROM competition.tournament_review_publication_chunks chunk
+      WHERE chunk.season_id = ${season.seasonId}
+        AND chunk.tournament_id = ${tournamentId}
+        AND chunk.event_id = ${eventId}
+        AND chunk.revision = ${revision}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM jsonb_to_recordset(${expectedChunkKeys}::jsonb) AS expected(section_key text, chunk_index integer)
+          WHERE expected.section_key = chunk.section_key
+            AND expected.chunk_index = chunk.chunk_index
+        )
+    `;
+    await tx`
+      UPDATE competition.tournament_review_obligations
+      SET last_observed_at = clock_timestamp(),
+          last_noop_at = CASE WHEN ${state === 'REUSED'} THEN clock_timestamp() ELSE last_noop_at END,
+          last_semantic_change_at = CASE
+            WHEN ${state === 'PUBLISHED'} THEN clock_timestamp()
+            ELSE last_semantic_change_at
+          END
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND event_id = ${eventId}
+    `;
     await tx`
       INSERT INTO competition.tournament_review_heads
         (season_id, tournament_id, event_id, revision, content_sha256, published_at, updated_at)
@@ -2234,6 +2836,7 @@ export async function publishTournamentReviewScope(
   season: FplSeasonRef,
   tournamentId: number,
   eventId: number,
+  correction?: TournamentReviewCorrection,
 ): Promise<TournamentReviewPublicationResult> {
   if (!Number.isInteger(tournamentId) || tournamentId <= 0) {
     throw new Error('tournamentId must be a positive integer');
@@ -2244,7 +2847,7 @@ export async function publishTournamentReviewScope(
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      return await publishTournamentReviewScopeOnce(season, tournamentId, eventId);
+      return await publishTournamentReviewScopeOnce(season, tournamentId, eventId, correction);
     } catch (error) {
       // Source readiness is a durable obligation concern. Do not spin three
       // immediate reads against an upstream that is still settling; the
@@ -2273,10 +2876,268 @@ export async function publishTournamentReviewScope(
   throw lastError;
 }
 
+/** Explicit correction is the only path that can advance a READY scope. */
+export async function publishTournamentReviewCorrection(
+  season: FplSeasonRef,
+  tournamentId: number,
+  eventId: number,
+  reason: string,
+  changeId: string,
+): Promise<TournamentReviewPublicationResult> {
+  if (!reason.trim() || !changeId.trim()) {
+    throw new Error('correction reason and changeId are required');
+  }
+  return publishTournamentReviewScope(season, tournamentId, eventId, {
+    mode: 'CORRECTION',
+    reason: reason.trim(),
+    changeId: changeId.trim(),
+  });
+}
+
+/** Reset a frozen scope and all later descendants for an explicit, audited
+ * correction. A null target selects the earliest READY scope in a tournament
+ * and is used by topology repair, which can invalidate every later phase. */
+async function resetTournamentReviewScopesForCorrection(
+  season: FplSeasonRef,
+  tournamentId: number,
+  targetEventId: number | null,
+  reason: string,
+  changeId: string,
+  allowEmpty = false,
+): Promise<number[]> {
+  const db = await getDbClient();
+  const rows: Array<{ event_id: number }> = await db.begin(
+    async (tx): Promise<Array<{ event_id: number }>> => {
+      // Correction Change IDs are globally idempotent within a tournament.
+      // A retry after a later correction has advanced the head must not reset
+      // descendants again or attribute a new revision to an old command.
+      const consumedCorrection = await tx<Array<{ event_id: number }>>`
+        SELECT event_id
+        FROM competition.tournament_review_publications
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+          AND correction_change_id = ${changeId}
+        ORDER BY event_id, revision
+        LIMIT 1
+      `;
+      if (consumedCorrection.length > 0) return [];
+      const targetRows = await tx<Array<{ event_id: number }>>`
+      SELECT candidate.event_id
+      FROM (
+        SELECT head.event_id
+        FROM competition.tournament_review_heads head
+        WHERE head.season_id = ${season.seasonId}
+          AND head.tournament_id = ${tournamentId}
+        UNION
+        SELECT obligation.event_id
+        FROM competition.tournament_review_obligations obligation
+        WHERE obligation.season_id = ${season.seasonId}
+          AND obligation.tournament_id = ${tournamentId}
+      ) candidate
+      WHERE (
+        -- A service-requested correction names the repaired event, but that
+        -- event may never have produced a head. In that case fence the first
+        -- later frozen READY scope so every descendant is rebuilt from the
+        -- repaired source facts. A topology repair has no event target and
+        -- instead fences the earliest existing head or in-flight obligation.
+        ${targetEventId}::integer IS NULL
+        OR (
+          candidate.event_id >= ${targetEventId}
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM competition.tournament_review_heads head
+              JOIN competition.tournament_review_obligations obligation
+                ON obligation.season_id = head.season_id
+               AND obligation.tournament_id = head.tournament_id
+               AND obligation.event_id = head.event_id
+              WHERE head.season_id = ${season.seasonId}
+                AND head.tournament_id = ${tournamentId}
+                AND head.event_id = candidate.event_id
+                AND obligation.state IN (
+                  'READY',
+                  'PENDING',
+                  'WAITING_SOURCE',
+                  'PROCESSING',
+                  'DEGRADED'
+                )
+            )
+            OR (
+              candidate.event_id >= ${targetEventId}
+              AND EXISTS (
+                SELECT 1
+                FROM competition.tournament_review_obligations obligation
+                WHERE obligation.season_id = ${season.seasonId}
+                  AND obligation.tournament_id = ${tournamentId}
+                  AND obligation.event_id = candidate.event_id
+                  AND obligation.state = 'PROCESSING'
+              )
+            )
+          )
+        )
+      )
+      ORDER BY candidate.event_id
+      LIMIT 1
+    `;
+      if (targetRows.length === 0) {
+        if (allowEmpty) return [];
+        throw new Error('only an existing READY review scope can be corrected');
+      }
+      const correctionTargetEventId = targetRows[0].event_id;
+      // Publishers take the same scope advisory lock before reading or writing
+      // a head. Lock every descendant before clearing a PROCESSING lease so an
+      // in-flight worker cannot publish the superseded snapshot after this
+      // correction request commits.
+      const descendantRows = await tx<Array<{ event_id: number }>>`
+      SELECT candidate.event_id
+      FROM (
+        SELECT head.event_id
+        FROM competition.tournament_review_heads head
+        WHERE head.season_id = ${season.seasonId}
+          AND head.tournament_id = ${tournamentId}
+        UNION
+        SELECT obligation.event_id
+        FROM competition.tournament_review_obligations obligation
+        WHERE obligation.season_id = ${season.seasonId}
+          AND obligation.tournament_id = ${tournamentId}
+      ) candidate
+      WHERE candidate.event_id >= ${correctionTargetEventId}
+      ORDER BY candidate.event_id
+    `;
+      for (const descendant of descendantRows) {
+        await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(
+            'review:' || ${season.seasonId}::text || ':' || ${tournamentId}::text || ':' || ${descendant.event_id}::text,
+            0
+          )
+        )
+      `;
+      }
+      const rowsAfterLocks = await tx<Array<{ event_id: number }>>`
+      UPDATE competition.tournament_review_obligations obligation
+      SET state = 'PENDING',
+          next_attempt_at = clock_timestamp(),
+          execution_attempts = 0,
+          source_rechecks = 0,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          first_attempt_at = NULL,
+          last_attempt_at = NULL,
+          -- A correction starts a fresh bounded retry horizon.  The original
+          -- eligibility watermark remains useful for audit, but must not make
+          -- an old READY scope degrade immediately after three correction
+          -- failures.
+          first_eligible_at = clock_timestamp(),
+          ready_at = NULL,
+          degraded_at = NULL,
+          ready_revision = NULL,
+          last_error_code = NULL,
+          last_failure_fingerprint = NULL,
+          -- Keep any attached repair issue on the descendant. The claimed
+          -- obligation carries this id into finishReviewObligation, which
+          -- resolves it in the same transaction as READY. Clearing it here
+          -- would leave an unresolved setup issue after a successful
+          -- correction.
+          -- Historical publication rows also require correction provenance even
+          -- when a previous repair temporarily removed the active head.
+          correction_reason = CASE WHEN EXISTS (
+            SELECT 1
+            FROM competition.tournament_review_publications publication
+            WHERE publication.season_id = obligation.season_id
+              AND publication.tournament_id = obligation.tournament_id
+              AND publication.event_id = obligation.event_id
+          ) THEN ${reason} ELSE NULL END,
+          correction_change_id = CASE WHEN EXISTS (
+            SELECT 1
+            FROM competition.tournament_review_publications publication
+            WHERE publication.season_id = obligation.season_id
+              AND publication.tournament_id = obligation.tournament_id
+              AND publication.event_id = obligation.event_id
+          ) THEN ${changeId} ELSE NULL END,
+          updated_at = clock_timestamp()
+      WHERE obligation.season_id = ${season.seasonId}
+        AND obligation.tournament_id = ${tournamentId}
+        AND obligation.event_id >= ${correctionTargetEventId}
+        AND obligation.state IN ('READY', 'PROCESSING', 'PENDING', 'WAITING_SOURCE', 'DEGRADED')
+      RETURNING obligation.event_id
+    `;
+      if (rowsAfterLocks.length === 0) {
+        if (allowEmpty) return [];
+        throw new Error('only an existing READY review scope can be corrected');
+      }
+      return rowsAfterLocks;
+    },
+  );
+  if (rows.length === 0 && !allowEmpty) {
+    throw new Error('only an existing READY review scope can be corrected');
+  }
+  return rows.map((row) => row.event_id);
+}
+
+/** Mark one frozen scope for an explicit, audited correction. Routine source
+ * reconciliation never performs this transition; callers must provide both
+ * a human-readable reason and an external Change ID before a revision >1 can
+ * be published. */
+export async function requestTournamentReviewCorrection(
+  season: FplSeasonRef,
+  tournamentId: number,
+  eventId: number,
+  reason: string,
+  changeId: string,
+  allowEmpty = false,
+): Promise<number[]> {
+  if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) {
+    throw new Error('tournamentId must be a positive integer');
+  }
+  if (!Number.isSafeInteger(eventId) || eventId < 1 || eventId > 38) {
+    throw new Error('eventId must be between 1 and 38');
+  }
+  if (!reason.trim() || !changeId.trim()) {
+    throw new Error('correction reason and changeId are required');
+  }
+  return resetTournamentReviewScopesForCorrection(
+    season,
+    tournamentId,
+    eventId,
+    reason.trim(),
+    changeId.trim(),
+    allowEmpty,
+  );
+}
+
+/** Reset all settled review scopes affected by a tournament-wide topology
+ * repair. Returning an empty list is valid when the tournament has not
+ * published a review head yet. */
+export async function requestTournamentReviewTournamentCorrection(
+  season: FplSeasonRef,
+  tournamentId: number,
+  reason: string,
+  changeId: string,
+): Promise<number[]> {
+  if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) {
+    throw new Error('tournamentId must be a positive integer');
+  }
+  if (!reason.trim() || !changeId.trim()) {
+    throw new Error('correction reason and changeId are required');
+  }
+  return resetTournamentReviewScopesForCorrection(
+    season,
+    tournamentId,
+    null,
+    reason.trim(),
+    changeId.trim(),
+    true,
+  );
+}
+
 export async function reconcileTournamentReviewObligations(
   season: FplSeasonRef,
   now = new Date(),
+  target: { tournamentId?: number; eventId?: number } = {},
 ): Promise<number> {
+  const targetTournamentId = target.tournamentId ?? null;
+  const targetEventId = target.eventId ?? null;
   const rows = await withDatabaseTransaction(async (tx) => {
     // First identify only scopes that could be retired. The lock set is
     // intentionally a bounded candidate set rather than the full review
@@ -2325,6 +3186,8 @@ export async function reconcileTournamentReviewObligations(
             )
           )
       )
+        AND (${targetTournamentId}::integer IS NULL OR stored.tournament_id = ${targetTournamentId})
+        AND (${targetEventId}::integer IS NULL OR stored.event_id = ${targetEventId})
       ORDER BY stored.tournament_id, stored.event_id
     `;
     for (const scope of potentialStaleScopes) {
@@ -2451,6 +3314,8 @@ export async function reconcileTournamentReviewObligations(
         AND event.finished = true
         AND event.data_checked = true
         AND event.data_checked_at IS NOT NULL
+        AND (${targetTournamentId}::integer IS NULL OR tournament.tournament_id = ${targetTournamentId})
+        AND (${targetEventId}::integer IS NULL OR event.event_id = ${targetEventId})
     ), candidate_states AS (
       SELECT candidate.tournament_id,
              candidate.event_id,
@@ -2467,11 +3332,12 @@ export async function reconcileTournamentReviewObligations(
              candidate.tournament_payload,
              candidate.format,
              existing.eligible_at AS existing_eligible_at,
+             history.historical_revision,
              existing.metadata_payload AS existing_metadata_payload,
              existing.group_assignment_payload AS existing_group_assignment_payload,
              previous.payload AS existing_payload,
              CASE
-               WHEN existing.metadata_payload IS NOT NULL
+             WHEN existing.metadata_payload IS NOT NULL
                 AND existing.metadata_payload IS DISTINCT FROM candidate.tournament_payload
                  THEN GREATEST(
                    candidate.tournament_updated_at,
@@ -2539,7 +3405,83 @@ export async function reconcileTournamentReviewObligations(
        AND existing.tournament_id = candidate.tournament_id
        AND existing.event_id = candidate.event_id
       LEFT JOIN LATERAL (
-        SELECT publication.payload
+        SELECT max(publication.revision) AS historical_revision
+        FROM competition.tournament_review_publications publication
+        WHERE publication.season_id = ${season.seasonId}
+          AND publication.tournament_id = candidate.tournament_id
+          AND publication.event_id = candidate.event_id
+      ) history ON true
+      LEFT JOIN LATERAL (
+        SELECT CASE publication.format
+                 WHEN 'POINTS' THEN jsonb_set(
+                   publication.payload,
+                   '{points,rows}',
+                   COALESCE(
+                     (
+                       SELECT jsonb_agg(item.value ORDER BY chunk.chunk_index, item.ordinality)
+                       FROM competition.tournament_review_publication_chunks chunk
+                       CROSS JOIN LATERAL jsonb_array_elements(chunk.items) WITH ORDINALITY AS item(value, ordinality)
+                       WHERE chunk.season_id = publication.season_id
+                         AND chunk.tournament_id = publication.tournament_id
+                         AND chunk.event_id = publication.event_id
+                         AND chunk.revision = publication.revision
+                         AND chunk.section_key = 'POINTS_STANDINGS'
+                     ),
+                     '[]'::jsonb
+                   )
+                 )
+                 WHEN 'H2H' THEN jsonb_set(
+                   jsonb_set(
+                     publication.payload,
+                     '{h2h,matches}',
+                     COALESCE(
+                       (
+                         SELECT jsonb_agg(item.value ORDER BY chunk.chunk_index, item.ordinality)
+                         FROM competition.tournament_review_publication_chunks chunk
+                         CROSS JOIN LATERAL jsonb_array_elements(chunk.items) WITH ORDINALITY AS item(value, ordinality)
+                         WHERE chunk.season_id = publication.season_id
+                           AND chunk.tournament_id = publication.tournament_id
+                           AND chunk.event_id = publication.event_id
+                           AND chunk.revision = publication.revision
+                           AND chunk.section_key = 'H2H_FIXTURES'
+                       ),
+                       '[]'::jsonb
+                     )
+                   ),
+                   '{h2h,standings}',
+                   COALESCE(
+                     (
+                       SELECT jsonb_agg(item.value ORDER BY chunk.chunk_index, item.ordinality)
+                       FROM competition.tournament_review_publication_chunks chunk
+                       CROSS JOIN LATERAL jsonb_array_elements(chunk.items) WITH ORDINALITY AS item(value, ordinality)
+                       WHERE chunk.season_id = publication.season_id
+                         AND chunk.tournament_id = publication.tournament_id
+                         AND chunk.event_id = publication.event_id
+                         AND chunk.revision = publication.revision
+                         AND chunk.section_key = 'H2H_STANDINGS'
+                     ),
+                     '[]'::jsonb
+                   )
+                 )
+                 WHEN 'KNOCKOUT' THEN jsonb_set(
+                   publication.payload,
+                   '{knockout,matches}',
+                   COALESCE(
+                     (
+                       SELECT jsonb_agg(item.value ORDER BY chunk.chunk_index, item.ordinality)
+                       FROM competition.tournament_review_publication_chunks chunk
+                       CROSS JOIN LATERAL jsonb_array_elements(chunk.items) WITH ORDINALITY AS item(value, ordinality)
+                       WHERE chunk.season_id = publication.season_id
+                         AND chunk.tournament_id = publication.tournament_id
+                         AND chunk.event_id = publication.event_id
+                         AND chunk.revision = publication.revision
+                         AND chunk.section_key = 'KNOCKOUT_BRACKET'
+                     ),
+                     '[]'::jsonb
+                   )
+                 )
+                 ELSE publication.payload
+               END AS payload
         FROM competition.tournament_review_heads head
         JOIN competition.tournament_review_publications publication
           ON publication.season_id = head.season_id
@@ -2555,6 +3497,7 @@ export async function reconcileTournamentReviewObligations(
       SELECT state.tournament_id,
              state.event_id,
              state.format,
+             state.historical_revision,
              state.tournament_payload,
              state.entry_metadata_payload,
              state.group_assignment_payload,
@@ -2771,17 +3714,21 @@ export async function reconcileTournamentReviewObligations(
       ) source ON true
       WHERE state.format IS NOT NULL
     ), valid_candidates AS (
-      SELECT tournament_id, event_id, format, eligible_at, tournament_payload,
+      SELECT tournament_id, event_id, format, eligible_at, historical_revision, tournament_payload,
              entry_metadata_payload, group_assignment_payload
       FROM candidates
     ), stored_scopes AS (
       SELECT tournament_id, event_id
       FROM competition.tournament_review_heads
       WHERE season_id = ${season.seasonId}
+        AND (${targetTournamentId}::integer IS NULL OR tournament_id = ${targetTournamentId})
+        AND (${targetEventId}::integer IS NULL OR event_id = ${targetEventId})
       UNION
       SELECT tournament_id, event_id
       FROM competition.tournament_review_obligations
       WHERE season_id = ${season.seasonId}
+        AND (${targetTournamentId}::integer IS NULL OR tournament_id = ${targetTournamentId})
+        AND (${targetEventId}::integer IS NULL OR event_id = ${targetEventId})
     ), stale_scopes AS (
       SELECT stored.tournament_id, stored.event_id
       FROM stored_scopes stored
@@ -2815,11 +3762,21 @@ export async function reconcileTournamentReviewObligations(
       RETURNING obligation.tournament_id, obligation.event_id
     ), upserted AS (
     INSERT INTO competition.tournament_review_obligations
-      (season_id, tournament_id, event_id, format, state, eligible_at, next_attempt_at,
-       metadata_payload, entry_metadata_payload, group_assignment_payload)
-    SELECT ${season.seasonId}, tournament_id, event_id, format, 'PENDING', eligible_at,
+      (season_id, tournament_id, event_id, format, state, eligible_at, first_eligible_at, next_attempt_at,
+       metadata_payload, entry_metadata_payload, group_assignment_payload,
+       correction_reason, correction_change_id)
+    SELECT ${season.seasonId}, tournament_id, event_id, format, 'PENDING', eligible_at, eligible_at,
            GREATEST(eligible_at, ${now.toISOString()}::timestamptz),
-           tournament_payload, entry_metadata_payload, group_assignment_payload
+           tournament_payload, entry_metadata_payload, group_assignment_payload,
+           CASE
+             WHEN historical_revision IS NOT NULL THEN ${TOURNAMENT_REVIEW_REACTIVATION_REASON}
+             ELSE NULL
+           END,
+           CASE
+             WHEN historical_revision IS NOT NULL THEN
+               concat('SYSTEM-REACTIVATION:', ${season.seasonId}::text, ':', tournament_id::text, ':', event_id::text, ':', historical_revision::text)
+             ELSE NULL
+           END
     FROM valid_candidates
     ON CONFLICT (season_id, tournament_id, event_id) DO UPDATE
     SET format = EXCLUDED.format,
@@ -2833,8 +3790,11 @@ export async function reconcileTournamentReviewObligations(
           competition.tournament_review_obligations.group_assignment_payload
         ),
         state = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN 'PENDING'
           ELSE competition.tournament_review_obligations.state
         END,
@@ -2842,9 +3802,17 @@ export async function reconcileTournamentReviewObligations(
           competition.tournament_review_obligations.eligible_at,
           EXCLUDED.eligible_at
         ),
+        first_eligible_at = COALESCE(
+          competition.tournament_review_obligations.first_eligible_at,
+          competition.tournament_review_obligations.eligible_at,
+          EXCLUDED.first_eligible_at
+        ),
         next_attempt_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN GREATEST(EXCLUDED.eligible_at, ${now.toISOString()}::timestamptz)
           ELSE COALESCE(
             competition.tournament_review_obligations.next_attempt_at,
@@ -2852,73 +3820,107 @@ export async function reconcileTournamentReviewObligations(
           )
         END,
         execution_attempts = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN 0
           ELSE competition.tournament_review_obligations.execution_attempts
         END,
         source_rechecks = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN 0
           ELSE competition.tournament_review_obligations.source_rechecks
         END,
         lease_owner = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.lease_owner
         END,
         lease_expires_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.lease_expires_at
         END,
         first_attempt_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.first_attempt_at
         END,
         last_attempt_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.last_attempt_at
         END,
         ready_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.ready_at
         END,
         degraded_at = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.degraded_at
         END,
         ready_revision = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.ready_revision
         END,
         last_error_code = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.last_error_code
         END,
         last_failure_fingerprint = CASE
-          WHEN competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
-            OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+          WHEN competition.tournament_review_obligations.state <> 'READY'
+            AND (
+              competition.tournament_review_obligations.eligible_at < EXCLUDED.eligible_at
+              OR competition.tournament_review_obligations.format IS DISTINCT FROM EXCLUDED.format
+            )
             THEN NULL
           ELSE competition.tournament_review_obligations.last_failure_fingerprint
         END,
         updated_at = clock_timestamp()
-    WHERE competition.tournament_review_obligations.state <> 'PROCESSING'
+      WHERE competition.tournament_review_obligations.state <> 'PROCESSING'
+      AND competition.tournament_review_obligations.state <> 'READY'
       AND (
         competition.tournament_review_obligations.metadata_payload IS NULL
         OR competition.tournament_review_obligations.entry_metadata_payload IS NULL
@@ -2947,15 +3949,22 @@ type ClaimedReviewObligation = {
   event_id: number;
   format: TournamentReviewFormat;
   eligible_at: Date | string;
+  first_eligible_at: Date | string;
   execution_attempts: number;
   source_rechecks: number;
+  repair_issue_id: number | null;
+  correction_reason: string | null;
+  correction_change_id: string | null;
 };
 
 async function claimTournamentReviewObligations(
   season: FplSeasonRef,
   limit: number,
+  target: { tournamentId?: number; eventId?: number } = {},
 ): Promise<{ owner: string; rows: ClaimedReviewObligation[] }> {
   const owner = randomUUID();
+  const targetTournamentId = target.tournamentId ?? null;
+  const targetEventId = target.eventId ?? null;
   const db = await getDbClient();
   const rows = await db.begin(
     async (tx) =>
@@ -2969,6 +3978,8 @@ async function claimTournamentReviewObligations(
               AND next_attempt_at IS NOT NULL AND next_attempt_at <= clock_timestamp())
             OR (state = 'PROCESSING' AND lease_expires_at < clock_timestamp())
           )
+          AND (${targetTournamentId}::integer IS NULL OR tournament_id = ${targetTournamentId})
+          AND (${targetEventId}::integer IS NULL OR event_id = ${targetEventId})
         ORDER BY next_attempt_at NULLS FIRST, event_id, tournament_id
         FOR UPDATE SKIP LOCKED
         LIMIT ${Math.max(1, Math.min(100, Math.trunc(limit)))}
@@ -2985,14 +3996,17 @@ async function claimTournamentReviewObligations(
         AND obligation.tournament_id = candidates.tournament_id
         AND obligation.event_id = candidates.event_id
       RETURNING obligation.season_id, obligation.tournament_id, obligation.event_id,
-                obligation.format, obligation.eligible_at,
-                obligation.execution_attempts, obligation.source_rechecks
+                obligation.format, obligation.eligible_at, obligation.first_eligible_at,
+	                obligation.execution_attempts, obligation.source_rechecks,
+	                obligation.repair_issue_id,
+	                obligation.correction_reason, obligation.correction_change_id
     `,
   );
   return { owner, rows };
 }
 
 const TOURNAMENT_REVIEW_LEASE_RENEW_INTERVAL_MS = 45_000;
+const TOURNAMENT_REVIEW_DEGRADED_RETRY_DELAY_MS = 60 * 60_000;
 
 async function renewReviewObligationLease(
   owner: string,
@@ -3013,27 +4027,168 @@ async function renewReviewObligationLease(
   return rows.length === 1;
 }
 
+function reviewRepairIssue(
+  obligation: ClaimedReviewObligation,
+  error: TournamentReviewSourceNotReadyError,
+  nextRepairAt: Date,
+): TournamentSetupIssueInput {
+  // Keep the persisted issue safe and stable. The source error text is useful
+  // inside the Data process, but it may contain provider/table details and is
+  // deliberately not copied into the repair queue or the public status API.
+  // A missing/stale/mismatched match score is a results issue: the existing
+  // repair worker must refresh the derived result rows before it can retry
+  // publication.  Only roster/group/bracket topology failures use the
+  // structure repair path; broad "match"/"winner" matching caused stale
+  // source rows to be misrouted and deleted accepted result evidence.
+  const structureFailure =
+    /roster|group assignment|entry changed groups|bracket|participant.*(outside|coverage|invalid)|side contract|structure/i.test(
+      error.message,
+    );
+  const code = structureFailure ? 'STRUCTURE_INTEGRITY_FAILED' : 'TOURNAMENT_RESULTS_INCOMPLETE';
+  return {
+    issueKey: setupIssueKey(code, obligation.event_id),
+    code,
+    category: 'results',
+    severity: 'blocking',
+    eventId: obligation.event_id,
+    affectedEntryIds: [],
+    diagnosticCode: structureFailure
+      ? 'TOURNAMENT_REVIEW_STRUCTURE_INTEGRITY'
+      : 'TOURNAMENT_REVIEW_RESULTS_INCOMPLETE',
+    internalMessage: 'Settled tournament review source validation failed',
+    nextRepairAt,
+  };
+}
+
+/** Persist one deduplicated issue in the existing repair system and attach its
+ * identity to the review obligation. A queue outage never hides the original
+ * source failure; the issue remains durable for the watchdog to enqueue. */
+async function enqueueTournamentReviewRepair(
+  season: FplSeasonRef,
+  obligation: ClaimedReviewObligation,
+  error: TournamentReviewSourceNotReadyError,
+  nextRepairAt: Date,
+): Promise<number | null> {
+  const db = await getDbClient();
+  let affectedEntryIds: number[] = [];
+  try {
+    const rows = await db<Array<{ entry_id: number }>>`
+      SELECT entry_id
+      FROM competition.tournament_entries
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${obligation.tournament_id}
+      ORDER BY entry_id
+    `;
+    affectedEntryIds = rows.map((row) => row.entry_id);
+  } catch {
+    // The issue is still actionable without an entry list: the existing
+    // structure/results repair paths resolve the roster from the tournament.
+  }
+  const issue = {
+    ...reviewRepairIssue(obligation, error, nextRepairAt),
+    affectedEntryIds,
+  } satisfies TournamentSetupIssueInput;
+  try {
+    const existing = await tournamentSetupIssueRepository.listUnresolved(
+      season,
+      obligation.tournament_id,
+    );
+    await tournamentSetupIssueRepository.sync(season, obligation.tournament_id, [issue], {
+      preserveUnresolvedIssueKeys: existing.map((candidate) => candidate.issueKey),
+    });
+    const persisted = (
+      await tournamentSetupIssueRepository.listUnresolved(season, obligation.tournament_id)
+    ).find((candidate) => candidate.issueKey === issue.issueKey);
+    if (!persisted) return null;
+    try {
+      // Load the queue adapter only on the failure path. Jobs/status and the
+      // normal publication reader remain free of BullMQ connection setup.
+      const { enqueueTournamentRepair } = await import('../jobs/tournament-repair.jobs');
+      await enqueueTournamentRepair(season, persisted, 'reconciliation');
+    } catch {
+      // The persisted issue is the retry source of truth; the repair watchdog
+      // will enqueue it when the queue is available again.
+    }
+    return persisted.issueId;
+  } catch {
+    return null;
+  }
+}
+
 async function finishReviewObligation(
   owner: string,
   obligation: ClaimedReviewObligation,
   result: TournamentReviewPublicationResult,
 ): Promise<boolean> {
   const db = await getDbClient();
-  const rows = await db<Array<{ event_id: number }>>`
-    UPDATE competition.tournament_review_obligations
-    SET state = 'READY', ready_revision = ${result.revision}, ready_at = clock_timestamp(),
-        next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
-        last_error_code = NULL, last_failure_fingerprint = NULL, updated_at = clock_timestamp()
-    WHERE season_id = ${obligation.season_id}
-      AND tournament_id = ${obligation.tournament_id}
-      AND event_id = ${obligation.event_id}
-      AND state = 'PROCESSING' AND lease_owner = ${owner}
-    RETURNING event_id
-  `;
-  return rows.length === 1;
+  return db.begin(async (tx) => {
+    const rows = await tx<Array<{ event_id: number }>>`
+      UPDATE competition.tournament_review_obligations
+      SET state = 'READY', ready_revision = ${result.revision}, ready_at = clock_timestamp(),
+          next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
+          last_error_code = NULL, last_failure_fingerprint = NULL, repair_issue_id = NULL,
+          correction_reason = NULL, correction_change_id = NULL,
+          updated_at = clock_timestamp()
+      WHERE season_id = ${obligation.season_id}
+        AND tournament_id = ${obligation.tournament_id}
+        AND event_id = ${obligation.event_id}
+        AND state = 'PROCESSING' AND lease_owner = ${owner}
+      RETURNING event_id
+    `;
+    if (rows.length !== 1) return false;
+    if (obligation.repair_issue_id !== null) {
+      // Resolve only the issue attached to this obligation. A broad
+      // tournament-level sync here could hide an unrelated open setup issue.
+      // Keep this transition in the same transaction as READY so a transient
+      // database failure cannot expose a completed review with a live blocker.
+      await tx`
+        UPDATE competition.tournament_setup_issues
+        SET resolved_at = clock_timestamp(),
+            next_repair_at = NULL,
+            updated_at = clock_timestamp()
+        WHERE season_id = ${obligation.season_id}
+          AND tournament_id = ${obligation.tournament_id}
+          AND issue_id = ${obligation.repair_issue_id}
+          AND resolved_at IS NULL
+      `;
+      // `finishReviewObligation` resolves the attached issue directly so the
+      // READY transition and repair evidence stay atomic. Recompute the
+      // tournament readiness projection here as well; otherwise a successful
+      // repair could leave `insights_ready_at` NULL until an unrelated setup
+      // reconciliation happens.
+      await tx`
+        WITH issue_counts AS (
+          SELECT
+            count(*) FILTER (WHERE resolved_at IS NULL AND severity = 'warning')::integer AS warning_count
+          FROM competition.tournament_setup_issues
+          WHERE season_id = ${obligation.season_id}
+            AND tournament_id = ${obligation.tournament_id}
+        )
+        UPDATE competition.tournaments tournament
+        SET setup_warning_count = issue_counts.warning_count,
+            insights_ready_at = CASE
+              WHEN NOT EXISTS (
+                SELECT 1
+                FROM competition.tournament_setup_issues issue
+                WHERE issue.season_id = tournament.season_id
+                  AND issue.tournament_id = tournament.tournament_id
+                  AND issue.category IN ('insights', 'results')
+                  AND issue.resolved_at IS NULL
+              ) THEN COALESCE(tournament.insights_ready_at, clock_timestamp())
+              ELSE NULL
+            END,
+            updated_at = clock_timestamp()
+        FROM issue_counts
+        WHERE tournament.season_id = ${obligation.season_id}
+          AND tournament.tournament_id = ${obligation.tournament_id}
+      `;
+    }
+    return true;
+  });
 }
 
 async function failReviewObligation(
+  season: FplSeasonRef,
   owner: string,
   obligation: ClaimedReviewObligation,
   error: unknown,
@@ -3044,14 +4199,17 @@ async function failReviewObligation(
     : obligation.execution_attempts + 1;
   const delay = tournamentReviewRetryDelayMs(sourceFailure ? 'source' : 'execution', failureNumber);
   const now = new Date();
-  const eligibleAt = asDate(obligation.eligible_at) ?? now;
+  const eligibleAt = asDate(obligation.first_eligible_at) ?? asDate(obligation.eligible_at) ?? now;
   const horizon = new Date(eligibleAt.getTime() + 24 * 60 * 60_000);
-  const degraded = delay === null;
+  // The fast schedules end after three attempts, but that is not the
+  // degradation threshold. Keep retrying every 15 minutes until the durable
+  // 24-hour horizon; only then expose DEGRADED and move to the hourly cadence.
+  const degraded = delay === null && now.getTime() >= horizon.getTime();
   const nextAt = degraded
-    ? now.getTime() >= horizon.getTime()
-      ? null
-      : new Date(Math.min(now.getTime() + 15 * 60_000, horizon.getTime()))
-    : new Date(now.getTime() + delay);
+    ? new Date(now.getTime() + TOURNAMENT_REVIEW_DEGRADED_RETRY_DELAY_MS)
+    : delay === null
+      ? new Date(Math.min(now.getTime() + 15 * 60_000, horizon.getTime()))
+      : new Date(now.getTime() + delay);
   const state: TournamentReviewObligationState = sourceFailure
     ? degraded
       ? 'DEGRADED'
@@ -3064,7 +4222,7 @@ async function failReviewObligation(
     : 'TOURNAMENT_REVIEW_PUBLISH_FAILED';
   const fingerprint = reviewFingerprint(
     code,
-    `${obligation.tournament_id}:${obligation.event_id}:${failureNumber}`,
+    `${obligation.tournament_id}:${obligation.event_id}:${sourceFailure ? 'source' : 'execution'}`,
   );
   const db = await getDbClient();
   const rows = await db<Array<{ event_id: number }>>`
@@ -3085,6 +4243,26 @@ async function failReviewObligation(
       AND state = 'PROCESSING' AND lease_owner = ${owner}
     RETURNING event_id
   `;
+  // Ownership is the admission boundary for the repair side effect.  A
+  // reclaimed/stale worker must not create or enqueue a repair after another
+  // worker has taken the lease.  Persist the failure transition first, then
+  // attach the deduplicated issue to the still-current failure row.
+  if (rows.length !== 1) return false;
+  if (sourceFailure) {
+    const repairIssueId = await enqueueTournamentReviewRepair(season, obligation, error, nextAt);
+    if (repairIssueId !== null) {
+      await db`
+        UPDATE competition.tournament_review_obligations
+        SET repair_issue_id = ${repairIssueId},
+            updated_at = clock_timestamp()
+        WHERE season_id = ${obligation.season_id}
+          AND tournament_id = ${obligation.tournament_id}
+          AND event_id = ${obligation.event_id}
+          AND state = ${state}
+          AND last_failure_fingerprint = ${fingerprint}
+      `;
+    }
+  }
   logError('Tournament review obligation failed', error, {
     seasonId: obligation.season_id,
     tournamentId: obligation.tournament_id,
@@ -3093,16 +4271,23 @@ async function failReviewObligation(
     state,
     nextAttemptAt: nextAt?.toISOString() ?? null,
   });
-  return rows.length === 1;
+  return true;
 }
 
 export async function processTournamentReviewObligations(
   season: FplSeasonRef,
-  options: { now?: Date; limit?: number } = {},
+  options: {
+    now?: Date;
+    limit?: number;
+    tournamentId?: number;
+    eventId?: number;
+    correction?: TournamentReviewCorrection;
+  } = {},
 ): Promise<{ reconciled: number; claimed: number; published: number; failed: number }> {
   const now = options.now ?? new Date();
-  const reconciled = await reconcileTournamentReviewObligations(season, now);
-  const claimed = await claimTournamentReviewObligations(season, options.limit ?? 20);
+  const target = { tournamentId: options.tournamentId, eventId: options.eventId };
+  const reconciled = await reconcileTournamentReviewObligations(season, now, target);
+  const claimed = await claimTournamentReviewObligations(season, options.limit ?? 20, target);
   let published = 0;
   let failed = 0;
   const obligationKey = (obligation: ClaimedReviewObligation): string =>
@@ -3161,11 +4346,53 @@ export async function processTournamentReviewObligations(
         continue;
       }
       try {
-        const result = await publishTournamentReviewScope(
-          season,
-          obligation.tournament_id,
-          obligation.event_id,
-        );
+        const persistedCorrection =
+          obligation.correction_reason && obligation.correction_change_id
+            ? {
+                mode: 'CORRECTION' as const,
+                reason: obligation.correction_reason,
+                changeId: obligation.correction_change_id,
+              }
+            : undefined;
+        const queuedCorrection =
+          options.correction &&
+          options.tournamentId === obligation.tournament_id &&
+          options.eventId === obligation.event_id
+            ? options.correction
+            : undefined;
+        // The obligation row is the durable authorization for a correction.
+        // Bull payloads are retry metadata and may be stale, duplicated, or
+        // forged by an older producer; they must never create revision >1 on
+        // their own. Headless descendants deliberately publish as initial
+        // revisions even when the repair job carries the parent correction
+        // payload. A mismatching queued value is therefore ignored rather
+        // than allowed to override the persisted provenance.
+        if (
+          queuedCorrection &&
+          (!persistedCorrection ||
+            queuedCorrection.reason !== persistedCorrection.reason ||
+            queuedCorrection.changeId !== persistedCorrection.changeId)
+        ) {
+          logInfo('Ignoring non-durable tournament review correction payload', {
+            seasonId: obligation.season_id,
+            tournamentId: obligation.tournament_id,
+            eventId: obligation.event_id,
+          });
+        }
+        const correction = persistedCorrection;
+        const result = correction
+          ? await publishTournamentReviewCorrection(
+              season,
+              obligation.tournament_id,
+              obligation.event_id,
+              correction.reason,
+              correction.changeId,
+            )
+          : await publishTournamentReviewScope(
+              season,
+              obligation.tournament_id,
+              obligation.event_id,
+            );
         // A lost lease means another worker owns the obligation. The immutable
         // publication is idempotent, but this worker must not claim completion.
         if (!leaseLost.has(key)) {
@@ -3190,7 +4417,7 @@ export async function processTournamentReviewObligations(
         }
       } catch (error) {
         failed += 1;
-        const failedByOwner = await failReviewObligation(claimed.owner, obligation, error);
+        const failedByOwner = await failReviewObligation(season, claimed.owner, obligation, error);
         if (!failedByOwner) {
           logInfo('Tournament review obligation lease was lost before failure recording', {
             seasonId: obligation.season_id,
@@ -3225,27 +4452,32 @@ export type TournamentReviewV2OperationalStatus = Readonly<{
   publication: Readonly<{
     readyWithCoherentHead: number;
     readyWithIncoherentHead: number;
+    readyWithIncompleteChunks: number;
   }>;
-  oldestPendingEligibleAt: string | null;
+  oldestActiveEligibleAt: string | null;
+  oldestDegradedAt: string | null;
   latestUpdatedAt: string | null;
   watch: Readonly<{
-    tournamentId: number;
-    scopes: ReadonlyArray<
-      Readonly<{
-        eventId: number;
-        format: TournamentReviewFormat;
-        state: TournamentReviewObligationState;
-        eligibleAt: string;
-        nextAttemptAt: string | null;
-        revision: number | null;
-        readyRevision: number | null;
-        publishedAt: string | null;
-        eventDataCheckedAt: string | null;
-        sourceMaxCheckedAt: string | null;
-        updatedAt: string;
-        lastErrorCode: string | null;
-      }>
-    >;
+    watchEntryId: number;
+    tournaments: ReadonlyArray<{
+      tournamentId: number;
+      scopes: ReadonlyArray<
+        Readonly<{
+          eventId: number;
+          format: TournamentReviewFormat;
+          state: TournamentReviewObligationState;
+          eligibleAt: string;
+          nextAttemptAt: string | null;
+          revision: number | null;
+          readyRevision: number | null;
+          publishedAt: string | null;
+          eventDataCheckedAt: string | null;
+          sourceMaxCheckedAt: string | null;
+          updatedAt: string;
+          lastErrorCode: string | null;
+        }>
+      >;
+    }>;
   } | null>;
 }>;
 
@@ -3258,8 +4490,22 @@ type TournamentReviewOperationalAggregateRow = {
   degraded_count: number | string;
   ready_coherent_count: number | string;
   ready_incoherent_count: number | string;
-  oldest_pending_eligible_at: Date | string | null;
+  ready_chunk_complete_count: number | string;
+  oldest_active_eligible_at: Date | string | null;
+  oldest_degraded_at: Date | string | null;
   latest_updated_at: Date | string | null;
+};
+
+type TournamentReviewOperationalSemanticRow = {
+  tournament_id: number;
+  event_id: number;
+  state: TournamentReviewObligationState;
+  ready_revision: number | string | null;
+  head_revision: number | string | null;
+  head_content_sha256: string | null;
+  publication_content_sha256: string | null;
+  payload: JsonRecord | null;
+  chunks: unknown;
 };
 
 type TournamentReviewOperationalWatchRow = {
@@ -3267,7 +4513,7 @@ type TournamentReviewOperationalWatchRow = {
   event_id: number;
   format: TournamentReviewFormat;
   state: TournamentReviewObligationState;
-  eligible_at: Date | string;
+  first_eligible_at: Date | string;
   next_attempt_at: Date | string | null;
   ready_revision: number | string | null;
   active_revision: number | string | null;
@@ -3286,11 +4532,296 @@ type TournamentReviewOperationalWatchRow = {
  */
 export async function getTournamentReviewV2OperationalStatus(
   season: FplSeasonRef,
-  watchTournamentId?: number,
+  watchEntryId?: number,
   now = new Date(),
+  options: { verifySemanticIntegrity?: boolean } = {},
 ): Promise<TournamentReviewV2OperationalStatus> {
   const db = await getDbClient();
   const aggregateRows = await db<TournamentReviewOperationalAggregateRow[]>`
+      WITH joined AS (
+        SELECT obligation.*,
+               head.revision AS head_revision,
+               head.content_sha256 AS head_content_sha256,
+               publication.revision AS publication_revision,
+               publication.content_sha256 AS publication_content_sha256,
+               COALESCE(
+                 CASE
+                   -- Guard every JSON expansion and numeric conversion. A
+                   -- corrupt manifest is evidence of an incoherent head, not
+                   -- a reason for /jobs/status to fail with a 500.
+                   WHEN jsonb_typeof(publication.payload) = 'object'
+                    AND jsonb_typeof(publication.payload -> 'manifest') = 'object'
+                    AND jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                    AND jsonb_typeof(publication.payload -> 'manifest' -> 'sectionCount') = 'number'
+                    AND jsonb_typeof(publication.payload -> 'manifest' -> 'chunkCount') = 'number'
+                    AND (publication.payload -> 'manifest' ->> 'sectionCount') ~ '^[0-9]{1,18}$'
+                    AND (publication.payload -> 'manifest' ->> 'chunkCount') ~ '^[0-9]{1,18}$'
+                    AND (CASE
+                      WHEN publication.payload -> 'manifest' ->> 'sectionCount' ~ '^[0-9]{1,18}$'
+                      THEN (publication.payload -> 'manifest' ->> 'sectionCount')::numeric
+                      ELSE -1
+                    END) = jsonb_array_length(publication.payload -> 'manifest' -> 'sections')
+                    -- A manifest section key is part of the chunk identity.
+                    -- Duplicate descriptors can otherwise make the aggregate
+                    -- counts appear closed while two logical sections read
+                    -- the same chunk namespace.
+                    AND (
+                      SELECT count(*)
+                      FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                      WHERE jsonb_typeof(section) = 'object'
+                    ) = (
+                      SELECT count(DISTINCT section ->> 'sectionKey')
+                      FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                      WHERE jsonb_typeof(section) = 'object'
+                    )
+                    -- Each format has a fixed, complete section surface.  A
+                    -- self-consistent empty manifest is still corrupt when a
+                    -- required standings, fixture, trajectory, or bracket
+                    -- section is absent.
+                    AND CASE publication.format
+                      WHEN 'POINTS' THEN (
+                        (SELECT count(*)
+                         FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                         WHERE section ->> 'sectionKey' IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')) = 2
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                          WHERE section ->> 'sectionKey' NOT IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')
+                        )
+                      )
+                      WHEN 'H2H' THEN (
+                        (SELECT count(*)
+                         FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                         WHERE section ->> 'sectionKey' IN ('H2H_STANDINGS', 'H2H_FIXTURES')) = 2
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                          WHERE section ->> 'sectionKey' NOT IN ('H2H_STANDINGS', 'H2H_FIXTURES')
+                        )
+                      )
+                      WHEN 'KNOCKOUT' THEN (
+                        (SELECT count(*)
+                         FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                         WHERE section ->> 'sectionKey' = 'KNOCKOUT_BRACKET') = 1
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                          WHERE section ->> 'sectionKey' <> 'KNOCKOUT_BRACKET'
+                        )
+                      )
+                      ELSE false
+                    END
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                      WHERE jsonb_typeof(section) IS DISTINCT FROM 'object'
+                         OR jsonb_typeof(section -> 'sectionKey') IS DISTINCT FROM 'string'
+                         OR btrim(COALESCE(section ->> 'sectionKey', '')) = ''
+                         OR jsonb_typeof(section -> 'chunkCount') IS DISTINCT FROM 'number'
+                         OR section ->> 'chunkCount' IS NULL
+                         OR section ->> 'chunkCount' !~ '^[0-9]{1,18}$'
+                         OR jsonb_typeof(section -> 'itemCount') IS DISTINCT FROM 'number'
+                         OR section ->> 'itemCount' IS NULL
+                         OR section ->> 'itemCount' !~ '^[0-9]{1,18}$'
+                         OR jsonb_typeof(section -> 'chunkHashes') IS NULL
+                         OR jsonb_typeof(section -> 'chunkHashes') <> 'array'
+                         OR jsonb_typeof(section -> 'chunkItemCounts') IS NULL
+                         OR jsonb_typeof(section -> 'chunkItemCounts') <> 'array'
+                         OR (CASE
+                           WHEN section ->> 'chunkCount' ~ '^[0-9]{1,18}$'
+                           THEN (section ->> 'chunkCount')::numeric
+                           ELSE -1
+                         END) <> jsonb_array_length(CASE
+                           WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
+                           THEN section -> 'chunkHashes'
+                           ELSE '[]'::jsonb
+                         END)
+                         OR (CASE
+                           WHEN section ->> 'chunkCount' ~ '^[0-9]{1,18}$'
+                           THEN (section ->> 'chunkCount')::numeric
+                           ELSE -1
+                         END) <> jsonb_array_length(CASE
+                           WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                           THEN section -> 'chunkItemCounts'
+                           ELSE '[]'::jsonb
+                         END)
+                         OR EXISTS (
+                           SELECT 1
+                           FROM jsonb_array_elements(CASE
+                             WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                             THEN section -> 'chunkItemCounts'
+                             ELSE '[]'::jsonb
+                           END) item_count
+                           WHERE jsonb_typeof(item_count) IS DISTINCT FROM 'number'
+                              OR CASE
+                                   WHEN jsonb_typeof(item_count) = 'number'
+                                   THEN CASE
+                                          WHEN item_count::text ~ '^[0-9]{1,3}$'
+                                          THEN (item_count::text)::numeric NOT BETWEEN 0 AND 100
+                                          ELSE true
+                                        END
+                                   ELSE true
+                                 END
+                         )
+                         OR (CASE
+                           WHEN section ->> 'itemCount' ~ '^[0-9]{1,18}$'
+                           THEN (section ->> 'itemCount')::numeric
+                           ELSE -1
+                         END) <> (
+                           SELECT COALESCE(sum(CASE
+                             WHEN jsonb_typeof(item_count) = 'number'
+                                  AND item_count::text ~ '^[0-9]{1,3}$'
+                             THEN (item_count::text)::numeric
+                             ELSE -1
+                           END), -1::numeric)
+                           FROM jsonb_array_elements(CASE
+                             WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                             THEN section -> 'chunkItemCounts'
+                             ELSE '[]'::jsonb
+                           END) item_count
+                         )
+                         OR (
+                           (CASE
+                             WHEN section ->> 'itemCount' ~ '^[0-9]{1,18}$'
+                             THEN (section ->> 'itemCount')::numeric
+                             ELSE -1
+                           END) = 0
+                           AND (CASE
+                             WHEN section ->> 'chunkCount' ~ '^[0-9]{1,18}$'
+                             THEN (section ->> 'chunkCount')::numeric
+                             ELSE -1
+                           END) <> 1
+                         )
+                         OR (
+                           (CASE
+                             WHEN section ->> 'itemCount' ~ '^[0-9]{1,18}$'
+                             THEN (section ->> 'itemCount')::numeric
+                             ELSE -1
+                           END) > 0
+                           AND EXISTS (
+                             SELECT 1
+                             FROM jsonb_array_elements(CASE
+                               WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                               THEN section -> 'chunkItemCounts'
+                               ELSE '[]'::jsonb
+                             END) item_count
+                             WHERE jsonb_typeof(item_count) = 'number'
+                               AND item_count::text ~ '^[0-9]{1,3}$'
+                               AND (item_count::text)::numeric = 0
+                           )
+                         )
+                    )
+                   THEN (
+                     (
+                       SELECT count(*)::numeric
+                       FROM competition.tournament_review_publication_chunks chunk
+                       WHERE chunk.season_id = obligation.season_id
+                         AND chunk.tournament_id = obligation.tournament_id
+                         AND chunk.event_id = obligation.event_id
+                         AND chunk.revision = head.revision
+                     ) = (publication.payload -> 'manifest' ->> 'chunkCount')::numeric
+                     AND (
+                       SELECT COALESCE(
+                         sum(
+                           CASE
+                             WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
+                             THEN jsonb_array_length(section -> 'chunkHashes')
+                             ELSE 0
+                           END
+                         ),
+                         0
+                       )::numeric
+                       FROM jsonb_array_elements(CASE
+                         WHEN jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                         THEN publication.payload -> 'manifest' -> 'sections'
+                         ELSE '[]'::jsonb
+                       END) section
+                     ) = (publication.payload -> 'manifest' ->> 'chunkCount')::numeric
+                     AND (
+                       SELECT count(*)::numeric
+                       FROM jsonb_array_elements(CASE
+                         WHEN jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                         THEN publication.payload -> 'manifest' -> 'sections'
+                         ELSE '[]'::jsonb
+                       END) section
+                       CROSS JOIN LATERAL jsonb_array_elements_text(
+                         CASE
+                           WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
+                           THEN section -> 'chunkHashes'
+                           ELSE '[]'::jsonb
+                         END
+                       ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
+                     ) = (
+                       SELECT count(*)::numeric
+                       FROM competition.tournament_review_publication_chunks chunk
+                       WHERE chunk.season_id = obligation.season_id
+                         AND chunk.tournament_id = obligation.tournament_id
+                         AND chunk.event_id = obligation.event_id
+                         AND chunk.revision = head.revision
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                       CROSS JOIN LATERAL jsonb_array_elements_text(
+                         section -> 'chunkHashes'
+                       ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
+                       JOIN LATERAL jsonb_array_elements_text(
+                         section -> 'chunkItemCounts'
+                       ) WITH ORDINALITY expected_count(expected_item_count, count_ordinal)
+                         ON expected_count.count_ordinal = expected.chunk_ordinal
+                       WHERE NOT EXISTS (
+                         SELECT 1
+                         FROM competition.tournament_review_publication_chunks chunk
+                         WHERE chunk.season_id = obligation.season_id
+                           AND chunk.tournament_id = obligation.tournament_id
+                           AND chunk.event_id = obligation.event_id
+                           AND chunk.revision = head.revision
+                           AND chunk.section_key = section ->> 'sectionKey'
+                           AND chunk.chunk_index = expected.chunk_ordinal - 1
+                           AND chunk.chunk_sha256 = expected.expected_hash
+                           AND chunk.item_count::numeric = expected_count.expected_item_count::numeric
+                         )
+                       )
+                     -- The expected-to-actual check above is intentionally
+                     -- bidirectional.  Matching row counts alone is not
+                     -- enough: a damaged manifest could replace one section
+                     -- descriptor with another and still have the same total
+                     -- number of hashes.  Every physical primary-key tuple
+                     -- must be described by exactly one section ordinal.
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM competition.tournament_review_publication_chunks chunk
+                       WHERE chunk.season_id = obligation.season_id
+                         AND chunk.tournament_id = obligation.tournament_id
+                         AND chunk.event_id = obligation.event_id
+                         AND chunk.revision = head.revision
+                         AND NOT EXISTS (
+                           SELECT 1
+                           FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                           CROSS JOIN LATERAL jsonb_array_elements_text(
+                             section -> 'chunkHashes'
+                           ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
+                           WHERE section ->> 'sectionKey' = chunk.section_key
+                             AND expected.chunk_ordinal - 1 = chunk.chunk_index
+                         )
+                     )
+                   )
+                   ELSE false
+                 END,
+                 false
+               ) AS chunks_complete
+        FROM competition.tournament_review_obligations obligation
+        LEFT JOIN competition.tournament_review_heads head
+          ON head.season_id = obligation.season_id
+         AND head.tournament_id = obligation.tournament_id
+         AND head.event_id = obligation.event_id
+        LEFT JOIN competition.tournament_review_publications publication
+          ON publication.season_id = obligation.season_id
+         AND publication.tournament_id = obligation.tournament_id
+         AND publication.event_id = obligation.event_id
+         AND publication.revision = head.revision
+        WHERE obligation.season_id = ${season.seasonId}
+      )
       SELECT count(*)::integer AS eligible_count,
              count(*) FILTER (WHERE state = 'PENDING')::integer AS pending_count,
              count(*) FILTER (WHERE state = 'WAITING_SOURCE')::integer AS waiting_source_count,
@@ -3300,42 +4831,181 @@ export async function getTournamentReviewV2OperationalStatus(
              count(*) FILTER (
                WHERE state = 'READY'
                  AND ready_revision IS NOT NULL
-                 AND head.revision = ready_revision
-                 AND head.content_sha256 = publication.content_sha256
+                 AND head_revision = ready_revision
+                 AND head_content_sha256 = publication_content_sha256
+                 AND chunks_complete
              )::integer AS ready_coherent_count,
              count(*) FILTER (
                WHERE state = 'READY'
-                 AND (
-                   ready_revision IS NULL
-                   OR head.revision IS NULL
-                   OR publication.revision IS NULL
-                   OR head.revision <> ready_revision
-                   OR head.content_sha256 <> publication.content_sha256
+                 AND NOT (
+                   ready_revision IS NOT NULL
+                   AND head_revision = ready_revision
+                   AND head_content_sha256 = publication_content_sha256
+                   AND chunks_complete
                  )
              )::integer AS ready_incoherent_count,
-             min(eligible_at) FILTER (WHERE state <> 'READY') AS oldest_pending_eligible_at,
-             max(obligation.updated_at) AS latest_updated_at
-      FROM competition.tournament_review_obligations obligation
-      LEFT JOIN competition.tournament_review_heads head
-        ON head.season_id = obligation.season_id
-       AND head.tournament_id = obligation.tournament_id
-       AND head.event_id = obligation.event_id
-      LEFT JOIN competition.tournament_review_publications publication
-        ON publication.season_id = obligation.season_id
-       AND publication.tournament_id = obligation.tournament_id
-       AND publication.event_id = obligation.event_id
-       AND publication.revision = obligation.ready_revision
-      WHERE obligation.season_id = ${season.seasonId}
+	             count(*) FILTER (
+	               WHERE state = 'READY'
+	                 AND chunks_complete
+	             )::integer AS ready_chunk_complete_count,
+             min(first_eligible_at) FILTER (WHERE state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING')) AS oldest_active_eligible_at,
+             min(degraded_at) FILTER (WHERE state = 'DEGRADED') AS oldest_degraded_at,
+             max(updated_at) AS latest_updated_at
+      FROM joined
     `;
-  const normalizedWatchTournamentId =
-    Number.isInteger(watchTournamentId) && (watchTournamentId ?? 0) > 0 ? watchTournamentId : null;
-  const watchRows = normalizedWatchTournamentId
+  const count = (value: number | string | null | undefined): number => {
+    const parsed = Number(value ?? 0);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  };
+  // The aggregate query above deliberately stays narrow for routine status
+  // polling: it validates manifest/cardinality/hash-column parity without
+  // transferring every chunk's JSON items into the Data process. The bounded
+  // hard-cut gate opts into the full semantic digest below, which is the only
+  // path that needs to materialize all sibling chunks to detect tampering that
+  // left the stored hash columns untouched.
+  let readyCoherentCount = count(aggregateRows[0]?.ready_coherent_count);
+  let readyChunkCompleteCount = count(aggregateRows[0]?.ready_chunk_complete_count);
+  const readyCount = count(aggregateRows[0]?.ready_count);
+  if (options.verifySemanticIntegrity === true) {
+    // Semantic verification is a bounded diagnostic/backfill path, never the
+    // routine /jobs/status path. Keyset batches cap the number of publication
+    // payloads/chunk arrays materialized in one database response while still
+    // covering every READY scope when the explicit gate opts in.
+    const semanticRows: TournamentReviewOperationalSemanticRow[] = [];
+    let lastTournamentId = 0;
+    let lastEventId = 0;
+    for (;;) {
+      const batch = await db<TournamentReviewOperationalSemanticRow[]>`
+        SELECT obligation.tournament_id,
+               obligation.event_id,
+               obligation.state,
+               obligation.ready_revision,
+               head.revision AS head_revision,
+               head.content_sha256 AS head_content_sha256,
+               publication.content_sha256 AS publication_content_sha256,
+               publication.payload,
+               COALESCE(
+                 (
+                   SELECT jsonb_agg(
+                     jsonb_build_object(
+                       'section_key', chunk.section_key,
+                       'chunk_index', chunk.chunk_index,
+                       'item_count', chunk.item_count,
+                       'chunk_sha256', chunk.chunk_sha256,
+                       'items', chunk.items
+                     )
+                     ORDER BY chunk.section_key, chunk.chunk_index
+                   )
+                   FROM competition.tournament_review_publication_chunks chunk
+                   WHERE chunk.season_id = obligation.season_id
+                     AND chunk.tournament_id = obligation.tournament_id
+                     AND chunk.event_id = obligation.event_id
+                     AND chunk.revision = head.revision
+                 ),
+                 '[]'::jsonb
+               ) AS chunks
+        FROM competition.tournament_review_obligations obligation
+        LEFT JOIN competition.tournament_review_heads head
+          ON head.season_id = obligation.season_id
+         AND head.tournament_id = obligation.tournament_id
+         AND head.event_id = obligation.event_id
+        LEFT JOIN competition.tournament_review_publications publication
+          ON publication.season_id = head.season_id
+         AND publication.tournament_id = head.tournament_id
+         AND publication.event_id = head.event_id
+         AND publication.revision = head.revision
+        WHERE obligation.season_id = ${season.seasonId}
+          AND obligation.state = 'READY'
+          AND (obligation.tournament_id, obligation.event_id) > (${lastTournamentId}, ${lastEventId})
+        ORDER BY obligation.tournament_id, obligation.event_id
+        LIMIT ${TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE}
+      `;
+      semanticRows.push(...batch);
+      if (batch.length < TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE) break;
+      const last = batch[batch.length - 1];
+      lastTournamentId = last.tournament_id;
+      lastEventId = last.event_id;
+    }
+    const storedChunkRows = (
+      value: unknown,
+    ): Array<{
+      section_key: string;
+      chunk_index: number | string;
+      item_count: number | string;
+      chunk_sha256: string;
+      items: unknown;
+    }> => {
+      if (!Array.isArray(value)) return [];
+      return value.flatMap((item) => {
+        if (!isRecord(item) || typeof item.section_key !== 'string') return [];
+        return [
+          {
+            section_key: item.section_key,
+            chunk_index: item.chunk_index as number | string,
+            item_count: item.item_count as number | string,
+            chunk_sha256: String(item.chunk_sha256 ?? ''),
+            items: item.items,
+          },
+        ];
+      });
+    };
+    readyCoherentCount = 0;
+    readyChunkCompleteCount = 0;
+    if (semanticRows.length === readyCount) {
+      for (const row of semanticRows) {
+        const chunks = storedChunkRows(row.chunks);
+        const chunksComplete = reviewChunksMatchPayload(row.payload, chunks);
+        if (chunksComplete) readyChunkCompleteCount += 1;
+        const semanticSha =
+          chunksComplete && row.payload
+            ? tournamentReviewSemanticSha256(row.payload, orderedReviewChunkHashes(chunks))
+            : null;
+        if (
+          chunksComplete &&
+          integerOrNull(row.ready_revision) !== null &&
+          integerOrNull(row.ready_revision) === integerOrNull(row.head_revision) &&
+          row.head_content_sha256 !== null &&
+          row.head_content_sha256 === row.publication_content_sha256 &&
+          semanticSha === row.head_content_sha256
+        ) {
+          readyCoherentCount += 1;
+        }
+      }
+    }
+  }
+  const readyIncoherentCount = Math.max(0, readyCount - readyCoherentCount);
+  const normalizedWatchEntryId =
+    Number.isInteger(watchEntryId) && (watchEntryId ?? 0) > 0 ? watchEntryId : null;
+  const watchedTournamentRows = normalizedWatchEntryId
+    ? await db<Array<{ tournament_id: number }>>`
+        WITH memberships AS (
+          SELECT tournament_id
+          FROM competition.tournament_entries
+          WHERE season_id = ${season.seasonId} AND entry_id = ${normalizedWatchEntryId}
+          UNION
+          SELECT tournament.tournament_id
+          FROM competition.entry_leagues entry_league
+          JOIN competition.tournaments tournament
+            ON tournament.season_id = entry_league.season_id
+           AND tournament.league_id = entry_league.league_id
+           AND tournament.league_type = entry_league.league_type
+          WHERE entry_league.season_id = ${season.seasonId}
+            AND entry_league.entry_id = ${normalizedWatchEntryId}
+        )
+        SELECT tournament_id
+        FROM memberships
+        ORDER BY tournament_id DESC
+        LIMIT 100
+      `
+    : [];
+  const watchedTournamentIds = watchedTournamentRows.map((row) => row.tournament_id);
+  const watchRows = watchedTournamentIds.length
     ? await db<TournamentReviewOperationalWatchRow[]>`
         SELECT obligation.tournament_id,
                obligation.event_id,
                obligation.format,
                obligation.state,
-               obligation.eligible_at,
+               obligation.first_eligible_at,
                obligation.next_attempt_at,
                obligation.ready_revision,
                head.revision AS active_revision,
@@ -3355,32 +5025,32 @@ export async function getTournamentReviewV2OperationalStatus(
          AND publication.event_id = obligation.event_id
          AND publication.revision = head.revision
         WHERE obligation.season_id = ${season.seasonId}
-          AND obligation.tournament_id = ${normalizedWatchTournamentId}
-        ORDER BY obligation.event_id DESC
-        LIMIT 38
+          AND obligation.tournament_id = ANY(${watchedTournamentIds}::int[])
+        ORDER BY obligation.tournament_id DESC, obligation.event_id DESC
       `
     : [];
   const aggregate = aggregateRows[0];
-  const count = (value: number | string | null | undefined): number => {
-    const parsed = Number(value ?? 0);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
-  };
-  const watch = watchRows.length
+  const watch = watchedTournamentIds.length
     ? {
-        tournamentId: watchRows[0].tournament_id,
-        scopes: watchRows.map((row) => ({
-          eventId: row.event_id,
-          format: row.format,
-          state: row.state,
-          eligibleAt: dateIso(row.eligible_at) ?? now.toISOString(),
-          nextAttemptAt: dateIso(row.next_attempt_at),
-          revision: integerOrNull(row.active_revision),
-          readyRevision: integerOrNull(row.ready_revision),
-          publishedAt: dateIso(row.published_at),
-          eventDataCheckedAt: dateIso(row.event_data_checked_at),
-          sourceMaxCheckedAt: dateIso(row.source_max_checked_at),
-          updatedAt: dateIso(row.updated_at) ?? now.toISOString(),
-          lastErrorCode: row.last_error_code,
+        watchEntryId: normalizedWatchEntryId as number,
+        tournaments: watchedTournamentIds.map((tournamentId) => ({
+          tournamentId,
+          scopes: watchRows
+            .filter((row) => row.tournament_id === tournamentId)
+            .map((row) => ({
+              eventId: row.event_id,
+              format: row.format,
+              state: row.state,
+              eligibleAt: dateIso(row.first_eligible_at) ?? now.toISOString(),
+              nextAttemptAt: dateIso(row.next_attempt_at),
+              revision: integerOrNull(row.active_revision),
+              readyRevision: integerOrNull(row.ready_revision),
+              publishedAt: dateIso(row.published_at),
+              eventDataCheckedAt: dateIso(row.event_data_checked_at),
+              sourceMaxCheckedAt: dateIso(row.source_max_checked_at),
+              updatedAt: dateIso(row.updated_at) ?? now.toISOString(),
+              lastErrorCode: row.last_error_code,
+            })),
         })),
       }
     : null;
@@ -3398,10 +5068,12 @@ export async function getTournamentReviewV2OperationalStatus(
       degraded: count(aggregate?.degraded_count),
     },
     publication: {
-      readyWithCoherentHead: count(aggregate?.ready_coherent_count),
-      readyWithIncoherentHead: count(aggregate?.ready_incoherent_count),
+      readyWithCoherentHead: readyCoherentCount,
+      readyWithIncoherentHead: readyIncoherentCount,
+      readyWithIncompleteChunks: Math.max(0, readyCount - readyChunkCompleteCount),
     },
-    oldestPendingEligibleAt: dateIso(aggregate?.oldest_pending_eligible_at),
+    oldestActiveEligibleAt: dateIso(aggregate?.oldest_active_eligible_at),
+    oldestDegradedAt: dateIso(aggregate?.oldest_degraded_at),
     latestUpdatedAt: dateIso(aggregate?.latest_updated_at),
     watch,
   };

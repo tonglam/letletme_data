@@ -1317,6 +1317,98 @@ run_migration_plan() {
   compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan
 }
 
+review_backfill_marker_pending() {
+  local runtime_database_url=${1:-${DATA_RUNTIME_DATABASE_URL:-}}
+  if [[ -z "$runtime_database_url" ]]; then
+    echo 'deploy review backfill: Data runtime DATABASE_URL is required to inspect the durable marker' >&2
+    return 2
+  fi
+  local marker_output marker_state
+  if ! marker_output=$(DATABASE_URL="$runtime_database_url" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL migration bun -e '
+      import postgres from "postgres";
+      const db = postgres(process.env.DATABASE_URL, { max: 1 });
+      const rows = await db`SELECT backfill_completed_at FROM ops.tournament_review_v2_1_backup_manifest WHERE restore_rehearsal_required = false AND restore_rehearsal_completed_at IS NOT NULL`;
+      const hasIncomplete = rows.some((row) => row.backfill_completed_at === null);
+      process.stdout.write(hasIncomplete || rows.length === 0 ? "pending" : "complete");
+      await db.end();
+    ' 2>/dev/null); then
+    echo 'deploy review backfill: durable marker probe failed; refusing to skip the backfill' >&2
+    return 2
+  fi
+  marker_state=$(printf '%s\n' "$marker_output" | tail -n 1)
+  case "$marker_state" in
+    pending|missing) return 0 ;;
+    complete) return 1 ;;
+    *)
+      echo "deploy review backfill: unexpected durable marker state '$marker_state'" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_tournament_review_restore_rehearsal() {
+  local rehearsal_url=${1:-${DATABASE_RESTORE_REHEARSAL_URL:-}}
+  local source_url=${2:-${MIGRATION_DATABASE_URL:-}}
+  if [[ -z "$rehearsal_url" ]]; then
+    echo 'deploy review restore rehearsal: DATABASE_RESTORE_REHEARSAL_URL is required for migration 0090' >&2
+    return 1
+  fi
+  if [[ -z "$source_url" ]]; then
+    echo 'deploy review restore rehearsal: source database URL is required for identity verification' >&2
+    return 1
+  fi
+  local dump_path
+  dump_path=$(find "$DATABASE_BACKUP_DIR" -maxdepth 1 -type f -name 'letletme-data-*.dump' \
+    -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 { sub(/^[^ ]+ /, ""); print; exit }')
+  if [[ -z "$dump_path" || ! -s "$dump_path" ]]; then
+    echo 'deploy review restore rehearsal: no complete pre-migration dump found' >&2
+    return 1
+  fi
+  local dump_base=${dump_path%.dump}
+  if [[ ! -s "${dump_base}.sha256" || ! -s "${dump_base}.manifest.json" ]]; then
+    echo 'deploy review restore rehearsal: dump sidecars are missing' >&2
+    return 1
+  fi
+  local container_dump_path
+  container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"
+  echo 'deploy review restore rehearsal: restoring the verified pre-migration dump into disposable infrastructure'
+  DATABASE_RESTORE_REHEARSAL_URL="$rehearsal_url" \
+    DATABASE_RESTORE_SOURCE_URL="$source_url" \
+    DATABASE_RESTORE_DUMP_PATH="$container_dump_path" \
+    compose --profile migration run --rm -T --interactive=false --no-deps \
+    -e DATABASE_RESTORE_REHEARSAL_URL -e DATABASE_RESTORE_DUMP_PATH \
+    -e DATABASE_RESTORE_SOURCE_URL \
+    --entrypoint sh backup -euc '
+      exec bash /app/scripts/verify-backup-restore.sh \
+        "$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL" "$DATABASE_RESTORE_SOURCE_URL"
+    '
+}
+
+run_tournament_review_hard_cut_backfill() {
+  local season=${1:-}
+  local runtime_database_url=${2:-${DATA_RUNTIME_DATABASE_URL:-}}
+  if ! [[ "$season" =~ ^[0-9]{4}$ ]]; then
+    echo 'deploy review backfill: season must be YYYY' >&2
+    return 1
+  fi
+  if [[ -z "$runtime_database_url" ]]; then
+    echo 'deploy review backfill: Data runtime DATABASE_URL is required' >&2
+    return 1
+  fi
+  echo "deploy review backfill: draining current-season V2.1 scopes for $season"
+  if ! DATABASE_URL="$runtime_database_url" \
+    MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM \
+    migration bun run db:backfill-tournament-review-v2 -- \
+    --season "$season" --batch-size 100 --max-batches 10000; then
+    echo 'deploy review backfill: bounded V2.1 gate failed; services remain stopped' >&2
+    return 1
+  fi
+}
+
 retire_expired_core_staging_publications() {
   local repair_publication_ids=${RETIRE_EXPIRED_CORE_STAGING_PUBLICATION_IDS:-}
   local repair_season_id=${RETIRE_EXPIRED_CORE_STAGING_SEASON_ID:-}

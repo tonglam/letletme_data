@@ -24,7 +24,13 @@ export type MaintenanceEnqueueOptions = Readonly<{
   /** Actual standalone market-daily Bull identity observed by the watchdog. */
   playerValuesBullJobId?: string;
   entryId?: number;
+  /** Optional tournament-scoped review bootstrap target. */
+  tournamentId?: number;
   eventId?: number;
+  /** Service-only explicit settled-review correction provenance. */
+  reviewMode?: 'CORRECTION';
+  reviewCorrectionReason?: string;
+  reviewCorrectionChangeId?: string;
   snapshotKind?: 'PROVISIONAL' | 'FINAL';
   snapshotActor?: string;
   snapshotReason?: string;
@@ -114,7 +120,15 @@ export async function enqueueMaintenanceJob(
       ? {}
       : { playerValuesBullJobId: options.playerValuesBullJobId }),
     ...(options.entryId === undefined ? {} : { entryId: options.entryId }),
+    ...(options.tournamentId === undefined ? {} : { tournamentId: options.tournamentId }),
     ...(options.eventId === undefined ? {} : { eventId: options.eventId }),
+    ...(options.reviewMode === undefined ? {} : { reviewMode: options.reviewMode }),
+    ...(options.reviewCorrectionReason === undefined
+      ? {}
+      : { reviewCorrectionReason: options.reviewCorrectionReason }),
+    ...(options.reviewCorrectionChangeId === undefined
+      ? {}
+      : { reviewCorrectionChangeId: options.reviewCorrectionChangeId }),
     ...(options.snapshotKind === undefined ? {} : { snapshotKind: options.snapshotKind }),
     ...(options.snapshotActor === undefined ? {} : { snapshotActor: options.snapshotActor }),
     ...(options.snapshotReason === undefined ? {} : { snapshotReason: options.snapshotReason }),

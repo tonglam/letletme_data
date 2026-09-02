@@ -7,6 +7,7 @@ import {
 import { getTournamentBackfillWindow } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
+import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -23,6 +24,10 @@ import { auditTournamentSetup } from './tournament-audit.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { rebuildTournamentStructure } from './tournament-structure.service';
+import {
+  requestTournamentReviewCorrection,
+  requestTournamentReviewTournamentCorrection,
+} from './tournament-review-publication.service';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -31,6 +36,21 @@ function scopedEntryIds(allEntryIds: number[], affectedEntryIds: number[]): numb
   const allowed = new Set(allEntryIds);
   const requested = uniqueNumbers(affectedEntryIds).filter((entryId) => allowed.has(entryId));
   return requested.length > 0 ? requested : allEntryIds;
+}
+
+/** A setup issue row is reused across occurrences by its stable issue key.
+ * Use the durable last-seen timestamp as the occurrence generation so a
+ * resolved issue that reappears receives a new correction Change ID, while
+ * retries of the same occurrence remain idempotent. */
+function repairCorrectionChangeId(
+  season: FplSeasonRef,
+  issue: { issueId: number; lastSeenAt: Date },
+): string {
+  const seenAt =
+    issue.lastSeenAt instanceof Date && Number.isFinite(issue.lastSeenAt.getTime())
+      ? issue.lastSeenAt.toISOString().replace(/[^0-9]/g, '')
+      : 'unknown-occurrence';
+  return `tournament-repair-${season.seasonCode}-${issue.issueId}-${seenAt}`;
 }
 
 function issueEventId(
@@ -76,6 +96,10 @@ async function repairTournamentSetupIssueUnlocked(
   const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
   const eventId = issueEventId(issue.eventId ?? null, window);
   const repairIssues: TournamentSetupIssue[] = [];
+  let reviewCorrection:
+    | { kind: 'event'; eventId: number; reason: string; changeId: string }
+    | { kind: 'tournament'; reason: string; changeId: string }
+    | null = null;
 
   switch (issue.code) {
     case 'ENTRY_PROFILE_INCOMPLETE': {
@@ -209,20 +233,36 @@ async function repairTournamentSetupIssueUnlocked(
         },
         () => rebuildTournamentStructure(season, tournament, entrySeeds),
       );
+      // A topology rebuild can change group membership, phase boundaries, or
+      // bracket edges for every settled event. Defer the correction reset
+      // until the post-repair audit succeeds, then fence the earliest head
+      // and enqueue every affected scope with durable provenance.
+      reviewCorrection = {
+        kind: 'tournament',
+        reason: `Tournament structure repair issue ${issue.issueId}`,
+        changeId: repairCorrectionChangeId(season, issue),
+      };
       break;
     }
 
     case 'TOURNAMENT_RESULTS_INCOMPLETE': {
       if (targetEntryIds.length === 0 || eventId === null) break;
-      repairIssues.push(
-        ...(await runTournamentEventBackfill(
-          season,
-          issue.tournamentId,
-          tournament,
-          targetEntryIds,
-          eventId,
-        )),
+      const resultIssues = await runTournamentEventBackfill(
+        season,
+        issue.tournamentId,
+        tournament,
+        targetEntryIds,
+        eventId,
       );
+      repairIssues.push(...resultIssues);
+      if (resultIssues.length === 0) {
+        reviewCorrection = {
+          kind: 'event',
+          eventId,
+          reason: `Tournament results repair issue ${issue.issueId}`,
+          changeId: repairCorrectionChangeId(season, issue),
+        };
+      }
       break;
     }
   }
@@ -242,6 +282,31 @@ async function repairTournamentSetupIssueUnlocked(
     season,
     issue.tournamentId,
   );
+
+  // Do not resolve the setup issue before the correction fence is durable. If
+  // the reset/enqueue fails after `sync` clears this row, the repair watchdog
+  // would have no unresolved issue left to retry. The audit result is the
+  // gate: only when this issue key is absent from the repaired set may we
+  // fence immutable review heads first.
+  let correctionEventIds: number[] | null = null;
+  if (reviewCorrection && !persisted.some((candidate) => candidate.issueKey === issue.issueKey)) {
+    correctionEventIds =
+      reviewCorrection.kind === 'tournament'
+        ? await requestTournamentReviewTournamentCorrection(
+            season,
+            issue.tournamentId,
+            reviewCorrection.reason,
+            reviewCorrection.changeId,
+          )
+        : await requestTournamentReviewCorrection(
+            season,
+            issue.tournamentId,
+            reviewCorrection.eventId,
+            reviewCorrection.reason,
+            reviewCorrection.changeId,
+            true,
+          );
+  }
   await tournamentSetupIssueRepository.sync(season, issue.tournamentId, persisted, {
     preserveUnresolvedIssueKeys: existingUnresolved
       .filter((existing) => existing.issueId !== issueId)
@@ -268,6 +333,28 @@ async function repairTournamentSetupIssueUnlocked(
     // successfully here would consume the deterministic job while the issue
     // only became eligible for the six-attempt/5-minute retry policy.
     throw new Error(`Tournament setup repair remains incomplete: ${issue.code}`);
+  }
+
+  if (correctionEventIds !== null) {
+    if (correctionEventIds.length > 0) {
+      await Promise.all(
+        correctionEventIds.map((correctionEventId) =>
+          enqueueTournamentReview(season, 'reconcile', {
+            tournamentId: issue.tournamentId,
+            eventId: correctionEventId,
+            deduplicationId: `tournament-review-repair-${season.seasonCode}-${issue.tournamentId}-${correctionEventId}-${reviewCorrection?.changeId}`,
+          }),
+        ),
+      );
+    }
+
+    // A topology/result repair is never allowed to fall through to routine
+    // reconciliation: that path deliberately skips READY obligations and
+    // would leave a frozen head on the pre-repair facts. An empty result is
+    // valid only when the tournament has not created a review obligation yet.
+    // In that case the normal eligibility discovery will create its initial
+    // publication; there is no READY head to invalidate.
+    return;
   }
 }
 

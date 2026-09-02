@@ -12,6 +12,8 @@ import {
   tournamentReviewFailureFingerprint,
   tournamentReviewRetryDelayMs,
   tournamentReviewSourceSpan,
+  tournamentReviewSemanticSha256,
+  splitTournamentReviewChunks,
 } from '../../src/services/tournament-review-publication.service';
 import {
   effectiveTournamentReviewEntryStartEventId,
@@ -23,8 +25,28 @@ const publicationSource = readFileSync(
   'utf8',
 );
 const entryEventResultsSource = readFileSync('src/repositories/entry-event-results.ts', 'utf8');
+const backfillSource = readFileSync('scripts/backfill-tournament-review-v2.ts', 'utf8');
+const hardCutMigration = readFileSync(
+  'migrations/0090_my_tournament_review_v2_1_hard_cut.sql',
+  'utf8',
+);
 
 describe('My Tournament Review V2 format and retry policy', () => {
+  test('handles the empty-database sentinel before requiring a current season', () => {
+    expect(backfillSource.indexOf('WHERE season_id = 0')).toBeGreaterThan(-1);
+    expect(backfillSource.indexOf('currentSeasonRows.length === 0')).toBeGreaterThan(-1);
+    expect(backfillSource.indexOf('seasonRepository.requireByCode')).toBeGreaterThan(
+      backfillSource.indexOf('currentSeasonRows.length === 0'),
+    );
+    expect(hardCutMigration).toContain('ops.bootstrap_tournament_review_v2_1_backup_marker');
+    expect(hardCutMigration).toContain(
+      'GRANT EXECUTE ON FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker',
+    );
+    expect(hardCutMigration).not.toMatch(
+      /GRANT INSERT ON TABLE ops\.tournament_review_v2_1_backup_manifest/,
+    );
+  });
+
   test('uses one mutually-exclusive format per finalized event', () => {
     const config = {
       groupMode: 'points_races' as const,
@@ -373,5 +395,110 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(knockoutSource).toContain('bracketMatchWasFetched');
     expect(knockoutSource).toContain('WHEN ${bracketMatchWasFetched}');
     expect(knockoutSource).toContain('THEN ${tournamentKnockoutsInCompetition.updatedAt}');
+  });
+
+  test('semantic hash ignores observation clocks but changes with business values', () => {
+    const first = {
+      schemaVersion: 'my-tournament-review-v2.1',
+      metricVersion: 'settled-review-v2',
+      points: { rows: [{ entryId: 6953, grossPoints: 70, updatedAt: '2026-08-30T10:00:00Z' }] },
+      freshness: { sourceMaxCheckedAt: '2026-08-30T10:01:00Z' },
+    };
+    const second = {
+      ...first,
+      points: { rows: [{ entryId: 6953, grossPoints: 70, updatedAt: '2026-09-01T10:00:00Z' }] },
+      freshness: { sourceMaxCheckedAt: '2026-09-01T10:01:00Z' },
+    };
+    expect(tournamentReviewSemanticSha256(first, ['a'.repeat(64)])).toBe(
+      tournamentReviewSemanticSha256(second, ['a'.repeat(64)]),
+    );
+    expect(
+      tournamentReviewSemanticSha256(
+        { ...second, points: { rows: [{ entryId: 6953, grossPoints: 71 }] } },
+        ['a'.repeat(64)],
+      ),
+    ).not.toBe(tournamentReviewSemanticSha256(first, ['a'.repeat(64)]));
+  });
+
+  test('makes correction retries idempotent by Change ID and keeps status JSON fail-closed', () => {
+    expect(publicationSource).toContain(
+      'previousHead[0]?.correction_change_id === correction.changeId',
+    );
+    expect(publicationSource).toContain('previousHead[0]?.correction_reason === correction.reason');
+    expect(publicationSource).toContain('state: \x27REUSED\x27');
+    expect(publicationSource).toContain(
+      'jsonb_typeof(publication.payload -> \x27manifest\x27) = \x27object\x27',
+    );
+    expect(publicationSource).toContain(
+      'jsonb_typeof(publication.payload -> \x27manifest\x27 -> \x27sectionCount\x27) = \x27number\x27',
+    );
+    expect(publicationSource).toContain(
+      'jsonb_typeof(section -> \x27itemCount\x27) IS DISTINCT FROM \x27number\x27',
+    );
+    expect(publicationSource).toContain('isSafeReviewManifestCount');
+    expect(publicationSource).toContain(
+      'jsonb_typeof(section -> \x27chunkHashes\x27) <> \x27array\x27',
+    );
+    expect(publicationSource).toContain('Keep any attached repair issue on the descendant');
+    expect(publicationSource).toContain('first_eligible_at = clock_timestamp()');
+    expect(publicationSource).toContain(String.raw`/^[0-9a-f]{64}$/.test(chunkSha256)`);
+    expect(publicationSource).toContain('[...expectedKeys].some((key) => !actual.has(key))');
+    expect(publicationSource).toContain('TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE = 100');
+    expect(publicationSource).toContain('Semantic verification is a bounded');
+    expect(publicationSource).toContain('chunkItemCounts');
+    expect(publicationSource).toContain('(section ->> \x27itemCount\x27)::numeric');
+    expect(publicationSource).toContain('(item_count::text)::numeric = 0');
+    expect(publicationSource).toContain(
+      'concat(\x27SYSTEM-REACTIVATION:\x27, ${season.seasonId}::text, \x27:\x27, tournament_id::text, \x27:\x27, event_id::text, \x27:\x27, historical_revision::text)',
+    );
+    expect(publicationSource).toContain(
+      '(publication.payload -> \x27manifest\x27 ->> \x27chunkCount\x27)::numeric',
+    );
+    expect(publicationSource).toContain(
+      'sum(\n                           CASE\n                             WHEN jsonb_typeof(section -> \x27chunkHashes\x27) = \x27array\x27',
+    );
+    expect(publicationSource).toContain(
+      'SELECT count(*)::numeric\n                       FROM jsonb_array_elements(CASE',
+    );
+    const sqlQuote = String.fromCharCode(39);
+    expect(publicationSource).toContain(
+      'count(DISTINCT section ->> ' + sqlQuote + 'sectionKey' + sqlQuote + ')',
+    );
+    expect(publicationSource).toContain('WHEN ' + sqlQuote + 'POINTS' + sqlQuote + ' THEN');
+    expect(publicationSource).toContain(sqlQuote + 'POINTS_TRAJECTORIES' + sqlQuote);
+    expect(publicationSource).toContain(sqlQuote + 'H2H_FIXTURES' + sqlQuote);
+    expect(publicationSource).toContain(sqlQuote + 'KNOCKOUT_BRACKET' + sqlQuote);
+  });
+
+  test('splits review sections into bounded deterministic chunks', () => {
+    const chunks = splitTournamentReviewChunks({
+      format: 'POINTS',
+      points: {
+        rows: Array.from({ length: 205 }, (_, index) => ({ entryId: index + 1 })),
+        trajectoryRows: Array.from({ length: 205 }, (_, index) => ({ entryId: 205 - index })),
+      },
+    });
+    expect(chunks.map((chunk) => chunk.itemCount)).toEqual([100, 100, 5, 100, 100, 5]);
+    expect(chunks.every((chunk) => chunk.itemCount <= 100)).toBe(true);
+    expect(chunks[0].chunkSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('publishes a distinct rank-ordered trajectory section', () => {
+    const chunks = splitTournamentReviewChunks({
+      format: 'POINTS',
+      points: {
+        rows: [{ entryId: 1 }, { entryId: 2 }],
+        trajectoryRows: [{ entryId: 2 }, { entryId: 1 }],
+      },
+    });
+    expect(chunks.filter((chunk) => chunk.sectionKey === 'POINTS_STANDINGS')[0]?.items).toEqual([
+      { entryId: 1 },
+      { entryId: 2 },
+    ]);
+    expect(chunks.filter((chunk) => chunk.sectionKey === 'POINTS_TRAJECTORIES')[0]?.items).toEqual([
+      { entryId: 2 },
+      { entryId: 1 },
+    ]);
+    expect(chunks[0]?.chunkSha256).not.toBe(chunks[2]?.chunkSha256);
   });
 });
