@@ -3018,6 +3018,11 @@ async function resetTournamentReviewScopesForCorrection(
           lease_expires_at = NULL,
           first_attempt_at = NULL,
           last_attempt_at = NULL,
+          -- A correction starts a fresh bounded retry horizon.  The original
+          -- eligibility watermark remains useful for audit, but must not make
+          -- an old READY scope degrade immediately after three correction
+          -- failures.
+          first_eligible_at = clock_timestamp(),
           ready_at = NULL,
           degraded_at = NULL,
           ready_revision = NULL,

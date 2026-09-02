@@ -413,6 +413,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
       'jsonb_typeof(section -> \x27chunkHashes\x27) <> \x27array\x27',
     );
     expect(publicationSource).toContain('Keep any attached repair issue on the descendant');
+    expect(publicationSource).toContain('first_eligible_at = clock_timestamp()');
     expect(publicationSource).toContain(String.raw`/^[0-9a-f]{64}$/.test(chunkSha256)`);
     expect(publicationSource).toContain('[...expectedKeys].some((key) => !actual.has(key))');
     expect(publicationSource).toContain('TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE = 100');
