@@ -133,8 +133,12 @@ describe('My Tournament Review V2 migration', () => {
     expect(hardCutMigration).toContain(
       'CREATE OR REPLACE FUNCTION extensions.strip_review_operational_metadata(input_value jsonb)',
     );
-    expect(hardCutMigration).toContain('extensions.strip_review_operational_metadata(object_entry.child)');
-    expect(hardCutMigration).toContain('REVOKE ALL ON FUNCTION extensions.strip_review_operational_metadata(jsonb) FROM PUBLIC');
+    expect(hardCutMigration).toContain(
+      'extensions.strip_review_operational_metadata(object_entry.child)',
+    );
+    expect(hardCutMigration).toContain(
+      'REVOKE ALL ON FUNCTION extensions.strip_review_operational_metadata(jsonb) FROM PUBLIC',
+    );
     expect(hardCutMigration).toContain('correction_reason text');
     expect(hardCutMigration).toContain('correction_change_id text');
     expect(hardCutMigration).toContain('schema_version <>');
