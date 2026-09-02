@@ -4496,6 +4496,43 @@ export async function getTournamentReviewV2OperationalStatus(
                       FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
                       WHERE jsonb_typeof(section) = 'object'
                     )
+                    -- Each format has a fixed, complete section surface.  A
+                    -- self-consistent empty manifest is still corrupt when a
+                    -- required standings, fixture, trajectory, or bracket
+                    -- section is absent.
+                    AND CASE publication.format
+                      WHEN 'POINTS' THEN (
+                        (SELECT count(*)
+                         FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                         WHERE section ->> 'sectionKey' IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')) = 2
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                          WHERE section ->> 'sectionKey' NOT IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')
+                        )
+                      )
+                      WHEN 'H2H' THEN (
+                        (SELECT count(*)
+                         FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                         WHERE section ->> 'sectionKey' IN ('H2H_STANDINGS', 'H2H_FIXTURES')) = 2
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                          WHERE section ->> 'sectionKey' NOT IN ('H2H_STANDINGS', 'H2H_FIXTURES')
+                        )
+                      )
+                      WHEN 'KNOCKOUT' THEN (
+                        (SELECT count(*)
+                         FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                         WHERE section ->> 'sectionKey' = 'KNOCKOUT_BRACKET') = 1
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                          WHERE section ->> 'sectionKey' <> 'KNOCKOUT_BRACKET'
+                        )
+                      )
+                      ELSE false
+                    END
                     AND NOT EXISTS (
                       SELECT 1
                       FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
@@ -4745,7 +4782,9 @@ export async function getTournamentReviewV2OperationalStatus(
          AND publication.event_id = head.event_id
          AND publication.revision = head.revision
         WHERE obligation.season_id = ${season.seasonId}
-          AND obligation.state = 'READY'
+                AND obligation.state IN (
+                  'READY', 'PROCESSING', 'PENDING', 'WAITING_SOURCE', 'DEGRADED'
+                )
           AND (obligation.tournament_id, obligation.event_id) > (${lastTournamentId}, ${lastEventId})
         ORDER BY obligation.tournament_id, obligation.event_id
         LIMIT ${TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE}
