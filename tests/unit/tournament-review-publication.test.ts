@@ -427,7 +427,7 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain(
       'SELECT count(*)::numeric\n                       FROM jsonb_array_elements(CASE',
     );
-    expect(publicationSource).toContain('count(DISTINCT section ->> \'sectionKey\')');
+    expect(publicationSource).toContain("count(DISTINCT section ->> 'sectionKey')");
     expect(publicationSource).toContain("WHEN 'POINTS' THEN");
     expect(publicationSource).toContain("'POINTS_TRAJECTORIES'");
     expect(publicationSource).toContain("'H2H_FIXTURES'");
