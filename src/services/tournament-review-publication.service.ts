@@ -4509,6 +4509,45 @@ export async function getTournamentReviewV2OperationalStatus(
                          AND chunk.event_id = obligation.event_id
                          AND chunk.revision = head.revision
                      ) = (publication.payload -> 'manifest' ->> 'chunkCount')::numeric
+                     AND (
+                       SELECT COALESCE(
+                         sum(
+                           CASE
+                             WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
+                             THEN jsonb_array_length(section -> 'chunkHashes')
+                             ELSE 0
+                           END
+                         ),
+                         0
+                       )::numeric
+                       FROM jsonb_array_elements(CASE
+                         WHEN jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                         THEN publication.payload -> 'manifest' -> 'sections'
+                         ELSE '[]'::jsonb
+                       END) section
+                     ) = (publication.payload -> 'manifest' ->> 'chunkCount')::numeric
+                     AND (
+                       SELECT count(*)::numeric
+                       FROM jsonb_array_elements(CASE
+                         WHEN jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                         THEN publication.payload -> 'manifest' -> 'sections'
+                         ELSE '[]'::jsonb
+                       END) section
+                       CROSS JOIN LATERAL jsonb_array_elements_text(
+                         CASE
+                           WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
+                           THEN section -> 'chunkHashes'
+                           ELSE '[]'::jsonb
+                         END
+                       ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
+                     ) = (
+                       SELECT count(*)::numeric
+                       FROM competition.tournament_review_publication_chunks chunk
+                       WHERE chunk.season_id = obligation.season_id
+                         AND chunk.tournament_id = obligation.tournament_id
+                         AND chunk.event_id = obligation.event_id
+                         AND chunk.revision = head.revision
+                     )
                      AND NOT EXISTS (
                        SELECT 1
                        FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section

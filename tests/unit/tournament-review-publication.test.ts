@@ -421,6 +421,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain(
       '(publication.payload -> \x27manifest\x27 ->> \x27chunkCount\x27)::numeric',
     );
+    expect(publicationSource).toContain(
+      'sum(\n                           CASE\n                             WHEN jsonb_typeof(section -> \x27chunkHashes\x27) = \x27array\x27',
+    );
+    expect(publicationSource).toContain(
+      'SELECT count(*)::numeric\n                       FROM jsonb_array_elements(CASE',
+    );
   });
 
   test('splits review sections into bounded deterministic chunks', () => {
