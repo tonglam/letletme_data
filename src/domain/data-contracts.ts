@@ -531,6 +531,7 @@ export function queueLaneForSchedulerJob(jobName: string): string | undefined {
     'understat-team-incremental': 'understat-team-sync',
     'understat-player-incremental': 'understat-player-sync',
     'tournament-official-h2h-live': officialH2hLiveQueueName,
+    'tournament-materialized-views-refresh': 'tournament-sync',
     'live-picks-refresh': livePicksQueueName,
     'my-fpl-snapshot': myFplOrchestrationQueueName,
     'my-fpl-finalization': myFplOrchestrationQueueName,
