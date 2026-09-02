@@ -300,7 +300,7 @@ async function applyMigration(migration: Migration): Promise<void> {
   await sql.begin(async (transaction) => {
     await transaction`SELECT set_config('lock_timeout', '5s', true)`;
     await transaction`SELECT set_config('statement_timeout', '15min', true)`;
-    // Migration 0084 reads this transaction-local flag before deleting the
+    // Migration 0090 reads this transaction-local flag before deleting the
     // current-season review rows. It is set only after the deployment gate
     // completes a disposable restore rehearsal, so a direct/manual run fails
     // closed instead of silently skipping that recovery proof.

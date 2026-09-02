@@ -91,7 +91,7 @@ export async function runTournamentReviewBackfill(
     LIMIT 1
   `;
   if (!marker) {
-    throw new Error('V2.1 review backfill refused: migration 0084 backup manifest is missing');
+    throw new Error('V2.1 review backfill refused: migration 0090 backup manifest is missing');
   }
   if (marker.restore_rehearsal_required || marker.restore_rehearsal_completed_at === null) {
     throw new Error('V2.1 review backfill refused: restore rehearsal evidence is missing');

@@ -2355,7 +2355,7 @@ export const tournamentReviewPublicationChunksInCompetition = competition.table(
 );
 
 /**
- * Immutable recovery copies created by migration 0084 before the current
+ * Immutable recovery copies created by migration 0090 before the current
  * season review rows are reset.  These are deliberately typed rather than
  * hidden behind a parity-test exemption: the backup is an operational
  * contract and its shape must remain reviewable alongside the live tables.
@@ -2364,8 +2364,8 @@ export const tournamentReviewPublicationChunksInCompetition = competition.table(
  * columns that exist at the point where `CREATE TABLE ... LIKE ...` runs.
  * Later correction/observation columns belong only to the live V2.1 tables.
  */
-export const tournamentReviewPublications0084BackupInCompetition = competition.table(
-  'tournament_review_publications_0084_backup',
+export const tournamentReviewPublications0090BackupInCompetition = competition.table(
+  'tournament_review_publications_0090_backup',
   {
     seasonId: smallint('season_id').notNull(),
     tournamentId: integer('tournament_id').notNull(),
@@ -2402,7 +2402,7 @@ export const tournamentReviewPublications0084BackupInCompetition = competition.t
   (table) => [
     primaryKey({
       columns: [table.seasonId, table.tournamentId, table.eventId, table.revision],
-      name: 'tournament_review_publications_0084_backup_pkey',
+      name: 'tournament_review_publications_0090_backup_pkey',
     }),
     uniqueIndex('tournament_review_publication_season_id_tournament_id_event_idx').on(
       table.seasonId,
@@ -2441,8 +2441,8 @@ export const tournamentReviewPublications0084BackupInCompetition = competition.t
   ],
 );
 
-export const tournamentReviewHeads0084BackupInCompetition = competition.table(
-  'tournament_review_heads_0084_backup',
+export const tournamentReviewHeads0090BackupInCompetition = competition.table(
+  'tournament_review_heads_0090_backup',
   {
     seasonId: smallint('season_id').notNull(),
     tournamentId: integer('tournament_id').notNull(),
@@ -2457,9 +2457,9 @@ export const tournamentReviewHeads0084BackupInCompetition = competition.table(
   (table) => [
     primaryKey({
       columns: [table.seasonId, table.tournamentId, table.eventId],
-      name: 'tournament_review_heads_0084_backup_pkey',
+      name: 'tournament_review_heads_0090_backup_pkey',
     }),
-    index('tournament_review_heads_0084__season_id_tournament_id_event_idx').on(
+    index('tournament_review_heads_0090__season_id_tournament_id_event_idx').on(
       table.seasonId,
       table.tournamentId,
       table.eventId.desc().nullsLast(),
@@ -2468,8 +2468,8 @@ export const tournamentReviewHeads0084BackupInCompetition = competition.table(
   ],
 );
 
-export const tournamentReviewObligations0084BackupInCompetition = competition.table(
-  'tournament_review_obligations_0084_backup',
+export const tournamentReviewObligations0090BackupInCompetition = competition.table(
+  'tournament_review_obligations_0090_backup',
   {
     seasonId: smallint('season_id').notNull(),
     tournamentId: integer('tournament_id').notNull(),
@@ -2505,7 +2505,7 @@ export const tournamentReviewObligations0084BackupInCompetition = competition.ta
   (table) => [
     primaryKey({
       columns: [table.seasonId, table.tournamentId, table.eventId],
-      name: 'tournament_review_obligations_0084_backup_pkey',
+      name: 'tournament_review_obligations_0090_backup_pkey',
     }),
     index('tournament_review_obligations_next_attempt_at_season_id_tou_idx')
       .on(table.nextAttemptAt, table.seasonId, table.tournamentId, table.eventId)

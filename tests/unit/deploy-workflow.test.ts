@@ -382,8 +382,9 @@ describe('release workflow gates', () => {
       'source database URL is required for identity verification',
     );
     expect(deployStateMachine).toContain('DATABASE_RESTORE_SOURCE_URL="$source_url"');
+    expect(deployStateMachine).toContain('local container_dump_path');
     expect(deployStateMachine).toContain(
-      'local container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"',
+      'container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"',
     );
     expect(deployStateMachine).toContain(
       '"$DATABASE_RESTORE_DUMP_PATH" "$DATABASE_RESTORE_REHEARSAL_URL" "$DATABASE_RESTORE_SOURCE_URL"',

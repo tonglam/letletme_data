@@ -1351,7 +1351,7 @@ run_tournament_review_restore_rehearsal() {
   local rehearsal_url=${1:-${DATABASE_RESTORE_REHEARSAL_URL:-}}
   local source_url=${2:-${MIGRATION_DATABASE_URL:-}}
   if [[ -z "$rehearsal_url" ]]; then
-    echo 'deploy review restore rehearsal: DATABASE_RESTORE_REHEARSAL_URL is required for migration 0084' >&2
+    echo 'deploy review restore rehearsal: DATABASE_RESTORE_REHEARSAL_URL is required for migration 0090' >&2
     return 1
   fi
   if [[ -z "$source_url" ]]; then

@@ -102,11 +102,11 @@ BEGIN
   END IF;
 END $$;
 
-CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0084_backup
+CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0090_backup
   (LIKE competition.tournament_review_publications INCLUDING ALL);
-CREATE TABLE IF NOT EXISTS competition.tournament_review_heads_0084_backup
+CREATE TABLE IF NOT EXISTS competition.tournament_review_heads_0090_backup
   (LIKE competition.tournament_review_heads INCLUDING ALL);
-CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0084_backup
+CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0090_backup
   (LIKE competition.tournament_review_obligations INCLUDING ALL);
 
 CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
@@ -153,7 +153,7 @@ BEGIN
     -- Schema-only CI/restore databases may be empty before the first FPL
     -- season is seeded.  Apply the structural hard-cut below, but there is no
     -- current-season data to back up or reset in that case.
-    RAISE NOTICE '0084 skipped current-season backup/reset because no current FPL season exists';
+    RAISE NOTICE '0090 skipped current-season backup/reset because no current FPL season exists';
     RETURN;
   END IF;
 
@@ -164,33 +164,33 @@ BEGIN
   -- from deleting the only recoverable current-season review rows.
   IF current_setting('letletme.review_restore_rehearsal', true) IS DISTINCT FROM 'true' THEN
     RAISE EXCEPTION
-      '0084 restore rehearsal is required before current-season review reset';
+      '0090 restore rehearsal is required before current-season review reset';
   END IF;
 
   -- Copy only the current season.  Historical descriptive-v1 evidence remains
   -- in the live tables and is never exposed by the V2.1 reader.
-  INSERT INTO competition.tournament_review_publications_0084_backup
+  INSERT INTO competition.tournament_review_publications_0090_backup
   SELECT * FROM competition.tournament_review_publications
   WHERE season_id = current_season;
-  INSERT INTO competition.tournament_review_heads_0084_backup
+  INSERT INTO competition.tournament_review_heads_0090_backup
   SELECT * FROM competition.tournament_review_heads
   WHERE season_id = current_season;
-  INSERT INTO competition.tournament_review_obligations_0084_backup
+  INSERT INTO competition.tournament_review_obligations_0090_backup
   SELECT * FROM competition.tournament_review_obligations
   WHERE season_id = current_season;
 
   SELECT count(*) INTO publication_count
-  FROM competition.tournament_review_publications_0084_backup;
+  FROM competition.tournament_review_publications_0090_backup;
   SELECT count(*) INTO head_count
-  FROM competition.tournament_review_heads_0084_backup;
+  FROM competition.tournament_review_heads_0090_backup;
   SELECT count(*) INTO obligation_count
-  FROM competition.tournament_review_obligations_0084_backup;
+  FROM competition.tournament_review_obligations_0090_backup;
 
   SELECT COALESCE(jsonb_object_agg(revision::text, revision_count), '{}'::jsonb)
     INTO revision_distribution
   FROM (
     SELECT revision, count(*)::bigint AS revision_count
-    FROM competition.tournament_review_publications_0084_backup
+    FROM competition.tournament_review_publications_0090_backup
     GROUP BY revision
     ORDER BY revision
   ) revisions;
@@ -199,15 +199,15 @@ BEGIN
   SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id, revision)::text, '[]'), 'sha256'), 'hex')
     INTO publication_sha
-  FROM competition.tournament_review_publications_0084_backup row;
+  FROM competition.tournament_review_publications_0090_backup row;
   SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
     INTO head_sha
-  FROM competition.tournament_review_heads_0084_backup row;
+  FROM competition.tournament_review_heads_0090_backup row;
   SELECT encode(extensions.digest(COALESCE(jsonb_agg(to_jsonb(row) ORDER BY season_id,
       tournament_id, event_id)::text, '[]'), 'sha256'), 'hex')
     INTO obligation_sha
-  FROM competition.tournament_review_obligations_0084_backup row;
+  FROM competition.tournament_review_obligations_0090_backup row;
 
   INSERT INTO ops.tournament_review_v2_1_backup_manifest (
     season_id, publications_rows, heads_rows, obligations_rows,

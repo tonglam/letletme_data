@@ -19,7 +19,7 @@ const sourceFloorMigration = readFileSync(
   'utf8',
 );
 const hardCutMigration = readFileSync(
-  'migrations/0084_my_tournament_review_v2_1_hard_cut.sql',
+  'migrations/0090_my_tournament_review_v2_1_hard_cut.sql',
   'utf8',
 );
 const backfillScript = readFileSync('scripts/backfill-tournament-review-v2.ts', 'utf8');
@@ -111,7 +111,7 @@ describe('My Tournament Review V2 migration', () => {
   });
 
   test('backs up and resets the current season before introducing V2.1 chunks', () => {
-    expect(hardCutMigration).toContain('tournament_review_publications_0084_backup');
+    expect(hardCutMigration).toContain('tournament_review_publications_0090_backup');
     expect(hardCutMigration).toContain('tournament_review_v2_1_backup_manifest');
     expect(hardCutMigration).toContain('publication_revision_distribution jsonb');
     expect(hardCutMigration).toContain('backfill_completed_at timestamptz');
@@ -189,6 +189,6 @@ describe('My Tournament Review V2 migration', () => {
     expect(backfillScript).toContain('restore_rehearsal_required');
     expect(backfillScript).toContain('restore_rehearsal_completed_at');
     expect(backfillScript).toContain('restore rehearsal evidence is missing');
-    expect(backfillScript).toContain('migration 0084 backup manifest is missing');
+    expect(backfillScript).toContain('migration 0090 backup manifest is missing');
   });
 });

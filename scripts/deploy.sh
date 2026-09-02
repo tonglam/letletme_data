@@ -394,7 +394,7 @@ deploy() {
     exit 1
   }
   printf '%s\n' "$migration_plan_output"
-  if printf '%s\n' "$migration_plan_output" | grep -Fq '0084_my_tournament_review_v2_1_hard_cut.sql'; then
+  if printf '%s\n' "$migration_plan_output" | grep -Fq '0090_my_tournament_review_v2_1_hard_cut.sql'; then
     DEPLOY_REVIEW_HARD_CUT_PENDING=true
   fi
   DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)

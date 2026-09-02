@@ -271,11 +271,11 @@ same bounded backfill; the global five-minute scan remains the safety net.
 
 ### V2.1 hard-cut backfill gate
 
-After migration `0084` removes the current-season review rows, the release
+After migration `0090` removes the current-season review rows, the release
 must drain them with the bounded backfill command below while the review lane
 is quiesced:
 
-Before migration `0084` is applied, the deploy lane must restore the verified
+Before migration `0090` is applied, the deploy lane must restore the verified
 pre-migration dump into the disposable `DATABASE_RESTORE_REHEARSAL_URL`
 database. The migration receives a transaction-local approval only after that
 restore, ledger-tail, and key-count check succeeds; a direct migration run
