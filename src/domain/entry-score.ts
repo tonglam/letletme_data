@@ -37,7 +37,7 @@ export function normalizeAuthoritativeUnrankedEventRank(input: {
   sourceTotalPoints: number | null | undefined;
 }): number | null {
   if (input.rank !== null && input.rank !== undefined) return input.rank;
-  return input.sourceTotalPoints === 0 && (input.overallRank ?? 0) === 0 ? 0 : null;
+  return input.sourceTotalPoints === 0 && input.overallRank === 0 ? 0 : null;
 }
 
 export function resolveEntryScoreBaseline(input: EntryScoreBaselineInput): EntryScoreBaseline {

@@ -3,6 +3,7 @@ import {
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
+import { registerDatabasePostCommit } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   estimateTournamentSetupRequests,
@@ -12,6 +13,7 @@ import {
   type TournamentSetupStatus,
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
+import { enqueueTournamentMaterializedViewsRefresh } from '../jobs/tournament-sync.jobs';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -457,6 +459,16 @@ export async function setupTournamentStructure(
     );
     await Promise.all(unresolvedIssues.map((issue) => enqueueTournamentRepair(season, issue)));
     await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
+    registerDatabasePostCommit(async () => {
+      await enqueueTournamentMaterializedViewsRefresh(season, targetEventId, 'reconcile', {
+        tournamentId,
+        jobId: `tournament-setup-mv-${tournamentId}-${targetEventId}-${Date.now()}`,
+      });
+      logInfo('Enqueued tournament materialized-view refresh after setup commit', {
+        tournamentId,
+        eventId: targetEventId,
+      });
+    });
     outcome = setupIssues.length > 0 ? 'ready_with_warnings' : 'ready';
     logInfo('Tournament setup completed', {
       tournamentId,

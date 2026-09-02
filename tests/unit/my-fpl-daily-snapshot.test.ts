@@ -126,6 +126,13 @@ describe('My FPL daily snapshot publication contract', () => {
       }),
     ).toBeNull();
     expect(
+      normalizeAuthoritativeUnrankedEventRank({
+        rank: null,
+        overallRank: null,
+        sourceTotalPoints: 0,
+      }),
+    ).toBeNull();
+    expect(
       isAuthoritativeUnrankedDeletedEntryResult({
         entryName: 'Deleted',
         playerName: 'Deleted Player',
@@ -398,6 +405,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).toMatch(/'my-fpl-orchestration', 'publication-outbox'/);
     expect(tournamentSetupService).toContain(
       'Skipped global tournament materialized-view refresh during setup',
+    );
+    expect(tournamentSetupService).toContain(
+      'Enqueued tournament materialized-view refresh after setup commit',
     );
     expect(tournamentSetupService).not.toContain('await refreshTournamentMaterializedViews()');
   });
