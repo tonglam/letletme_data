@@ -281,6 +281,64 @@ GRANT SELECT ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_dat
 GRANT UPDATE (backfill_completed_at)
   ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
 
+-- A schema-only deployment can apply 0090 before the first current season is
+-- seeded.  Once that season is present, the runtime writer must be able to
+-- convert the season-0 sentinel into a per-season marker without receiving
+-- arbitrary INSERT access to the backup manifest.  Keep that transition in a
+-- narrowly validated SECURITY DEFINER function owned by the migration role.
+CREATE OR REPLACE FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker(
+  requested_season_id smallint,
+  rehearsal_completed_at timestamptz
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+  IF requested_season_id <= 0 THEN
+    RAISE EXCEPTION 'backup marker season must be positive';
+  END IF;
+  IF rehearsal_completed_at IS NULL THEN
+    RAISE EXCEPTION 'backup marker restore rehearsal timestamp is required';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM fpl.seasons
+    WHERE season_id = requested_season_id
+      AND is_current
+  ) THEN
+    RAISE EXCEPTION 'backup marker season must be current';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM ops.tournament_review_v2_1_backup_manifest
+    WHERE season_id = requested_season_id
+  ) THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO ops.tournament_review_v2_1_backup_manifest (
+    season_id, publications_rows, heads_rows, obligations_rows,
+    publication_revision_distribution, publications_sha256, heads_sha256,
+    obligations_sha256, restore_rehearsal_required,
+    restore_rehearsal_completed_at, backfill_completed_at
+  ) VALUES (
+    requested_season_id, 0, 0, 0, '{}'::jsonb,
+    encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+    encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+    encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+    false, rehearsal_completed_at, NULL
+  );
+  RETURN true;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker(smallint, timestamptz)
+  FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker(smallint, timestamptz)
+  TO letletme_data_writer;
+
 DO $migration$
 DECLARE
   current_season smallint;

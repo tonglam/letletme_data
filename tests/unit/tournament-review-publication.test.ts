@@ -25,8 +25,28 @@ const publicationSource = readFileSync(
   'utf8',
 );
 const entryEventResultsSource = readFileSync('src/repositories/entry-event-results.ts', 'utf8');
+const backfillSource = readFileSync('scripts/backfill-tournament-review-v2.ts', 'utf8');
+const hardCutMigration = readFileSync(
+  'migrations/0090_my_tournament_review_v2_1_hard_cut.sql',
+  'utf8',
+);
 
 describe('My Tournament Review V2 format and retry policy', () => {
+  test('handles the empty-database sentinel before requiring a current season', () => {
+    expect(backfillSource.indexOf('WHERE season_id = 0')).toBeGreaterThan(-1);
+    expect(backfillSource.indexOf('currentSeasonRows.length === 0')).toBeGreaterThan(-1);
+    expect(backfillSource.indexOf('seasonRepository.requireByCode')).toBeGreaterThan(
+      backfillSource.indexOf('currentSeasonRows.length === 0'),
+    );
+    expect(hardCutMigration).toContain('ops.bootstrap_tournament_review_v2_1_backup_marker');
+    expect(hardCutMigration).toContain(
+      'GRANT EXECUTE ON FUNCTION ops.bootstrap_tournament_review_v2_1_backup_marker',
+    );
+    expect(hardCutMigration).not.toMatch(
+      /GRANT INSERT ON TABLE ops\.tournament_review_v2_1_backup_manifest/,
+    );
+  });
+
   test('uses one mutually-exclusive format per finalized event', () => {
     const config = {
       groupMode: 'points_races' as const,

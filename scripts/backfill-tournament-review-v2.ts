@@ -61,6 +61,52 @@ export async function runTournamentReviewBackfill(
   args: TournamentReviewBackfillArguments,
 ): Promise<Record<string, unknown>> {
   assertBackfillAuthorization();
+  const db = await getDbClient();
+  // A schema-only deployment may have no FPL season yet.  The migration
+  // records a completed season-0 sentinel in that case; consume it before
+  // calling seasonRepository, whose current-season contract intentionally
+  // fails closed when zero seasons exist.
+  const [emptyCutover] = await db<
+    {
+      backfill_completed_at: Date | string | null;
+      restore_rehearsal_completed_at: Date | string | null;
+    }[]
+  >`
+    SELECT backfill_completed_at,
+           restore_rehearsal_completed_at
+    FROM ops.tournament_review_v2_1_backup_manifest
+    WHERE season_id = 0
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  const currentSeasonRows = await db<{ season_id: number }[]>`
+    SELECT season_id
+    FROM fpl.seasons
+    WHERE is_current
+    ORDER BY season_id DESC
+    LIMIT 2
+  `;
+  if (currentSeasonRows.length === 0) {
+    if (!emptyCutover || emptyCutover.backfill_completed_at === null) {
+      throw new Error(
+        'V2.1 review backfill refused: current season and empty-database cutover marker are missing',
+      );
+    }
+    return {
+      contractVersion: 'my-tournament-review-v2.1',
+      metricVersion: 'settled-review-v2',
+      season: args.season,
+      skipped: true,
+      emptyDatabase: true,
+      backfillCompletedAt:
+        emptyCutover.backfill_completed_at instanceof Date
+          ? emptyCutover.backfill_completed_at.toISOString()
+          : emptyCutover.backfill_completed_at,
+    };
+  }
+  if (currentSeasonRows.length !== 1) {
+    throw new Error('V2.1 review backfill refused: multiple current FPL seasons exist');
+  }
   const season = await seasonRepository.requireByCode(args.season);
   const currentSeason = await seasonRepository.findCurrent();
   if (!season.isCurrent || season.seasonId !== currentSeason.seasonId) {
@@ -74,7 +120,6 @@ export async function runTournamentReviewBackfill(
   // the scheduler after startup. The marker is written only after the full
   // semantic/integrity gate below passes, so a failed cutover remains safely
   // retryable on the next deployment.
-  const db = await getDbClient();
   let [marker] = await db<
     {
       backfill_completed_at: Date | string | null;
@@ -91,30 +136,10 @@ export async function runTournamentReviewBackfill(
     LIMIT 1
   `;
   if (!marker) {
-    const [emptyCutover] = await db<
-      {
-        restore_rehearsal_completed_at: Date | string | null;
-      }[]
-    >`
-      SELECT restore_rehearsal_completed_at
-      FROM ops.tournament_review_v2_1_backup_manifest
-      WHERE season_id = 0
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
     if (emptyCutover) {
       await db`
-        INSERT INTO ops.tournament_review_v2_1_backup_manifest (
-          season_id, publications_rows, heads_rows, obligations_rows,
-          publication_revision_distribution, publications_sha256, heads_sha256,
-          obligations_sha256, restore_rehearsal_required,
-          restore_rehearsal_completed_at, backfill_completed_at
-        ) VALUES (
-          ${season.seasonId}, 0, 0, 0, '{}'::jsonb,
-          encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
-          encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
-          encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
-          false, ${emptyCutover.restore_rehearsal_completed_at}, NULL
+        SELECT ops.bootstrap_tournament_review_v2_1_backup_marker(
+          ${season.seasonId}, ${emptyCutover.restore_rehearsal_completed_at}
         )
       `;
       [marker] = await db<
