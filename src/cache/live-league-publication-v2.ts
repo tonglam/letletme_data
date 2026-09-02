@@ -271,6 +271,100 @@ export function liveLeagueV2Key(
   return `${baseKey(scope)}:${suffix}`;
 }
 
+const LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT = 512;
+
+function liveLeagueCheckpointDesiredScanCursorKey(season: string): string {
+  return `llm:data:v2:fpl:league-live:${season}:checkpoint-desired-scan-cursor`;
+}
+
+export async function readLiveLeagueCheckpointDesiredScanCursorV2(
+  season: string,
+  redisClient?: Redis,
+): Promise<string | null> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const value = await redis.get(liveLeagueCheckpointDesiredScanCursorKey(season));
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+async function writeLiveLeagueCheckpointDesiredScanCursorV2(
+  season: string,
+  cursor: string,
+  redis: Redis,
+): Promise<void> {
+  await redis.set(liveLeagueCheckpointDesiredScanCursorKey(season), cursor);
+}
+
+async function clearLiveLeagueCheckpointDesiredScanCursorV2(
+  season: string,
+  redis: Redis,
+): Promise<void> {
+  await redis.del(liveLeagueCheckpointDesiredScanCursorKey(season));
+}
+
+/**
+ * Recover exact checkpoint scopes after a producer/DB outage. This scans only
+ * the V2 desired-marker namespace; it never reads publication payloads or
+ * discovers scopes from broad application keys.
+ */
+export function parseLiveLeagueCheckpointScopeV2(
+  key: string,
+  season: string,
+): LeagueLiveScope | null {
+  if (!/^\d{4}$/.test(season)) return null;
+  const match = new RegExp(
+    `^llm:data:v2:fpl:league-live:${season}:([1-9][0-9]*):([1-9][0-9]*):(classic|h2h-head|h2h-standings):checkpoint-desired$`,
+  ).exec(key);
+  if (!match) return null;
+  const eventId = Number(match[1]);
+  const tournamentId = Number(match[2]);
+  const scopeName = match[3];
+  if (!Number.isSafeInteger(eventId) || !Number.isSafeInteger(tournamentId)) return null;
+  const scope =
+    scopeName === 'classic' ? 'CLASSIC' : scopeName === 'h2h-head' ? 'H2H_HEAD' : 'H2H_STANDINGS';
+  return { season, eventId, tournamentId, scope };
+}
+
+export async function listLiveLeagueCheckpointDesiredScopesV2(
+  season: string,
+  redisClient?: Redis,
+): Promise<readonly LeagueLiveScope[]> {
+  if (!/^\d{4}$/.test(season)) {
+    throw new CacheError('Invalid live league season', 'LIVE_LEAGUE_SEASON_INVALID');
+  }
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const keys: string[] = [];
+  let cursor = (await readLiveLeagueCheckpointDesiredScanCursorV2(season, redis)) ?? '0';
+  const pattern = `llm:data:v2:fpl:league-live:${season}:*:*:checkpoint-desired`;
+  do {
+    const result = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', '200');
+    cursor = result[0];
+    const remaining = LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT - keys.length;
+    if (remaining <= 0) break;
+    keys.push(...result[1].slice(0, remaining));
+    if (keys.length >= LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT) {
+      if (cursor !== '0') {
+        await writeLiveLeagueCheckpointDesiredScanCursorV2(season, cursor, redis);
+      }
+      break;
+    }
+  } while (cursor !== '0');
+  if (cursor === '0') {
+    await clearLiveLeagueCheckpointDesiredScanCursorV2(season, redis);
+  }
+  const unique = new Map<string, LeagueLiveScope>();
+  for (const key of keys) {
+    const scope = parseLiveLeagueCheckpointScopeV2(key, season);
+    if (!scope) continue;
+    unique.set(`${scope.eventId}:${scope.tournamentId}:${scope.scope}`, scope);
+  }
+  return [...unique.values()].sort(
+    (left, right) =>
+      left.eventId - right.eventId ||
+      left.tournamentId - right.tournamentId ||
+      left.scope.localeCompare(right.scope),
+  );
+}
+
 export function liveLeagueV2ItemKey(
   scope: LeagueLiveScope,
   generation: number,
@@ -325,6 +419,7 @@ function validItem(
   value: unknown,
   expectedKey: string,
   expectedName: LeaguePublicationItem['name'],
+  maxBytes: number,
 ): value is LeaguePublicationItem {
   return (
     isRecord(value) &&
@@ -337,6 +432,7 @@ function validItem(
     typeof value.bytes === 'number' &&
     Number.isSafeInteger(value.bytes) &&
     value.bytes >= 0 &&
+    value.bytes <= maxBytes &&
     validHash(value.sha256)
   );
 }
@@ -385,6 +481,7 @@ function parseManifest(raw: string | null, scope: LeagueLiveScope): LeagueLiveMa
       noPicks < 0
     )
       return null;
+    if (expected > LIVE_LEAGUE_MAX_ENTRIES) return null;
     const countsAreValid =
       scope.scope === 'CLASSIC'
         ? published === expected && published === ready + noPicks
@@ -422,8 +519,18 @@ function parseManifest(raw: string | null, scope: LeagueLiveScope): LeagueLiveMa
       return null;
     const items = value.items;
     if (
-      !validItem(items.index, liveLeagueV2ItemKey(scope, generation, 'index'), 'index') ||
-      !validItem(items.payload, liveLeagueV2ItemKey(scope, generation, 'payload'), 'payload')
+      !validItem(
+        items.index,
+        liveLeagueV2ItemKey(scope, generation, 'index'),
+        'index',
+        LIVE_LEAGUE_MAX_INDEX_BYTES,
+      ) ||
+      !validItem(
+        items.payload,
+        liveLeagueV2ItemKey(scope, generation, 'payload'),
+        'payload',
+        LIVE_LEAGUE_MAX_PAYLOAD_BYTES,
+      )
     )
       return null;
     return value as unknown as LeagueLiveManifest;
@@ -532,7 +639,8 @@ function validClassicPayload(
           eventId: manifest.eventId,
           entryId: row.entryId,
         }) ||
-        leagueEntryInputRevision(input) !== row.inputRevision
+        leagueEntryInputRevision(input) !== row.inputRevision ||
+        (manifest.state === 'FINALIZED' ? input.finalResult === null : input.finalResult !== null)
       )
         return false;
     } else {
@@ -646,39 +754,75 @@ function validH2HMatchPayload(
   value: unknown,
   manifest: LeagueLiveManifest,
 ): value is H2HMatchPayload {
+  if (!isRecord(value)) return false;
+  if (
+    value.contractVersion !== LIVE_LEAGUE_CONTRACT_VERSION ||
+    value.season !== manifest.season ||
+    value.eventId !== manifest.eventId ||
+    value.tournamentId !== manifest.tournamentId ||
+    typeof value.officialMatchId !== 'number' ||
+    !Number.isSafeInteger(value.officialMatchId) ||
+    value.officialMatchId <= 0 ||
+    (manifest.scope === 'H2H_MATCH' && value.officialMatchId !== manifest.matchId) ||
+    typeof value.groupId !== 'number' ||
+    !Number.isSafeInteger(value.groupId) ||
+    typeof value.sourceOrder !== 'number' ||
+    !Number.isSafeInteger(value.sourceOrder) ||
+    value.sourceOrder < 0 ||
+    (value.phase !== 'REGULAR' && value.phase !== 'KNOCKOUT') ||
+    (value.phase === 'KNOCKOUT' ? value.groupId < 0 : value.groupId <= 0) ||
+    (value.knockoutName !== null && typeof value.knockoutName !== 'string') ||
+    (value.tiebreak !== null && typeof value.tiebreak !== 'string') ||
+    typeof value.isBye !== 'boolean' ||
+    (value.state !== 'READY' && value.state !== 'PENDING' && value.state !== 'ERROR') ||
+    !validIso(value.sourceCheckedAt) ||
+    !isRecord(value.globalRef) ||
+    typeof value.globalRef.publicationId !== 'string' ||
+    !/^[0-9a-f-]{36}$/i.test(value.globalRef.publicationId) ||
+    typeof value.globalRef.generation !== 'number' ||
+    !Number.isSafeInteger(value.globalRef.generation) ||
+    value.globalRef.generation <= 0 ||
+    !validH2HMatchSide(value.home, manifest, value.isBye) ||
+    !validH2HMatchSide(value.away, manifest, value.isBye)
+  )
+    return false;
+
+  const realSide = (side: H2HMatchSide): boolean => side.entryId !== null && !side.isAverage;
+  const byePlaceholder = (side: H2HMatchSide): boolean =>
+    side.entryId === null && !side.isAverage && side.entryName === 'Bye';
+  const producerByeSide = (side: H2HMatchSide): boolean =>
+    side.entryId === null && side.isAverage && side.entryName === 'Average';
+  const nullableByeSide = (side: H2HMatchSide): boolean =>
+    byePlaceholder(side) || producerByeSide(side);
+  const completeSide = (side: H2HMatchSide): boolean =>
+    side.entryId !== null
+      ? side.input !== null
+      : side.isAverage
+        ? side.officialNetPoints !== null
+        : true;
+  const lifecycleInputsValid = [value.home, value.away].every(
+    (side) =>
+      side.entryId === null ||
+      side.input === null ||
+      (manifest.state === 'FINALIZED'
+        ? side.input.finalResult !== null
+        : side.input.finalResult === null),
+  );
+
+  if (
+    value.isBye
+      ? !(
+          (realSide(value.home) && nullableByeSide(value.away)) ||
+          (realSide(value.away) && nullableByeSide(value.home))
+        )
+      : (value.home.entryId !== null && value.home.entryId === value.away.entryId) ||
+        (value.home.isAverage && value.away.isAverage)
+  )
+    return false;
+
   return (
-    isRecord(value) &&
-    value.contractVersion === LIVE_LEAGUE_CONTRACT_VERSION &&
-    value.season === manifest.season &&
-    value.eventId === manifest.eventId &&
-    value.tournamentId === manifest.tournamentId &&
-    typeof value.officialMatchId === 'number' &&
-    Number.isSafeInteger(value.officialMatchId) &&
-    value.officialMatchId > 0 &&
-    typeof value.groupId === 'number' &&
-    Number.isSafeInteger(value.groupId) &&
-    typeof value.sourceOrder === 'number' &&
-    Number.isSafeInteger(value.sourceOrder) &&
-    value.sourceOrder >= 0 &&
-    (value.phase === 'REGULAR' || value.phase === 'KNOCKOUT') &&
-    (value.phase === 'KNOCKOUT' ? value.groupId >= 0 : value.groupId > 0) &&
-    (value.knockoutName === null || typeof value.knockoutName === 'string') &&
-    (value.tiebreak === null || typeof value.tiebreak === 'string') &&
-    typeof value.isBye === 'boolean' &&
-    (value.state === 'READY' || value.state === 'PENDING' || value.state === 'ERROR') &&
-    validIso(value.sourceCheckedAt) &&
-    isRecord(value.globalRef) &&
-    typeof value.globalRef.publicationId === 'string' &&
-    /^[0-9a-f-]{36}$/i.test(value.globalRef.publicationId) &&
-    typeof value.globalRef.generation === 'number' &&
-    Number.isSafeInteger(value.globalRef.generation) &&
-    value.globalRef.generation > 0 &&
-    validH2HMatchSide(value.home, manifest, value.isBye) &&
-    validH2HMatchSide(value.away, manifest, value.isBye) &&
-    (value.state === 'READY'
-      ? (value.home.entryId === null || value.home.input !== null) &&
-        (value.away.entryId === null || value.away.input !== null)
-      : true)
+    lifecycleInputsValid &&
+    (value.state !== 'READY' || (completeSide(value.home) && completeSide(value.away)))
   );
 }
 
@@ -705,8 +849,9 @@ function validH2HStandingsPayload(
     standings.tournamentId !== manifest.tournamentId ||
     typeof standings.throughEventId !== 'number' ||
     !Number.isSafeInteger(standings.throughEventId) ||
-    standings.throughEventId <= 0 ||
-    standings.throughEventId !== manifest.eventId ||
+    standings.throughEventId < 0 ||
+    standings.throughEventId > manifest.eventId ||
+    (standings.state === 'READY' && standings.throughEventId !== manifest.eventId) ||
     (standings.state !== 'READY' &&
       standings.state !== 'UPDATING' &&
       standings.state !== 'UNAVAILABLE') ||
@@ -734,6 +879,20 @@ function validH2HStandingsPayload(
       !validNullableInteger(row.pointsFor)
     )
       return false;
+    const typedRow = row as unknown as H2HStandingsRow;
+    if (
+      standings.state === 'READY' &&
+      (typedRow.rank === null ||
+        typedRow.matchPoints === null ||
+        typedRow.played === null ||
+        typedRow.won === null ||
+        typedRow.drawn === null ||
+        typedRow.lost === null ||
+        typedRow.pointsFor === null ||
+        typedRow.played !== typedRow.won + typedRow.drawn + typedRow.lost ||
+        typedRow.matchPoints !== typedRow.won * 3 + typedRow.drawn)
+    )
+      return false;
     ids.add(row.entryId);
   }
   if (standings.state === 'READY') return standings.rows.length > 0;
@@ -749,12 +908,14 @@ function validH2HPayload(
   if (!Array.isArray(index) || !isRecord(payload)) return false;
   if (manifest.scope === 'H2H_STANDINGS') {
     if (
+      manifest.items.index.count !== index.length ||
       manifest.items.payload.count !== 1 ||
       Object.keys(payload).length !== 1 ||
       !validH2HStandingsPayload(payload, manifest) ||
       index.length !== manifest.counts.expected ||
       manifest.counts.published !== index.length ||
-      manifest.counts.ready !== index.length
+      manifest.counts.ready !== index.length ||
+      manifest.counts.noPicks !== 0
     )
       return false;
     const rows = payload.standings.rows;
@@ -763,21 +924,61 @@ function validH2HPayload(
       if (!validH2HStandingsIndexRow(row) || ids.has(row.entryId)) return false;
       ids.add(row.entryId);
     }
+    if (payload.standings.state === 'UNAVAILABLE') {
+      return (
+        index.length === 0 &&
+        manifest.counts.expected === 0 &&
+        manifest.counts.published === 0 &&
+        manifest.counts.ready === 0 &&
+        rows.length === 0
+      );
+    }
+    if (payload.standings.state === 'UPDATING' && rows.length === 0) return true;
     return rows.length === index.length && rows.every((row) => ids.has(row.entryId));
   }
   const rows = index;
   const matchRows = rows.filter(validH2HMatchIndexRow);
-  if (matchRows.length !== rows.length || rows.length !== manifest.counts.expected) return false;
+  if (
+    matchRows.length !== rows.length ||
+    rows.length !== manifest.counts.expected ||
+    manifest.items.index.count !== rows.length ||
+    manifest.items.payload.count !== rows.length ||
+    manifest.counts.noPicks !== 0
+  )
+    return false;
+  if (
+    manifest.scope === 'H2H_MATCH' &&
+    (manifest.matchId === undefined || rows.length !== 1 || rows[0]?.matchId !== manifest.matchId)
+  )
+    return false;
   const ids = new Set<number>();
   for (const row of matchRows) {
     if (ids.has(row.matchId)) return false;
     ids.add(row.matchId);
+    if (row.eventId !== manifest.eventId) return false;
     const match = payload[String(row.matchId)];
     if (!validH2HMatchPayload(match, manifest) || match.officialMatchId !== row.matchId)
       return false;
     if (match.state !== row.availability) return false;
-    if (match.home.entryId !== row.homeEntryId || match.away.entryId !== row.awayEntryId)
+    if (
+      match.home.entryId !== row.homeEntryId ||
+      match.away.entryId !== row.awayEntryId ||
+      match.eventId !== row.eventId ||
+      match.groupId !== row.groupId ||
+      match.sourceOrder !== row.sourceOrder ||
+      match.phase !== row.phase
+    )
       return false;
+  }
+  if (manifest.counts.ready !== matchRows.filter((row) => row.availability === 'READY').length)
+    return false;
+  const participantIds = new Set<number>();
+  for (const row of matchRows) {
+    for (const entryId of [row.homeEntryId, row.awayEntryId]) {
+      if (entryId === null) continue;
+      if (participantIds.has(entryId)) return false;
+      participantIds.add(entryId);
+    }
   }
   if (
     Object.keys(payload).length !== rows.length ||
@@ -823,10 +1024,48 @@ function validFinalizedLeaguePayload(
     if (!validH2HMatchIndexRow(row) || !isRecord(payload[String(row.matchId)])) return false;
     const match = payload[String(row.matchId)];
     if (!validH2HMatchPayload(match, manifest) || match.state !== 'READY') return false;
-    return [match.home, match.away].every(
-      (side) => side.entryId === null || (side.input !== null && side.input.finalResult !== null),
-    );
+    return [match.home, match.away].every((side) => {
+      if (side.entryId === null) {
+        return side.isAverage ? side.officialNetPoints !== null : true;
+      }
+      return (
+        side.input !== null &&
+        side.input.finalResult !== null &&
+        (match.isBye || side.officialNetPoints !== null)
+      );
+    });
   });
+}
+
+export function validateLiveLeaguePublicationV2Payload(
+  scope: LeagueLiveScope,
+  manifest: LeagueLiveManifest,
+  index: unknown,
+  payload: unknown,
+): boolean {
+  try {
+    if (
+      manifest.season !== scope.season ||
+      manifest.eventId !== scope.eventId ||
+      manifest.tournamentId !== scope.tournamentId ||
+      manifest.scope !== scope.scope ||
+      (scope.scope === 'H2H_MATCH'
+        ? manifest.matchId !== scope.matchId
+        : manifest.matchId !== undefined)
+    )
+      return false;
+    const valid =
+      scope.scope === 'CLASSIC'
+        ? validClassicPayload(index, payload, manifest)
+        : validH2HPayload(index, payload, manifest);
+    return (
+      valid &&
+      (manifest.state !== 'FINALIZED' ||
+        validFinalizedLeaguePayload(scope, index, payload, manifest))
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -970,40 +1209,125 @@ return {tostring(generation), tostring(now[1]), tostring(now[2])}
 `;
 
 const PROMOTE_LUA = `
-local candidate = cjson.decode(ARGV[1])
+local candidateOk, candidate = pcall(cjson.decode, ARGV[1])
 local observed = ARGV[4] or ''
 local currentHealthy = ARGV[5] == '1'
+local expectedSeason = ARGV[6]
+local expectedEventId = tonumber(ARGV[7])
+local expectedTournamentId = tonumber(ARGV[8])
+local expectedScope = ARGV[9]
+local expectedMatchId = ARGV[10] == '' and nil or tonumber(ARGV[10])
 local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= observed then return {'changed', currentRaw} end
 local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
-if candidate.contractVersion ~= 'live-points-v2' or not candidate.items or type(candidate.generation) ~= 'number' or candidate.generation <= 0 then return {'invalid_candidate'} end
+if not candidateOk or type(candidate) ~= 'table' or candidate.contractVersion ~= 'live-points-v2' or type(candidate.items) ~= 'table' or type(candidate.generation) ~= 'number' or candidate.generation <= 0 then return {'invalid_candidate'} end
 local function validItem(item, name, generation)
-  return item and item.name == name and item.type == 'string' and type(item.key) == 'string' and item.key == scopePrefix .. ':' .. tostring(generation) .. ':' .. name and type(item.count) == 'number' and item.count >= 0 and type(item.bytes) == 'number' and item.bytes >= 0 and type(item.sha256) == 'string' and string.len(item.sha256) == 64
+  local maxBytes = name == 'index' and 8388608 or 16777216
+  return type(item) == 'table' and item.name == name and item.type == 'string' and type(item.key) == 'string' and item.key == scopePrefix .. ':' .. tostring(generation) .. ':' .. name and type(item.count) == 'number' and item.count >= 0 and item.count <= 5000 and item.count == math.floor(item.count) and type(item.bytes) == 'number' and item.bytes >= 0 and item.bytes <= maxBytes and item.bytes == math.floor(item.bytes) and type(item.sha256) == 'string' and string.len(item.sha256) == 64 and string.match(item.sha256, '^[0-9a-fA-F]+$') ~= nil
+end
+local function storedItemHealthy(item, name, generation)
+  if not validItem(item, name, generation) or redis.call('EXISTS', item.key) ~= 1 then return false end
+  local itemType = redis.call('TYPE', item.key)
+  local actualType = type(itemType) == 'table' and itemType['ok'] or itemType
+  return actualType == 'string' and redis.call('STRLEN', item.key) == item.bytes and redis.call('GET', item.key .. ':meta') == tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256
 end
 for _, name in ipairs({'index', 'payload'}) do
   local descriptor = candidate.items[name]
   if not validItem(descriptor, name, candidate.generation) then return {'invalid_item'} end
-  if redis.call('EXISTS', descriptor.key) ~= 1 then return {'missing_stage', descriptor.key} end
-  local itemType = redis.call('TYPE', descriptor.key)
-  local actualType = type(itemType) == 'table' and itemType['ok'] or itemType
-  if actualType ~= 'string' or redis.call('STRLEN', descriptor.key) ~= descriptor.bytes or redis.call('GET', descriptor.key .. ':meta') ~= tostring(descriptor.count) .. '|' .. tostring(descriptor.bytes) .. '|' .. descriptor.sha256 then return {'invalid_stage', descriptor.key} end
+  if not storedItemHealthy(descriptor, name, candidate.generation) then return {'invalid_stage', descriptor.key} end
 end
+local function validUuid(value)
+  return type(value) == 'string' and string.len(value) == 36 and string.match(value, '^[0-9a-fA-F%-]+$') ~= nil
+end
+local function validHash(value)
+  return type(value) == 'string' and string.len(value) == 64 and string.match(value, '^[0-9a-fA-F]+$') ~= nil
+end
+local function validIso(value)
+  return type(value) == 'string' and string.match(value, '^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$') ~= nil
+end
+local function validOptionalIso(value)
+  return value == cjson.null or validIso(value)
+end
+local function validInteger(value, minimum)
+  return type(value) == 'number' and value >= minimum and value <= 9007199254740991 and value == math.floor(value)
+end
+local function validPointer(value)
+  if type(value) ~= 'table' or
+     value.contractVersion ~= 'live-points-v2' or
+     not validUuid(value.publicationId) or
+     not validInteger(value.generation, 1) or
+     value.season ~= expectedSeason or
+     value.eventId ~= expectedEventId or
+     value.tournamentId ~= expectedTournamentId or
+     value.scope ~= expectedScope or
+     (expectedMatchId == nil and value.matchId ~= nil) or
+     (expectedMatchId ~= nil and (type(value.matchId) ~= 'number' or value.matchId ~= expectedMatchId or not validInteger(value.matchId, 1))) or
+     (value.state ~= 'PRE_DEADLINE' and value.state ~= 'PICKS_WAIT' and value.state ~= 'PICKS_PROBE' and value.state ~= 'PICKS_SYNC' and value.state ~= 'LIVE_ACTIVE' and value.state ~= 'BETWEEN_FIXTURES' and value.state ~= 'DAY_SETTLING' and value.state ~= 'GW_REVIEW' and value.state ~= 'FINALIZED') or
+     type(value.globalRef) ~= 'table' or
+     not validUuid(value.globalRef.publicationId) or
+     not validInteger(value.globalRef.generation, 1) or
+     type(value.revisions) ~= 'table' or
+     not validHash(value.revisions.roster) or
+     not validHash(value.revisions.scoreCore) or
+     not validHash(value.revisions.fixtureIdentity) or
+     not validHash(value.revisions.entryInputSet) or
+     not validHash(value.revisions.identity) or
+     not validHash(value.revisions.rules) or
+     not validHash(value.revisions.algorithm) or
+     not validHash(value.revisions.content) or
+     value.revisions.officialRank == nil or
+     (value.revisions.officialRank ~= cjson.null and not validHash(value.revisions.officialRank)) or
+     value.revisions.schedule == nil or
+     (value.revisions.schedule ~= cjson.null and not validHash(value.revisions.schedule)) or
+     value.revisions.averageSide == nil or
+     (value.revisions.averageSide ~= cjson.null and not validHash(value.revisions.averageSide)) or
+     type(value.times) ~= 'table' or
+     not validIso(value.times.sourceCheckedAt) or
+     not validIso(value.times.contentUpdatedAt) or
+     not validIso(value.times.publishedAt) or
+     not validOptionalIso(value.times.checkpointedAt) or
+     not validOptionalIso(value.times.expectedNextCheckAt) or
+     type(value.counts) ~= 'table' or
+     not validInteger(value.counts.expected, 0) or
+     value.counts.expected > 5000 or
+     not validInteger(value.counts.published, 0) or
+     not validInteger(value.counts.ready, 0) or
+     not validInteger(value.counts.noPicks, 0) or
+     value.counts.published ~= value.counts.expected or
+     value.counts.ready > value.counts.expected or
+     value.counts.noPicks > value.counts.expected or
+     (expectedScope == 'CLASSIC' and value.counts.published ~= value.counts.ready + value.counts.noPicks) or
+     type(value.items) ~= 'table' or
+     not validItem(value.items.index, 'index', value.generation) or
+     not validItem(value.items.payload, 'payload', value.generation) then
+    return false
+  end
+  return true
+end
+if not validPointer(candidate) then return {'invalid_candidate'} end
 local current = nil
-if currentHealthy and currentRaw ~= '' then
+-- Decode the pointer even when its immutable items are unhealthy. A
+-- FINALIZED pointer is a supersession fence in its own right; treating a
+-- corrupt final payload as "no current" would allow a provisional candidate
+-- to replace the final publication.
+if currentRaw ~= '' then
   local ok, decoded = pcall(cjson.decode, currentRaw)
-  if ok and decoded.contractVersion == 'live-points-v2' and type(decoded.generation) == 'number' then current = decoded end
+  if ok and validPointer(decoded) then current = decoded end
 end
 if current and current.generation >= candidate.generation then return {'stale', currentRaw} end
 if current and current.state == 'FINALIZED' then return {'stale', currentRaw} end
-if current and currentHealthy then
+local currentItemsHealthy = current ~= nil and currentHealthy and type(current.items) == 'table'
+if currentItemsHealthy then
+  for _, name in ipairs({'index', 'payload'}) do
+    if not storedItemHealthy(current.items and current.items[name], name, current.generation) then currentItemsHealthy = false end
+  end
+end
+if currentItemsHealthy then
   redis.call('SET', KEYS[2], currentRaw, 'PX', ARGV[2])
   for _, name in ipairs({'index', 'payload'}) do
-    local old = current.items and current.items[name]
-    local expectedOldKey = scopePrefix .. ':' .. tostring(current.generation) .. ':' .. name
-    if old and old.name == name and old.type == 'string' and old.key == expectedOldKey then
-      redis.call('PEXPIRE', old.key, ARGV[2])
-      redis.call('PEXPIRE', old.key .. ':meta', ARGV[2])
-    end
+    local old = current.items[name]
+    redis.call('PEXPIRE', old.key, ARGV[2])
+    redis.call('PEXPIRE', old.key .. ':meta', ARGV[2])
   end
 end
 for _, name in ipairs({'index', 'payload'}) do
@@ -1028,15 +1352,31 @@ local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= ARGV[1] then return {'changed', currentRaw} end
 local ok, current = pcall(cjson.decode, currentRaw)
 local nextOk, next = pcall(cjson.decode, ARGV[2])
-if not ok or not nextOk or current.publicationId ~= next.publicationId or current.generation ~= next.generation or current.revisions.content ~= next.revisions.content then
+if not ok or type(current) ~= 'table' or not nextOk or type(next) ~= 'table' or
+   type(current.revisions) ~= 'table' or type(next.revisions) ~= 'table' or
+   type(next.items) ~= 'table' or
+   current.publicationId ~= next.publicationId or current.generation ~= next.generation or
+   current.revisions.content ~= next.revisions.content then
   return {'invalid'}
 end
 local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
 local function validItem(item, name)
-  return item and item.name == name and item.type == 'string' and item.key == scopePrefix .. ':' .. tostring(next.generation) .. ':' .. name
+  if type(item) ~= 'table' or item.name ~= name or item.type ~= 'string' or type(item.key) ~= 'string' or
+     item.key ~= scopePrefix .. ':' .. tostring(next.generation) .. ':' .. name or
+     type(item.count) ~= 'number' or item.count < 0 or item.count ~= math.floor(item.count) or
+     type(item.bytes) ~= 'number' or item.bytes < 0 or item.bytes ~= math.floor(item.bytes) or
+     type(item.sha256) ~= 'string' or string.len(item.sha256) ~= 64 then
+    return false
+  end
+  if redis.call('EXISTS', item.key) ~= 1 then return false end
+  local itemType = redis.call('TYPE', item.key)
+  local actualType = type(itemType) == 'table' and itemType['ok'] or itemType
+  return actualType == 'string' and
+    redis.call('STRLEN', item.key) == item.bytes and
+    redis.call('GET', item.key .. ':meta') == tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256
 end
 for _, name in ipairs({'index', 'payload'}) do
-  if not validItem(next.items and next.items[name], name) then return {'invalid'} end
+  if not validItem(next.items[name], name) then return {'invalid'} end
 end
 redis.call('SET', KEYS[1], ARGV[2])
 if next.state == 'FINALIZED' then
@@ -1048,6 +1388,11 @@ if next.state == 'FINALIZED' then
   end
 else
   redis.call('PERSIST', KEYS[1])
+  for _, name in ipairs({'index', 'payload'}) do
+    local item = next.items[name]
+    redis.call('PERSIST', item.key)
+    redis.call('PERSIST', item.key .. ':meta')
+  end
 end
 return {'touched', ARGV[2]}
 `;
@@ -1056,16 +1401,28 @@ const CHECKPOINT_LUA = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'missing'} end
 local ok, value = pcall(cjson.decode, raw)
-if not ok or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) then return {'changed'} end
+if not ok or type(value) ~= 'table' or type(value.times) ~= 'table' or
+   type(value.items) ~= 'table' or
+   value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) then return {'changed'} end
 value.times.checkpointedAt = ARGV[3]
 local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
 local function validItem(item, name)
-  return item and item.name == name and item.type == 'string' and item.key == scopePrefix .. ':' .. tostring(value.generation) .. ':' .. name
-end
-if value.state == 'FINALIZED' then
-  for _, name in ipairs({'index', 'payload'}) do
-    if not validItem(value.items and value.items[name], name) then return {'invalid'} end
+  if type(item) ~= 'table' or item.name ~= name or item.type ~= 'string' or type(item.key) ~= 'string' or
+     item.key ~= scopePrefix .. ':' .. tostring(value.generation) .. ':' .. name or
+     type(item.count) ~= 'number' or item.count < 0 or item.count ~= math.floor(item.count) or
+     type(item.bytes) ~= 'number' or item.bytes < 0 or item.bytes ~= math.floor(item.bytes) or
+     type(item.sha256) ~= 'string' or string.len(item.sha256) ~= 64 then
+    return false
   end
+  if redis.call('EXISTS', item.key) ~= 1 then return false end
+  local itemType = redis.call('TYPE', item.key)
+  local actualType = type(itemType) == 'table' and itemType['ok'] or itemType
+  return actualType == 'string' and
+    redis.call('STRLEN', item.key) == item.bytes and
+    redis.call('GET', item.key .. ':meta') == tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256
+end
+for _, name in ipairs({'index', 'payload'}) do
+  if not validItem(value.items[name], name) then return {'invalid'} end
 end
 redis.call('SET', KEYS[1], cjson.encode(value))
 if value.state == 'FINALIZED' then
@@ -1077,6 +1434,11 @@ if value.state == 'FINALIZED' then
   end
 else
   redis.call('PERSIST', KEYS[1])
+  for _, name in ipairs({'index', 'payload'}) do
+    local item = value.items[name]
+    redis.call('PERSIST', item.key)
+    redis.call('PERSIST', item.key .. ':meta')
+  end
 end
 return {'checkpointed', cjson.encode(value)}
 `;
@@ -1348,56 +1710,22 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
       'LIVE_LEAGUE_COUNTS_INVALID',
     );
   }
+  const candidateManifest = validationManifest(input);
   if (
-    input.scope.scope !== 'CLASSIC' &&
-    !validH2HPayload(input.index, input.payload, validationManifest(input))
-  ) {
-    throw new CacheError('Live league H2H payload is incomplete', 'LIVE_LEAGUE_PAYLOAD_INVALID');
-  }
-  if (
-    input.scope.scope === 'CLASSIC' &&
-    !validClassicPayload(input.index, input.payload, {
-      contractVersion: LIVE_LEAGUE_CONTRACT_VERSION,
-      publicationId: randomUUID(),
-      generation: 1,
-      season: input.scope.season,
-      eventId: input.scope.eventId,
-      tournamentId: input.scope.tournamentId,
-      scope: input.scope.scope,
-      state: input.state,
-      globalRef: input.globalRef,
-      revisions: input.revisions,
-      times: {
-        sourceCheckedAt: sourceDate(input.sourceCheckedAt),
-        contentUpdatedAt: sourceDate(input.contentUpdatedAt ?? input.sourceCheckedAt),
-        publishedAt: sourceDate(input.sourceCheckedAt),
-        checkpointedAt: null,
-        expectedNextCheckAt: null,
-      },
-      counts: input.counts,
-      items: {
-        index: {
-          name: 'index',
-          key: '',
-          type: 'string',
-          count: input.index.length,
-          bytes: 0,
-          sha256: hashPayload(input.index),
-        },
-        payload: {
-          name: 'payload',
-          key: '',
-          type: 'string',
-          count: payloadCount(input.payload),
-          bytes: 0,
-          sha256: hashPayload(input.payload),
-        },
-      },
-    })
+    !validateLiveLeaguePublicationV2Payload(
+      input.scope,
+      candidateManifest,
+      input.index,
+      input.payload,
+    )
   ) {
     throw new CacheError(
-      'Live league classic payload is incomplete',
-      'LIVE_LEAGUE_PAYLOAD_INVALID',
+      input.state === 'FINALIZED'
+        ? 'Live league finalized payload is incomplete'
+        : `Live league ${input.scope.scope.toLowerCase()} payload is incomplete`,
+      input.state === 'FINALIZED'
+        ? 'LIVE_LEAGUE_FINAL_PAYLOAD_INVALID'
+        : 'LIVE_LEAGUE_PAYLOAD_INVALID',
     );
   }
   assertRowBytes(input.scope, input.index, input.payload);
@@ -1516,6 +1844,11 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
     String(input.state === 'FINALIZED' ? LIVE_LEAGUE_FINAL_TTL_MS : 0),
     currentRaw,
     currentRead ? '1' : '0',
+    input.scope.season,
+    String(input.scope.eventId),
+    String(input.scope.tournamentId),
+    input.scope.scope,
+    input.scope.matchId === undefined ? '' : String(input.scope.matchId),
   )) as unknown;
   if (!Array.isArray(result) || typeof result[0] !== 'string')
     throw new CacheError('Invalid live league promotion result', 'LIVE_LEAGUE_PROMOTE_FAILED');
@@ -1617,17 +1950,11 @@ function decodePointerRead(
       return null;
     const index = JSON.parse(indexPayload) as unknown;
     const decodedPayload = JSON.parse(payload) as unknown;
-    let validatedIndex: LeagueLiveIndex[];
-    if (publication.scope === 'CLASSIC') {
-      if (!validClassicPayload(index, decodedPayload, publication)) return null;
-      validatedIndex = index;
-    } else {
-      if (!validH2HPayload(index, decodedPayload, publication)) return null;
-      validatedIndex = index;
-    }
+    if (!validateLiveLeaguePublicationV2Payload(scope, publication, index, decodedPayload))
+      return null;
     return {
       publication,
-      index: validatedIndex,
+      index: index as LeagueLiveIndex[],
       payload: decodedPayload as LeagueLivePayload,
       servedFrom: pointer === 'active' ? 'REDIS_CURRENT' : 'REDIS_PREVIOUS',
     };
