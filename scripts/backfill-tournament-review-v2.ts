@@ -75,7 +75,7 @@ export async function runTournamentReviewBackfill(
   // semantic/integrity gate below passes, so a failed cutover remains safely
   // retryable on the next deployment.
   const db = await getDbClient();
-  const [marker] = await db<
+  let [marker] = await db<
     {
       backfill_completed_at: Date | string | null;
       restore_rehearsal_required: boolean;
@@ -90,6 +90,50 @@ export async function runTournamentReviewBackfill(
     ORDER BY created_at DESC
     LIMIT 1
   `;
+  if (!marker) {
+    const [emptyCutover] = await db<
+      {
+        restore_rehearsal_completed_at: Date | string | null;
+      }[]
+    >`
+      SELECT restore_rehearsal_completed_at
+      FROM ops.tournament_review_v2_1_backup_manifest
+      WHERE season_id = 0
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    if (emptyCutover) {
+      await db`
+        INSERT INTO ops.tournament_review_v2_1_backup_manifest (
+          season_id, publications_rows, heads_rows, obligations_rows,
+          publication_revision_distribution, publications_sha256, heads_sha256,
+          obligations_sha256, restore_rehearsal_required,
+          restore_rehearsal_completed_at, backfill_completed_at
+        ) VALUES (
+          ${season.seasonId}, 0, 0, 0, '{}'::jsonb,
+          encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+          encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+          encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+          false, ${emptyCutover.restore_rehearsal_completed_at}, NULL
+        )
+      `;
+      [marker] = await db<
+        {
+          backfill_completed_at: Date | string | null;
+          restore_rehearsal_required: boolean;
+          restore_rehearsal_completed_at: Date | string | null;
+        }[]
+      >`
+        SELECT backfill_completed_at,
+               restore_rehearsal_required,
+               restore_rehearsal_completed_at
+        FROM ops.tournament_review_v2_1_backup_manifest
+        WHERE season_id = ${season.seasonId}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+    }
+  }
   if (!marker) {
     throw new Error('V2.1 review backfill refused: migration 0090 backup manifest is missing');
   }

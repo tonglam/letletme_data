@@ -2471,6 +2471,7 @@ async function publishTournamentReviewScopeOnce(
           FROM competition.tournament_review_publications
           WHERE season_id = ${season.seasonId}
             AND tournament_id = ${tournamentId}
+            AND event_id = ${eventId}
             AND correction_change_id = ${correction.changeId}
           ORDER BY revision DESC
           LIMIT 1
@@ -3012,21 +3013,21 @@ async function resetTournamentReviewScopesForCorrection(
           -- resolves it in the same transaction as READY. Clearing it here
           -- would leave an unresolved setup issue after a successful
           -- correction.
-          -- Only scopes with an existing immutable head are correction
-          -- publications. Headless descendants remain initial publications.
+          -- Historical publication rows also require correction provenance even
+          -- when a previous repair temporarily removed the active head.
           correction_reason = CASE WHEN EXISTS (
             SELECT 1
-            FROM competition.tournament_review_heads head
-            WHERE head.season_id = obligation.season_id
-              AND head.tournament_id = obligation.tournament_id
-              AND head.event_id = obligation.event_id
+            FROM competition.tournament_review_publications publication
+            WHERE publication.season_id = obligation.season_id
+              AND publication.tournament_id = obligation.tournament_id
+              AND publication.event_id = obligation.event_id
           ) THEN ${reason} ELSE NULL END,
           correction_change_id = CASE WHEN EXISTS (
             SELECT 1
-            FROM competition.tournament_review_heads head
-            WHERE head.season_id = obligation.season_id
-              AND head.tournament_id = obligation.tournament_id
-              AND head.event_id = obligation.event_id
+            FROM competition.tournament_review_publications publication
+            WHERE publication.season_id = obligation.season_id
+              AND publication.tournament_id = obligation.tournament_id
+              AND publication.event_id = obligation.event_id
           ) THEN ${changeId} ELSE NULL END,
           updated_at = clock_timestamp()
       WHERE obligation.season_id = ${season.seasonId}
@@ -4854,9 +4855,7 @@ export async function getTournamentReviewV2OperationalStatus(
          AND publication.event_id = head.event_id
          AND publication.revision = head.revision
         WHERE obligation.season_id = ${season.seasonId}
-                AND obligation.state IN (
-                  'READY', 'PROCESSING', 'PENDING', 'WAITING_SOURCE', 'DEGRADED'
-                )
+          AND obligation.state = 'READY'
           AND (obligation.tournament_id, obligation.event_id) > (${lastTournamentId}, ${lastEventId})
         ORDER BY obligation.tournament_id, obligation.event_id
         LIMIT ${TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE}

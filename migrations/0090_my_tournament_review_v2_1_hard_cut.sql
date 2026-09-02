@@ -277,7 +277,9 @@ CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
   )
 );
 REVOKE ALL ON TABLE ops.tournament_review_v2_1_backup_manifest FROM PUBLIC;
-GRANT SELECT, UPDATE ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
+GRANT SELECT ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
+GRANT UPDATE (backfill_completed_at)
+  ON TABLE ops.tournament_review_v2_1_backup_manifest TO letletme_data_writer;
 
 DO $migration$
 DECLARE
@@ -298,9 +300,26 @@ BEGIN
 
   IF current_season IS NULL THEN
     -- Schema-only CI/restore databases may be empty before the first FPL
-    -- season is seeded.  Apply the structural hard-cut below, but there is no
-    -- current-season data to back up or reset in that case.
-    RAISE NOTICE '0090 skipped current-season backup/reset because no current FPL season exists';
+    -- season is seeded. Record a durable sentinel so deployment can prove the
+    -- migration completed while a later first season can bootstrap its own
+    -- per-season marker before backfill.
+    INSERT INTO ops.tournament_review_v2_1_backup_manifest (
+      season_id, publications_rows, heads_rows, obligations_rows,
+      publication_revision_distribution, publications_sha256, heads_sha256,
+      obligations_sha256, restore_rehearsal_required,
+      restore_rehearsal_completed_at, backfill_completed_at
+    )
+    SELECT 0, 0, 0, 0, '{}'::jsonb,
+           encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+           encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+           encode(extensions.digest(convert_to('[]', 'UTF8'), 'sha256'), 'hex'),
+           false, clock_timestamp(), clock_timestamp()
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM ops.tournament_review_v2_1_backup_manifest
+      WHERE season_id = 0
+    );
+    RAISE NOTICE '0090 recorded an empty-database cutover marker';
     RETURN;
   END IF;
 

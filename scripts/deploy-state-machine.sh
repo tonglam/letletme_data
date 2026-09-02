@@ -1329,8 +1329,13 @@ review_backfill_marker_pending() {
     -e DATABASE_URL migration bun -e '
       import postgres from "postgres";
       const db = postgres(process.env.DATABASE_URL, { max: 1 });
-      const rows = await db`SELECT backfill_completed_at FROM ops.tournament_review_v2_1_backup_manifest ORDER BY created_at DESC LIMIT 1`;
-      process.stdout.write(rows.length === 0 ? "missing" : rows[0].backfill_completed_at === null ? "pending" : "complete");
+      const current = await db`SELECT season_id FROM fpl.seasons WHERE is_current ORDER BY season_id DESC LIMIT 1`;
+      if (current.length === 0) {
+        process.stdout.write("complete");
+      } else {
+        const rows = await db`SELECT backfill_completed_at FROM ops.tournament_review_v2_1_backup_manifest WHERE season_id = ${current[0].season_id} ORDER BY created_at DESC LIMIT 1`;
+        process.stdout.write(rows.length === 0 ? "pending" : rows[0].backfill_completed_at === null ? "pending" : "complete");
+      }
       await db.end();
     ' 2>/dev/null); then
     echo 'deploy review backfill: durable marker probe failed; refusing to skip the backfill' >&2

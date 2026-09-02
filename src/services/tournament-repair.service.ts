@@ -38,6 +38,21 @@ function scopedEntryIds(allEntryIds: number[], affectedEntryIds: number[]): numb
   return requested.length > 0 ? requested : allEntryIds;
 }
 
+/** A setup issue row is reused across occurrences by its stable issue key.
+ * Use the durable last-seen timestamp as the occurrence generation so a
+ * resolved issue that reappears receives a new correction Change ID, while
+ * retries of the same occurrence remain idempotent. */
+function repairCorrectionChangeId(
+  season: FplSeasonRef,
+  issue: { issueId: number; lastSeenAt: Date },
+): string {
+  const seenAt =
+    issue.lastSeenAt instanceof Date && Number.isFinite(issue.lastSeenAt.getTime())
+      ? issue.lastSeenAt.toISOString().replace(/[^0-9]/g, '')
+      : 'unknown-occurrence';
+  return `tournament-repair-${season.seasonCode}-${issue.issueId}-${seenAt}`;
+}
+
 function issueEventId(
   issueEventIdValue: number | null,
   window: { startEventId: number; endEventId: number } | null,
@@ -225,7 +240,7 @@ async function repairTournamentSetupIssueUnlocked(
       reviewCorrection = {
         kind: 'tournament',
         reason: `Tournament structure repair issue ${issue.issueId}`,
-        changeId: `tournament-repair-${season.seasonCode}-${issue.issueId}`,
+        changeId: repairCorrectionChangeId(season, issue),
       };
       break;
     }
@@ -245,7 +260,7 @@ async function repairTournamentSetupIssueUnlocked(
           kind: 'event',
           eventId,
           reason: `Tournament results repair issue ${issue.issueId}`,
-          changeId: `tournament-repair-${season.seasonCode}-${issue.issueId}`,
+          changeId: repairCorrectionChangeId(season, issue),
         };
       }
       break;
