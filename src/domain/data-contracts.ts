@@ -197,6 +197,7 @@ export const dataContractRegistry = [
       'tournament-event-picks',
       'tournament-event-results',
       'tournament-transfers-pre',
+      'tournament-materialized-views-refresh',
     ],
     dispatchWithinMs: 15 * 60_000,
     executionBudgetMs: 20 * 60_000,

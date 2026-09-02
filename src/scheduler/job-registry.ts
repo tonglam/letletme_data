@@ -21,6 +21,7 @@ import {
   enqueueTournamentEventPicks,
   enqueueTournamentEventResults,
   enqueueTournamentInfo,
+  enqueueTournamentMaterializedViewsRefresh,
   enqueueTournamentOfficialH2H,
   enqueueTournamentRosterSync,
   enqueueTournamentTransfersPre,
@@ -1872,6 +1873,42 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
         return { bullJobId: job.id, runId: job.data.runId };
       },
     }),
+    {
+      name: 'tournament-materialized-views-refresh',
+      cadence: 'after tournament setup commit or cascade barrier',
+      timezone: 'UTC',
+      catchUpPolicy: 'none',
+      criticality: 'normal',
+      queueName: 'tournament-sync',
+      // Setup-owned refreshes are persisted directly by the setup transaction;
+      // the definition is intentionally a delivery/recovery target rather
+      // than a second recurring schedule.
+      executionLanes: ['queue:tournament-sync'],
+      claimPriority: 35,
+      successPredicate: 'tournament materialized views refresh completes',
+      recoveryCompletionMode: 'root-job',
+      manualTrigger: false,
+      resolve: async () => [],
+      enqueue: async ({ context, plan, obligationId, generation }) => {
+        const tournamentId = plan.evidence?.tournamentId;
+        if (!Number.isSafeInteger(tournamentId) || Number(tournamentId) <= 0) {
+          throw new Error('Tournament materialized-view obligation is missing tournamentId');
+        }
+        const eventId = plan.eventId ?? context.currentEventId ?? 0;
+        const job = await enqueueTournamentMaterializedViewsRefresh(
+          context.season,
+          eventId,
+          'reconcile',
+          {
+            tournamentId: Number(tournamentId),
+            jobId: `scheduler-${obligationId}-g${generation}`,
+            obligationId,
+            obligationGeneration: generation,
+          },
+        );
+        return { bullJobId: job.id, runId: job.data.runId };
+      },
+    },
     eventDefinition({
       name: 'tournament-event-picks',
       cadence: 'post-deadline event checkpoint',

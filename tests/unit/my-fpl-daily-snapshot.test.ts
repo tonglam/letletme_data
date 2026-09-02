@@ -407,8 +407,10 @@ describe('My FPL daily snapshot publication contract', () => {
       'Skipped global tournament materialized-view refresh during setup',
     );
     expect(tournamentSetupService).toContain(
-      'Enqueued tournament materialized-view refresh after setup commit',
+      'Requested scheduler delivery for tournament materialized-view refresh',
     );
+    expect(tournamentSetupService).toContain('reserveSchedulerObligation');
+    expect(tournamentSetupService).toContain('runCompatibilitySchedulerPass');
     expect(tournamentSetupService).not.toContain('await refreshTournamentMaterializedViews()');
   });
 

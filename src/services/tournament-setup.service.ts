@@ -13,7 +13,6 @@ import {
   type TournamentSetupStatus,
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
-import { enqueueTournamentMaterializedViewsRefresh } from '../jobs/tournament-sync.jobs';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -25,6 +24,11 @@ import { getFplRequestMetricsSnapshot } from '../utils/fpl-request-metrics';
 import { getJobLogContext } from '../utils/job-log-context';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
+import { runCompatibilitySchedulerPass } from '../scheduler/scheduler.service';
+import {
+  reserveSchedulerObligation,
+  type SchedulerObligation,
+} from '../repositories/scheduler-obligations';
 
 import { auditTournamentSetup } from './tournament-audit.service';
 import {
@@ -459,14 +463,37 @@ export async function setupTournamentStructure(
     );
     await Promise.all(unresolvedIssues.map((issue) => enqueueTournamentRepair(season, issue)));
     await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
-    registerDatabasePostCommit(async () => {
-      await enqueueTournamentMaterializedViewsRefresh(season, targetEventId, 'reconcile', {
-        tournamentId,
-        jobId: `tournament-setup-mv-${tournamentId}-${targetEventId}-${Date.now()}`,
+    // Persist the refresh obligation inside the same lifecycle transaction as
+    // the setup publication. If queue delivery fails after commit, the
+    // standalone scheduler can still claim this durable pending row; no
+    // post-commit callback is allowed to be the only copy of the work.
+    const materializedViewsRefreshObligation: SchedulerObligation =
+      await reserveSchedulerObligation({
+        definition: {
+          name: 'tournament-materialized-views-refresh',
+          cadence: 'after tournament setup commit or cascade barrier',
+          timezone: 'UTC',
+          queueName: 'tournament-sync',
+        },
+        plan: {
+          scopeKey: `${season.seasonCode}:tournament:${tournamentId}`,
+          periodKey: `setup-${tournamentId}-${targetEventId}`,
+          dueAt: new Date(),
+          source: 'reconcile',
+          eventId: targetEventId,
+          evidence: { tournamentId, setupRefresh: true },
+        },
       });
-      logInfo('Enqueued tournament materialized-view refresh after setup commit', {
+    registerDatabasePostCommit(async () => {
+      // The durable row is the source of truth. This pass only attempts
+      // delivery after commit; a failed pass leaves the row pending for the
+      // next scheduler tick and therefore remains retryable.
+      const delivery = await runCompatibilitySchedulerPass();
+      logInfo('Requested scheduler delivery for tournament materialized-view refresh', {
         tournamentId,
         eventId: targetEventId,
+        obligationId: materializedViewsRefreshObligation.obligationId,
+        delivery,
       });
     });
     outcome = setupIssues.length > 0 ? 'ready_with_warnings' : 'ready';

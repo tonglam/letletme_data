@@ -54,6 +54,7 @@ entry-results
 league-event-picks
 league-event-results
 tournament-event-results
+tournament-materialized-views-refresh
 tournament-event-picks
 tournament-transfers-pre
 live-snapshot
