@@ -257,6 +257,17 @@ async function hasFinalLiveLeagueCheckpointsV2(
  * rebuild an entry input still exist.  Redis retention is a serving policy,
  * not evidence that a final entry can be reconstructed after a cold rebuild.
  */
+export function durableFinalChipMatches(activeChip: SQL, inputChip: SQL): SQL {
+  return sql`
+    CASE
+      WHEN ${inputChip} IS NULL THEN ${activeChip} IS NULL
+      WHEN ${inputChip} IN ('n/a', 'wildcard', 'freehit', 'bboost', '3xc', 'manager')
+        THEN ${activeChip} IS NOT DISTINCT FROM (${inputChip})::competition.chip
+      ELSE false
+    END
+  `;
+}
+
 function hasDurableFinalEntryInput(seasonCode: string, entryId: SQL): SQL {
   return sql`
     EXISTS (
@@ -371,17 +382,10 @@ function hasDurableFinalEntryInput(seasonCode: string, entryId: SQL): SQL {
                      AND stored_pick.is_vice_captain = pick.is_vice_captain
                      AND (
                        (pick.position = 1
-                         AND (
-                           input_head.input_payload->'picksBase'->>'chip' IS NULL
-                           OR input_head.input_payload->'picksBase'->>'chip' IN (
-                             'n/a', 'wildcard', 'freehit', 'bboost', '3xc', 'manager'
-                           )
-                         )
-                         AND stored_pick.active_chip IS NOT DISTINCT FROM CASE
-                           WHEN input_head.input_payload->'picksBase'->>'chip' IS NULL
-                             THEN NULL::competition.chip
-                           ELSE (input_head.input_payload->'picksBase'->>'chip')::competition.chip
-                         END
+                         AND ${durableFinalChipMatches(
+                           sql`stored_pick.active_chip`,
+                           sql`input_head.input_payload->'picksBase'->>'chip'`,
+                         )}
                          AND stored_pick.transfers = CASE
                            WHEN jsonb_typeof(input_head.input_payload->'picksBase'->'transferCount') = 'number'
                            THEN (input_head.input_payload->'picksBase'->>'transferCount')::numeric
