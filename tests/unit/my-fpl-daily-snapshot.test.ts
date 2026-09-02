@@ -343,6 +343,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).toContain('periodKey = myFplFinalizationPeriodKey({');
     expect(scheduler).toContain('status.finalSla');
     expect(scheduler).toContain('delivery-recovered');
+    expect(scheduler).toContain(String.raw`while (predecessor?.status === 'irrecoverable')`);
+    expect(scheduler).toContain('predecessor = repairObligation');
     expect(integrityMigration).toContain('expected_not_applicable_entry_count');
     expect(integrityMigration).toContain(
       'COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM',

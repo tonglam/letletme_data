@@ -736,17 +736,17 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
         // identity on its next 30-second pass, and historical FINAL events
         // are not rekeyed merely because a scheduler process restarted.
         if (status?.settlementState === 'FINAL' && status.finalSla === 'MET') {
-          const failedObligation = await getSchedulerObligationByIdentity({
+          let predecessor = await getSchedulerObligationByIdentity({
             jobName: 'my-fpl-finalization',
             scopeKey,
             periodKey,
           });
-          if (failedObligation?.status === 'irrecoverable') {
+          while (predecessor?.status === 'irrecoverable') {
             const repairPeriodKey = myFplFinalizationPeriodKey({
               eventId: event.id,
               dataCheckedAt: checkedAt,
               scopeFence,
-              repairFence: `${failedObligation.obligationId}-delivery-recovered`,
+              repairFence: `${predecessor.obligationId}-delivery-recovered`,
             });
             const repairObligation = await getSchedulerObligationByIdentity({
               jobName: 'my-fpl-finalization',
@@ -756,10 +756,14 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
             // The outbox delivery state is a transition fence: before Redis
             // delivery, finalSla is not MET; afterwards it is MET. Keep the
             // predecessor UUID in the identity so a later output revision
-            // cannot manufacture a new obligation on every pass.
+            // cannot manufacture a new obligation on every pass. If this
+            // repair also becomes irrecoverable, rotate once more from that
+            // terminal row; every failed repair therefore has a dispatchable
+            // successor after the next observed recovery.
             if (repairObligation?.status === 'succeeded') continue;
             periodKey = repairPeriodKey;
             deliveryRecovery = true;
+            predecessor = repairObligation;
           }
         }
         plans.push({
