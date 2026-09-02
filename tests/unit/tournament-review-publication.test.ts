@@ -427,11 +427,14 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain(
       'SELECT count(*)::numeric\n                       FROM jsonb_array_elements(CASE',
     );
-    expect(publicationSource).toContain("count(DISTINCT section ->> 'sectionKey')");
-    expect(publicationSource).toContain("WHEN 'POINTS' THEN");
-    expect(publicationSource).toContain("'POINTS_TRAJECTORIES'");
-    expect(publicationSource).toContain("'H2H_FIXTURES'");
-    expect(publicationSource).toContain("'KNOCKOUT_BRACKET'");
+    const sqlQuote = String.fromCharCode(39);
+    expect(publicationSource).toContain(
+      'count(DISTINCT section ->> ' + sqlQuote + 'sectionKey' + sqlQuote + ')',
+    );
+    expect(publicationSource).toContain('WHEN ' + sqlQuote + 'POINTS' + sqlQuote + ' THEN');
+    expect(publicationSource).toContain(sqlQuote + 'POINTS_TRAJECTORIES' + sqlQuote);
+    expect(publicationSource).toContain(sqlQuote + 'H2H_FIXTURES' + sqlQuote);
+    expect(publicationSource).toContain(sqlQuote + 'KNOCKOUT_BRACKET' + sqlQuote);
   });
 
   test('splits review sections into bounded deterministic chunks', () => {
