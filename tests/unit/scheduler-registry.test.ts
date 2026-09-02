@@ -5,6 +5,7 @@ import { describe, expect, mock, test } from 'bun:test';
 import {
   createSchedulerRegistry,
   officialH2HDefinition,
+  myFplFinalizationPeriodKey,
   resolvePriceChangeWatchPlans,
   resolveEntryInfoSnapshotTargetEventId,
   selectLiveSnapshotEventIds,
@@ -112,6 +113,39 @@ describe('standalone scheduler registry', () => {
       'league-event-results',
       'my-fpl-snapshot',
     ]);
+  });
+
+  test('adds one stable repair identity only after delivery recovery', () => {
+    const base = {
+      eventId: 2,
+      dataCheckedAt: '2026-09-01T13:06:20.040Z',
+      scopeFence: 'entries-tournaments-na0',
+    };
+    expect(myFplFinalizationPeriodKey(base)).toBe(
+      'final-2-2026-09-01T13:06:20.040Z-entries-tournaments-na0',
+    );
+    expect(myFplFinalizationPeriodKey(base)).toBe(
+      'final-2-2026-09-01T13:06:20.040Z-entries-tournaments-na0',
+    );
+    expect(
+      myFplFinalizationPeriodKey({
+        ...base,
+        repairFence: 'failed-obligation-delivery-recovered',
+      }),
+    ).toBe(
+      'final-2-2026-09-01T13:06:20.040Z-entries-tournaments-na0-repair-failed-obligation-delivery-recovered',
+    );
+    expect(
+      myFplFinalizationPeriodKey({
+        ...base,
+        repairFence: 'failed-obligation-delivery-recovered',
+      }),
+    ).toBe(
+      myFplFinalizationPeriodKey({
+        ...base,
+        repairFence: 'failed-obligation-delivery-recovered',
+      }),
+    );
   });
 
   test('orders claims by dispatch deadline, criticality, priority and stable name', () => {

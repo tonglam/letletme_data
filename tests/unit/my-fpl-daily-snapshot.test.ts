@@ -340,7 +340,9 @@ describe('My FPL daily snapshot publication contract', () => {
       'active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256',
     );
     expect(scheduler).toContain('getMyFplSnapshotOperationalStatus');
-    expect(scheduler).toContain('periodKey: `final-${event.id}-${checkedAt}-${scopeFence}`');
+    expect(scheduler).toContain('periodKey = myFplFinalizationPeriodKey({');
+    expect(scheduler).toContain('status.finalSla');
+    expect(scheduler).toContain('delivery-recovered');
     expect(integrityMigration).toContain('expected_not_applicable_entry_count');
     expect(integrityMigration).toContain(
       'COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM',

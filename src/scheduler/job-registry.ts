@@ -663,6 +663,24 @@ function myFplSnapshotDefinition(): ScheduledJobDefinition {
   };
 }
 
+/**
+ * Keep the ordinary finalization identity stable for one source fence. A
+ * repair fence is deliberately opt-in: it is derived from the terminal
+ * obligation that needs delivery recovery, not from the publication produced
+ * by a successful finalizer. This keeps normal 30-second passes idempotent
+ * while still allowing a post-failure delivery repair to obtain a new row.
+ */
+export function myFplFinalizationPeriodKey(input: {
+  eventId: number;
+  dataCheckedAt: string;
+  scopeFence: string;
+  repairFence?: string | null;
+}): string {
+  const base = `final-${input.eventId}-${input.dataCheckedAt}-${input.scopeFence}`;
+  const repairFence = input.repairFence?.trim();
+  return repairFence ? `${base}-repair-${repairFence}` : base;
+}
+
 function myFplFinalizationDefinition(): ScheduledJobDefinition {
   return {
     name: 'my-fpl-finalization',
@@ -704,15 +722,56 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
               `na${status.expectedNotApplicableEntryCount ?? 0}`,
             ].join('-')
           : 'missing-status';
+        const scopeKey = `${context.season.seasonCode}:event:${event.id}`;
+        let periodKey = myFplFinalizationPeriodKey({
+          eventId: event.id,
+          dataCheckedAt: checkedAt,
+          scopeFence,
+        });
+        let deliveryRecovery = false;
+        // A terminal failure can be followed by a successful PostgreSQL and
+        // Redis publication without changing the source fence or revision.
+        // Only then create a repair identity, fenced by the failed row's
+        // immutable UUID. A normal successful finalizer never changes this
+        // identity on its next 30-second pass, and historical FINAL events
+        // are not rekeyed merely because a scheduler process restarted.
+        if (status?.settlementState === 'FINAL' && status.finalSla === 'MET') {
+          const failedObligation = await getSchedulerObligationByIdentity({
+            jobName: 'my-fpl-finalization',
+            scopeKey,
+            periodKey,
+          });
+          if (failedObligation?.status === 'irrecoverable') {
+            const repairPeriodKey = myFplFinalizationPeriodKey({
+              eventId: event.id,
+              dataCheckedAt: checkedAt,
+              scopeFence,
+              repairFence: `${failedObligation.obligationId}-delivery-recovered`,
+            });
+            const repairObligation = await getSchedulerObligationByIdentity({
+              jobName: 'my-fpl-finalization',
+              scopeKey,
+              periodKey: repairPeriodKey,
+            });
+            // The outbox delivery state is a transition fence: before Redis
+            // delivery, finalSla is not MET; afterwards it is MET. Keep the
+            // predecessor UUID in the identity so a later output revision
+            // cannot manufacture a new obligation on every pass.
+            if (repairObligation?.status === 'succeeded') continue;
+            periodKey = repairPeriodKey;
+            deliveryRecovery = true;
+          }
+        }
         plans.push({
-          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `final-${event.id}-${checkedAt}-${scopeFence}`,
+          scopeKey,
+          periodKey,
           dueAt: context.now,
           eventId: event.id,
           source: 'reconcile',
           evidence: {
             snapshotKind: 'FINAL',
             dataCheckedAt: checkedAt,
+            ...(deliveryRecovery ? { reconciliation: 'delivery-recovered' } : {}),
             expectedEntryCount: status?.expectedEntryCount,
             expectedEntryScopeSha256: status?.expectedEntryScopeSha256,
             expectedNotApplicableEntryCount: status?.expectedNotApplicableEntryCount,
