@@ -310,13 +310,13 @@ export async function listLiveLeagueCheckpointDesiredScopesV2(
   do {
     const result = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', '200');
     cursor = result[0];
-    keys.push(...result[1]);
-    if (keys.length > LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT) {
-      throw new CacheError(
-        'Live league checkpoint reconciler found too many desired scopes',
-        'LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT',
-      );
-    }
+    const remaining = LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT - keys.length;
+    if (remaining <= 0) break;
+    keys.push(...result[1].slice(0, remaining));
+    // This is intentionally a bounded batch. The reconciler clears successful
+    // obligations and the next pass drains the rest without allowing one
+    // oversized season to monopolize a worker or request an unbounded scan.
+    if (keys.length >= LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT) break;
   } while (cursor !== '0');
   const unique = new Map<string, LeagueLiveScope>();
   for (const key of keys) {
@@ -1175,12 +1175,18 @@ const PROMOTE_LUA = `
 local candidateOk, candidate = pcall(cjson.decode, ARGV[1])
 local observed = ARGV[4] or ''
 local currentHealthy = ARGV[5] == '1'
+local expectedSeason = ARGV[6]
+local expectedEventId = tonumber(ARGV[7])
+local expectedTournamentId = tonumber(ARGV[8])
+local expectedScope = ARGV[9]
+local expectedMatchId = ARGV[10] == '' and nil or tonumber(ARGV[10])
 local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= observed then return {'changed', currentRaw} end
 local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
 if not candidateOk or type(candidate) ~= 'table' or candidate.contractVersion ~= 'live-points-v2' or type(candidate.items) ~= 'table' or type(candidate.generation) ~= 'number' or candidate.generation <= 0 then return {'invalid_candidate'} end
 local function validItem(item, name, generation)
-  return type(item) == 'table' and item.name == name and item.type == 'string' and type(item.key) == 'string' and item.key == scopePrefix .. ':' .. tostring(generation) .. ':' .. name and type(item.count) == 'number' and item.count >= 0 and item.count == math.floor(item.count) and type(item.bytes) == 'number' and item.bytes >= 0 and item.bytes == math.floor(item.bytes) and type(item.sha256) == 'string' and string.len(item.sha256) == 64 and string.match(item.sha256, '^[0-9a-fA-F]+$') ~= nil
+  local maxBytes = name == 'index' and 8388608 or 16777216
+  return type(item) == 'table' and item.name == name and item.type == 'string' and type(item.key) == 'string' and item.key == scopePrefix .. ':' .. tostring(generation) .. ':' .. name and type(item.count) == 'number' and item.count >= 0 and item.count <= 5000 and item.count == math.floor(item.count) and type(item.bytes) == 'number' and item.bytes >= 0 and item.bytes <= maxBytes and item.bytes == math.floor(item.bytes) and type(item.sha256) == 'string' and string.len(item.sha256) == 64 and string.match(item.sha256, '^[0-9a-fA-F]+$') ~= nil
 end
 local function storedItemHealthy(item, name, generation)
   if not validItem(item, name, generation) or redis.call('EXISTS', item.key) ~= 1 then return false end
@@ -1193,6 +1199,75 @@ for _, name in ipairs({'index', 'payload'}) do
   if not validItem(descriptor, name, candidate.generation) then return {'invalid_item'} end
   if not storedItemHealthy(descriptor, name, candidate.generation) then return {'invalid_stage', descriptor.key} end
 end
+local function validUuid(value)
+  return type(value) == 'string' and string.len(value) == 36 and string.match(value, '^[0-9a-fA-F%-]+$') ~= nil
+end
+local function validHash(value)
+  return type(value) == 'string' and string.len(value) == 64 and string.match(value, '^[0-9a-fA-F]+$') ~= nil
+end
+local function validIso(value)
+  return type(value) == 'string' and string.match(value, '^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$') ~= nil
+end
+local function validOptionalIso(value)
+  return value == cjson.null or validIso(value)
+end
+local function validInteger(value, minimum)
+  return type(value) == 'number' and value >= minimum and value <= 9007199254740991 and value == math.floor(value)
+end
+local function validPointer(value)
+  if type(value) ~= 'table' or
+     value.contractVersion ~= 'live-points-v2' or
+     not validUuid(value.publicationId) or
+     not validInteger(value.generation, 1) or
+     value.season ~= expectedSeason or
+     value.eventId ~= expectedEventId or
+     value.tournamentId ~= expectedTournamentId or
+     value.scope ~= expectedScope or
+     (expectedMatchId == nil and value.matchId ~= nil) or
+     (expectedMatchId ~= nil and (type(value.matchId) ~= 'number' or value.matchId ~= expectedMatchId or not validInteger(value.matchId, 1))) or
+     (value.state ~= 'PRE_DEADLINE' and value.state ~= 'PICKS_WAIT' and value.state ~= 'PICKS_PROBE' and value.state ~= 'PICKS_SYNC' and value.state ~= 'LIVE_ACTIVE' and value.state ~= 'BETWEEN_FIXTURES' and value.state ~= 'DAY_SETTLING' and value.state ~= 'GW_REVIEW' and value.state ~= 'FINALIZED') or
+     type(value.globalRef) ~= 'table' or
+     not validUuid(value.globalRef.publicationId) or
+     not validInteger(value.globalRef.generation, 1) or
+     type(value.revisions) ~= 'table' or
+     not validHash(value.revisions.roster) or
+     not validHash(value.revisions.scoreCore) or
+     not validHash(value.revisions.fixtureIdentity) or
+     not validHash(value.revisions.entryInputSet) or
+     not validHash(value.revisions.identity) or
+     not validHash(value.revisions.rules) or
+     not validHash(value.revisions.algorithm) or
+     not validHash(value.revisions.content) or
+     value.revisions.officialRank == nil or
+     (value.revisions.officialRank ~= cjson.null and not validHash(value.revisions.officialRank)) or
+     value.revisions.schedule == nil or
+     (value.revisions.schedule ~= cjson.null and not validHash(value.revisions.schedule)) or
+     value.revisions.averageSide == nil or
+     (value.revisions.averageSide ~= cjson.null and not validHash(value.revisions.averageSide)) or
+     type(value.times) ~= 'table' or
+     not validIso(value.times.sourceCheckedAt) or
+     not validIso(value.times.contentUpdatedAt) or
+     not validIso(value.times.publishedAt) or
+     not validOptionalIso(value.times.checkpointedAt) or
+     not validOptionalIso(value.times.expectedNextCheckAt) or
+     type(value.counts) ~= 'table' or
+     not validInteger(value.counts.expected, 0) or
+     value.counts.expected > 5000 or
+     not validInteger(value.counts.published, 0) or
+     not validInteger(value.counts.ready, 0) or
+     not validInteger(value.counts.noPicks, 0) or
+     value.counts.published ~= value.counts.expected or
+     value.counts.ready > value.counts.expected or
+     value.counts.noPicks > value.counts.expected or
+     (expectedScope == 'CLASSIC' and value.counts.published ~= value.counts.ready + value.counts.noPicks) or
+     type(value.items) ~= 'table' or
+     not validItem(value.items.index, 'index', value.generation) or
+     not validItem(value.items.payload, 'payload', value.generation) then
+    return false
+  end
+  return true
+end
+if not validPointer(candidate) then return {'invalid_candidate'} end
 local current = nil
 -- Decode the pointer even when its immutable items are unhealthy. A
 -- FINALIZED pointer is a supersession fence in its own right; treating a
@@ -1200,7 +1275,7 @@ local current = nil
 -- to replace the final publication.
 if currentRaw ~= '' then
   local ok, decoded = pcall(cjson.decode, currentRaw)
-  if ok and type(decoded) == 'table' and decoded.contractVersion == 'live-points-v2' and type(decoded.generation) == 'number' then current = decoded end
+  if ok and validPointer(decoded) then current = decoded end
 end
 if current and current.generation >= candidate.generation then return {'stale', currentRaw} end
 if current and current.state == 'FINALIZED' then return {'stale', currentRaw} end
@@ -1732,6 +1807,11 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
     String(input.state === 'FINALIZED' ? LIVE_LEAGUE_FINAL_TTL_MS : 0),
     currentRaw,
     currentRead ? '1' : '0',
+    input.scope.season,
+    String(input.scope.eventId),
+    String(input.scope.tournamentId),
+    input.scope.scope,
+    input.scope.matchId === undefined ? '' : String(input.scope.matchId),
   )) as unknown;
   if (!Array.isArray(result) || typeof result[0] !== 'string')
     throw new CacheError('Invalid live league promotion result', 'LIVE_LEAGUE_PROMOTE_FAILED');

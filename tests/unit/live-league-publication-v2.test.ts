@@ -6,6 +6,7 @@ import {
   LIVE_LEAGUE_MAX_INDEX_BYTES,
   LIVE_LEAGUE_MAX_PAYLOAD_BYTES,
   leagueEntryInputRevision,
+  listLiveLeagueCheckpointDesiredScopesV2,
   parseLiveLeagueCheckpointScopeV2,
   parseLiveLeaguePublicationV2Manifest,
   validateLiveLeaguePublicationV2Checkpoint,
@@ -215,6 +216,21 @@ const h2hManifest = (): LeagueLiveManifest => {
 };
 
 describe('Live League V2 manifest contract', () => {
+  test('returns a bounded checkpoint batch instead of aborting on oversized scans', async () => {
+    const keys = Array.from(
+      { length: 513 },
+      (_, index) =>
+        `llm:data:v2:fpl:league-live:${scope.season}:${index + 1}:3:classic:checkpoint-desired`,
+    );
+    const redis = {
+      scan: async () => ['0', keys] as [string, string[]],
+    } as unknown as NonNullable<Parameters<typeof listLiveLeagueCheckpointDesiredScopesV2>[1]>;
+
+    await expect(
+      listLiveLeagueCheckpointDesiredScopesV2(scope.season, redis),
+    ).resolves.toHaveLength(512);
+  });
+
   test('parses only exact V2 checkpoint desired scopes', () => {
     expect(
       parseLiveLeagueCheckpointScopeV2(

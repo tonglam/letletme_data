@@ -635,6 +635,10 @@ type H2HStandingRow = {
   sourceCheckedAt: Date | string | null;
   finalizationAt: Date | string | null;
   throughEventId: number;
+  expectedMatchCount: number;
+  completeMatchCount: number;
+  completeMissingSourceCount: number;
+  oldestCompleteSourceCheckedAt: Date | string | null;
 };
 
 type H2HStandingsRead = {
@@ -642,6 +646,10 @@ type H2HStandingsRead = {
   readonly sourceCheckedAt: Date | string | null;
   readonly finalizationAt: Date | string | null;
   readonly throughEventId: number;
+  readonly expectedMatchCount: number;
+  readonly completeMatchCount: number;
+  readonly completeMissingSourceCount: number;
+  readonly oldestCompleteSourceCheckedAt: Date | string | null;
 };
 
 type H2HPreparedMatch = {
@@ -1026,25 +1034,56 @@ async function findOfficialH2HStandings(
         AND groups.tournament_id = ${tournamentId}
         AND groups.entry_id IS NOT NULL
       GROUP BY groups.entry_id, entry.entry_name, entry.player_name
-    ), complete_matches AS (
+    ), match_rows AS (
       SELECT
-        battle.*,
-        result_event.data_checked_at AS source_checked_at
+        battle.event_id,
+        battle.source_checked_at,
+        battle.home_entry_id,
+        battle.home_match_points,
+        battle.home_net_points,
+        battle.away_entry_id,
+        battle.away_match_points,
+        battle.away_net_points,
+        (
+          result_event.finished = true
+          AND result_event.data_checked = true
+          AND result_event.data_checked_at IS NOT NULL
+          AND (
+            (battle.is_bye = true AND battle.home_entry_id IS NULL)
+            OR (battle.home_match_points IS NOT NULL AND battle.home_net_points IS NOT NULL)
+          )
+          AND (
+            (battle.is_bye = true AND battle.away_entry_id IS NULL)
+            OR (battle.away_match_points IS NOT NULL AND battle.away_net_points IS NOT NULL)
+          )
+        ) AS is_complete
       FROM competition.tournament_battle_group_results AS battle
-      INNER JOIN fpl.events AS result_event
+      LEFT JOIN fpl.events AS result_event
         ON result_event.season_id = battle.season_id
        AND result_event.event_id = battle.event_id
-       AND result_event.finished = true
-       AND result_event.data_checked = true
-       AND result_event.data_checked_at IS NOT NULL
       WHERE battle.season_id = ${season.seasonId}
         AND battle.tournament_id = ${tournamentId}
         AND battle.event_id <= ${eventId}
         AND battle.official_match_id IS NOT NULL
-        AND battle.home_match_points IS NOT NULL
-        AND battle.home_net_points IS NOT NULL
-        AND battle.away_match_points IS NOT NULL
-        AND battle.away_net_points IS NOT NULL
+    ), complete_matches AS (
+      SELECT
+        match_rows.event_id,
+        match_rows.source_checked_at,
+        match_rows.home_entry_id,
+        match_rows.home_match_points,
+        match_rows.home_net_points,
+        match_rows.away_entry_id,
+        match_rows.away_match_points,
+        match_rows.away_net_points
+      FROM match_rows
+      WHERE match_rows.is_complete
+    ), match_coverage AS (
+      SELECT
+        COUNT(*)::integer AS "expectedMatchCount",
+        COUNT(*) FILTER (WHERE match_rows.is_complete)::integer AS "completeMatchCount",
+        COUNT(*) FILTER (WHERE match_rows.is_complete AND match_rows.source_checked_at IS NULL)::integer AS "completeMissingSourceCount",
+        MIN(match_rows.source_checked_at) FILTER (WHERE match_rows.is_complete) AS "oldestCompleteSourceCheckedAt"
+      FROM match_rows
     ), official_sides AS (
       SELECT
         battle.event_id,
@@ -1094,8 +1133,19 @@ async function findOfficialH2HStandings(
         RANK() OVER (ORDER BY aggregates."matchPoints" DESC, aggregates."pointsFor" DESC) AS rank
       FROM aggregates
     ), coverage AS (
-      SELECT COALESCE(MAX(official_sides.event_id), 0)::integer AS "throughEventId"
-      FROM official_sides
+      SELECT
+        COALESCE(MAX(official_sides.event_id), 0)::integer AS "throughEventId",
+        match_coverage."expectedMatchCount",
+        match_coverage."completeMatchCount",
+        match_coverage."completeMissingSourceCount",
+        match_coverage."oldestCompleteSourceCheckedAt"
+      FROM match_coverage
+      LEFT JOIN official_sides ON true
+      GROUP BY
+        match_coverage."expectedMatchCount",
+        match_coverage."completeMatchCount",
+        match_coverage."completeMissingSourceCount",
+        match_coverage."oldestCompleteSourceCheckedAt"
     )
     SELECT
       ranked."entryId",
@@ -1110,6 +1160,10 @@ async function findOfficialH2HStandings(
       ranked."pointsFor",
       ranked."sourceCheckedAt",
       coverage."throughEventId",
+      coverage."expectedMatchCount",
+      coverage."completeMatchCount",
+      coverage."completeMissingSourceCount",
+      coverage."oldestCompleteSourceCheckedAt",
       event.data_checked_at AS "finalizationAt"
     FROM ranked
     CROSS JOIN coverage
@@ -1129,6 +1183,9 @@ async function findOfficialH2HStandings(
     lost: row.lost === null ? null : Number(row.lost),
     pointsFor: row.pointsFor === null ? null : Number(row.pointsFor),
     throughEventId: Number(row.throughEventId),
+    expectedMatchCount: Number(row.expectedMatchCount),
+    completeMatchCount: Number(row.completeMatchCount),
+    completeMissingSourceCount: Number(row.completeMissingSourceCount),
   }));
   const latestSourceCheckedAt = normalizedRows.reduce<Date | string | null>((latest, row) => {
     if (row.sourceCheckedAt === null) return latest;
@@ -1147,6 +1204,10 @@ async function findOfficialH2HStandings(
     sourceCheckedAt: latestSourceCheckedAt,
     finalizationAt: normalizedRows[0]?.finalizationAt ?? null,
     throughEventId: normalizedRows[0]?.throughEventId ?? 0,
+    expectedMatchCount: normalizedRows[0]?.expectedMatchCount ?? 0,
+    completeMatchCount: normalizedRows[0]?.completeMatchCount ?? 0,
+    completeMissingSourceCount: normalizedRows[0]?.completeMissingSourceCount ?? 0,
+    oldestCompleteSourceCheckedAt: normalizedRows[0]?.oldestCompleteSourceCheckedAt ?? null,
   };
 }
 
@@ -1162,20 +1223,29 @@ function h2hSide(
   entryName: string | null,
   playerName: string | null,
   isAverage: boolean,
+  isBye: boolean,
   officialNetPoints: number | null,
   inputRead: EntryLivePublicationRead | undefined,
 ): H2HMatchSide {
-  const input = entryId === null || isAverage ? null : (inputRead?.input ?? null);
+  // FPL encodes a regular bye with a nullable side and the same nullable-side
+  // marker used by its synthetic Average side. The persisted is_bye bit is the
+  // only reliable discriminator; keep the publication contract explicit.
+  const normalizedIsAverage = isBye && entryId === null ? false : isAverage;
+  const input = entryId === null || normalizedIsAverage ? null : (inputRead?.input ?? null);
   return {
     entryId,
-    entryName: isAverage
+    entryName: normalizedIsAverage
       ? 'Average'
       : entryId === null
         ? 'Bye'
         : entryName?.trim() || `Entry ${entryId}`,
-    playerName: entryId === null || isAverage ? null : playerName,
-    isAverage,
-    officialNetPoints,
+    playerName: entryId === null || normalizedIsAverage ? null : playerName,
+    isAverage: normalizedIsAverage,
+    officialNetPoints: normalizedIsAverage
+      ? officialNetPoints
+      : entryId === null
+        ? null
+        : officialNetPoints,
     inputPublicationId: inputRead?.publication.publicationId ?? null,
     inputGeneration: inputRead?.publication.generation ?? null,
     inputRevision: input ? leagueEntryInputRevision(input) : null,
@@ -1400,6 +1470,7 @@ async function publishH2HMatch(
     row.homeEntryName,
     row.homePlayerName,
     row.homeIsAverage,
+    row.isBye,
     row.homeNetPoints,
     homeRead,
   );
@@ -1408,6 +1479,7 @@ async function publishH2HMatch(
     row.awayEntryName,
     row.awayPlayerName,
     row.awayIsAverage,
+    row.isBye,
     row.awayNetPoints,
     awayRead,
   );
@@ -1442,8 +1514,8 @@ async function publishH2HMatch(
           row.awayEntryId,
           row.awayNetPoints,
           row.isBye,
-          row.homeIsAverage,
-          row.awayIsAverage,
+          row.isBye && row.homeEntryId === null ? false : row.homeIsAverage,
+          row.isBye && row.awayEntryId === null ? false : row.awayIsAverage,
         )));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',
@@ -1820,10 +1892,14 @@ export async function syncLiveH2HLeaguePublicationsV2(
         global.publication.sourceCheckedAt,
       );
       const finalizationAt = standingsRead.finalizationAt;
-      const standingsFreshForFinal = isTimestampAtOrAfter(
-        standingsRead.throughEventId === eventId ? standingsRead.sourceCheckedAt : null,
-        finalizationAt,
-      );
+      const standingsCoverageComplete =
+        standingsRead.expectedMatchCount > 0 &&
+        standingsRead.expectedMatchCount === standingsRead.completeMatchCount &&
+        standingsRead.completeMissingSourceCount === 0;
+      const standingsFreshForFinal =
+        standingsCoverageComplete &&
+        standingsRead.throughEventId === eventId &&
+        isTimestampAtOrAfter(standingsRead.oldestCompleteSourceCheckedAt, finalizationAt);
       const liveStandingsPayload =
         !standingsIsFinalized && standings.length > 0
           ? standingsPayload(
