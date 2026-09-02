@@ -2,9 +2,14 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   liveLeagueV2ItemKey,
+  LIVE_LEAGUE_MAX_ENTRIES,
+  LIVE_LEAGUE_MAX_INDEX_BYTES,
+  LIVE_LEAGUE_MAX_PAYLOAD_BYTES,
   leagueEntryInputRevision,
+  parseLiveLeagueCheckpointScopeV2,
   parseLiveLeaguePublicationV2Manifest,
   validateLiveLeaguePublicationV2Checkpoint,
+  validateLiveLeaguePublicationV2Payload,
   type LeagueLiveManifest,
   type LeagueLiveRead,
   type LeagueLiveScope,
@@ -182,7 +187,61 @@ const manifest = (): LeagueLiveManifest => ({
   },
 });
 
+const h2hManifest = (): LeagueLiveManifest => {
+  const base = manifest();
+  const h2hScope: LeagueLiveScope = {
+    season: scope.season,
+    eventId: scope.eventId,
+    tournamentId: scope.tournamentId,
+    scope: 'H2H_HEAD',
+  };
+  return {
+    ...base,
+    scope: h2hScope.scope,
+    counts: { expected: 1, published: 1, ready: 0, noPicks: 0 },
+    items: {
+      index: {
+        ...base.items.index,
+        key: liveLeagueV2ItemKey(h2hScope, 1, 'index'),
+        count: 1,
+      },
+      payload: {
+        ...base.items.payload,
+        key: liveLeagueV2ItemKey(h2hScope, 1, 'payload'),
+        count: 1,
+      },
+    },
+  };
+};
+
 describe('Live League V2 manifest contract', () => {
+  test('parses only exact V2 checkpoint desired scopes', () => {
+    expect(
+      parseLiveLeagueCheckpointScopeV2(
+        'llm:data:v2:fpl:league-live:2627:1:3:classic:checkpoint-desired',
+        '2627',
+      ),
+    ).toEqual({ season: '2627', eventId: 1, tournamentId: 3, scope: 'CLASSIC' });
+    expect(
+      parseLiveLeagueCheckpointScopeV2(
+        'llm:data:v2:fpl:league-live:2627:1:3:h2h-head:checkpoint-desired',
+        '2627',
+      ),
+    ).toEqual({ season: '2627', eventId: 1, tournamentId: 3, scope: 'H2H_HEAD' });
+    expect(
+      parseLiveLeagueCheckpointScopeV2(
+        'llm:data:v2:fpl:league-live:2627:1:3:h2h-match-7:checkpoint-desired',
+        '2627',
+      ),
+    ).toBeNull();
+    expect(
+      parseLiveLeagueCheckpointScopeV2(
+        'llm:data:v1:fpl:league-live:2627:1:3:classic:checkpoint-desired',
+        '2627',
+      ),
+    ).toBeNull();
+  });
+
   test('accepts a complete Classic publication with exact item keys', () => {
     const value = parseLiveLeaguePublicationV2Manifest(JSON.stringify(manifest()), scope);
     expect(value).toMatchObject({
@@ -212,6 +271,39 @@ describe('Live League V2 manifest contract', () => {
       },
     };
     expect(parseLiveLeaguePublicationV2Manifest(JSON.stringify(invalid), scope)).toBeNull();
+  });
+
+  test('rejects over-limit Redis manifest metadata before reading its payload', () => {
+    const tooManyEntries = {
+      ...manifest(),
+      counts: {
+        expected: LIVE_LEAGUE_MAX_ENTRIES + 1,
+        published: LIVE_LEAGUE_MAX_ENTRIES + 1,
+        ready: LIVE_LEAGUE_MAX_ENTRIES + 1,
+        noPicks: 0,
+      },
+    };
+    expect(parseLiveLeaguePublicationV2Manifest(JSON.stringify(tooManyEntries), scope)).toBeNull();
+
+    const oversizedIndex = {
+      ...manifest(),
+      items: {
+        ...manifest().items,
+        index: { ...manifest().items.index, bytes: LIVE_LEAGUE_MAX_INDEX_BYTES + 1 },
+      },
+    };
+    expect(parseLiveLeaguePublicationV2Manifest(JSON.stringify(oversizedIndex), scope)).toBeNull();
+
+    const oversizedPayload = {
+      ...manifest(),
+      items: {
+        ...manifest().items,
+        payload: { ...manifest().items.payload, bytes: LIVE_LEAGUE_MAX_PAYLOAD_BYTES + 1 },
+      },
+    };
+    expect(
+      parseLiveLeaguePublicationV2Manifest(JSON.stringify(oversizedPayload), scope),
+    ).toBeNull();
   });
 
   test('rejects an invalid publication contract version', () => {
@@ -267,6 +359,134 @@ describe('Live League V2 manifest contract', () => {
         fixture.index,
         incompletePayload,
         fixture.proof,
+      ),
+    ).toBe(false);
+  });
+
+  test('uses the same final payload fence for Redis reads and new candidates', () => {
+    const fixture = completeClassicCheckpointFixture();
+    expect(
+      validateLiveLeaguePublicationV2Payload(
+        scope,
+        fixture.checkpointManifest,
+        fixture.index,
+        fixture.payload,
+      ),
+    ).toBe(true);
+    expect(
+      validateLiveLeaguePublicationV2Payload(scope, fixture.checkpointManifest, fixture.index, {
+        ...fixture.payload,
+        '101': {
+          ...(fixture.payload['101'] as Record<string, unknown>),
+          finalResult: null,
+        },
+      }),
+    ).toBe(false);
+
+    expect(
+      validateLiveLeaguePublicationV2Payload(
+        scope,
+        { ...fixture.checkpointManifest, state: 'LIVE_ACTIVE' },
+        fixture.index,
+        fixture.payload,
+      ),
+    ).toBe(false);
+  });
+
+  test('binds H2H item counts and no-picks metadata to the payload', () => {
+    const h2hScope: LeagueLiveScope = {
+      season: scope.season,
+      eventId: scope.eventId,
+      tournamentId: scope.tournamentId,
+      scope: 'H2H_HEAD',
+    };
+    const h2h = h2hManifest();
+    const index = [
+      {
+        matchId: 501,
+        eventId: scope.eventId,
+        groupId: 1,
+        sourceOrder: 0,
+        phase: 'REGULAR' as const,
+        availability: 'PENDING' as const,
+        homeEntryId: 101,
+        awayEntryId: null,
+      },
+    ];
+    const payload = {
+      '501': {
+        contractVersion: 'live-points-v2' as const,
+        season: scope.season,
+        eventId: scope.eventId,
+        tournamentId: scope.tournamentId,
+        officialMatchId: 501,
+        groupId: 1,
+        sourceOrder: 0,
+        phase: 'REGULAR' as const,
+        knockoutName: null,
+        tiebreak: null,
+        isBye: false,
+        state: 'PENDING' as const,
+        sourceCheckedAt: h2h.times.sourceCheckedAt,
+        globalRef: h2h.globalRef,
+        home: {
+          entryId: 101,
+          entryName: 'Entry 101',
+          playerName: 'Manager',
+          isAverage: false,
+          officialNetPoints: null,
+          inputPublicationId: null,
+          inputGeneration: null,
+          inputRevision: null,
+          inputContentUpdatedAt: null,
+          input: null,
+        },
+        away: {
+          entryId: null,
+          entryName: 'Average',
+          playerName: null,
+          isAverage: true,
+          officialNetPoints: null,
+          inputPublicationId: null,
+          inputGeneration: null,
+          inputRevision: null,
+          inputContentUpdatedAt: null,
+          input: null,
+        },
+      },
+    };
+
+    expect(validateLiveLeaguePublicationV2Payload(h2hScope, h2h, index, payload)).toBe(true);
+    expect(
+      validateLiveLeaguePublicationV2Payload(
+        h2hScope,
+        { ...h2h, counts: { ...h2h.counts, ready: 1 } },
+        index,
+        payload,
+      ),
+    ).toBe(false);
+    expect(
+      validateLiveLeaguePublicationV2Payload(
+        h2hScope,
+        { ...h2h, items: { ...h2h.items, index: { ...h2h.items.index, count: 2 } } },
+        index,
+        payload,
+      ),
+    ).toBe(false);
+    expect(
+      validateLiveLeaguePublicationV2Payload(
+        h2hScope,
+        { ...h2h, items: { ...h2h.items, payload: { ...h2h.items.payload, count: 2 } } },
+        index,
+        payload,
+      ),
+    ).toBe(false);
+    expect(
+      validateLiveLeaguePublicationV2Payload(
+        h2hScope,
+        { ...h2h, counts: { ...h2h.counts, noPicks: 1 } },
+        index,
+        payload,
       ),
     ).toBe(false);
   });
@@ -445,6 +665,11 @@ describe('Live League V2 H2H final score fence', () => {
 
   test('does not require provider scores for a knockout bye', () => {
     expect(hasCompleteH2HOfficialScores(101, null, null, null, true)).toBe(true);
+  });
+
+  test('requires the official score for an Average side', () => {
+    expect(hasCompleteH2HOfficialScores(101, 42, null, null, false, false, true)).toBe(false);
+    expect(hasCompleteH2HOfficialScores(101, 42, null, 0, false, false, true)).toBe(true);
   });
 });
 

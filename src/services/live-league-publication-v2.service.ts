@@ -266,11 +266,13 @@ function buildRevisions(
     lastTeamValue: row.lastTeamValue,
     lastBank: row.lastBank,
   }));
-  const entryInputSet = index.map((row) => ({
-    entryId: row.entryId,
-    inputRevision: row.inputRevision,
-    availability: row.availability,
-  }));
+  const entryInputSet = index
+    .map((row) => ({
+      entryId: row.entryId,
+      inputRevision: row.inputRevision,
+      availability: row.availability,
+    }))
+    .sort((left, right) => left.entryId - right.entryId);
   const algorithm = contentHash(LIVE_LEAGUE_ALGORITHM_VERSION);
   return {
     roster: contentHash(
@@ -632,12 +634,14 @@ type H2HStandingRow = {
   pointsFor: number | null;
   sourceCheckedAt: Date | string | null;
   finalizationAt: Date | string | null;
+  throughEventId: number;
 };
 
 type H2HStandingsRead = {
   readonly rows: readonly H2HStandingRow[];
   readonly sourceCheckedAt: Date | string | null;
   readonly finalizationAt: Date | string | null;
+  readonly throughEventId: number;
 };
 
 type H2HPreparedMatch = {
@@ -1022,28 +1026,43 @@ async function findOfficialH2HStandings(
         AND groups.tournament_id = ${tournamentId}
         AND groups.entry_id IS NOT NULL
       GROUP BY groups.entry_id, entry.entry_name, entry.player_name
+    ), complete_matches AS (
+      SELECT
+        battle.*,
+        result_event.data_checked_at AS source_checked_at
+      FROM competition.tournament_battle_group_results AS battle
+      INNER JOIN fpl.events AS result_event
+        ON result_event.season_id = battle.season_id
+       AND result_event.event_id = battle.event_id
+       AND result_event.finished = true
+       AND result_event.data_checked = true
+       AND result_event.data_checked_at IS NOT NULL
+      WHERE battle.season_id = ${season.seasonId}
+        AND battle.tournament_id = ${tournamentId}
+        AND battle.event_id <= ${eventId}
+        AND battle.official_match_id IS NOT NULL
+        AND battle.home_match_points IS NOT NULL
+        AND battle.home_net_points IS NOT NULL
+        AND battle.away_match_points IS NOT NULL
+        AND battle.away_net_points IS NOT NULL
     ), official_sides AS (
       SELECT
+        battle.event_id,
+        battle.source_checked_at,
         battle.home_entry_id AS entry_id,
         battle.home_match_points AS match_points,
         battle.home_net_points AS points_for
-      FROM competition.tournament_battle_group_results AS battle
-      WHERE battle.season_id = ${season.seasonId}
-        AND battle.tournament_id = ${tournamentId}
-        AND battle.event_id <= ${eventId}
-        AND battle.official_match_id IS NOT NULL
-        AND battle.home_entry_id IS NOT NULL
+      FROM complete_matches AS battle
+      WHERE battle.home_entry_id IS NOT NULL
       UNION ALL
       SELECT
+        battle.event_id,
+        battle.source_checked_at,
         battle.away_entry_id AS entry_id,
         battle.away_match_points AS match_points,
         battle.away_net_points AS points_for
-      FROM competition.tournament_battle_group_results AS battle
-      WHERE battle.season_id = ${season.seasonId}
-        AND battle.tournament_id = ${tournamentId}
-        AND battle.event_id <= ${eventId}
-        AND battle.official_match_id IS NOT NULL
-        AND battle.away_entry_id IS NOT NULL
+      FROM complete_matches AS battle
+      WHERE battle.away_entry_id IS NOT NULL
     ), aggregates AS (
       SELECT
         roster.entry_id AS "entryId",
@@ -1055,7 +1074,13 @@ async function findOfficialH2HStandings(
         COUNT(*) FILTER (WHERE official_sides.match_points = 1)::integer AS drawn,
         COUNT(*) FILTER (WHERE official_sides.match_points = 0)::integer AS lost,
         COALESCE(SUM(official_sides.points_for), 0)::integer AS "pointsFor",
-        roster.source_checked_at AS "sourceCheckedAt"
+        CASE
+          WHEN roster.source_checked_at IS NULL THEN MAX(official_sides.source_checked_at)
+          WHEN MAX(official_sides.source_checked_at) IS NULL THEN roster.source_checked_at
+          WHEN roster.source_checked_at >= MAX(official_sides.source_checked_at)
+            THEN roster.source_checked_at
+          ELSE MAX(official_sides.source_checked_at)
+        END AS "sourceCheckedAt"
       FROM roster
       LEFT JOIN official_sides ON official_sides.entry_id = roster.entry_id
       GROUP BY
@@ -1068,6 +1093,9 @@ async function findOfficialH2HStandings(
         aggregates.*,
         RANK() OVER (ORDER BY aggregates."matchPoints" DESC, aggregates."pointsFor" DESC) AS rank
       FROM aggregates
+    ), coverage AS (
+      SELECT COALESCE(MAX(official_sides.event_id), 0)::integer AS "throughEventId"
+      FROM official_sides
     )
     SELECT
       ranked."entryId",
@@ -1081,8 +1109,10 @@ async function findOfficialH2HStandings(
       ranked.lost,
       ranked."pointsFor",
       ranked."sourceCheckedAt",
+      coverage."throughEventId",
       event.data_checked_at AS "finalizationAt"
     FROM ranked
+    CROSS JOIN coverage
     INNER JOIN fpl.events AS event
       ON event.season_id = ${season.seasonId}
      AND event.event_id = ${eventId}
@@ -1098,6 +1128,7 @@ async function findOfficialH2HStandings(
     drawn: row.drawn === null ? null : Number(row.drawn),
     lost: row.lost === null ? null : Number(row.lost),
     pointsFor: row.pointsFor === null ? null : Number(row.pointsFor),
+    throughEventId: Number(row.throughEventId),
   }));
   const latestSourceCheckedAt = normalizedRows.reduce<Date | string | null>((latest, row) => {
     if (row.sourceCheckedAt === null) return latest;
@@ -1115,6 +1146,7 @@ async function findOfficialH2HStandings(
     rows: normalizedRows,
     sourceCheckedAt: latestSourceCheckedAt,
     finalizationAt: normalizedRows[0]?.finalizationAt ?? null,
+    throughEventId: normalizedRows[0]?.throughEventId ?? 0,
   };
 }
 
@@ -1185,13 +1217,25 @@ function h2hRevisions(
     ]),
   );
   const entryInputSet = contentHash(
-    matches.map(({ payload }) => [
-      payload.officialMatchId,
-      payload.home.entryId,
-      payload.home.inputRevision,
-      payload.away.entryId,
-      payload.away.inputRevision,
-    ]),
+    matches
+      .flatMap(({ payload }) =>
+        [payload.home, payload.away]
+          .filter(
+            (side): side is H2HMatchPayload['home'] & { readonly entryId: number } =>
+              side.entryId !== null,
+          )
+          .map((side) => ({
+            entryId: side.entryId,
+            inputRevision: side.inputRevision,
+            // This vector describes the entry-input set, not the official
+            // score state of the match. A final-score/average update must not
+            // invalidate a picks projection when the embedded input is the
+            // same. Missing input remains a stable pending input until it is
+            // actually published.
+            availability: side.input === null ? 'PENDING' : 'READY',
+          })),
+      )
+      .sort((left, right) => left.entryId - right.entryId),
   );
   const schedule = contentHash(
     matches.map(({ payload }) => ({
@@ -1200,6 +1244,8 @@ function h2hRevisions(
       groupId: payload.groupId,
       sourceOrder: payload.sourceOrder,
       phase: payload.phase,
+      knockoutName: payload.knockoutName,
+      tiebreak: payload.tiebreak,
       homeEntryId: payload.home.entryId,
       awayEntryId: payload.away.entryId,
       isBye: payload.isBye,
@@ -1209,11 +1255,14 @@ function h2hRevisions(
     ? contentHash(standings.map((row) => [row.entryId, row.rank]))
     : null;
   const averageSide = contentHash(
-    matches.map(({ payload }) => [
-      payload.officialMatchId,
-      payload.home.isAverage,
-      payload.away.isAverage,
-    ]),
+    matches
+      .flatMap(({ payload }) => [payload.home, payload.away])
+      .filter((side) => side.isAverage)
+      .map((side) => ({
+        entryName: side.entryName,
+        officialNetPoints: side.officialNetPoints,
+      }))
+      .sort((left, right) => left.entryName.localeCompare(right.entryName)),
   );
   const contentMatches = matches.map(({ index, payload }) => ({
     index,
@@ -1315,11 +1364,19 @@ export function hasCompleteH2HOfficialScores(
   awayEntryId: number | null,
   awayNetPoints: number | null,
   isBye = false,
+  homeIsAverage = false,
+  awayIsAverage = false,
 ): boolean {
-  if (isBye) return true;
-  const scoreAvailable = (entryId: number | null, netPoints: number | null) =>
-    entryId === null || (netPoints !== null && Number.isFinite(netPoints));
-  return scoreAvailable(homeEntryId, homeNetPoints) && scoreAvailable(awayEntryId, awayNetPoints);
+  const scoreAvailable = (entryId: number | null, netPoints: number | null, isAverage: boolean) =>
+    isAverage
+      ? netPoints !== null && Number.isFinite(netPoints)
+      : isBye || entryId === null
+        ? true
+        : netPoints !== null && Number.isFinite(netPoints);
+  return (
+    scoreAvailable(homeEntryId, homeNetPoints, homeIsAverage) &&
+    scoreAvailable(awayEntryId, awayNetPoints, awayIsAverage)
+  );
 }
 
 async function publishH2HMatch(
@@ -1354,9 +1411,13 @@ async function publishH2HMatch(
     row.awayNetPoints,
     awayRead,
   );
-  const inputReady =
-    (home.entryId === null || home.isAverage || home.input !== null) &&
-    (away.entryId === null || away.isAverage || away.input !== null);
+  const sideReady = (side: H2HMatchSide): boolean =>
+    side.entryId === null
+      ? side.isAverage
+        ? side.officialNetPoints !== null
+        : true
+      : side.input !== null;
+  const inputReady = sideReady(home) && sideReady(away);
   const finalReadyInput =
     inputReady &&
     (global.publication.state !== 'FINALIZED' ||
@@ -1381,6 +1442,8 @@ async function publishH2HMatch(
           row.awayEntryId,
           row.awayNetPoints,
           row.isBye,
+          row.homeIsAverage,
+          row.awayIsAverage,
         )));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',
@@ -1491,6 +1554,7 @@ function standingsPayload(
   season: FplSeasonRef,
   eventId: number,
   tournamentId: number,
+  throughEventId: number,
   sourceCheckedAt: string,
   rows: readonly H2HStandingRow[],
   state: H2HStandingsPayload['state'] = rows.length > 0 ? 'READY' : 'UNAVAILABLE',
@@ -1500,7 +1564,7 @@ function standingsPayload(
     season: season.seasonCode,
     eventId,
     tournamentId,
-    throughEventId: eventId,
+    throughEventId,
     state,
     sourceCheckedAt,
     rows: rows.map((row) => ({
@@ -1565,6 +1629,14 @@ export async function syncLiveH2HLeaguePublicationsV2(
     try {
       const sourceMatches = await findOfficialH2HMatches(season, tournamentId, eventId);
       if (sourceMatches.length === 0 || sourceMatches.length > LIVE_LEAGUE_MAX_ENTRIES) {
+        totals.skipped += 1;
+        if (global.publication.state === 'FINALIZED' && phaseActive) {
+          finalReady = false;
+        }
+        continue;
+      }
+      const sourceMatchIds = sourceMatches.map((row) => row.officialMatchId);
+      if (new Set(sourceMatchIds).size !== sourceMatchIds.length) {
         totals.skipped += 1;
         if (global.publication.state === 'FINALIZED' && phaseActive) {
           finalReady = false;
@@ -1636,7 +1708,6 @@ export async function syncLiveH2HLeaguePublicationsV2(
       const expectedMatchIds = (retainedHead?.index ?? [])
         .filter((row): row is H2HMatchIndexRow => 'matchId' in row)
         .map((row) => row.matchId);
-      const sourceMatchIds = sourceMatches.map((row) => row.officialMatchId);
       const matchSetComplete = hasExpectedH2HMatchSet(expectedMatchIds, sourceMatchIds);
       const matchScopes = sourceMatches.map((row) =>
         h2hMatchScope(season.seasonCode, eventId, row),
@@ -1677,7 +1748,11 @@ export async function syncLiveH2HLeaguePublicationsV2(
       };
       const allMatchesFinalReady = matchSetComplete && prepared.every((match) => match.finalReady);
       let headFinalReady = global.publication.state !== 'FINALIZED';
-      if (global.publication.state !== 'FINALIZED' || allMatchesFinalReady) {
+      // A transient source response may omit an already published match. Keep
+      // publishing independently valid match snapshots, but never replace the
+      // composite head with a smaller match set. A later reconciliation pass
+      // can publish the new head once the source set is complete again.
+      if (matchSetComplete && (global.publication.state !== 'FINALIZED' || allMatchesFinalReady)) {
         const headPayload = Object.fromEntries(
           prepared.map(({ payload }) => [String(payload.officialMatchId), payload]),
         );
@@ -1746,25 +1821,29 @@ export async function syncLiveH2HLeaguePublicationsV2(
       );
       const finalizationAt = standingsRead.finalizationAt;
       const standingsFreshForFinal = isTimestampAtOrAfter(
-        standingsRead.sourceCheckedAt,
+        standingsRead.throughEventId === eventId ? standingsRead.sourceCheckedAt : null,
         finalizationAt,
       );
-      if (!standingsIsFinalized && existingStandings) {
-        // Keep the existing official overlay untouched while the event is live.
-        // Standings are not derived from live scores.
-      } else if (!standingsIsFinalized && standings.length > 0) {
+      const liveStandingsPayload =
+        !standingsIsFinalized && standings.length > 0
+          ? standingsPayload(
+              season,
+              eventId,
+              tournamentId,
+              standingsRead.throughEventId,
+              standingsSourceCheckedAt,
+              standings,
+              'UPDATING',
+            )
+          : null;
+      const shouldSyncLiveStandings =
+        liveStandingsPayload !== null && existingStandings?.publication.state !== 'FINALIZED';
+      if (shouldSyncLiveStandings && liveStandingsPayload !== null) {
         // Seed the official overlay as soon as a live scope is first observed.
         // It is an independent, updating source and is never derived from live
-        // scores; later live passes retain this overlay until final evidence is
-        // available.
-        const standingsPayloadValue = standingsPayload(
-          season,
-          eventId,
-          tournamentId,
-          standingsSourceCheckedAt,
-          standings,
-          'UPDATING',
-        );
+        // scores. Heartbeat-only checks retain the same generation; a real
+        // standings change creates a new snapshot.
+        const standingsPayloadValue = liveStandingsPayload;
         const standingsIndex: H2HStandingsIndexRow[] = standingsPayloadValue.rows.map((row) => ({
           entryId: row.entryId,
           availability: 'READY',
@@ -1817,6 +1896,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
           season,
           eventId,
           tournamentId,
+          standingsRead.throughEventId,
           standingsSourceCheckedAt,
           standings,
           'READY',

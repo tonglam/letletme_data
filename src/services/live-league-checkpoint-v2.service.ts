@@ -4,6 +4,7 @@ import { liveLeagueCheckpointsInCompetition } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   clearLiveLeagueCheckpointDesiredV2,
+  listLiveLeagueCheckpointDesiredScopesV2,
   markLiveLeaguePublicationCheckpointedV2,
   readLiveLeagueCheckpointDesiredV2,
   readLiveLeaguePublicationV2,
@@ -14,6 +15,7 @@ import {
 import { redisSingleton } from '../cache/singleton';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logError } from '../utils/logger';
+import { mapWithConcurrency } from '../utils/async';
 
 const CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
@@ -354,6 +356,37 @@ export async function reconcileLiveLeagueCheckpointV2(scope: LeagueLiveScope): P
   if (!marked) return false;
   await clearLiveLeagueCheckpointDesiredV2(desired, redis);
   return true;
+}
+
+/**
+ * Reconcile only desired league checkpoints left behind by a failed inline
+ * checkpoint. The producer remains the publication owner; this is a bounded
+ * recovery pass and never creates a new publication or reads FPL.
+ */
+export async function reconcileLiveLeagueCheckpointObligationsV2(
+  season: string,
+): Promise<{ readonly scopes: number; readonly checkpointed: number; readonly failed: number }> {
+  const scopes = await listLiveLeagueCheckpointDesiredScopesV2(season);
+  let failed = 0;
+  const results = await mapWithConcurrency(scopes, 2, async (scope) => {
+    try {
+      return await reconcileLiveLeagueCheckpointV2(scope);
+    } catch (error) {
+      failed += 1;
+      logError('Live league checkpoint desired-scope reconciliation failed', error, {
+        season,
+        eventId: scope.eventId,
+        tournamentId: scope.tournamentId,
+        scope: scope.scope,
+      });
+      return false;
+    }
+  });
+  return {
+    scopes: scopes.length,
+    checkpointed: results.filter(Boolean).length,
+    failed,
+  };
 }
 
 export function liveLeagueCheckpointIsDue(
