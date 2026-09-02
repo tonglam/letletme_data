@@ -741,6 +741,7 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
             scopeKey,
             periodKey,
           });
+          let repairSucceeded = false;
           while (predecessor?.status === 'irrecoverable') {
             const repairPeriodKey = myFplFinalizationPeriodKey({
               eventId: event.id,
@@ -760,11 +761,15 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
             // repair also becomes irrecoverable, rotate once more from that
             // terminal row; every failed repair therefore has a dispatchable
             // successor after the next observed recovery.
-            if (repairObligation?.status === 'succeeded') continue;
+            if (repairObligation?.status === 'succeeded') {
+              repairSucceeded = true;
+              break;
+            }
             periodKey = repairPeriodKey;
             deliveryRecovery = true;
             predecessor = repairObligation;
           }
+          if (repairSucceeded) continue;
         }
         plans.push({
           scopeKey,
