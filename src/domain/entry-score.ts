@@ -22,6 +22,24 @@ export type EntryScoreBaseline = Readonly<{
   usedPersistedFallback: boolean;
 }>;
 
+/**
+ * FPL represents an entry that has not received an overall ranking yet with a
+ * nullable event rank and a zero overall rank.  A nullable rank is not a
+ * publishable value, so preserve the source semantic as the explicit rank
+ * sentinel `0` only when the same source payload also reports a zero
+ * cumulative total.  Normal ranked rows (and rows with a non-zero cumulative
+ * total) remain nullable and are rejected by finalization until FPL supplies
+ * an authoritative rank.
+ */
+export function normalizeAuthoritativeUnrankedEventRank(input: {
+  rank: number | null | undefined;
+  overallRank: number | null | undefined;
+  sourceTotalPoints: number | null | undefined;
+}): number | null {
+  if (input.rank !== null && input.rank !== undefined) return input.rank;
+  return input.sourceTotalPoints === 0 && (input.overallRank ?? 0) === 0 ? 0 : null;
+}
+
 export function resolveEntryScoreBaseline(input: EntryScoreBaselineInput): EntryScoreBaseline {
   const sourcePreviousOverallPoints =
     input.sourceTotalPoints - (input.sourceEventPoints - input.eventTransfersCost);

@@ -4,6 +4,7 @@ import {
   entryEventResultsInCompetition,
   type DbEntryEventResultInsert,
 } from '../db/schemas/index.schema';
+import { normalizeAuthoritativeUnrankedEventRank } from '../domain/entry-score';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryHistoryCurrentItem } from '../types';
 
@@ -39,7 +40,11 @@ export function buildCoreHistoryUpsertPlan(
       eventTransfersCost: item.event_transfers_cost as number,
       eventNetPoints: item.points - (item.event_transfers_cost as number),
       eventBenchPoints: item.points_on_bench ?? null,
-      eventRank: item.rank ?? null,
+      eventRank: normalizeAuthoritativeUnrankedEventRank({
+        rank: item.rank,
+        overallRank: item.overall_rank,
+        sourceTotalPoints: item.total_points,
+      }),
       overallPoints: item.total_points,
       overallRank: item.overall_rank ?? 0,
       teamValue: item.value ?? null,

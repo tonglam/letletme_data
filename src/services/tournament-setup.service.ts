@@ -37,7 +37,6 @@ import {
   type TournamentEntrySyncPlan,
   type TournamentSetupIssue,
 } from './tournament-backfill.service';
-import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
 import { rebuildTournamentStructure } from './tournament-structure.service';
 import { syncOfficialH2HTournament } from './tournament-official-h2h.service';
 
@@ -420,7 +419,13 @@ export async function setupTournamentStructure(
     phaseStartedAtMs = performance.now();
     await markSetupProgress('finalizing', 0, 1);
     const audit = await auditTournamentSetup(season, tournament, window);
-    await refreshTournamentMaterializedViews();
+    // The global reporting materialized view has its own cascade obligation.
+    // It is intentionally not part of tournament setup: a slow or blocked
+    // refresh must not roll back the canonical roster/group/points writes or
+    // hold up My FPL FINAL readiness for unrelated tournaments.
+    logInfo('Skipped global tournament materialized-view refresh during setup', {
+      tournamentId,
+    });
     await markSetupProgress('finalizing', 1, 1);
     phaseDurationsMs.finalizing = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {

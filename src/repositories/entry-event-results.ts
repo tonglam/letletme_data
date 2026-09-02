@@ -8,7 +8,10 @@ import {
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import { deriveEventLiveManagerScore } from '../domain/event-live-manager-score';
-import { resolveEntryScoreBaseline } from '../domain/entry-score';
+import {
+  normalizeAuthoritativeUnrankedEventRank,
+  resolveEntryScoreBaseline,
+} from '../domain/entry-score';
 import {
   hasCompleteEntryPickLiveCoverage,
   isCompleteEntryPicks,
@@ -569,7 +572,11 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventNetPoints: eventLiveScore.netEventPoints,
           eventBenchPoints: benchPoints,
           eventAutoSubPoints: getAutoSubPoints(autoSubs, elementsPoints),
-          eventRank: entryHistory.rank ?? null,
+          eventRank: normalizeAuthoritativeUnrankedEventRank({
+            rank: entryHistory.rank,
+            overallRank: entryHistory.overall_rank,
+            sourceTotalPoints: entryHistory.total_points,
+          }),
           eventChip: toNullableDbChip(picks.active_chip),
           playedCaptainElementId: captainPick ? captainPick.element : null,
           captainPoints: captainPick ? captainPointsBase * captainPick.multiplier : null,

@@ -240,6 +240,36 @@ export function isAuthoritativeUnrankedFirstEventResult(
   );
 }
 
+/**
+ * FPL keeps deleted entries in the current-season feed, but reports their
+ * source cumulative total and overall rank as zero and never assigns an event
+ * rank.  The entry identity is the only durable discriminator available to
+ * us (`Deleted` / `Deleted Player`).  Treat that source fact as the explicit
+ * rank-zero sentinel only after the persisted cumulative total reconciles;
+ * ordinary entries with a missing rank remain ineligible for FINAL.
+ */
+export function isAuthoritativeUnrankedDeletedEntryResult(
+  input: Readonly<{
+    entryName: string;
+    playerName: string;
+    identityOverallPoints: number | null;
+    identityOverallRank: number | null;
+    eventRank: number | null;
+    overallRank: number | null;
+    totalReconciles: boolean;
+  }>,
+): boolean {
+  return (
+    input.entryName.trim() === 'Deleted' &&
+    input.playerName.trim() === 'Deleted Player' &&
+    input.identityOverallPoints === 0 &&
+    input.identityOverallRank === 0 &&
+    input.eventRank === 0 &&
+    input.overallRank === 0 &&
+    input.totalReconciles
+  );
+}
+
 class MyFplCaptureLockBusyError extends Error {}
 
 const MY_FPL_CAPTURE_LOCK_WAIT_TIMEOUT_MS = 2 * 60_000;
@@ -2049,6 +2079,10 @@ export async function assessMyFplFinalizationReadiness(
   const entryRows = await client<
     {
       entry_id: number;
+      entry_name: string;
+      player_name: string;
+      identity_overall_points: number | null;
+      identity_overall_rank: number | null;
       source_result_id: number | null;
       event_rank: number | null;
       overall_rank: number | null;
@@ -2080,6 +2114,10 @@ export async function assessMyFplFinalizationReadiness(
     }[]
   >`
     SELECT entry.entry_id,
+           entry.entry_name,
+           entry.player_name,
+           entry.overall_points AS identity_overall_points,
+           entry.overall_rank AS identity_overall_rank,
            result.source_result_id,
            result.event_rank,
            result.overall_rank,
@@ -2234,15 +2272,25 @@ export async function assessMyFplFinalizationReadiness(
       row.previous_overall_points === null &&
       row.overall_points === 0 &&
       row.overall_rank === 0;
-    const ranksComplete =
-      isNonNegativeSafeInteger(row.event_rank) &&
-      isNonNegativeSafeInteger(row.overall_rank) &&
-      ((row.event_rank > 0 && row.overall_rank > 0) ||
-        (unrankedFirstEvent && row.event_rank === 0 && row.overall_rank === 0));
     const totalReconciles =
       row.overall_points !== null &&
       row.event_net_points !== null &&
       row.overall_points === (row.previous_overall_points ?? 0) + row.event_net_points;
+    const deletedEntryUnranked = isAuthoritativeUnrankedDeletedEntryResult({
+      entryName: row.entry_name,
+      playerName: row.player_name,
+      identityOverallPoints: row.identity_overall_points,
+      identityOverallRank: row.identity_overall_rank,
+      eventRank: row.event_rank,
+      overallRank: row.overall_rank,
+      totalReconciles,
+    });
+    const ranksComplete =
+      isNonNegativeSafeInteger(row.event_rank) &&
+      isNonNegativeSafeInteger(row.overall_rank) &&
+      ((row.event_rank > 0 && row.overall_rank > 0) ||
+        (unrankedFirstEvent && row.event_rank === 0 && row.overall_rank === 0) ||
+        deletedEntryUnranked);
     const pastSeasonsComplete =
       row.past_seasons_checked_at !== null &&
       row.past_seasons_count !== null &&
@@ -2275,7 +2323,7 @@ export async function assessMyFplFinalizationReadiness(
       row.event_net_points === row.event_points - row.event_transfers_cost &&
       pastSeasonsComplete &&
       historyComplete &&
-      (totalReconciles || unrankedFirstEvent);
+      (totalReconciles || unrankedFirstEvent || deletedEntryUnranked);
     if (!complete) missingEntryIds.push(row.entry_id);
   }
   const expectedEntryCount = entryRows.length;
@@ -2950,10 +2998,20 @@ async function captureMyFplSnapshotOnce(
           overallPoints: current.overall_points,
           overallRank: current.overall_rank,
         });
+        const acceptsDeletedEntryUnranked = isAuthoritativeUnrankedDeletedEntryResult({
+          entryName: entry.entry_name,
+          playerName: entry.player_name,
+          identityOverallPoints: entry.overall_points,
+          identityOverallRank: entry.overall_rank,
+          eventRank: current.event_rank,
+          overallRank: current.overall_rank,
+          totalReconciles: reconciles,
+        });
         if (
           !(
             (current.event_rank > 0 && current.overall_rank > 0) ||
-            (acceptsUnrankedFirstEvent && current.event_rank === 0 && current.overall_rank === 0)
+            (acceptsUnrankedFirstEvent && current.event_rank === 0 && current.overall_rank === 0) ||
+            acceptsDeletedEntryUnranked
           )
         ) {
           throw new MyFplSnapshotIncompleteError(
@@ -2965,8 +3023,8 @@ async function captureMyFplSnapshotOnce(
             `Entry ${entry.entry_id} final total does not reconcile for event ${eventId}`,
           );
         }
-        if (acceptsUnrankedFirstEvent && !reconciles) {
-          logWarn('Accepted authoritative unranked first-event cumulative total', {
+        if ((acceptsUnrankedFirstEvent || acceptsDeletedEntryUnranked) && !reconciles) {
+          logWarn('Accepted authoritative unranked cumulative total', {
             season: season.seasonCode,
             eventId,
           });

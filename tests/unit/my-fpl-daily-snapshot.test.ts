@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
+  isAuthoritativeUnrankedDeletedEntryResult,
   isAuthoritativeUnrankedFirstEventResult,
   isRetryableMyFplCaptureContention,
   isMatchingProvisionalMyFplPublication,
@@ -15,6 +16,7 @@ import {
   type MyFplSnapshotPublication,
   type MyFplSnapshotRedisManifest,
 } from '../../src/services/my-fpl-snapshot-publication.service';
+import { normalizeAuthoritativeUnrankedEventRank } from '../../src/domain/entry-score';
 
 const migration = readFileSync('migrations/0036_my_fpl_daily_snapshot_publications.sql', 'utf8');
 const eligibilityMigration = readFileSync(
@@ -41,6 +43,7 @@ const queueRunBarrier = readFileSync('src/services/queue-run-barrier.ts', 'utf8'
 const transaction = readFileSync('src/db/singleton.ts', 'utf8');
 const trends = readFileSync('src/services/tournament-trends-publication.service.ts', 'utf8');
 const tournamentWorker = readFileSync('src/workers/tournament-sync.worker.ts', 'utf8');
+const tournamentSetupService = readFileSync('src/services/tournament-setup.service.ts', 'utf8');
 const tournamentTransfers = readFileSync(
   'src/services/tournament-event-transfers.service.ts',
   'utf8',
@@ -103,6 +106,45 @@ describe('My FPL daily snapshot publication contract', () => {
         hasPreviousResult: false,
         overallPoints: 1,
         overallRank: 0,
+      }),
+    ).toBe(false);
+  });
+
+  test('normalizes and accepts only the canonical deleted-entry rank sentinel', () => {
+    expect(
+      normalizeAuthoritativeUnrankedEventRank({
+        rank: null,
+        overallRank: 0,
+        sourceTotalPoints: 0,
+      }),
+    ).toBe(0);
+    expect(
+      normalizeAuthoritativeUnrankedEventRank({
+        rank: null,
+        overallRank: 0,
+        sourceTotalPoints: 56,
+      }),
+    ).toBeNull();
+    expect(
+      isAuthoritativeUnrankedDeletedEntryResult({
+        entryName: 'Deleted',
+        playerName: 'Deleted Player',
+        identityOverallPoints: 0,
+        identityOverallRank: 0,
+        eventRank: 0,
+        overallRank: 0,
+        totalReconciles: true,
+      }),
+    ).toBe(true);
+    expect(
+      isAuthoritativeUnrankedDeletedEntryResult({
+        entryName: 'A normal team',
+        playerName: 'Manager',
+        identityOverallPoints: 0,
+        identityOverallRank: 0,
+        eventRank: 0,
+        overallRank: 0,
+        totalReconciles: true,
       }),
     ).toBe(false);
   });
@@ -354,6 +396,10 @@ describe('My FPL daily snapshot publication contract', () => {
     );
     expect(maintenanceJobs).toMatch(/options\?\.snapshotKind === 'FINAL'/);
     expect(worker).toMatch(/'my-fpl-orchestration', 'publication-outbox'/);
+    expect(tournamentSetupService).toContain(
+      'Skipped global tournament materialized-view refresh during setup',
+    );
+    expect(tournamentSetupService).not.toContain('await refreshTournamentMaterializedViews()');
   });
 
   test('decides same-day provisional noops only after normalized content hashing', () => {

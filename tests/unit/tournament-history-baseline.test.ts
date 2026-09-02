@@ -64,4 +64,23 @@ describe('tournament history baseline upsert', () => {
       ),
     ).toBe(true);
   });
+
+  test('persists an explicit zero for FPL unranked zero-total source rows', () => {
+    const result = buildCoreHistoryUpsertPlan(TEST_SEASON, 123, [
+      {
+        event: 1,
+        points: 29,
+        total_points: 0,
+        rank: null,
+        overall_rank: 0,
+        bank: 0,
+        value: 1000,
+        event_transfers: 0,
+        event_transfers_cost: 0,
+        points_on_bench: 0,
+      },
+    ]);
+
+    expect(result.rows[0]?.eventRank).toBe(0);
+  });
 });
