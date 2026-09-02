@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0090_backu
 CREATE UNIQUE INDEX IF NOT EXISTS tournament_review_publication_season_id_tournament_id_event_idx
   ON competition.tournament_review_publications_0090_backup
     (season_id, tournament_id, event_id, content_sha256);
-CREATE INDEX IF NOT EXISTS tournament_review_publication_season_id_tournament_id_event_idx1
+CREATE INDEX IF NOT EXISTS tournament_review_publication_season_id_tournament_id_even_idx1
   ON competition.tournament_review_publications_0090_backup
     (season_id, tournament_id, event_id, published_at DESC NULLS LAST);
 

@@ -2459,6 +2459,33 @@ async function publishTournamentReviewScopeOnce(
         AND head.event_id = ${eventId}
       LIMIT 1
     `;
+    // A correction Change ID is a durable idempotency key, not merely a
+    // property of the current head.  Once a later correction has advanced the
+    // head, replaying an older command must not mint another revision carrying
+    // the already-consumed ID.  The reset path below performs the same check
+    // before it clears descendants; this guard also protects service-only
+    // callers that invoke the publisher directly.
+    const consumedCorrection = correction
+      ? await tx<Array<{ revision: number | string; correction_reason: string | null }>>`
+          SELECT revision, correction_reason
+          FROM competition.tournament_review_publications
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournamentId}
+            AND correction_change_id = ${correction.changeId}
+          ORDER BY revision DESC
+          LIMIT 1
+        `
+      : [];
+    if (
+      correction &&
+      consumedCorrection.length > 0 &&
+      (previousHead[0]?.correction_change_id !== correction.changeId ||
+        previousHead[0]?.correction_reason !== correction.reason)
+    ) {
+      throw new TournamentReviewPublicationError(
+        'correction Change ID was already consumed by another review revision',
+      );
+    }
     const previousChunks = previousHead[0]
       ? await tx<
           Array<{
@@ -2488,6 +2515,11 @@ async function publishTournamentReviewScopeOnce(
         previousHead[0].payload,
         orderedReviewChunkHashes(previousChunks),
       ) === previousHead[0].content_sha256;
+    if (correction && consumedCorrection.length > 0 && !previousPublicationIsCoherent) {
+      throw new TournamentReviewPublicationError(
+        'previously consumed correction Change ID points at an incoherent head',
+      );
+    }
     const routineReuse = !correction && previousHead[0]?.obligation_state === 'READY';
     // A correction command is idempotent by Change ID.  If the transaction
     // committed the new publication but the worker lost its lease before
@@ -2497,9 +2529,7 @@ async function publishTournamentReviewScopeOnce(
       correction !== undefined &&
       previousHead[0]?.correction_change_id === correction.changeId &&
       previousHead[0]?.correction_reason === correction.reason &&
-      (previousHead[0]?.obligation_state === 'PROCESSING' ||
-        previousHead[0]?.obligation_state === 'READY' ||
-        previousHead[0]?.obligation_state === 'PENDING');
+      previousPublicationIsCoherent;
     if (previousPublicationIsCoherent && (routineReuse || correctionReuse)) {
       const publishedAt = asDate(previousHead[0].published_at) ?? new Date();
       await tx`
@@ -2856,6 +2886,19 @@ async function resetTournamentReviewScopesForCorrection(
   const db = await getDbClient();
   const rows: Array<{ event_id: number }> = await db.begin(
     async (tx): Promise<Array<{ event_id: number }>> => {
+      // Correction Change IDs are globally idempotent within a tournament.
+      // A retry after a later correction has advanced the head must not reset
+      // descendants again or attribute a new revision to an old command.
+      const consumedCorrection = await tx<Array<{ event_id: number }>>`
+        SELECT event_id
+        FROM competition.tournament_review_publications
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+          AND correction_change_id = ${changeId}
+        ORDER BY event_id, revision
+        LIMIT 1
+      `;
+      if (consumedCorrection.length > 0) return [];
       const targetRows = await tx<Array<{ event_id: number }>>`
       SELECT candidate.event_id
       FROM (
@@ -2889,7 +2932,13 @@ async function resetTournamentReviewScopesForCorrection(
               WHERE head.season_id = ${season.seasonId}
                 AND head.tournament_id = ${tournamentId}
                 AND head.event_id = candidate.event_id
-                AND obligation.state = 'READY'
+                AND obligation.state IN (
+                  'READY',
+                  'PENDING',
+                  'WAITING_SOURCE',
+                  'PROCESSING',
+                  'DEGRADED'
+                )
             )
             OR (
               candidate.event_id >= ${targetEventId}
@@ -4670,7 +4719,30 @@ export async function getTournamentReviewV2OperationalStatus(
                            AND chunk.chunk_index = expected.chunk_ordinal - 1
                            AND chunk.chunk_sha256 = expected.expected_hash
                            AND chunk.item_count::numeric = expected_count.expected_item_count::numeric
+                         )
                        )
+                     -- The expected-to-actual check above is intentionally
+                     -- bidirectional.  Matching row counts alone is not
+                     -- enough: a damaged manifest could replace one section
+                     -- descriptor with another and still have the same total
+                     -- number of hashes.  Every physical primary-key tuple
+                     -- must be described by exactly one section ordinal.
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM competition.tournament_review_publication_chunks chunk
+                       WHERE chunk.season_id = obligation.season_id
+                         AND chunk.tournament_id = obligation.tournament_id
+                         AND chunk.event_id = obligation.event_id
+                         AND chunk.revision = head.revision
+                         AND NOT EXISTS (
+                           SELECT 1
+                           FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                           CROSS JOIN LATERAL jsonb_array_elements_text(
+                             section -> 'chunkHashes'
+                           ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
+                           WHERE section ->> 'sectionKey' = chunk.section_key
+                             AND expected.chunk_ordinal - 1 = chunk.chunk_index
+                         )
                      )
                    )
                    ELSE false

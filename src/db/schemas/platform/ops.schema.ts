@@ -358,7 +358,7 @@ export const schemaMigrationsInOps = ops.table(
   ],
 );
 
-/** Durable cutover evidence for the destructive My Tournament Review 0084
+/** Durable cutover evidence for the destructive My Tournament Review 0090
  * reset.  This row is application state, so keep it in the typed catalog
  * rather than allowing a SQL-only parity exception. */
 export const tournamentReviewV21BackupManifestInOps = ops.table(
