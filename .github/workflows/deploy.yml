@@ -509,7 +509,7 @@ jobs:
             echo "deploy preflight: validating migration plan and queue quiescence before stopping services"
             migration_plan_output=$(APP_IMAGE="$IMAGE_REF" compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan)
             printf '%s\n' "$migration_plan_output"
-            if printf '%s\n' "$migration_plan_output" | grep -Fq '0084_my_tournament_review_v2_1_hard_cut.sql'; then
+            if printf '%s\n' "$migration_plan_output" | grep -Fq '0090_my_tournament_review_v2_1_hard_cut.sql'; then
               review_hard_cut_pending=true
             fi
             ledger_before=$(APP_IMAGE="$IMAGE_REF" migration_ledger_fingerprint)

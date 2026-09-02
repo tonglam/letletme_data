@@ -2892,7 +2892,7 @@ async function resetTournamentReviewScopesForCorrection(
                 AND obligation.state = 'READY'
             )
             OR (
-              candidate.event_id = ${targetEventId}
+              candidate.event_id >= ${targetEventId}
               AND EXISTS (
                 SELECT 1
                 FROM competition.tournament_review_obligations obligation
@@ -4476,28 +4476,79 @@ export async function getTournamentReviewV2OperationalStatus(
                    WHEN jsonb_typeof(publication.payload) = 'object'
                     AND jsonb_typeof(publication.payload -> 'manifest') = 'object'
                     AND jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
-                    AND (publication.payload -> 'manifest' ->> 'sectionCount') ~ '^[0-9]+$'
-                    AND (publication.payload -> 'manifest' ->> 'chunkCount') ~ '^[0-9]+$'
-                    AND jsonb_array_length(publication.payload -> 'manifest' -> 'sections') =
-                      (publication.payload -> 'manifest' ->> 'sectionCount')::numeric
+                    AND (publication.payload -> 'manifest' ->> 'sectionCount') ~ '^[0-9]{1,18}$'
+                    AND (publication.payload -> 'manifest' ->> 'chunkCount') ~ '^[0-9]{1,18}$'
+                    AND (CASE
+                      WHEN publication.payload -> 'manifest' ->> 'sectionCount' ~ '^[0-9]{1,18}$'
+                      THEN (publication.payload -> 'manifest' ->> 'sectionCount')::numeric
+                      ELSE -1
+                    END) = jsonb_array_length(publication.payload -> 'manifest' -> 'sections')
                     AND NOT EXISTS (
                       SELECT 1
                       FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
-                      WHERE jsonb_typeof(section) <> 'object'
-                         OR jsonb_typeof(section -> 'sectionKey') <> 'string'
+                      WHERE jsonb_typeof(section) IS DISTINCT FROM 'object'
+                         OR jsonb_typeof(section -> 'sectionKey') IS DISTINCT FROM 'string'
+                         OR btrim(COALESCE(section ->> 'sectionKey', '')) = ''
+                         OR section ->> 'chunkCount' IS NULL
+                         OR section ->> 'chunkCount' !~ '^[0-9]{1,18}$'
+                         OR section ->> 'itemCount' IS NULL
+                         OR section ->> 'itemCount' !~ '^[0-9]{1,18}$'
+                         OR jsonb_typeof(section -> 'chunkHashes') IS NULL
                          OR jsonb_typeof(section -> 'chunkHashes') <> 'array'
+                         OR jsonb_typeof(section -> 'chunkItemCounts') IS NULL
                          OR jsonb_typeof(section -> 'chunkItemCounts') <> 'array'
-                         OR jsonb_array_length(section -> 'chunkHashes') IS DISTINCT FROM
-                            jsonb_array_length(section -> 'chunkItemCounts')
+                         OR (CASE
+                           WHEN section ->> 'chunkCount' ~ '^[0-9]{1,18}$'
+                           THEN (section ->> 'chunkCount')::numeric
+                           ELSE -1
+                         END) <> jsonb_array_length(CASE
+                           WHEN jsonb_typeof(section -> 'chunkHashes') = 'array'
+                           THEN section -> 'chunkHashes'
+                           ELSE '[]'::jsonb
+                         END)
+                         OR (CASE
+                           WHEN section ->> 'chunkCount' ~ '^[0-9]{1,18}$'
+                           THEN (section ->> 'chunkCount')::numeric
+                           ELSE -1
+                         END) <> jsonb_array_length(CASE
+                           WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                           THEN section -> 'chunkItemCounts'
+                           ELSE '[]'::jsonb
+                         END)
                          OR EXISTS (
                            SELECT 1
-                           FROM jsonb_array_elements_text(section -> 'chunkItemCounts') item_count
-                           WHERE item_count.value !~ '^[0-9]+$'
+                           FROM jsonb_array_elements(CASE
+                             WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                             THEN section -> 'chunkItemCounts'
+                             ELSE '[]'::jsonb
+                           END) item_count
+                           WHERE jsonb_typeof(item_count) IS DISTINCT FROM 'number'
                               OR CASE
-                                   WHEN item_count.value ~ '^[0-9]+$'
-                                   THEN item_count.value::numeric NOT BETWEEN 0 AND 100
+                                   WHEN jsonb_typeof(item_count) = 'number'
+                                   THEN CASE
+                                          WHEN item_count::text ~ '^[0-9]{1,3}$'
+                                          THEN (item_count::text)::numeric NOT BETWEEN 0 AND 100
+                                          ELSE true
+                                        END
                                    ELSE true
                                  END
+                         )
+                         OR (CASE
+                           WHEN section ->> 'itemCount' ~ '^[0-9]{1,18}$'
+                           THEN (section ->> 'itemCount')::numeric
+                           ELSE -1
+                         END) <> (
+                           SELECT COALESCE(sum(CASE
+                             WHEN jsonb_typeof(item_count) = 'number'
+                                  AND item_count::text ~ '^[0-9]{1,3}$'
+                             THEN (item_count::text)::numeric
+                             ELSE -1
+                           END), -1::numeric)
+                           FROM jsonb_array_elements(CASE
+                             WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                             THEN section -> 'chunkItemCounts'
+                             ELSE '[]'::jsonb
+                           END) item_count
                          )
                     )
                    THEN (
