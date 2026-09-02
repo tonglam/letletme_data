@@ -9,6 +9,70 @@
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 
+-- Keep the database-side publication witness in lockstep with the Data and
+-- GraphQL semantic hash implementations.  Review operational metadata may be
+-- nested inside the immutable manifest shell; strip it recursively before
+-- hashing so an observation timestamp can never create a semantic revision.
+-- The function is argument-only, immutable, and never exposes table data.
+CREATE OR REPLACE FUNCTION extensions.strip_review_operational_metadata(input_value jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+STRICT
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+  object_entry record;
+  array_entry record;
+  output jsonb;
+BEGIN
+  IF jsonb_typeof(input_value) = 'object' THEN
+    output := '{}'::jsonb;
+    FOR object_entry IN
+      SELECT key, value AS child
+      FROM jsonb_each(input_value)
+      WHERE key NOT IN (
+        'freshness',
+        'observation',
+        'observedAt',
+        'lastObservedAt',
+        'publishedAt',
+        'updatedAt',
+        'createdAt'
+      )
+      ORDER BY key
+    LOOP
+      output := output || jsonb_build_object(
+        object_entry.key,
+        extensions.strip_review_operational_metadata(object_entry.child)
+      );
+    END LOOP;
+    RETURN output;
+  END IF;
+
+  IF jsonb_typeof(input_value) = 'array' THEN
+    output := '[]'::jsonb;
+    FOR array_entry IN
+      SELECT item.value AS child
+      FROM jsonb_array_elements(input_value) WITH ORDINALITY AS item(value, ordinal)
+      ORDER BY item.ordinal
+    LOOP
+      output := output || jsonb_build_array(
+        extensions.strip_review_operational_metadata(array_entry.child)
+      );
+    END LOOP;
+    RETURN output;
+  END IF;
+
+  RETURN input_value;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION extensions.strip_review_operational_metadata(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION extensions.strip_review_operational_metadata(jsonb)
+  TO letletme_graphql_reader, letletme_data_writer;
+
 -- `eligible_at` remains the source-change watermark.  Keep the first time a
 -- scope became eligible separately so repeated source retries cannot move the
 -- 24-hour degradation horizon forward forever.
