@@ -353,6 +353,10 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('run_tournament_review_restore_rehearsal');
     expect(deployStateMachine).toContain('DATABASE_RESTORE_REHEARSAL_URL is required');
     expect(deployStateMachine).toContain('review_backfill_marker_pending');
+    expect(deployStateMachine).toContain(
+      'restore_rehearsal_required = false AND restore_rehearsal_completed_at IS NOT NULL',
+    );
+    expect(deployStateMachine).not.toContain('WHERE season_id = ${current[0].season_id}');
     expect(deployStateMachine).toContain('Data runtime DATABASE_URL is required');
     expect(deployStateMachine).toContain(
       '-e DATABASE_URL -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM',

@@ -3768,7 +3768,7 @@ export async function reconcileTournamentReviewObligations(
            END,
            CASE
              WHEN historical_revision IS NOT NULL THEN
-               concat('SYSTEM-REACTIVATION:', ${season.seasonId}::text, ':', tournament_id::text, ':', event_id::text)
+               concat('SYSTEM-REACTIVATION:', ${season.seasonId}::text, ':', tournament_id::text, ':', event_id::text, ':', historical_revision::text)
              ELSE NULL
            END
     FROM valid_candidates
@@ -4669,6 +4669,36 @@ export async function getTournamentReviewV2OperationalStatus(
                              THEN section -> 'chunkItemCounts'
                              ELSE '[]'::jsonb
                            END) item_count
+                         )
+                         OR (
+                           (CASE
+                             WHEN section ->> 'itemCount' ~ '^[0-9]{1,18}$'
+                             THEN (section ->> 'itemCount')::numeric
+                             ELSE -1
+                           END) = 0
+                           AND (CASE
+                             WHEN section ->> 'chunkCount' ~ '^[0-9]{1,18}$'
+                             THEN (section ->> 'chunkCount')::numeric
+                             ELSE -1
+                           END) <> 1
+                         )
+                         OR (
+                           (CASE
+                             WHEN section ->> 'itemCount' ~ '^[0-9]{1,18}$'
+                             THEN (section ->> 'itemCount')::numeric
+                             ELSE -1
+                           END) > 0
+                           AND EXISTS (
+                             SELECT 1
+                             FROM jsonb_array_elements(CASE
+                               WHEN jsonb_typeof(section -> 'chunkItemCounts') = 'array'
+                               THEN section -> 'chunkItemCounts'
+                               ELSE '[]'::jsonb
+                             END) item_count
+                             WHERE jsonb_typeof(item_count) = 'number'
+                               AND item_count::text ~ '^[0-9]{1,3}$'
+                               AND (item_count::text)::numeric = 0
+                           )
                          )
                     )
                    THEN (

@@ -439,6 +439,11 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(publicationSource).toContain('TOURNAMENT_REVIEW_SEMANTIC_VERIFY_BATCH_SIZE = 100');
     expect(publicationSource).toContain('Semantic verification is a bounded');
     expect(publicationSource).toContain('chunkItemCounts');
+    expect(publicationSource).toContain('(section ->> \x27itemCount\x27)::numeric');
+    expect(publicationSource).toContain('(item_count::text)::numeric = 0');
+    expect(publicationSource).toContain(
+      'concat(\x27SYSTEM-REACTIVATION:\x27, ${season.seasonId}::text, \x27:\x27, tournament_id::text, \x27:\x27, event_id::text, \x27:\x27, historical_revision::text)',
+    );
     expect(publicationSource).toContain(
       '(publication.payload -> \x27manifest\x27 ->> \x27chunkCount\x27)::numeric',
     );
