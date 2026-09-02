@@ -1453,6 +1453,10 @@ export async function startSchedulerObligation(input: {
     .update(schedulerObligationsInOps)
     .set({
       status: 'running',
+      // A retrying obligation retains its diagnostic while Bull waits for
+      // backoff.  Clear it atomically with the running transition so the
+      // last-error/status constraint cannot reject the next attempt.
+      lastError: null,
       nextAttemptAt: null,
       // Non-terminal failures intentionally release the previous lease while
       // Bull waits for its backoff. Reclaim it for the retry generation before
