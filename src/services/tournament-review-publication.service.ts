@@ -4483,6 +4483,19 @@ export async function getTournamentReviewV2OperationalStatus(
                       THEN (publication.payload -> 'manifest' ->> 'sectionCount')::numeric
                       ELSE -1
                     END) = jsonb_array_length(publication.payload -> 'manifest' -> 'sections')
+                    -- A manifest section key is part of the chunk identity.
+                    -- Duplicate descriptors can otherwise make the aggregate
+                    -- counts appear closed while two logical sections read
+                    -- the same chunk namespace.
+                    AND (
+                      SELECT count(*)
+                      FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                      WHERE jsonb_typeof(section) = 'object'
+                    ) = (
+                      SELECT count(DISTINCT section ->> 'sectionKey')
+                      FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section
+                      WHERE jsonb_typeof(section) = 'object'
+                    )
                     AND NOT EXISTS (
                       SELECT 1
                       FROM jsonb_array_elements(publication.payload -> 'manifest' -> 'sections') section

@@ -102,12 +102,159 @@ BEGIN
   END IF;
 END $$;
 
-CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0090_backup
-  (LIKE competition.tournament_review_publications INCLUDING ALL);
-CREATE TABLE IF NOT EXISTS competition.tournament_review_heads_0090_backup
-  (LIKE competition.tournament_review_heads INCLUDING ALL);
-CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0090_backup
-  (LIKE competition.tournament_review_obligations INCLUDING ALL);
+-- Do not use `LIKE ... INCLUDING ALL` here.  PostgreSQL derives copied index
+-- names from the destination relation and preserves source constraint names;
+-- that makes the catalog produced by a migrated database differ from the
+-- checked-in Drizzle declaration on some server versions.  The backup shape
+-- is deliberately the pre-reset shape, so spell it out with stable names and
+-- keep the parity contract deterministic.
+CREATE TABLE IF NOT EXISTS competition.tournament_review_publications_0090_backup (
+  season_id smallint NOT NULL,
+  tournament_id integer NOT NULL,
+  event_id integer NOT NULL,
+  revision bigint NOT NULL,
+  format text NOT NULL,
+  schema_version text NOT NULL DEFAULT 'my-tournament-review-v2',
+  metric_version text NOT NULL DEFAULT 'descriptive-v1',
+  event_data_checked_at timestamptz NOT NULL,
+  source_min_checked_at timestamptz NOT NULL,
+  source_max_checked_at timestamptz NOT NULL,
+  expected_subject_count integer NOT NULL,
+  ready_subject_count integer NOT NULL,
+  not_applicable_subject_count integer NOT NULL DEFAULT 0,
+  row_count integer NOT NULL,
+  content_sha256 text NOT NULL,
+  payload jsonb NOT NULL,
+  published_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_publications_0090_backup_pkey
+    PRIMARY KEY (season_id, tournament_id, event_id, revision),
+  CONSTRAINT tournament_review_publications_revision_positive
+    CHECK (revision > 0),
+  CONSTRAINT tournament_review_publications_format_check
+    CHECK (format IN ('POINTS', 'H2H', 'KNOCKOUT')),
+  CONSTRAINT tournament_review_publications_versions_check
+    CHECK (
+      schema_version = 'my-tournament-review-v2'
+      AND metric_version = 'descriptive-v1'
+    ),
+  CONSTRAINT tournament_review_publications_counts_check
+    CHECK (
+      expected_subject_count >= 0
+      AND ready_subject_count >= 0
+      AND not_applicable_subject_count >= 0
+      AND ready_subject_count + not_applicable_subject_count = expected_subject_count
+      AND row_count >= 0
+    ),
+  CONSTRAINT tournament_review_publications_hash_check
+    CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT tournament_review_publications_payload_check
+    CHECK (
+      jsonb_typeof(payload) = 'object'
+      AND payload ->> 'schemaVersion' = schema_version
+      AND payload ->> 'metricVersion' = metric_version
+      AND payload ->> 'format' = format
+      AND (
+        (format = 'POINTS' AND payload ? 'points' AND NOT (payload ? 'h2h') AND NOT (payload ? 'knockout'))
+        OR (format = 'H2H' AND payload ? 'h2h' AND NOT (payload ? 'points') AND NOT (payload ? 'knockout'))
+        OR (format = 'KNOCKOUT' AND payload ? 'knockout' AND NOT (payload ? 'points') AND NOT (payload ? 'h2h'))
+      )
+    ),
+  CONSTRAINT tournament_review_publications_source_span_check
+    CHECK (
+      source_min_checked_at <= event_data_checked_at
+      AND event_data_checked_at <= source_max_checked_at
+      AND source_max_checked_at <= published_at
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tournament_review_publication_season_id_tournament_id_event_idx
+  ON competition.tournament_review_publications_0090_backup
+    (season_id, tournament_id, event_id, content_sha256);
+CREATE INDEX IF NOT EXISTS tournament_review_publication_season_id_tournament_id_event_idx1
+  ON competition.tournament_review_publications_0090_backup
+    (season_id, tournament_id, event_id, published_at DESC NULLS LAST);
+
+CREATE TABLE IF NOT EXISTS competition.tournament_review_heads_0090_backup (
+  season_id smallint NOT NULL,
+  tournament_id integer NOT NULL,
+  event_id integer NOT NULL,
+  revision bigint NOT NULL,
+  content_sha256 text NOT NULL,
+  published_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_heads_0090_backup_pkey
+    PRIMARY KEY (season_id, tournament_id, event_id),
+  CONSTRAINT tournament_review_heads_hash_check
+    CHECK (content_sha256 ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS tournament_review_heads_0090__season_id_tournament_id_event_idx
+  ON competition.tournament_review_heads_0090_backup
+    (season_id, tournament_id, event_id DESC NULLS LAST);
+
+CREATE TABLE IF NOT EXISTS competition.tournament_review_obligations_0090_backup (
+  season_id smallint NOT NULL,
+  tournament_id integer NOT NULL,
+  event_id integer NOT NULL,
+  format text NOT NULL,
+  state text NOT NULL DEFAULT 'PENDING',
+  eligible_at timestamptz NOT NULL,
+  next_attempt_at timestamptz,
+  execution_attempts integer NOT NULL DEFAULT 0,
+  source_rechecks integer NOT NULL DEFAULT 0,
+  lease_owner text,
+  lease_expires_at timestamptz,
+  first_attempt_at timestamptz,
+  last_attempt_at timestamptz,
+  ready_at timestamptz,
+  degraded_at timestamptz,
+  ready_revision bigint,
+  last_error_code text,
+  last_failure_fingerprint text,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  metadata_payload jsonb,
+  entry_metadata_payload jsonb,
+  group_assignment_payload jsonb,
+  first_eligible_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT tournament_review_obligations_0090_backup_pkey
+    PRIMARY KEY (season_id, tournament_id, event_id),
+  CONSTRAINT tournament_review_obligations_format_check
+    CHECK (format IN ('POINTS', 'H2H', 'KNOCKOUT')),
+  CONSTRAINT tournament_review_obligations_state_check
+    CHECK (state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING', 'READY', 'DEGRADED')),
+  CONSTRAINT tournament_review_obligations_attempts_check
+    CHECK (execution_attempts >= 0 AND source_rechecks >= 0),
+  CONSTRAINT tournament_review_obligations_lease_check
+    CHECK (
+      (lease_owner IS NULL AND lease_expires_at IS NULL)
+      OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+    ),
+  CONSTRAINT tournament_review_obligations_ready_check
+    CHECK (
+      (state = 'READY' AND ready_at IS NOT NULL AND ready_revision IS NOT NULL)
+      OR (state <> 'READY' AND ready_revision IS NULL)
+    ),
+  CONSTRAINT tournament_review_obligations_fingerprint_check
+    CHECK (
+      last_failure_fingerprint IS NULL
+      OR last_failure_fingerprint ~ '^[0-9a-f]{64}$'
+    ),
+  CONSTRAINT tournament_review_obligations_metadata_payload_check
+    CHECK (metadata_payload IS NULL OR jsonb_typeof(metadata_payload) = 'object'),
+  CONSTRAINT tournament_review_obligations_entry_metadata_payload_check
+    CHECK (entry_metadata_payload IS NULL OR jsonb_typeof(entry_metadata_payload) = 'array'),
+  CONSTRAINT tournament_review_obligations_group_assignment_payload_check
+    CHECK (group_assignment_payload IS NULL OR jsonb_typeof(group_assignment_payload) = 'object')
+);
+CREATE INDEX IF NOT EXISTS tournament_review_obligations_next_attempt_at_season_id_tou_idx
+  ON competition.tournament_review_obligations_0090_backup
+    (next_attempt_at, season_id, tournament_id, event_id)
+  WHERE state IN ('PENDING', 'WAITING_SOURCE', 'DEGRADED')
+    AND next_attempt_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tournament_review_obligations_lease_expires_at_season_id_to_idx
+  ON competition.tournament_review_obligations_0090_backup
+    (lease_expires_at, season_id, tournament_id, event_id)
+  WHERE state = 'PROCESSING';
 
 CREATE TABLE IF NOT EXISTS ops.tournament_review_v2_1_backup_manifest (
   backup_id uuid PRIMARY KEY DEFAULT extensions.gen_random_uuid(),

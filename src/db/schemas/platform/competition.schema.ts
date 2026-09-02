@@ -2361,8 +2361,10 @@ export const tournamentReviewPublicationChunksInCompetition = competition.table(
  * contract and its shape must remain reviewable alongside the live tables.
  *
  * The publication/obligation copies intentionally describe the pre-V2.1
- * columns that exist at the point where `CREATE TABLE ... LIKE ...` runs.
- * Later correction/observation columns belong only to the live V2.1 tables.
+ * columns that exist at the point where migration 0090 takes its backup.
+ * Migration 0090 spells these operational copies out with stable catalog
+ * names; later correction/observation columns belong only to the live V2.1
+ * tables.
  */
 export const tournamentReviewPublications0090BackupInCompetition = competition.table(
   'tournament_review_publications_0090_backup',
