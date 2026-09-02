@@ -4515,9 +4515,10 @@ export async function getTournamentReviewV2OperationalStatus(
                        CROSS JOIN LATERAL jsonb_array_elements_text(
                          section -> 'chunkHashes'
                        ) WITH ORDINALITY expected(expected_hash, chunk_ordinal)
-                       CROSS JOIN LATERAL jsonb_array_elements_text(
+                       JOIN LATERAL jsonb_array_elements_text(
                          section -> 'chunkItemCounts'
                        ) WITH ORDINALITY expected_count(expected_item_count, count_ordinal)
+                         ON expected_count.count_ordinal = expected.chunk_ordinal
                        WHERE NOT EXISTS (
                          SELECT 1
                          FROM competition.tournament_review_publication_chunks chunk
@@ -4528,7 +4529,6 @@ export async function getTournamentReviewV2OperationalStatus(
                            AND chunk.section_key = section ->> 'sectionKey'
                            AND chunk.chunk_index = expected.chunk_ordinal - 1
                            AND chunk.chunk_sha256 = expected.expected_hash
-                           AND expected_count.count_ordinal = expected.chunk_ordinal
                            AND chunk.item_count::numeric = expected_count.expected_item_count::numeric
                        )
                      )

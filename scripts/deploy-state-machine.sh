@@ -1370,7 +1370,8 @@ run_tournament_review_restore_rehearsal() {
     echo 'deploy review restore rehearsal: dump sidecars are missing' >&2
     return 1
   fi
-  local container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"
+  local container_dump_path
+  container_dump_path="/var/backups/letletme-data/$(basename -- "$dump_path")"
   echo 'deploy review restore rehearsal: restoring the verified pre-migration dump into disposable infrastructure'
   DATABASE_RESTORE_REHEARSAL_URL="$rehearsal_url" \
     DATABASE_RESTORE_SOURCE_URL="$source_url" \
