@@ -356,6 +356,9 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain(
       'restore_rehearsal_required = false AND restore_rehearsal_completed_at IS NOT NULL',
     );
+    expect(deployStateMachine).toContain('const hasIncomplete = rows.some');
+    expect(deployStateMachine).toContain('hasIncomplete || rows.length === 0 ? "pending" : "complete"');
+    expect(deployStateMachine).not.toContain('ORDER BY created_at ASC LIMIT 1');
     expect(deployStateMachine).not.toContain('WHERE season_id = ${current[0].season_id}');
     expect(deployStateMachine).toContain('Data runtime DATABASE_URL is required');
     expect(deployStateMachine).toContain(

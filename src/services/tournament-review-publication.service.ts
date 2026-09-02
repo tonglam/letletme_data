@@ -407,6 +407,10 @@ export function splitTournamentReviewChunks(payload: JsonRecord): ReadonlyArray<
   return chunks;
 }
 
+function isSafeReviewManifestCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 /**
  * Reuse a READY publication only when its complete sibling set is present and
  * every stored descriptor still matches the payload-derived chunk.  A missing
@@ -427,13 +431,11 @@ function reviewChunksMatchPayload(
   const manifest = isRecord(payload.manifest) ? payload.manifest : null;
   const descriptors = manifest && Array.isArray(manifest.sections) ? manifest.sections : null;
   if (!manifest || !descriptors) return false;
-  const sectionCount = Number(manifest.sectionCount);
-  const chunkCount = Number(manifest.chunkCount);
+  const sectionCount = manifest.sectionCount;
+  const chunkCount = manifest.chunkCount;
   if (
-    !Number.isSafeInteger(sectionCount) ||
-    sectionCount < 0 ||
-    !Number.isSafeInteger(chunkCount) ||
-    chunkCount < 0 ||
+    !isSafeReviewManifestCount(sectionCount) ||
+    !isSafeReviewManifestCount(chunkCount) ||
     descriptors.length !== sectionCount
   ) {
     return false;
@@ -456,24 +458,22 @@ function reviewChunksMatchPayload(
     ) {
       return false;
     }
-    const itemCount = Number(section.itemCount);
-    const declaredChunkCount = Number(section.chunkCount);
+    const itemCount = section.itemCount;
+    const declaredChunkCount = section.chunkCount;
     const hashes = section.chunkHashes;
     const itemCounts = section.chunkItemCounts;
     if (
-      !Number.isSafeInteger(itemCount) ||
-      itemCount < 0 ||
-      !Number.isSafeInteger(declaredChunkCount) ||
+      !isSafeReviewManifestCount(itemCount) ||
+      !isSafeReviewManifestCount(declaredChunkCount) ||
       declaredChunkCount !== hashes.length ||
       declaredChunkCount !== itemCounts.length ||
-      itemCounts.some(
-        (count) => !Number.isSafeInteger(Number(count)) || Number(count) < 0 || Number(count) > 100,
-      ) ||
-      (itemCount === 0 && (declaredChunkCount !== 1 || Number(itemCounts[0]) !== 0)) ||
+      !itemCounts.every(isSafeReviewManifestCount) ||
+      itemCounts.some((count) => count > 100) ||
+      (itemCount === 0 && (declaredChunkCount !== 1 || itemCounts[0] !== 0)) ||
       (itemCount > 0 &&
         (declaredChunkCount < 1 ||
-          itemCounts.some((count) => Number(count) <= 0) ||
-          itemCounts.reduce((total, count) => total + Number(count), 0) !== itemCount)) ||
+          itemCounts.some((count) => count <= 0) ||
+          itemCounts.reduce((total, count) => total + count, 0) !== itemCount)) ||
       !hashes.every(
         (chunkSha256): chunkSha256 is string =>
           typeof chunkSha256 === 'string' && /^[0-9a-f]{64}$/.test(chunkSha256),
@@ -487,7 +487,7 @@ function reviewChunksMatchPayload(
       expected.push({
         sectionKey,
         chunkIndex,
-        itemCount: Number(itemCounts[chunkIndex]),
+        itemCount: itemCounts[chunkIndex],
         chunkSha256,
       });
     });
@@ -541,10 +541,16 @@ function reviewChunksMatchPayload(
         (candidate) => isRecord(candidate) && candidate.sectionKey === sectionKey,
       );
       if (!descriptor || !isRecord(descriptor)) return false;
-      const itemCount = Number(descriptor.itemCount);
+      if (
+        !isSafeReviewManifestCount(descriptor.itemCount) ||
+        !isSafeReviewManifestCount(descriptor.chunkCount)
+      ) {
+        return false;
+      }
+      const itemCount = descriptor.itemCount;
       const sectionRows = rows.filter((row) => row.section_key === sectionKey);
       return (
-        sectionRows.length === Number(descriptor.chunkCount) &&
+        sectionRows.length === descriptor.chunkCount &&
         sectionRows.reduce((total, row) => total + Number(row.item_count), 0) === itemCount
       );
     })
@@ -4546,6 +4552,8 @@ export async function getTournamentReviewV2OperationalStatus(
                    WHEN jsonb_typeof(publication.payload) = 'object'
                     AND jsonb_typeof(publication.payload -> 'manifest') = 'object'
                     AND jsonb_typeof(publication.payload -> 'manifest' -> 'sections') = 'array'
+                    AND jsonb_typeof(publication.payload -> 'manifest' -> 'sectionCount') = 'number'
+                    AND jsonb_typeof(publication.payload -> 'manifest' -> 'chunkCount') = 'number'
                     AND (publication.payload -> 'manifest' ->> 'sectionCount') ~ '^[0-9]{1,18}$'
                     AND (publication.payload -> 'manifest' ->> 'chunkCount') ~ '^[0-9]{1,18}$'
                     AND (CASE
@@ -4609,8 +4617,10 @@ export async function getTournamentReviewV2OperationalStatus(
                       WHERE jsonb_typeof(section) IS DISTINCT FROM 'object'
                          OR jsonb_typeof(section -> 'sectionKey') IS DISTINCT FROM 'string'
                          OR btrim(COALESCE(section ->> 'sectionKey', '')) = ''
+                         OR jsonb_typeof(section -> 'chunkCount') IS DISTINCT FROM 'number'
                          OR section ->> 'chunkCount' IS NULL
                          OR section ->> 'chunkCount' !~ '^[0-9]{1,18}$'
+                         OR jsonb_typeof(section -> 'itemCount') IS DISTINCT FROM 'number'
                          OR section ->> 'itemCount' IS NULL
                          OR section ->> 'itemCount' !~ '^[0-9]{1,18}$'
                          OR jsonb_typeof(section -> 'chunkHashes') IS NULL
