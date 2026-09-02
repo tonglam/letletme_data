@@ -639,6 +639,7 @@ type H2HStandingRow = {
   completeMatchCount: number;
   completeMissingSourceCount: number;
   oldestCompleteSourceCheckedAt: Date | string | null;
+  currentEventOldestCompleteSourceCheckedAt: Date | string | null;
 };
 
 type H2HStandingsRead = {
@@ -650,6 +651,7 @@ type H2HStandingsRead = {
   readonly completeMatchCount: number;
   readonly completeMissingSourceCount: number;
   readonly oldestCompleteSourceCheckedAt: Date | string | null;
+  readonly currentEventOldestCompleteSourceCheckedAt: Date | string | null;
 };
 
 type H2HPreparedMatch = {
@@ -665,6 +667,46 @@ type OfficialH2HTournament = {
   readonly knockoutStartedEventId: number | null;
   readonly knockoutEndedEventId: number | null;
 };
+
+export function standingsCoverageEventId(
+  tournament: Pick<OfficialH2HTournament, 'groupEndedEventId' | 'knockoutStartedEventId'>,
+  eventId: number,
+): number {
+  const inKnockout =
+    tournament.knockoutStartedEventId !== null && eventId >= tournament.knockoutStartedEventId;
+  if (inKnockout) {
+    return tournament.groupEndedEventId ?? eventId;
+  }
+  return eventId;
+}
+
+export function standingsFreshForFinalization(
+  standingsRead: Pick<
+    H2HStandingsRead,
+    | 'expectedMatchCount'
+    | 'completeMatchCount'
+    | 'completeMissingSourceCount'
+    | 'throughEventId'
+    | 'currentEventOldestCompleteSourceCheckedAt'
+  >,
+  eventId: number,
+  tournament: Pick<OfficialH2HTournament, 'groupEndedEventId' | 'knockoutStartedEventId'>,
+  finalizationAt: Date | string | null,
+): boolean {
+  const coverageEventId = standingsCoverageEventId(tournament, eventId);
+  const standingsCoverageComplete =
+    standingsRead.expectedMatchCount > 0 &&
+    standingsRead.expectedMatchCount === standingsRead.completeMatchCount &&
+    standingsRead.completeMissingSourceCount === 0;
+  const currentEventFresh =
+    standingsRead.currentEventOldestCompleteSourceCheckedAt === null ||
+    isTimestampAtOrAfter(standingsRead.currentEventOldestCompleteSourceCheckedAt, finalizationAt);
+  return (
+    standingsCoverageComplete &&
+    standingsRead.throughEventId === coverageEventId &&
+    currentEventFresh
+  );
+}
 
 export function isH2HTournamentPhaseActive(
   tournament: Pick<
@@ -1049,12 +1091,13 @@ async function findOfficialH2HStandings(
           AND result_event.data_checked = true
           AND result_event.data_checked_at IS NOT NULL
           AND (
-            (battle.is_bye = true AND battle.home_entry_id IS NULL)
-            OR (battle.home_match_points IS NOT NULL AND battle.home_net_points IS NOT NULL)
-          )
-          AND (
-            (battle.is_bye = true AND battle.away_entry_id IS NULL)
-            OR (battle.away_match_points IS NOT NULL AND battle.away_net_points IS NOT NULL)
+            battle.is_bye = true
+            OR (
+              battle.home_match_points IS NOT NULL
+              AND battle.home_net_points IS NOT NULL
+              AND battle.away_match_points IS NOT NULL
+              AND battle.away_net_points IS NOT NULL
+            )
           )
         ) AS is_complete
       FROM competition.tournament_battle_group_results AS battle
@@ -1082,7 +1125,10 @@ async function findOfficialH2HStandings(
         COUNT(*)::integer AS "expectedMatchCount",
         COUNT(*) FILTER (WHERE match_rows.is_complete)::integer AS "completeMatchCount",
         COUNT(*) FILTER (WHERE match_rows.is_complete AND match_rows.source_checked_at IS NULL)::integer AS "completeMissingSourceCount",
-        MIN(match_rows.source_checked_at) FILTER (WHERE match_rows.is_complete) AS "oldestCompleteSourceCheckedAt"
+        MIN(match_rows.source_checked_at) FILTER (WHERE match_rows.is_complete) AS "oldestCompleteSourceCheckedAt",
+        MIN(match_rows.source_checked_at) FILTER (
+          WHERE match_rows.is_complete AND match_rows.event_id = ${eventId}
+        ) AS "currentEventOldestCompleteSourceCheckedAt"
       FROM match_rows
     ), official_sides AS (
       SELECT
@@ -1208,6 +1254,8 @@ async function findOfficialH2HStandings(
     completeMatchCount: normalizedRows[0]?.completeMatchCount ?? 0,
     completeMissingSourceCount: normalizedRows[0]?.completeMissingSourceCount ?? 0,
     oldestCompleteSourceCheckedAt: normalizedRows[0]?.oldestCompleteSourceCheckedAt ?? null,
+    currentEventOldestCompleteSourceCheckedAt:
+      normalizedRows[0]?.currentEventOldestCompleteSourceCheckedAt ?? null,
   };
 }
 
@@ -1218,7 +1266,7 @@ function isoOrFallback(value: Date | string | null, fallback: string): string {
   return fallback;
 }
 
-function h2hSide(
+export function h2hSide(
   entryId: number | null,
   entryName: string | null,
   playerName: string | null,
@@ -1892,14 +1940,12 @@ export async function syncLiveH2HLeaguePublicationsV2(
         global.publication.sourceCheckedAt,
       );
       const finalizationAt = standingsRead.finalizationAt;
-      const standingsCoverageComplete =
-        standingsRead.expectedMatchCount > 0 &&
-        standingsRead.expectedMatchCount === standingsRead.completeMatchCount &&
-        standingsRead.completeMissingSourceCount === 0;
-      const standingsFreshForFinal =
-        standingsCoverageComplete &&
-        standingsRead.throughEventId === eventId &&
-        isTimestampAtOrAfter(standingsRead.oldestCompleteSourceCheckedAt, finalizationAt);
+      const standingsFreshForFinal = standingsFreshForFinalization(
+        standingsRead,
+        eventId,
+        tournament,
+        finalizationAt,
+      );
       const liveStandingsPayload =
         !standingsIsFinalized && standings.length > 0
           ? standingsPayload(

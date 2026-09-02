@@ -9,6 +9,7 @@ import {
   listLiveLeagueCheckpointDesiredScopesV2,
   parseLiveLeagueCheckpointScopeV2,
   parseLiveLeaguePublicationV2Manifest,
+  readLiveLeagueCheckpointDesiredScanCursorV2,
   validateLiveLeaguePublicationV2Checkpoint,
   validateLiveLeaguePublicationV2Payload,
   type LeagueLiveManifest,
@@ -24,9 +25,12 @@ import {
 import {
   hasCompleteH2HOfficialScores,
   hasExpectedH2HMatchSet,
+  h2hSide,
   isH2HTournamentPhaseActive,
   isTimestampAtOrAfter,
   selectRetainedH2HMatchPayload,
+  standingsCoverageEventId,
+  standingsFreshForFinalization,
 } from '../../src/services/live-league-publication-v2.service';
 
 const scope: LeagueLiveScope = {
@@ -223,6 +227,9 @@ describe('Live League V2 manifest contract', () => {
         `llm:data:v2:fpl:league-live:${scope.season}:${index + 1}:3:classic:checkpoint-desired`,
     );
     const redis = {
+      get: async () => null,
+      set: async () => 'OK',
+      del: async () => 1,
       scan: async () => ['0', keys] as [string, string[]],
     } as unknown as NonNullable<Parameters<typeof listLiveLeagueCheckpointDesiredScopesV2>[1]>;
 
@@ -707,5 +714,200 @@ describe('Live League V2 H2H match retention', () => {
     const previous = payload('READY');
 
     expect(selectRetainedH2HMatchPayload(active, previous, payload('ERROR'))).toBe(active);
+  });
+});
+
+describe('Live League V2 standings finalization helpers', () => {
+  const tournament = {
+    groupEndedEventId: 10,
+    knockoutStartedEventId: 13,
+  };
+
+  test('uses the last group event as coverage during knockout', () => {
+    expect(standingsCoverageEventId(tournament, 13)).toBe(10);
+    expect(standingsCoverageEventId(tournament, 5)).toBe(5);
+  });
+
+  test('accepts group standings during knockout without requiring knockout throughEventId', () => {
+    const boundary = '2026-08-30T00:00:00.000Z';
+    expect(
+      standingsFreshForFinalization(
+        {
+          expectedMatchCount: 10,
+          completeMatchCount: 10,
+          completeMissingSourceCount: 0,
+          throughEventId: 10,
+          currentEventOldestCompleteSourceCheckedAt: null,
+        },
+        13,
+        tournament,
+        boundary,
+      ),
+    ).toBe(true);
+  });
+
+  test('scopes freshness to the current event instead of historical minima', () => {
+    const boundary = '2026-08-30T00:00:00.000Z';
+    expect(
+      standingsFreshForFinalization(
+        {
+          expectedMatchCount: 2,
+          completeMatchCount: 2,
+          completeMissingSourceCount: 0,
+          throughEventId: 5,
+          currentEventOldestCompleteSourceCheckedAt: '2026-08-30T00:00:01.000Z',
+        },
+        5,
+        { groupEndedEventId: 10, knockoutStartedEventId: 13 },
+        boundary,
+      ),
+    ).toBe(true);
+    expect(
+      standingsFreshForFinalization(
+        {
+          expectedMatchCount: 2,
+          completeMatchCount: 2,
+          completeMissingSourceCount: 0,
+          throughEventId: 5,
+          currentEventOldestCompleteSourceCheckedAt: '2026-08-29T23:59:59.000Z',
+        },
+        5,
+        { groupEndedEventId: 10, knockoutStartedEventId: 13 },
+        boundary,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('Live League V2 regular bye normalization', () => {
+  test('normalizes producer Average bye sides to explicit Bye contract', () => {
+    const side = h2hSide(null, null, null, true, true, null, undefined);
+    expect(side).toEqual({
+      entryId: null,
+      entryName: 'Bye',
+      playerName: null,
+      isAverage: false,
+      officialNetPoints: null,
+      inputPublicationId: null,
+      inputGeneration: null,
+      inputRevision: null,
+      inputContentUpdatedAt: null,
+      input: null,
+    });
+  });
+
+  test('accepts normalized bye payloads in the publication validator', () => {
+    const matchScope: LeagueLiveScope = {
+      season: scope.season,
+      eventId: scope.eventId,
+      tournamentId: scope.tournamentId,
+      scope: 'H2H_MATCH',
+      matchId: 7,
+    };
+    const manifest = {
+      ...h2hManifest(),
+      scope: 'H2H_MATCH' as const,
+      matchId: 7,
+      counts: { expected: 1, published: 1, ready: 0, noPicks: 0 },
+      items: {
+        index: {
+          ...h2hManifest().items.index,
+          key: liveLeagueV2ItemKey(matchScope, 1, 'index'),
+          count: 1,
+        },
+        payload: {
+          ...h2hManifest().items.payload,
+          key: liveLeagueV2ItemKey(matchScope, 1, 'payload'),
+          count: 1,
+        },
+      },
+    };
+    const home = h2hSide(101, 'Entry 101', 'Player 101', false, true, 42, undefined);
+    const away = h2hSide(null, null, null, true, true, null, undefined);
+    const payload = {
+      contractVersion: 'live-points-v2' as const,
+      season: manifest.season,
+      eventId: manifest.eventId,
+      tournamentId: manifest.tournamentId,
+      officialMatchId: 7,
+      groupId: 1,
+      sourceOrder: 0,
+      phase: 'REGULAR' as const,
+      knockoutName: null,
+      tiebreak: null,
+      isBye: true,
+      state: 'PENDING' as const,
+      sourceCheckedAt: manifest.times.sourceCheckedAt,
+      globalRef: manifest.globalRef,
+      home,
+      away,
+    };
+    expect(
+      validateLiveLeaguePublicationV2Payload(
+        matchScope,
+        manifest,
+        [
+          {
+            matchId: 7,
+            eventId: manifest.eventId,
+            groupId: 1,
+            sourceOrder: 0,
+            phase: 'REGULAR' as const,
+            homeEntryId: 101,
+            awayEntryId: null,
+            availability: 'PENDING' as const,
+          },
+        ],
+        { '7': payload },
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('Live League V2 checkpoint desired scan cursor', () => {
+  test('preserves the scan cursor when a bounded batch fills before SCAN completes', async () => {
+    const stored: Record<string, string> = {};
+    let scanCalls = 0;
+    const redis = {
+      get: async (key: string) => stored[key] ?? null,
+      set: async (key: string, value: string) => {
+        stored[key] = value;
+        return 'OK';
+      },
+      del: async (key: string) => {
+        delete stored[key];
+        return 1;
+      },
+      scan: async (cursor: string) => {
+        scanCalls += 1;
+        if (cursor === '0') {
+          return [
+            '42',
+            Array.from(
+              { length: 600 },
+              (_, index) =>
+                `llm:data:v2:fpl:league-live:${scope.season}:${index + 1}:3:classic:checkpoint-desired`,
+            ),
+          ] as [string, string[]];
+        }
+        return ['0', []] as [string, string[]];
+      },
+    } as unknown as NonNullable<Parameters<typeof listLiveLeagueCheckpointDesiredScopesV2>[1]>;
+
+    await expect(
+      listLiveLeagueCheckpointDesiredScopesV2(scope.season, redis),
+    ).resolves.toHaveLength(512);
+    await expect(readLiveLeagueCheckpointDesiredScanCursorV2(scope.season, redis)).resolves.toBe(
+      '42',
+    );
+
+    scanCalls = 0;
+    await expect(
+      listLiveLeagueCheckpointDesiredScopesV2(scope.season, redis),
+    ).resolves.toHaveLength(0);
+    expect(scanCalls).toBe(1);
+    await expect(readLiveLeagueCheckpointDesiredScanCursorV2(scope.season, redis)).resolves.toBe(
+      null,
+    );
   });
 });

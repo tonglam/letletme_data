@@ -273,6 +273,34 @@ export function liveLeagueV2Key(
 
 const LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT = 512;
 
+function liveLeagueCheckpointDesiredScanCursorKey(season: string): string {
+  return `llm:data:v2:fpl:league-live:${season}:checkpoint-desired-scan-cursor`;
+}
+
+export async function readLiveLeagueCheckpointDesiredScanCursorV2(
+  season: string,
+  redisClient?: Redis,
+): Promise<string | null> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const value = await redis.get(liveLeagueCheckpointDesiredScanCursorKey(season));
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+async function writeLiveLeagueCheckpointDesiredScanCursorV2(
+  season: string,
+  cursor: string,
+  redis: Redis,
+): Promise<void> {
+  await redis.set(liveLeagueCheckpointDesiredScanCursorKey(season), cursor);
+}
+
+async function clearLiveLeagueCheckpointDesiredScanCursorV2(
+  season: string,
+  redis: Redis,
+): Promise<void> {
+  await redis.del(liveLeagueCheckpointDesiredScanCursorKey(season));
+}
+
 /**
  * Recover exact checkpoint scopes after a producer/DB outage. This scans only
  * the V2 desired-marker namespace; it never reads publication payloads or
@@ -305,7 +333,7 @@ export async function listLiveLeagueCheckpointDesiredScopesV2(
   }
   const redis = redisClient ?? (await redisSingleton.getClient());
   const keys: string[] = [];
-  let cursor = '0';
+  let cursor = (await readLiveLeagueCheckpointDesiredScanCursorV2(season, redis)) ?? '0';
   const pattern = `llm:data:v2:fpl:league-live:${season}:*:*:checkpoint-desired`;
   do {
     const result = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', '200');
@@ -313,11 +341,16 @@ export async function listLiveLeagueCheckpointDesiredScopesV2(
     const remaining = LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT - keys.length;
     if (remaining <= 0) break;
     keys.push(...result[1].slice(0, remaining));
-    // This is intentionally a bounded batch. The reconciler clears successful
-    // obligations and the next pass drains the rest without allowing one
-    // oversized season to monopolize a worker or request an unbounded scan.
-    if (keys.length >= LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT) break;
+    if (keys.length >= LIVE_LEAGUE_CHECKPOINT_SCOPE_LIMIT) {
+      if (cursor !== '0') {
+        await writeLiveLeagueCheckpointDesiredScanCursorV2(season, cursor, redis);
+      }
+      break;
+    }
   } while (cursor !== '0');
+  if (cursor === '0') {
+    await clearLiveLeagueCheckpointDesiredScanCursorV2(season, redis);
+  }
   const unique = new Map<string, LeagueLiveScope>();
   for (const key of keys) {
     const scope = parseLiveLeagueCheckpointScopeV2(key, season);
@@ -757,6 +790,10 @@ function validH2HMatchPayload(
   const realSide = (side: H2HMatchSide): boolean => side.entryId !== null && !side.isAverage;
   const byePlaceholder = (side: H2HMatchSide): boolean =>
     side.entryId === null && !side.isAverage && side.entryName === 'Bye';
+  const producerByeSide = (side: H2HMatchSide): boolean =>
+    side.entryId === null && side.isAverage && side.entryName === 'Average';
+  const nullableByeSide = (side: H2HMatchSide): boolean =>
+    byePlaceholder(side) || producerByeSide(side);
   const completeSide = (side: H2HMatchSide): boolean =>
     side.entryId !== null
       ? side.input !== null
@@ -775,8 +812,8 @@ function validH2HMatchPayload(
   if (
     value.isBye
       ? !(
-          (realSide(value.home) && byePlaceholder(value.away)) ||
-          (realSide(value.away) && byePlaceholder(value.home))
+          (realSide(value.home) && nullableByeSide(value.away)) ||
+          (realSide(value.away) && nullableByeSide(value.home))
         )
       : (value.home.entryId !== null && value.home.entryId === value.away.entryId) ||
         (value.home.isAverage && value.away.isAverage)
