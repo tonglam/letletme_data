@@ -38,7 +38,20 @@ if [[ "$source_identity" = "$target_identity" ]]; then
   echo 'backup restore rehearsal target has the same database identity as the source' >&2
   exit 1
 fi
+set +e
 pg_restore --clean --if-exists --no-owner --no-acl --dbname="$target_url" "$dump_path"
+restore_rc=$?
+set -e
+# Disposable rehearsal hosts may lack Supabase-only extensions (pg_cron,
+# pgsodium, vault). pg_restore then exits 1 after continuing. Hard-fail only on
+# worse codes; ledger/key-count witnesses below remain the acceptance gate.
+if [ "$restore_rc" -gt 1 ]; then
+  echo "backup restore rehearsal: pg_restore failed hard with exit ${restore_rc}" >&2
+  exit "$restore_rc"
+fi
+if [ "$restore_rc" -ne 0 ]; then
+  echo "backup restore rehearsal: tolerating pg_restore exit ${restore_rc}; verifying ledger/key witnesses next" >&2
+fi
 target_major=$(psql "$target_url" -Atqc 'SHOW server_version_num')
 target_major=$((target_major / 10000))
 test "$target_major" = "$manifest_major"

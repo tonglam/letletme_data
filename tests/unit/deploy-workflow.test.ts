@@ -403,6 +403,9 @@ describe('release workflow gates', () => {
     expect(restoreScript).toContain('source_identity=$(psql');
     expect(restoreScript).toContain('target_identity=$(psql');
     expect(restoreScript).toContain('same database identity as the source');
+    expect(restoreScript).toContain('restore_rc=$?');
+    expect(restoreScript).toContain('tolerating pg_restore exit');
+    expect(restoreScript).toContain('verifying ledger/key witnesses next');
   });
 
   test('keeps the read-only backup container able to normalize its writable mount', () => {
