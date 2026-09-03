@@ -376,6 +376,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).toContain('entryScopeGeneration');
     expect(scheduler).toContain('verifiedRevision === control.activeRevision');
     expect(scheduler).toContain('scope-e${control.entryScopeGeneration');
+    expect(scheduler).toContain('latestFinalizedEventId');
+    expect(scheduler).toContain('const finalizationEvents = [...context.events]');
     expect(publicationService).toContain('return readMyFplFinalizationControlState(season, false)');
     expect(publicationService).toContain('return readMyFplFinalizationControlState(season, true)');
     expect(scheduler).toContain('getMyFplFinalizationControlStateWithScope(context.season)');

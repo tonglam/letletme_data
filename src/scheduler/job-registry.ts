@@ -711,8 +711,18 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
       // finalization worker.
       const controlStates = await getMyFplFinalizationControlStateWithScope(context.season);
       const statusByEventId = new Map(controlStates.map((status) => [status.eventId, status]));
-      for (const event of context.events) {
-        if (!event.finished || !event.dataChecked) continue;
+      const finalizationEvents = [...context.events]
+        .filter((event) => event.finished && event.dataChecked)
+        .sort((left, right) => {
+          const priority = (eventId: number): number =>
+            eventId === context.currentEventId
+              ? 0
+              : eventId === context.latestFinalizedEventId
+                ? 1
+                : 2;
+          return priority(left.id) - priority(right.id) || right.id - left.id;
+        });
+      for (const event of finalizationEvents) {
         const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
         const control = statusByEventId.get(event.id);
         const finalPublished = Boolean(

@@ -478,6 +478,8 @@ WITH active AS (
          state.entry_scope_generation = state.verified_entry_scope_generation
            AND state.tournament_scope_generation = state.verified_tournament_scope_generation
            AND state.verified_revision = active.revision
+           AND event.finished
+           AND event.data_checked
            AND active.kind = 'FINAL'
            AND active.entry_scope_sha256 IS NOT NULL
            AND active.tournament_scope_sha256 IS NOT NULL AS final_verified
