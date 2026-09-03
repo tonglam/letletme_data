@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import type { TournamentSetupStatusRow } from '../../src/repositories/tournament-infos';
 import { seasonRepository } from '../../src/repositories/seasons';
@@ -258,6 +258,11 @@ const triggerJob = spyOn(jobTriggerServiceModule, 'triggerJob').mockImplementati
     throw new jobTriggerServiceModule.JobNotFoundError(name);
   },
 );
+
+afterAll(() => {
+  listTriggerableJobs.mockRestore();
+  triggerJob.mockRestore();
+});
 
 describe('eventsAPI handlers', () => {
   beforeEach(() => {

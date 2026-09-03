@@ -1,12 +1,14 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
+import { leagueSyncQueue, leagueSyncQueueName } from '../queues/league-sync.queue';
 import {
-  leagueSyncQueue,
-  leagueSyncQueueName,
   LEAGUE_JOBS,
+  InvalidLeagueSyncJobError,
+  isLeagueSyncJobName,
+  validateLeagueSyncJobData,
   type LeagueSyncJobData,
-} from '../queues/league-sync.queue';
+} from '../queues/league-sync-job-contract';
 import {
   processLeagueEventPicksJob,
   processLeagueEventResultsJob,
@@ -35,25 +37,39 @@ import {
 
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
 
-function startSchedulerLeaseHeartbeat(job: Job<LeagueSyncJobData>): () => void {
-  const obligationId = job.data.obligationId;
+function startSchedulerLeaseHeartbeat(
+  job: Job<LeagueSyncJobData>,
+  data: LeagueSyncJobData,
+): () => void {
+  const obligationId = data.obligationId;
   if (!obligationId) return () => undefined;
 
   const timer = setInterval(() => {
     void renewSchedulerObligation({
       obligationId,
-      generation: job.data.obligationGeneration,
+      generation: data.obligationGeneration,
     }).catch((error) => {
       logError('Failed to renew league scheduler obligation lease', error, {
         jobId: job.id,
         jobName: job.name,
         obligationId,
-        generation: job.data.obligationGeneration,
+        generation: data.obligationGeneration,
       });
     });
   }, SCHEDULER_LEASE_HEARTBEAT_MS);
 
   return () => clearInterval(timer);
+}
+
+function parseLeagueSyncWorkerJob(job: Job<LeagueSyncJobData>): LeagueSyncJobData {
+  if (!isLeagueSyncJobName(job.name)) {
+    throw new InvalidLeagueSyncJobError();
+  }
+  try {
+    return validateLeagueSyncJobData(job.data);
+  } catch {
+    throw new InvalidLeagueSyncJobError();
+  }
 }
 
 /**
@@ -64,8 +80,9 @@ function startSchedulerLeaseHeartbeat(job: Job<LeagueSyncJobData>): () => void {
  * - Tournament job (with tournamentId): Processes that specific tournament
  */
 async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
+  const data = parseLeagueSyncWorkerJob(job);
   if (
-    !(await startCurrentSchedulerJob(job.data, {
+    !(await startCurrentSchedulerJob(data, {
       queueName: job.queueName,
       jobName: job.name,
       jobId: job.id,
@@ -73,9 +90,9 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
   ) {
     return { skipped: true, staleSchedulerGeneration: true };
   }
-  const season = await requireCurrentSeasonForJob(job.data);
-  const { eventId, tournamentId, source } = job.data;
-  const runId = job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);
+  const season = await requireCurrentSeasonForJob(data);
+  const { eventId, tournamentId, source } = data;
+  const runId = data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -90,7 +107,7 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
 
   logJobTriggered(context);
 
-  const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job);
+  const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job, data);
   try {
     return await runDataSyncAttempt(
       {
@@ -117,7 +134,7 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
                 return processLeagueEventResultsJob(season, eventId, tournamentId, {
                   runId,
                   freshAfter,
-                  freshnessWindowId: job.data.freshnessWindowId,
+                  freshnessWindowId: data.freshnessWindowId,
                 });
               }
 
@@ -197,9 +214,18 @@ export function createLeagueSyncWorker(): WorkerRuntime {
     logError('League sync worker failed job', err, {
       jobId: job?.id,
       jobName: job?.name,
-      eventId: job?.data.eventId,
-      tournamentId: job?.data.tournamentId,
+      eventId: job?.data?.eventId,
+      tournamentId: job?.data?.tournamentId,
     });
+    if (err instanceof InvalidLeagueSyncJobError) {
+      if (job) void alertOnFinalFailure(job, err);
+      if (job?.id !== undefined && isTerminalJobFailure(job, err)) {
+        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
+          () => undefined,
+        );
+      }
+      return;
+    }
     if (job) void alertOnFinalFailure(job, err);
     const fence = job ? inspectSchedulerObligationFence(job.data) : null;
     if (job && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {

@@ -376,6 +376,10 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('migration-scoped gate skipped');
     expect(deployStateMachine).toContain('MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES');
     expect(deployStateMachine).toContain('--batch-size 100 --max-batches 10000');
+    expect(deployStateMachine).toContain('api bun run db:backfill-tournament-review-v2 --');
+    expect(deployStateMachine).not.toContain(
+      'migration bun run db:backfill-tournament-review-v2 --',
+    );
     const localBackfill = deployScript.indexOf('run_tournament_review_hard_cut_backfill');
     const localRoleVerify = deployScript.indexOf('start_stage roleVerify');
     const workflowBackfill = workflow.indexOf('run_tournament_review_hard_cut_backfill');

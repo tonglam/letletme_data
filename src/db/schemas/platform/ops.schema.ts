@@ -455,6 +455,12 @@ export const schedulerObligationsInOps = ops.table(
     index('scheduler_obligations_failure_idx')
       .on(table.jobName, table.status, table.updatedAt.desc())
       .where(sql`status IN ('failed', 'irrecoverable')`),
+    index('scheduler_obligations_inflight_job_idx')
+      .on(table.jobName, table.obligationId)
+      .where(sql`status IN ('enqueued', 'running', 'retrying')`),
+    index('scheduler_obligations_pending_job_scope_idx')
+      .on(table.jobName, table.scopeKey, table.periodKey, table.obligationId)
+      .where(sql`status IN ('pending', 'failed')`),
     check(
       'scheduler_obligations_status_check',
       sql`status = ANY (ARRAY['pending'::text, 'enqueued'::text, 'running'::text, 'retrying'::text, 'succeeded'::text, 'failed'::text, 'skipped'::text, 'irrecoverable'::text])`,
