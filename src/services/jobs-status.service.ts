@@ -27,7 +27,7 @@ import { schedulerQueueLaneOverride, schedulerRegistry } from '../scheduler/job-
 import {
   getActiveMyFplPublication,
   getActiveMyFplSnapshotRedisManifest,
-  getMyFplSnapshotOperationalStatus,
+  getMyFplSnapshotControlStatus,
   isMyFplSnapshotRedisManifestForPublication,
 } from './my-fpl-snapshot-publication.service';
 import { getTournamentReviewV2OperationalStatus } from './tournament-review-publication.service';
@@ -370,7 +370,11 @@ export async function getJobsStatus(
     readRuntimeHeartbeat('mediaWorker'),
     readRuntimeHeartbeat('livePicksWorker'),
     readRuntimeHeartbeat('officialH2HWorker'),
-    getMyFplSnapshotOperationalStatus(season),
+    // `/jobs/status` is a monitoring read path. It must use the bounded
+    // control projection and never trigger the worker-only canonical scope
+    // audit. Before scope generations are installed the projection marks
+    // scope verification as UNVERIFIED; it must not claim COMPLETE.
+    getMyFplSnapshotControlStatus(season),
     getTournamentReviewV2OperationalStatus(season, watchEntryId).catch(() => ({
       schemaVersion: 'my-tournament-review-v2.1' as const,
       metricVersion: 'settled-review-v2',
@@ -861,6 +865,18 @@ export async function getJobsStatus(
         observedTournamentScopeSha256: myFplTarget.observedTournamentScopeSha256,
         redisRevision: myFplRedisManifest?.revision ?? null,
         redisParity: myFplRedisParity,
+        scopeVerification: myFplTarget.scopeVerification ?? 'UNVERIFIED',
+        scopeGenerationInstalled: myFplTarget.scopeGenerationInstalled ?? false,
+        scopeState: myFplTarget.scopeState ?? {
+          entryDesired: null,
+          entryVerified: null,
+          tournamentDesired: null,
+          tournamentVerified: null,
+          entryDirtySince: null,
+          tournamentDirtySince: null,
+          verifiedRevision: null,
+          state: 'UNAVAILABLE',
+        },
         schedulerObligation: {
           latest: safeSchedulerObligationLatest(myFplFinalizationObligation.latest),
           overdue: myFplFinalizationObligation.overdue,

@@ -74,7 +74,7 @@ import {
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import {
-  getMyFplSnapshotOperationalStatus,
+  getMyFplFinalizationControlState,
   hasFinalMyFplPublication,
 } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
@@ -705,49 +705,63 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
     claimPriority: 45,
     resolve: async (context) => {
       const plans: SchedulerObligationPlan[] = [];
-      const operationalStatuses = await getMyFplSnapshotOperationalStatus(
-        context.season,
-        context.now,
-      );
-      const statusByEventId = new Map(
-        operationalStatuses.map((status) => [status.eventId, status]),
-      );
+      // This 30-second loop is a control-plane dispatcher.  Do not call the
+      // deep readiness audit here: it scans canonical Entries/Tournaments and
+      // immutable snapshot children, which belongs only to the single-event
+      // finalization worker.
+      const controlStates = await getMyFplFinalizationControlState(context.season);
+      const statusByEventId = new Map(controlStates.map((status) => [status.eventId, status]));
       for (const event of context.events) {
         if (!event.finished || !event.dataChecked) continue;
         const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
-        const status = statusByEventId.get(event.id);
-        // Include the current canonical scope fence in the durable identity.
-        // A succeeded FINAL therefore cannot suppress a later correction when
-        // entries or tournament memberships change after publication.
-        const scopeFence = status
-          ? [
-              status.expectedEntryScopeSha256 ?? 'missing-entry-scope',
-              status.expectedTournamentScopeSha256 ?? 'missing-tournament-scope',
-              `na${status.expectedNotApplicableEntryCount ?? 0}`,
-            ].join('-')
-          : 'missing-status';
-        const scopeKey = `${context.season.seasonCode}:event:${event.id}`;
-        let periodKey = myFplFinalizationPeriodKey({
-          eventId: event.id,
-          dataCheckedAt: checkedAt,
-          scopeFence,
-        });
-        let deliveryRecovery = false;
-        // A terminal failure can be followed by a successful PostgreSQL and
-        // Redis publication without changing the source fence or revision.
-        // Only then create a repair identity, fenced by the failed row's
-        // immutable UUID. A normal successful finalizer never changes this
-        // identity on its next 30-second pass, and historical FINAL events
-        // are not rekeyed merely because a scheduler process restarted.
-        if (status?.settlementState === 'FINAL' && status.finalSla === 'MET') {
+        const control = statusByEventId.get(event.id);
+        const finalPublished = Boolean(
+          control?.activeKind === 'FINAL' &&
+            control.activeRevision !== null &&
+            control.activeOutboxDeliveredCount > 0,
+        );
+        const scopeStateAvailable = Boolean(
+          control &&
+            control.entryScopeGeneration !== null &&
+            control.verifiedEntryScopeGeneration !== null &&
+            control.tournamentScopeGeneration !== null &&
+            control.verifiedTournamentScopeGeneration !== null,
+        );
+        const scopeClean = Boolean(
+          control &&
+            scopeStateAvailable &&
+            control.entryScopeGeneration !== null &&
+            control.verifiedEntryScopeGeneration === control.entryScopeGeneration &&
+            control.tournamentScopeGeneration !== null &&
+            control.verifiedTournamentScopeGeneration === control.tournamentScopeGeneration &&
+            control.verifiedRevision === control.activeRevision,
+        );
+        // A stable, delivered FINAL is terminal and must not create an
+        // obligation on every 30-second tick. A dirty generation, a missing
+        // state row, or a delivery-recovery predecessor remains dispatchable.
+        if (finalPublished && control && (!control.scopeGenerationInstalled || scopeClean)) {
+          const scopeKey = `${context.season.seasonCode}:event:${event.id}`;
+          const scopeFence = scopeStateAvailable
+            ? `scope-e${control.entryScopeGeneration}-t${control.tournamentScopeGeneration}`
+            : [
+                control.entryScopeSha256 ?? 'missing-entry-scope',
+                control.tournamentScopeSha256 ?? 'missing-tournament-scope',
+                `na${control.notApplicableEntryCount ?? 0}`,
+              ].join('-');
+          const stablePeriodKey = myFplFinalizationPeriodKey({
+            eventId: event.id,
+            dataCheckedAt: checkedAt,
+            scopeFence,
+          });
           let predecessor = await getSchedulerObligationByIdentity({
             jobName: 'my-fpl-finalization',
             scopeKey,
-            periodKey,
+            periodKey: stablePeriodKey,
           });
           let repairSucceeded = false;
+          let repairPeriodKey: string | null = null;
           while (predecessor?.status === 'irrecoverable') {
-            const repairPeriodKey = myFplFinalizationPeriodKey({
+            repairPeriodKey = myFplFinalizationPeriodKey({
               eventId: event.id,
               dataCheckedAt: checkedAt,
               scopeFence,
@@ -758,23 +772,52 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
               scopeKey,
               periodKey: repairPeriodKey,
             });
-            // The outbox delivery state is a transition fence: before Redis
-            // delivery, finalSla is not MET; afterwards it is MET. Keep the
-            // predecessor UUID in the identity so a later output revision
-            // cannot manufacture a new obligation on every pass. If this
-            // repair also becomes irrecoverable, rotate once more from that
-            // terminal row; every failed repair therefore has a dispatchable
-            // successor after the next observed recovery.
             if (repairObligation?.status === 'succeeded') {
               repairSucceeded = true;
               break;
             }
-            periodKey = repairPeriodKey;
-            deliveryRecovery = true;
             predecessor = repairObligation;
           }
           if (repairSucceeded) continue;
+          if (repairPeriodKey) {
+            plans.push({
+              scopeKey,
+              periodKey: repairPeriodKey,
+              dueAt: context.now,
+              eventId: event.id,
+              source: 'reconcile',
+              evidence: {
+                snapshotKind: 'FINAL',
+                dataCheckedAt: checkedAt,
+                reconciliation: 'delivery-recovered',
+                expectedEntryCount: control.expectedEntryCount,
+                expectedEntryScopeSha256: control.entryScopeSha256,
+                expectedNotApplicableEntryCount: control.notApplicableEntryCount,
+                expectedTournamentCount: control.expectedTournamentCount,
+                expectedTournamentScopeSha256: control.tournamentScopeSha256,
+              },
+            });
+          }
+          continue;
         }
+
+        // Include only the cheap, durable generation fence in the obligation
+        // identity. Same generation => same task; a new scope generation
+        // produces one successor without hashing canonical business tables.
+        const scopeFence =
+          control && scopeStateAvailable
+            ? `scope-e${control.entryScopeGeneration}-t${control.tournamentScopeGeneration}`
+            : [
+                control?.entryScopeSha256 ?? 'missing-entry-scope',
+                control?.tournamentScopeSha256 ?? 'missing-tournament-scope',
+                `na${control?.notApplicableEntryCount ?? 0}`,
+              ].join('-');
+        const scopeKey = `${context.season.seasonCode}:event:${event.id}`;
+        const periodKey = myFplFinalizationPeriodKey({
+          eventId: event.id,
+          dataCheckedAt: checkedAt,
+          scopeFence,
+        });
         plans.push({
           scopeKey,
           periodKey,
@@ -784,12 +827,11 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
           evidence: {
             snapshotKind: 'FINAL',
             dataCheckedAt: checkedAt,
-            ...(deliveryRecovery ? { reconciliation: 'delivery-recovered' } : {}),
-            expectedEntryCount: status?.expectedEntryCount,
-            expectedEntryScopeSha256: status?.expectedEntryScopeSha256,
-            expectedNotApplicableEntryCount: status?.expectedNotApplicableEntryCount,
-            expectedTournamentCount: status?.expectedTournamentCount,
-            expectedTournamentScopeSha256: status?.expectedTournamentScopeSha256,
+            expectedEntryCount: control?.expectedEntryCount,
+            expectedEntryScopeSha256: control?.entryScopeSha256,
+            expectedNotApplicableEntryCount: control?.notApplicableEntryCount,
+            expectedTournamentCount: control?.expectedTournamentCount,
+            expectedTournamentScopeSha256: control?.tournamentScopeSha256,
           },
         });
       }
