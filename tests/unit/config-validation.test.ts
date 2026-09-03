@@ -192,26 +192,25 @@ describe('production environment preflight', () => {
   });
 
   test('uses bounded preflight, verifies roles read-only, and publishes before restart', () => {
-    const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
-    const preflight = workflow.indexOf('bun run env:check');
-    const screenshotProbe = workflow.indexOf('--probe-bug-report-storage');
-    const fplSourceProbe = workflow.indexOf('--probe-fpl-raw-snapshot-storage');
-    const identityContract = workflow.indexOf('bun scripts/wait-for-migration-login.ts');
-    const configuredRuntimeUrl = workflow.indexOf('data_runtime_database_url=$(sed -n');
-    const stopServices = workflow.indexOf(
-      'APP_IMAGE="$IMAGE_REF" compose stop -t 45 api worker',
-      identityContract,
-    );
-    const databaseQuiescence = workflow.indexOf(
+    const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
+    const preflight = deployScript.indexOf('bun run env:check');
+    const screenshotProbe = deployScript.indexOf('--probe-bug-report-storage');
+    const fplSourceProbe = deployScript.indexOf('--probe-fpl-raw-snapshot-storage');
+    const identityContract = deployScript.indexOf('bun scripts/wait-for-migration-login.ts');
+    const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
+    const stopServices = deployScript.indexOf('if ! compose stop -t 45 api worker; then');
+    const databaseQuiescence = deployScript.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
     );
-    const redisQuiescence = workflow.indexOf('wait_for_scoped_queue_quiescence 150 2');
-    const schedulerStop = workflow.indexOf('if ! compose stop -t 45 scheduler; then');
-    const migrate = workflow.indexOf('bun run db:migrate');
-    const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
-    const roleVerify = workflow.indexOf('bun run db:verify-runtime-logins', migrate);
-    const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute --allow-empty');
-    const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
+    const redisQuiescence = deployScript.indexOf('wait_for_scoped_queue_quiescence 150 2');
+    const schedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
+    const migrate = deployScript.indexOf('bun run db:migrate');
+    const canonicalContract = deployScript.indexOf('bun run db:migration-contract', migrate);
+    const roleVerify = deployScript.indexOf('bun run db:verify-runtime-logins', migrate);
+    const publishCore = deployScript.indexOf(
+      'bun run cache:publish-core -- --execute --allow-empty',
+    );
+    const replaceServices = deployScript.indexOf('start_runtime_services', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
     expect(screenshotProbe).toBeGreaterThan(preflight);
@@ -225,11 +224,11 @@ describe('production environment preflight', () => {
     expect(redisQuiescence).toBeLessThan(stopServices);
     expect(schedulerStop).toBeGreaterThan(databaseQuiescence);
     expect(schedulerStop).toBeLessThan(redisQuiescence);
-    const postStopDatabaseQuiescence = workflow.indexOf(
+    const postStopDatabaseQuiescence = deployScript.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
       stopServices,
     );
-    const postStopRedisQuiescence = workflow.indexOf(
+    const postStopRedisQuiescence = deployScript.indexOf(
       'run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10',
       stopServices,
     );
@@ -241,22 +240,20 @@ describe('production environment preflight', () => {
     expect(publishCore).toBeGreaterThan(canonicalContract);
     expect(publishCore).toBeGreaterThan(roleVerify);
     expect(replaceServices).toBeGreaterThan(publishCore);
-    expect(workflow).toContain('using the configured Data runtime URL without rewriting it');
-    expect(workflow).not.toContain('letletme-vps-ops');
-    expect(workflow).not.toContain('flock -w 300 9');
-    expect(workflow).toContain('deployment_started=true');
-    expect(workflow).toContain('services_stopped=false');
-    expect(workflow).toContain('services_stopped=true');
-    expect(workflow).toContain('drain_content_worker_queues_for_deploy');
-    expect(workflow).toContain('prepare_content_worker_paused_runs_for_deploy');
-    expect(workflow).toContain('renew_content_worker_admission');
-    expect(workflow).toContain('restore_content_deploy_controls');
-    expect(workflow).not.toContain('restore_before_migration');
-    expect(workflow).not.toContain('/usr/local/libexec/vps-maintenance');
-    expect(workflow).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
-    expect(workflow).not.toContain('GRAPHQL_RUNTIME_DATABASE_URL');
-    expect(workflow).not.toContain('db:provision-runtime-logins');
-    expect(workflow).not.toContain('sleep 60');
+    expect(deployScript).toContain('Using the configured Data runtime URL without rewriting it');
+    expect(deployScript).toContain('DEPLOY_COMMITTED=false');
+    expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=false');
+    expect(deployScript).toContain('DEPLOY_SERVICES_STOPPED=true');
+    expect(deployScript).toContain('drain_content_worker_queues_for_deploy');
+    expect(deployScript).toContain('prepare_content_worker_paused_runs_for_deploy');
+    expect(deployScript).toContain('renew_content_worker_admission');
+    expect(deployScript).toContain('restore_content_deploy_controls');
+    expect(deployScript).not.toContain('restore_before_migration');
+    expect(deployScript).not.toContain('/usr/local/libexec/vps-maintenance');
+    expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
+    expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DATABASE_URL');
+    expect(deployScript).not.toContain('db:provision-runtime-logins');
+    expect(deployScript).not.toContain('sleep 60');
     for (const stage of [
       'pull',
       'preflight',
@@ -266,16 +263,18 @@ describe('production environment preflight', () => {
       'cachePublish',
       'serviceReady',
     ]) {
-      expect(workflow).toContain(`start_stage ${stage}`);
+      expect(deployScript).toContain(`start_stage ${stage}`);
     }
-    expect(workflow).toMatch(
+    expect(deployScript).toMatch(
       /DATABASE_URL="?\$data_runtime_database_url"?[\s\S]*?\n\s+-e DATABASE_URL api[\s\S]*?bun run cache:publish-core -- --execute --allow-empty/,
     );
-    expect(workflow).not.toContain('-e "DATABASE_URL=$data_runtime_database_url"');
-    expect(workflow).not.toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=$migration_database_url"');
-    expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
-    expect(workflow).toContain('read_env_setting DATABASE_BACKUP_DIR "$env_file"');
-    expect(workflow).toContain('export DATABASE_BACKUP_KEEP=${DATABASE_BACKUP_KEEP:-7}');
+    expect(deployScript).not.toContain('-e "DATABASE_URL=$data_runtime_database_url"');
+    expect(deployScript).not.toContain(
+      '-e "LIVE_POINTS_V2_SEED_DATABASE_URL=$migration_database_url"',
+    );
+    expect(deployScript).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(deployScript).toContain('read_env_setting DATABASE_BACKUP_DIR "$ENV_FILE"');
+    expect(deployScript).toContain('DATABASE_BACKUP_KEEP=${value:-7}');
   });
 
   test('restores stopped services when a pre-migration deployment gate rejects', () => {

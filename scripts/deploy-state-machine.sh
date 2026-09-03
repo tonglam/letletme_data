@@ -37,6 +37,13 @@ DEPLOY_CONTENT_WORKER_CONTROL_IMAGE=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE:-}
 DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE_TEMP_TAG:-}
 
 acquire_deploy_lock() {
+  # The CI bootstrap locks before replacing the checkout, then sources the
+  # exact target's deploy script in the same shell. Treat that inherited lock
+  # as already acquired instead of opening a second, self-conflicting FD.
+  if [[ -n "$deploy_lock_fd" ]]; then
+    echo "deploy lock already acquired: $deploy_lock_path"
+    return 0
+  fi
   mkdir -p "$(dirname "$deploy_lock_path")"
   exec {deploy_lock_fd}>"$deploy_lock_path"
   if ! flock -n "$deploy_lock_fd"; then

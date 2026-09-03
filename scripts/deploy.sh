@@ -310,6 +310,14 @@ deploy() {
     export APP_IMAGE
     log_info "Pulling the configured application image"
     compose --profile migration pull api scheduler worker content-worker live-picks-worker official-h2h-worker media-worker migration backup
+    if [[ "$APP_IMAGE" == *@sha256:* ]]; then
+      image_revision=$(docker image inspect \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$APP_IMAGE")
+      if [[ "$image_revision" != "$DEPLOY_SHA" ]]; then
+        log_error "Immutable image revision does not match DEPLOY_SHA."
+        exit 1
+      fi
+    fi
   else
     log_info "Building containers"
     compose build --pull
@@ -670,6 +678,10 @@ deploy() {
     exit 1
   fi
   DEPLOY_COMMITTED=true
+  if [[ -n "$DEPLOY_OLD_IMAGE" && "$DEPLOY_ROLLBACK_ELIGIBLE" = true ]]; then
+    printf '%s\n' "$DEPLOY_OLD_IMAGE" > "$HOME/.letletme-data-previous-image"
+    chmod 600 "$HOME/.letletme-data-previous-image"
+  fi
 }
 
 update_repo() {
