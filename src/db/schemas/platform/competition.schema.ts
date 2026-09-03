@@ -1851,7 +1851,7 @@ export const myFplSnapshotScopeStateInCompetition = competition.table(
         myFplSnapshotPublicationsInCompetition.revision,
       ],
       name: 'my_fpl_snapshot_scope_state_revision_fk',
-    }),
+    }).onDelete('cascade'),
     primaryKey({
       columns: [table.seasonId, table.eventId],
       name: 'my_fpl_snapshot_scope_state_pkey',

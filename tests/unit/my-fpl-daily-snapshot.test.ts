@@ -367,6 +367,9 @@ describe('My FPL daily snapshot publication contract', () => {
     );
     expect(scopeGenerationMigration).toContain('ON CONFLICT (season_id, event_id) DO NOTHING');
     expect(scopeGenerationMigration).toContain(
+      'REFERENCES competition.my_fpl_snapshot_publications(season_id, event_id, revision)\n    ON DELETE CASCADE',
+    );
+    expect(scopeGenerationMigration).toContain(
       'CREATE OR REPLACE VIEW reporting.my_fpl_active_snapshot_status',
     );
     expect(scopeGenerationView).not.toContain('array_agg(');

@@ -32,6 +32,7 @@ CREATE TABLE competition.my_fpl_snapshot_scope_state (
   CONSTRAINT my_fpl_snapshot_scope_state_revision_fk
     FOREIGN KEY (season_id, event_id, verified_revision)
     REFERENCES competition.my_fpl_snapshot_publications(season_id, event_id, revision)
+    ON DELETE CASCADE
 );
 
 CREATE INDEX my_fpl_snapshot_scope_state_dirty_idx
