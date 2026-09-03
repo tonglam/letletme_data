@@ -134,6 +134,14 @@ function readContentConsumerOwnerToken(): string | null {
   return token ? token : null;
 }
 
+export function isContentConsumerPauseOwned(
+  owner: string | null,
+  callerOwner: string,
+  acquiringOwner: string | null,
+): boolean {
+  return owner === callerOwner || (acquiringOwner !== null && owner === acquiringOwner);
+}
+
 export function parseContentConsumerModeArguments(
   argv: readonly string[],
 ): ContentConsumerModeArguments {
@@ -300,7 +308,7 @@ async function applyContentConsumerMode(args: ContentConsumerModeArguments) {
     let owner = await readQueueConsumerPauseOwner(args.queueName);
 
     if (args.mode === 'STATUS') {
-      let owned = owner === callerOwner || owner === acquiringOwner;
+      let owned = isContentConsumerPauseOwned(owner, callerOwner, acquiringOwner);
       if (ownerToken && owned && previousPaused && owner) {
         owned = await touchQueueConsumerPauseOwner(args.queueName, owner);
         if (!owned) owner = await readQueueConsumerPauseOwner(args.queueName);

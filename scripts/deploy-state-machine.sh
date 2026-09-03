@@ -1402,7 +1402,7 @@ run_tournament_review_hard_cut_backfill() {
     MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES \
     compose run --rm -T --interactive=false \
     -e DATABASE_URL -e MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM \
-    migration bun run db:backfill-tournament-review-v2 -- \
+    api bun run db:backfill-tournament-review-v2 -- \
     --season "$season" --batch-size 100 --max-batches 10000; then
     echo 'deploy review backfill: bounded V2.1 gate failed; services remain stopped' >&2
     return 1

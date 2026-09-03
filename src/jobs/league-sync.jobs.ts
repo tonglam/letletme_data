@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import type { FplSeasonRef } from '../domain/fpl-season';
 
+import { leagueSyncQueue } from '../queues/league-sync.queue';
 import {
-  leagueSyncQueue,
   LEAGUE_JOBS,
+  isLeagueSyncJobName,
+  validateLeagueSyncJobData,
   type LeagueSyncJobName,
   type LeagueSyncJobData,
-} from '../queues/league-sync.queue';
+} from '../queues/league-sync-job-contract';
+import { ValidationError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
@@ -25,6 +28,32 @@ export type LeagueSyncEnqueueOptions = {
   freshAfter?: string;
 };
 
+export function buildLeagueSyncJobData(
+  season: FplSeasonRef,
+  eventId: number,
+  source: LeagueSyncJobSource,
+  options: LeagueSyncEnqueueOptions,
+): LeagueSyncJobData {
+  const runId = options.runId ?? randomUUID();
+  return validateLeagueSyncJobData({
+    seasonId: season.seasonId,
+    seasonCode: season.seasonCode,
+    eventId,
+    tournamentId: options.tournamentId,
+    source,
+    triggeredAt: new Date().toISOString(),
+    runId,
+    ...(options.obligationId === undefined ? {} : { obligationId: options.obligationId }),
+    ...(options.obligationGeneration === undefined
+      ? {}
+      : { obligationGeneration: options.obligationGeneration }),
+    ...(options.freshnessWindowId === undefined
+      ? {}
+      : { freshnessWindowId: options.freshnessWindowId }),
+    ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
+  });
+}
+
 async function enqueueLeagueSyncJob(
   jobName: LeagueSyncJobName,
   season: FplSeasonRef,
@@ -33,28 +62,16 @@ async function enqueueLeagueSyncJob(
   options: LeagueSyncEnqueueOptions = {},
 ) {
   try {
+    if (!isLeagueSyncJobName(jobName)) {
+      throw new ValidationError('League sync job name is invalid.', 'INVALID_LEAGUE_SYNC_JOB');
+    }
+    // Validate before Redis admission and before constructing an e<eventId>
+    // job identity. TypeScript annotations cannot protect runtime callers.
+    const jobData = buildLeagueSyncJobData(season, eventId, source, options);
     const queue = leagueSyncQueue;
     if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
-    const runId = options.runId ?? randomUUID();
-    const jobData: LeagueSyncJobData = {
-      seasonId: season.seasonId,
-      seasonCode: season.seasonCode,
-      eventId,
-      tournamentId: options.tournamentId,
-      source,
-      triggeredAt: new Date().toISOString(),
-      runId,
-      ...(options.obligationId ? { obligationId: options.obligationId } : {}),
-      ...(options.obligationGeneration === undefined
-        ? {}
-        : { obligationGeneration: options.obligationGeneration }),
-      ...(options.freshnessWindowId === undefined
-        ? {}
-        : { freshnessWindowId: options.freshnessWindowId }),
-      ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
-    };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
     // Other cron, manual, and cascade runs retain unique IDs.
@@ -79,7 +96,7 @@ async function enqueueLeagueSyncJob(
     logInfo('League sync job enqueued', {
       jobId: job.id,
       jobName,
-      runId: job.data?.runId ?? runId,
+      runId: job.data?.runId ?? jobData.runId,
       eventId,
       tournamentId: options.tournamentId,
       source,

@@ -1,35 +1,22 @@
 import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
+import type { LeagueSyncJobData } from './league-sync-job-contract';
 import { leagueSyncQueueName } from './names';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from './retention';
 
 export { leagueSyncQueueName } from './names';
 
-export const LEAGUE_JOBS = {
-  LEAGUE_EVENT_PICKS: 'league-event-picks',
-  LEAGUE_EVENT_RESULTS: 'league-event-results',
-} as const;
-
-export type LeagueSyncJobName = (typeof LEAGUE_JOBS)[keyof typeof LEAGUE_JOBS];
-
-export interface LeagueSyncJobData {
-  seasonId: number;
-  seasonCode: string;
-  eventId: number;
-  tournamentId?: number; // If specified, process only this tournament; if not, coordinator job
-  source: 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
-  triggeredAt: string;
-  /** Stable database-clock reuse cutoff retained across BullMQ attempts. */
-  freshAfter?: string;
-  /** Correlates a coordinator and all of its per-tournament child attempts. */
-  runId?: string;
-  /** Durable scheduler obligation identity carried through coordinator jobs. */
-  obligationId?: string;
-  obligationGeneration?: number;
-  /** Exact freshness window being repaired. */
-  freshnessWindowId?: number;
-}
+export {
+  INVALID_LEAGUE_SYNC_JOB_CODE,
+  InvalidLeagueSyncJobError,
+  isLeagueSyncJobName,
+  LEAGUE_JOBS,
+  LeagueSyncJobDataSchema,
+  parseLeagueSyncJobData,
+  validateLeagueSyncJobData,
+} from './league-sync-job-contract';
+export type { LeagueSyncJobData, LeagueSyncJobName } from './league-sync-job-contract';
 
 export const leagueSyncQueue = new Queue<LeagueSyncJobData>(leagueSyncQueueName, {
   connection: getQueueConnection(),

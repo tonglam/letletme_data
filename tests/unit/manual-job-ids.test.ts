@@ -57,6 +57,9 @@ mock.module('../../src/queues/league-sync.queue', () => ({
     LEAGUE_EVENT_PICKS: 'league-event-picks',
     LEAGUE_EVENT_RESULTS: 'league-event-results',
   },
+  isLeagueSyncJobName: (value: unknown) =>
+    value === 'league-event-picks' || value === 'league-event-results',
+  parseLeagueSyncJobData: (value: Record<string, unknown>) => value,
   leagueSyncQueue: {
     name: 'league-sync',
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {

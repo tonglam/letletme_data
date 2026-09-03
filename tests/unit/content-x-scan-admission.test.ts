@@ -5,6 +5,7 @@ import {
   parseContentWorkerAdmissionArguments,
   parseContentConsumerModeArguments,
   parseAllowedPausedQueueNames,
+  isContentConsumerPauseOwned,
   CONTENT_X_SCAN_QUEUE,
   CONTENT_CONSUMER_QUEUE_NAMES,
   DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS,
@@ -17,6 +18,19 @@ import {
 } from '../../src/services/queue-governance.service';
 
 describe('content-worker deployment admission command', () => {
+  test('does not report an owner-less pause as deployment-owned', () => {
+    expect(isContentConsumerPauseOwned(null, 'deployment:run-1', null)).toBe(false);
+    expect(isContentConsumerPauseOwned('deployment:run-1', 'deployment:run-1', null)).toBe(true);
+    expect(
+      isContentConsumerPauseOwned(
+        'acquiring:deployment:run-1',
+        'deployment:run-1',
+        'acquiring:deployment:run-1',
+      ),
+    ).toBe(true);
+    expect(isContentConsumerPauseOwned('operator', 'deployment:run-1', null)).toBe(false);
+  });
+
   function runQueueProbeShell(
     composeBody: string,
     environment: Record<string, string> = {},
