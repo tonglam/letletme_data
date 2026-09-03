@@ -23,7 +23,7 @@ import {
 } from '../jobs/entry-sync-enqueue';
 import { enqueueTournamentRosterSync } from '../jobs/tournament-sync.jobs';
 import {
-  captureMyFplSnapshot,
+  captureMyFplSnapshotWithScopeGeneration,
   assessMyFplFinalizationReadiness,
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
@@ -591,13 +591,18 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               }),
             ]);
           }
-          const capture = await captureMyFplSnapshot(season, eventId, snapshotKind, {
-            ...(job.data.snapshotActor ? { actor: job.data.snapshotActor } : {}),
-            ...(job.data.snapshotReason ? { reason: job.data.snapshotReason } : {}),
-            ...(job.data.snapshotIdempotencyKey
-              ? { idempotencyKey: job.data.snapshotIdempotencyKey }
-              : {}),
-          });
+          const capture = await captureMyFplSnapshotWithScopeGeneration(
+            season,
+            eventId,
+            snapshotKind,
+            {
+              ...(job.data.snapshotActor ? { actor: job.data.snapshotActor } : {}),
+              ...(job.data.snapshotReason ? { reason: job.data.snapshotReason } : {}),
+              ...(job.data.snapshotIdempotencyKey
+                ? { idempotencyKey: job.data.snapshotIdempotencyKey }
+                : {}),
+            },
+          );
           // An idempotent FINAL override may resolve to its original inactive
           // publication after a newer revision has become active. Delivery
           // evidence must certify the current active publication, not the

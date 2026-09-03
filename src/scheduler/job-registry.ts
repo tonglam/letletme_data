@@ -74,7 +74,7 @@ import {
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import {
-  getMyFplFinalizationControlState,
+  getMyFplFinalizationControlStateWithScope,
   hasFinalMyFplPublication,
 } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
@@ -709,7 +709,7 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
       // deep readiness audit here: it scans canonical Entries/Tournaments and
       // immutable snapshot children, which belongs only to the single-event
       // finalization worker.
-      const controlStates = await getMyFplFinalizationControlState(context.season);
+      const controlStates = await getMyFplFinalizationControlStateWithScope(context.season);
       const statusByEventId = new Map(controlStates.map((status) => [status.eventId, status]));
       for (const event of context.events) {
         if (!event.finished || !event.dataChecked) continue;
