@@ -50,6 +50,7 @@
   "myFplSnapshotPublicationOutboxInCompetition",
   "myFplSnapshotPublicationRevisionsInCompetition",
   "myFplSnapshotPublicationsInCompetition",
+  "myFplSnapshotScopeStateInCompetition",
   "myFplSnapshotTournamentAggregatesInCompetition",
   "myFplSnapshotTournamentRowsInCompetition",
   "officialLeagueKindInCompetition",
