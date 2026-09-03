@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
+  contentAcquisitionRuns,
   contentAcquisitionBudgetLedgers,
   contentAcquisitionBudgetReservations,
 } from '../../db/schemas/content.schema';
@@ -172,6 +173,32 @@ export async function reserveXRunBudgets(input: {
   const requestedUnits = input.units ?? 1;
   if (!Number.isSafeInteger(requestedUnits) || requestedUnits < 1) {
     throw new Error('X budget reservation units must be a positive integer');
+  }
+  const runRows = await input.tx
+    .select({
+      status: contentAcquisitionRuns.status,
+      leaseExpiresAt: contentAcquisitionRuns.leaseExpiresAt,
+    })
+    .from(contentAcquisitionRuns)
+    .where(eq(contentAcquisitionRuns.runId, input.runId))
+    .for('update')
+    .limit(1);
+  const run = runRows[0];
+  const runCanReserve =
+    run?.status === 'PENDING'
+      ? run.leaseExpiresAt === null || run.leaseExpiresAt > input.dbNow
+      : run?.status === 'RUNNING' &&
+        run.leaseExpiresAt !== null &&
+        run.leaseExpiresAt > input.dbNow;
+  if (!runCanReserve) {
+    return {
+      reserved: false,
+      deferredScope: 'RUN_INACTIVE',
+      remainingBeforeReservation: 0,
+      reservationIds: [],
+      createdReservationIds: [],
+      incrementedReservationIds: [],
+    };
   }
   await input.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('briefing-x-budget-v1'))`);
   const scopes = budgetScopes(input);

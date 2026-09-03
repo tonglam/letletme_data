@@ -15,6 +15,11 @@ export type ContentRuntimeFlags = Readonly<{
   youtubeNativeEnabled: boolean;
   youtubeGeneratedEnabled: boolean;
   realGrokEnabled: boolean;
+  xAccountProvider: 'GROK_BUILD' | 'TIKHUB';
+  tikhubApiKeyPresent: boolean;
+  tikhubTimeoutMs: number;
+  tikhubMaxOutputBytes: number;
+  tikhubMaxPagesPerMember: number;
   publicationEnabled: boolean;
   briefingPublicEnabled: boolean;
   grokConcurrency: number;
@@ -99,6 +104,14 @@ const integerEnv = (name: string, fallback: number, minimum: number, maximum: nu
 const numberEnv = (name: string, fallback: number, minimum: number, maximum: number): number =>
   parseStrictNumberEnv(process.env[name], fallback, minimum, maximum, name);
 
+function xAccountProviderEnv(): 'GROK_BUILD' | 'TIKHUB' {
+  const value = process.env.CONTENT_X_ACCOUNT_PROVIDER?.trim() || 'GROK_BUILD';
+  if (value !== 'GROK_BUILD' && value !== 'TIKHUB') {
+    throw new Error('CONTENT_X_ACCOUNT_PROVIDER must be GROK_BUILD or TIKHUB');
+  }
+  return value;
+}
+
 function assertHttpUrlWithoutCredentials(value: string, name: string): void {
   let parsed: URL;
   try {
@@ -128,6 +141,16 @@ export function getContentRuntimeFlags(): ContentRuntimeFlags {
     youtubeNativeEnabled: booleanEnv('CONTENT_YOUTUBE_NATIVE_ENABLED', false),
     youtubeGeneratedEnabled: booleanEnv('CONTENT_YOUTUBE_GENERATED_ENABLED', false),
     realGrokEnabled: booleanEnv('CONTENT_REAL_GROK_ENABLED', false),
+    xAccountProvider: xAccountProviderEnv(),
+    tikhubApiKeyPresent: Boolean(process.env.TIKHUB_API_KEY?.trim()),
+    tikhubTimeoutMs: integerEnv('CONTENT_TIKHUB_TIMEOUT_MS', 45_000, 1_000, 240_000),
+    tikhubMaxOutputBytes: integerEnv(
+      'CONTENT_TIKHUB_MAX_OUTPUT_BYTES',
+      4 * 1024 * 1024,
+      1024,
+      16 * 1024 * 1024,
+    ),
+    tikhubMaxPagesPerMember: integerEnv('CONTENT_TIKHUB_MAX_PAGES_PER_MEMBER', 25, 1, 100),
     publicationEnabled: booleanEnv('CONTENT_PUBLICATION_ENABLED', false),
     briefingPublicEnabled: booleanEnv('BRIEFING_PUBLIC_ENABLED', false),
     grokConcurrency: integerEnv('CONTENT_GROK_CONCURRENCY', 2, 1, 32),
@@ -231,6 +254,15 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
   if (flags.realGrokEnabled && !flags.xScanEnabled) {
     throw new Error('CONTENT_REAL_GROK_ENABLED requires CONTENT_X_SCAN_ENABLED');
   }
+  if (
+    flags.xAccountProvider === 'TIKHUB' &&
+    flags.xScanEnabled &&
+    (!flags.pipelineEnabled || !flags.realGrokEnabled || !flags.tikhubApiKeyPresent)
+  ) {
+    throw new Error(
+      'CONTENT_X_ACCOUNT_PROVIDER=TIKHUB requires pipeline/X scanning, Grok semantic support and TIKHUB_API_KEY',
+    );
+  }
   if (flags.xBackstopEnabled && (!flags.xScanEnabled || !flags.realGrokEnabled)) {
     throw new Error('CONTENT_X_BACKSTOP_ENABLED requires real X scanning');
   }
@@ -312,6 +344,7 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
     ['CONTENT_HERMES_TRANSCRIPT_TIMEOUT_MS', flags.hermesTranscriptTimeoutMs],
     ['CONTENT_SUPADATA_TIMEOUT_MS', flags.supadataTimeoutMs],
     ['CONTENT_HTTP_TIMEOUT_MS', flags.httpTimeoutMs],
+    ['CONTENT_TIKHUB_TIMEOUT_MS', flags.tikhubTimeoutMs],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1_000 || value > 2 * 60 * 60_000) {
       throw new Error(`${name} must be a safe integer between 1000 and 7200000`);
@@ -335,6 +368,7 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
     ['CONTENT_HERMES_TRANSCRIPT_MAX_OUTPUT_BYTES', flags.hermesTranscriptMaxOutputBytes],
     ['CONTENT_SUPADATA_MAX_OUTPUT_BYTES', flags.supadataMaxOutputBytes],
     ['CONTENT_HTTP_MAX_OUTPUT_BYTES', flags.httpMaxOutputBytes],
+    ['CONTENT_TIKHUB_MAX_OUTPUT_BYTES', flags.tikhubMaxOutputBytes],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1024 || value > 16 * 1024 * 1024) {
       throw new Error(`${name} must be a safe integer between 1024 and 16777216`);
@@ -348,6 +382,13 @@ export function assertContentRuntimeFlags(flags: ContentRuntimeFlags): void {
     throw new Error(
       'CONTENT_GROK_MAX_OUTPUT_BYTES must be a safe integer between 1024 and 4194304',
     );
+  }
+  if (
+    !Number.isSafeInteger(flags.tikhubMaxPagesPerMember) ||
+    flags.tikhubMaxPagesPerMember < 1 ||
+    flags.tikhubMaxPagesPerMember > 100
+  ) {
+    throw new Error('CONTENT_TIKHUB_MAX_PAGES_PER_MEMBER must be between 1 and 100');
   }
   if (
     !Number.isFinite(flags.xLaneCapMultiplier) ||

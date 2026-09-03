@@ -78,6 +78,62 @@ describe('formal acquisition request contracts', () => {
     ).toBe('FINAL90');
   });
 
+  test('persists TikHub only for fixed-account scans and defaults old snapshots to Grok', () => {
+    const baseRequest = {
+      schemaVersion: 1,
+      phase: 'NORMAL',
+      profileKey: 'x-official-v2',
+      profileRevision: 2,
+      windowStart: '2026-08-30T06:00:00.000Z',
+      windowEnd: '2026-08-30T18:00:00.000Z',
+      jobKind: 'X_KEYWORD_SCAN',
+      adapterKind: 'X_ACCOUNT',
+      coverageMode: 'BACKSTOP',
+      partition: {
+        partitionId: '00000000-0000-4000-8000-000000000001',
+        partitionKey: 'official-fpl',
+        members: [
+          {
+            endpointId: '00000000-0000-4000-8000-000000000002',
+            endpointKey: 'official-fpl-x',
+            sourceId: '00000000-0000-4000-8000-000000000003',
+            sourceKey: 'official-fpl',
+            adapterKind: 'X_ACCOUNT',
+            profileKey: 'x-official-v2',
+            locator: { handle: 'OfficialFPL' },
+            stableExternalId: '761568335138058240',
+            identityRequirement: 'REQUIRED',
+            rightsPolicy: {},
+          },
+        ],
+      },
+      toolRequest: compileXKeywordRequest({
+        handles: ['OfficialFPL'],
+        windowStart: new Date('2026-08-30T06:00:00.000Z'),
+        windowEnd: new Date('2026-08-30T18:00:00.000Z'),
+      }),
+    } as const;
+    expect(parseFormalRunRequestV1(baseRequest)).toMatchObject({
+      providerRoute: 'GROK_BUILD',
+    });
+    expect(
+      parseFormalRunRequestV1({ ...baseRequest, providerRoute: 'TIKHUB_TIMELINE' }),
+    ).toMatchObject({ providerRoute: 'TIKHUB_TIMELINE' });
+    expect(() =>
+      parseFormalRunRequestV1({
+        ...baseRequest,
+        providerRoute: 'TIKHUB_TIMELINE',
+        jobKind: 'X_SEMANTIC_SCAN',
+        adapterKind: 'X_SEMANTIC',
+        toolRequest: compileXSemanticRequest({
+          semanticProfileKey: 'availability-v1',
+          windowStart: new Date('2026-08-30T06:00:00.000Z'),
+          windowEnd: new Date('2026-08-30T18:00:00.000Z'),
+        }),
+      }),
+    ).toThrow('TikHub timeline is only valid for fixed-account keyword scans');
+  });
+
   test('allows generated fallback to resume a video explicitly deferred after native attempts', () => {
     const request = {
       schemaVersion: 1,

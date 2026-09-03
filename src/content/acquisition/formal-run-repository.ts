@@ -78,16 +78,17 @@ export type BegunFormalRun = Readonly<{
   providerJobId: string | null;
   providerUnits: number;
   providerTraceSequence: number;
+  leaseExpiresAt: Date | null;
   status: 'RUNNING' | 'TERMINAL';
 }>;
 
 export type FormalRunProviderEvidence = Readonly<{
-  provider: 'grok-build';
+  provider: 'grok-build' | 'tikhub';
   operation: string;
   requestMetadataHash: string;
-  responseMetadataHash: string;
-  providerJobIdHash: string;
-  providerUnits: 1;
+  responseMetadataHash: string | null;
+  providerJobIdHash: string | null;
+  providerUnits: number;
   terminalState: string;
   runMetrics: Readonly<Record<string, unknown>>;
 }>;
@@ -595,6 +596,7 @@ export async function claimDueFormalRuns(input: {
   enabledAdapters: readonly RecurringAdapterKind[];
   claimLimit: number;
   xBudgetPolicy?: XBudgetPolicy;
+  xAccountProvider?: 'GROK_BUILD' | 'TIKHUB';
   db?: DbHandle;
 }): Promise<readonly ClaimedFormalRun[]> {
   if (!Number.isSafeInteger(input.claimLimit) || input.claimLimit < 1 || input.claimLimit > 100) {
@@ -914,6 +916,10 @@ export async function claimDueFormalRuns(input: {
           profileRevision: schedule.profileRevision,
           windowStart: window.windowStart.toISOString(),
           windowEnd: window.windowEnd.toISOString(),
+          providerRoute:
+            schedule.adapterKind === 'X_ACCOUNT' && input.xAccountProvider === 'TIKHUB'
+              ? 'TIKHUB_TIMELINE'
+              : 'GROK_BUILD',
           coverageMode: schedule.scheduleRole,
           partition: {
             partitionId: partition.partitionId,
@@ -1013,7 +1019,9 @@ export async function claimDueFormalRuns(input: {
         leaseExpiresAt,
         evidenceMode:
           schedule.adapterKind === 'X_ACCOUNT' || schedule.adapterKind === 'X_SEMANTIC'
-            ? 'GROK_ATTESTED_FINAL'
+            ? 'providerRoute' in request && request.providerRoute === 'TIKHUB_TIMELINE'
+              ? 'PROVIDER_ATTESTED'
+              : 'GROK_ATTESTED_FINAL'
             : 'HTTP_DETERMINISTIC',
       });
       if (schedule.adapterKind === 'X_ACCOUNT' || schedule.adapterKind === 'X_SEMANTIC') {
@@ -1193,40 +1201,42 @@ export async function failFormalRun(input: {
       throw new Error('Rejected provider items require persisted provider evidence');
     }
     const request = parseFormalRunRequestV1(run.requestSnapshot);
-    const grokProviderAttempted =
+    const xProviderAttempted =
       input.providerEvidence !== undefined ||
       input.probeEvidence !== undefined ||
       input.providerProcessStarted === true;
-    const currentGrokProviderUnits =
+    const currentXProviderUnits =
       (input.providerEvidence?.providerUnits ?? (input.providerProcessStarted ? 1 : 0)) +
       (input.probeEvidence?.providerUnits ?? 0);
-    const currentGrokCallCount =
-      (input.providerEvidence ? 1 : 0) +
+    const currentXCallCount =
+      (input.providerEvidence?.providerUnits ?? 0) +
       (input.probeEvidence ? 1 : 0) +
       (!input.providerEvidence && input.providerProcessStarted ? 1 : 0);
-    const priorGrokProviderUnits = Number(run.providerUnits ?? 0);
-    if (!Number.isFinite(priorGrokProviderUnits) || priorGrokProviderUnits < 0) {
-      throw new Error('Failed formal run has invalid persisted Grok provider units');
+    const priorXProviderUnits = Number(run.providerUnits ?? 0);
+    if (!Number.isFinite(priorXProviderUnits) || priorXProviderUnits < 0) {
+      throw new Error('Failed formal run has invalid persisted X provider units');
     }
-    const grokProviderUnits = priorGrokProviderUnits + currentGrokProviderUnits;
-    let priorGrokTraceCount = 0;
-    let maximumGrokTraceSequence = -1;
-    if (grokProviderAttempted) {
+    const xProviderUnits = priorXProviderUnits + currentXProviderUnits;
+    let priorXCallCount = 0;
+    let maximumProviderTraceSequence = -1;
+    if (xProviderAttempted) {
       const traceRows = await tx.execute<{
         maximum: number | string | null;
-        count: number | string;
+        units: number | string;
       }>(sql`
         SELECT max(sequence) AS maximum,
-               count(*) FILTER (WHERE provider = 'grok-build')::integer AS count
+               COALESCE(sum(provider_units) FILTER (
+                 WHERE provider IN ('grok-build', 'tikhub')
+               ), 0)::integer AS units
         FROM content.acquisition_provider_traces
         WHERE run_id = ${input.runId}::uuid
       `);
-      maximumGrokTraceSequence = Number(traceRows[0]?.maximum ?? -1);
-      priorGrokTraceCount = Number(traceRows[0]?.count ?? 0);
+      maximumProviderTraceSequence = Number(traceRows[0]?.maximum ?? -1);
+      priorXCallCount = Number(traceRows[0]?.units ?? 0);
       if (
-        !Number.isSafeInteger(maximumGrokTraceSequence) ||
-        !Number.isSafeInteger(priorGrokTraceCount) ||
-        priorGrokTraceCount < 0
+        !Number.isSafeInteger(maximumProviderTraceSequence) ||
+        !Number.isSafeInteger(priorXCallCount) ||
+        priorXCallCount < 0
       ) {
         throw new Error('Failed formal run has invalid persisted provider trace state');
       }
@@ -1246,18 +1256,33 @@ export async function failFormalRun(input: {
     let supadataTotalProviderUnits: number | null = null;
     if (input.providerEvidence || input.probeEvidence) {
       if (run.adapterKind !== 'X_ACCOUNT' && run.adapterKind !== 'X_SEMANTIC') {
-        throw new Error('Grok provider evidence is only valid for formal X runs');
+        throw new Error('X provider evidence is only valid for formal X runs');
       }
       if (input.providerEvidence) {
+        const providerMatchesRequest =
+          input.providerEvidence.provider === 'grok-build'
+            ? 'toolRequest' in request &&
+              (!('providerRoute' in request) || request.providerRoute === 'GROK_BUILD') &&
+              request.toolRequest.toolName === input.providerEvidence.operation
+            : 'providerRoute' in request &&
+              request.providerRoute === 'TIKHUB_TIMELINE' &&
+              request.jobKind === 'X_KEYWORD_SCAN' &&
+              input.providerEvidence.operation === 'fetch_user_post_tweet';
         if (
-          !('toolRequest' in request) ||
-          request.toolRequest.toolName !== input.providerEvidence.operation ||
+          !providerMatchesRequest ||
           !/^[0-9a-f]{64}$/.test(input.providerEvidence.requestMetadataHash) ||
-          !/^[0-9a-f]{64}$/.test(input.providerEvidence.responseMetadataHash) ||
-          !/^[0-9a-f]{64}$/.test(input.providerEvidence.providerJobIdHash) ||
+          (input.providerEvidence.responseMetadataHash !== null &&
+            !/^[0-9a-f]{64}$/.test(input.providerEvidence.responseMetadataHash)) ||
+          (input.providerEvidence.providerJobIdHash !== null &&
+            !/^[0-9a-f]{64}$/.test(input.providerEvidence.providerJobIdHash)) ||
+          !Number.isSafeInteger(input.providerEvidence.providerUnits) ||
+          input.providerEvidence.providerUnits < 1 ||
           !input.providerEvidence.terminalState.trim()
         ) {
           throw new Error('Failed formal run has invalid provider evidence');
+        }
+        if (input.probeEvidence && input.providerEvidence.provider !== 'grok-build') {
+          throw new Error('Host Grok probe cannot be combined with another X provider');
         }
       }
       const committedReservations = input.releaseExecutionBudgetAfterProbe
@@ -1271,7 +1296,7 @@ export async function failFormalRun(input: {
         : await commitRunBudgets({ tx, runId: input.runId, dbNow });
       if (
         !committedReservations &&
-        !(input.probeEvidence && priorGrokProviderUnits >= input.probeEvidence.providerUnits)
+        !(input.probeEvidence && priorXProviderUnits >= input.probeEvidence.providerUnits)
       ) {
         throw new Error('Billed formal X failure has no reserved budget');
       }
@@ -1281,7 +1306,7 @@ export async function failFormalRun(input: {
               {
                 traceId: randomUUID(),
                 runId: input.runId,
-                sequence: maximumGrokTraceSequence + 1,
+                sequence: maximumProviderTraceSequence + 1,
                 provider: input.probeEvidence.provider,
                 operation: input.probeEvidence.operation,
                 requestMetadataHash: input.probeEvidence.requestMetadataHash,
@@ -1297,7 +1322,7 @@ export async function failFormalRun(input: {
               {
                 traceId: randomUUID(),
                 runId: input.runId,
-                sequence: maximumGrokTraceSequence + 1 + (input.probeEvidence ? 1 : 0),
+                sequence: maximumProviderTraceSequence + 1 + (input.probeEvidence ? 1 : 0),
                 provider: input.providerEvidence.provider,
                 operation: input.providerEvidence.operation,
                 requestMetadataHash: input.providerEvidence.requestMetadataHash,
@@ -1515,21 +1540,24 @@ export async function failFormalRun(input: {
           ? 'supadata'
           : input.hermesProviderAttempted
             ? 'hermes'
-            : grokProviderAttempted
-              ? 'grok-build'
-              : undefined,
+            : (input.providerEvidence?.provider ??
+              (input.probeEvidence
+                ? 'grok-build'
+                : xProviderAttempted
+                  ? 'providerRoute' in request && request.providerRoute === 'TIKHUB_TIMELINE'
+                    ? 'tikhub'
+                    : 'grok-build'
+                  : undefined)),
         providerJobId: input.supadataFailureEvidence?.providerJobId ?? undefined,
         providerUnits:
           supadataTotalProviderUnits === null
             ? input.hermesProviderUnits !== undefined
               ? String(input.hermesProviderUnits)
-              : grokProviderAttempted
-                ? String(grokProviderUnits || 1)
+              : xProviderAttempted
+                ? String(xProviderUnits || 1)
                 : undefined
             : String(supadataTotalProviderUnits),
-        xCallCount: grokProviderAttempted
-          ? priorGrokTraceCount + currentGrokCallCount
-          : priorGrokTraceCount,
+        xCallCount: xProviderAttempted ? priorXCallCount + currentXCallCount : priorXCallCount,
         traceVerified: input.providerEvidence !== undefined,
         runMetrics: sql`${contentAcquisitionRuns.runMetrics} || ${JSON.stringify(
           input.supadataFailureEvidence
@@ -2234,6 +2262,7 @@ export async function beginFormalRun(input: {
         providerJobId: run.providerJobId,
         providerUnits,
         providerTraceSequence,
+        leaseExpiresAt: dateValue(run.leaseExpiresAt),
         status: 'TERMINAL',
       };
     }
@@ -2260,6 +2289,7 @@ export async function beginFormalRun(input: {
       providerJobId: run.providerJobId,
       providerUnits,
       providerTraceSequence,
+      leaseExpiresAt: dateValue(run.leaseExpiresAt),
       status: 'RUNNING',
     };
   });

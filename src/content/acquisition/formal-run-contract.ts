@@ -81,6 +81,9 @@ const xScanRunRequestV1Schema = commonSchema
   .extend({
     jobKind: z.enum(['X_KEYWORD_SCAN', 'X_SEMANTIC_SCAN', 'X_THREAD_FETCH']),
     adapterKind: z.enum(['X_ACCOUNT', 'X_SEMANTIC']),
+    // Persist the selected transport with the immutable run request. Old
+    // snapshots predate this field and replay through the Grok route.
+    providerRoute: z.enum(['GROK_BUILD', 'TIKHUB_TIMELINE']).default('GROK_BUILD'),
     coverageMode: z.enum(['PRIMARY', 'BACKSTOP']).default('PRIMARY'),
     partition: z
       .object({
@@ -104,6 +107,16 @@ const xScanRunRequestV1Schema = commonSchema
         code: z.ZodIssueCode.custom,
         path: ['toolRequest', 'toolName'],
         message: 'X job kind and tool request must agree',
+      });
+    }
+    if (
+      request.providerRoute === 'TIKHUB_TIMELINE' &&
+      (request.jobKind !== 'X_KEYWORD_SCAN' || request.adapterKind !== 'X_ACCOUNT')
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['providerRoute'],
+        message: 'TikHub timeline is only valid for fixed-account keyword scans',
       });
     }
   });

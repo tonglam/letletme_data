@@ -241,7 +241,9 @@ function assertResultSemantics(input: PersistAcquisitionResultInput): void {
   }
   if (
     input.checkpointComplete &&
-    !['EMPTY', 'CHECKED_NO_CHANGE', 'COMPLETED', 'SATURATED', 'PARTIAL'].includes(input.state)
+    !['EMPTY', 'CHECKED_NO_CHANGE', 'COMPLETED', 'SATURATED', 'PARTIAL', 'GAP'].includes(
+      input.state,
+    )
   ) {
     throw new Error(`${input.state} cannot advance a discovery checkpoint`);
   }
@@ -936,15 +938,16 @@ export async function persistAcquisitionResult(
       );
     }
 
-    const priorProviderTraceRows = await tx.execute<{ count: string | number }>(sql`
-      SELECT count(*)::integer AS count
+    const priorProviderTraceRows = await tx.execute<{ units: string | number }>(sql`
+      SELECT COALESCE(sum(provider_units) FILTER (
+               WHERE provider IN ('grok-build', 'tikhub')
+             ), 0)::integer AS units
       FROM content.acquisition_provider_traces
       WHERE run_id = ${input.runId}::uuid
-        AND provider = 'grok-build'
     `);
-    const priorGrokTraceCount = Number(priorProviderTraceRows[0]?.count ?? 0);
-    if (!Number.isSafeInteger(priorGrokTraceCount) || priorGrokTraceCount < 0) {
-      throw new Error('Persisted Grok provider trace count is invalid');
+    const priorXCallCount = Number(priorProviderTraceRows[0]?.units ?? 0);
+    if (!Number.isSafeInteger(priorXCallCount) || priorXCallCount < 0) {
+      throw new Error('Persisted X provider trace units are invalid');
     }
 
     if (input.providerTraces?.length) {
@@ -1267,8 +1270,12 @@ export async function persistAcquisitionResult(
       });
     }
     const committedReservations = await commitRunBudgets({ tx, runId: input.runId, dbNow });
-    if (input.providerResult?.provider === 'grok-build' && committedReservations === 0) {
-      throw new Error('Attested formal X result has no reserved budget');
+    if (
+      (input.providerResult?.provider === 'grok-build' ||
+        input.providerResult?.provider === 'tikhub') &&
+      committedReservations === 0
+    ) {
+      throw new Error('Validated formal X result has no reserved budget');
     }
 
     let checkpointAdvanced = false;
@@ -1321,11 +1328,15 @@ export async function persistAcquisitionResult(
             ? undefined
             : String(input.providerResult.providerUnits),
         xCallCount:
-          priorGrokTraceCount +
-          (input.providerTraces?.filter((trace) => trace.provider === 'grok-build').length ?? 0),
+          priorXCallCount +
+          (input.providerTraces
+            ?.filter((trace) => trace.provider === 'grok-build' || trace.provider === 'tikhub')
+            .reduce((total, trace) => total + (trace.providerUnits ?? 0), 0) ?? 0),
         traceVerified:
           input.providerTraces?.some(
-            (trace) => trace.provider === 'grok-build' && trace.terminalState === 'ATTESTED_FINAL',
+            (trace) =>
+              (trace.provider === 'grok-build' && trace.terminalState === 'ATTESTED_FINAL') ||
+              (trace.provider === 'tikhub' && trace.terminalState === 'HTTP_VALIDATED'),
           ) ?? false,
         failureClass: null,
         failureDetailsHash: null,

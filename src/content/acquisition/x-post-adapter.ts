@@ -2,6 +2,7 @@ import type { AcquisitionBatchV1, AcquisitionItemV1 } from './acquisition-contra
 import { normalizeCanonicalText, sha256CanonicalJson } from './canonicalization';
 import type { XScanRunRequestV1 } from './formal-run-contract';
 import type { GrokBuildExecutionResult, GrokBuildXPostV1 } from './grok-build-executor';
+import type { TikHubXTimelineExecutionResult } from './tikhub-x-timeline-client';
 import { canonicalXPostUrl } from './x-query-compiler';
 
 const X_SNOWFLAKE_EPOCH_MS = 1_288_834_974_657n;
@@ -181,9 +182,10 @@ export function prevalidateGrokBuildPostsForAuthorResolution(input: {
 
 function adaptMappedPosts(input: {
   request: XScanRunRequestV1;
-  execution: GrokBuildExecutionResult;
+  execution: Pick<GrokBuildExecutionResult, 'posts'>;
   checkedAt: Date;
   limit: number;
+  saturatedOverride?: boolean;
   fallbackEndpointKey: string;
   resolveAuthor: (post: GrokBuildXPostV1) =>
     | Readonly<{
@@ -262,14 +264,14 @@ function adaptMappedPosts(input: {
       rejections,
     );
   }
-  const saturated = input.execution.posts.length >= input.limit;
+  const saturated = input.saturatedOverride ?? input.execution.posts.length >= input.limit;
   const stateHint =
     rejections.length > 0
       ? ('PARTIAL' as const)
-      : acceptedCount === 0
-        ? ('EMPTY' as const)
-        : saturated
-          ? ('SATURATED' as const)
+      : saturated
+        ? ('SATURATED' as const)
+        : acceptedCount === 0
+          ? ('EMPTY' as const)
           : ('COMPLETED' as const);
   const newestPostId =
     batches
@@ -298,6 +300,12 @@ export function adaptGrokBuildPosts(input: {
   execution: GrokBuildExecutionResult;
   checkedAt: Date;
 }): XPostAdapterResult {
+  if (input.request.providerRoute !== 'GROK_BUILD') {
+    throw new XPostQualityError(
+      'X_PROVIDER_ROUTE_MISMATCH',
+      'Grok post adapter requires the persisted Grok provider route',
+    );
+  }
   if (input.request.jobKind !== 'X_KEYWORD_SCAN' && input.request.jobKind !== 'X_THREAD_FETCH') {
     throw new XPostQualityError(
       'X_SEMANTIC_MAPPING_UNAVAILABLE',
@@ -365,6 +373,63 @@ export function adaptGrokBuildPosts(input: {
   });
 }
 
+export function adaptTikHubTimelinePosts(input: {
+  request: XScanRunRequestV1;
+  execution: TikHubXTimelineExecutionResult;
+  checkedAt: Date;
+}): XPostAdapterResult {
+  if (
+    input.request.providerRoute !== 'TIKHUB_TIMELINE' ||
+    input.request.jobKind !== 'X_KEYWORD_SCAN' ||
+    input.request.adapterKind !== 'X_ACCOUNT'
+  ) {
+    throw new XPostQualityError(
+      'X_PROVIDER_ROUTE_MISMATCH',
+      'TikHub timeline adapter requires a persisted fixed-account TikHub route',
+    );
+  }
+  const endpointByHandle = new Map(
+    input.request.partition.members.map((member) => [
+      member.locator.handle?.toLowerCase() ?? '',
+      member,
+    ]),
+  );
+  if (endpointByHandle.has('')) {
+    throw new XPostQualityError('X_IDENTITY_INVALID', 'X partition member has no handle');
+  }
+  return adaptMappedPosts({
+    request: input.request,
+    execution: input.execution,
+    checkedAt: input.checkedAt,
+    limit: Number.MAX_SAFE_INTEGER,
+    saturatedOverride: input.execution.saturated,
+    fallbackEndpointKey: input.request.partition.members[0]!.endpointKey,
+    resolveAuthor: (post) => {
+      const endpoint = endpointByHandle.get(post.authorHandle.toLowerCase());
+      if (!endpoint) {
+        throw new XPostQualityError(
+          'X_AUTHOR_OUTSIDE_PARTITION',
+          'X post author is outside the persisted partition snapshot',
+        );
+      }
+      if (
+        endpoint.identityRequirement !== 'HANDLE_ONLY' &&
+        (!endpoint.stableExternalId || !/^\d{1,20}$/.test(endpoint.stableExternalId))
+      ) {
+        throw new XPostQualityError(
+          'X_IDENTITY_INVALID',
+          'X partition member requires a numeric user ID before scanning',
+        );
+      }
+      return {
+        endpointKey: endpoint.endpointKey,
+        stableExternalId:
+          endpoint.identityRequirement === 'HANDLE_ONLY' ? null : endpoint.stableExternalId,
+      };
+    },
+  });
+}
+
 export function adaptGrokBuildSemanticPosts(input: {
   request: XScanRunRequestV1;
   execution: GrokBuildExecutionResult;
@@ -372,6 +437,7 @@ export function adaptGrokBuildSemanticPosts(input: {
   authors: readonly ResolvedSemanticXAuthor[];
 }): XPostAdapterResult {
   if (
+    input.request.providerRoute !== 'GROK_BUILD' ||
     input.request.jobKind !== 'X_SEMANTIC_SCAN' ||
     input.request.toolRequest.toolName !== 'x_semantic_search' ||
     input.execution.toolName !== 'x_semantic_search'

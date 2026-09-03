@@ -28,6 +28,11 @@ describe('content worker poll policy', () => {
       youtubeNativeEnabled: false,
       youtubeGeneratedEnabled: false,
       realGrokEnabled: false,
+      xAccountProvider: 'GROK_BUILD',
+      tikhubApiKeyPresent: false,
+      tikhubTimeoutMs: 45_000,
+      tikhubMaxOutputBytes: 4_194_304,
+      tikhubMaxPagesPerMember: 25,
       publicationEnabled: false,
       briefingPublicEnabled: false,
       grokConcurrency: 3,
@@ -153,6 +158,68 @@ describe('content worker poll policy', () => {
     expect(() => parseContentApiKeyHashes('not-a-digest', 'CONTENT_EDITOR_API_KEY_HASHES')).toThrow(
       'CONTENT_EDITOR_API_KEY_HASHES',
     );
+  });
+
+  test('allows a TikHub selection to remain configured while X acquisition is disabled', () => {
+    const disabledTikHub: ContentRuntimeFlags = {
+      pipelineEnabled: false,
+      acquisitionShadowMode: false,
+      xScanEnabled: false,
+      xBackstopEnabled: false,
+      httpAcquisitionEnabled: false,
+      podcastTranscriptEnabled: false,
+      youtubeDiscoveryEnabled: false,
+      youtubeNativeEnabled: false,
+      youtubeGeneratedEnabled: false,
+      realGrokEnabled: false,
+      xAccountProvider: 'TIKHUB',
+      tikhubApiKeyPresent: false,
+      tikhubTimeoutMs: 45_000,
+      tikhubMaxOutputBytes: 4_194_304,
+      tikhubMaxPagesPerMember: 25,
+      publicationEnabled: false,
+      briefingPublicEnabled: false,
+      grokConcurrency: 1,
+      grokRunnerSocket: '/run/letletme-grok-runner/runner.sock',
+      grokRunnerReleaseSha: null,
+      httpConcurrency: 1,
+      httpHostConcurrency: 1,
+      hermesTranscriptConcurrency: 1,
+      hermesTranscriptUrl: null,
+      hermesTranscriptTokenPresent: false,
+      hermesTranscriptTimeoutMs: 7_200_000,
+      hermesTranscriptMaxOutputBytes: 16_777_216,
+      supadataTimeoutMs: 75_000,
+      supadataMaxOutputBytes: 16_777_216,
+      supadataJobPollIntervalMs: 5_000,
+      grokTimeoutMs: 240_000,
+      grokMaxOutputBytes: 4_194_304,
+      grokExpectedVersion: '1.0.5',
+      httpTimeoutMs: 40_000,
+      httpMaxOutputBytes: 8_388_608,
+      dailyXCallLimit: 0,
+      final90XCallLimit: 0,
+      identityXCallLimit: 0,
+      xLaneCapMultiplier: 1,
+      supadataDailyCreditLimit: 0,
+      hermesDailyAudioMinutes: 0,
+      supadataApiKeyPresent: false,
+      youtubeDataApiKeyPresent: false,
+      revalidationUrl: null,
+      revalidationSecret: null,
+      editorApiKeyHashes: [],
+      publisherApiKeyHashes: [],
+    };
+
+    expect(() => assertContentRuntimeFlags(disabledTikHub)).not.toThrow();
+    expect(() =>
+      assertContentRuntimeFlags({
+        ...disabledTikHub,
+        pipelineEnabled: true,
+        xScanEnabled: true,
+        realGrokEnabled: true,
+      }),
+    ).toThrow('CONTENT_X_ACCOUNT_PROVIDER=TIKHUB');
   });
 
   test('keeps FINAL_90 disabled unless a future duty window and budget are recorded', () => {
