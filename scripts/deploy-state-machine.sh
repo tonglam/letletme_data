@@ -5,7 +5,10 @@
 # Shared with the GraphQL VPS deploy workflow.  Data listens on 3000 and
 # GraphQL on 4000, but both compose projects touch the same host resources.
 deploy_lock_path=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
-deploy_lock_fd=''
+# Preserve an already-held descriptor when the workflow sources this shared
+# state machine once before checkout and once from the exact target revision.
+# Re-sourcing must never silently forget the lock that protects the workdir.
+deploy_lock_fd=${deploy_lock_fd:-}
 CONTENT_WORKER_CONSUMER_QUEUE_NAMES=(
   content-x-scan
   content-http-acquisition

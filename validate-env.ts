@@ -13,6 +13,19 @@ if (!result.ok) {
   process.exit(1);
 }
 
+function describeProbeError(error: unknown): { name: string; message: string } {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      // Keep diagnostics useful without allowing a provider response to flood
+      // the deploy log. Storage credentials are never included in these
+      // messages by the client implementation.
+      message: error.message.slice(0, 240),
+    };
+  }
+  return { name: 'UnknownError', message: String(error).slice(0, 240) };
+}
+
 try {
   assertContentRuntimeFlags(getContentRuntimeFlags());
 } catch (error) {
@@ -37,7 +50,7 @@ if (process.argv.includes('--probe-bug-report-storage')) {
     });
   } catch (error) {
     console.error('[env] bug-report screenshot storage probe FAILED', {
-      error: error instanceof Error ? error.name : 'UnknownError',
+      error: describeProbeError(error),
     });
     process.exit(1);
   }
@@ -64,7 +77,7 @@ if (process.argv.includes('--probe-fpl-raw-snapshot-storage')) {
     });
   } catch (error) {
     console.error('[env] FPL raw snapshot storage probe FAILED', {
-      error: error instanceof Error ? error.name : 'UnknownError',
+      error: describeProbeError(error),
     });
     process.exit(1);
   }

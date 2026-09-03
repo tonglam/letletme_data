@@ -674,16 +674,28 @@ describe('release workflow gates', () => {
     expect(cleanupWorkflow).not.toContain('script_stop:');
   });
 
-  test('scans the immutable digest before promotion and SSH deployment', () => {
+  test('acquires the shared lock before snapshotting or mutating the remote checkout', () => {
+    const lock = workflow.indexOf('acquire_deploy_lock');
+    const snapshot = workflow.indexOf('old_container=$(docker compose ps -aq api');
+    const checkout = workflow.indexOf('git checkout --force main');
+
+    expect(lock).toBeGreaterThan(-1);
+    expect(snapshot).toBeGreaterThan(lock);
+    expect(checkout).toBeGreaterThan(lock);
+    expect(deployStateMachine).toContain('deploy_lock_fd=${deploy_lock_fd:-}');
+  });
+
+  test('scans and deploys the immutable digest before promoting it to latest', () => {
     const push = workflow.indexOf('Build and push immutable SHA image');
     const scan = workflow.indexOf('Scan immutable image digest');
-    const promote = workflow.indexOf('Promote scanned digest to latest');
+    const promote = workflow.indexOf('Promote verified digest to latest');
     const deploy = workflow.indexOf('Deploy exact image digest');
 
     expect(push).toBeGreaterThan(-1);
     expect(scan).toBeGreaterThan(push);
     expect(promote).toBeGreaterThan(scan);
-    expect(deploy).toBeGreaterThan(promote);
+    expect(deploy).toBeGreaterThan(scan);
+    expect(promote).toBeGreaterThan(deploy);
     expect(workflow).toContain(`ignore-unfixed: ${quote}false${quote}`);
     expect(workflow).toContain('severity: HIGH,CRITICAL');
     expect(workflow).not.toContain('--tag "${IMAGE_NAME}:latest" \\\n');
@@ -691,6 +703,9 @@ describe('release workflow gates', () => {
       'docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_REF}"',
     );
     expect(workflow).toContain('test "$latest_digest" = "$expected_digest"');
+    expect(workflow).toContain('EXPECTED_DEPLOY_SHA="$DEPLOY_SHA"');
+    expect(deployScript).toContain('EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA"');
+    expect(runtimeHealthScript).toContain('deploySha');
   });
 
   test('retains current and rollback Data digests and removes only unused failed digests', () => {

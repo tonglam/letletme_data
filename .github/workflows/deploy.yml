@@ -109,14 +109,6 @@ jobs:
           ignore-unfixed: 'false'
           severity: HIGH,CRITICAL
 
-      - name: Promote scanned digest to latest
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_REF}"
-          expected_digest="${IMAGE_REF##*@}"
-          latest_digest=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/ { print $2; exit }')
-          test "$latest_digest" = "$expected_digest"
-
       - name: Deploy exact image digest over pinned OpenSSH
         uses: ./.github/actions/pinned-openssh
         env:
@@ -256,6 +248,7 @@ jobs:
                       "$old_image" "$old_release_sha" "$old_runner_release_sha" \
                       "$old_media_present" "$old_image_id" && \
                       run_deploy_command_with_pause_renewal env \
+                      EXPECTED_DEPLOY_SHA="$old_release_sha" \
                       HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
                       PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
                       scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
@@ -285,6 +278,7 @@ jobs:
                     "$old_runner_release_sha" "$old_media_present" \
                     "$old_runtime_rollback_eligible" "$old_image_id" && \
                     run_deploy_command_with_pause_renewal env \
+                    EXPECTED_DEPLOY_SHA="$old_release_sha" \
                     HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
                     PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
                     scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
@@ -332,7 +326,26 @@ jobs:
             lower_user=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$lower_user" --password-stdin
             cd "$VPS_WORKDIR"
+            # Serialize every shared-workdir operation, including the
+            # rollback snapshot and git checkout.  The state machine is
+            # sourced again after checkout from the exact target revision;
+            # its lock descriptor is intentionally preserved across that
+            # second source.
+            source scripts/deploy-state-machine.sh
+            acquire_deploy_lock
             old_revision=$(git rev-parse HEAD)
+            old_container=$(docker compose ps -aq api | head -n 1)
+            old_image=""
+            old_image_id=""
+            old_media_present=false
+            if [ -n "$old_container" ]; then
+              old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
+              old_image_id=$(docker inspect --format '{{.Image}}' "$old_container")
+              test -n "$old_image"
+              test -n "$old_image_id"
+            fi
+            old_media_container=$(docker compose ps -aq media-worker 2>/dev/null | head -n 1)
+            if [ -n "$old_media_container" ]; then old_media_present=true; fi
             git fetch origin main
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
@@ -411,18 +424,6 @@ jobs:
             fi
             export LIVE_POINTS_V2_SEED_SEASON LIVE_POINTS_V2_SEED_EVENT_ID
 
-            old_container=$(docker compose ps -aq api | head -n 1)
-            old_image=""
-            old_media_present=false
-            if [ -n "$old_container" ]; then
-              old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
-              old_image_id=$(docker inspect --format '{{.Image}}' "$old_container")
-              test -n "$old_image"
-              test -n "$old_image_id"
-            fi
-            old_media_container=$(docker compose ps -aq media-worker 2>/dev/null | head -n 1)
-            if [ -n "$old_media_container" ]; then old_media_present=true; fi
-
             export APP_IMAGE="$IMAGE_REF"
             compose_direct() { docker compose "$@"; }
             compose() {
@@ -441,7 +442,6 @@ jobs:
             old_runner_release_sha=$(cat \
               /home/workspace/letletme-grok-runner/current.release 2>/dev/null || printf unknown)
             old_runner_release_sha=${old_runner_release_sha:-unknown}
-            acquire_deploy_lock
             image_pull_attempted=true
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api scheduler worker content-worker live-picks-worker official-h2h-worker media-worker migration backup
             image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")
@@ -721,6 +721,7 @@ jobs:
             # first API bind failure.
             APP_IMAGE="$IMAGE_REF" start_runtime_services
             run_deploy_command_with_pause_renewal env \
+              EXPECTED_DEPLOY_SHA="$DEPLOY_SHA" \
               HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300 \
               PROJECT_DIR="$VPS_WORKDIR" COMPOSE_FILE=docker-compose.yml COMPOSE_BIN='docker compose' \
               scripts/verify-runtime-health.sh
@@ -748,3 +749,12 @@ jobs:
             fi
             cleanup_obsolete_data_digests
             docker system df || true
+
+      - name: Promote verified digest to latest
+        if: success()
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_REF}"
+          expected_digest="${IMAGE_REF##*@}"
+          latest_digest=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/ { print $2; exit }')
+          test "$latest_digest" = "$expected_digest"

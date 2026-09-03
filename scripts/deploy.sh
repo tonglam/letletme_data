@@ -194,6 +194,7 @@ restore_stopped_services() {
   fi
   if [[ "$restored" = true ]]; then
     if ! run_deploy_command_with_pause_renewal env \
+      EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
       PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
       scripts/verify-runtime-health.sh; then
       log_error "Recovered runtime did not become healthy; leaving deployment controls closed."
@@ -234,6 +235,7 @@ deploy() {
           "$DEPLOY_OLD_MEDIA_PRESENT" "$DEPLOY_ROLLBACK_ELIGIBLE" \
           "$DEPLOY_OLD_IMAGE_ID" && \
           run_deploy_command_with_pause_renewal env \
+          EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
           PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
           scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
           controls_restored=true
@@ -646,6 +648,7 @@ deploy() {
   log_info "Current service status"
   compose ps
   if ! run_deploy_command_with_pause_renewal env \
+    EXPECTED_DEPLOY_SHA="$DEPLOY_SHA" \
     PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
     scripts/verify-runtime-health.sh; then
     log_error "Runtime health verification failed."

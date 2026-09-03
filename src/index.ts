@@ -183,12 +183,15 @@ const app = new Elysia()
       includeRuntimeDependencies: true,
       strict: true,
     });
-    if (!readiness.ready) set.status = 503;
+    const deploySha = process.env.DEPLOY_SHA?.trim() || 'unknown';
+    const deployIdentityValid = /^[0-9a-f]{40}$/.test(deploySha);
+    const deployReady = readiness.ready && deployIdentityValid;
+    if (!deployReady) set.status = 503;
     return {
-      success: readiness.ready,
-      status: readiness.ready ? 'deploy_ready' : 'deploy_not_ready',
+      success: deployReady,
+      status: deployReady ? 'deploy_ready' : 'deploy_not_ready',
       dependencies: readiness.dependencies,
-      deploySha: process.env.DEPLOY_SHA?.trim() || 'unknown',
+      deploySha,
       timestamp: new Date().toISOString(),
     };
   })
