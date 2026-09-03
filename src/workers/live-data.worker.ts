@@ -12,6 +12,10 @@ import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-ca
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
+import {
+  liveFinalRetentionCompletionEvidence,
+  runLiveFinalRetentionV2,
+} from '../services/live-final-retention.service';
 import { syncLiveMatchObservationV3 } from '../services/live-match-observation-v3.service';
 import {
   checkpointLiveMatchScopeV3,
@@ -106,6 +110,15 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
   logJobTriggered(context);
 
   return runTrackedJob(context, async () => {
+    if (job.name === LIVE_JOBS.LIVE_FINAL_RETENTION) {
+      const result = await runLiveFinalRetentionV2(season, eventId);
+      if (result.status !== 'succeeded') {
+        throw new Error(
+          `Live final retention did not complete for event ${eventId}: failed=${result.failed} minTtlMs=${result.minRemainingTtlMs ?? 'null'}`,
+        );
+      }
+      return result;
+    }
     if (job.name === LIVE_JOBS.LIVE_MATCH_CHECKPOINT) {
       if (!job.data.checkpointKind) {
         throw new Error('Live Match checkpoint job is missing checkpoint kind');
@@ -314,6 +327,9 @@ export function createLiveDataWorker(): WorkerRuntime {
         queue: liveDataQueueName,
         jobName: job.name,
         eventId: job.data.eventId,
+        ...(job.name === LIVE_JOBS.LIVE_FINAL_RETENTION && job.returnvalue
+          ? { retention: liveFinalRetentionCompletionEvidence(job.returnvalue) }
+          : {}),
         ...(job.data.freshnessWindowId === undefined
           ? {}
           : { freshnessWindowId: job.data.freshnessWindowId }),

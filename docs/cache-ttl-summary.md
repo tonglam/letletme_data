@@ -32,6 +32,15 @@ SHA-256 before serving it. Reads do not extend retention and a repeated
 publication ID is idempotent. PostgreSQL is an asynchronous complete
 checkpoint/cold fallback, not a heartbeat write path.
 
+After an event is final, the `live-final-retention` scheduler obligation runs
+every six hours for the unique current event. It renews a complete publication
+only when its remaining TTL is at or below 24 hours, restoring from the exact
+PostgreSQL checkpoint/head when the Redis publication is missing or invalid.
+The CAS lease path changes TTL only; it does not create a new publication or
+alter its identity and business timestamps. Once the event is no longer
+current, no further lease is granted and the final data expires naturally
+within the existing 48-hour window.
+
 Live Matches V3 has one external root but two internal publications: compact
 desk and fixture-grain detail. Detail may lag desk but may never lead its desk
 generation or cross fixture identity. The detail item hash is part of its key,

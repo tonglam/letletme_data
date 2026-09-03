@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import {
   entryEventPickHeadsInCompetition,
@@ -751,6 +751,68 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         throw new DatabaseError(
           'Failed to retrieve durable live input heads',
           'ENTRY_EVENT_PICKS_LIVE_INPUT_HEAD_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    /** Keyset page of all durable V2 heads for final retention validation. */
+    listHeadsByEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+      afterEntryId = 0,
+      limit = 250,
+    ): Promise<EntryEventPickHeadMetadata[]> => {
+      if (
+        !Number.isSafeInteger(eventId) ||
+        eventId <= 0 ||
+        !Number.isSafeInteger(afterEntryId) ||
+        afterEntryId < 0 ||
+        !Number.isSafeInteger(limit) ||
+        limit <= 0 ||
+        limit > 250
+      ) {
+        throw new DatabaseError(
+          'Invalid durable live input head page',
+          'ENTRY_EVENT_PICKS_HEAD_PAGE_INVALID',
+        );
+      }
+      try {
+        const db = await getDbInstance();
+        return await db
+          .select({
+            publicationId: entryEventPickHeadsInCompetition.publicationId,
+            generation: entryEventPickHeadsInCompetition.generation,
+            picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+            contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+            inputPayload: entryEventPickHeadsInCompetition.inputPayload,
+            rowCount: entryEventPickHeadsInCompetition.rowCount,
+            sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+            contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
+            checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
+            state: entryEventPickHeadsInCompetition.state,
+            entryId: entryEventPickHeadsInCompetition.entryId,
+          })
+          .from(entryEventPickHeadsInCompetition)
+          .where(
+            and(
+              eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+              eq(entryEventPickHeadsInCompetition.eventId, eventId),
+              gt(entryEventPickHeadsInCompetition.entryId, afterEntryId),
+            ),
+          )
+          .orderBy(asc(entryEventPickHeadsInCompetition.entryId))
+          .limit(limit);
+      } catch (error) {
+        logError('Failed to page durable live input heads', error, {
+          season: season.seasonCode,
+          eventId,
+          afterEntryId,
+          limit,
+        });
+        throw new DatabaseError(
+          'Failed to page durable live input heads',
+          'ENTRY_EVENT_PICKS_HEAD_PAGE_ERROR',
           error instanceof Error ? error : undefined,
         );
       }

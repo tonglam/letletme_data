@@ -10,6 +10,7 @@ export { liveDataQueueName } from './names';
 export const LIVE_JOBS = {
   LIVE_SNAPSHOT: 'live-snapshot',
   LIVE_MATCH_CHECKPOINT: 'live-match-checkpoint',
+  LIVE_FINAL_RETENTION: 'live-final-retention',
 } as const;
 
 export type LiveDataJobName = (typeof LIVE_JOBS)[keyof typeof LIVE_JOBS];

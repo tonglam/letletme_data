@@ -1831,6 +1831,8 @@ export async function schedulerObligationStatus(input: {
     attempts: number;
     lastError: string | null;
     nextAttemptAt: Date | null;
+    completedAt: Date | null;
+    evidence: Record<string, unknown>;
   } | null;
   overdue: boolean;
   consecutiveUnsuccessfulCycles: number;
@@ -1846,6 +1848,8 @@ export async function schedulerObligationStatus(input: {
       attempts: schedulerObligationsInOps.attempts,
       lastError: schedulerObligationsInOps.lastError,
       nextAttemptAt: schedulerObligationsInOps.nextAttemptAt,
+      completedAt: schedulerObligationsInOps.completedAt,
+      evidence: schedulerObligationsInOps.evidence,
       scheduledDueAtMs: sql<
         string | null
       >`${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs'`,
@@ -1885,6 +1889,8 @@ export async function schedulerObligationStatus(input: {
         attempts: rows[0].attempts,
         lastError: rows[0].lastError,
         nextAttemptAt: rows[0].nextAttemptAt,
+        completedAt: rows[0].completedAt,
+        evidence: (rows[0].evidence ?? {}) as Record<string, unknown>,
       }
     : null;
   let consecutiveUnsuccessfulCycles = 0;

@@ -6,16 +6,18 @@ import {
   clearLiveLeagueCheckpointDesiredV2,
   listLiveLeagueCheckpointDesiredScopesV2,
   markLiveLeaguePublicationCheckpointedV2,
+  parseLiveLeaguePublicationV2Manifest,
   readLiveLeagueCheckpointDesiredV2,
   readLiveLeaguePublicationV2,
   validateLiveLeaguePublicationV2Checkpoint,
-  type LeagueLiveRead,
   type LeagueLiveScope,
+  type LeagueLiveRead,
 } from '../cache/live-league-publication-v2';
 import { redisSingleton } from '../cache/singleton';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logError } from '../utils/logger';
 import { mapWithConcurrency } from '../utils/async';
+import type { FplSeasonRef } from '../domain/fpl-season';
 
 const CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
@@ -77,6 +79,92 @@ export async function readLiveLeagueCheckpointGenerationV2(
     .limit(1);
   const generation = Number(rows[0]?.generation ?? 0);
   return Number.isSafeInteger(generation) && generation > 0 ? generation : 0;
+}
+
+/** Read and validate one exact persisted FINAL league publication. */
+export async function readLiveLeagueCheckpointV2(
+  scope: LeagueLiveScope,
+  dbInstance?: DbOrTransaction,
+): Promise<LeagueLiveRead | null> {
+  if (scope.scope === 'H2H_MATCH') return null;
+  const db = dbInstance ?? (await getDb());
+  const seasonId = seasonIdFromCode(scope.season);
+  const [row] = await db
+    .select()
+    .from(liveLeagueCheckpointsInCompetition)
+    .where(
+      and(
+        eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
+        eq(liveLeagueCheckpointsInCompetition.eventId, scope.eventId),
+        eq(liveLeagueCheckpointsInCompetition.tournamentId, scope.tournamentId),
+        eq(liveLeagueCheckpointsInCompetition.scopeKind, scope.scope),
+        eq(liveLeagueCheckpointsInCompetition.state, 'FINALIZED'),
+      ),
+    )
+    .orderBy(desc(liveLeagueCheckpointsInCompetition.generation))
+    .limit(1);
+  if (!row) return null;
+  const publication = parseLiveLeaguePublicationV2Manifest(JSON.stringify(row.manifest), scope);
+  if (
+    !publication ||
+    publication.state !== 'FINALIZED' ||
+    publication.times.checkpointedAt === null ||
+    !validateLiveLeaguePublicationV2Checkpoint(scope, row.manifest, row.indexPayload, row.payload, {
+      publicationId: row.publicationId,
+      generation: row.generation,
+      state: row.state,
+      rowCount: row.rowCount,
+      payloadBytes: row.payloadBytes,
+      payloadSha256: row.payloadSha256,
+    }) ||
+    !Array.isArray(row.indexPayload) ||
+    row.payload === null ||
+    typeof row.payload !== 'object' ||
+    Array.isArray(row.payload)
+  ) {
+    return null;
+  }
+  return {
+    publication,
+    index: row.indexPayload as LeagueLiveRead['index'],
+    payload: row.payload as LeagueLiveRead['payload'],
+    servedFrom: 'POSTGRES_CHECKPOINT',
+  };
+}
+
+/** List persisted FINAL scopes for one current event, excluding H2H_MATCH. */
+export async function listLiveLeagueFinalCheckpointScopesV2(
+  season: FplSeasonRef,
+  eventId: number,
+  dbInstance?: DbOrTransaction,
+): Promise<readonly LeagueLiveScope[]> {
+  const db = dbInstance ?? (await getDb());
+  const rows = await db
+    .select({
+      tournamentId: liveLeagueCheckpointsInCompetition.tournamentId,
+      scope: liveLeagueCheckpointsInCompetition.scopeKind,
+    })
+    .from(liveLeagueCheckpointsInCompetition)
+    .where(
+      and(
+        eq(liveLeagueCheckpointsInCompetition.seasonId, season.seasonId),
+        eq(liveLeagueCheckpointsInCompetition.eventId, eventId),
+        eq(liveLeagueCheckpointsInCompetition.state, 'FINALIZED'),
+      ),
+    );
+  return rows.flatMap((row) => {
+    if (row.scope !== 'CLASSIC' && row.scope !== 'H2H_HEAD' && row.scope !== 'H2H_STANDINGS') {
+      return [];
+    }
+    return [
+      {
+        season: season.seasonCode,
+        eventId,
+        tournamentId: row.tournamentId,
+        scope: row.scope,
+      } satisfies LeagueLiveScope,
+    ];
+  });
 }
 
 function checkpointValues(read: LeagueLiveRead, checkpointedAt: Date) {
