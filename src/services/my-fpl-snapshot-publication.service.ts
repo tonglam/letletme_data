@@ -165,6 +165,70 @@ export type MyFplSnapshotOperationalStatus = Readonly<{
   pendingInvalidationCount: number;
   invalidationAttempts: number;
   finalSla: 'NOT_DUE' | 'DUE' | 'MET' | 'BREACHED';
+  /**
+   * The scheduler/status projection deliberately does not prove the current
+   * canonical scope.  The permanent generation projection will replace this
+   * marker; until then consumers must not interpret the publication metadata
+   * as a fresh completeness audit.
+   */
+  scopeVerification?: 'UNVERIFIED' | 'VERIFIED';
+  scopeGenerationInstalled?: boolean;
+  scopeState?: MyFplSnapshotScopeState;
+}>;
+
+/**
+ * Control-plane state for the 30-second finalization dispatcher.
+ *
+ * This query is intentionally limited to the event row, its active durable
+ * publication, and the two small outboxes.  It must never read canonical
+ * Entries, Tournament tables, immutable snapshot children, or the reporting
+ * audit view.  Those are worker-only concerns until the scope-generation
+ * projection is installed.
+ */
+export type MyFplFinalizationControlState = Readonly<{
+  /** False only for the P0 projection used before migration 0092. */
+  scopeGenerationInstalled: boolean;
+  eventId: number;
+  deadlineTime: string | null;
+  finished: boolean;
+  dataChecked: boolean;
+  dataCheckedAt: string | null;
+  activeRevision: number | null;
+  activeSnapshotDate: string | null;
+  activeKind: MyFplSnapshotKind | null;
+  activeContentSha256: string | null;
+  activePublishedAt: string | null;
+  expectedEntryCount: number | null;
+  readyEntryCount: number | null;
+  emptyEntryCount: number | null;
+  notApplicableEntryCount: number | null;
+  expectedTournamentCount: number | null;
+  readyTournamentCount: number | null;
+  entryScopeSha256: string | null;
+  tournamentScopeSha256: string | null;
+  pendingOutboxCount: number;
+  activeOutboxDeliveredCount: number;
+  outboxAttempts: number;
+  pendingInvalidationCount: number;
+  invalidationAttempts: number;
+  entryScopeGeneration: number | null;
+  verifiedEntryScopeGeneration: number | null;
+  tournamentScopeGeneration: number | null;
+  verifiedTournamentScopeGeneration: number | null;
+  entryDirtySince: string | null;
+  tournamentDirtySince: string | null;
+  verifiedRevision: number | null;
+}>;
+
+export type MyFplSnapshotScopeState = Readonly<{
+  entryDesired: number | null;
+  entryVerified: number | null;
+  tournamentDesired: number | null;
+  tournamentVerified: number | null;
+  entryDirtySince: string | null;
+  tournamentDirtySince: string | null;
+  verifiedRevision: number | null;
+  state: 'CLEAN' | 'ENTRY_DIRTY' | 'TOURNAMENT_DIRTY' | 'BOTH_DIRTY' | 'UNAVAILABLE';
 }>;
 
 export class MyFplSnapshotIncompleteError extends Error {
@@ -173,6 +237,16 @@ export class MyFplSnapshotIncompleteError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'MyFplSnapshotIncompleteError';
+  }
+}
+
+/** A source scope changed while a final publication was being captured. */
+export class MyFplSnapshotScopeGenerationConflictError extends Error {
+  readonly code = 'MY_FPL_SCOPE_GENERATION_CONFLICT';
+
+  constructor(seasonId: number, eventId: number) {
+    super(`My FPL scope generation changed during capture for ${seasonId}/${eventId}`);
+    this.name = 'MyFplSnapshotScopeGenerationConflictError';
   }
 }
 
@@ -390,6 +464,7 @@ function classifyMyFplCaptureContention(error: unknown): MyFplCaptureContention 
   let current = error;
   for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
     if (current instanceof MyFplCaptureLockBusyError) return 'lock-busy';
+    if (current instanceof MyFplSnapshotScopeGenerationConflictError) return 'serialization';
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as {
@@ -2480,6 +2555,368 @@ export async function assessMyFplFinalizationReadiness(
   };
 }
 
+/**
+ * Read only the finalization control plane.  This is the hot-path replacement
+ * for the former operational-status query: no reporting view, canonical
+ * business scope table, snapshot child table, aggregation, hash, or sort is
+ * allowed here. The database timeout is set on the transaction so PostgreSQL cancels
+ * the statement itself; a JavaScript timeout alone would leave the query
+ * running in the pool after the caller had moved on.
+ */
+type MyFplFinalizationControlRow = {
+  event_id: number;
+  deadline_time: Date | string | null;
+  finished: boolean;
+  data_checked: boolean;
+  data_checked_at: Date | string | null;
+  revision: number | string | null;
+  snapshot_date: string | null;
+  kind: MyFplSnapshotKind | null;
+  published_at: Date | string | null;
+  content_sha256: string | null;
+  expected_entry_count: number | null;
+  ready_entry_count: number | null;
+  empty_entry_count: number | null;
+  not_applicable_entry_count: number | null;
+  expected_tournament_count: number | null;
+  ready_tournament_count: number | null;
+  entry_scope_sha256: string | null;
+  tournament_scope_sha256: string | null;
+  pending_outbox_count: number;
+  active_outbox_delivered_count: number;
+  outbox_attempts: number;
+  pending_invalidation_count: number;
+  invalidation_attempts: number;
+  entry_scope_generation: number | string | null;
+  verified_entry_scope_generation: number | string | null;
+  tournament_scope_generation: number | string | null;
+  verified_tournament_scope_generation: number | string | null;
+  entry_dirty_since: Date | string | null;
+  tournament_dirty_since: Date | string | null;
+  verified_revision: number | string | null;
+};
+
+async function readMyFplFinalizationControlState(
+  season: FplSeasonRef,
+  includeScopeState: boolean,
+): Promise<readonly MyFplFinalizationControlState[]> {
+  const client = await getDbClient();
+  const rows = await client.begin(async (tx) => {
+    await tx`SET LOCAL statement_timeout = '2s'`;
+    const scopeColumns = includeScopeState
+      ? tx`
+          scope.entry_scope_generation,
+          scope.verified_entry_scope_generation,
+          scope.tournament_scope_generation,
+          scope.verified_tournament_scope_generation,
+          scope.entry_dirty_since,
+          scope.tournament_dirty_since,
+          scope.verified_revision
+        `
+      : tx`
+          NULL::bigint AS entry_scope_generation,
+          NULL::bigint AS verified_entry_scope_generation,
+          NULL::bigint AS tournament_scope_generation,
+          NULL::bigint AS verified_tournament_scope_generation,
+          NULL::timestamptz AS entry_dirty_since,
+          NULL::timestamptz AS tournament_dirty_since,
+          NULL::bigint AS verified_revision
+        `;
+    const scopeJoin = includeScopeState
+      ? tx`
+          LEFT JOIN competition.my_fpl_snapshot_scope_state scope
+            ON scope.season_id = event.season_id
+           AND scope.event_id = event.event_id
+        `
+      : tx``;
+    return tx<MyFplFinalizationControlRow[]>`
+      SELECT event.event_id,
+             event.deadline_time,
+             event.finished,
+             event.data_checked,
+             event.data_checked_at,
+             publication.revision,
+             publication.snapshot_date,
+             publication.kind,
+             publication.published_at,
+             publication.content_sha256,
+             publication.expected_entry_count,
+             publication.ready_entry_count,
+             publication.empty_entry_count,
+             publication.not_applicable_entry_count,
+             publication.expected_tournament_count,
+             publication.ready_tournament_count,
+             publication.entry_scope_sha256,
+             publication.tournament_scope_sha256,
+             COALESCE(outbox.pending_outbox_count, 0)::integer AS pending_outbox_count,
+             COALESCE(outbox.active_outbox_delivered_count, 0)::integer
+               AS active_outbox_delivered_count,
+             COALESCE(outbox.outbox_attempts, 0)::integer AS outbox_attempts,
+             COALESCE(invalidation.pending_invalidation_count, 0)::integer
+               AS pending_invalidation_count,
+             COALESCE(invalidation.invalidation_attempts, 0)::integer AS invalidation_attempts,
+             ${scopeColumns}
+      FROM fpl.events event
+      LEFT JOIN competition.my_fpl_snapshot_publications publication
+        ON publication.season_id = event.season_id
+       AND publication.event_id = event.event_id
+       AND publication.active
+      LEFT JOIN LATERAL (
+        SELECT count(*) FILTER (WHERE status IN ('PENDING', 'PROCESSING'))::integer
+                   AS pending_outbox_count,
+               count(*) FILTER (
+                 WHERE status = 'DELIVERED'
+                   AND publication.revision IS NOT NULL
+                   AND outbox_row.revision = publication.revision
+               )::integer AS active_outbox_delivered_count,
+               COALESCE(max(attempts), 0)::integer AS outbox_attempts
+        FROM competition.my_fpl_snapshot_publication_outbox outbox_row
+        WHERE outbox_row.season_id = event.season_id
+          AND outbox_row.event_id = event.event_id
+      ) outbox ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT count(*) FILTER (WHERE status IN ('PENDING', 'PROCESSING', 'FAILED'))::integer
+                   AS pending_invalidation_count,
+               COALESCE(max(attempts), 0)::integer AS invalidation_attempts
+        FROM competition.my_fpl_snapshot_invalidation_outbox invalidation_row
+          WHERE invalidation_row.season_id = event.season_id
+            AND invalidation_row.event_id = event.event_id
+      ) invalidation ON TRUE
+      ${scopeJoin}
+      WHERE event.season_id = ${season.seasonId}
+      ORDER BY event.event_id
+    `;
+  });
+
+  return rows.map((row) => ({
+    scopeGenerationInstalled: includeScopeState,
+    eventId: row.event_id,
+    deadlineTime: iso(row.deadline_time),
+    finished: row.finished,
+    dataChecked: row.data_checked,
+    dataCheckedAt: iso(row.data_checked_at),
+    activeRevision: row.revision === null ? null : Number(row.revision),
+    activeSnapshotDate: row.snapshot_date,
+    activeKind: row.kind,
+    activeContentSha256: row.content_sha256,
+    activePublishedAt: iso(row.published_at),
+    expectedEntryCount: nullableNumber(row.expected_entry_count),
+    readyEntryCount: nullableNumber(row.ready_entry_count),
+    emptyEntryCount: nullableNumber(row.empty_entry_count),
+    notApplicableEntryCount: nullableNumber(row.not_applicable_entry_count),
+    expectedTournamentCount: nullableNumber(row.expected_tournament_count),
+    readyTournamentCount: nullableNumber(row.ready_tournament_count),
+    entryScopeSha256: row.entry_scope_sha256,
+    tournamentScopeSha256: row.tournament_scope_sha256,
+    pendingOutboxCount: integerValue(row.pending_outbox_count),
+    activeOutboxDeliveredCount: integerValue(row.active_outbox_delivered_count),
+    outboxAttempts: integerValue(row.outbox_attempts),
+    pendingInvalidationCount: integerValue(row.pending_invalidation_count),
+    invalidationAttempts: integerValue(row.invalidation_attempts),
+    entryScopeGeneration: nullableNumber(row.entry_scope_generation),
+    verifiedEntryScopeGeneration: nullableNumber(row.verified_entry_scope_generation),
+    tournamentScopeGeneration: nullableNumber(row.tournament_scope_generation),
+    verifiedTournamentScopeGeneration: nullableNumber(row.verified_tournament_scope_generation),
+    entryDirtySince: iso(row.entry_dirty_since),
+    tournamentDirtySince: iso(row.tournament_dirty_since),
+    verifiedRevision: nullableNumber(row.verified_revision),
+  }));
+}
+
+/**
+ * P0 control query. It is deployable before the scope-generation migration:
+ * the shared reader selects the no-scope branch and terminal scope remains
+ * unverified.
+ */
+export async function getMyFplFinalizationControlState(
+  season: FplSeasonRef,
+): Promise<readonly MyFplFinalizationControlState[]> {
+  return readMyFplFinalizationControlState(season, false);
+}
+
+/** P1 control query after migration 0092 exposes the durable scope fence. */
+export async function getMyFplFinalizationControlStateWithScope(
+  season: FplSeasonRef,
+): Promise<readonly MyFplFinalizationControlState[]> {
+  return readMyFplFinalizationControlState(season, true);
+}
+
+function resolveMyFplSnapshotScopeState(
+  row: MyFplFinalizationControlState,
+): MyFplSnapshotScopeState {
+  const entryDesired = row.entryScopeGeneration;
+  const entryVerified = row.verifiedEntryScopeGeneration;
+  const tournamentDesired = row.tournamentScopeGeneration;
+  const tournamentVerified = row.verifiedTournamentScopeGeneration;
+  if (
+    entryDesired === null ||
+    entryVerified === null ||
+    tournamentDesired === null ||
+    tournamentVerified === null
+  ) {
+    return {
+      entryDesired,
+      entryVerified,
+      tournamentDesired,
+      tournamentVerified,
+      entryDirtySince: row.entryDirtySince,
+      tournamentDirtySince: row.tournamentDirtySince,
+      verifiedRevision: row.verifiedRevision,
+      state: 'UNAVAILABLE',
+    };
+  }
+  const entryDirty = entryDesired !== entryVerified;
+  const tournamentDirty = tournamentDesired !== tournamentVerified;
+  return {
+    entryDesired,
+    entryVerified,
+    tournamentDesired,
+    tournamentVerified,
+    entryDirtySince: row.entryDirtySince,
+    tournamentDirtySince: row.tournamentDirtySince,
+    verifiedRevision: row.verifiedRevision,
+    state:
+      entryDirty && tournamentDirty
+        ? 'BOTH_DIRTY'
+        : entryDirty
+          ? 'ENTRY_DIRTY'
+          : tournamentDirty
+            ? 'TOURNAMENT_DIRTY'
+            : 'CLEAN',
+  };
+}
+
+/**
+ * Status projection for `/jobs/status`.  It carries the durable publication
+ * metadata for operators while keeping canonical scope generation state
+ * separate from the deep audit. It is intentionally separate from
+ * `getMyFplSnapshotOperationalStatus`, whose deep readiness audit is reserved
+ * for the single-event finalization worker and compatibility tests.
+ */
+function resolveMyFplSnapshotControlStatus(
+  controls: readonly MyFplFinalizationControlState[],
+  now: Date,
+  scopeGenerationInstalled: boolean,
+): readonly MyFplSnapshotOperationalStatus[] {
+  return controls.map((row) => {
+    const dataCheckedAt = row.dataCheckedAt;
+    const publishedAt = row.activePublishedAt;
+    const finalDueAt = dataCheckedAt
+      ? new Date(new Date(dataCheckedAt).getTime() + MY_FPL_FINALIZATION_TOTAL_SLA_MS)
+      : null;
+    const observedEntryCount =
+      row.readyEntryCount === null || row.emptyEntryCount === null
+        ? null
+        : row.readyEntryCount + row.emptyEntryCount;
+    const finalDelivered =
+      row.activeKind === 'FINAL' &&
+      row.activeRevision !== null &&
+      row.activeOutboxDeliveredCount > 0;
+    const scopeState = resolveMyFplSnapshotScopeState(row);
+    const scopeVerified =
+      row.activeKind === 'FINAL' &&
+      scopeState.state === 'CLEAN' &&
+      scopeState.verifiedRevision === row.activeRevision;
+    const publicationEntryComplete =
+      row.expectedEntryCount !== null &&
+      row.readyEntryCount !== null &&
+      row.emptyEntryCount !== null &&
+      row.readyEntryCount + row.emptyEntryCount === row.expectedEntryCount;
+    const publicationTournamentComplete =
+      row.expectedTournamentCount !== null &&
+      row.readyTournamentCount === row.expectedTournamentCount;
+    const settlementState: MyFplSnapshotOperationalStatus['settlementState'] = !row.dataChecked
+      ? 'PROVISIONAL'
+      : finalDelivered
+        ? 'FINAL'
+        : finalDueAt && now.getTime() >= finalDueAt.getTime()
+          ? 'DELAYED'
+          : 'FINALIZING';
+    const finalSla: MyFplSnapshotOperationalStatus['finalSla'] =
+      !row.finished || !row.dataChecked
+        ? 'NOT_DUE'
+        : finalDelivered
+          ? 'MET'
+          : finalDueAt && now.getTime() < finalDueAt.getTime()
+            ? 'DUE'
+            : 'BREACHED';
+    const coverageState: MyFplSnapshotCoverageState =
+      row.activeKind === null
+        ? 'NO_PUBLICATION'
+        : row.activeKind === 'FINAL'
+          ? scopeVerified
+            ? 'COMPLETE'
+            : 'CORRECTION_PENDING'
+          : publicationEntryComplete && publicationTournamentComplete
+            ? 'COMPLETE'
+            : 'CORRECTION_PENDING';
+    return {
+      eventId: row.eventId,
+      deadlineTime: row.deadlineTime,
+      finished: row.finished,
+      dataChecked: row.dataChecked,
+      dataCheckedAt,
+      finalizationStartedAt: dataCheckedAt,
+      finalizationDueAt: finalDueAt?.toISOString() ?? null,
+      settlementState,
+      activeRevision: row.activeRevision,
+      activeSnapshotDate: row.activeSnapshotDate,
+      activeKind: row.activeKind,
+      activeContentSha256: row.activeContentSha256,
+      activePublishedAt: publishedAt,
+      activeAgeSeconds: publishedAt
+        ? Math.max(0, Math.floor((now.getTime() - new Date(publishedAt).getTime()) / 1000))
+        : null,
+      timelinessState: getMyFplSnapshotTimeliness(row.activeSnapshotDate, row.activeKind, now),
+      expectedEntryCount: row.expectedEntryCount,
+      observedEntryCount,
+      expectedNotApplicableEntryCount: row.notApplicableEntryCount,
+      expectedEntryScopeSha256: row.entryScopeSha256,
+      observedEntryScopeSha256: row.entryScopeSha256,
+      readyEntryCount: row.readyEntryCount,
+      emptyEntryCount: row.emptyEntryCount,
+      notApplicableEntryCount: row.notApplicableEntryCount,
+      expectedTournamentCount: row.expectedTournamentCount,
+      observedTournamentCount: row.readyTournamentCount,
+      expectedTournamentScopeSha256: row.tournamentScopeSha256,
+      observedTournamentScopeSha256: row.tournamentScopeSha256,
+      readyTournamentCount: row.readyTournamentCount,
+      currentEntryCount: observedEntryCount ?? 0,
+      pendingCorrectionEntryCount:
+        row.expectedEntryCount !== null && observedEntryCount !== null
+          ? Math.max(0, row.expectedEntryCount - observedEntryCount)
+          : 0,
+      coverageState,
+      pendingOutboxCount: row.pendingOutboxCount,
+      outboxAttempts: row.outboxAttempts,
+      pendingInvalidationCount: row.pendingInvalidationCount,
+      invalidationAttempts: row.invalidationAttempts,
+      finalSla,
+      scopeVerification: scopeVerified || row.activeKind !== 'FINAL' ? 'VERIFIED' : 'UNVERIFIED',
+      scopeGenerationInstalled,
+      scopeState,
+    };
+  });
+}
+
+/** P0 status projection; terminal scope is explicitly UNVERIFIED. */
+export async function getMyFplSnapshotControlStatus(
+  season: FplSeasonRef,
+  now = new Date(),
+): Promise<readonly MyFplSnapshotOperationalStatus[]> {
+  const controls = await getMyFplFinalizationControlState(season);
+  return resolveMyFplSnapshotControlStatus(controls, now, false);
+}
+
+/** P1 status projection after migration 0092 exposes scope generations. */
+export async function getMyFplSnapshotControlStatusWithScope(
+  season: FplSeasonRef,
+  now = new Date(),
+): Promise<readonly MyFplSnapshotOperationalStatus[]> {
+  const controls = await getMyFplFinalizationControlStateWithScope(season);
+  return resolveMyFplSnapshotControlStatus(controls, now, true);
+}
+
 export async function getMyFplSnapshotOperationalStatus(
   season: FplSeasonRef,
   now = new Date(),
@@ -2696,6 +3133,7 @@ async function captureMyFplSnapshotOnce(
   eventId: number,
   kind: MyFplSnapshotKind,
   options: MyFplSnapshotCaptureOptions = {},
+  useScopeGeneration = false,
 ): Promise<MyFplSnapshotCaptureResult> {
   const now = options.now ?? new Date();
   const snapshotDate = options.snapshotDate ?? utc8DateKey(now);
@@ -2759,6 +3197,73 @@ async function captureMyFplSnapshotOnce(
     }
 
     const active = await loadActivePublication(tx, season.seasonId, eventId);
+
+    // The generation read is the cheap capture fence.  It is deliberately
+    // not held with FOR UPDATE: scope triggers must be able to commit their
+    // short row update while this worker is building the publication.  The
+    // final CAS below then rejects a capture that raced a real scope change.
+    let scopeGenerationAtStart: {
+      entry: number;
+      tournament: number;
+    } | null = null;
+    if (kind === 'FINAL' && useScopeGeneration) {
+      await tx`
+        INSERT INTO competition.my_fpl_snapshot_scope_state (season_id, event_id)
+        VALUES (${season.seasonId}, ${eventId})
+        ON CONFLICT (season_id, event_id) DO NOTHING
+      `;
+      const scopeRows = await tx<
+        {
+          entry_scope_generation: number | string;
+          tournament_scope_generation: number | string;
+        }[]
+      >`
+        SELECT entry_scope_generation, tournament_scope_generation
+        FROM competition.my_fpl_snapshot_scope_state
+        WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
+      `;
+      const scope = scopeRows[0];
+      if (!scope) {
+        throw new MyFplSnapshotIncompleteError(
+          `My FPL scope state is unavailable for event ${eventId}`,
+        );
+      }
+      const entry = Number(scope.entry_scope_generation);
+      const tournament = Number(scope.tournament_scope_generation);
+      if (
+        !Number.isSafeInteger(entry) ||
+        entry < 0 ||
+        !Number.isSafeInteger(tournament) ||
+        tournament < 0
+      ) {
+        throw new MyFplSnapshotIncompleteError(
+          `My FPL scope state is invalid for event ${eventId}`,
+        );
+      }
+      scopeGenerationAtStart = { entry, tournament };
+    }
+
+    const verifyScopeGeneration = async (revision: number): Promise<void> => {
+      if (!scopeGenerationAtStart) return;
+      const verified = await tx<{ event_id: number }[]>`
+        UPDATE competition.my_fpl_snapshot_scope_state
+        SET verified_entry_scope_generation = entry_scope_generation,
+            verified_tournament_scope_generation = tournament_scope_generation,
+            verified_revision = ${revision},
+            entry_dirty_since = NULL,
+            tournament_dirty_since = NULL,
+            verified_at = clock_timestamp(),
+            updated_at = clock_timestamp()
+        WHERE season_id = ${season.seasonId}
+          AND event_id = ${eventId}
+          AND entry_scope_generation = ${scopeGenerationAtStart.entry}
+          AND tournament_scope_generation = ${scopeGenerationAtStart.tournament}
+        RETURNING event_id
+      `;
+      if (verified.length !== 1) {
+        throw new MyFplSnapshotScopeGenerationConflictError(season.seasonId, eventId);
+      }
+    };
 
     // Read the current canonical scopes inside the capture transaction before
     // considering an idempotent FINAL no-op.  The worker performs the same
@@ -2867,6 +3372,7 @@ async function captureMyFplSnapshotOnce(
         !idempotencyKey ||
         active?.idempotencyKey === idempotencyKey)
     ) {
+      await verifyScopeGeneration(active!.revision);
       return { status: 'noop', publication: active! };
     }
     if (idempotencyKey) {
@@ -4384,6 +4890,12 @@ async function captureMyFplSnapshotOnce(
       ON CONFLICT (season_id, event_id, revision) DO NOTHING
     `;
 
+    // The publication and its outbox receipt are now complete in the same
+    // transaction.  Only the generation CAS may authorize the active-pointer
+    // switch; a concurrent scope trigger makes this transaction retry and
+    // rolls back every child/outbox row it prepared.
+    await verifyScopeGeneration(revision);
+
     await tx`
       UPDATE competition.my_fpl_snapshot_publications
       SET active = false, updated_at = ${nowIso}::timestamptz
@@ -4451,6 +4963,21 @@ export function captureMyFplSnapshot(
 ): Promise<MyFplSnapshotCaptureResult> {
   return serializeMyFplSnapshotCapture(myFplSnapshotEventLockScope(season.seasonId, eventId), () =>
     captureMyFplSnapshotOnce(season, eventId, kind, options),
+  );
+}
+
+/**
+ * P1 finalization capture. The extra generation CAS is opt-in so the P0
+ * deployment remains runnable before migration 0092 is installed.
+ */
+export function captureMyFplSnapshotWithScopeGeneration(
+  season: FplSeasonRef,
+  eventId: number,
+  kind: MyFplSnapshotKind,
+  options: MyFplSnapshotCaptureOptions = {},
+): Promise<MyFplSnapshotCaptureResult> {
+  return serializeMyFplSnapshotCapture(myFplSnapshotEventLockScope(season.seasonId, eventId), () =>
+    captureMyFplSnapshotOnce(season, eventId, kind, options, true),
   );
 }
 

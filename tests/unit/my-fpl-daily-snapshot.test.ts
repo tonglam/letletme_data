@@ -33,6 +33,15 @@ const publicationService = readFileSync(
   'src/services/my-fpl-snapshot-publication.service.ts',
   'utf8',
 );
+const jobsStatus = readFileSync('src/services/jobs-status.service.ts', 'utf8');
+const controlProjection = publicationService.slice(
+  publicationService.indexOf('async function readMyFplFinalizationControlState'),
+  publicationService.indexOf('function resolveMyFplSnapshotScopeState'),
+);
+const statusProjection = publicationService.slice(
+  publicationService.indexOf('function resolveMyFplSnapshotControlStatus'),
+  publicationService.indexOf('export async function getMyFplSnapshotOperationalStatus'),
+);
 const governanceService = readFileSync('src/services/data-governance.service.ts', 'utf8');
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
 const maintenanceJobs = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
@@ -328,6 +337,22 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(governanceService).toContain('retireEmptyMyFplOutboxFreshnessWindows');
   });
 
+  test('isolates the P0 control path from periodic My FPL audits', () => {
+    expect(scheduler).toContain('getMyFplFinalizationControlState(context.season)');
+    expect(scheduler).not.toContain('getMyFplFinalizationControlStateWithScope');
+    expect(scheduler).not.toContain('getMyFplSnapshotOperationalStatus(');
+    expect(jobsStatus).toContain('getMyFplSnapshotControlStatus(season)');
+    expect(jobsStatus).not.toContain('getMyFplSnapshotControlStatusWithScope');
+    expect(worker).toContain('captureMyFplSnapshot(season, eventId, snapshotKind');
+    expect(worker).not.toContain('captureMyFplSnapshotWithScopeGeneration');
+    expect(controlProjection).toContain(String.raw`SET LOCAL statement_timeout = '2s'`);
+    expect(controlProjection).toContain('my_fpl_snapshot_publication_outbox');
+    expect(controlProjection).not.toContain('reporting.my_fpl_active_snapshot_status');
+    expect(controlProjection).not.toContain('competition.entries');
+    expect(controlProjection).not.toContain('competition.tournament_entries');
+    expect(publicationService).toContain('return readMyFplFinalizationControlState(season, false)');
+  });
+
   test('rebuilds legacy finals and keeps provisional transfer facts on one authority', () => {
     expect(publicationService).toContain('isManagerReviewV2MyFplPublication');
     expect(worker).toContain('activeFinalUsesManagerReviewV2');
@@ -339,9 +364,17 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(worker).toContain(
       'active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256',
     );
-    expect(scheduler).toContain('getMyFplSnapshotOperationalStatus');
+    expect(scheduler).toContain('getMyFplFinalizationControlState(context.season)');
     expect(scheduler).toContain('periodKey = myFplFinalizationPeriodKey({');
-    expect(scheduler).toContain('status.finalSla');
+    expect(scheduler).toContain(String.raw`control?.activeKind === 'FINAL'`);
+    expect(scheduler).not.toContain('getMyFplSnapshotOperationalStatus(');
+    expect(controlProjection).toContain(String.raw`SET LOCAL statement_timeout = '2s'`);
+    expect(statusProjection).toContain('getMyFplSnapshotControlStatus');
+    expect(statusProjection).toContain(String.raw`: 'UNVERIFIED'`);
+    expect(controlProjection).toContain('my_fpl_snapshot_publication_outbox');
+    expect(controlProjection).not.toContain('reporting.my_fpl_active_snapshot_status');
+    expect(controlProjection).not.toContain('competition.entries');
+    expect(controlProjection).not.toContain('competition.tournament_entries');
     expect(scheduler).toContain('delivery-recovered');
     expect(scheduler).toContain(String.raw`while (predecessor?.status === 'irrecoverable')`);
     expect(scheduler).toContain('predecessor = repairObligation');
