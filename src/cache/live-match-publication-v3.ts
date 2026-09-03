@@ -566,6 +566,64 @@ end
 return {'touched', encoded}
 `;
 
+/** TTL-only final lease renewal. The active pointer remains the CAS fence. */
+const RENEW_DESK_FINAL_LEASE_LUA = `
+local raw = redis.call('GET', KEYS[1]) or ''
+if raw ~= (ARGV[1] or '') then return {'changed'} end
+local ok, value = pcall(cjson.decode, raw)
+if not ok or type(value) ~= 'table' or value.contractVersion ~= 'live-matches-v3' or
+   value.publicationId ~= ARGV[2] or value.generation ~= tonumber(ARGV[3]) or
+   value.state ~= 'FINALIZED' or type(value.desk) ~= 'table' then return {'invalid'} end
+local item = value.desk
+if item.name ~= 'desk' or item.type ~= 'string' or type(item.key) ~= 'string' or
+   type(item.count) ~= 'number' or item.count < 0 or item.count ~= math.floor(item.count) or
+   type(item.bytes) ~= 'number' or item.bytes < 0 or item.bytes ~= math.floor(item.bytes) or
+   type(item.sha256) ~= 'string' or string.len(item.sha256) ~= 64 or
+   redis.call('EXISTS', item.key) ~= 1 then return {'invalid'} end
+local itemType = redis.call('TYPE', item.key)
+if type(itemType) == 'table' then itemType = itemType['ok'] end
+if itemType ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or
+   redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'invalid'} end
+if redis.call('PTTL', KEYS[1]) == -2 then return {'missing'} end
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+redis.call('PEXPIRE', item.key, ARGV[4])
+redis.call('PEXPIRE', item.key .. ':meta', ARGV[4])
+return {'renewed', tostring(redis.call('PTTL', KEYS[1]))}
+`;
+
+const RENEW_DETAIL_FINAL_LEASE_LUA = `
+local raw = redis.call('GET', KEYS[1]) or ''
+local manifestRaw = redis.call('GET', KEYS[2]) or ''
+if raw ~= (ARGV[1] or '') then return {'changed'} end
+local ok, value = pcall(cjson.decode, raw)
+local manifestOk, manifest = pcall(cjson.decode, manifestRaw)
+if not ok or not manifestOk or type(value) ~= 'table' or type(manifest) ~= 'table' or
+   value.contractVersion ~= 'live-matches-v3' or value.publicationId ~= ARGV[2] or
+   value.generation ~= tonumber(ARGV[3]) or value.finalized ~= true or
+   manifest.publicationId ~= value.publicationId or manifest.generation ~= value.generation or
+   manifest.finalized ~= true or type(value.fixtures) ~= 'table' then return {'invalid'} end
+for _, item in ipairs(value.fixtures) do
+  if type(item) ~= 'table' or item.type ~= 'string' or type(item.key) ~= 'string' or
+     type(item.fixtureId) ~= 'number' or item.fixtureId <= 0 or
+     type(item.count) ~= 'number' or item.count < 0 or item.count ~= math.floor(item.count) or
+     type(item.bytes) ~= 'number' or item.bytes < 0 or item.bytes ~= math.floor(item.bytes) or
+     type(item.sha256) ~= 'string' or string.len(item.sha256) ~= 64 or
+     redis.call('EXISTS', item.key) ~= 1 then return {'invalid'} end
+  local itemType = redis.call('TYPE', item.key)
+  if type(itemType) == 'table' then itemType = itemType['ok'] end
+  if itemType ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or
+     redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'invalid'} end
+end
+if redis.call('PTTL', KEYS[1]) == -2 or redis.call('PTTL', KEYS[2]) == -2 then return {'missing'} end
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
+for _, item in ipairs(value.fixtures) do
+  redis.call('PEXPIRE', item.key, ARGV[4])
+  redis.call('PEXPIRE', item.key .. ':meta', ARGV[4])
+end
+return {'renewed', tostring(redis.call('PTTL', KEYS[1]))}
+`;
+
 const CHECKPOINT_ONE_LUA = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'missing'} end
@@ -1941,6 +1999,104 @@ export async function touchLiveMatchDetailV3(input: {
   );
   if (status !== 'touched') return null;
   return parseDetailPublication(raw ?? null, scope);
+}
+
+export type LiveMatchFinalLeaseResult = Readonly<{
+  status: 'renewed' | 'changed' | 'invalid' | 'missing';
+  ttlMs: number | null;
+}>;
+
+/** Renew a complete FINAL desk without rewriting the desk manifest. */
+export async function renewLiveMatchDeskFinalLeaseV3(input: {
+  readonly publication: MatchDeskPublication;
+  readonly observedRaw?: string;
+  readonly redis?: Redis;
+}): Promise<LiveMatchFinalLeaseResult> {
+  const publication = input.publication;
+  const scope = { season: publication.season, eventId: publication.eventId } as const;
+  assertScope(scope);
+  if (publication.state !== 'FINALIZED') return { status: 'invalid', ttlMs: null };
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  const observedRaw =
+    input.observedRaw ?? (await redis.get(liveMatchDeskKey(scope, 'active'))) ?? '';
+  const current = await readDeskPointer(redis, scope, 'active');
+  if (
+    !current ||
+    current.servedFrom !== 'REDIS_CURRENT' ||
+    current.publication.publicationId !== publication.publicationId ||
+    current.publication.generation !== publication.generation ||
+    current.publication.state !== 'FINALIZED'
+  ) {
+    return { status: observedRaw === '' ? 'missing' : 'changed', ttlMs: null };
+  }
+  const rawAfterValidation = (await redis.get(liveMatchDeskKey(scope, 'active'))) ?? '';
+  if (rawAfterValidation !== observedRaw) return { status: 'changed', ttlMs: null };
+  const result = promotionResult(
+    await redis.eval(
+      RENEW_DESK_FINAL_LEASE_LUA,
+      1,
+      liveMatchDeskKey(scope, 'active'),
+      observedRaw,
+      publication.publicationId,
+      String(publication.generation),
+      String(LIVE_MATCH_FINAL_TTL_MS),
+    ),
+  );
+  const status = result[0];
+  return {
+    status:
+      status === 'renewed' || status === 'changed' || status === 'invalid' || status === 'missing'
+        ? status
+        : 'invalid',
+    ttlMs: status === 'renewed' ? Number(result[1] ?? 0) : null,
+  };
+}
+
+/** Renew every immutable FINAL detail item and its generation manifest. */
+export async function renewLiveMatchDetailFinalLeaseV3(input: {
+  readonly publication: MatchDetailPublication;
+  readonly observedRaw?: string;
+  readonly redis?: Redis;
+}): Promise<LiveMatchFinalLeaseResult> {
+  const publication = input.publication;
+  const scope = { season: publication.season, eventId: publication.eventId } as const;
+  assertScope(scope);
+  if (!publication.finalized) return { status: 'invalid', ttlMs: null };
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  const observedRaw =
+    input.observedRaw ?? (await redis.get(liveMatchDetailKey(scope, 'active'))) ?? '';
+  const current = await readDetailPointer(redis, scope, 'active');
+  if (
+    !current ||
+    current.servedFrom !== 'REDIS_CURRENT' ||
+    current.publication.publicationId !== publication.publicationId ||
+    current.publication.generation !== publication.generation ||
+    !current.publication.finalized
+  ) {
+    return { status: observedRaw === '' ? 'missing' : 'changed', ttlMs: null };
+  }
+  const rawAfterValidation = (await redis.get(liveMatchDetailKey(scope, 'active'))) ?? '';
+  if (rawAfterValidation !== observedRaw) return { status: 'changed', ttlMs: null };
+  const result = promotionResult(
+    await redis.eval(
+      RENEW_DETAIL_FINAL_LEASE_LUA,
+      2,
+      liveMatchDetailKey(scope, 'active'),
+      liveMatchDetailManifestKey(scope, publication.generation),
+      observedRaw,
+      publication.publicationId,
+      String(publication.generation),
+      String(LIVE_MATCH_FINAL_TTL_MS),
+    ),
+  );
+  const status = result[0];
+  return {
+    status:
+      status === 'renewed' || status === 'changed' || status === 'invalid' || status === 'missing'
+        ? status
+        : 'invalid',
+    ttlMs: status === 'renewed' ? Number(result[1] ?? 0) : null,
+  };
 }
 
 export async function markLiveMatchDeskCheckpointedV3(

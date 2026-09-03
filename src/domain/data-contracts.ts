@@ -163,6 +163,29 @@ export const dataContractRegistry = [
     visibility: 'public',
   },
   {
+    contractKey: 'live-final-retention',
+    dataset: 'redis:v2:fpl:live:final-retention',
+    lifecycleStages: ['review', 'finished'],
+    eligibility: 'the unique current event is finished and data_checked is true',
+    queueLane: liveDataQueueName,
+    schedulerJobs: ['live-final-retention'],
+    dispatchWithinMs: 15 * 60_000,
+    executionBudgetMs: 60 * 60_000,
+    freshnessEvidence: 'none',
+    integrity:
+      'current final global/match/entry/league publication identities are checkpoint-correct and every required Redis item retains more than 24 hours',
+    publicationEvidence: ['Redis final lease CAS', 'PostgreSQL final checkpoint/head identity'],
+    consumerEvidence: {},
+    retry: {
+      maxGenerations: 3,
+      policy: 'CAS-only TTL renewal or exact durable restore; identity conflicts fail closed',
+    },
+    compensator: 'bounded current-event final retention reconcile',
+    visibility: 'internal-only',
+    visibilityReason:
+      'Internal lease maintenance for public live publications; it is not a separate consumer dataset.',
+  },
+  {
     contractKey: 'live-picks',
     dataset: 'competition:live-entry-picks',
     lifecycleStages: ['active', 'review'],

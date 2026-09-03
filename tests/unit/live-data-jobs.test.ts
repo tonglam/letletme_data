@@ -16,6 +16,9 @@ const waitingJobs: Array<{
     matchObservationOnly?: boolean;
     promoteActiveEvent?: boolean;
     checkpointKind?: 'desk' | 'detail';
+    source?: string;
+    obligationId?: string;
+    obligationGeneration?: number;
   };
 }> = [];
 const existingJobIds = new Set<string>();
@@ -24,6 +27,7 @@ mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
     LIVE_SNAPSHOT: 'live-snapshot',
     LIVE_MATCH_CHECKPOINT: 'live-match-checkpoint',
+    LIVE_FINAL_RETENTION: 'live-final-retention',
   },
   liveDataQueue: {
     name: 'live-data',
@@ -38,8 +42,11 @@ mock.module('../../src/queues/live-data.queue', () => ({
       waitingJobs.push(job);
       return job;
     },
-    getJob: async (jobId: string) =>
-      existingJobIds.has(jobId) ? { id: jobId, getState: async () => 'completed' } : null,
+    getJob: async (jobId: string) => {
+      const pending = waitingJobs.find((job) => job.id === jobId);
+      if (pending) return { ...pending, getState: async () => pending.state ?? 'waiting' };
+      return existingJobIds.has(jobId) ? { id: jobId, getState: async () => 'completed' } : null;
+    },
     getJobs: async (states: string[]) =>
       waitingJobs.filter((job) => states.includes(job.state ?? 'waiting')),
   },
@@ -49,6 +56,7 @@ const {
   enqueueLiveActiveSnapshot,
   enqueueLiveMatchCheckpoint,
   enqueueLiveSnapshot,
+  enqueueLiveFinalRetention,
   liveSnapshotMinuteBucket,
 } = await import('../../src/jobs/live-data.jobs');
 
@@ -165,6 +173,44 @@ describe('Live Points V2 snapshot enqueue', () => {
     expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v2');
     expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
     expect(addCalls[0]?.data.expectedNextCheckAt).toBe('2026-08-09T12:35:26.000Z');
+  });
+
+  test('uses one deterministic six-hour final-retention bucket and preserves scheduler evidence', async () => {
+    const now = new Date('2026-08-09T12:34:56.000Z');
+    const job = await enqueueLiveFinalRetention(TEST_SEASON, 12, 'reconcile', {
+      now,
+      obligationId: 'obligation-retention',
+      obligationGeneration: 1,
+    });
+
+    expect(job?.id).toBe(
+      `live-final-retention-2627-e12-${Math.floor(now.getTime() / (6 * 60 * 60_000))}`,
+    );
+    expect(addCalls[0]).toMatchObject({
+      name: 'live-final-retention',
+      data: {
+        seasonId: 2026,
+        seasonCode: '2627',
+        eventId: 12,
+        source: 'reconcile',
+        obligationId: 'obligation-retention',
+        obligationGeneration: 1,
+      },
+    });
+  });
+
+  test('coalesces a pending final-retention bucket', async () => {
+    const now = new Date('2026-08-09T12:34:56.000Z');
+    waitingJobs.push({
+      id: `live-final-retention-2627-e12-${Math.floor(now.getTime() / (6 * 60 * 60_000))}`,
+      state: 'delayed',
+      name: 'live-final-retention',
+      data: { seasonId: TEST_SEASON.seasonId, eventId: 12 },
+    });
+
+    const job = await enqueueLiveFinalRetention(TEST_SEASON, 12, 'reconcile', { now });
+    expect(job?.id).toBe(waitingJobs[0]?.id);
+    expect(addCalls).toHaveLength(0);
   });
 
   test('creates a delayed successor when an active checkpoint coalesced a newer desired marker', async () => {

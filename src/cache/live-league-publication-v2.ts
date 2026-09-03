@@ -198,7 +198,7 @@ export type LeagueLiveRead = {
   readonly publication: LeagueLiveManifest;
   readonly index: readonly LeagueLiveIndex[];
   readonly payload: LeagueLivePayload;
-  readonly servedFrom: 'REDIS_CURRENT' | 'REDIS_PREVIOUS';
+  readonly servedFrom: 'REDIS_CURRENT' | 'REDIS_PREVIOUS' | 'POSTGRES_CHECKPOINT';
 };
 
 export type LeagueLivePointerReadV2 = {
@@ -1347,6 +1347,83 @@ if sequence < candidate.generation then redis.call('SET', KEYS[3], tostring(cand
 return {'published', currentRaw}
 `;
 
+/** Restore a validated FINAL checkpoint without allocating a new league id. */
+const RESTORE_FINAL_LUA = `
+local candidateOk, candidate = pcall(cjson.decode, ARGV[1])
+local observed = ARGV[2] or ''
+local currentRaw = redis.call('GET', KEYS[1]) or ''
+if currentRaw ~= observed then return {'changed'} end
+if not candidateOk or type(candidate) ~= 'table' or candidate.contractVersion ~= 'live-points-v2' or
+   candidate.state ~= 'FINALIZED' or type(candidate.items) ~= 'table' or
+   type(candidate.publicationId) ~= 'string' or type(candidate.generation) ~= 'number' or candidate.generation <= 0 then
+  return {'invalid_candidate'}
+end
+if currentRaw ~= '' then
+  local currentOk, current = pcall(cjson.decode, currentRaw)
+  if currentOk and type(current) == 'table' and current.contractVersion == 'live-points-v2' then
+    if current.season ~= candidate.season or current.eventId ~= candidate.eventId or
+       current.tournamentId ~= candidate.tournamentId or current.scope ~= candidate.scope or
+       current.matchId ~= candidate.matchId then return {'scope_mismatch'} end
+    if current.publicationId ~= candidate.publicationId or current.generation ~= candidate.generation then
+      if current.state == 'FINALIZED' or (type(current.generation) == 'number' and current.generation >= candidate.generation) then
+        return {'conflict'}
+      end
+    end
+  end
+end
+local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
+for _, name in ipairs({'index', 'payload'}) do
+  local item = candidate.items[name]
+  local payload = name == 'index' and (ARGV[3] or '') or (ARGV[4] or '')
+  if type(item) ~= 'table' or item.name ~= name or item.type ~= 'string' or
+     item.key ~= scopePrefix .. ':' .. tostring(candidate.generation) .. ':' .. name or
+     type(item.count) ~= 'number' or item.count < 0 or item.count ~= math.floor(item.count) or
+     type(item.bytes) ~= 'number' or item.bytes < 0 or item.bytes ~= math.floor(item.bytes) or
+     type(item.sha256) ~= 'string' or string.len(item.sha256) ~= 64 or string.len(payload) ~= item.bytes then
+    return {'invalid_item'}
+  end
+  redis.call('SET', item.key, payload)
+  redis.call('SET', item.key .. ':meta', tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256)
+  redis.call('PEXPIRE', item.key, ARGV[6])
+  redis.call('PEXPIRE', item.key .. ':meta', ARGV[6])
+end
+redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[5])
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[6])
+local sequence = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
+if sequence < candidate.generation then redis.call('SET', KEYS[3], tostring(candidate.generation)) end
+return {'restored'}
+`;
+
+/** TTL-only CAS for a complete FINAL league publication. */
+const RENEW_FINAL_LEASE_LUA = `
+local raw = redis.call('GET', KEYS[1]) or ''
+if raw ~= (ARGV[1] or '') then return {'changed'} end
+local ok, value = pcall(cjson.decode, raw)
+if not ok or type(value) ~= 'table' or value.contractVersion ~= 'live-points-v2' or
+   value.publicationId ~= ARGV[2] or value.generation ~= tonumber(ARGV[3]) or
+   value.state ~= 'FINALIZED' or type(value.items) ~= 'table' then return {'invalid'} end
+for _, name in ipairs({'index', 'payload'}) do
+  local item = value.items[name]
+  if type(item) ~= 'table' or item.name ~= name or item.type ~= 'string' or
+     type(item.key) ~= 'string' or type(item.count) ~= 'number' or item.count < 0 or
+     item.count ~= math.floor(item.count) or type(item.bytes) ~= 'number' or item.bytes < 0 or
+     item.bytes ~= math.floor(item.bytes) or type(item.sha256) ~= 'string' or string.len(item.sha256) ~= 64 or
+     redis.call('EXISTS', item.key) ~= 1 then return {'invalid'} end
+  local itemType = redis.call('TYPE', item.key)
+  if type(itemType) == 'table' then itemType = itemType['ok'] end
+  if itemType ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or
+     redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then return {'invalid'} end
+end
+if redis.call('PTTL', KEYS[1]) == -2 then return {'missing'} end
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+for _, name in ipairs({'index', 'payload'}) do
+  local item = value.items[name]
+  redis.call('PEXPIRE', item.key, ARGV[4])
+  redis.call('PEXPIRE', item.key .. ':meta', ARGV[4])
+end
+return {'renewed', tostring(redis.call('PTTL', KEYS[1]))}
+`;
+
 const TOUCH_LUA = `
 local currentRaw = redis.call('GET', KEYS[1]) or ''
 if currentRaw ~= ARGV[1] then return {'changed', currentRaw} end
@@ -2054,6 +2131,155 @@ export async function readLiveLeaguePublicationV2Pointer(
   assertScope(scope);
   const redis = redisClient ?? (await redisSingleton.getClient());
   return readPointer(redis, scope, pointer);
+}
+
+export type LiveLeagueFinalLeaseResult = Readonly<{
+  status: 'renewed' | 'changed' | 'invalid' | 'missing';
+  ttlMs: number | null;
+}>;
+
+/** Extend a complete FINAL league publication without changing its manifest. */
+export async function renewLiveLeagueFinalLeaseV2(input: {
+  readonly publication: LeagueLiveManifest;
+  readonly observedRaw?: string;
+  readonly redis?: Redis;
+}): Promise<LiveLeagueFinalLeaseResult> {
+  const publication = input.publication;
+  const scope: LeagueLiveScope = {
+    season: publication.season,
+    eventId: publication.eventId,
+    tournamentId: publication.tournamentId,
+    scope: publication.scope,
+    ...(publication.matchId === undefined ? {} : { matchId: publication.matchId }),
+  };
+  assertScope(scope);
+  if (publication.state !== 'FINALIZED') return { status: 'invalid', ttlMs: null };
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  const observedRaw =
+    input.observedRaw ?? (await redis.get(liveLeagueV2Key(scope, 'active'))) ?? '';
+  const current = await readPointer(redis, scope, 'active');
+  if (
+    !current ||
+    current.servedFrom !== 'REDIS_CURRENT' ||
+    current.publication.publicationId !== publication.publicationId ||
+    current.publication.generation !== publication.generation ||
+    current.publication.state !== 'FINALIZED'
+  ) {
+    return { status: observedRaw === '' ? 'missing' : 'changed', ttlMs: null };
+  }
+  const rawAfterValidation = (await redis.get(liveLeagueV2Key(scope, 'active'))) ?? '';
+  if (rawAfterValidation !== observedRaw) return { status: 'changed', ttlMs: null };
+  const result = (await redis.eval(
+    RENEW_FINAL_LEASE_LUA,
+    1,
+    liveLeagueV2Key(scope, 'active'),
+    observedRaw,
+    publication.publicationId,
+    String(publication.generation),
+    String(LIVE_LEAGUE_FINAL_TTL_MS),
+  )) as unknown;
+  if (!Array.isArray(result) || typeof result[0] !== 'string') {
+    return { status: 'invalid', ttlMs: null };
+  }
+  const status = result[0];
+  return {
+    status:
+      status === 'renewed' || status === 'changed' || status === 'invalid' || status === 'missing'
+        ? status
+        : 'invalid',
+    ttlMs: status === 'renewed' ? Number(result[1] ?? 0) : null,
+  };
+}
+
+/**
+ * Restore a self-contained FINAL league checkpoint with its persisted
+ * publication id and generation. H2H_MATCH is intentionally excluded because
+ * it has no PostgreSQL checkpoint and is rebuilt from canonical match rows.
+ */
+export async function restoreLiveLeaguePublicationV2Checkpoint(input: {
+  readonly checkpoint: LeagueLiveRead;
+  readonly redis?: Redis;
+}): Promise<{ readonly publication: LeagueLiveManifest; readonly restored: boolean }> {
+  const publication = input.checkpoint.publication;
+  const scope: LeagueLiveScope = {
+    season: publication.season,
+    eventId: publication.eventId,
+    tournamentId: publication.tournamentId,
+    scope: publication.scope,
+    ...(publication.matchId === undefined ? {} : { matchId: publication.matchId }),
+  };
+  assertScope(scope);
+  if (
+    publication.scope === 'H2H_MATCH' ||
+    publication.state !== 'FINALIZED' ||
+    publication.times.checkpointedAt === null ||
+    !validateLiveLeaguePublicationV2Payload(
+      scope,
+      publication,
+      input.checkpoint.index,
+      input.checkpoint.payload,
+    )
+  ) {
+    throw new CacheError('Invalid FINAL league checkpoint', 'LIVE_LEAGUE_CHECKPOINT_INVALID');
+  }
+  const indexItem = item(scope, publication.generation, 'index', input.checkpoint.index);
+  const payloadItem = item(scope, publication.generation, 'payload', input.checkpoint.payload);
+  const sameItem = (left: LeaguePublicationItem, right: LeaguePublicationItem): boolean =>
+    left.name === right.name &&
+    left.key === right.key &&
+    left.type === right.type &&
+    left.count === right.count &&
+    left.bytes === right.bytes &&
+    left.sha256 === right.sha256;
+  if (
+    !sameItem(publication.items.index, indexItem.manifest) ||
+    !sameItem(publication.items.payload, payloadItem.manifest)
+  ) {
+    throw new CacheError(
+      'FINAL league checkpoint payload does not match its manifest',
+      'LIVE_LEAGUE_CHECKPOINT_INVALID',
+    );
+  }
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  const observedRaw = (await redis.get(liveLeagueV2Key(scope, 'active'))) ?? '';
+  const result = (await redis.eval(
+    RESTORE_FINAL_LUA,
+    3,
+    liveLeagueV2Key(scope, 'active'),
+    liveLeagueV2Key(scope, 'previous'),
+    liveLeagueV2Key(scope, 'sequence'),
+    JSON.stringify(publication),
+    observedRaw,
+    indexItem.payload,
+    payloadItem.payload,
+    String(LIVE_LEAGUE_PREVIOUS_TTL_MS),
+    String(LIVE_LEAGUE_FINAL_TTL_MS),
+  )) as unknown;
+  if (!Array.isArray(result) || typeof result[0] !== 'string') {
+    throw new CacheError(
+      'Invalid FINAL league checkpoint restore result',
+      'LIVE_LEAGUE_CHECKPOINT_RESTORE_FAILED',
+    );
+  }
+  if (result[0] === 'changed') {
+    throw new CacheError(
+      'FINAL league checkpoint restore observed a changed current publication',
+      'LIVE_LEAGUE_CHECKPOINT_RESTORE_CHANGED',
+    );
+  }
+  if (result[0] === 'conflict' || result[0] === 'scope_mismatch') {
+    throw new CacheError(
+      `FINAL league checkpoint restore refused ${result[0]} current publication`,
+      'LIVE_LEAGUE_CHECKPOINT_CONFLICT',
+    );
+  }
+  if (result[0] !== 'restored') {
+    throw new CacheError(
+      `FINAL league checkpoint restore failed: ${result[0]}`,
+      'LIVE_LEAGUE_CHECKPOINT_RESTORE_FAILED',
+    );
+  }
+  return { publication, restored: true };
 }
 
 export async function markLiveLeaguePublicationCheckpointedV2(

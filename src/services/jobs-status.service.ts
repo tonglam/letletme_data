@@ -13,6 +13,7 @@ import {
   PRICE_CHANGE_READY_MS,
 } from './price-change-predictions.service';
 import { seasonRepository } from '../repositories/seasons';
+import { eventRepository } from '../repositories/events';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { allQueueNames } from '../queues/names';
 import { getQueueConnection } from '../utils/queue';
@@ -45,6 +46,7 @@ import { calculateBurnRate } from '../domain/freshness-slo';
 import { safePersistedDataErrorCode } from '../domain/error-classification';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
+import { LIVE_FINAL_RETENTION_THRESHOLD_MS } from './live-final-retention.service';
 import { readPriceChangeHotSnapshotMetadata } from './price-change-hot.service';
 import {
   FPL_BULK_MAX_INFLIGHT_HARD_CAP,
@@ -79,15 +81,22 @@ export function safeSchedulerLaneErrorCode(lastError: string | null): string | n
 type SchedulerObligationLatest = NonNullable<
   Awaited<ReturnType<typeof schedulerObligationStatus>>['latest']
 >;
+type SchedulerObligationLatestInput = Pick<
+  SchedulerObligationLatest,
+  'periodKey' | 'status' | 'dueAt' | 'generation' | 'attempts' | 'lastError' | 'nextAttemptAt'
+> &
+  Partial<Pick<SchedulerObligationLatest, 'completedAt' | 'evidence'>>;
 
 /**
  * Keep the price-change operational summary useful without leaking the
  * persisted scheduler error text.  The detailed error belongs to the
  * protected governance case feed and is never part of `/jobs/status`.
  */
-export function safeSchedulerObligationLatest(
-  latest: SchedulerObligationLatest | null,
-): (Omit<SchedulerObligationLatest, 'lastError'> & { lastErrorCode: string | null }) | null {
+export function safeSchedulerObligationLatest(latest: SchedulerObligationLatestInput | null):
+  | (Omit<SchedulerObligationLatestInput, 'lastError' | 'completedAt' | 'evidence'> & {
+      lastErrorCode: string | null;
+    })
+  | null {
   if (!latest) return null;
   return {
     periodKey: latest.periodKey,
@@ -104,6 +113,138 @@ function asContext(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+const LIVE_FINAL_RETENTION_FAMILIES = [
+  'global',
+  'matchDesk',
+  'matchDetail',
+  'entry',
+  'league',
+] as const;
+
+function retentionFamilyStatus(value: unknown): Record<string, unknown> {
+  const family = asContext(value);
+  if (!family) {
+    return { checked: 0, renewed: 0, restored: 0, failed: 1, minRemainingTtlMs: null };
+  }
+  const integer = (key: string): number =>
+    typeof family[key] === 'number' && Number.isSafeInteger(family[key]) && family[key] >= 0
+      ? family[key]
+      : 0;
+  const minRemainingTtlMs =
+    typeof family.minRemainingTtlMs === 'number' && Number.isFinite(family.minRemainingTtlMs)
+      ? family.minRemainingTtlMs
+      : null;
+  return {
+    checked: integer('checked'),
+    renewed: integer('renewed'),
+    restored: integer('restored'),
+    failed: integer('failed'),
+    minRemainingTtlMs,
+  };
+}
+
+async function getLiveFinalRetentionOperationalStatus(
+  season: Awaited<ReturnType<typeof seasonRepository.findCurrent>>,
+): Promise<Record<string, unknown>> {
+  const checkedAt = new Date().toISOString();
+  const current = await eventRepository.findCurrent(season);
+  if (!current || !current.finished || !current.dataChecked) {
+    return {
+      schemaVersion: 'live-final-retention-status-v1',
+      eventId: current?.id ?? null,
+      checkedAt,
+      lastRunAt: null,
+      state: 'NOT_APPLICABLE',
+      overdue: false,
+      consecutiveUnsuccessfulCycles: 0,
+      minRemainingTtlMs: null,
+      families: Object.fromEntries(
+        LIVE_FINAL_RETENTION_FAMILIES.map((family) => [family, retentionFamilyStatus(null)]),
+      ),
+      schedulerObligation: null,
+      reasonCodes: ['CURRENT_EVENT_NOT_FINAL'],
+    };
+  }
+
+  const obligation = await schedulerObligationStatus({
+    jobName: 'live-final-retention',
+    scopeKey: `${season.seasonCode}:event:${current.id}`,
+  }).catch(() => ({
+    latest: null,
+    overdue: true,
+    consecutiveUnsuccessfulCycles: 0,
+  }));
+  const latestEvidence = asContext(obligation.latest?.evidence);
+  const retention = asContext(latestEvidence?.retention);
+  const families = Object.fromEntries(
+    LIVE_FINAL_RETENTION_FAMILIES.map((family) => [
+      family,
+      retentionFamilyStatus(retention?.families && asContext(retention.families)?.[family]),
+    ]),
+  );
+  const minRemainingTtlMs =
+    retention && typeof retention.minRemainingTtlMs === 'number'
+      ? retention.minRemainingTtlMs
+      : null;
+  const identityMismatch = retention !== null && retention.eventId !== current.id;
+  const failed =
+    retention && typeof retention.failed === 'number' ? retention.failed : retention ? 1 : 0;
+  const critical =
+    !retention ||
+    identityMismatch ||
+    failed > 0 ||
+    retention.complete !== true ||
+    minRemainingTtlMs === null ||
+    minRemainingTtlMs < 12 * 60 * 60_000 ||
+    obligation.consecutiveUnsuccessfulCycles >= 2 ||
+    obligation.latest?.status === 'failed' ||
+    obligation.latest?.status === 'irrecoverable';
+  const warning =
+    !critical &&
+    (obligation.overdue ||
+      minRemainingTtlMs === null ||
+      minRemainingTtlMs <= LIVE_FINAL_RETENTION_THRESHOLD_MS);
+  const state = critical ? 'CRITICAL' : warning ? 'WARNING' : 'READY';
+  const reasonCodes = [
+    ...(!retention ? ['RETENTION_RESULT_MISSING'] : []),
+    ...(identityMismatch ? ['EVENT_IDENTITY_MISMATCH'] : []),
+    ...(failed > 0 ? ['RETENTION_PUBLICATION_FAILURE'] : []),
+    ...(minRemainingTtlMs === null ? ['RETENTION_TTL_UNAVAILABLE'] : []),
+    ...(minRemainingTtlMs !== null && minRemainingTtlMs < 12 * 60 * 60_000
+      ? ['RETENTION_TTL_CRITICAL']
+      : []),
+    ...(minRemainingTtlMs !== null && minRemainingTtlMs <= LIVE_FINAL_RETENTION_THRESHOLD_MS
+      ? ['RETENTION_TTL_WARNING']
+      : []),
+    ...(obligation.overdue ? ['RETENTION_JOB_OVERDUE'] : []),
+    ...(obligation.consecutiveUnsuccessfulCycles >= 2 ? ['RETENTION_TWO_UNSUCCESSFUL_CYCLES'] : []),
+  ];
+  return {
+    schemaVersion: 'live-final-retention-status-v1',
+    eventId: current.id,
+    checkedAt,
+    lastRunAt:
+      typeof retention?.checkedAt === 'string'
+        ? retention.checkedAt
+        : (obligation.latest?.completedAt?.toISOString() ?? null),
+    state,
+    overdue: obligation.overdue,
+    consecutiveUnsuccessfulCycles: obligation.consecutiveUnsuccessfulCycles,
+    minRemainingTtlMs,
+    families,
+    schedulerObligation: {
+      name: 'live-final-retention',
+      cadence: schedulerRegistry.find((definition) => definition.name === 'live-final-retention')
+        ?.cadence,
+      criticality: schedulerRegistry.find(
+        (definition) => definition.name === 'live-final-retention',
+      )?.criticality,
+      latest: safeSchedulerObligationLatest(obligation.latest),
+    },
+    reasonCodes,
+  };
 }
 
 function priceChangeEventSummary(
@@ -577,6 +718,22 @@ export async function getJobsStatus(
     });
   }
 
+  const liveFinalRetention = await getLiveFinalRetentionOperationalStatus(season).catch(() => ({
+    schemaVersion: 'live-final-retention-status-v1',
+    eventId: null,
+    checkedAt: new Date().toISOString(),
+    lastRunAt: null,
+    state: 'UNAVAILABLE',
+    overdue: true,
+    consecutiveUnsuccessfulCycles: 0,
+    minRemainingTtlMs: null,
+    families: Object.fromEntries(
+      LIVE_FINAL_RETENTION_FAMILIES.map((family) => [family, retentionFamilyStatus(null)]),
+    ),
+    schedulerObligation: null,
+    reasonCodes: ['RETENTION_STATUS_UNAVAILABLE'],
+  }));
+
   const connection = getQueueConnection();
   const queues = await Promise.all(
     allQueueNames.map(async (name) => {
@@ -756,6 +913,7 @@ export async function getJobsStatus(
     myFplSnapshots,
     myFplIntegrity,
     tournamentReviewV2,
+    liveFinalRetention,
     publicationConsistency,
     fplAdmission,
     priceChanges,

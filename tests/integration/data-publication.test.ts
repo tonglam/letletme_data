@@ -29,6 +29,8 @@ import {
   readLiveCheckpointDesiredV2,
   readEntryLiveInputV2,
   readLivePublicationV2,
+  renewEntryLiveInputV2FinalLease,
+  renewLivePublicationV2FinalLease,
   setLiveCheckpointDesiredV2,
   touchLivePublicationV2,
 } from '../../src/cache/live-publication-v2';
@@ -615,6 +617,40 @@ describe('immutable Redis publication', () => {
     expect(checkpointedTtl).toBeLessThanOrEqual(touchedTtl);
   });
 
+  test('renews a complete final global lease without changing publication identity or timestamps', async () => {
+    const finalized = await publishLivePublicationV2({
+      ...LIVE_SCOPE,
+      state: 'FINALIZED',
+      sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      eventLives: [],
+      fixtures: [],
+      redis,
+    });
+    const activeKey = liveV2Key(LIVE_SCOPE, 'active');
+    const observedRaw = await redis.get(activeKey);
+    if (!observedRaw) throw new Error('final global active pointer is missing');
+    const before = JSON.parse(observedRaw) as Record<string, unknown>;
+    const keys = [
+      activeKey,
+      finalized.publication.items.eventLive.key,
+      `${finalized.publication.items.eventLive.key}:meta`,
+      finalized.publication.items.fixtures.key,
+      `${finalized.publication.items.fixtures.key}:meta`,
+    ];
+    await Promise.all(keys.map((key) => redis.pexpire(key, 1_000)));
+
+    const renewed = await renewLivePublicationV2FinalLease({
+      publication: finalized.publication,
+      observedRaw,
+      redis,
+    });
+
+    expect(renewed.status).toBe('renewed');
+    expect(renewed.ttlMs).toBeGreaterThan(24 * 60 * 60 * 1000);
+    expect(await redis.get(activeKey)).toBe(observedRaw);
+    expect(JSON.parse((await redis.get(activeKey)) ?? '{}')).toEqual(before);
+  });
+
   test('a finalized entry input cannot be superseded by a provisional picks refresh', async () => {
     const provisionalInput = entryLiveInputFromFplPicks(
       explicitSeasonRef(ENTRY_SCOPE.season),
@@ -655,6 +691,25 @@ describe('immutable Redis publication', () => {
     expect(downgraded.publication.state).toBe('FINAL');
     expect((await readEntryLiveInputV2(ENTRY_SCOPE, redis))?.publication.state).toBe('FINAL');
     expect(await redis.exists(entryLiveV2Key(ENTRY_SCOPE, 'previous'))).toBe(1);
+
+    const activeKey = entryLiveV2Key(ENTRY_SCOPE, 'active');
+    const observedRaw = await redis.get(activeKey);
+    if (!observedRaw) throw new Error('final entry active pointer is missing');
+    const before = JSON.parse(observedRaw) as Record<string, unknown>;
+    const keys = [
+      activeKey,
+      finalized.publication.item.key,
+      `${finalized.publication.item.key}:meta`,
+    ];
+    await Promise.all(keys.map((key) => redis.pexpire(key, 1_000)));
+    const renewed = await renewEntryLiveInputV2FinalLease({
+      publication: finalized.publication,
+      observedRaw,
+      redis,
+    });
+    expect(renewed.status).toBe('renewed');
+    expect(renewed.ttlMs).toBeGreaterThan(24 * 60 * 60 * 1000);
+    expect(JSON.parse((await redis.get(activeKey)) ?? '{}')).toEqual(before);
   });
 
   test('a crash after staging leaves the prior revision active and the stage bounded', async () => {

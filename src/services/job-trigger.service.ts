@@ -12,7 +12,7 @@ import {
 } from '../jobs/entry-sync-enqueue';
 import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
-import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
+import { enqueueLiveFinalRetention, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentEventResultsSync } from '../jobs/tournament-event-results.jobs';
 import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
@@ -498,6 +498,16 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
         throw new Error('No current event found');
       }
       return enqueueLiveSnapshot(season, currentEvent.id, 'manual');
+    },
+    'live-final-retention': async () => {
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
+      if (!currentEvent) {
+        throw new Error('No current event found');
+      }
+      return enqueueLiveFinalRetention(season, currentEvent.id, 'manual', {
+        jobId: `manual-live-final-retention-e${currentEvent.id}-${Date.now()}`,
+      });
     },
     'live-finalization': runPostMatchConsolidation,
   };

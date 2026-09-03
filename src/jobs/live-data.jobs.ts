@@ -10,6 +10,7 @@ import {
 } from '../cache/live-match-publication-v3';
 
 const LIVE_MATCH_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
+export const LIVE_FINAL_RETENTION_INTERVAL_MS = 6 * 60 * 60_000;
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
@@ -336,6 +337,102 @@ export async function enqueueLiveSnapshot(
     return job;
   } catch (error) {
     logError('Failed to enqueue live snapshot job', error, {
+      season: season.seasonCode,
+      eventId,
+      source,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Enqueue one current-event final-publication retention pass.  The six-hour
+ * bucket is deliberately part of the default job identity so a scheduler
+ * restart cannot create duplicate work for the same retention window.
+ */
+export async function enqueueLiveFinalRetention(
+  season: FplSeasonRef,
+  eventId: number,
+  source: LiveDataJobSource = 'reconcile',
+  options: {
+    now?: Date;
+    jobId?: string;
+    runId?: string;
+    obligationId?: string;
+    obligationGeneration?: number;
+    /** Scheduler reconciliation may join an already-enqueued deterministic job. */
+    reuseExisting?: boolean;
+  } = {},
+) {
+  try {
+    const queue = liveDataQueue;
+    if (await isQueueDrainOnly(queue.name)) {
+      throw new QueueDrainOnlyError(queue.name);
+    }
+    const now = options.now ?? new Date();
+    const bucket = Math.floor(now.getTime() / LIVE_FINAL_RETENTION_INTERVAL_MS);
+    const generatedJobId = `live-final-retention-${season.seasonCode}-e${eventId}-${bucket}`;
+    const explicitJobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : null;
+    const baseJobId = explicitJobId ?? generatedJobId;
+    let jobId = baseJobId;
+    const existing = await queue.getJob(baseJobId);
+    if (existing) {
+      const state = await existing.getState();
+      const activeStates = ['waiting', 'waiting-children', 'delayed', 'active', 'paused'];
+      if (activeStates.includes(state)) {
+        logInfo('Live final retention job already pending; coalescing', {
+          jobId: existing.id,
+          season: season.seasonCode,
+          eventId,
+          state,
+        });
+        return existing;
+      }
+      if (!options.reuseExisting) {
+        logInfo('Live final retention job already completed for bucket; skipping', {
+          jobId: existing.id,
+          season: season.seasonCode,
+          eventId,
+          state,
+        });
+        return null;
+      }
+      jobId = `${baseJobId}-retry-${randomUUID()}`;
+    }
+    const job = await queue.add(
+      LIVE_JOBS.LIVE_FINAL_RETENTION,
+      {
+        seasonId: season.seasonId,
+        seasonCode: season.seasonCode,
+        eventId,
+        source,
+        triggeredAt: new Date().toISOString(),
+        runId:
+          options.runId ??
+          (options.obligationId && (options.obligationGeneration ?? 0) === 0
+            ? options.obligationId
+            : randomUUID()),
+        ...(options.obligationId ? { obligationId: options.obligationId } : {}),
+        ...(options.obligationGeneration === undefined
+          ? {}
+          : { obligationGeneration: options.obligationGeneration }),
+      } satisfies LiveDataJobData,
+      {
+        jobId,
+        ...(source === 'manual' ? { removeOnComplete: true, removeOnFail: true } : {}),
+      },
+    );
+    logInfo('Live final retention job enqueued', {
+      jobId: job.id,
+      season: season.seasonCode,
+      eventId,
+      source,
+      bucket,
+      queue: queue.name,
+    });
+    return job;
+  } catch (error) {
+    logError('Failed to enqueue Live final retention job', error, {
       season: season.seasonCode,
       eventId,
       source,

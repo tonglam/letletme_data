@@ -11,6 +11,7 @@ import {
   liveLeagueV2ItemKey,
   parseLiveLeaguePublicationV2Manifest,
   publishLiveLeaguePublicationV2,
+  renewLiveLeagueFinalLeaseV2,
   setLiveLeagueCheckpointDesiredV2,
   readLiveLeagueCheckpointDesiredV2,
   type LeagueLiveManifest,
@@ -223,5 +224,32 @@ describe('Live League V2 checkpoint desired marker', () => {
         promotionScope,
       )?.state,
     ).toBe('FINALIZED');
+  });
+
+  test('renews a complete final league lease without rewriting its manifest', async () => {
+    await redis.del(...promotionKeys);
+    const finalized = await publishLiveLeaguePublicationV2(
+      promotionInput('FINALIZED', '5'.repeat(64), '05'),
+    );
+    const activeKey = liveLeagueV2Key(promotionScope, 'active');
+    const observedRaw = await redis.get(activeKey);
+    if (!observedRaw) throw new Error('final league active pointer is missing');
+    const keys = [
+      activeKey,
+      finalized.publication.items.index.key,
+      `${finalized.publication.items.index.key}:meta`,
+      finalized.publication.items.payload.key,
+      `${finalized.publication.items.payload.key}:meta`,
+    ];
+    await Promise.all(keys.map((key) => redis.pexpire(key, 1_000)));
+
+    const renewed = await renewLiveLeagueFinalLeaseV2({
+      publication: finalized.publication,
+      observedRaw,
+      redis,
+    });
+    expect(renewed.status).toBe('renewed');
+    expect(renewed.ttlMs).toBeGreaterThan(24 * 60 * 60 * 1000);
+    expect(await redis.get(activeKey)).toBe(observedRaw);
   });
 });

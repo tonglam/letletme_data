@@ -71,6 +71,68 @@ describe('standalone scheduler registry', () => {
     expect(transfers?.successPredicate).toContain('entry transfers checkpoint');
   });
 
+  test('runs final retention only for the current finalized event and one six-hour bucket', async () => {
+    const retention = registry.find((definition) => definition.name === 'live-final-retention');
+    expect(retention).toMatchObject({
+      cadence: 'every six hours while the current event is finalized',
+      catchUpPolicy: 'latest-authoritative',
+      criticality: 'critical',
+      queueName: 'live-data',
+      executionLanes: ['queue:live-data'],
+    });
+    expect(retention?.successPredicate).toContain('above 24 hours');
+
+    const now = new Date('2026-08-23T12:00:00.000Z');
+    const finalized = await retention!.resolve({
+      season: TEST_SEASON,
+      now,
+      currentEventId: 12,
+      events: [
+        {
+          id: 12,
+          deadlineTime: new Date('2026-08-20T12:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: new Date('2026-08-21T12:00:00.000Z'),
+        },
+      ],
+    });
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]).toMatchObject({
+      scopeKey: `${TEST_SEASON.seasonCode}:event:12`,
+      eventId: 12,
+      source: 'reconcile',
+      evidence: { retentionOnly: true },
+    });
+    expect(finalized[0]?.periodKey).toBe(
+      `live-final-retention-12-${Math.floor(now.getTime() / (6 * 60 * 60_000))}`,
+    );
+
+    const repeated = await retention!.resolve({
+      season: TEST_SEASON,
+      now: new Date(now.getTime() + 30 * 60_000),
+      currentEventId: 12,
+      events: [{ id: 12, deadlineTime: null, finished: true, dataChecked: true }],
+    });
+    expect(repeated[0]?.periodKey).toBe(finalized[0]?.periodKey);
+
+    const nonFinal = await retention!.resolve({
+      season: TEST_SEASON,
+      now,
+      currentEventId: 12,
+      events: [{ id: 12, deadlineTime: null, finished: true, dataChecked: false }],
+    });
+    expect(nonFinal).toEqual([]);
+
+    const rotated = await retention!.resolve({
+      season: TEST_SEASON,
+      now,
+      currentEventId: 13,
+      events: [{ id: 12, deadlineTime: null, finished: true, dataChecked: true }],
+    });
+    expect(rotated).toEqual([]);
+  });
+
   test('declares semantic recovery finalizers for durable scheduler chains', () => {
     const modes = new Map(
       registry.map((definition) => [definition.name, definition.recoveryCompletionMode]),

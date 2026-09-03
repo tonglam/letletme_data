@@ -27,6 +27,8 @@ import {
   readLiveMatchDeskFenceV3,
   restoreLiveMatchDeskCheckpointV3,
   restoreLiveMatchDetailCheckpointV3,
+  renewLiveMatchDeskFinalLeaseV3,
+  renewLiveMatchDetailFinalLeaseV3,
   markLiveMatchDeskCheckpointedV3,
   setLiveMatchActiveEventV3,
   setLiveMatchCheckpointDesiredV3,
@@ -892,6 +894,56 @@ describe('Live Matches V3 Redis publications', () => {
     expect(
       (await readLiveMatchDetailV3({ ...scope, redis }))?.fixtures[0]?.players[0]?.stats[0]?.value,
     ).toBe(35);
+  });
+
+  test('renews final desk and detail leases without changing publication pointers', async () => {
+    const desk = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'FINALIZED',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const detail = await publishLiveMatchDetailV3({
+      ...scope,
+      observedDeskGeneration: desk.publication.generation,
+      fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(35),
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      finalized: true,
+      redis,
+    });
+    const deskActiveKey = liveMatchDeskKey(scope, 'active');
+    const detailActiveKey = liveMatchDetailKey(scope, 'active');
+    const deskRaw = await redis.get(deskActiveKey);
+    const detailRaw = await redis.get(detailActiveKey);
+    if (!deskRaw || !detailRaw) throw new Error('final Match pointers are missing');
+    const keys = [
+      deskActiveKey,
+      desk.publication.desk.key,
+      `${desk.publication.desk.key}:meta`,
+      detailActiveKey,
+      liveMatchDetailManifestKey(scope, detail.publication.generation),
+      ...detail.publication.fixtures.flatMap((item) => [item.key, `${item.key}:meta`]),
+    ];
+    await Promise.all(keys.map((key) => redis.pexpire(key, 1_000)));
+
+    const deskRenewed = await renewLiveMatchDeskFinalLeaseV3({
+      publication: desk.publication,
+      observedRaw: deskRaw,
+      redis,
+    });
+    const detailRenewed = await renewLiveMatchDetailFinalLeaseV3({
+      publication: detail.publication,
+      observedRaw: detailRaw,
+      redis,
+    });
+    expect(deskRenewed.status).toBe('renewed');
+    expect(detailRenewed.status).toBe('renewed');
+    expect(deskRenewed.ttlMs).toBeGreaterThan(24 * 60 * 60 * 1000);
+    expect(detailRenewed.ttlMs).toBeGreaterThan(24 * 60 * 60 * 1000);
+    expect(await redis.get(deskActiveKey)).toBe(deskRaw);
+    expect(await redis.get(detailActiveKey)).toBe(detailRaw);
   });
 
   test('does not promote detail beside a newer incompatible desk publication', async () => {
