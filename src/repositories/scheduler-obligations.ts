@@ -364,14 +364,14 @@ export async function reserveSchedulerObligation(input: {
     const refreshed = await db
       .update(schedulerObligationsInOps)
       .set({
-        evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('eventPriority', ${eventPriority})`,
+        evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('eventPriority', ${eventPriority}::integer)`,
         updatedAt: sql`clock_timestamp()`,
       })
       .where(
         and(
           eq(schedulerObligationsInOps.obligationId, row.obligationId),
           inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
-          sql`${schedulerObligationsInOps.evidence}->>'eventPriority' IS DISTINCT FROM ${String(eventPriority)}`,
+          sql`${schedulerObligationsInOps.evidence}->>'eventPriority' IS DISTINCT FROM ${String(eventPriority)}::text`,
         ),
       )
       .returning();

@@ -805,6 +805,30 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
                 eventPriority,
               },
             });
+          } else if (predecessor) {
+            // A delivered FINAL normally has no dispatchable plan. Keep the
+            // existing identity visible for one pass when its event changes
+            // from current to historical (or vice versa), so the scheduler
+            // can refresh the mutable priority evidence without reserving a
+            // duplicate obligation or re-running a settled capture.
+            plans.push({
+              scopeKey,
+              periodKey: stablePeriodKey,
+              dueAt: context.now,
+              eventId: event.id,
+              source: 'reconcile',
+              evidence: {
+                snapshotKind: 'FINAL',
+                dataCheckedAt: checkedAt,
+                reconciliation: 'priority-refresh',
+                expectedEntryCount: control.expectedEntryCount,
+                expectedEntryScopeSha256: control.entryScopeSha256,
+                expectedNotApplicableEntryCount: control.notApplicableEntryCount,
+                expectedTournamentCount: control.expectedTournamentCount,
+                expectedTournamentScopeSha256: control.tournamentScopeSha256,
+                eventPriority,
+              },
+            });
           }
           continue;
         }

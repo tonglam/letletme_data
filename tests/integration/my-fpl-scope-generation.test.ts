@@ -5,11 +5,13 @@ assertIntegrationEnv();
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { getDbClient } from '../../src/db/singleton';
+import { verifyMyFplSnapshotScopeGeneration } from '../../src/services/my-fpl-snapshot-publication.service';
 
 const SEASON_ID = 9395;
 const SEASON_CODE = '9395';
 const EVENT_ID = 1;
 const REVISION = 9_395_001;
+const SEASON = { seasonId: SEASON_ID, seasonCode: SEASON_CODE };
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -78,6 +80,25 @@ beforeAll(seed);
 afterAll(cleanup);
 
 describe('My FPL scope-generation event fence', () => {
+  test('verifies a clean generation without reading canonical scope tables', async () => {
+    expect(
+      await verifyMyFplSnapshotScopeGeneration({
+        season: SEASON,
+        eventId: EVENT_ID,
+        revision: REVISION,
+        generation: { entry: 0, tournament: 0 },
+      }),
+    ).toBe(true);
+    expect(
+      await verifyMyFplSnapshotScopeGeneration({
+        season: SEASON,
+        eventId: EVENT_ID,
+        revision: REVISION,
+        generation: { entry: 1, tournament: 0 },
+      }),
+    ).toBe(false);
+  });
+
   test('invalidates both verified scope families when a final event reopens and refinalizes', async () => {
     const sql = await getDbClient();
     const initial = await sql<

@@ -399,18 +399,30 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).not.toContain('getMyFplSnapshotOperationalStatus(');
     expect(jobsStatus).toContain('getMyFplSnapshotControlStatusWithScope(season)');
     expect(worker).toContain('captureMyFplSnapshotWithScopeGeneration');
-    const workerFastPathStart = worker.indexOf('const activeFinalUsesManagerReviewV2');
-    const workerCaptureStart = worker.indexOf(
-      'const capture = await captureMyFplSnapshotWithScopeGeneration',
+    expect(worker).toContain('verifyMyFplSnapshotScopeGeneration');
+    const workerNoopStart = worker.indexOf('const finalizationControl');
+    const workerReadinessStart = worker.indexOf('const finalizationReadiness');
+    expect(workerNoopStart).toBeGreaterThanOrEqual(0);
+    expect(workerReadinessStart).toBeGreaterThan(workerNoopStart);
+    expect(worker.slice(workerNoopStart, workerReadinessStart)).toContain(
+      'verifyMyFplSnapshotScopeGeneration',
     );
-    expect(workerFastPathStart).toBeGreaterThanOrEqual(0);
-    expect(workerCaptureStart).toBeGreaterThan(workerFastPathStart);
-    expect(worker.slice(workerFastPathStart, workerCaptureStart)).not.toContain(
+    expect(worker.slice(workerNoopStart, workerReadinessStart)).toContain(
       String.raw`return { status: 'noop', publication: active }`,
     );
-    expect(worker.slice(workerFastPathStart, workerCaptureStart)).not.toContain(
-      'recordMyFplOutboxRedisEvidence',
+    const scopeVerifierStart = publicationService.indexOf(
+      'export async function verifyMyFplSnapshotScopeGeneration',
     );
+    const scopeVerifierEnd = publicationService.indexOf(
+      'function resolveMyFplSnapshotScopeState',
+      scopeVerifierStart,
+    );
+    const scopeVerifier = publicationService.slice(scopeVerifierStart, scopeVerifierEnd);
+    expect(scopeVerifier).not.toContain('competition.entries');
+    expect(scopeVerifier).not.toContain('competition.tournaments');
+    expect(scopeVerifier).not.toContain('competition.tournament_entries');
+    expect(scopeVerifier).not.toContain('my_fpl_snapshot_entries');
+    expect(publicationService).toContain('scopeVerified &&');
     expect(controlProjection).toContain(String.raw`SET LOCAL statement_timeout = '2s'`);
     expect(controlProjection).toContain('my_fpl_snapshot_publication_outbox');
     expect(controlProjection).not.toContain('reporting.my_fpl_active_snapshot_status');
@@ -421,16 +433,8 @@ describe('My FPL daily snapshot publication contract', () => {
   test('rebuilds legacy finals and keeps provisional transfer facts on one authority', () => {
     expect(publicationService).toContain('isManagerReviewV2MyFplPublication');
     expect(worker).toContain('activeFinalUsesManagerReviewV2');
-    expect(worker).toContain('activeFinalScopeGenerationVerified');
-    expect(worker).toContain('getMyFplFinalizationControlStateWithScope(season)');
-    expect(worker).toContain('activeFinalScopeMatchesCurrentReadiness');
-    expect(worker).toContain('active.entryScopeSha256 === finalizationReadiness.entryScopeSha256');
-    expect(worker).toContain(
-      'active.notApplicableEntryCount === finalizationReadiness.notApplicableEntryCount',
-    );
-    expect(worker).toContain(
-      'active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256',
-    );
+    expect(worker).toContain('getMyFplFinalizationControlStateWithScopeForEvent(season, eventId)');
+    expect(worker).toContain('verifyMyFplSnapshotScopeGeneration');
     expect(scheduler).toContain('getMyFplFinalizationControlStateWithScope(context.season)');
     expect(scheduler).toContain('periodKey = myFplFinalizationPeriodKey({');
     expect(scheduler).toContain(String.raw`control?.activeKind === 'FINAL'`);

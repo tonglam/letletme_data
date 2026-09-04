@@ -231,6 +231,11 @@ export type MyFplSnapshotScopeState = Readonly<{
   state: 'CLEAN' | 'ENTRY_DIRTY' | 'TOURNAMENT_DIRTY' | 'BOTH_DIRTY' | 'UNAVAILABLE';
 }>;
 
+export type MyFplSnapshotScopeGeneration = Readonly<{
+  entry: number;
+  tournament: number;
+}>;
+
 export class MyFplSnapshotIncompleteError extends Error {
   readonly code = 'MY_FPL_SNAPSHOT_INCOMPLETE';
 
@@ -384,11 +389,11 @@ export function serializeMyFplSnapshotCapture(
   return result;
 }
 
-async function runMyFplCaptureTransaction(
+async function runMyFplCaptureTransaction<T>(
   client: postgres.Sql,
   lockScopes: readonly string[],
-  operation: (transaction: postgres.TransactionSql) => Promise<MyFplSnapshotCaptureResult>,
-): Promise<MyFplSnapshotCaptureResult> {
+  operation: (transaction: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
   // A production transaction pool does not preserve session affinity between
   // statements, so a session-level advisory lock cannot protect the following
   // transaction. Try a transaction lock without waiting instead: every miss
@@ -402,7 +407,7 @@ async function runMyFplCaptureTransaction(
   while (true) {
     const lockAttemptStartedAt = Date.now();
     try {
-      return await client.begin('isolation level repeatable read', async (tx) => {
+      const result = await client.begin('isolation level repeatable read', async (tx) => {
         for (const lockScope of lockScopes) {
           const lockRows = await tx<{ acquired: boolean }[]>`
             SELECT pg_try_advisory_xact_lock(hashtextextended(${lockScope}, 0)) AS acquired
@@ -413,6 +418,7 @@ async function runMyFplCaptureTransaction(
         }
         return operation(tx);
       });
+      return result as unknown as T;
     } catch (error) {
       const contention = classifyMyFplCaptureContention(error);
       if (contention === 'lock-busy') {
@@ -2601,6 +2607,7 @@ type MyFplFinalizationControlRow = {
 async function readMyFplFinalizationControlState(
   season: FplSeasonRef,
   includeScopeState: boolean,
+  eventId?: number,
 ): Promise<readonly MyFplFinalizationControlState[]> {
   const client = await getDbClient();
   const rows = await client.begin(async (tx) => {
@@ -2631,6 +2638,7 @@ async function readMyFplFinalizationControlState(
            AND scope.event_id = event.event_id
         `
       : tx``;
+    const eventFilter = eventId === undefined ? tx`` : tx`AND event.event_id = ${eventId}`;
     return tx<MyFplFinalizationControlRow[]>`
       SELECT event.event_id,
              event.deadline_time,
@@ -2686,6 +2694,7 @@ async function readMyFplFinalizationControlState(
       ) invalidation ON TRUE
       ${scopeJoin}
       WHERE event.season_id = ${season.seasonId}
+        ${eventFilter}
       ORDER BY event.event_id
     `;
   });
@@ -2741,6 +2750,82 @@ export async function getMyFplFinalizationControlStateWithScope(
   season: FplSeasonRef,
 ): Promise<readonly MyFplFinalizationControlState[]> {
   return readMyFplFinalizationControlState(season, true);
+}
+
+/** Read one event's scope fence without scanning the rest of the season. */
+export async function getMyFplFinalizationControlStateWithScopeForEvent(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<MyFplFinalizationControlState | null> {
+  return (await readMyFplFinalizationControlState(season, true, eventId))[0] ?? null;
+}
+
+/**
+ * Verify a clean FINAL generation fence without inspecting canonical scope
+ * tables or snapshot children. The no-op caller supplies the generation it
+ * observed before deciding that the active publication can be reused. The
+ * single-row no-op update still takes the same row lock as the scope triggers,
+ * so a concurrent mutation either waits and fails the predicate or makes
+ * PostgreSQL retry the repeatable-read transaction.
+ */
+export async function verifyMyFplSnapshotScopeGeneration(input: {
+  season: FplSeasonRef;
+  eventId: number;
+  revision: number;
+  generation: MyFplSnapshotScopeGeneration;
+}): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(input.revision) ||
+    input.revision <= 0 ||
+    !Number.isSafeInteger(input.generation.entry) ||
+    input.generation.entry < 0 ||
+    !Number.isSafeInteger(input.generation.tournament) ||
+    input.generation.tournament < 0
+  ) {
+    throw new Error('My FPL scope generation verification input is invalid');
+  }
+  const client = await getDbClient();
+  const lockScopes = [
+    myFplSnapshotSeasonLockScope(input.season.seasonId),
+    myFplSnapshotEventLockScope(input.season.seasonId, input.eventId),
+  ] as const;
+  return runMyFplCaptureTransaction(client, lockScopes, async (tx) => {
+    await tx`SET LOCAL statement_timeout = '2s'`;
+    const rows = await tx<{ event_id: number }[]>`
+      UPDATE competition.my_fpl_snapshot_scope_state AS scope
+      SET verified_entry_scope_generation = scope.verified_entry_scope_generation,
+          verified_tournament_scope_generation = scope.verified_tournament_scope_generation,
+          verified_revision = scope.verified_revision,
+          verified_at = scope.verified_at,
+          updated_at = scope.updated_at
+      WHERE scope.season_id = ${input.season.seasonId}
+        AND scope.event_id = ${input.eventId}
+        AND scope.entry_scope_generation = ${input.generation.entry}
+        AND scope.verified_entry_scope_generation = ${input.generation.entry}
+        AND scope.tournament_scope_generation = ${input.generation.tournament}
+        AND scope.verified_tournament_scope_generation = ${input.generation.tournament}
+        AND scope.verified_revision = ${input.revision}
+        AND EXISTS (
+          SELECT 1
+          FROM fpl.events event
+          WHERE event.season_id = scope.season_id
+            AND event.event_id = scope.event_id
+            AND event.finished
+            AND event.data_checked
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_publications publication
+          WHERE publication.season_id = scope.season_id
+            AND publication.event_id = scope.event_id
+            AND publication.revision = ${input.revision}
+            AND publication.active
+            AND publication.kind = 'FINAL'
+        )
+      RETURNING scope.event_id
+    `;
+    return rows.length === 1;
+  });
 }
 
 function resolveMyFplSnapshotScopeState(
@@ -2810,15 +2895,19 @@ function resolveMyFplSnapshotControlStatus(
       row.readyEntryCount === null || row.emptyEntryCount === null
         ? null
         : row.readyEntryCount + row.emptyEntryCount;
-    const finalDelivered =
-      row.activeKind === 'FINAL' &&
-      row.activeRevision !== null &&
-      row.activeOutboxDeliveredCount > 0;
     const scopeState = resolveMyFplSnapshotScopeState(row);
     const scopeVerified =
       row.activeKind === 'FINAL' &&
       scopeState.state === 'CLEAN' &&
       scopeState.verifiedRevision === row.activeRevision;
+    // A delivered FINAL from an older scope generation is not a settled
+    // result. Keep settlement and SLA consistent with the coverage marker
+    // until the durable generation fence verifies this active revision.
+    const finalDelivered =
+      row.activeKind === 'FINAL' &&
+      scopeVerified &&
+      row.activeRevision !== null &&
+      row.activeOutboxDeliveredCount > 0;
     const publicationEntryComplete =
       row.expectedEntryCount !== null &&
       row.readyEntryCount !== null &&
@@ -2938,7 +3027,6 @@ export async function getMyFplSnapshotOperationalStatus(
       expected_entry_count: number | null;
       ready_entry_count: number | null;
       empty_entry_count: number | null;
-      not_applicable_entry_count: number | null;
       publication_not_applicable_entry_count: number | null;
       expected_tournament_count: number | null;
       ready_tournament_count: number | null;
@@ -2976,7 +3064,6 @@ export async function getMyFplSnapshotOperationalStatus(
            publication.entry_scope_sha256 AS publication_entry_scope_sha256,
            publication.tournament_scope_sha256 AS publication_tournament_scope_sha256,
            coverage.current_entry_count, coverage.current_entry_scope_sha256,
-           coverage.not_applicable_entry_count AS not_applicable_entry_count,
            coverage.not_applicable_entry_count AS current_not_applicable_entry_count,
            coverage.missing_active_entry_count,
            tournament_coverage.current_tournament_scope_sha256,
@@ -3169,7 +3256,7 @@ export async function getMyFplSnapshotOperationalStatus(
       observedEntryScopeSha256: row.status_observed_entry_scope_sha256,
       readyEntryCount: row.ready_entry_count,
       emptyEntryCount: row.empty_entry_count,
-      notApplicableEntryCount: row.not_applicable_entry_count,
+      notApplicableEntryCount: row.current_not_applicable_entry_count,
       expectedTournamentCount:
         row.status_expected_tournament_count ?? row.expected_tournament_count,
       observedTournamentCount: row.status_observed_tournament_count ?? row.ready_tournament_count,
