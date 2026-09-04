@@ -330,6 +330,7 @@ export function isAuthoritativeUnrankedDeletedEntryResult(
     playerName: string;
     identityOverallPoints: number | null;
     identityOverallRank: number | null;
+    resultOverallPoints: number | null;
     eventRank: number | null;
     overallRank: number | null;
   }>,
@@ -339,6 +340,7 @@ export function isAuthoritativeUnrankedDeletedEntryResult(
     input.playerName.trim() === 'Deleted Player' &&
     input.identityOverallPoints === 0 &&
     input.identityOverallRank === 0 &&
+    input.resultOverallPoints === 0 &&
     input.eventRank === 0 &&
     input.overallRank === 0
   );
@@ -2356,6 +2358,7 @@ export async function assessMyFplFinalizationReadiness(
       playerName: row.player_name,
       identityOverallPoints: row.identity_overall_points,
       identityOverallRank: row.identity_overall_rank,
+      resultOverallPoints: row.overall_points,
       eventRank: row.event_rank,
       overallRank: row.overall_rank,
     });
@@ -3508,6 +3511,7 @@ async function captureMyFplSnapshotOnce(
           playerName: entry.player_name,
           identityOverallPoints: entry.overall_points,
           identityOverallRank: entry.overall_rank,
+          resultOverallPoints: current.overall_points,
           eventRank: current.event_rank,
           overallRank: current.overall_rank,
         });
