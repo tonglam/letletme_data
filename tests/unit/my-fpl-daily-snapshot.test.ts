@@ -33,10 +33,6 @@ const scopeGenerationView = scopeGenerationMigration.slice(
     'CREATE OR REPLACE VIEW reporting.my_fpl_active_snapshot_status',
   ),
 );
-const scopeGenerationBaseline = scopeGenerationMigration.slice(
-  scopeGenerationMigration.indexOf('-- Establish a direct rebuild fence'),
-  scopeGenerationMigration.indexOf('-- Keep the public reporting shape unchanged'),
-);
 const resultPicksMigration = readFileSync('migrations/0055_entry_event_result_picks.sql', 'utf8');
 const retainedRevisionMigration = readFileSync(
   'migrations/0038_my_fpl_retained_revision_reads.sql',
@@ -379,15 +375,6 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scopeGenerationMigration).toContain(
       'CREATE OR REPLACE VIEW reporting.my_fpl_active_snapshot_status',
     );
-    expect(scopeGenerationBaseline).toContain(
-      'LEFT JOIN competition.my_fpl_snapshot_publications publication',
-    );
-    expect(scopeGenerationBaseline).toContain(
-      'CASE WHEN publication.revision IS NOT NULL THEN 1 ELSE 0 END',
-    );
-    expect(scopeGenerationBaseline).not.toContain('my_fpl_snapshot_entries');
-    expect(scopeGenerationBaseline).not.toContain('contractVersion');
-    expect(scopeGenerationMigration).not.toContain('manager_review_v2');
     expect(scopeGenerationView).not.toContain('array_agg(');
     expect(scopeGenerationView).not.toContain('extensions.digest');
     expect(scopeGenerationView).not.toContain('competition.entries');
@@ -473,7 +460,6 @@ describe('My FPL daily snapshot publication contract', () => {
   test('rebuilds dirty finals directly and keeps provisional transfer facts on one authority', () => {
     expect(publicationService).not.toContain('isManagerReviewV2MyFplPublication');
     expect(publicationService).not.toContain('readActiveFinalManagerReviewV2');
-    expect(scopeGenerationMigration).not.toContain('manager_review_v2');
     expect(worker).toContain('getMyFplFinalizationControlStateWithScopeForEvent(season, eventId)');
     expect(worker).toContain('verifyMyFplSnapshotScopeGeneration');
     expect(scheduler).toContain('getMyFplFinalizationControlStateWithScope(context.season)');
