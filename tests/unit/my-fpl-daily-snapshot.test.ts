@@ -375,9 +375,6 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scopeGenerationMigration).toContain(
       'CREATE OR REPLACE VIEW reporting.my_fpl_active_snapshot_status',
     );
-    expect(scopeGenerationMigration).toContain(
-      String.raw`snapshot_entry.payload->>'contractVersion' = '2'`,
-    );
     expect(scopeGenerationView).not.toContain('array_agg(');
     expect(scopeGenerationView).not.toContain('extensions.digest');
     expect(scopeGenerationView).not.toContain('competition.entries');
@@ -432,17 +429,25 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scopeVerifier).not.toContain('competition.tournament_entries');
     expect(scopeVerifier).not.toContain('my_fpl_snapshot_entries');
     expect(publicationService).toContain('This is a full rebuild entrypoint, not a health probe.');
+    expect(publicationService).not.toContain('isManagerReviewV2MyFplPublication');
+    expect(publicationService).not.toContain(String.raw`payload->>'contractVersion'`);
     const captureStart = publicationService.indexOf('async function captureMyFplSnapshotOnce');
     const captureDeepScanStart = publicationService.indexOf(
       'FROM competition.entries',
       captureStart,
     );
-    expect(
-      publicationService.indexOf('const activeFinalScopeGenerationVerified', captureStart),
-    ).toBeLessThan(captureDeepScanStart);
     expect(captureDeepScanStart).toBeGreaterThan(captureStart);
     expect(publicationService.slice(captureStart, captureDeepScanStart)).not.toContain(
       'competition.my_fpl_snapshot_entries',
+    );
+    expect(publicationService.slice(captureStart, captureDeepScanStart)).toContain(
+      'Explicit FINAL retries are idempotent by durable key',
+    );
+    const captureWithScopeStart = publicationService.indexOf(
+      'export function captureMyFplSnapshotWithScopeGeneration',
+    );
+    expect(publicationService.slice(captureWithScopeStart)).toContain(
+      String.raw`captureMyFplSnapshotOnce(season, eventId, 'FINAL', options, true)`,
     );
     expect(publicationService).toContain('scopeVerified &&');
     expect(controlProjection).toContain(String.raw`SET LOCAL statement_timeout = '2s'`);
@@ -452,8 +457,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(controlProjection).not.toContain('competition.tournament_entries');
   });
 
-  test('rebuilds legacy finals and keeps provisional transfer facts on one authority', () => {
-    expect(publicationService).toContain('isManagerReviewV2MyFplPublication');
+  test('rebuilds dirty finals directly and keeps provisional transfer facts on one authority', () => {
+    expect(publicationService).not.toContain('isManagerReviewV2MyFplPublication');
+    expect(publicationService).not.toContain('readActiveFinalManagerReviewV2');
     expect(worker).toContain('getMyFplFinalizationControlStateWithScopeForEvent(season, eventId)');
     expect(worker).toContain('verifyMyFplSnapshotScopeGeneration');
     expect(scheduler).toContain('getMyFplFinalizationControlStateWithScope(context.season)');

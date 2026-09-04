@@ -1871,7 +1871,7 @@ function mapMyFplPublication(row: MyFplPublicationRow): MyFplSnapshotPublication
 
 /**
  * A publication is readable only when its score authority and source span
- * describe one complete, internally consistent capture. Incomplete legacy or
+ * describe one complete, internally consistent capture. Incomplete or
  * partially migrated rows are treated as unavailable; callers must recapture
  * instead of silently using their payload.
  */
@@ -1990,48 +1990,6 @@ export async function getActiveMyFplPublication(
   eventId: number,
 ): Promise<MyFplSnapshotPublication | null> {
   return loadActivePublication(await getDbClient(), season.seasonId, eventId);
-}
-
-/**
- * A FINAL publication may have been written by the pre-manager-review
- * snapshot contract.  The maintenance worker can use this check to skip a
- * settled event only when every expected entry row is the hard-cut v2 shape;
- * a legacy FINAL must flow through capture so it is rebuilt before consumers
- * are allowed to observe it.
- */
-export async function isManagerReviewV2MyFplPublication(
-  season: FplSeasonRef,
-  eventId: number,
-  publication: MyFplSnapshotPublication | null,
-): Promise<boolean> {
-  if (
-    !publication ||
-    publication.kind !== 'FINAL' ||
-    !isCompleteMyFplPublication(publication) ||
-    publication.seasonId !== season.seasonId ||
-    publication.eventId !== eventId
-  ) {
-    return false;
-  }
-  const rows = await (await getDbClient())<{ total_count: number; v2_count: number }[]>`
-    SELECT count(*)::integer AS total_count,
-           count(*) FILTER (
-             WHERE jsonb_typeof(payload) = 'object'
-               AND payload->>'contractVersion' = '2'
-           )::integer AS v2_count
-    FROM competition.my_fpl_snapshot_entries
-    WHERE season_id = ${season.seasonId}
-      AND event_id = ${eventId}
-      AND revision = ${publication.revision}
-  `;
-  const counts = rows[0];
-  const expectedEntryRows = publication.expectedEntryCount + publication.notApplicableEntryCount;
-  return Boolean(
-    counts &&
-      expectedEntryRows > 0 &&
-      counts.total_count === expectedEntryRows &&
-      counts.v2_count === expectedEntryRows,
-  );
 }
 
 /**
@@ -3179,8 +3137,8 @@ export async function getMyFplSnapshotOperationalStatus(
     const finalDueAt = dataCheckedAt
       ? new Date(new Date(dataCheckedAt).getTime() + MY_FPL_FINALIZATION_TOTAL_SLA_MS)
       : null;
-    // This legacy diagnostic deliberately retains its deep provisional-entry
-    // check. Scheduler and /jobs/status use the control projection above, but
+    // This diagnostic deliberately retains its deep provisional-entry check.
+    // Scheduler and /jobs/status use the control projection above, but
     // onboarding callers still need to see a newly added entry before the
     // next provisional publication is captured.
     const provisionalEntryScopeDrift =
@@ -3358,13 +3316,7 @@ async function captureMyFplSnapshotOnce(
     // not held with FOR UPDATE: scope triggers must be able to commit their
     // short row update while this worker is building the publication.  The
     // final CAS below then rejects a capture that raced a real scope change.
-    let scopeGenerationAtStart:
-      | (MyFplSnapshotScopeGeneration & {
-          verifiedEntry: number;
-          verifiedTournament: number;
-          verifiedRevision: number | null;
-        })
-      | null = null;
+    let scopeGenerationAtStart: MyFplSnapshotScopeGeneration | null = null;
     if (kind === 'FINAL' && useScopeGeneration) {
       await tx`
         INSERT INTO competition.my_fpl_snapshot_scope_state (season_id, event_id)
@@ -3374,17 +3326,10 @@ async function captureMyFplSnapshotOnce(
       const scopeRows = await tx<
         {
           entry_scope_generation: number | string;
-          verified_entry_scope_generation: number | string;
           tournament_scope_generation: number | string;
-          verified_tournament_scope_generation: number | string;
-          verified_revision: number | string | null;
         }[]
       >`
-        SELECT entry_scope_generation,
-               verified_entry_scope_generation,
-               tournament_scope_generation,
-               verified_tournament_scope_generation,
-               verified_revision
+        SELECT entry_scope_generation, tournament_scope_generation
         FROM competition.my_fpl_snapshot_scope_state
         WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
       `;
@@ -3395,36 +3340,18 @@ async function captureMyFplSnapshotOnce(
         );
       }
       const entry = Number(scope.entry_scope_generation);
-      const verifiedEntry = Number(scope.verified_entry_scope_generation);
       const tournament = Number(scope.tournament_scope_generation);
-      const verifiedTournament = Number(scope.verified_tournament_scope_generation);
-      const verifiedRevision =
-        scope.verified_revision === null ? null : Number(scope.verified_revision);
       if (
         !Number.isSafeInteger(entry) ||
         entry < 0 ||
-        !Number.isSafeInteger(verifiedEntry) ||
-        verifiedEntry < 0 ||
         !Number.isSafeInteger(tournament) ||
-        tournament < 0 ||
-        verifiedEntry > entry ||
-        !Number.isSafeInteger(verifiedTournament) ||
-        verifiedTournament < 0 ||
-        verifiedTournament > tournament ||
-        (verifiedRevision !== null &&
-          (!Number.isSafeInteger(verifiedRevision) || verifiedRevision <= 0))
+        tournament < 0
       ) {
         throw new MyFplSnapshotIncompleteError(
           `My FPL scope state is invalid for event ${eventId}`,
         );
       }
-      scopeGenerationAtStart = {
-        entry,
-        tournament,
-        verifiedEntry,
-        verifiedTournament,
-        verifiedRevision,
-      };
+      scopeGenerationAtStart = { entry, tournament };
     }
 
     const verifyScopeGeneration = async (revision: number): Promise<void> => {
@@ -3449,31 +3376,27 @@ async function captureMyFplSnapshotOnce(
       }
     };
 
-    // A clean generation fence is sufficient for the stable FINAL no-op. The
-    // migration baseline routes legacy payloads into the dirty path, and all
-    // post-migration FINAL captures write the manager-review shape. No
-    // snapshot-child scan is needed before this return.
-    const activeFinalScopeGenerationVerified = Boolean(
-      kind === 'FINAL' &&
-        useScopeGeneration &&
-        active?.kind === 'FINAL' &&
-        scopeGenerationAtStart &&
-        scopeGenerationAtStart.entry === scopeGenerationAtStart.verifiedEntry &&
-        scopeGenerationAtStart.tournament === scopeGenerationAtStart.verifiedTournament &&
-        scopeGenerationAtStart.verifiedRevision === active?.revision &&
-        !overrideActor &&
-        !overrideReason &&
-        !idempotencyKey,
-    );
-    if (activeFinalScopeGenerationVerified) {
-      await verifyScopeGeneration(active!.revision);
-      return { status: 'noop', publication: active! };
+    // Explicit FINAL retries are idempotent by durable key. Resolve them
+    // before the deep capture reads canonical scope and historical results.
+    // The worker still verifies the current active publication for Redis
+    // delivery after this return.
+    if (idempotencyKey) {
+      const priorOverride = await loadPublicationByIdempotencyKey(
+        tx,
+        season.seasonId,
+        eventId,
+        idempotencyKey,
+      );
+      if (priorOverride) {
+        return { status: 'noop', publication: priorOverride };
+      }
     }
 
-    // We are now on the deliberate deep capture path. It reads canonical
-    // scope tables, historical results, and snapshot inputs only when the
-    // worker has a dirty/missing/legacy final or an explicit capture request.
-    // A stable FINAL must return from the generation fence above instead.
+    // This is the deliberate deep capture path. It reads canonical scope
+    // tables, historical results, and snapshot inputs only for a missing or
+    // dirty FINAL, or for a provisional/explicit capture request. Stable
+    // FINAL no-op decisions belong to the maintenance worker's lightweight
+    // generation and Redis verification path.
     const entries = await tx<EntrySource[]>`
       SELECT entry_id, entry_name, player_name, region, started_event,
              overall_points, overall_rank, bank, team_value, total_transfers,
@@ -3538,65 +3461,6 @@ async function captureMyFplSnapshotOnce(
         );
       }
     }
-    const readActiveFinalManagerReviewV2 = async (): Promise<boolean> => {
-      if (!isCompleteMyFplPublication(active) || active.kind !== 'FINAL') return false;
-      const activeEntryPayloadCounts = await tx<{ total_count: number; v2_count: number }[]>`
-        SELECT count(*)::integer AS total_count,
-               count(*) FILTER (
-                 WHERE jsonb_typeof(payload) = 'object'
-                   AND payload->>'contractVersion' = '2'
-               )::integer AS v2_count
-        FROM competition.my_fpl_snapshot_entries
-        WHERE season_id = ${season.seasonId}
-          AND event_id = ${eventId}
-          AND revision = ${active.revision}
-      `;
-      const counts = activeEntryPayloadCounts[0];
-      const expectedEntryRows = active.expectedEntryCount + active.notApplicableEntryCount;
-      return Boolean(
-        counts &&
-          expectedEntryRows > 0 &&
-          counts.total_count === expectedEntryRows &&
-          counts.v2_count === expectedEntryRows,
-      );
-    };
-    const activeFinalUsesManagerReviewV2 = await readActiveFinalManagerReviewV2();
-    const activeFinalScopeMatchesCurrentScope = Boolean(
-      active &&
-        active.expectedEntryCount === expectedEntryCount &&
-        active.notApplicableEntryCount === notApplicableEntryCount &&
-        active.entryScopeSha256 === entryScopeSha256 &&
-        active.expectedTournamentCount === tournamentIds.length &&
-        active.tournamentScopeSha256 === tournamentScopeSha256,
-    );
-    if (
-      activeFinalUsesManagerReviewV2 &&
-      activeFinalScopeMatchesCurrentScope &&
-      (!overrideActor ||
-        !overrideReason ||
-        !idempotencyKey ||
-        active?.idempotencyKey === idempotencyKey)
-    ) {
-      await verifyScopeGeneration(active!.revision);
-      return { status: 'noop', publication: active! };
-    }
-    if (idempotencyKey) {
-      const priorOverride = await loadPublicationByIdempotencyKey(
-        tx,
-        season.seasonId,
-        eventId,
-        idempotencyKey,
-      );
-      if (
-        priorOverride &&
-        (!isCompleteMyFplPublication(active) ||
-          activeFinalUsesManagerReviewV2 ||
-          active.revision !== priorOverride.revision)
-      ) {
-        return { status: 'noop', publication: priorOverride };
-      }
-    }
-
     // Provisional scores never read the current event result. Final scores read
     // the current event only after the final fence has passed.
     const resultUpperBound = kind === 'FINAL' ? eventId : Math.max(0, eventId - 1);
@@ -4949,6 +4813,40 @@ async function captureMyFplSnapshotOnce(
       .update(postgresJsonbCanonicalJson(content), 'utf8')
       .digest('hex');
 
+    // A scope mutation can dirty the generation without changing the
+    // captured bytes. After the deliberate deep verification, preserve the
+    // active FINAL identity and only advance the verified generation. This
+    // path is never used as the stable hot-path probe.
+    const activeFinalContentMatches = Boolean(
+      kind === 'FINAL' &&
+        !overrideActor &&
+        !overrideReason &&
+        !idempotencyKey &&
+        isCompleteMyFplPublication(active) &&
+        active.kind === 'FINAL' &&
+        active.snapshotDate === snapshotDate &&
+        active.sourceCheckedAt.toISOString() === sourceCheckedAtIso &&
+        active.sourceMinCheckedAt?.toISOString() === sourceCheckedAtIso &&
+        active.sourceMaxCheckedAt?.toISOString() === sourceMaxCheckedAtIso &&
+        active.scoreSource === scoreSource &&
+        active.livePublicationId === livePublicationId &&
+        active.liveRevision === liveRevision &&
+        active.algorithmVersion === algorithmVersion &&
+        active.expectedEntryCount === expectedEntryCount &&
+        active.readyEntryCount === readyEntryIds.size &&
+        active.emptyEntryCount === emptyEntryCount &&
+        active.notApplicableEntryCount === notApplicableEntryCount &&
+        active.expectedTournamentCount === tournamentIds.length &&
+        active.readyTournamentCount === tournamentIds.length &&
+        active.entryScopeSha256 === entryScopeSha256 &&
+        active.tournamentScopeSha256 === tournamentScopeSha256 &&
+        active.contentSha256 === contentSha256,
+    );
+    if (activeFinalContentMatches) {
+      await verifyScopeGeneration(active!.revision);
+      return { status: 'noop', publication: active! };
+    }
+
     if (
       isMatchingProvisionalMyFplPublication(active, {
         kind,
@@ -5174,20 +5072,18 @@ export function captureMyFplSnapshot(
 /**
  * P1 finalization capture with a durable scope-generation CAS.
  *
- * This is a full rebuild entrypoint, not a health probe. Its defensive clean
- * FINAL check runs before any canonical scope or historical-result scan; the
- * finalization worker should use verifyMyFplSnapshotScopeGeneration for its
- * normal lightweight no-op decision and call this function only for a dirty,
- * missing, legacy, or explicitly overridden publication.
+ * This is a full rebuild entrypoint, not a health probe. The finalization
+ * worker must use verifyMyFplSnapshotScopeGeneration for its normal
+ * lightweight no-op decision and call this function only for a missing,
+ * dirty, or explicitly overridden FINAL publication.
  */
 export function captureMyFplSnapshotWithScopeGeneration(
   season: FplSeasonRef,
   eventId: number,
-  kind: MyFplSnapshotKind,
   options: MyFplSnapshotCaptureOptions = {},
 ): Promise<MyFplSnapshotCaptureResult> {
   return serializeMyFplSnapshotCapture(myFplSnapshotEventLockScope(season.seasonId, eventId), () =>
-    captureMyFplSnapshotOnce(season, eventId, kind, options, true),
+    captureMyFplSnapshotOnce(season, eventId, 'FINAL', options, true),
   );
 }
 
