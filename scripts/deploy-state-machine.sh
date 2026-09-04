@@ -713,8 +713,8 @@ cleanup_content_worker_control_image() {
 run_deploy_probe_command() {
   case "${DEPLOY_PROBE_KIND:-}" in
     queue)
-      DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES="${DEPLOY_PROBE_ALLOW_PAUSED_QUEUES:-}" \
-        APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false api \
+      APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false \
+        -e "DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES=${DEPLOY_PROBE_ALLOW_PAUSED_QUEUES:-}" api \
         bun scripts/assert-queue-quiescence.ts --redis-only --scoped
       ;;
     consumer)
