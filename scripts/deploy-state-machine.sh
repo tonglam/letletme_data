@@ -14,6 +14,10 @@ CONTENT_WORKER_CONSUMER_QUEUE_NAMES=(
   content-http-acquisition
   content-media-transcript
 )
+DEPLOY_QUIESCENCE_CONSUMER_QUEUE_NAMES=(
+  entry-sync
+  "${CONTENT_WORKER_CONSUMER_QUEUE_NAMES[@]}"
+)
 DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES=${DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES=${DEPLOY_CONTENT_WORKER_ADMISSION_OWNED_QUEUES:-}
 DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED=${DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED:-false}
@@ -505,8 +509,8 @@ set_content_worker_consumer_mode() {
     echo "deploy preflight: invalid content worker consumer mode=$mode" >&2
     return 1
   fi
-  if ! content_worker_queue_is_listed "$queue_name" "${CONTENT_WORKER_CONSUMER_QUEUE_NAMES[*]}"; then
-    echo "deploy preflight: invalid content worker consumer queue=$queue_name" >&2
+  if ! content_worker_queue_is_listed "$queue_name" "${DEPLOY_QUIESCENCE_CONSUMER_QUEUE_NAMES[*]}"; then
+    echo "deploy preflight: invalid deployment consumer queue=$queue_name" >&2
     return 1
   fi
   output_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-consumer-control.XXXXXX")
@@ -533,7 +537,7 @@ pause_content_worker_consumers_for_deploy() {
   ensure_content_worker_pause_owner_token
 
   local queue_name status_output output
-  for queue_name in "${CONTENT_WORKER_CONSUMER_QUEUE_NAMES[@]}"; do
+  for queue_name in "${DEPLOY_QUIESCENCE_CONSUMER_QUEUE_NAMES[@]}"; do
     if ! status_output=$(set_content_worker_consumer_mode STATUS "$queue_name"); then
       printf '%s\n' "$status_output" >&2
       return 1
@@ -577,7 +581,7 @@ pause_content_worker_consumers_for_deploy() {
       return 1
     fi
   done
-  echo 'deploy preflight: content-worker consumers paused; active work can drain without new claims'
+  echo 'deploy preflight: deployment consumers paused; active work can drain without new claims'
 }
 
 run_content_worker_consumer_status_probe() {
