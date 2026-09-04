@@ -760,6 +760,31 @@ return 0`,
     expect(elapsedMs).toBeLessThan(5_000);
   });
 
+  test('gives each paused consumer its own bounded status probe', () => {
+    const startedAt = Date.now();
+    const script = String.raw`
+set -euo pipefail
+export DEPLOY_CONTENT_WORKER_PAUSED_QUEUES='entry-sync content-x-scan content-http-acquisition content-media-transcript'
+source scripts/deploy-state-machine.sh
+run_content_worker_consumer_status_probe() {
+  local output_file=$1
+  local queue_name=$3
+  sleep 0.35
+  printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":true,"owned":false}\n' "$queue_name" >"$output_file"
+}
+assert_content_worker_consumers_paused 1
+`;
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: process.env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const elapsedMs = Date.now() - startedAt;
+    expect(result.exitCode).toBe(0);
+    expect(elapsedMs).toBeGreaterThanOrEqual(1_000);
+    expect(elapsedMs).toBeLessThan(5_000);
+  });
+
   test('preserves the local Compose context in a setsid probe', () => {
     const script = String.raw`
 set -euo pipefail

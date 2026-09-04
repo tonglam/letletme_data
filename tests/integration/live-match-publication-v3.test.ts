@@ -558,6 +558,7 @@ describe('Live Matches V3 Redis publications', () => {
       redis,
     });
     const firstItemKey = first.publication.fixtures[0]?.key;
+    expect(first.publication.detail.contentUpdatedAt).toBe('2026-08-29T10:00:00.000Z');
     const second = await publishLiveMatchDetailV3({
       ...scope,
       observedDeskGeneration: desk.publication.generation,
@@ -569,6 +570,7 @@ describe('Live Matches V3 Redis publications', () => {
     });
     const secondItemKey = second.publication.fixtures[0]?.key;
     expect(secondItemKey).not.toBe(firstItemKey);
+    expect(second.publication.detail.contentUpdatedAt).toBe('2026-08-29T10:00:30.000Z');
 
     const third = await publishLiveMatchDetailV3({
       ...scope,
@@ -580,6 +582,9 @@ describe('Live Matches V3 Redis publications', () => {
       redis,
     });
     expect(third.publication.fixtures[0]?.key).toBe(secondItemKey);
+    expect(third.publication.detail.contentUpdatedAt).toBe(
+      second.publication.detail.contentUpdatedAt,
+    );
     expect(
       (await readLiveMatchDetailV3({ ...scope, redis }))?.fixtures[0]?.players[0]?.stats[0]?.value,
     ).toBe(35);

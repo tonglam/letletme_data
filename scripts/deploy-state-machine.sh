@@ -589,17 +589,28 @@ run_content_worker_consumer_status_probe() {
 }
 
 assert_content_worker_consumers_paused() {
-  local timeout_seconds=${1:-10}
-  local deadline_at=$(( $(date +%s) + timeout_seconds ))
-  local queue_name output_file remaining_seconds
+  local probe_timeout_seconds=${1:-10}
+  local deadline_at=${2:-0}
+  local queue_name output_file remaining_seconds effective_probe_timeout
+  if ! [[ "$probe_timeout_seconds" =~ ^[1-9][0-9]*$ && "$deadline_at" =~ ^[0-9]+$ ]]; then
+    echo 'deploy preflight: consumer status bounds are invalid' >&2
+    return 1
+  fi
   for queue_name in $DEPLOY_CONTENT_WORKER_PAUSED_QUEUES; do
-    remaining_seconds=$((deadline_at - $(date +%s)))
-    if (( remaining_seconds <= 0 )); then
-      echo 'deploy preflight: content-worker consumer status deadline exceeded' >&2
-      return 124
+    effective_probe_timeout=$probe_timeout_seconds
+    if (( deadline_at > 0 )); then
+      remaining_seconds=$((deadline_at - $(date +%s)))
+      if (( remaining_seconds <= 0 )); then
+        echo 'deploy preflight: content-worker consumer status deadline exceeded' >&2
+        return 124
+      fi
+      if (( effective_probe_timeout > remaining_seconds )); then
+        effective_probe_timeout=$remaining_seconds
+      fi
     fi
     output_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-consumer-status.XXXXXX")
-    if ! run_content_worker_consumer_status_probe "$output_file" "$remaining_seconds" "$queue_name"; then
+    if ! run_content_worker_consumer_status_probe \
+      "$output_file" "$effective_probe_timeout" "$queue_name"; then
       cat "$output_file" >&2 || true
       rm -f "$output_file"
       echo "deploy preflight: could not verify the $queue_name consumer pause" >&2
@@ -983,7 +994,6 @@ wait_for_scoped_queue_quiescence() {
   local now_seconds
   local remaining_seconds
   local effective_probe_timeout
-  local effective_status_timeout
   local sleep_seconds
   if ! [[
     "$attempts" =~ ^[1-9][0-9]*$ &&
@@ -1002,12 +1012,7 @@ wait_for_scoped_queue_quiescence() {
       printf '%s\n' "deploy preflight: scoped queue quiescence deadline exceeded (${deadline_seconds}s)" >>"$output_file"
       break
     fi
-    remaining_seconds=$((deadline_at - now_seconds))
-    effective_status_timeout=$probe_timeout_seconds
-    if (( effective_status_timeout > remaining_seconds )); then
-      effective_status_timeout=$remaining_seconds
-    fi
-    if ! assert_content_worker_consumers_paused "$effective_status_timeout"; then
+    if ! assert_content_worker_consumers_paused "$probe_timeout_seconds" "$deadline_at"; then
       rm -f "$output_file"
       return 1
     fi
@@ -1027,12 +1032,7 @@ wait_for_scoped_queue_quiescence() {
         printf '%s\n' "deploy preflight: scoped queue quiescence deadline exceeded (${deadline_seconds}s)" >>"$output_file"
         break
       fi
-      remaining_seconds=$((deadline_at - now_seconds))
-      effective_status_timeout=$probe_timeout_seconds
-      if (( effective_status_timeout > remaining_seconds )); then
-        effective_status_timeout=$remaining_seconds
-      fi
-      if ! assert_content_worker_consumers_paused "$effective_status_timeout"; then
+      if ! assert_content_worker_consumers_paused "$probe_timeout_seconds" "$deadline_at"; then
         cat "$output_file" >&2 || true
         rm -f "$output_file"
         return 1
