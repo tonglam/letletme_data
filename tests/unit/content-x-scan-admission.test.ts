@@ -741,7 +741,7 @@ printf 'result=%s\n' "$result"
   test('passes only the deployment-paused queue allowlist to the bounded probe', () => {
     const result = runQueueProbeShell(
       String.raw`
-[[ "$DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES" = entry-sync,content-x-scan,content-http-acquisition ]]
+[[ "$*" == *"-e DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES=entry-sync,content-x-scan,content-http-acquisition"* ]]
 return 0`,
       {
         DEPLOY_CONTENT_WORKER_PAUSED_QUEUES: 'entry-sync content-x-scan content-http-acquisition',
