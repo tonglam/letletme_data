@@ -53,6 +53,7 @@ const statusProjection = publicationService.slice(
 );
 const governanceService = readFileSync('src/services/data-governance.service.ts', 'utf8');
 const scheduler = readFileSync('src/scheduler/job-registry.ts', 'utf8');
+const schedulerService = readFileSync('src/scheduler/scheduler.service.ts', 'utf8');
 const maintenanceJobs = readFileSync('src/jobs/maintenance.jobs.ts', 'utf8');
 const worker = readFileSync('src/workers/maintenance.worker.ts', 'utf8');
 const schedulerObligations = readFileSync('src/repositories/scheduler-obligations.ts', 'utf8');
@@ -386,12 +387,30 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).toContain('eventPriority');
     expect(publicationService).toContain('current_tournament_scope_sha256');
     expect(publicationService).toContain('current_not_applicable_entry_count');
+    expect(publicationService).toContain(
+      'publication.not_applicable_entry_count AS publication_not_applicable_entry_count',
+    );
+    expect(publicationService).toContain(
+      'row.current_not_applicable_entry_count !== row.publication_not_applicable_entry_count',
+    );
     expect(publicationService).toContain('return readMyFplFinalizationControlState(season, false)');
     expect(publicationService).toContain('return readMyFplFinalizationControlState(season, true)');
     expect(scheduler).toContain('getMyFplFinalizationControlStateWithScope(context.season)');
     expect(scheduler).not.toContain('getMyFplSnapshotOperationalStatus(');
     expect(jobsStatus).toContain('getMyFplSnapshotControlStatusWithScope(season)');
     expect(worker).toContain('captureMyFplSnapshotWithScopeGeneration');
+    const workerFastPathStart = worker.indexOf('const activeFinalUsesManagerReviewV2');
+    const workerCaptureStart = worker.indexOf(
+      'const capture = await captureMyFplSnapshotWithScopeGeneration',
+    );
+    expect(workerFastPathStart).toBeGreaterThanOrEqual(0);
+    expect(workerCaptureStart).toBeGreaterThan(workerFastPathStart);
+    expect(worker.slice(workerFastPathStart, workerCaptureStart)).not.toContain(
+      "return { status: 'noop', publication: active }",
+    );
+    expect(worker.slice(workerFastPathStart, workerCaptureStart)).not.toContain(
+      'recordMyFplOutboxRedisEvidence',
+    );
     expect(controlProjection).toContain(String.raw`SET LOCAL statement_timeout = '2s'`);
     expect(controlProjection).toContain('my_fpl_snapshot_publication_outbox');
     expect(controlProjection).not.toContain('reporting.my_fpl_active_snapshot_status');
@@ -402,6 +421,8 @@ describe('My FPL daily snapshot publication contract', () => {
   test('rebuilds legacy finals and keeps provisional transfer facts on one authority', () => {
     expect(publicationService).toContain('isManagerReviewV2MyFplPublication');
     expect(worker).toContain('activeFinalUsesManagerReviewV2');
+    expect(worker).toContain('activeFinalScopeGenerationVerified');
+    expect(worker).toContain('getMyFplFinalizationControlStateWithScope(season)');
     expect(worker).toContain('activeFinalScopeMatchesCurrentReadiness');
     expect(worker).toContain('active.entryScopeSha256 === finalizationReadiness.entryScopeSha256');
     expect(worker).toContain(
@@ -422,6 +443,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(controlProjection).not.toContain('competition.entries');
     expect(controlProjection).not.toContain('competition.tournament_entries');
     expect(scheduler).toContain('delivery-recovered');
+    expect(schedulerService).toContain('refreshMyFplEventPriority');
+    expect(schedulerService).toContain('mergeSchedulerObligationEvidence');
     expect(scheduler).toContain(String.raw`while (predecessor?.status === 'irrecoverable')`);
     expect(scheduler).toContain('predecessor = repairObligation');
     expect(scheduler).toContain('let repairSucceeded = false');

@@ -28,6 +28,7 @@ import {
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
+  getMyFplFinalizationControlStateWithScope,
   invalidateMyFplSnapshotRedisManifest,
   isManagerReviewV2MyFplPublication,
   isMyFplSnapshotRedisManifestForPublication,
@@ -453,6 +454,27 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           const activeFinalUsesManagerReviewV2 =
             active?.kind === 'FINAL' &&
             (await isManagerReviewV2MyFplPublication(season, eventId, active));
+          // The durable scope-generation fence is the authority for a FINAL
+          // no-op.  Do not let a stale active revision short-circuit capture
+          // after an event was reopened/refinalized and its scope generations
+          // became dirty.  The capture service repeats this fence internally;
+          // this bounded control read protects the worker-level fast path.
+          const finalizationControl = activeFinalUsesManagerReviewV2
+            ? (await getMyFplFinalizationControlStateWithScope(season)).find(
+                (control) => control.eventId === eventId,
+              )
+            : null;
+          const activeFinalScopeGenerationVerified = Boolean(
+            finalizationControl?.scopeGenerationInstalled &&
+              finalizationControl.activeRevision === active?.revision &&
+              finalizationControl.entryScopeGeneration !== null &&
+              finalizationControl.entryScopeGeneration ===
+                finalizationControl.verifiedEntryScopeGeneration &&
+              finalizationControl.tournamentScopeGeneration !== null &&
+              finalizationControl.tournamentScopeGeneration ===
+                finalizationControl.verifiedTournamentScopeGeneration &&
+              finalizationControl.verifiedRevision === active?.revision,
+          );
           const activeFinalScopeMatchesCurrentReadiness = Boolean(
             active &&
               finalizationReadiness &&
@@ -464,6 +486,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           );
           if (
             activeFinalUsesManagerReviewV2 &&
+            activeFinalScopeGenerationVerified &&
             activeFinalScopeMatchesCurrentReadiness &&
             (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
           ) {
@@ -472,54 +495,33 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               eventId,
             );
             if (
-              isMyFplSnapshotRedisManifestForPublication(
+              !isMyFplSnapshotRedisManifestForPublication(
                 redisManifest,
                 active,
                 season.seasonCode,
                 eventId,
               )
             ) {
-              await recordMyFplOutboxRedisEvidence({
-                freshnessWindowId: job.data.freshnessWindowId,
-                publication: active,
-                redisRevision: redisManifest.revision,
-              });
-              return { status: 'noop', publication: active };
-            }
-            // A corrupt pointer cannot be overwritten by the activation Lua
-            // (it deliberately fails closed). Clear only the exact active
-            // revision before replaying its durable outbox receipt; a newer
-            // pointer is fenced and remains untouched.
-            await invalidateMyFplSnapshotRedisManifest(season.seasonCode, eventId, active.revision);
-            await requeueDeliveredMyFplSnapshotPublication(season, eventId, active.revision);
-            const replay = await dispatchMyFplSnapshotPublicationOutbox({
-              limit: 1,
-              seasonCode: season.seasonCode,
-              eventId,
-            });
-            if (replay.failed > 0) {
-              throw new Error(
-                `My FPL snapshot Redis replay left ${replay.failed} delivery receipt(s) for retry`,
-              );
-            }
-            const replayedManifest = await getActiveMyFplSnapshotRedisManifest(
-              season.seasonCode,
-              eventId,
-            );
-            if (
-              isMyFplSnapshotRedisManifestForPublication(
-                replayedManifest,
-                active,
+              // A corrupt pointer cannot be overwritten by the activation
+              // Lua (it deliberately fails closed). Clear only the exact
+              // active revision before replaying its durable outbox receipt;
+              // a newer pointer is fenced and remains untouched.
+              await invalidateMyFplSnapshotRedisManifest(
                 season.seasonCode,
                 eventId,
-              )
-            ) {
-              await recordMyFplOutboxRedisEvidence({
-                freshnessWindowId: job.data.freshnessWindowId,
-                publication: active,
-                redisRevision: replayedManifest.revision,
+                active.revision,
+              );
+              await requeueDeliveredMyFplSnapshotPublication(season, eventId, active.revision);
+              const replay = await dispatchMyFplSnapshotPublicationOutbox({
+                limit: 1,
+                seasonCode: season.seasonCode,
+                eventId,
               });
-              return { status: 'noop', publication: active };
+              if (replay.failed > 0) {
+                throw new Error(
+                  `My FPL snapshot Redis replay left ${replay.failed} delivery receipt(s) for retry`,
+                );
+              }
             }
           }
 

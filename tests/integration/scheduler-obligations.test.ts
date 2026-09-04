@@ -17,6 +17,7 @@ import {
   markSchedulerObligationIrrecoverable,
   reconcilePostMatchSchedulerObligations,
   renewSchedulerObligation,
+  reserveSchedulerObligation,
   schedulerObligationStatus,
   startSchedulerObligation,
   supersedeSchedulerObligations,
@@ -39,6 +40,7 @@ const ACCEPTED_BACKOFF_OBLIGATION_ID = '30000000-0000-4000-8000-000000000011';
 const RETRYING_START_OBLIGATION_ID = '30000000-0000-4000-8000-000000000012';
 const MY_FPL_PRIORITY_HISTORICAL_OBLIGATION_ID = '30000000-0000-4000-8000-000000000013';
 const MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000014';
+const MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID = '30000000-0000-4000-8000-000000000015';
 const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
 const ACCEPTED_BACKOFF_SCOPE_KEY = 'integration:event:accepted-backoff';
 const ACCEPTED_BACKOFF_CASE_FINGERPRINT = 'integration:live-picks-backoff:breach';
@@ -61,7 +63,8 @@ async function cleanup(): Promise<void> {
       ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid,
       ${RETRYING_START_OBLIGATION_ID}::uuid,
       ${MY_FPL_PRIORITY_HISTORICAL_OBLIGATION_ID}::uuid,
-      ${MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID}::uuid
+      ${MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID}::uuid,
+      ${MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID}::uuid
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
@@ -333,6 +336,59 @@ describe('scheduler obligation generation fencing', () => {
       includedJobNames: ['my-fpl-finalization'],
     });
     expect(claimed?.obligation.obligationId).toBe(MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID);
+  });
+
+  test('refreshes an existing pending My FPL obligation priority without replacing its identity', async () => {
+    const sql = await getDbClient();
+    const dueAt = new Date('2026-08-23T00:01:00.000Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID}::uuid,
+        'my-fpl-finalization',
+        'integration:event:my-fpl-priority-refresh',
+        'event-1',
+        '30 seconds',
+        'UTC',
+        'pending',
+        'reconcile',
+        ${dueAt.toISOString()}::timestamptz,
+        3,
+        2,
+        jsonb_build_object(
+          'eventPriority', 2,
+          'scheduledDueAtMs', ${dueAt.getTime()}::bigint,
+          'preservedEvidence', 'yes'
+        )
+      )
+    `;
+
+    const refreshed = await reserveSchedulerObligation({
+      definition: { name: 'my-fpl-finalization', cadence: '30 seconds', timezone: 'UTC' },
+      plan: {
+        scopeKey: 'integration:event:my-fpl-priority-refresh',
+        periodKey: 'event-1',
+        dueAt: new Date('2026-08-23T00:02:00.000Z'),
+        source: 'reconcile',
+        eventId: 1,
+        evidence: { eventPriority: 0 },
+      },
+    });
+
+    expect(refreshed).toMatchObject({
+      obligationId: MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID,
+      status: 'pending',
+      generation: 3,
+      attempts: 2,
+      evidence: {
+        eventPriority: 0,
+        scheduledDueAtMs: dueAt.getTime(),
+        preservedEvidence: 'yes',
+      },
+    });
   });
 
   test('claims one atomic capacity lane and leaves a conflicting job pending', async () => {

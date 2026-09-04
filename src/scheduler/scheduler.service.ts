@@ -307,6 +307,15 @@ export function schedulerPlanKey(
     identity.push(Number(resultScheduleAnchorMs));
     identity.push(Number(resultAuthorityAtMs));
   }
+  const eventPriority = plan.evidence?.eventPriority;
+  if (
+    definition.name === 'my-fpl-finalization' &&
+    typeof eventPriority === 'number' &&
+    Number.isSafeInteger(eventPriority) &&
+    eventPriority >= 0
+  ) {
+    identity.push('eventPriority', eventPriority);
+  }
   return JSON.stringify(identity);
 }
 
@@ -1327,16 +1336,34 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     }
     for (const plan of resolution.plans) {
       const planKey = schedulerPlanKey(definition, plan);
+      // My FPL finalization carries the current-event authority in mutable
+      // evidence. Revisit its stable identity on every pass so a rollover
+      // from current to historical (or vice versa) refreshes eventPriority
+      // without creating a second durable obligation.
+      const refreshMyFplEventPriority = definition.name === 'my-fpl-finalization';
       // Single-flight lanes must revisit an existing period on every pass so
       // a newly-created desired target can be reconciled after a prior job
       // completed. All other definitions keep the in-process observation
       // guard to avoid redundant reservation reads.
-      if (wasPlanObserved(planKey) && !definition.executionPolicy) continue;
+      if (wasPlanObserved(planKey) && !definition.executionPolicy && !refreshMyFplEventPriority)
+        continue;
       try {
-        const obligation = await reserveSchedulerObligation({
+        let obligation = await reserveSchedulerObligation({
           definition: { ...definition, queueName: schedulerLaneName(definition) },
           plan,
         });
+        const eventPriority = plan.evidence?.eventPriority;
+        if (
+          refreshMyFplEventPriority &&
+          typeof eventPriority === 'number' &&
+          Number.isSafeInteger(eventPriority) &&
+          eventPriority >= 0
+        ) {
+          obligation = await mergeSchedulerObligationEvidence({
+            obligationId: obligation.obligationId,
+            evidence: { eventPriority },
+          });
+        }
         if (!plan.terminalStatus) {
           const freshnessWindowId = await recordFreshnessWindowForPlan(
             definition,

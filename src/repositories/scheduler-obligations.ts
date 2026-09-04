@@ -299,6 +299,11 @@ function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): 
   return Number.isFinite(scheduled.getTime()) ? scheduled : dueAt;
 }
 
+function myFplEventPriorityFromPlan(plan: SchedulerObligationPlan): number | null {
+  const value = plan.evidence?.eventPriority;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 export async function reserveSchedulerObligation(input: {
   definition: { name: string; cadence: string; timezone: string; queueName?: string };
   plan: SchedulerObligationPlan;
@@ -353,6 +358,25 @@ export async function reserveSchedulerObligation(input: {
     .limit(1);
   const row = existing[0];
   if (!row) throw new Error('Scheduler obligation disappeared after conflict');
+  const eventPriority =
+    input.definition.name === 'my-fpl-finalization' ? myFplEventPriorityFromPlan(input.plan) : null;
+  if (eventPriority !== null) {
+    const refreshed = await db
+      .update(schedulerObligationsInOps)
+      .set({
+        evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('eventPriority', ${eventPriority})`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, row.obligationId),
+          inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+          sql`${schedulerObligationsInOps.evidence}->>'eventPriority' IS DISTINCT FROM ${String(eventPriority)}`,
+        ),
+      )
+      .returning();
+    if (refreshed[0]) return mapRow(refreshed[0]);
+  }
   return mapRow(row);
 }
 

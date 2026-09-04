@@ -900,6 +900,42 @@ describe('standalone scheduler registry', () => {
     );
   });
 
+  test('revisits a My FPL obligation when event priority changes', () => {
+    const definition = { name: 'my-fpl-finalization' };
+    const base = {
+      scopeKey: '2627:event:1',
+      periodKey: 'event-1-final',
+    };
+    expect(
+      schedulerPlanKey(definition, {
+        ...base,
+        evidence: { eventPriority: 0 },
+      }),
+    ).not.toBe(
+      schedulerPlanKey(definition, {
+        ...base,
+        evidence: { eventPriority: 1 },
+      }),
+    );
+    expect(
+      schedulerPlanKey(
+        { name: 'entry-results' },
+        {
+          ...base,
+          evidence: { eventPriority: 0 },
+        },
+      ),
+    ).toBe(
+      schedulerPlanKey(
+        { name: 'entry-results' },
+        {
+          ...base,
+          evidence: { eventPriority: 1 },
+        },
+      ),
+    );
+  });
+
   test('keeps a corrected post-match plan retryable until its authority is persisted', () => {
     const plan = {
       evidence: {

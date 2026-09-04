@@ -2939,6 +2939,7 @@ export async function getMyFplSnapshotOperationalStatus(
       ready_entry_count: number | null;
       empty_entry_count: number | null;
       not_applicable_entry_count: number | null;
+      publication_not_applicable_entry_count: number | null;
       expected_tournament_count: number | null;
       ready_tournament_count: number | null;
       publication_entry_scope_sha256: string | null;
@@ -2969,12 +2970,13 @@ export async function getMyFplSnapshotOperationalStatus(
            event.data_checked_at, publication.revision, publication.snapshot_date,
            publication.kind, publication.published_at, publication.expected_entry_count,
            publication.ready_entry_count, publication.empty_entry_count,
+           publication.not_applicable_entry_count AS publication_not_applicable_entry_count,
            publication.content_sha256,
            publication.expected_tournament_count, publication.ready_tournament_count,
            publication.entry_scope_sha256 AS publication_entry_scope_sha256,
            publication.tournament_scope_sha256 AS publication_tournament_scope_sha256,
            coverage.current_entry_count, coverage.current_entry_scope_sha256,
-           coverage.not_applicable_entry_count,
+           coverage.not_applicable_entry_count AS not_applicable_entry_count,
            coverage.not_applicable_entry_count AS current_not_applicable_entry_count,
            coverage.missing_active_entry_count,
            tournament_coverage.current_tournament_scope_sha256,
@@ -3103,7 +3105,7 @@ export async function getMyFplSnapshotOperationalStatus(
       row.current_entry_scope_sha256 !== row.publication_entry_scope_sha256;
     const provisionalNotApplicableScopeDrift =
       row.kind === 'PROVISIONAL' &&
-      row.current_not_applicable_entry_count !== row.not_applicable_entry_count;
+      row.current_not_applicable_entry_count !== row.publication_not_applicable_entry_count;
     const provisionalTournamentScopeDrift =
       row.kind === 'PROVISIONAL' &&
       row.current_tournament_scope_sha256 !== row.publication_tournament_scope_sha256;
