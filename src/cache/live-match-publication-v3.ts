@@ -1411,7 +1411,10 @@ export async function publishLiveMatchDeskV3(input: {
     input.expectedNextCheckAt == null ? null : sourceDate(input.expectedNextCheckAt);
   const staleAt = input.staleAt == null ? null : sourceDate(input.staleAt);
   const previousPublication = input.previous?.publication ?? null;
-  const contentUpdatedAt = allocation.now;
+  // Revision content time describes the source observation that introduced a
+  // semantic change. Redis allocation time remains the publication time, but
+  // must not make an unchanged/changed source appear newer than it was checked.
+  const contentUpdatedAt = sourceCheckedAt;
   const desk = manifestItem(
     'desk',
     liveMatchDeskItemKey(scope, allocation.generation),

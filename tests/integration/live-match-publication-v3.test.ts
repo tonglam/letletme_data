@@ -141,6 +141,64 @@ describe('Live Matches V3 Redis publications', () => {
     );
   });
 
+  test('orders desk revision content time by source observation and preserves it when unchanged', async () => {
+    const first = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    expect(first.publication.revisions.lifecycle.contentUpdatedAt).toBe(
+      first.publication.sourceCheckedAt,
+    );
+    expect(first.publication.revisions.fixtureIdentity.contentUpdatedAt).toBe(
+      first.publication.sourceCheckedAt,
+    );
+    expect(first.publication.revisions.scoreState.contentUpdatedAt).toBe(
+      first.publication.sourceCheckedAt,
+    );
+    expect(new Date(first.publication.sourceCheckedAt).getTime()).toBeLessThanOrEqual(
+      new Date(first.publication.publishedAt).getTime(),
+    );
+
+    const unchanged = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(0)],
+      sourceCheckedAt: '2026-08-29T10:00:00.001Z',
+      previous: await readLiveMatchDeskV3({ ...scope, redis }),
+      redis,
+    });
+    expect(unchanged.publication.revisions).toEqual(first.publication.revisions);
+    expect(unchanged.publication.publicationId).not.toBe(first.publication.publicationId);
+    expect(unchanged.publication.generation).toBeGreaterThan(first.publication.generation);
+    expect(new Date(unchanged.publication.sourceCheckedAt).getTime()).toBeLessThanOrEqual(
+      new Date(unchanged.publication.publishedAt).getTime(),
+    );
+
+    const finalized = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'FINALIZED',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.002Z',
+      previous: await readLiveMatchDeskV3({ ...scope, redis }),
+      redis,
+    });
+    expect(finalized.publication.revisions.lifecycle.contentUpdatedAt).toBe(
+      finalized.publication.sourceCheckedAt,
+    );
+    expect(finalized.publication.revisions.scoreState.contentUpdatedAt).toBe(
+      finalized.publication.sourceCheckedAt,
+    );
+    expect(finalized.publication.revisions.fixtureIdentity).toEqual(
+      first.publication.revisions.fixtureIdentity,
+    );
+    expect(new Date(finalized.publication.sourceCheckedAt).getTime()).toBeLessThanOrEqual(
+      new Date(finalized.publication.publishedAt).getTime(),
+    );
+  });
+
   test('persists forced checkpoint urgency for a boundary publication', async () => {
     const publication = await publishLiveMatchDeskV3({
       ...scope,
