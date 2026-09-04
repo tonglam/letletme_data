@@ -645,13 +645,21 @@ type TournamentReviewPointsRowDraft = {
 /** Keep tournament metrics absent for roster entries that were not yet
  * eligible for the reviewed event. Overall FPL totals remain useful context,
  * but copying zero/default tournament values would make the immutable payload
- * fail the reader's applicability contract. */
+ * fail the reader's applicability contract. FPL also uses zero as an
+ * "unranked" sentinel for deleted entries; the GraphQL contract represents
+ * that absence as null. */
 export function normalizeTournamentReviewPointsRow(
   row: TournamentReviewPointsRowDraft,
 ): TournamentReviewPointsRowDraft {
-  if (row.applicable) return row;
-  return {
+  const normalized = {
     ...row,
+    previousRank: row.previousRank === 0 ? null : row.previousRank,
+    eventRank: row.eventRank === 0 ? null : row.eventRank,
+    overallRank: row.overallRank === 0 ? null : row.overallRank,
+  };
+  if (normalized.applicable) return normalized;
+  return {
+    ...normalized,
     groupId: null,
     rank: null,
     previousRank: null,
