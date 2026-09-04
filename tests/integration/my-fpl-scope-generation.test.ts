@@ -89,9 +89,9 @@ describe('My FPL scope-generation event fence', () => {
         verified_revision: number;
       }>
     >`
-      SELECT entry_scope_generation, verified_entry_scope_generation,
-             tournament_scope_generation, verified_tournament_scope_generation,
-             verified_revision
+      SELECT entry_scope_generation::integer, verified_entry_scope_generation::integer,
+             tournament_scope_generation::integer, verified_tournament_scope_generation::integer,
+             verified_revision::integer
       FROM competition.my_fpl_snapshot_scope_state
       WHERE season_id = ${SEASON_ID} AND event_id = ${EVENT_ID}
     `;
@@ -119,9 +119,9 @@ describe('My FPL scope-generation event fence', () => {
         tournament_dirty_since: Date | null;
       }>
     >`
-      SELECT entry_scope_generation, verified_entry_scope_generation,
-             tournament_scope_generation, verified_tournament_scope_generation,
-             verified_revision, entry_dirty_since, tournament_dirty_since
+      SELECT entry_scope_generation::integer, verified_entry_scope_generation::integer,
+             tournament_scope_generation::integer, verified_tournament_scope_generation::integer,
+             verified_revision::integer, entry_dirty_since, tournament_dirty_since
       FROM competition.my_fpl_snapshot_scope_state
       WHERE season_id = ${SEASON_ID} AND event_id = ${EVENT_ID}
     `;
@@ -150,9 +150,9 @@ describe('My FPL scope-generation event fence', () => {
         verified_revision: number | null;
       }>
     >`
-      SELECT entry_scope_generation, verified_entry_scope_generation,
-             tournament_scope_generation, verified_tournament_scope_generation,
-             verified_revision
+      SELECT entry_scope_generation::integer, verified_entry_scope_generation::integer,
+             tournament_scope_generation::integer, verified_tournament_scope_generation::integer,
+             verified_revision::integer
       FROM competition.my_fpl_snapshot_scope_state
       WHERE season_id = ${SEASON_ID} AND event_id = ${EVENT_ID}
     `;
