@@ -340,6 +340,10 @@ BEGIN
      AND new_row.tournament_id = old_row.tournament_id
     WHERE new_row.tournament_id IS NULL
        OR old_row.tournament_id IS NULL
+       OR old_row.total_team_num IS DISTINCT FROM new_row.total_team_num
+       OR old_row.group_mode IS DISTINCT FROM new_row.group_mode
+       OR old_row.group_started_event_id IS DISTINCT FROM new_row.group_started_event_id
+       OR old_row.group_ended_event_id IS DISTINCT FROM new_row.group_ended_event_id
   )
   SELECT COALESCE(array_agg(DISTINCT season_id), ARRAY[]::smallint[])
     INTO seasons

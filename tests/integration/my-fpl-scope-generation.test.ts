@@ -11,6 +11,8 @@ const SEASON_ID = 9395;
 const SEASON_CODE = '9395';
 const EVENT_ID = 1;
 const REVISION = 9_395_001;
+const ENTRY_ID = 939_500_1;
+const TOURNAMENT_ID = 939_500_1;
 const SEASON = { seasonId: SEASON_ID, seasonCode: SEASON_CODE };
 
 async function cleanup(): Promise<void> {
@@ -18,6 +20,14 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM competition.my_fpl_snapshot_publications
     WHERE season_id = ${SEASON_ID}
+  `;
+  await sql`
+    DELETE FROM competition.tournaments
+    WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+  `;
+  await sql`
+    DELETE FROM competition.entries
+    WHERE season_id = ${SEASON_ID} AND entry_id = ${ENTRY_ID}
   `;
   await sql`
     DELETE FROM fpl.events
@@ -52,6 +62,20 @@ async function seed(): Promise<void> {
     )
   `;
   await sql`
+    INSERT INTO competition.entries (season_id, entry_id, entry_name, player_name)
+    VALUES (${SEASON_ID}, ${ENTRY_ID}, 'Scope generation entry', 'Scope generation manager')
+  `;
+  await sql`
+    INSERT INTO competition.tournaments (
+      tournament_id, season_id, name, creator, admin_entry_id, league_id,
+      league_type, total_team_num, tournament_mode, group_mode,
+      group_auto_averages, state
+    ) VALUES (
+      ${TOURNAMENT_ID}, ${SEASON_ID}, 'Scope generation tournament', 'integration-test',
+      ${ENTRY_ID}, ${TOURNAMENT_ID}, 'classic', 1, 'normal', 'no_group', false, 'active'
+    )
+  `;
+  await sql`
     INSERT INTO competition.my_fpl_snapshot_publications (
       season_id, event_id, revision, snapshot_date, source_checked_at,
       published_at, kind, active, expected_entry_count, ready_entry_count,
@@ -65,8 +89,10 @@ async function seed(): Promise<void> {
   `;
   await sql`
     UPDATE competition.my_fpl_snapshot_scope_state
-    SET verified_entry_scope_generation = entry_scope_generation,
-        verified_tournament_scope_generation = tournament_scope_generation,
+    SET entry_scope_generation = 0,
+        verified_entry_scope_generation = 0,
+        tournament_scope_generation = 0,
+        verified_tournament_scope_generation = 0,
         entry_dirty_since = NULL,
         tournament_dirty_since = NULL,
         verified_revision = ${REVISION},
@@ -184,6 +210,57 @@ describe('My FPL scope-generation event fence', () => {
       tournament_scope_generation: 2,
       verified_tournament_scope_generation: 0,
       verified_revision: null,
+    });
+  });
+
+  test('invalidates tournament scope when finalization-affecting configuration changes', async () => {
+    const sql = await getDbClient();
+    const before = await sql<Array<{ tournament_scope_generation: number }>>`
+      SELECT tournament_scope_generation::integer
+      FROM competition.my_fpl_snapshot_scope_state
+      WHERE season_id = ${SEASON_ID} AND event_id = ${EVENT_ID}
+    `;
+    const startingGeneration = before[0]?.tournament_scope_generation;
+    if (startingGeneration === undefined) throw new Error('missing scope state row');
+
+    await sql`
+      UPDATE competition.tournaments
+      SET total_team_num = 2
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+    await sql`
+      UPDATE competition.tournaments
+      SET group_mode = 'points_races'
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+    await sql`
+      UPDATE competition.tournaments
+      SET group_started_event_id = ${EVENT_ID}
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+    await sql`
+      UPDATE competition.tournaments
+      SET group_ended_event_id = ${EVENT_ID}
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${TOURNAMENT_ID}
+    `;
+
+    const after = await sql<
+      Array<{
+        tournament_scope_generation: number;
+        verified_tournament_scope_generation: number;
+        tournament_dirty: boolean;
+      }>
+    >`
+      SELECT tournament_scope_generation::integer,
+             verified_tournament_scope_generation::integer,
+             tournament_dirty_since IS NOT NULL AS tournament_dirty
+      FROM competition.my_fpl_snapshot_scope_state
+      WHERE season_id = ${SEASON_ID} AND event_id = ${EVENT_ID}
+    `;
+    expect(after[0]).toEqual({
+      tournament_scope_generation: startingGeneration + 4,
+      verified_tournament_scope_generation: 0,
+      tournament_dirty: true,
     });
   });
 });
