@@ -2974,6 +2974,7 @@ export async function getMyFplSnapshotOperationalStatus(
            publication.entry_scope_sha256 AS publication_entry_scope_sha256,
            publication.tournament_scope_sha256 AS publication_tournament_scope_sha256,
            coverage.current_entry_count, coverage.current_entry_scope_sha256,
+           coverage.not_applicable_entry_count,
            coverage.not_applicable_entry_count AS current_not_applicable_entry_count,
            coverage.missing_active_entry_count,
            tournament_coverage.current_tournament_scope_sha256,

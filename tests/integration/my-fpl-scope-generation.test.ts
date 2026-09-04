@@ -36,7 +36,7 @@ async function seed(): Promise<void> {
       lifecycle_state, is_current
     ) VALUES (
       ${SEASON_ID}, ${SEASON_CODE}, 'My FPL scope generation integration',
-      2095, 2096, 'completed', false
+      9395, 9396, 'completed', false
     )
   `;
   await sql`
