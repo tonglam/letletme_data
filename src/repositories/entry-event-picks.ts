@@ -681,6 +681,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
             contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
             checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
             state: entryEventPickHeadsInCompetition.state,
+            entryId: entryEventPickHeadsInCompetition.entryId,
           })
           .from(entryEventPickHeadsInCompetition)
           .where(
