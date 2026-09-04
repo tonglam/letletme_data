@@ -6,6 +6,7 @@ import {
   hasCanonicalTournamentReviewGroupAssignment,
   h2hMatchPointsMatchScore,
   isTournamentReviewEntryApplicable,
+  normalizeTournamentReviewPointsRow,
   rankTournamentReviewH2HStandings,
   resolveTournamentReviewFormat,
   tournamentReviewScoreMatchesEntryResult,
@@ -32,6 +33,42 @@ const hardCutMigration = readFileSync(
 );
 
 describe('My Tournament Review V2 format and retry policy', () => {
+  test('nulls tournament metrics for non-applicable points rows', () => {
+    const row = normalizeTournamentReviewPointsRow({
+      entryId: 1,
+      entryName: 'Entry',
+      playerName: 'Player',
+      applicable: false,
+      groupId: 1,
+      rank: 1,
+      previousRank: 2,
+      grossPoints: 10,
+      transferCost: 0,
+      netPoints: 10,
+      tournamentScore: 10,
+      seasonNetPoints: 10,
+      seasonGrossPoints: 10,
+      eventRank: 3,
+      overallPoints: 42,
+      overallRank: 7,
+    });
+    expect(row).toMatchObject({
+      applicable: false,
+      groupId: null,
+      rank: null,
+      previousRank: null,
+      grossPoints: null,
+      transferCost: null,
+      netPoints: null,
+      tournamentScore: null,
+      seasonNetPoints: null,
+      seasonGrossPoints: null,
+      eventRank: null,
+      overallPoints: 42,
+      overallRank: 7,
+    });
+  });
+
   test('handles the empty-database sentinel before requiring a current season', () => {
     expect(backfillSource.indexOf('WHERE season_id = 0')).toBeGreaterThan(-1);
     expect(backfillSource.indexOf('currentSeasonRows.length === 0')).toBeGreaterThan(-1);
