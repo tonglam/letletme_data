@@ -1,6 +1,9 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 
-import { liveLeagueCheckpointsInCompetition } from '../db/schemas/index.schema';
+import {
+  liveLeagueCheckpointsInCompetition,
+  tournamentsInCompetition,
+} from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   clearLiveLeagueCheckpointDesiredV2,
@@ -132,8 +135,63 @@ export async function readLiveLeagueCheckpointV2(
   };
 }
 
-/** List persisted FINAL scopes for one current event, excluding H2H_MATCH. */
-export async function listLiveLeagueFinalCheckpointScopesV2(
+type H2HFinalizationPhase = Readonly<{
+  groupStartedEventId: number | null;
+  groupEndedEventId: number | null;
+  knockoutStartedEventId: number | null;
+  knockoutEndedEventId: number | null;
+}>;
+
+type LiveLeagueFinalizationTournament = H2HFinalizationPhase &
+  Readonly<{
+    tournamentId: number;
+    leagueType: string;
+    rosterMode: string;
+    groupMode: string | null;
+  }>;
+
+export function isH2HTournamentPhaseActive(
+  tournament: H2HFinalizationPhase,
+  eventId: number,
+): boolean {
+  const phases = [
+    [tournament.groupStartedEventId, tournament.groupEndedEventId],
+    [tournament.knockoutStartedEventId, tournament.knockoutEndedEventId],
+  ] as const;
+  if (!phases.some(([start, end]) => start !== null || end !== null)) return true;
+  return phases.some(
+    ([start, end]) =>
+      (start !== null && eventId >= start && (end === null || eventId <= end)) ||
+      (start === null && end !== null && eventId <= end),
+  );
+}
+
+export function requiredLiveLeagueFinalCheckpointScopesV2(
+  season: string,
+  eventId: number,
+  tournaments: readonly LiveLeagueFinalizationTournament[],
+): readonly LeagueLiveScope[] {
+  return tournaments.flatMap((tournament): readonly LeagueLiveScope[] => {
+    if (tournament.leagueType === 'classic') {
+      return [{ season, eventId, tournamentId: tournament.tournamentId, scope: 'CLASSIC' }];
+    }
+    if (
+      tournament.leagueType !== 'h2h' ||
+      tournament.rosterMode !== 'official_sync' ||
+      tournament.groupMode !== 'battle_races' ||
+      !isH2HTournamentPhaseActive(tournament, eventId)
+    ) {
+      return [];
+    }
+    return [
+      { season, eventId, tournamentId: tournament.tournamentId, scope: 'H2H_HEAD' },
+      { season, eventId, tournamentId: tournament.tournamentId, scope: 'H2H_STANDINGS' },
+    ];
+  });
+}
+
+/** List every FINAL checkpoint scope required by the canonical active tournaments. */
+export async function listRequiredLiveLeagueFinalCheckpointScopesV2(
   season: FplSeasonRef,
   eventId: number,
   dbInstance?: DbOrTransaction,
@@ -141,30 +199,25 @@ export async function listLiveLeagueFinalCheckpointScopesV2(
   const db = dbInstance ?? (await getDb());
   const rows = await db
     .select({
-      tournamentId: liveLeagueCheckpointsInCompetition.tournamentId,
-      scope: liveLeagueCheckpointsInCompetition.scopeKind,
+      tournamentId: tournamentsInCompetition.tournamentId,
+      leagueType: tournamentsInCompetition.leagueType,
+      rosterMode: tournamentsInCompetition.rosterMode,
+      groupMode: tournamentsInCompetition.groupMode,
+      groupStartedEventId: tournamentsInCompetition.groupStartedEventId,
+      groupEndedEventId: tournamentsInCompetition.groupEndedEventId,
+      knockoutStartedEventId: tournamentsInCompetition.knockoutStartedEventId,
+      knockoutEndedEventId: tournamentsInCompetition.knockoutEndedEventId,
     })
-    .from(liveLeagueCheckpointsInCompetition)
+    .from(tournamentsInCompetition)
     .where(
       and(
-        eq(liveLeagueCheckpointsInCompetition.seasonId, season.seasonId),
-        eq(liveLeagueCheckpointsInCompetition.eventId, eventId),
-        eq(liveLeagueCheckpointsInCompetition.state, 'FINALIZED'),
+        eq(tournamentsInCompetition.seasonId, season.seasonId),
+        eq(tournamentsInCompetition.state, 'active'),
+        eq(tournamentsInCompetition.setupStatus, 'ready'),
       ),
-    );
-  return rows.flatMap((row) => {
-    if (row.scope !== 'CLASSIC' && row.scope !== 'H2H_HEAD' && row.scope !== 'H2H_STANDINGS') {
-      return [];
-    }
-    return [
-      {
-        season: season.seasonCode,
-        eventId,
-        tournamentId: row.tournamentId,
-        scope: row.scope,
-      } satisfies LeagueLiveScope,
-    ];
-  });
+    )
+    .orderBy(asc(tournamentsInCompetition.tournamentId));
+  return requiredLiveLeagueFinalCheckpointScopesV2(season.seasonCode, eventId, rows);
 }
 
 function checkpointValues(read: LeagueLiveRead, checkpointedAt: Date) {

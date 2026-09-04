@@ -28,6 +28,7 @@ import { redisSingleton } from '../cache/singleton';
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
+  isH2HTournamentPhaseActive,
   liveLeagueCheckpointIsDue,
   readLiveLeagueCheckpointGenerationV2,
   reconcileLiveLeagueCheckpointV2,
@@ -705,26 +706,6 @@ export function standingsFreshForFinalization(
     standingsCoverageComplete &&
     standingsRead.throughEventId === coverageEventId &&
     currentEventFresh
-  );
-}
-
-export function isH2HTournamentPhaseActive(
-  tournament: Pick<
-    OfficialH2HTournament,
-    'groupStartedEventId' | 'groupEndedEventId' | 'knockoutStartedEventId' | 'knockoutEndedEventId'
-  >,
-  eventId: number,
-): boolean {
-  const phases = [
-    [tournament.groupStartedEventId, tournament.groupEndedEventId],
-    [tournament.knockoutStartedEventId, tournament.knockoutEndedEventId],
-  ] as const;
-  const hasConfiguredPhase = phases.some(([start, end]) => start !== null || end !== null);
-  if (!hasConfiguredPhase) return true;
-  return phases.some(
-    ([start, end]) =>
-      (start !== null && eventId >= start && (end === null || eventId <= end)) ||
-      (start === null && end !== null && eventId <= end),
   );
 }
 

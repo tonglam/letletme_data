@@ -7,6 +7,7 @@ import {
 } from '../../src/cache/live-publication-v2';
 import type { DbEntryEventResult } from '../../src/db/schemas/platform.types';
 import { buildFinalEntryLiveInputFromBaseAndResult } from '../../src/services/entries.service';
+import { requiredLiveLeagueFinalCheckpointScopesV2 } from '../../src/services/live-league-checkpoint-v2.service';
 import {
   LiveFinalRetentionIncompleteError,
   finalPublicationConflict,
@@ -241,5 +242,46 @@ describe('Live final retention failure evidence', () => {
     expect(evidence).toEqual(result);
     expect(evidence).not.toHaveProperty('payload');
     expect(new LiveFinalRetentionIncompleteError(result).evidence).toEqual(evidence);
+  });
+});
+
+describe('Live final retention league scope completeness', () => {
+  test('requires missing active Classic and in-phase official H2H checkpoints', () => {
+    const tournament = {
+      rosterMode: 'snapshot',
+      groupMode: 'no_group',
+      groupStartedEventId: null,
+      groupEndedEventId: null,
+      knockoutStartedEventId: null,
+      knockoutEndedEventId: null,
+    } as const;
+
+    expect(
+      requiredLiveLeagueFinalCheckpointScopesV2('2627', 2, [
+        { ...tournament, tournamentId: 3, leagueType: 'classic' },
+        {
+          ...tournament,
+          tournamentId: 6,
+          leagueType: 'h2h',
+          rosterMode: 'official_sync',
+          groupMode: 'battle_races',
+          groupStartedEventId: 1,
+          groupEndedEventId: 5,
+        },
+        {
+          ...tournament,
+          tournamentId: 7,
+          leagueType: 'h2h',
+          rosterMode: 'official_sync',
+          groupMode: 'battle_races',
+          groupStartedEventId: 3,
+          groupEndedEventId: 5,
+        },
+      ]),
+    ).toEqual([
+      { season: '2627', eventId: 2, tournamentId: 3, scope: 'CLASSIC' },
+      { season: '2627', eventId: 2, tournamentId: 6, scope: 'H2H_HEAD' },
+      { season: '2627', eventId: 2, tournamentId: 6, scope: 'H2H_STANDINGS' },
+    ]);
   });
 });

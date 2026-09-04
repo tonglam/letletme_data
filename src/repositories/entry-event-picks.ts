@@ -59,7 +59,7 @@ export type EntryEventPicksUpsertOptions = {
 };
 
 export type EntryEventPickHeadMetadata = {
-  readonly entryId?: number;
+  readonly entryId: number;
   readonly publicationId: string;
   readonly generation: number;
   readonly picksBaseRevision: string;
