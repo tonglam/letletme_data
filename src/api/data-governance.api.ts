@@ -202,14 +202,15 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
     async ({ request, set, body }) => {
       if (!(await requireOpsKey(request, set))) return { success: false, error: 'Unauthorized' };
       try {
-        const repair = await runLiveMatchesV3Repair({
+        const repairInput = {
           action: body.action,
           season: body.season,
           eventId: body.eventId,
-          kind: body.kind ?? null,
           reason: body.reason ?? null,
           confirmation: body.confirmation ?? null,
-        });
+          ...(body.kind === undefined ? {} : { kind: body.kind }),
+        };
+        const repair = await runLiveMatchesV3Repair(repairInput);
         return { success: true, repair };
       } catch (error) {
         const status = getHttpStatusFromError(error);
@@ -235,6 +236,7 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
           t.Literal('promote-previous'),
           t.Literal('rebuild-current'),
           t.Literal('replay-checkpoint'),
+          t.Literal('restore-equivalent-final-pair'),
         ]),
         season: t.String({ pattern: '^\\d{4}$' }),
         eventId: t.Integer({ minimum: 1 }),

@@ -127,10 +127,11 @@ export async function checkpointEntryLiveInputV2(
   season: FplSeasonRef,
   eventId: number,
   entryId: number,
+  redisClient?: Redis,
 ): Promise<'checkpointed' | 'missing'> {
   const scope = { season: season.seasonCode, eventId, entryId } as const;
-  let desired = await readEntryCheckpointDesiredV2(scope);
-  const candidate = await readEntryLiveInputV2(scope);
+  let desired = await readEntryCheckpointDesiredV2(scope, redisClient);
+  const candidate = await readEntryLiveInputV2(scope, redisClient);
   if (!candidate) return 'missing';
 
   // The reader may fall back to the previous publication for serving a
@@ -144,7 +145,7 @@ export async function checkpointEntryLiveInputV2(
   // Treat that marker as an idempotent success instead of re-writing every
   // already durable entry (or reporting a false missing input).
   if (!desired && candidate.publication.checkpointedAt !== null) {
-    return (await isEntryPublicationActiveAndCheckpointedV2(candidate.publication))
+    return (await isEntryPublicationActiveAndCheckpointedV2(candidate.publication, redisClient))
       ? 'checkpointed'
       : 'missing';
   }
@@ -152,7 +153,8 @@ export async function checkpointEntryLiveInputV2(
   // obligation is visible to this worker. Re-create the obligation from the
   // one active candidate so the normal generation/identity checks and
   // PostgreSQL fence below can complete the exact publication.
-  if (!desired) desired = await setEntryCheckpointDesiredV2(candidate.publication);
+  if (!desired)
+    desired = await setEntryCheckpointDesiredV2(candidate.publication, new Date(), redisClient);
 
   if (candidate.publication.generation < desired.generation) return 'missing';
   if (
@@ -162,7 +164,7 @@ export async function checkpointEntryLiveInputV2(
     return 'missing';
   }
   if (candidate.publication.generation > desired.generation) {
-    desired = await setEntryCheckpointDesiredV2(candidate.publication);
+    desired = await setEntryCheckpointDesiredV2(candidate.publication, new Date(), redisClient);
   }
 
   const sourceCheckedAt = new Date(candidate.publication.sourceCheckedAt);
@@ -201,9 +203,13 @@ export async function checkpointEntryLiveInputV2(
   ) {
     return 'missing';
   }
-  const marked = await markEntryPublicationCheckpointedV2(candidate.publication, checkpointedAt);
+  const marked = await markEntryPublicationCheckpointedV2(
+    candidate.publication,
+    checkpointedAt,
+    redisClient,
+  );
   if (marked === null) return 'missing';
-  await clearEntryCheckpointDesiredV2(desired);
+  await clearEntryCheckpointDesiredV2(desired, redisClient);
   return 'checkpointed';
 }
 
@@ -659,7 +665,7 @@ export async function syncEntryEventResults(
   }
 }
 
-function normalizeFinalPicks(
+export function normalizeFinalPicks(
   raw: unknown,
   entryId: number,
   eventId: number,
@@ -721,7 +727,7 @@ function normalizeFinalPicks(
   ) as unknown as Exactly15Picks;
 }
 
-function normalizeFinalAutomaticSubs(
+export function normalizeFinalAutomaticSubs(
   raw: unknown,
   allowedElements: ReadonlySet<number>,
 ): OfficialSubstitution[] | null {
@@ -773,6 +779,78 @@ function durableLiveInputContentHash(rows: readonly EntryLiveInputPickRow[]): st
     transferCount: first?.transfers,
     transferCost: first?.transfersCost,
   });
+}
+
+/**
+ * Build the FINAL semantic input from a validated Redis provisional input and
+ * the durable finalized result.  No provider fields are inferred here: the
+ * result must contain the persisted 15-pick payload, valid substitutions, a
+ * rich-sync timestamp at/after data_checked, and integer score totals.
+ */
+export function buildFinalEntryLiveInputFromBaseAndResult(
+  baseInput: EntryLiveInputV2,
+  result: DbEntryEventResult,
+  dataCheckedAt: Date,
+): EntryLiveInputV2 | null {
+  if (
+    baseInput.finalResult !== null ||
+    !Number.isSafeInteger(result.eventPoints) ||
+    !Number.isSafeInteger(result.overallPoints) ||
+    !result.richSyncedAt ||
+    !Number.isFinite(result.richSyncedAt.getTime()) ||
+    result.richSyncedAt.getTime() < dataCheckedAt.getTime()
+  ) {
+    return null;
+  }
+  const finalPicks = normalizeFinalPicks(result.eventPicks, result.entryId, result.eventId);
+  const automaticSubs = finalPicks
+    ? normalizeFinalAutomaticSubs(
+        result.eventAutoSub,
+        new Set(finalPicks.map((pick) => pick.element)),
+      )
+    : null;
+  if (!finalPicks || !automaticSubs) return null;
+  const dataCheckedAtIso = dataCheckedAt.toISOString();
+  const multipliers = finalPicks.map((pick) => ({
+    element: pick.element,
+    multiplier: pick.multiplier,
+  }));
+  const score = {
+    eventPoints: result.eventPoints,
+    totalPoints: result.overallPoints,
+  };
+  const officialAdjustmentRevision = contentHash({
+    dataCheckedAt: dataCheckedAtIso,
+    multipliers,
+    automaticSubs,
+  });
+  const finalResultRevision = contentHash({
+    dataCheckedAt: dataCheckedAtIso,
+    score,
+    picks: finalPicks,
+    automaticSubs,
+  });
+  const input: EntryLiveInputV2 = {
+    ...baseInput,
+    officialAdjustment: {
+      revision: officialAdjustmentRevision,
+      multipliers,
+      automaticSubs,
+    },
+    finalResult: {
+      revision: finalResultRevision,
+      score,
+      picks: finalPicks,
+      automaticSubs,
+    },
+  };
+  return validateEntryLiveInputV2(input, {
+    season: baseInput.season,
+    eventId: baseInput.eventId,
+    entryId: baseInput.entryId,
+  })
+    ? input
+    : null;
 }
 
 function durableRowsMatchEntryLiveInput(

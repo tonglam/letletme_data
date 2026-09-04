@@ -13,6 +13,7 @@ import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
 import {
+  LiveFinalRetentionIncompleteError,
   liveFinalRetentionCompletionEvidence,
   runLiveFinalRetentionV2,
 } from '../services/live-final-retention.service';
@@ -113,9 +114,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     if (job.name === LIVE_JOBS.LIVE_FINAL_RETENTION) {
       const result = await runLiveFinalRetentionV2(season, eventId);
       if (result.status !== 'succeeded') {
-        throw new Error(
-          `Live final retention did not complete for event ${eventId}: failed=${result.failed} minTtlMs=${result.minRemainingTtlMs ?? 'null'}`,
-        );
+        throw new LiveFinalRetentionIncompleteError(result);
       }
       return result;
     }
@@ -357,16 +356,21 @@ export function createLiveDataWorker(): WorkerRuntime {
     if (job) {
       void alertOnFinalFailure(job, err);
       const fence = inspectSchedulerObligationFence(job.data);
+      const failureEvidence =
+        err instanceof LiveFinalRetentionIncompleteError ? { retention: err.evidence } : undefined;
       if (isTerminalJobFailure(job, err) && fence.kind === 'complete') {
         void failSchedulerObligation({
           obligationId: fence.obligationId,
           generation: fence.generation,
           error: err,
+          ...(failureEvidence ? { evidence: failureEvidence } : {}),
         }).catch(() => undefined);
       } else if (job.id !== undefined && isTerminalJobFailure(job, err) && fence.kind === 'none') {
-        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
-          () => undefined,
-        );
+        void failSchedulerObligationByBullJobId({
+          bullJobId: job.id,
+          error: err,
+          ...(failureEvidence ? { evidence: failureEvidence } : {}),
+        }).catch(() => undefined);
       }
     }
   });

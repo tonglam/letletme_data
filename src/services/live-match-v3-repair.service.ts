@@ -4,9 +4,11 @@ import {
   promotePreviousLiveMatchV3,
   readLiveMatchCheckpointDesiredV3,
   readLiveMatchDeskV3,
+  readLiveMatchDeskFenceV3,
   readLiveMatchDeskPointerV3,
   readLiveMatchDetailFenceV3,
   readLiveMatchDetailPointerV3,
+  restoreLiveMatchEquivalentFinalPairV3,
   restoreLiveMatchDeskCheckpointV3,
   restoreLiveMatchDetailCheckpointV3,
   setLiveMatchCheckpointDesiredV3,
@@ -23,6 +25,7 @@ import {
   readLiveMatchDetailCheckpointV3,
 } from './live-match-v3-checkpoint.service';
 import { ForbiddenError, ValidationError } from '../utils/errors';
+import { canonicalJson } from '../utils/content-hash';
 
 export const LIVE_MATCHES_V3_REPAIR_CONFIRMATION = 'LIVE_MATCHES_V3_REPAIR';
 
@@ -30,7 +33,8 @@ export type LiveMatchesV3RepairAction =
   | 'inspect'
   | 'promote-previous'
   | 'rebuild-current'
-  | 'replay-checkpoint';
+  | 'replay-checkpoint'
+  | 'restore-equivalent-final-pair';
 export type LiveMatchesV3RepairKind = 'desk' | 'detail';
 
 export type LiveMatchesV3RepairRequest = Readonly<{
@@ -47,6 +51,7 @@ const REPAIR_ACTIONS = new Set<LiveMatchesV3RepairAction>([
   'promote-previous',
   'rebuild-current',
   'replay-checkpoint',
+  'restore-equivalent-final-pair',
 ]);
 const REPAIR_KINDS = new Set<LiveMatchesV3RepairKind>(['desk', 'detail']);
 const REQUEST_FIELDS = new Set(['action', 'season', 'eventId', 'kind', 'reason', 'confirmation']);
@@ -85,7 +90,7 @@ export function parseLiveMatchesV3RepairRequest(value: unknown): LiveMatchesV3Re
   const action = record.action;
   if (typeof action !== 'string' || !REPAIR_ACTIONS.has(action as LiveMatchesV3RepairAction)) {
     invalidRequest(
-      'action must be inspect, promote-previous, rebuild-current, or replay-checkpoint',
+      'action must be inspect, promote-previous, rebuild-current, replay-checkpoint, or restore-equivalent-final-pair',
     );
   }
   const season = record.season;
@@ -97,15 +102,26 @@ export function parseLiveMatchesV3RepairRequest(value: unknown): LiveMatchesV3Re
     invalidRequest('eventId must be a positive integer');
   }
   const rawKind = record.kind;
+  if (
+    action === 'restore-equivalent-final-pair' &&
+    Object.prototype.hasOwnProperty.call(record, 'kind')
+  ) {
+    invalidRequest('restore-equivalent-final-pair requires kind to be omitted');
+  }
   const kind = rawKind === undefined || rawKind === null ? null : optionalString(rawKind, 'kind');
   if (kind !== null && !REPAIR_KINDS.has(kind as LiveMatchesV3RepairKind)) {
     invalidRequest('kind must be desk or detail');
   }
   const reason = optionalString(record.reason, 'reason');
-  if (action !== 'inspect') {
+  if (action !== 'inspect' && action !== 'restore-equivalent-final-pair') {
     if (kind === null) invalidRequest('write repairs require an exact desk or detail kind');
     if (reason === null || reason.length < 12) {
       invalidRequest('write repairs require a reason with at least 12 characters');
+    }
+  }
+  if (action === 'restore-equivalent-final-pair') {
+    if (reason === null || reason.length < 12) {
+      invalidRequest('restore-equivalent-final-pair requires a reason with at least 12 characters');
     }
   }
   const confirmation = optionalExactString(record.confirmation, 'confirmation');
@@ -228,6 +244,63 @@ function sameDeskContent(left: MatchDeskRead | null, right: MatchDeskRead | null
       left.publication.revisions.scoreState.revision ===
         right.publication.revisions.scoreState.revision,
   );
+}
+
+/**
+ * Compare final desk semantics while deliberately ignoring publication/storage
+ * identity.  A recovery may replace a Redis generation with the durable
+ * checkpoint generation, but it must never replace a different final payload.
+ */
+export function sameFinalLiveMatchDeskContent(
+  left: MatchDeskRead | null,
+  right: MatchDeskRead | null,
+): boolean {
+  return Boolean(
+    left &&
+      right &&
+      left.publication.season === right.publication.season &&
+      left.publication.eventId === right.publication.eventId &&
+      left.publication.state === 'FINALIZED' &&
+      right.publication.state === 'FINALIZED' &&
+      left.publication.desk.sha256 === right.publication.desk.sha256 &&
+      left.publication.desk.bytes === right.publication.desk.bytes &&
+      left.publication.desk.count === right.publication.desk.count &&
+      left.publication.revisions.lifecycle.revision ===
+        right.publication.revisions.lifecycle.revision &&
+      left.publication.revisions.fixtureIdentity.revision ===
+        right.publication.revisions.fixtureIdentity.revision &&
+      left.publication.revisions.scoreState.revision ===
+        right.publication.revisions.scoreState.revision,
+  );
+}
+
+/** Compare final detail payload/revision semantics without pointer identity. */
+export function sameFinalLiveMatchDetailContent(
+  left: MatchDetailRead | null,
+  right: MatchDetailRead | null,
+): boolean {
+  if (
+    !left ||
+    !right ||
+    left.publication.season !== right.publication.season ||
+    left.publication.eventId !== right.publication.eventId ||
+    !left.publication.finalized ||
+    !right.publication.finalized ||
+    left.publication.fixtureIdentityRevision !== right.publication.fixtureIdentityRevision ||
+    left.publication.detail.revision !== right.publication.detail.revision
+  ) {
+    return false;
+  }
+  const descriptor = (read: MatchDetailRead) =>
+    [...read.publication.fixtures]
+      .map((item) => ({
+        fixtureId: item.fixtureId,
+        count: item.count,
+        bytes: item.bytes,
+        sha256: item.sha256,
+      }))
+      .sort((a, b) => a.fixtureId - b.fixtureId);
+  return canonicalJson(descriptor(left)) === canonicalJson(descriptor(right));
 }
 
 function sameDetailContent(left: MatchDetailRead | null, right: MatchDetailRead | null): boolean {
@@ -355,13 +428,143 @@ async function inspectLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
   };
 }
 
+function pairRepairSummary(
+  desk: MatchDeskRead | null,
+  detail: MatchDetailRead | null,
+): Record<string, unknown> {
+  return {
+    desk: deskSummary(desk),
+    detail: detailSummary(detail),
+  };
+}
+
+async function restoreEquivalentFinalPair(
+  request: LiveMatchesV3RepairRequest,
+  season: Awaited<ReturnType<typeof seasonRepository.requireByCode>>,
+  redis: Parameters<typeof readLiveMatchDeskV3>[0]['redis'],
+) {
+  if (!season.isCurrent) {
+    throw new ValidationError(
+      'final pair recovery is restricted to the current season',
+      'LIVE_MATCH_REPAIR_CURRENT_SEASON_REQUIRED',
+    );
+  }
+  const [event, currentEvent] = await Promise.all([
+    eventRepository.findById(season, request.eventId),
+    eventRepository.findCurrent(season),
+  ]);
+  if (
+    !event ||
+    !currentEvent ||
+    currentEvent.id !== request.eventId ||
+    !event.finished ||
+    !event.dataChecked
+  ) {
+    throw new ValidationError(
+      'final pair recovery requires the current finished and data-checked event',
+      'LIVE_MATCH_REPAIR_EVENT_NOT_FINAL',
+    );
+  }
+  const [deskCheckpoint, detailCheckpoint, observedDesk, observedDetail] = await Promise.all([
+    readLiveMatchDeskCheckpointV3(season, request.eventId),
+    readLiveMatchDetailCheckpointV3(season, request.eventId),
+    readLiveMatchDeskFenceV3({ season: request.season, eventId: request.eventId, redis }),
+    readLiveMatchDetailFenceV3({ season: request.season, eventId: request.eventId, redis }),
+  ]);
+  if (
+    !deskCheckpoint ||
+    !detailCheckpoint ||
+    deskCheckpoint.publication.state !== 'FINALIZED' ||
+    !detailCheckpoint.publication.finalized ||
+    !isLiveMatchDetailCompatibleWithDesk(detailCheckpoint, deskCheckpoint)
+  ) {
+    throw new ValidationError(
+      'PostgreSQL does not contain a complete compatible final desk/detail pair',
+      'LIVE_MATCH_REPAIR_FINAL_PAIR_CHECKPOINT_MISSING',
+    );
+  }
+  const currentDesk = observedDesk.read;
+  if (
+    !currentDesk ||
+    currentDesk.servedFrom !== 'REDIS_CURRENT' ||
+    currentDesk.publication.state !== 'FINALIZED' ||
+    !sameFinalLiveMatchDeskContent(currentDesk, deskCheckpoint)
+  ) {
+    throw new ValidationError(
+      'Redis current final desk is missing or not equivalent to PostgreSQL',
+      'LIVE_MATCH_REPAIR_FINAL_DESK_CONFLICT',
+    );
+  }
+  const activeDetailPointerExists = observedDetail.observed !== '';
+  const currentDetail = observedDetail.read;
+  if (
+    activeDetailPointerExists &&
+    (!currentDetail ||
+      currentDetail.servedFrom !== 'REDIS_CURRENT' ||
+      !sameFinalLiveMatchDetailContent(currentDetail, detailCheckpoint))
+  ) {
+    throw new ValidationError(
+      'Redis current detail is present but not equivalent to PostgreSQL',
+      'LIVE_MATCH_REPAIR_FINAL_DETAIL_CONFLICT',
+    );
+  }
+
+  const before = pairRepairSummary(currentDesk, currentDetail);
+  if (
+    currentDetail &&
+    isLiveMatchDetailCompatibleWithDesk(currentDetail, currentDesk) &&
+    sameFinalLiveMatchDetailContent(currentDetail, detailCheckpoint)
+  ) {
+    return {
+      contractVersion: 'live-matches-v3',
+      action: request.action,
+      season: request.season,
+      eventId: request.eventId,
+      status: 'already-canonical' as const,
+      before,
+      after: before,
+    };
+  }
+
+  const restored = await restoreLiveMatchEquivalentFinalPairV3({
+    deskCheckpoint,
+    detailCheckpoint,
+    observedDesk,
+    observedDetail,
+    promoteActiveEvent: true,
+    redis,
+  });
+  const after = pairRepairSummary(
+    { publication: restored.desk, fixtures: deskCheckpoint.fixtures, servedFrom: 'REDIS_CURRENT' },
+    {
+      publication: restored.detail,
+      fixtures: detailCheckpoint.fixtures,
+      servedFrom: 'REDIS_CURRENT',
+    },
+  );
+  return {
+    contractVersion: 'live-matches-v3',
+    action: request.action,
+    season: request.season,
+    eventId: request.eventId,
+    status: restored.status,
+    before,
+    after,
+  };
+}
+
 async function executeLiveMatchesV3Repair(request: LiveMatchesV3RepairRequest) {
   assertLiveMatchesV3RepairAuthorization(request);
-  if (!request.kind) throw new ValidationError('write repairs require an exact kind');
   const season = await seasonRepository.requireByCode(request.season);
   assertLiveMatchesV3RepairSeason(request.action, season);
   const redis = await redisSingleton.getClient();
   const scope = { season: request.season, eventId: request.eventId } as const;
+
+  if (request.action === 'restore-equivalent-final-pair') {
+    return restoreEquivalentFinalPair(request, season, redis);
+  }
+
+  if (!request.kind) throw new ValidationError('write repairs require an exact kind');
 
   if (request.action === 'promote-previous') {
     let observedDetail: MatchDetailActiveFence | null = null;

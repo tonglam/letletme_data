@@ -526,6 +526,108 @@ if sequence < candidate.generation then redis.call('SET', KEYS[3], tostring(cand
 return {'published', currentRaw}
 `;
 
+/**
+ * Restore a PostgreSQL-proven final desk/detail pair in one pointer CAS.
+ *
+ * The caller performs the semantic equivalence checks (payload hashes,
+ * revisions, fixture identity, and scope).  This script fences the exact raw
+ * pointers observed with those checks, validates every staged immutable item,
+ * and changes both active pointers atomically.  Sequence keys are floors only:
+ * a recovery from an older durable generation can never move them backwards.
+ */
+const RESTORE_EQUIVALENT_FINAL_PAIR_LUA = `
+local deskRaw = ARGV[1] or ''
+local detailRaw = ARGV[2] or ''
+local observedDeskRaw = ARGV[3] or ''
+local observedDetailRaw = ARGV[4] or ''
+local previousTtl = ARGV[5]
+local finalTtl = ARGV[6]
+local currentDeskRaw = redis.call('GET', KEYS[1]) or ''
+local currentDetailRaw = redis.call('GET', KEYS[4]) or ''
+if currentDeskRaw ~= observedDeskRaw or currentDetailRaw ~= observedDetailRaw then return {'changed'} end
+
+local deskOk, desk = pcall(cjson.decode, deskRaw)
+local detailOk, detail = pcall(cjson.decode, detailRaw)
+if not deskOk or not detailOk or type(desk) ~= 'table' or type(detail) ~= 'table' then return {'invalid_candidate'} end
+if desk.contractVersion ~= 'live-matches-v3' or detail.contractVersion ~= 'live-matches-v3' or
+   desk.state ~= 'FINALIZED' or detail.finalized ~= true or
+   desk.season ~= detail.season or desk.eventId ~= detail.eventId or
+   type(desk.generation) ~= 'number' or type(detail.generation) ~= 'number' or
+   desk.generation <= 0 or detail.generation <= 0 or
+   type(detail.observedDeskGeneration) ~= 'number' or
+   detail.observedDeskGeneration ~= desk.generation or
+   type(desk.desk) ~= 'table' or type(detail.fixtures) ~= 'table' then
+  return {'invalid_candidate'}
+end
+local deskItem = desk.desk
+if deskItem.type ~= 'string' or deskItem.name ~= 'desk' or type(deskItem.key) ~= 'string' or
+   type(deskItem.count) ~= 'number' or type(deskItem.bytes) ~= 'number' or
+   type(deskItem.sha256) ~= 'string' then return {'invalid_candidate'} end
+local deskType = redis.call('TYPE', deskItem.key)
+if type(deskType) == 'table' then deskType = deskType['ok'] end
+if redis.call('EXISTS', deskItem.key) ~= 1 or
+   deskType ~= 'string' or
+   redis.call('STRLEN', deskItem.key) ~= deskItem.bytes or
+   redis.call('GET', deskItem.key .. ':meta') ~= tostring(deskItem.count) .. '|' .. tostring(deskItem.bytes) .. '|' .. deskItem.sha256 then
+  return {'invalid_item'}
+end
+for _, item in ipairs(detail.fixtures) do
+  if type(item) ~= 'table' or item.type ~= 'string' or type(item.key) ~= 'string' or
+     type(item.fixtureId) ~= 'number' or item.fixtureId <= 0 or
+     type(item.count) ~= 'number' or type(item.bytes) ~= 'number' or
+     type(item.sha256) ~= 'string' then return {'invalid_candidate'} end
+  local itemType = redis.call('TYPE', item.key)
+  if type(itemType) == 'table' then itemType = itemType['ok'] end
+  if redis.call('EXISTS', item.key) ~= 1 or itemType ~= 'string' or
+     redis.call('STRLEN', item.key) ~= item.bytes or
+     redis.call('GET', item.key .. ':meta') ~= tostring(item.count) .. '|' .. tostring(item.bytes) .. '|' .. item.sha256 then
+    return {'invalid_item'}
+  end
+end
+
+-- A byte-for-byte candidate is already canonical.  Returning before any
+-- writes makes the action idempotent and avoids rotating a healthy previous.
+if currentDeskRaw == deskRaw and currentDetailRaw == detailRaw then return {'already-canonical', currentDeskRaw, currentDetailRaw} end
+
+local currentDeskOk, currentDesk = pcall(cjson.decode, currentDeskRaw)
+if currentDeskRaw ~= '' and currentDeskOk and type(currentDesk) == 'table' and type(currentDesk.desk) == 'table' then
+  redis.call('SET', KEYS[2], currentDeskRaw, 'PX', previousTtl)
+  if currentDesk.desk.key then
+    redis.call('PEXPIRE', currentDesk.desk.key, previousTtl)
+    redis.call('PEXPIRE', currentDesk.desk.key .. ':meta', previousTtl)
+  end
+end
+local currentDetailOk, currentDetail = pcall(cjson.decode, currentDetailRaw)
+if currentDetailRaw ~= '' and currentDetailOk and type(currentDetail) == 'table' then
+  redis.call('SET', KEYS[5], currentDetailRaw, 'PX', previousTtl)
+  local oldManifest = 'llm:data:v3:fpl:live-match:detail:' .. currentDetail.season .. ':' .. tostring(currentDetail.eventId) .. ':' .. tostring(currentDetail.generation) .. ':manifest'
+  redis.call('PEXPIRE', oldManifest, previousTtl)
+  for _, oldItem in ipairs(currentDetail.fixtures or {}) do
+    if type(oldItem) == 'table' and oldItem.key then
+      redis.call('PEXPIRE', oldItem.key, previousTtl)
+      redis.call('PEXPIRE', oldItem.key .. ':meta', previousTtl)
+    end
+  end
+end
+
+redis.call('PEXPIRE', deskItem.key, finalTtl)
+redis.call('PEXPIRE', deskItem.key .. ':meta', finalTtl)
+local detailManifestKey = 'llm:data:v3:fpl:live-match:detail:' .. detail.season .. ':' .. tostring(detail.eventId) .. ':' .. tostring(detail.generation) .. ':manifest'
+redis.call('SET', detailManifestKey, detailRaw, 'PX', finalTtl)
+redis.call('PEXPIRE', detailManifestKey, finalTtl)
+for _, item in ipairs(detail.fixtures) do
+  redis.call('PEXPIRE', item.key, finalTtl)
+  redis.call('PEXPIRE', item.key .. ':meta', finalTtl)
+end
+redis.call('SET', KEYS[1], deskRaw, 'PX', finalTtl)
+redis.call('SET', KEYS[4], detailRaw, 'PX', finalTtl)
+local deskSequence = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
+if deskSequence < desk.generation then redis.call('SET', KEYS[3], tostring(desk.generation)) end
+local detailSequence = tonumber(redis.call('GET', KEYS[6]) or '0') or 0
+if detailSequence < detail.generation then redis.call('SET', KEYS[6], tostring(detail.generation)) end
+return {'restored', currentDeskRaw, currentDetailRaw}
+`;
+
 const TOUCH_ONE_LUA = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'missing'} end
@@ -1847,6 +1949,175 @@ export async function restoreLiveMatchDetailCheckpointV3(input: {
     );
   }
   return { publication: current.publication, published: status === 'published' };
+}
+
+/**
+ * Atomically restore a complete FINAL desk/detail pair from PostgreSQL.
+ *
+ * This is intentionally separate from the ordinary per-kind checkpoint
+ * restores: a final pair must move together, and a valid current desk/detail
+ * observed by the caller is fenced by its exact pointer bytes.  The caller is
+ * responsible for proving semantic equivalence before invoking this function;
+ * this layer validates the durable checkpoint payloads and performs the Redis
+ * CAS without exposing either payload in the return value.
+ */
+export async function restoreLiveMatchEquivalentFinalPairV3(input: {
+  readonly deskCheckpoint: MatchDeskRead;
+  readonly detailCheckpoint: MatchDetailRead;
+  readonly observedDesk: MatchDeskActiveFence;
+  readonly observedDetail: MatchDetailActiveFence;
+  readonly promoteActiveEvent?: boolean;
+  readonly redis?: Redis;
+}): Promise<{
+  readonly status: 'restored' | 'already-canonical';
+  readonly desk: MatchDeskPublication;
+  readonly detail: MatchDetailPublication;
+  readonly previousDesk: MatchDeskPublication | null;
+  readonly previousDetail: MatchDetailPublication | null;
+}> {
+  const desk = input.deskCheckpoint.publication;
+  const detail = input.detailCheckpoint.publication;
+  const scope = { season: desk.season, eventId: desk.eventId } as const;
+  assertScope(scope);
+  if (
+    detail.season !== scope.season ||
+    detail.eventId !== scope.eventId ||
+    desk.state !== 'FINALIZED' ||
+    !detail.finalized ||
+    detail.observedDeskGeneration !== desk.generation ||
+    detail.fixtureIdentityRevision !== desk.revisions.fixtureIdentity.revision
+  ) {
+    throw new CacheError(
+      'Live Match final pair checkpoint is incompatible',
+      'LIVE_MATCH_EQUIVALENT_PAIR_INVALID',
+    );
+  }
+
+  assertDeskLimits(input.deskCheckpoint.fixtures);
+  const parsedDesk = parseLiveMatchDeskPublicationV3(desk, scope);
+  const expectedDesk = manifestItem(
+    'desk',
+    liveMatchDeskItemKey(scope, desk.generation),
+    input.deskCheckpoint.fixtures,
+  );
+  if (
+    !parsedDesk ||
+    canonicalJson(parsedDesk) !== canonicalJson(desk) ||
+    !validDeskPayload(input.deskCheckpoint.fixtures, scope.eventId) ||
+    !samePublicationItem(desk.desk, expectedDesk)
+  ) {
+    throw new CacheError(
+      'Live Match final desk checkpoint does not match its manifest',
+      'LIVE_MATCH_EQUIVALENT_PAIR_INVALID',
+    );
+  }
+
+  assertDetailLimits(input.detailCheckpoint.fixtures);
+  const sortedDetails = [...input.detailCheckpoint.fixtures].sort(
+    (left, right) => left.fixtureId - right.fixtureId,
+  );
+  if (
+    !parseLiveMatchDetailPublicationV3(detail, scope) ||
+    !isValidLiveMatchDetailCheckpointPayloadV3(sortedDetails) ||
+    detail.fixtures.length !== sortedDetails.length ||
+    detail.detail.revision !== contentHash(sortedDetails)
+  ) {
+    throw new CacheError(
+      'Live Match final detail checkpoint does not match its manifest',
+      'LIVE_MATCH_EQUIVALENT_PAIR_INVALID',
+    );
+  }
+  const detailValues = sortedDetails.map((fixture, index) => {
+    const item = detail.fixtures[index];
+    if (!item) {
+      throw new CacheError(
+        'Live Match final detail checkpoint fixture is missing from its manifest',
+        'LIVE_MATCH_EQUIVALENT_PAIR_INVALID',
+      );
+    }
+    const itemGeneration = Number(item.key.split(':').at(-3));
+    if (!Number.isSafeInteger(itemGeneration) || itemGeneration <= 0) {
+      throw new CacheError(
+        `Live Match final detail fixture ${fixture.fixtureId} has an invalid item generation`,
+        'LIVE_MATCH_EQUIVALENT_PAIR_INVALID',
+      );
+    }
+    const expected = detailItem(scope, itemGeneration, fixture.fixtureId, fixture.players);
+    if (item.fixtureId !== fixture.fixtureId || !samePublicationItem(item, expected)) {
+      throw new CacheError(
+        `Live Match final detail fixture ${fixture.fixtureId} does not match its manifest`,
+        'LIVE_MATCH_EQUIVALENT_PAIR_INVALID',
+      );
+    }
+    return { key: item.key, payload: canonicalJson(fixture.players), item };
+  });
+
+  const redis = input.redis ?? (await redisSingleton.getClient());
+  // Stage immutable siblings before the pointer CAS.  Restore staging is
+  // bounded and checksum-verified; if the CAS is rejected, no active pointer
+  // changes and the staged keys remain only as short-lived repair candidates.
+  await stage(
+    redis,
+    [
+      {
+        key: desk.desk.key,
+        payload: canonicalJson(input.deskCheckpoint.fixtures),
+        item: desk.desk,
+      },
+    ],
+    'restore',
+  );
+  await stage(redis, detailValues, 'restore');
+
+  const result = promotionResult(
+    await redis.eval(
+      RESTORE_EQUIVALENT_FINAL_PAIR_LUA,
+      6,
+      liveMatchDeskKey(scope, 'active'),
+      liveMatchDeskKey(scope, 'previous'),
+      liveMatchDeskKey(scope, 'sequence'),
+      liveMatchDetailKey(scope, 'active'),
+      liveMatchDetailKey(scope, 'previous'),
+      liveMatchDetailKey(scope, 'sequence'),
+      JSON.stringify(desk),
+      JSON.stringify(detail),
+      input.observedDesk.observed,
+      input.observedDetail.observed,
+      String(LIVE_MATCH_PREVIOUS_TTL_MS),
+      String(LIVE_MATCH_FINAL_TTL_MS),
+    ),
+  );
+  const status = result[0];
+  if (status === 'changed') {
+    throw new CacheError(
+      'Live Match final pair changed during atomic restore',
+      'LIVE_MATCH_EQUIVALENT_PAIR_CHANGED',
+    );
+  }
+  if (status !== 'restored' && status !== 'already-canonical') {
+    throw new CacheError(
+      `Live Match final pair restore failed: ${status}`,
+      'LIVE_MATCH_EQUIVALENT_PAIR_FAILED',
+    );
+  }
+  const currentDesk = await readDeskPointer(redis, scope, 'active');
+  const currentDetail = await readDetailPointer(redis, scope, 'active');
+  if (!currentDesk || !currentDetail) {
+    throw new CacheError(
+      'Live Match final pair restore produced an incomplete active pair',
+      'LIVE_MATCH_EQUIVALENT_PAIR_FAILED',
+    );
+  }
+  if (input.promoteActiveEvent !== false) {
+    await setLiveMatchActiveEventV3({ ...scope, redis });
+  }
+  return {
+    status: status as 'restored' | 'already-canonical',
+    desk: currentDesk.publication,
+    detail: currentDetail.publication,
+    previousDesk: input.observedDesk.read?.publication ?? null,
+    previousDetail: input.observedDetail.read?.publication ?? null,
+  };
 }
 
 /** CAS-promote one validated previous pointer; a valid final current is never rolled back. */
