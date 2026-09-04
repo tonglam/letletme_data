@@ -118,7 +118,15 @@ function resolveMatchWinner(
   return homeEntryId <= awayEntryId ? homeEntryId : awayEntryId;
 }
 
-function calcEntryWinningNum(
+/**
+ * Count decisive legs won by one entry for a knockout fixture.
+ *
+ * The persisted bracket fields `home_wins` and `away_wins` are integer
+ * columns. A tied leg is therefore deliberately not represented as `0.5`;
+ * the aggregate winner is resolved separately from the net-point and
+ * goal-based tie breakers below.
+ */
+export function calcEntryWinningNum(
   results: Array<{
     homeEntryId: number | null;
     awayEntryId: number | null;
@@ -143,11 +151,6 @@ function calcEntryWinningNum(
       winningNum += 1;
     } else if (result.awayEntryId === entryId && awayNet > homeNet) {
       winningNum += 1;
-    } else if (
-      homeNet === awayNet &&
-      (result.homeEntryId === entryId || result.awayEntryId === entryId)
-    ) {
-      winningNum += 0.5;
     }
   }
   return winningNum;
