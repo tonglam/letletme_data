@@ -1677,7 +1677,10 @@ export async function publishLiveMatchDetailV3(input: {
     input.expectedNextCheckAt == null ? null : sourceDate(input.expectedNextCheckAt);
   const staleAt = input.staleAt == null ? null : sourceDate(input.staleAt);
   const previousPublication = input.previous?.publication ?? null;
-  const detailRevision = revision(previousPublication?.detail, input.fixtures, allocation.now);
+  // Content time identifies the accepted source observation that introduced
+  // the semantic change. Redis allocation time remains publication time and
+  // may be slightly later, so using it here would invert the public timeline.
+  const detailRevision = revision(previousPublication?.detail, input.fixtures, sourceCheckedAt);
   const previousByHash = new Map<string, MatchDetailItem>();
   for (const item of previousPublication?.fixtures ?? [])
     previousByHash.set(`${item.fixtureId}:${item.sha256}`, item);
