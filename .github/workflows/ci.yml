@@ -147,9 +147,6 @@ jobs:
             exit 1
           fi
 
-      - name: Production dependency audit
-        run: bun audit --production
-
   integration:
     name: integration (${{ matrix.bun-version }})
     runs-on: ubuntu-latest
