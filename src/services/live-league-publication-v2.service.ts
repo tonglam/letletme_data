@@ -194,7 +194,9 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
       entry.region,
       entry.started_event AS "startedEvent",
       entry.overall_points AS "overallPoints",
-      entry.overall_rank AS "overallRank",
+      -- The repository uses zero as the "no current rank" sentinel. The V2
+      -- publication contract exposes absence as null, never as a fake rank.
+      NULLIF(entry.overall_rank, 0) AS "overallRank",
       entry.bank,
       entry.team_value AS "teamValue",
       entry.total_transfers AS "totalTransfers",

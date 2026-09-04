@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
@@ -220,6 +221,13 @@ const h2hManifest = (): LeagueLiveManifest => {
 };
 
 describe('Live League V2 manifest contract', () => {
+  test('normalizes both missing rank sentinels before building a Classic publication', () => {
+    const source = readFileSync('src/services/live-league-publication-v2.service.ts', 'utf8');
+
+    expect(source).toContain('NULLIF(entry.overall_rank, 0) AS "overallRank"');
+    expect(source).toContain('NULLIF(entry.last_overall_rank, 0) AS "lastOverallRank"');
+  });
+
   test('returns a bounded checkpoint batch instead of aborting on oversized scans', async () => {
     const keys = Array.from(
       { length: 513 },
