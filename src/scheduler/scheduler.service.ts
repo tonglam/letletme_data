@@ -319,6 +319,30 @@ export function schedulerPlanKey(
   return JSON.stringify(identity);
 }
 
+/**
+ * An in-flight My FPL obligation may still carry the previous event priority.
+ * Keep its changed plan observable until a later pass can update the durable
+ * evidence after the row becomes pending/failed. Terminal rows are already
+ * settled and do not need a priority refresh.
+ */
+export function schedulerPlanObservationCanBeRemembered(
+  definition: Pick<ScheduledJobDefinition, 'name'>,
+  plan: Pick<SchedulerObligationPlan, 'terminalStatus' | 'evidence'>,
+  obligation: Pick<SchedulerObligation, 'status' | 'evidence'>,
+): boolean {
+  if (definition.name !== 'my-fpl-finalization' || plan.terminalStatus !== undefined) return true;
+  const expectedPriority = plan.evidence?.eventPriority;
+  if (
+    typeof expectedPriority !== 'number' ||
+    !Number.isSafeInteger(expectedPriority) ||
+    expectedPriority < 0
+  ) {
+    return true;
+  }
+  if (['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) return true;
+  return obligation.evidence.eventPriority === expectedPriority;
+}
+
 export function postMatchReservationWasPersisted(
   plan: Pick<SchedulerObligationPlan, 'evidence'>,
   obligation: Pick<SchedulerObligation, 'evidence'> | undefined,
@@ -1373,7 +1397,9 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
               plan.terminalStatus === 'irrecoverable',
           });
         }
-        rememberObservedPlan(planKey);
+        if (schedulerPlanObservationCanBeRemembered(definition, plan, obligation)) {
+          rememberObservedPlan(planKey);
+        }
         reserved += 1;
         if (definition.executionPolicy && plan.terminalStatus === undefined) {
           const laneKey = definition.executionPolicy.laneKey({ context, plan });
