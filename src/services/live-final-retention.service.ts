@@ -1,4 +1,5 @@
 import type Redis from 'ioredis';
+import type { DbEntryEventResult } from '../db/schemas/platform.types';
 
 import {
   entryLiveV2ItemKey,
@@ -7,9 +8,11 @@ import {
   readEntryLiveInputV2,
   readLivePublicationV2Pointer,
   renewEntryLiveInputV2FinalLease,
+  publishEntryLiveInputV2,
   renewLivePublicationV2FinalLease,
   restoreEntryLiveInputV2Checkpoint,
   restoreLivePublicationV2Checkpoint,
+  setEntryCheckpointDesiredV2,
   validateEntryLiveInputV2,
   type EntryLiveInputV2,
   type EntryLivePublicationV2,
@@ -39,6 +42,7 @@ import {
 import { redisSingleton } from '../cache/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { eventRepository } from '../repositories/events';
+import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import {
   entryEventPicksRepository,
   type EntryEventPickHeadMetadata,
@@ -56,12 +60,16 @@ import { syncLiveH2HLeaguePublicationsV2 } from './live-league-publication-v2.se
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
+import {
+  buildFinalEntryLiveInputFromBaseAndResult,
+  checkpointEntryLiveInputV2,
+} from './entries.service';
 
 export const LIVE_FINAL_RETENTION_INTERVAL_MS = 6 * 60 * 60_000;
 export const LIVE_FINAL_RETENTION_THRESHOLD_MS = 24 * 60 * 60_000;
 export const LIVE_FINAL_RETENTION_TTL_MS = 48 * 60 * 60_000;
 export const LIVE_FINAL_RETENTION_ENTRY_PAGE_SIZE = 250;
-export const LIVE_FINAL_RETENTION_ENTRY_CONCURRENCY = 8;
+export const LIVE_FINAL_RETENTION_ENTRY_CONCURRENCY = 2;
 
 export type LiveFinalRetentionFamilyStats = {
   checked: number;
@@ -88,6 +96,23 @@ export type LiveFinalRetentionResult = {
     league: LiveFinalRetentionFamilyStats;
   };
 };
+
+/**
+ * A final retention run remains a durable failed/irrecoverable scheduler
+ * outcome, but its bounded completion evidence must survive the failure path
+ * for `/jobs/status` and operator reconciliation.
+ */
+export class LiveFinalRetentionIncompleteError extends Error {
+  readonly evidence: Record<string, unknown>;
+
+  constructor(result: LiveFinalRetentionResult) {
+    super(
+      `Live final retention did not complete for event ${result.eventId}: failed=${result.failed} minTtlMs=${result.minRemainingTtlMs ?? 'null'}`,
+    );
+    this.name = 'LiveFinalRetentionIncompleteError';
+    this.evidence = liveFinalRetentionCompletionEvidence(result);
+  }
+}
 
 /** Keep scheduler completion evidence small and free of publication payloads. */
 export function liveFinalRetentionCompletionEvidence(
@@ -513,7 +538,9 @@ async function processMatchDetail(
 async function processEntryHead(
   season: FplSeasonRef,
   eventId: number,
+  dataCheckedAt: Date,
   head: EntryEventPickHeadMetadata,
+  durableResult: DbEntryEventResult | undefined,
   redis: Redis,
   family: MutableFamilyStats,
 ): Promise<void> {
@@ -523,19 +550,158 @@ async function processEntryHead(
     entryId === undefined ||
     !Number.isSafeInteger(entryId) ||
     entryId <= 0 ||
-    head.inputPayload === null ||
-    !validFinalEntryInput(head.inputPayload, season.seasonCode, eventId, entryId)
+    head.state !== 'COMPLETE' ||
+    head.rowCount !== 15 ||
+    !/^[0-9a-f]{64}$/.test(head.picksBaseRevision) ||
+    !/^[0-9a-f]{64}$/.test(head.contentSha256) ||
+    !Number.isFinite(head.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(head.contentUpdatedAt.getTime()) ||
+    !Number.isFinite(head.checkpointedAt.getTime()) ||
+    (head.inputPayload !== null &&
+      !validFinalEntryInput(head.inputPayload, season.seasonCode, eventId, entryId))
   ) {
     family.failed += 1;
     return;
   }
   const scope = { season: season.seasonCode, eventId, entryId } as const;
   const existing = await readEntryLiveInputV2(scope, redis);
+
+  // A null durable input payload is recoverable only from the exact active
+  // Redis provisional publication and a complete persisted final result.  No
+  // provider request or guessed previous totals are allowed on this path.
+  if (head.inputPayload === null) {
+    const current = existing;
+    const currentPicksBaseHash = current
+      ? contentHash({
+          picks: current.input.picksBase.picks,
+          chip: current.input.picksBase.chip,
+          transferCount: current.input.picksBase.transferCount,
+          transferCost: current.input.picksBase.transferCost,
+        })
+      : null;
+    if (
+      !current ||
+      !durableResult ||
+      durableResult.entryId !== entryId ||
+      durableResult.eventId !== eventId ||
+      current.servedFrom !== 'REDIS_CURRENT' ||
+      current.publication.publicationId !== head.publicationId ||
+      current.publication.generation !== head.generation ||
+      current.publication.state !== 'PROVISIONAL' ||
+      current.input.finalResult !== null ||
+      current.input.picksBase.revision !== head.picksBaseRevision ||
+      current.input.picksBase.picks.length !== 15 ||
+      currentPicksBaseHash !== head.contentSha256
+    ) {
+      family.failed += 1;
+      return;
+    }
+    const durableHeadBeforeRecovery = await entryEventPicksRepository.findHead(
+      season,
+      entryId,
+      eventId,
+    );
+    if (
+      !durableHeadBeforeRecovery ||
+      durableHeadBeforeRecovery.publicationId !== head.publicationId ||
+      durableHeadBeforeRecovery.generation !== head.generation ||
+      durableHeadBeforeRecovery.picksBaseRevision !== head.picksBaseRevision ||
+      durableHeadBeforeRecovery.contentSha256 !== head.contentSha256 ||
+      durableHeadBeforeRecovery.rowCount !== 15 ||
+      durableHeadBeforeRecovery.sourceCheckedAt.getTime() !== head.sourceCheckedAt.getTime() ||
+      durableHeadBeforeRecovery.contentUpdatedAt.getTime() !== head.contentUpdatedAt.getTime() ||
+      durableHeadBeforeRecovery.checkpointedAt.getTime() !== head.checkpointedAt.getTime() ||
+      durableHeadBeforeRecovery.inputPayload !== null ||
+      durableHeadBeforeRecovery.state !== 'COMPLETE'
+    ) {
+      family.failed += 1;
+      return;
+    }
+    const finalInput = buildFinalEntryLiveInputFromBaseAndResult(
+      current.input,
+      durableResult,
+      dataCheckedAt,
+    );
+    if (!finalInput || !durableResult.richSyncedAt) {
+      family.failed += 1;
+      return;
+    }
+    try {
+      const published = await publishEntryLiveInputV2({
+        season: season.seasonCode,
+        eventId,
+        entryId,
+        input: finalInput,
+        sourceCheckedAt: durableResult.richSyncedAt,
+        generationFloor: head.generation,
+        redis,
+      });
+      if (!published.published || published.publication.state !== 'FINAL') {
+        family.failed += 1;
+        return;
+      }
+      await setEntryCheckpointDesiredV2(published.publication, new Date(), redis);
+      if ((await checkpointEntryLiveInputV2(season, eventId, entryId, redis)) !== 'checkpointed') {
+        family.failed += 1;
+        return;
+      }
+      const durableAfter = await entryEventPicksRepository.findHead(season, entryId, eventId);
+      if (
+        !durableAfter ||
+        durableAfter.publicationId !== published.publication.publicationId ||
+        durableAfter.generation !== published.publication.generation ||
+        durableAfter.picksBaseRevision !== finalInput.picksBase.revision ||
+        durableAfter.inputPayload === null
+      ) {
+        family.failed += 1;
+        return;
+      }
+      family.restored += 1;
+      updateMinimum(
+        family,
+        await minimumTtl(redis, [
+          entryLiveV2Key(scope, 'active'),
+          published.publication.item.key,
+          `${published.publication.item.key}:meta`,
+        ]),
+      );
+    } catch (error) {
+      family.failed += 1;
+      logError('Live final retention entry final recovery failed', error, {
+        season: season.seasonCode,
+        eventId,
+        entryId,
+      });
+    }
+    return;
+  }
+
+  // Re-read the durable head immediately before any TTL/renewal decision.  A
+  // newer generation or changed payload must fence this pass rather than
+  // allowing a stale page read to renew an unrelated publication.
+  const durableHead = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  if (
+    !durableHead ||
+    durableHead.publicationId !== head.publicationId ||
+    durableHead.generation !== head.generation ||
+    durableHead.picksBaseRevision !== head.picksBaseRevision ||
+    durableHead.contentSha256 !== head.contentSha256 ||
+    durableHead.sourceCheckedAt.getTime() !== head.sourceCheckedAt.getTime() ||
+    durableHead.contentUpdatedAt.getTime() !== head.contentUpdatedAt.getTime() ||
+    durableHead.checkpointedAt.getTime() !== head.checkpointedAt.getTime() ||
+    durableHead.state !== 'COMPLETE' ||
+    durableHead.inputPayload === null ||
+    !validFinalEntryInput(durableHead.inputPayload, season.seasonCode, eventId, entryId)
+  ) {
+    family.failed += 1;
+    return;
+  }
+  const durableInput = durableHead.inputPayload;
   const publication = entryPublicationFromHead(
     season,
     eventId,
-    head,
-    head.inputPayload,
+    durableHead,
+    durableInput,
     existing?.publication.publicationId === head.publicationId &&
       existing.publication.generation === head.generation
       ? existing.publication
@@ -590,7 +756,7 @@ async function processEntryHead(
   try {
     await restoreEntryLiveInputV2Checkpoint({
       publication,
-      liveInput: head.inputPayload,
+      liveInput: durableInput,
       redis,
     });
     family.restored += 1;
@@ -797,6 +963,9 @@ export async function runLiveFinalRetentionV2(
   if (!event.finished || !event.dataChecked) {
     throw new Error(`Live final retention event ${eventId} is not finished and data checked`);
   }
+  if (!event.dataCheckedAt || !Number.isFinite(event.dataCheckedAt.getTime())) {
+    throw new Error(`Live final retention event ${eventId} has no valid data_checked timestamp`);
+  }
   const redis = redisClient ?? (await redisSingleton.getClient());
   const families = {
     global: emptyFamily(),
@@ -819,8 +988,29 @@ export async function runLiveFinalRetentionV2(
       LIVE_FINAL_RETENTION_ENTRY_PAGE_SIZE,
     );
     if (page.length === 0) break;
+    const durableResults = await entryEventResultsRepository.findByEventAndEntryIds(
+      season,
+      eventId,
+      page
+        .map((head) => head.entryId)
+        .filter(
+          (entryId): entryId is number =>
+            typeof entryId === 'number' && Number.isSafeInteger(entryId) && entryId > 0,
+        ),
+    );
+    const resultByEntry = new Map(
+      durableResults.map((result) => [result.entryId, result] as const),
+    );
     await mapWithConcurrency(page, LIVE_FINAL_RETENTION_ENTRY_CONCURRENCY, async (head) =>
-      processEntryHead(season, eventId, head, redis, families.entry),
+      processEntryHead(
+        season,
+        eventId,
+        event.dataCheckedAt!,
+        head,
+        head.entryId === undefined ? undefined : resultByEntry.get(head.entryId),
+        redis,
+        families.entry,
+      ),
     );
     const nextCursor = Math.max(...page.map((head) => head.entryId ?? 0));
     if (!Number.isSafeInteger(nextCursor) || nextCursor <= cursor) {

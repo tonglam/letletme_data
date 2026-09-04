@@ -25,6 +25,7 @@ import {
   readLiveMatchDetailV3,
   readLiveMatchDetailPointerV3,
   readLiveMatchDeskFenceV3,
+  restoreLiveMatchEquivalentFinalPairV3,
   restoreLiveMatchDeskCheckpointV3,
   restoreLiveMatchDetailCheckpointV3,
   renewLiveMatchDeskFinalLeaseV3,
@@ -139,6 +140,111 @@ describe('Live Matches V3 Redis publications', () => {
     expect(await redis.get(liveMatchDeskKey(scope, 'previous'))).toContain(
       first.publication.publicationId,
     );
+  });
+
+  test('restores an equivalent final pair atomically, preserves sequence floors, and is idempotent', async () => {
+    const deskPublished = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'FINALIZED',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const detailPublished = await publishLiveMatchDetailV3({
+      ...scope,
+      observedDeskGeneration: deskPublished.publication.generation,
+      fixtureIdentityRevision: deskPublished.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(30),
+      sourceCheckedAt: '2026-08-29T10:00:01.000Z',
+      finalized: true,
+      redis,
+    });
+    const deskCheckpoint = await readLiveMatchDeskPointerV3({ ...scope, redis }, 'active');
+    const detailCheckpoint = await readLiveMatchDetailPointerV3({ ...scope, redis }, 'active');
+    if (!deskCheckpoint || !detailCheckpoint) throw new Error('final pair fixture is missing');
+    const observedDesk = await readLiveMatchDeskFenceV3({ ...scope, redis });
+    await redis.del(liveMatchDetailKey(scope, 'active'));
+    const observedDetail = await readLiveMatchDetailFenceV3({ ...scope, redis });
+    expect(observedDetail.observed).toBe('');
+    expect(observedDetail.read).toBeNull();
+    const deskSequenceKey = `${liveMatchDeskKey(scope, 'sequence')}`;
+    const detailSequenceKey = `${liveMatchDetailKey(scope, 'sequence')}`;
+    const deskSequenceBefore = await redis.get(deskSequenceKey);
+    const detailSequenceBefore = await redis.get(detailSequenceKey);
+
+    const restored = await restoreLiveMatchEquivalentFinalPairV3({
+      deskCheckpoint,
+      detailCheckpoint,
+      observedDesk,
+      observedDetail,
+      redis,
+    });
+    expect(restored.status).toBe('restored');
+    expect(restored.desk.publicationId).toBe(deskPublished.publication.publicationId);
+    expect(restored.detail.publicationId).toBe(detailPublished.publication.publicationId);
+    expect(await redis.get(deskSequenceKey)).toBe(deskSequenceBefore);
+    expect(await redis.get(detailSequenceKey)).toBe(detailSequenceBefore);
+    expect(
+      (await readLiveMatchDetailPointerV3({ ...scope, redis }, 'active'))?.publication
+        .publicationId,
+    ).toBe(detailPublished.publication.publicationId);
+    expect(
+      (await readLiveMatchDeskPointerV3({ ...scope, redis }, 'previous'))?.publication
+        .publicationId,
+    ).toBe(deskPublished.publication.publicationId);
+
+    const secondObservedDesk = await readLiveMatchDeskFenceV3({ ...scope, redis });
+    const secondObservedDetail = await readLiveMatchDetailFenceV3({ ...scope, redis });
+    const second = await restoreLiveMatchEquivalentFinalPairV3({
+      deskCheckpoint,
+      detailCheckpoint,
+      observedDesk: secondObservedDesk,
+      observedDetail: secondObservedDetail,
+      redis,
+    });
+    expect(second.status).toBe('already-canonical');
+    expect(await redis.get(deskSequenceKey)).toBe(deskSequenceBefore);
+    expect(await redis.get(detailSequenceKey)).toBe(detailSequenceBefore);
+  });
+
+  test('rejects a stale pair fence without changing either active pointer', async () => {
+    const deskPublished = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'FINALIZED',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const detailPublished = await publishLiveMatchDetailV3({
+      ...scope,
+      observedDeskGeneration: deskPublished.publication.generation,
+      fixtureIdentityRevision: deskPublished.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(30),
+      sourceCheckedAt: '2026-08-29T10:00:01.000Z',
+      finalized: true,
+      redis,
+    });
+    const deskCheckpoint = await readLiveMatchDeskPointerV3({ ...scope, redis }, 'active');
+    const detailCheckpoint = await readLiveMatchDetailPointerV3({ ...scope, redis }, 'active');
+    if (!deskCheckpoint || !detailCheckpoint) throw new Error('final pair fixture is missing');
+    const observedDesk = await readLiveMatchDeskFenceV3({ ...scope, redis });
+    const observedDetail = await readLiveMatchDetailFenceV3({ ...scope, redis });
+    const racedRaw = JSON.stringify({ race: true });
+    await redis.set(liveMatchDetailKey(scope, 'active'), racedRaw);
+    await expect(
+      restoreLiveMatchEquivalentFinalPairV3({
+        deskCheckpoint,
+        detailCheckpoint,
+        observedDesk,
+        observedDetail,
+        redis,
+      }),
+    ).rejects.toMatchObject({ code: 'LIVE_MATCH_EQUIVALENT_PAIR_CHANGED' });
+    expect(await redis.get(liveMatchDetailKey(scope, 'active'))).toBe(racedRaw);
+    expect(await redis.get(liveMatchDeskKey(scope, 'active'))).toContain(
+      deskPublished.publication.publicationId,
+    );
+    expect(detailPublished.publication.publicationId).toBeDefined();
   });
 
   test('orders desk revision content time by source observation and preserves it when unchanged', async () => {

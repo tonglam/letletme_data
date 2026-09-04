@@ -1735,6 +1735,7 @@ export async function completeSchedulerObligationByBullJobId(input: {
 export async function failSchedulerObligationByBullJobId(input: {
   bullJobId: string | number;
   error: unknown;
+  evidence?: Record<string, unknown>;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -1752,6 +1753,7 @@ export async function failSchedulerObligationByBullJobId(input: {
   return failSchedulerObligation({
     obligationId: obligation.obligationId,
     error: input.error,
+    evidence: input.evidence,
     db,
   });
 }
@@ -1762,6 +1764,7 @@ export async function failSchedulerObligation(input: {
   generation?: number;
   expectedStatus?: Extract<SchedulerObligationStatus, 'enqueued' | 'running' | 'retrying'>;
   error: unknown;
+  evidence?: Record<string, unknown>;
   retryDelayMs?: number;
   db?: DbHandle;
 }): Promise<boolean> {
@@ -1787,6 +1790,7 @@ export async function failSchedulerObligation(input: {
         ELSE clock_timestamp() + ${retryDelayMs} * interval '1 millisecond'
       END`,
       completedAt: sql`CASE WHEN ${terminalAfterThisAttempt} THEN clock_timestamp() ELSE NULL END`,
+      evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(input.evidence ?? {})}::jsonb`,
       lastError: summary,
       leaseOwner: null,
       leaseExpiresAt: null,
