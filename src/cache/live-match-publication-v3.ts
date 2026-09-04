@@ -637,6 +637,10 @@ if not ok or value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV
 local ttl = redis.call('PTTL', KEYS[1])
 if ttl == -2 then return {'changed'} end
 value.sourceCheckedAt = ARGV[3]
+if type(value.publishedAt) ~= 'string' or value.publishedAt < ARGV[3] then
+  value.publishedAt = ARGV[3]
+  value.checkpointedAt = cjson.null
+end
 value.expectedNextCheckAt = ARGV[4] == '' and cjson.null or ARGV[4]
 value.staleAt = ARGV[5] == '' and cjson.null or ARGV[5]
 local encoded = cjson.encode(value)
@@ -655,6 +659,10 @@ if not ok or not manifestOk or value.publicationId ~= ARGV[1] or value.generatio
 local ttl = redis.call('PTTL', KEYS[1])
 if ttl == -2 then return {'changed'} end
 value.sourceCheckedAt = ARGV[3]
+if type(value.publishedAt) ~= 'string' or value.publishedAt < ARGV[3] then
+  value.publishedAt = ARGV[3]
+  value.checkpointedAt = cjson.null
+end
 value.expectedNextCheckAt = ARGV[4] == '' and cjson.null or ARGV[4]
 value.staleAt = ARGV[5] == '' and cjson.null or ARGV[5]
 local encoded = cjson.encode(value)

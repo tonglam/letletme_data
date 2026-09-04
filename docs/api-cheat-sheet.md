@@ -77,9 +77,11 @@ curl "$LETLETME_DATA_URL/jobs/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
 
 The global live lane observes event-live and fixtures together every 30 seconds while an event is
 active. A heartbeat updates `sourceCheckedAt` and `expectedNextCheckAt` without creating a new
-generation or database write. A content change creates one immutable generation and one merged
-checkpoint obligation. The reader order is Redis current, Redis previous, GraphQL process LKG, and
-then a complete PostgreSQL checkpoint; no request calls FPL, a Data manager API, or a queue.
+generation or database write; it advances `publishedAt` only when needed to keep the active
+manifest's timestamp order causal. A content change creates one immutable generation and one
+merged checkpoint obligation. The reader order is Redis current, Redis previous, GraphQL process
+LKG, and then a complete PostgreSQL checkpoint; no request calls FPL, a Data manager API, or a
+queue.
 
 Entry picks are a one-time post-deadline canary plus per-entry single-flight publication. Once a
 complete same-event V2 input exists, it is not swept again on a ten-minute cohort cadence. If Redis
@@ -87,7 +89,8 @@ publishes before PostgreSQL is unavailable, the exact publication remains a Redi
 checkpoint and is repaired from Redis without refetching FPL.
 
 `sourceCheckedAt` describes the last successful coherent source check; `contentUpdatedAt`
-describes the last semantic change; `publishedAt` describes Redis promotion; `checkpointedAt`
+describes the last semantic change; `publishedAt` describes the latest Redis active-manifest
+write (promotion or heartbeat); `checkpointedAt`
 describes durable completion. Age changes delivery from `FRESH` to `STALE` or `DEGRADED`; it never
 deletes a same-event complete last-known-good response.
 

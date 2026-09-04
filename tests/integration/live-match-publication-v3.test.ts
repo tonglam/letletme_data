@@ -31,9 +31,11 @@ import {
   renewLiveMatchDeskFinalLeaseV3,
   renewLiveMatchDetailFinalLeaseV3,
   markLiveMatchDeskCheckpointedV3,
+  markLiveMatchDetailCheckpointedV3,
   setLiveMatchActiveEventV3,
   setLiveMatchCheckpointDesiredV3,
   touchLiveMatchDeskV3,
+  touchLiveMatchDetailV3,
   type MatchDeskPublication,
 } from '../../src/cache/live-match-publication-v3';
 import type { MatchDeskFixture, MatchFixtureDetail } from '../../src/services/live-match-v3';
@@ -475,17 +477,65 @@ describe('Live Matches V3 Redis publications', () => {
       staleAt: '2026-08-29T10:12:00.000Z',
       redis,
     });
+    const checkpointed = await markLiveMatchDeskCheckpointedV3(
+      published.publication,
+      '2026-08-29T10:00:05.000Z',
+      redis,
+    );
+    expect(checkpointed?.checkpointedAt).toBe('2026-08-29T10:00:05.000Z');
+    const heartbeatAt = new Date(Date.parse(published.publication.publishedAt) + 1).toISOString();
     const touched = await touchLiveMatchDeskV3({
       publication: published.publication,
-      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      sourceCheckedAt: heartbeatAt,
       expectedNextCheckAt: '2026-08-29T10:05:00.000Z',
       staleAt: '2026-08-29T10:12:30.000Z',
       redis,
     });
     expect(touched).toMatchObject({
       generation: published.publication.generation,
-      sourceCheckedAt: '2026-08-29T10:00:30.000Z',
+      sourceCheckedAt: heartbeatAt,
+      publishedAt: heartbeatAt,
+      checkpointedAt: null,
       revisions: published.publication.revisions,
+    });
+  });
+
+  test('touches detail heartbeat publication watermark without changing generation or revision', async () => {
+    const desk = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const published = await publishLiveMatchDetailV3({
+      ...scope,
+      observedDeskGeneration: desk.publication.generation,
+      fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(30),
+      sourceCheckedAt: '2026-08-29T10:00:00.000Z',
+      redis,
+    });
+    const checkpointed = await markLiveMatchDetailCheckpointedV3(
+      published.publication,
+      '2026-08-29T10:00:05.000Z',
+      redis,
+    );
+    expect(checkpointed?.checkpointedAt).toBe('2026-08-29T10:00:05.000Z');
+    const heartbeatAt = new Date(Date.parse(published.publication.publishedAt) + 1).toISOString();
+    const touched = await touchLiveMatchDetailV3({
+      publication: published.publication,
+      sourceCheckedAt: heartbeatAt,
+      expectedNextCheckAt: '2026-08-29T10:05:00.000Z',
+      staleAt: '2026-08-29T10:12:30.000Z',
+      redis,
+    });
+    expect(touched).toMatchObject({
+      generation: published.publication.generation,
+      sourceCheckedAt: heartbeatAt,
+      publishedAt: heartbeatAt,
+      checkpointedAt: null,
+      detail: published.publication.detail,
     });
   });
 
