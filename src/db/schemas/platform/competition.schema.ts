@@ -1842,7 +1842,7 @@ export const myFplSnapshotScopeStateInCompetition = competition.table(
       columns: [table.seasonId, table.eventId],
       foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
       name: 'my_fpl_snapshot_scope_state_event_fk',
-    }),
+    }).onDelete('cascade'),
     foreignKey({
       columns: [table.seasonId, table.eventId, table.verifiedRevision],
       foreignColumns: [
