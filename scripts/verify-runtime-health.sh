@@ -6,6 +6,7 @@ compose_bin=${COMPOSE_BIN:-docker compose}
 compose_file=${COMPOSE_FILE:-docker-compose.yml}
 project_dir=${PROJECT_DIR:-$(pwd)}
 api_url=${API_HEALTH_URL:-http://127.0.0.1:3000}
+expected_deploy_sha=${EXPECTED_DEPLOY_SHA:-}
 # A cold restart after migrations can take longer than the container health
 # start period while Redis, the queue worker, and the content worker rebuild
 # their connections.  Keep bounded per-check attempts for diagnostics, but
@@ -17,6 +18,19 @@ curl_timeout_seconds=${HEALTH_CURL_TIMEOUT_SECONDS:-5}
 deadline_seconds=${HEALTH_DEADLINE_SECONDS:-300}
 
 deadline_at=$((SECONDS + deadline_seconds))
+
+if [ -n "$expected_deploy_sha" ] && ! [[ "$expected_deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "runtime health: EXPECTED_DEPLOY_SHA must be a 40-character lowercase git SHA" >&2
+  exit 2
+fi
+
+api_payload_file=/dev/null
+if [ -n "$expected_deploy_sha" ]; then
+  api_payload_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-health.XXXXXX")
+  cleanup_health_payload() { rm -f -- "$api_payload_file"; }
+  trap cleanup_health_payload EXIT
+fi
+
 deadline_reached() {
   [ "$SECONDS" -ge "$deadline_at" ]
 }
@@ -47,9 +61,18 @@ for attempt in $(seq 1 "$attempts"); do
     "$api_url/health/live" >/dev/null \
     && timeout=$(curl_timeout_with_deadline) \
     && curl --fail --silent --show-error --max-time "$timeout" \
-      "$api_url/health/deploy" >/dev/null; then
-    api_ready=true
-    break
+      "$api_url/health/deploy" >"$api_payload_file"; then
+    if [ -z "$expected_deploy_sha" ]; then
+      api_ready=true
+      break
+    fi
+    payload=$(tr -d '[:space:]' < "$api_payload_file")
+    if printf '%s' "$payload" | grep -Fq '"status":"deploy_ready"' && \
+      printf '%s' "$payload" | grep -Fq "\"deploySha\":\"$expected_deploy_sha\""; then
+      api_ready=true
+      break
+    fi
+    echo "runtime health: /health/deploy identity mismatch (expected=$expected_deploy_sha)" >&2
   fi
   if [ "$attempt" -lt "$attempts" ] && sleep_with_deadline; then
     continue

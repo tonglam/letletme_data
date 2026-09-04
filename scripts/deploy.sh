@@ -194,6 +194,7 @@ restore_stopped_services() {
   fi
   if [[ "$restored" = true ]]; then
     if ! run_deploy_command_with_pause_renewal env \
+      EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
       PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
       scripts/verify-runtime-health.sh; then
       log_error "Recovered runtime did not become healthy; leaving deployment controls closed."
@@ -234,6 +235,7 @@ deploy() {
           "$DEPLOY_OLD_MEDIA_PRESENT" "$DEPLOY_ROLLBACK_ELIGIBLE" \
           "$DEPLOY_OLD_IMAGE_ID" && \
           run_deploy_command_with_pause_renewal env \
+          EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
           PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
           scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
           controls_restored=true
@@ -308,6 +310,14 @@ deploy() {
     export APP_IMAGE
     log_info "Pulling the configured application image"
     compose --profile migration pull api scheduler worker content-worker live-picks-worker official-h2h-worker media-worker migration backup
+    if [[ "$APP_IMAGE" == *@sha256:* ]]; then
+      image_revision=$(docker image inspect \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$APP_IMAGE")
+      if [[ "$image_revision" != "$DEPLOY_SHA" ]]; then
+        log_error "Immutable image revision does not match DEPLOY_SHA."
+        exit 1
+      fi
+    fi
   else
     log_info "Building containers"
     compose build --pull
@@ -646,6 +656,7 @@ deploy() {
   log_info "Current service status"
   compose ps
   if ! run_deploy_command_with_pause_renewal env \
+    EXPECTED_DEPLOY_SHA="$DEPLOY_SHA" \
     PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
     scripts/verify-runtime-health.sh; then
     log_error "Runtime health verification failed."
@@ -667,6 +678,10 @@ deploy() {
     exit 1
   fi
   DEPLOY_COMMITTED=true
+  if [[ -n "$DEPLOY_OLD_IMAGE" && "$DEPLOY_ROLLBACK_ELIGIBLE" = true ]]; then
+    printf '%s\n' "$DEPLOY_OLD_IMAGE" > "$HOME/.letletme-data-previous-image"
+    chmod 600 "$HOME/.letletme-data-previous-image"
+  fi
 }
 
 update_repo() {

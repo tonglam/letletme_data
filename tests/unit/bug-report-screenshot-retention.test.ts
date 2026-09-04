@@ -205,6 +205,26 @@ describe('bug-report screenshot retention', () => {
     expect(calls.every((call) => call.signal)).toBe(true);
   });
 
+  it('retries transient read-only Storage failures before succeeding', async () => {
+    let calls = 0;
+    const storage = createBugReportScreenshotStorage(config, (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ message: 'temporary outage' }), { status: 503 });
+      }
+      return new Response(JSON.stringify({ name: 'bug-report-screenshots', public: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch);
+
+    await expect(storage.getBucket()).resolves.toMatchObject({
+      name: 'bug-report-screenshots',
+      public: false,
+    });
+    expect(calls).toBe(2);
+  });
+
   it('shares the 1,000-delete budget across database failures and orphan cleanup', async () => {
     let removeCalls = 0;
     const storage: BugReportScreenshotStorage = {

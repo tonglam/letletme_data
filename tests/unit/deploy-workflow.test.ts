@@ -134,9 +134,6 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain(
       'remove_exact_stopped_container api\n  remove_stale_api_run_containers\n  wait_for_port_3000_free',
     );
-    expect(workflow).toContain(
-      'remove_exact_stopped_container api\n            remove_stale_api_run_containers\n            wait_for_port_3000_free',
-    );
   });
 
   test('defers formal acquisition while deployment admission is closed', () => {
@@ -182,8 +179,6 @@ describe('release workflow gates', () => {
     );
     expect(deployScript).toContain('restore_content_deploy_controls');
     expect(deployScript).toContain('stop_content_worker_for_forward_recovery');
-    expect(workflow).toContain('restore_content_deploy_controls');
-    expect(workflow).toContain('stop_content_worker_for_forward_recovery');
 
     const localPause = deployScript.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
     const localAdmission = deployScript.indexOf(
@@ -205,29 +200,6 @@ describe('release workflow gates', () => {
     expect(localStop).toBeLessThan(localPrepare);
     expect(localPrepare).toBeLessThan(localRenew);
     expect(deployScript).toContain('DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES');
-
-    const workflowPause = workflow.indexOf('if ! pause_content_worker_consumers_for_deploy; then');
-    const workflowSchedulerStop = workflow.indexOf('if ! compose stop -t 45 scheduler; then');
-    const workflowProbe = workflow.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
-    const workflowStop = workflow.indexOf('if ! compose stop -t 45 content-worker; then');
-    const workflowAdmission = workflow.indexOf('if ! drain_content_worker_queues_for_deploy; then');
-    const workflowPrepare = workflow.indexOf(
-      'if ! prepare_content_worker_paused_runs_for_deploy; then',
-    );
-    const workflowRenew = workflow.indexOf('if ! renew_content_worker_admission; then');
-    expect(workflowPause).toBeGreaterThan(-1);
-    expect(workflowPause).toBeLessThan(workflowAdmission);
-    expect(workflowAdmission).toBeLessThan(workflowProbe);
-    expect(workflowAdmission).toBeLessThan(workflowSchedulerStop);
-    expect(workflowSchedulerStop).toBeLessThan(workflowProbe);
-    expect(workflowProbe).toBeLessThan(workflowStop);
-    expect(workflowStop).toBeLessThan(workflowPrepare);
-    expect(workflowPrepare).toBeLessThan(workflowRenew);
-    expect(workflow).toContain('content_worker_fenced=true');
-    expect(workflow).toContain('scheduler_stop_attempted=true');
-    expect(workflow).toContain(
-      '[ "$services_stopped" = true ] || [ "$content_worker_fenced" = true ]',
-    );
   });
 
   test('keeps the compiled host runner free of runtime logger transports', () => {
@@ -243,9 +215,6 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('pending|missing) return 0');
     expect(deployScript).toContain(
       'Unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped.',
-    );
-    expect(workflow).toContain(
-      'unable to inspect My Tournament Review V2.1 backfill marker; services remain stopped',
     );
   });
 
@@ -271,15 +240,7 @@ describe('release workflow gates', () => {
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
     expect(deployScript).toContain('--provision-and-probe');
     expect(deployScript).toContain('--probe-fpl-raw-snapshot-storage');
-    expect(workflow).toContain('--probe-fpl-raw-snapshot-storage');
     expect(deployScript).toContain('bootstrap-briefing-source-media-env.sh');
-    expect(workflow).toContain('bootstrap-briefing-source-media-env.sh');
-    expect(workflow.indexOf('scripts/bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
-      workflow.indexOf('acquire_deploy_lock'),
-    );
-    expect(workflow.indexOf('scripts/bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
-      workflow.indexOf('bun validate-env.ts --probe-bug-report-storage'),
-    );
     expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
       deployScript.indexOf('bun validate-env.ts --probe-bug-report-storage'),
     );
@@ -300,15 +261,7 @@ describe('release workflow gates', () => {
     expect(runtimeHealthScript).toContain('attempts=${HEALTH_ATTEMPTS:-90}');
     expect(runtimeHealthScript).toContain('deadline_seconds=${HEALTH_DEADLINE_SECONDS:-300}');
     expect(runtimeHealthScript).toContain('deadline_reached()');
-    expect(workflow).toContain(
-      'HEALTH_ATTEMPTS=90 HEALTH_DELAY_SECONDS=2 HEALTH_DEADLINE_SECONDS=300',
-    );
     expect(workflow).toContain('timeout: 30m');
-    expect(workflow).toContain('compose stop -t 45 content-worker');
-    expect(workflow).toContain('compose stop -t 45 scheduler;');
-    expect(workflow).toContain('compose stop -t 45 media-worker');
-    expect(workflow).toContain('"$old_media_present" "$old_image_id" && \\');
-    expect(workflow).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
     expect(deployStateMachine).toContain(
       'export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"',
@@ -334,18 +287,10 @@ describe('release workflow gates', () => {
     expect(v2Seed).toMatch(
       /if ! compose run --rm -T --interactive=false \\\n\s+api \\\n\s+bun run verify:live-points-v2/,
     );
-
-    const workflowV2Seed = workflow.slice(workflow.indexOf('start_stage v2Seed'));
-    expect(workflowV2Seed).toContain('LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url"');
-    expect(workflowV2Seed).toContain('-e LIVE_POINTS_V2_SEED_DATABASE_URL');
-    expect(workflowV2Seed).not.toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=$');
-    expect(workflowV2Seed).toContain('DATABASE_URL="$data_runtime_database_url"');
-    expect(workflowV2Seed).toContain('-e DATABASE_URL api');
-    expect(workflowV2Seed).not.toContain('-e "DATABASE_URL=$');
-    expect(workflowV2Seed).toContain(
-      'bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized',
-    );
-    expect(workflowV2Seed).not.toContain('bun run db:cutover-seed-live-match-v2');
+    expect(v2Seed).toContain('DATABASE_URL="$data_runtime_database_url"');
+    expect(v2Seed).toContain('-e DATABASE_URL api');
+    expect(v2Seed).toContain('bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized');
+    expect(v2Seed).not.toContain('bun run db:cutover-seed-live-match-v2');
   });
 
   test('drains the destructive review reset before runtime startup', () => {
@@ -370,9 +315,6 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=true');
     expect(deployScript).toContain('MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES');
     expect(deployScript).toContain('review_backfill_marker_pending');
-    expect(workflow).toContain('review_restore_rehearsal_passed=true');
-    expect(workflow).toContain('MY_TOURNAMENT_REVIEW_RESTORE_REHEARSAL=YES');
-    expect(workflow).toContain('review_backfill_marker_pending');
     expect(deployScript).toContain('migration-scoped gate skipped');
     expect(deployStateMachine).toContain('MY_TOURNAMENT_REVIEW_BACKFILL_CONFIRM=YES');
     expect(deployStateMachine).toContain('--batch-size 100 --max-batches 10000');
@@ -382,12 +324,8 @@ describe('release workflow gates', () => {
     );
     const localBackfill = deployScript.indexOf('run_tournament_review_hard_cut_backfill');
     const localRoleVerify = deployScript.indexOf('start_stage roleVerify');
-    const workflowBackfill = workflow.indexOf('run_tournament_review_hard_cut_backfill');
-    const workflowRoleVerify = workflow.indexOf('start_stage roleVerify');
     expect(localBackfill).toBeGreaterThan(-1);
     expect(localBackfill).toBeLessThan(localRoleVerify);
-    expect(workflowBackfill).toBeGreaterThan(-1);
-    expect(workflowBackfill).toBeLessThan(workflowRoleVerify);
   });
 
   test('verifies restore target identity and translates host backup paths into the container mount', () => {
@@ -489,7 +427,6 @@ describe('release workflow gates', () => {
   });
 
   test('prevents streamed deployment scripts from consuming bash stdin', () => {
-    expectNonInteractiveComposeRuns(workflow, 'main deploy workflow');
     expectNonInteractiveComposeRuns(deployScript, 'local deploy script');
     expectNonInteractiveComposeRuns(deployStateMachine, 'shared deploy state machine');
     expectNonInteractiveComposeRuns(
@@ -511,8 +448,7 @@ describe('release workflow gates', () => {
     expect(briefingRolloutWorkflow).toContain(
       '--profile migration run --rm -T --interactive=false --no-deps --entrypoint sh backup -euc',
     );
-    expect(workflow).toContain('streams this script through `bash -s`');
-    expect(workflow).toContain('Never let Compose attach to that stdin');
+    expect(workflow).toContain('source scripts/deploy.sh deploy');
     expect(deployStateMachine).toContain('Callers may execute this state machine from an SSH');
   });
 
@@ -621,7 +557,6 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('run-briefing-control-probe.sh');
     expect(deployScript).toContain('DEPLOY_RUNNER_UPDATED');
     expect(deployScript).toContain('CONTENT_REAL_GROK_ENABLED');
-    expect(workflow).toContain('CONTENT_REAL_GROK_ENABLED');
     expect(composeFile).toContain('/run/letletme-grok-runner:/run/letletme-grok-runner:ro');
     expect(composeFile).toContain(['group_add:', `      - ${quote}1555${quote}`].join('\n'));
     expect(rearmScript).toContain(`identity_requirement = ${quote}REQUIRED${quote}`);
@@ -633,14 +568,6 @@ describe('release workflow gates', () => {
   });
 
   test('does not roll back Data when the optional Briefing provider probe is degraded', () => {
-    expect(workflow).toContain('runner_probe_succeeded=false');
-    expect(workflow).toContain(
-      'if run_deploy_command_with_pause_renewal scripts/run-briefing-control-probe.sh',
-    );
-    expect(workflow).toContain('dataDeploymentContinues');
-    expect(workflow).toContain('[ "$runner_probe_succeeded" = true ]');
-    expect(workflow).toContain('finish_stage degraded');
-
     expect(deployScript).toContain('DEPLOY_RUNNER_PROBE_SUCCEEDED=false');
     expect(deployScript).toContain(
       'if run_deploy_command_with_pause_renewal "${PROJECT_DIR}/scripts/run-briefing-control-probe.sh"',
@@ -674,16 +601,34 @@ describe('release workflow gates', () => {
     expect(cleanupWorkflow).not.toContain('script_stop:');
   });
 
-  test('scans the immutable digest before promotion and SSH deployment', () => {
+  test('keeps the workflow thin and locks before checkout and runtime snapshot', () => {
+    const lock = workflow.indexOf('acquire_deploy_lock');
+    const checkout = workflow.indexOf('git checkout --force main');
+    const delegate = workflow.indexOf('source scripts/deploy.sh deploy');
+    const localLock = deployScript.indexOf('deploy() {\n  acquire_deploy_lock');
+    const snapshot = deployScript.indexOf('old_container=$(compose ps -aq api');
+
+    expect(lock).toBeGreaterThan(-1);
+    expect(checkout).toBeGreaterThan(lock);
+    expect(delegate).toBeGreaterThan(checkout);
+    expect(snapshot).toBeGreaterThan(localLock);
+    expect(workflow.split('\n').length).toBeLessThan(200);
+    expect(workflow).not.toContain('start_stage preflight');
+    expect(deployStateMachine).toContain('deploy_lock_fd=${deploy_lock_fd:-}');
+    expect(deployStateMachine).toContain('deploy lock already acquired');
+  });
+
+  test('scans and deploys the immutable digest before promoting it to latest', () => {
     const push = workflow.indexOf('Build and push immutable SHA image');
     const scan = workflow.indexOf('Scan immutable image digest');
-    const promote = workflow.indexOf('Promote scanned digest to latest');
+    const promote = workflow.indexOf('Promote verified digest to latest');
     const deploy = workflow.indexOf('Deploy exact image digest');
 
     expect(push).toBeGreaterThan(-1);
     expect(scan).toBeGreaterThan(push);
     expect(promote).toBeGreaterThan(scan);
-    expect(deploy).toBeGreaterThan(promote);
+    expect(deploy).toBeGreaterThan(scan);
+    expect(promote).toBeGreaterThan(deploy);
     expect(workflow).toContain(`ignore-unfixed: ${quote}false${quote}`);
     expect(workflow).toContain('severity: HIGH,CRITICAL');
     expect(workflow).not.toContain('--tag "${IMAGE_NAME}:latest" \\\n');
@@ -691,25 +636,20 @@ describe('release workflow gates', () => {
       'docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_REF}"',
     );
     expect(workflow).toContain('test "$latest_digest" = "$expected_digest"');
+    expect(workflow).toContain('export APP_IMAGE="$IMAGE_REF"');
+    expect(deployScript).toContain('image_revision=$(docker image inspect');
+    expect(deployScript).toContain('"$image_revision" != "$DEPLOY_SHA"');
+    expect(deployScript).toContain('EXPECTED_DEPLOY_SHA="$DEPLOY_SHA"');
+    expect(deployScript).toContain('EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA"');
+    expect(runtimeHealthScript).toContain('deploySha');
   });
 
-  test('retains current and rollback Data digests and removes only unused failed digests', () => {
-    const commit = workflow.indexOf('deployment_committed=true');
-    const successCleanup = workflow.lastIndexOf('cleanup_obsolete_data_digests');
-    const failedCleanupCall = workflow.indexOf('cleanup_failed_image "${IMAGE_REF:-}"');
-
-    expect(failedCleanupCall).toBeGreaterThan(-1);
-    expect(successCleanup).toBeGreaterThan(commit);
-    expect(workflow).toContain('image_pull_attempted=true');
-    expect(workflow).toContain(
-      'if [ "$original_status" -ne 0 ] && [ "$image_pull_attempted" = true ]; then',
-    );
-    expect(workflow).toContain('docker image ls --no-trunc --digests');
-    expect(workflow).toContain('[ "$digest_ref" = "$IMAGE_REF" ]');
-    expect(workflow).toContain('[ "$digest_ref" = "$old_image" ]');
-    expect(workflow).toContain('done < <(docker ps -aq');
-    expect(workflow).toContain('image_id_is_referenced "$digest_id"');
-    expect(workflow).toContain('docker image rm "$image_ref"');
+  test('records the rollback digest and leaves image cleanup outside deployment', () => {
+    expect(deployScript).toContain('> "$HOME/.letletme-data-previous-image"');
+    expect(deployScript).toContain('chmod 600 "$HOME/.letletme-data-previous-image"');
+    expect(workflow).not.toContain('cleanup_obsolete_data_digests');
+    expect(workflow).not.toContain('cleanup_failed_image');
+    expect(workflow).not.toContain('docker image rm');
   });
 
   test('restores only a recently proven coherent rollback runtime', () => {
@@ -743,26 +683,12 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
     expect(deployScript).toContain('"$DEPLOY_ROLLBACK_ELIGIBLE" != true');
     expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
-    expect(workflow).toContain('old_release_sha=$(release_sha_for_container "$old_container")');
-    expect(workflow).toContain('old_release_sha=$(release_sha_for_image "$old_image")');
-    expect(workflow).toContain(String.raw`old_image_id=$(docker inspect --format '{{.Image}}'`);
-    expect(workflow).toContain('old_runtime_rollback_eligible=false');
-    expect(workflow).toContain('old_runtime_rollback_eligible=true');
-    expect(workflow).toContain('[ "$old_runtime_rollback_eligible" = true ]');
-    expect(workflow.lastIndexOf('rollback_runtime_is_eligible')).toBeGreaterThan(
-      workflow.indexOf('migration plan and queue quiescence passed before stopping services'),
-    );
-    expect(workflow.lastIndexOf('rollback_runtime_is_eligible')).toBeLessThan(
-      workflow.indexOf('services_stopped=true'),
-    );
     expect(deployScript.lastIndexOf('rollback_runtime_is_eligible')).toBeGreaterThan(
       deployScript.indexOf('Migration plan and queue quiescence passed before stopping services'),
     );
     expect(deployScript.lastIndexOf('rollback_runtime_is_eligible')).toBeLessThan(
       deployScript.indexOf('DEPLOY_SERVICES_STOPPED=true'),
     );
-    expect(workflow).toContain('old_runner_release_sha=$(cat');
-    expect(workflow).toContain('"$old_image" "$old_release_sha" "$old_runner_release_sha"');
     expect(runtimeHealthScript).toContain('curl_timeout_with_deadline()');
     expect(runtimeHealthScript).toContain('--max-time "$timeout"');
   });

@@ -6,6 +6,9 @@ const RETENTION_BATCH_SIZE = 100;
 const RETENTION_MAX_DELETES = 1_000;
 const STORAGE_SCAN_PAGE_SIZE = 100;
 const STORAGE_REQUEST_TIMEOUT_MS = 10_000;
+const STORAGE_REQUEST_MAX_ATTEMPTS = 3;
+const STORAGE_RETRY_DELAY_MS = 250;
+const STORAGE_RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const STORAGE_OBJECT_KEY_PATTERN =
   /^bug-reports\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp|gif)$/i;
 
@@ -79,14 +82,34 @@ async function storageRequest<T>(
   fetchImpl: typeof fetch,
   parse: (response: Response) => Promise<T>,
 ): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), STORAGE_REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetchImpl(url, { ...init, signal: controller.signal });
-    return await parse(response);
-  } finally {
-    clearTimeout(timeoutId);
+  const method = (init.method ?? 'GET').toUpperCase();
+  const retryableMethod = method === 'GET' || method === 'HEAD' || method === 'POST';
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= STORAGE_REQUEST_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), STORAGE_REQUEST_TIMEOUT_MS);
+    let response: Response | undefined;
+    try {
+      response = await fetchImpl(url, { ...init, signal: controller.signal });
+      return await parse(response);
+    } catch (error) {
+      lastError = error;
+      const retryable =
+        retryableMethod &&
+        attempt < STORAGE_REQUEST_MAX_ATTEMPTS &&
+        (response === undefined || STORAGE_RETRYABLE_STATUSES.has(response.status));
+      if (!retryable) throw error;
+      if (response && !response.bodyUsed) {
+        await response.body?.cancel().catch(() => undefined);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    await new Promise((resolve) => setTimeout(resolve, STORAGE_RETRY_DELAY_MS * attempt));
   }
+
+  throw lastError instanceof Error ? lastError : new Error('Storage request failed');
 }
 
 async function parseJsonResponse(response: Response, operation: string): Promise<unknown> {
