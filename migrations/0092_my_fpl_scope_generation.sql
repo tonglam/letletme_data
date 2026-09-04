@@ -368,9 +368,65 @@ FOR EACH STATEMENT
 EXECUTE FUNCTION competition.bump_my_fpl_tournament_scope_on_tournament_update();
 
 -- Initialize state from the old, bounded-by-the-migration status view before
--- replacing it.  ON CONFLICT DO NOTHING is intentional: a trigger that saw a
--- concurrent mutation owns a newer dirty state and must not be overwritten by
--- this one-time baseline.
+-- replacing it. The manager-review payload check is intentionally limited to
+-- this one-time migration baseline; the steady-state scheduler and worker
+-- never scan snapshot children just to decide whether a FINAL is stable.
+-- ON CONFLICT DO NOTHING is intentional: a trigger that saw a concurrent
+-- mutation owns a newer dirty state and must not be overwritten by this
+-- one-time baseline.
+WITH manager_review_shape AS (
+  SELECT publication.season_id,
+         publication.event_id,
+         publication.revision,
+         count(snapshot_entry.entry_id)::integer AS total_count,
+         count(snapshot_entry.entry_id) FILTER (
+           WHERE jsonb_typeof(snapshot_entry.payload) = 'object'
+             AND snapshot_entry.payload->>'contractVersion' = '2'
+         )::integer AS v2_count
+  FROM competition.my_fpl_snapshot_publications publication
+  LEFT JOIN competition.my_fpl_snapshot_entries snapshot_entry
+    ON snapshot_entry.season_id = publication.season_id
+   AND snapshot_entry.event_id = publication.event_id
+   AND snapshot_entry.revision = publication.revision
+  WHERE publication.active
+    AND publication.kind = 'FINAL'
+  GROUP BY publication.season_id, publication.event_id, publication.revision
+), baseline AS (
+  SELECT status.*,
+         COALESCE(
+           status.kind = 'FINAL'
+           AND shape.revision = status.revision
+           AND COALESCE(shape.total_count, 0) =
+             COALESCE(status.expected_entry_count, 0) +
+             COALESCE(status.not_applicable_entry_count, 0)
+           AND COALESCE(shape.total_count, 0) > 0
+           AND COALESCE(shape.v2_count, 0) = COALESCE(shape.total_count, 0),
+           false
+         ) AS manager_review_v2,
+         COALESCE(
+           status.expected_entry_count IS NOT NULL
+           AND status.observed_entry_count = status.expected_entry_count
+           AND status.expected_entry_scope_sha256 IS NOT NULL
+           AND status.expected_entry_scope_sha256 = status.observed_entry_scope_sha256
+           AND status.not_applicable_entry_count = status.expected_not_applicable_entry_count,
+           false
+         ) AS entry_scope_clean,
+         COALESCE(
+           status.expected_tournament_count IS NOT NULL
+           AND status.observed_tournament_count = status.expected_tournament_count
+           AND status.expected_tournament_scope_sha256 IS NOT NULL
+           AND status.expected_tournament_scope_sha256 = status.observed_tournament_scope_sha256,
+           false
+         ) AS tournament_scope_clean
+  FROM reporting.my_fpl_active_snapshot_status status
+  LEFT JOIN manager_review_shape shape
+    ON shape.season_id = status.season_id
+   AND shape.event_id = status.event_id
+   AND shape.revision = status.revision
+  JOIN fpl.events event
+    ON event.season_id = status.season_id AND event.event_id = status.event_id
+  WHERE event.finished AND event.data_checked
+)
 INSERT INTO competition.my_fpl_snapshot_scope_state (
   season_id,
   event_id,
@@ -389,76 +445,45 @@ SELECT status.season_id,
        CASE WHEN status.kind = 'FINAL' THEN 1 ELSE 0 END,
        CASE
          WHEN status.kind = 'FINAL'
-          AND status.expected_entry_count IS NOT NULL
-          AND status.observed_entry_count = status.expected_entry_count
-          AND status.expected_entry_scope_sha256 IS NOT NULL
-          AND status.expected_entry_scope_sha256 = status.observed_entry_scope_sha256
-          AND status.not_applicable_entry_count = status.expected_not_applicable_entry_count
+          AND status.entry_scope_clean
+          AND status.manager_review_v2
          THEN 1 ELSE 0
        END,
        CASE WHEN status.kind = 'FINAL' THEN 1 ELSE 0 END,
        CASE
          WHEN status.kind = 'FINAL'
-          AND status.expected_tournament_count IS NOT NULL
-          AND status.observed_tournament_count = status.expected_tournament_count
-          AND status.expected_tournament_scope_sha256 IS NOT NULL
-          AND status.expected_tournament_scope_sha256 = status.observed_tournament_scope_sha256
+          AND status.tournament_scope_clean
+          AND status.manager_review_v2
          THEN 1 ELSE 0
        END,
        CASE
          WHEN status.kind = 'FINAL'
-          AND NOT (
-            status.expected_entry_count IS NOT NULL
-            AND status.observed_entry_count = status.expected_entry_count
-            AND status.expected_entry_scope_sha256 IS NOT NULL
-            AND status.expected_entry_scope_sha256 = status.observed_entry_scope_sha256
-            AND status.not_applicable_entry_count = status.expected_not_applicable_entry_count
-          )
+          AND NOT (status.entry_scope_clean AND status.manager_review_v2)
          THEN clock_timestamp()
        END,
        CASE
          WHEN status.kind = 'FINAL'
-          AND NOT (
-            status.expected_tournament_count IS NOT NULL
-            AND status.observed_tournament_count = status.expected_tournament_count
-            AND status.expected_tournament_scope_sha256 IS NOT NULL
-            AND status.expected_tournament_scope_sha256 = status.observed_tournament_scope_sha256
-          )
+          AND NOT (status.tournament_scope_clean AND status.manager_review_v2)
          THEN clock_timestamp()
        END,
        CASE
          WHEN status.kind = 'FINAL'
           AND status.revision IS NOT NULL
-          AND status.expected_entry_count IS NOT NULL
-          AND status.observed_entry_count = status.expected_entry_count
-          AND status.expected_entry_scope_sha256 IS NOT NULL
-          AND status.expected_entry_scope_sha256 = status.observed_entry_scope_sha256
-          AND status.not_applicable_entry_count = status.expected_not_applicable_entry_count
-          AND status.expected_tournament_count IS NOT NULL
-          AND status.observed_tournament_count = status.expected_tournament_count
-          AND status.expected_tournament_scope_sha256 IS NOT NULL
-          AND status.expected_tournament_scope_sha256 = status.observed_tournament_scope_sha256
+          AND status.entry_scope_clean
+          AND status.tournament_scope_clean
+          AND status.manager_review_v2
          THEN status.revision
        END,
        CASE
          WHEN status.kind = 'FINAL'
           AND status.revision IS NOT NULL
-          AND status.expected_entry_count IS NOT NULL
-          AND status.observed_entry_count = status.expected_entry_count
-          AND status.expected_entry_scope_sha256 IS NOT NULL
-          AND status.expected_entry_scope_sha256 = status.observed_entry_scope_sha256
-          AND status.not_applicable_entry_count = status.expected_not_applicable_entry_count
-          AND status.expected_tournament_count IS NOT NULL
-          AND status.observed_tournament_count = status.expected_tournament_count
-          AND status.expected_tournament_scope_sha256 IS NOT NULL
-          AND status.expected_tournament_scope_sha256 = status.observed_tournament_scope_sha256
+          AND status.entry_scope_clean
+          AND status.tournament_scope_clean
+          AND status.manager_review_v2
          THEN clock_timestamp()
        END,
        clock_timestamp()
-FROM reporting.my_fpl_active_snapshot_status status
-JOIN fpl.events event
-  ON event.season_id = status.season_id AND event.event_id = status.event_id
-WHERE event.finished AND event.data_checked
+FROM baseline status
 ON CONFLICT (season_id, event_id) DO NOTHING;
 
 -- Keep the public reporting shape unchanged, but make it a projection over

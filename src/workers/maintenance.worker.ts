@@ -31,7 +31,6 @@ import {
   getActiveMyFplPublication,
   getMyFplFinalizationControlStateWithScopeForEvent,
   invalidateMyFplSnapshotRedisManifest,
-  isManagerReviewV2MyFplPublication,
   isMyFplSnapshotRedisManifestForPublication,
   MyFplSnapshotIncompleteError,
   requeueDeliveredMyFplSnapshotPublication,
@@ -389,24 +388,31 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             snapshotKind === 'FINAL'
               ? await getMyFplFinalizationControlStateWithScopeForEvent(season, eventId)
               : null;
-          const activeFinalUsesManagerReviewV2 =
-            active?.kind === 'FINAL' &&
-            (await isManagerReviewV2MyFplPublication(season, eventId, active));
-          if (
+          const activeFinalScopeGenerationVerified = Boolean(
             snapshotKind === 'FINAL' &&
-            !hasExplicitFinalOverride &&
-            activeFinalUsesManagerReviewV2 &&
-            active &&
-            finalizationControl?.scopeGenerationInstalled &&
-            finalizationControl.activeRevision === active.revision &&
-            finalizationControl.entryScopeGeneration !== null &&
-            finalizationControl.entryScopeGeneration ===
-              finalizationControl.verifiedEntryScopeGeneration &&
-            finalizationControl.tournamentScopeGeneration !== null &&
-            finalizationControl.tournamentScopeGeneration ===
-              finalizationControl.verifiedTournamentScopeGeneration &&
-            finalizationControl.verifiedRevision === active.revision
-          ) {
+              !hasExplicitFinalOverride &&
+              active &&
+              active.kind === 'FINAL' &&
+              finalizationControl?.scopeGenerationInstalled &&
+              finalizationControl.activeRevision === active.revision &&
+              finalizationControl.entryScopeGeneration !== null &&
+              finalizationControl.entryScopeGeneration ===
+                finalizationControl.verifiedEntryScopeGeneration &&
+              finalizationControl.tournamentScopeGeneration !== null &&
+              finalizationControl.tournamentScopeGeneration ===
+                finalizationControl.verifiedTournamentScopeGeneration &&
+              finalizationControl.verifiedRevision === active.revision,
+          );
+          // The migration backfill marks legacy FINAL payloads dirty, so a
+          // clean generation fence is sufficient here. No snapshot-child
+          // scan is needed on the stable worker path; legacy/missing finals
+          // fall through to the worker-only deep capture path.
+          if (activeFinalScopeGenerationVerified) {
+            if (!active || !finalizationControl) {
+              throw new MyFplSnapshotIncompleteError(
+                `My FPL finalization control is unavailable for event ${eventId}`,
+              );
+            }
             const control = finalizationControl;
             const entryScopeGeneration = control.entryScopeGeneration;
             const tournamentScopeGeneration = control.tournamentScopeGeneration;

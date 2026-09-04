@@ -2764,9 +2764,9 @@ export async function getMyFplFinalizationControlStateWithScopeForEvent(
  * Verify a clean FINAL generation fence without inspecting canonical scope
  * tables or snapshot children. The no-op caller supplies the generation it
  * observed before deciding that the active publication can be reused. The
- * single-row no-op update still takes the same row lock as the scope triggers,
- * so a concurrent mutation either waits and fails the predicate or makes
- * PostgreSQL retry the repeatable-read transaction.
+ * The row lock is taken with SELECT FOR UPDATE, so a concurrent mutation
+ * either waits and fails the predicate or makes PostgreSQL retry the
+ * repeatable-read transaction without generating a no-op row version.
  */
 export async function verifyMyFplSnapshotScopeGeneration(input: {
   season: FplSeasonRef;
@@ -2792,12 +2792,8 @@ export async function verifyMyFplSnapshotScopeGeneration(input: {
   return runMyFplCaptureTransaction(client, lockScopes, async (tx) => {
     await tx`SET LOCAL statement_timeout = '2s'`;
     const rows = await tx<{ event_id: number }[]>`
-      UPDATE competition.my_fpl_snapshot_scope_state AS scope
-      SET verified_entry_scope_generation = scope.verified_entry_scope_generation,
-          verified_tournament_scope_generation = scope.verified_tournament_scope_generation,
-          verified_revision = scope.verified_revision,
-          verified_at = scope.verified_at,
-          updated_at = scope.updated_at
+      SELECT scope.event_id
+      FROM competition.my_fpl_snapshot_scope_state AS scope
       WHERE scope.season_id = ${input.season.seasonId}
         AND scope.event_id = ${input.eventId}
         AND scope.entry_scope_generation = ${input.generation.entry}
@@ -2822,7 +2818,7 @@ export async function verifyMyFplSnapshotScopeGeneration(input: {
             AND publication.active
             AND publication.kind = 'FINAL'
         )
-      RETURNING scope.event_id
+      FOR UPDATE OF scope
     `;
     return rows.length === 1;
   });
@@ -3362,10 +3358,13 @@ async function captureMyFplSnapshotOnce(
     // not held with FOR UPDATE: scope triggers must be able to commit their
     // short row update while this worker is building the publication.  The
     // final CAS below then rejects a capture that raced a real scope change.
-    let scopeGenerationAtStart: {
-      entry: number;
-      tournament: number;
-    } | null = null;
+    let scopeGenerationAtStart:
+      | (MyFplSnapshotScopeGeneration & {
+          verifiedEntry: number;
+          verifiedTournament: number;
+          verifiedRevision: number | null;
+        })
+      | null = null;
     if (kind === 'FINAL' && useScopeGeneration) {
       await tx`
         INSERT INTO competition.my_fpl_snapshot_scope_state (season_id, event_id)
@@ -3375,10 +3374,17 @@ async function captureMyFplSnapshotOnce(
       const scopeRows = await tx<
         {
           entry_scope_generation: number | string;
+          verified_entry_scope_generation: number | string;
           tournament_scope_generation: number | string;
+          verified_tournament_scope_generation: number | string;
+          verified_revision: number | string | null;
         }[]
       >`
-        SELECT entry_scope_generation, tournament_scope_generation
+        SELECT entry_scope_generation,
+               verified_entry_scope_generation,
+               tournament_scope_generation,
+               verified_tournament_scope_generation,
+               verified_revision
         FROM competition.my_fpl_snapshot_scope_state
         WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
       `;
@@ -3389,18 +3395,36 @@ async function captureMyFplSnapshotOnce(
         );
       }
       const entry = Number(scope.entry_scope_generation);
+      const verifiedEntry = Number(scope.verified_entry_scope_generation);
       const tournament = Number(scope.tournament_scope_generation);
+      const verifiedTournament = Number(scope.verified_tournament_scope_generation);
+      const verifiedRevision =
+        scope.verified_revision === null ? null : Number(scope.verified_revision);
       if (
         !Number.isSafeInteger(entry) ||
         entry < 0 ||
+        !Number.isSafeInteger(verifiedEntry) ||
+        verifiedEntry < 0 ||
         !Number.isSafeInteger(tournament) ||
-        tournament < 0
+        tournament < 0 ||
+        verifiedEntry > entry ||
+        !Number.isSafeInteger(verifiedTournament) ||
+        verifiedTournament < 0 ||
+        verifiedTournament > tournament ||
+        (verifiedRevision !== null &&
+          (!Number.isSafeInteger(verifiedRevision) || verifiedRevision <= 0))
       ) {
         throw new MyFplSnapshotIncompleteError(
           `My FPL scope state is invalid for event ${eventId}`,
         );
       }
-      scopeGenerationAtStart = { entry, tournament };
+      scopeGenerationAtStart = {
+        entry,
+        tournament,
+        verifiedEntry,
+        verifiedTournament,
+        verifiedRevision,
+      };
     }
 
     const verifyScopeGeneration = async (revision: number): Promise<void> => {
@@ -3425,11 +3449,31 @@ async function captureMyFplSnapshotOnce(
       }
     };
 
-    // Read the current canonical scopes inside the capture transaction before
-    // considering an idempotent FINAL no-op.  The worker performs the same
-    // readiness check outside this transaction, but a newly onboarded entry
-    // or roster mutation can race that read; the transaction-level guard must
-    // not let an old FINAL hide the changed denominator.
+    // A clean generation fence is sufficient for the stable FINAL no-op. The
+    // migration baseline routes legacy payloads into the dirty path, and all
+    // post-migration FINAL captures write the manager-review shape. No
+    // snapshot-child scan is needed before this return.
+    const activeFinalScopeGenerationVerified = Boolean(
+      kind === 'FINAL' &&
+        useScopeGeneration &&
+        active?.kind === 'FINAL' &&
+        scopeGenerationAtStart &&
+        scopeGenerationAtStart.entry === scopeGenerationAtStart.verifiedEntry &&
+        scopeGenerationAtStart.tournament === scopeGenerationAtStart.verifiedTournament &&
+        scopeGenerationAtStart.verifiedRevision === active?.revision &&
+        !overrideActor &&
+        !overrideReason &&
+        !idempotencyKey,
+    );
+    if (activeFinalScopeGenerationVerified) {
+      await verifyScopeGeneration(active!.revision);
+      return { status: 'noop', publication: active! };
+    }
+
+    // We are now on the deliberate deep capture path. It reads canonical
+    // scope tables, historical results, and snapshot inputs only when the
+    // worker has a dirty/missing/legacy final or an explicit capture request.
+    // A stable FINAL must return from the generation fence above instead.
     const entries = await tx<EntrySource[]>`
       SELECT entry_id, entry_name, player_name, region, started_event,
              overall_points, overall_rank, bank, team_value, total_transfers,
@@ -3494,8 +3538,8 @@ async function captureMyFplSnapshotOnce(
         );
       }
     }
-    let activeFinalUsesManagerReviewV2 = false;
-    if (isCompleteMyFplPublication(active) && active.kind === 'FINAL') {
+    const readActiveFinalManagerReviewV2 = async (): Promise<boolean> => {
+      if (!isCompleteMyFplPublication(active) || active.kind !== 'FINAL') return false;
       const activeEntryPayloadCounts = await tx<{ total_count: number; v2_count: number }[]>`
         SELECT count(*)::integer AS total_count,
                count(*) FILTER (
@@ -3509,13 +3553,14 @@ async function captureMyFplSnapshotOnce(
       `;
       const counts = activeEntryPayloadCounts[0];
       const expectedEntryRows = active.expectedEntryCount + active.notApplicableEntryCount;
-      activeFinalUsesManagerReviewV2 = Boolean(
+      return Boolean(
         counts &&
           expectedEntryRows > 0 &&
           counts.total_count === expectedEntryRows &&
           counts.v2_count === expectedEntryRows,
       );
-    }
+    };
+    const activeFinalUsesManagerReviewV2 = await readActiveFinalManagerReviewV2();
     const activeFinalScopeMatchesCurrentScope = Boolean(
       active &&
         active.expectedEntryCount === expectedEntryCount &&
@@ -5127,8 +5172,13 @@ export function captureMyFplSnapshot(
 }
 
 /**
- * P1 finalization capture. The extra generation CAS is opt-in so the P0
- * deployment remains runnable before migration 0092 is installed.
+ * P1 finalization capture with a durable scope-generation CAS.
+ *
+ * This is a full rebuild entrypoint, not a health probe. Its defensive clean
+ * FINAL check runs before any canonical scope or historical-result scan; the
+ * finalization worker should use verifyMyFplSnapshotScopeGeneration for its
+ * normal lightweight no-op decision and call this function only for a dirty,
+ * missing, legacy, or explicitly overridden publication.
  */
 export function captureMyFplSnapshotWithScopeGeneration(
   season: FplSeasonRef,
