@@ -6,7 +6,11 @@ import {
   type EntryLiveInputV2,
 } from '../../src/cache/live-publication-v2';
 import type { DbEntryEventResult } from '../../src/db/schemas/platform.types';
-import { buildFinalEntryLiveInputFromBaseAndResult } from '../../src/services/entries.service';
+import {
+  buildFinalEntryLiveInputFromBaseAndResult,
+  entryLiveFinalResultCheckpointHash,
+  entryLivePicksBaseCheckpointHash,
+} from '../../src/services/entries.service';
 import { requiredLiveLeagueFinalCheckpointScopesV2 } from '../../src/services/live-league-checkpoint-v2.service';
 import {
   LiveFinalRetentionIncompleteError,
@@ -206,6 +210,40 @@ describe('final entry retention recovery', () => {
     expect(input?.finalResult?.automaticSubs).toEqual([]);
     expect(input?.officialAdjustment?.multipliers).toEqual(
       picks.map((pick) => ({ element: pick.element, multiplier: pick.multiplier })),
+    );
+  });
+
+  test('keeps deadline picks identity separate from finalized durable row identity', () => {
+    const base = provisionalInput();
+    const finalizedPicks = picks.map((pick, index) => ({
+      ...pick,
+      multiplier: index === 11 ? 0 : pick.multiplier,
+    })) as unknown as Exactly15Picks;
+    const input = buildFinalEntryLiveInputFromBaseAndResult(
+      base,
+      finalizedResult({
+        eventPicks: finalizedPicks.map((pick) => ({
+          element: pick.element,
+          position: pick.position,
+          multiplier: pick.multiplier,
+          is_captain: pick.isCaptain,
+          is_vice_captain: pick.isViceCaptain,
+        })),
+      }),
+      new Date('2026-09-04T08:00:00.000Z'),
+    );
+
+    expect(input).not.toBeNull();
+    expect(entryLivePicksBaseCheckpointHash(input!)).not.toBe(
+      entryLiveFinalResultCheckpointHash(input!),
+    );
+    expect(entryLiveFinalResultCheckpointHash(input!)).toBe(
+      contentHash({
+        picks: finalizedPicks,
+        chip: input!.picksBase.chip,
+        transferCount: input!.picksBase.transferCount,
+        transferCost: input!.picksBase.transferCost,
+      }),
     );
   });
 

@@ -76,6 +76,39 @@ function entryLivePicksBaseContentHash(input: EntryLiveInputV2): string {
   });
 }
 
+/** Hash of the deadline-time picks stored by a complete semantic checkpoint. */
+export function entryLivePicksBaseCheckpointHash(input: EntryLiveInputV2): string {
+  return contentHash({
+    picks: input.picksBase.picks.map((pick) => ({
+      element: pick.element,
+      position: pick.position,
+      multiplier: pick.multiplier,
+      isCaptain: pick.isCaptain,
+      isViceCaptain: pick.isViceCaptain,
+    })),
+    chip: input.picksBase.chip,
+    transferCount: input.picksBase.transferCount,
+    transferCost: input.picksBase.transferCost,
+  });
+}
+
+/** Hash of the finalized pick rows, kept separate from picksBase.revision. */
+export function entryLiveFinalResultCheckpointHash(input: EntryLiveInputV2): string | null {
+  if (input.finalResult === null) return null;
+  return contentHash({
+    picks: input.finalResult.picks.map((pick) => ({
+      element: pick.element,
+      position: pick.position,
+      multiplier: pick.multiplier,
+      isCaptain: pick.isCaptain,
+      isViceCaptain: pick.isViceCaptain,
+    })),
+    chip: input.picksBase.chip,
+    transferCount: input.picksBase.transferCount,
+    transferCost: input.picksBase.transferCost,
+  });
+}
+
 type LiveObservation = NonNullable<Awaited<ReturnType<typeof readLivePublicationV2>>>;
 
 function sameLiveScoreObservation(left: LiveObservation, right: LiveObservation): boolean {
