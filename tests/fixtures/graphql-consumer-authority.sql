@@ -3619,17 +3619,90 @@ SET
   updated_at = now();
 
 -- The GraphQL reader hard-cut validates that every active publication carries
--- the canonical entry/tournament scope hashes exposed by the Data-owned
--- status view. Populate the fixture from that same authority rather than
--- duplicating hash literals that could drift when the sentinel roster changes.
+-- the canonical entry/tournament scope hashes. This fixture owns the exact
+-- canonical sentinel rows, so derive the hashes directly and seed the
+-- generation state before any later read of the lightweight status view.
+WITH canonical_scope AS (
+  SELECT
+    publication.season_id,
+    publication.event_id,
+    publication.revision,
+    encode(
+      extensions.digest(
+        convert_to(
+          COALESCE(
+            (
+              SELECT to_json(array_agg(entry.entry_id::text ORDER BY entry.entry_id))::text
+              FROM competition.entries entry
+              WHERE entry.season_id = publication.season_id
+                AND (entry.started_event IS NULL OR entry.started_event <= publication.event_id)
+            ),
+            '[]'
+          ),
+          'UTF8'
+        ),
+        'sha256'
+      ),
+      'hex'
+    ) AS entry_scope_sha256,
+    encode(
+      extensions.digest(
+        convert_to(
+          COALESCE(
+            (
+              SELECT to_json(array_agg(
+                format('%s:%s', roster.tournament_id, roster.entry_id)
+                ORDER BY roster.tournament_id, roster.entry_id
+              ))::text
+              FROM competition.tournament_entries roster
+              WHERE roster.season_id = publication.season_id
+            ),
+            '[]'
+          ),
+          'UTF8'
+        ),
+        'sha256'
+      ),
+      'hex'
+    ) AS tournament_scope_sha256
+  FROM competition.my_fpl_snapshot_publications publication
+  WHERE publication.season_id = 2026
+    AND publication.event_id = 1
+    AND publication.revision = (SELECT revision FROM graphql_my_fpl_revision)
+    AND publication.active
+)
 UPDATE competition.my_fpl_snapshot_publications AS publication
-SET entry_scope_sha256 = status.expected_entry_scope_sha256,
-    tournament_scope_sha256 = status.expected_tournament_scope_sha256,
+SET entry_scope_sha256 = canonical_scope.entry_scope_sha256,
+    tournament_scope_sha256 = canonical_scope.tournament_scope_sha256,
     updated_at = now()
-FROM reporting.my_fpl_active_snapshot_status AS status
-WHERE publication.season_id = status.season_id
-  AND publication.event_id = status.event_id
-  AND publication.revision = status.revision
+FROM canonical_scope
+WHERE publication.season_id = canonical_scope.season_id
+  AND publication.event_id = canonical_scope.event_id
+  AND publication.revision = canonical_scope.revision;
+
+INSERT INTO competition.my_fpl_snapshot_scope_state (
+  season_id,
+  event_id
+)
+SELECT publication.season_id, publication.event_id
+FROM competition.my_fpl_snapshot_publications publication
+WHERE publication.season_id = 2026
+  AND publication.event_id = 1
+  AND publication.revision = (SELECT revision FROM graphql_my_fpl_revision)
+  AND publication.active
+ON CONFLICT (season_id, event_id) DO NOTHING;
+
+UPDATE competition.my_fpl_snapshot_scope_state AS state
+SET verified_entry_scope_generation = state.entry_scope_generation,
+    verified_tournament_scope_generation = state.tournament_scope_generation,
+    entry_dirty_since = NULL,
+    tournament_dirty_since = NULL,
+    verified_revision = publication.revision,
+    verified_at = now(),
+    updated_at = now()
+FROM competition.my_fpl_snapshot_publications publication
+WHERE state.season_id = publication.season_id
+  AND state.event_id = publication.event_id
   AND publication.season_id = 2026
   AND publication.event_id = 1
   AND publication.revision = (SELECT revision FROM graphql_my_fpl_revision)

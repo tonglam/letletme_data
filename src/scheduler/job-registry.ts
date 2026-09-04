@@ -74,7 +74,7 @@ import {
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import {
-  getMyFplFinalizationControlState,
+  getMyFplFinalizationControlStateWithScope,
   hasFinalMyFplPublication,
 } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
@@ -709,11 +709,18 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
       // deep readiness audit here: it scans canonical Entries/Tournaments and
       // immutable snapshot children, which belongs only to the single-event
       // finalization worker.
-      const controlStates = await getMyFplFinalizationControlState(context.season);
+      const controlStates = await getMyFplFinalizationControlStateWithScope(context.season);
       const statusByEventId = new Map(controlStates.map((status) => [status.eventId, status]));
-      for (const event of context.events) {
-        if (!event.finished || !event.dataChecked) continue;
+      const priorityForEvent = (eventId: number): number =>
+        eventId === context.currentEventId ? 0 : eventId === context.latestFinalizedEventId ? 1 : 2;
+      const finalizationEvents = [...context.events]
+        .filter((event) => event.finished && event.dataChecked)
+        .sort((left, right) => {
+          return priorityForEvent(left.id) - priorityForEvent(right.id) || right.id - left.id;
+        });
+      for (const event of finalizationEvents) {
         const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
+        const eventPriority = priorityForEvent(event.id);
         const control = statusByEventId.get(event.id);
         const finalPublished = Boolean(
           control?.activeKind === 'FINAL' &&
@@ -795,6 +802,31 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
                 expectedNotApplicableEntryCount: control.notApplicableEntryCount,
                 expectedTournamentCount: control.expectedTournamentCount,
                 expectedTournamentScopeSha256: control.tournamentScopeSha256,
+                eventPriority,
+              },
+            });
+          } else if (predecessor) {
+            // A delivered FINAL normally has no dispatchable plan. Keep the
+            // existing identity visible for one pass when its event changes
+            // from current to historical (or vice versa), so the scheduler
+            // can refresh the mutable priority evidence without reserving a
+            // duplicate obligation or re-running a settled capture.
+            plans.push({
+              scopeKey,
+              periodKey: stablePeriodKey,
+              dueAt: context.now,
+              eventId: event.id,
+              source: 'reconcile',
+              evidence: {
+                snapshotKind: 'FINAL',
+                dataCheckedAt: checkedAt,
+                reconciliation: 'priority-refresh',
+                expectedEntryCount: control.expectedEntryCount,
+                expectedEntryScopeSha256: control.entryScopeSha256,
+                expectedNotApplicableEntryCount: control.notApplicableEntryCount,
+                expectedTournamentCount: control.expectedTournamentCount,
+                expectedTournamentScopeSha256: control.tournamentScopeSha256,
+                eventPriority,
               },
             });
           }
@@ -832,6 +864,7 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
             expectedNotApplicableEntryCount: control?.notApplicableEntryCount,
             expectedTournamentCount: control?.expectedTournamentCount,
             expectedTournamentScopeSha256: control?.tournamentScopeSha256,
+            eventPriority,
           },
         });
       }

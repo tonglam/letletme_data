@@ -299,6 +299,11 @@ function immutableScheduledDueAt(dueAt: Date, scheduledDueAtMs: string | null): 
   return Number.isFinite(scheduled.getTime()) ? scheduled : dueAt;
 }
 
+function myFplEventPriorityFromPlan(plan: SchedulerObligationPlan): number | null {
+  const value = plan.evidence?.eventPriority;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 export async function reserveSchedulerObligation(input: {
   definition: { name: string; cadence: string; timezone: string; queueName?: string };
   plan: SchedulerObligationPlan;
@@ -353,6 +358,25 @@ export async function reserveSchedulerObligation(input: {
     .limit(1);
   const row = existing[0];
   if (!row) throw new Error('Scheduler obligation disappeared after conflict');
+  const eventPriority =
+    input.definition.name === 'my-fpl-finalization' ? myFplEventPriorityFromPlan(input.plan) : null;
+  if (eventPriority !== null) {
+    const refreshed = await db
+      .update(schedulerObligationsInOps)
+      .set({
+        evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object('eventPriority', ${eventPriority}::integer)`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, row.obligationId),
+          inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+          sql`${schedulerObligationsInOps.evidence}->>'eventPriority' IS DISTINCT FROM ${String(eventPriority)}::text`,
+        ),
+      )
+      .returning();
+    if (refreshed[0]) return mapRow(refreshed[0]);
+  }
   return mapRow(row);
 }
 
@@ -1119,6 +1143,14 @@ export async function claimSchedulerObligations(
   const currentResultSlot = sql`${schedulerObligationsInOps.evidence}->>'resultSlot'`;
   const newerResultSlot = sql`newer.evidence->>'resultSlot'`;
   const currentDueAt = immutableScheduledDueAtSql();
+  const myFplEventPriority = sql`CASE
+    WHEN ${schedulerObligationsInOps.jobName} = 'my-fpl-finalization'
+      AND (${schedulerObligationsInOps.evidence}->>'eventPriority') ~ '^[0-9]+$'
+      THEN (${schedulerObligationsInOps.evidence}->>'eventPriority')::integer
+    ELSE 2147483647
+  END`;
+  const prioritizeMyFplEvents =
+    includedJobNames.length === 1 && includedJobNames[0] === 'my-fpl-finalization';
   const newerDueAt = immutableScheduledDueAtForSql(sql`newer.evidence`, sql`newer.due_at`);
   const currentAuthorityAt = postMatchAuthorityAtForSql(sql`${schedulerObligationsInOps.evidence}`);
   const newerAuthorityAt = postMatchAuthorityAtForSql(sql`newer.evidence`);
@@ -1199,7 +1231,11 @@ export async function claimSchedulerObligations(
       // by the scheduler prefilter. due_at remains mutable retry eligibility;
       // ordering by it here could dispatch a newer bucket and strand the
       // older deadline that selected this job name.
-      .orderBy(asc(currentDueAt), asc(schedulerObligationsInOps.obligationId))
+      .orderBy(
+        ...(prioritizeMyFplEvents ? [asc(myFplEventPriority)] : []),
+        asc(currentDueAt),
+        asc(schedulerObligationsInOps.obligationId),
+      )
       .limit(limit)
       .for('update', { skipLocked: true });
     const claimed: { obligation: SchedulerObligation; owner: string }[] = [];

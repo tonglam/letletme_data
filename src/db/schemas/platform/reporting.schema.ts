@@ -1087,161 +1087,91 @@ export const myFplActiveSnapshotStatusInReporting = reporting
          publication.tournament_scope_sha256
   FROM competition.my_fpl_snapshot_publications publication
   WHERE publication.active
-), canonical_entry_scopes AS (
+), shaped AS (
   SELECT event.season_id,
          event.event_id,
-         encode(
-           extensions.digest(
-             convert_to(
-               COALESCE(
-                     to_json(
-                   array_agg(entry.entry_id::text ORDER BY entry.entry_id)
-                     FILTER (
-                       WHERE entry.entry_id IS NOT NULL
-                         AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)
-                     )
-                 )::text,
-                 '[]'
-               ),
-               'UTF8'
-             ),
-             'sha256'
-           ),
-           'hex'
-         ) AS expected_entry_scope_sha256,
-         count(DISTINCT entry.entry_id) FILTER (
-           WHERE entry.entry_id IS NOT NULL
-             AND entry.started_event IS NOT NULL
-             AND entry.started_event > event.event_id
-         )::integer AS expected_not_applicable_entry_count
+         event.finished,
+         event.data_checked,
+         event.data_checked_at,
+         active.revision,
+         active.snapshot_date,
+         active.kind,
+         active.source_checked_at,
+         active.published_at,
+         active.expected_entry_count,
+         active.ready_entry_count,
+         active.empty_entry_count,
+         active.not_applicable_entry_count,
+         active.expected_tournament_count,
+         active.ready_tournament_count,
+         active.entry_scope_sha256,
+         active.tournament_scope_sha256,
+         state.entry_scope_generation = state.verified_entry_scope_generation
+           AND state.tournament_scope_generation = state.verified_tournament_scope_generation
+           AND state.verified_revision = active.revision
+           AND event.finished
+           AND event.data_checked
+           AND active.kind = 'FINAL'
+           AND active.entry_scope_sha256 IS NOT NULL
+           AND active.tournament_scope_sha256 IS NOT NULL AS final_verified
   FROM fpl.events event
-  LEFT JOIN competition.entries entry
-    ON entry.season_id = event.season_id
-  GROUP BY event.season_id, event.event_id
-), canonical_tournament_scopes AS (
-  SELECT event.season_id,
-         event.event_id,
-         encode(
-           extensions.digest(
-             convert_to(
-               COALESCE(
-                 to_json(
-                   array_agg(
-                     format('%s:%s', roster.tournament_id, roster.entry_id)
-                     ORDER BY roster.tournament_id, roster.entry_id
-                   ) FILTER (WHERE roster.tournament_id IS NOT NULL)
-                 )::text,
-                 '[]'
-               ),
-               'UTF8'
-             ),
-             'sha256'
-           ),
-           'hex'
-         ) AS expected_tournament_scope_sha256
-  FROM fpl.events event
-  LEFT JOIN competition.tournament_entries roster
-    ON roster.season_id = event.season_id
-  GROUP BY event.season_id, event.event_id
-), canonical_scopes AS (
-  SELECT entry_scope.season_id,
-         entry_scope.event_id,
-         entry_scope.expected_entry_scope_sha256,
-         entry_scope.expected_not_applicable_entry_count,
-         tournament_scope.expected_tournament_scope_sha256
-  FROM canonical_entry_scopes entry_scope
-  JOIN canonical_tournament_scopes tournament_scope
-    ON tournament_scope.season_id = entry_scope.season_id
-   AND tournament_scope.event_id = entry_scope.event_id
-), eligible AS (
-  SELECT event.season_id,
-         event.event_id,
-         count(DISTINCT entry.entry_id)::integer AS expected_entry_count,
-         count(DISTINCT snapshot_entry.entry_id) FILTER (WHERE snapshot_entry.entry_id IS NOT NULL)::integer
-           AS observed_entry_count
-  FROM fpl.events event
-  LEFT JOIN competition.entries entry
-    ON entry.season_id = event.season_id
-   AND (entry.started_event IS NULL OR entry.started_event <= event.event_id)
   LEFT JOIN active
-    ON active.season_id = event.season_id
-   AND active.event_id = event.event_id
-  LEFT JOIN competition.my_fpl_snapshot_entries snapshot_entry
-    ON snapshot_entry.season_id = entry.season_id
-   AND snapshot_entry.entry_id = entry.entry_id
-   AND snapshot_entry.event_id = event.event_id
-   AND snapshot_entry.revision = active.revision
-  GROUP BY event.season_id, event.event_id
-), tournaments AS (
-  SELECT event.season_id,
-         event.event_id,
-         count(DISTINCT tournament.tournament_id)::integer AS expected_tournament_count,
-         count(DISTINCT snapshot_aggregate.tournament_id) FILTER (WHERE snapshot_aggregate.tournament_id IS NOT NULL)::integer
-           AS observed_tournament_count
-  FROM fpl.events event
-  LEFT JOIN competition.tournaments tournament
-    ON tournament.season_id = event.season_id
-  LEFT JOIN active
-    ON active.season_id = event.season_id
-   AND active.event_id = event.event_id
-  LEFT JOIN competition.my_fpl_snapshot_tournament_aggregates snapshot_aggregate
-    ON snapshot_aggregate.season_id = event.season_id
-   AND snapshot_aggregate.event_id = event.event_id
-   AND snapshot_aggregate.revision = active.revision
-   AND snapshot_aggregate.tournament_id = tournament.tournament_id
-  GROUP BY event.season_id, event.event_id
+    ON active.season_id = event.season_id AND active.event_id = event.event_id
+  LEFT JOIN competition.my_fpl_snapshot_scope_state state
+    ON state.season_id = event.season_id AND state.event_id = event.event_id
 )
-SELECT event.season_id,
-       event.event_id,
-       active.revision,
-       active.snapshot_date,
-       active.kind,
-       event.finished,
-       event.data_checked,
-       event.data_checked_at,
-       active.source_checked_at,
-       active.published_at,
-       CASE WHEN event.data_checked_at IS NULL THEN NULL ELSE event.data_checked_at END
+SELECT shaped.season_id,
+       shaped.event_id,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.revision END AS revision,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.snapshot_date END AS snapshot_date,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.kind END AS kind,
+       shaped.finished,
+       shaped.data_checked,
+       shaped.data_checked_at,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.source_checked_at END AS source_checked_at,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.published_at END AS published_at,
+       CASE WHEN shaped.data_checked_at IS NULL THEN NULL ELSE shaped.data_checked_at END
          AS finalization_started_at,
-       CASE WHEN event.data_checked_at IS NULL THEN NULL
-            ELSE event.data_checked_at + interval '4500 seconds' END
+       CASE WHEN shaped.data_checked_at IS NULL THEN NULL
+            ELSE shaped.data_checked_at + interval '4500 seconds' END
          AS finalization_due_at,
-       COALESCE(eligible.expected_entry_count, 0)::integer AS expected_entry_count,
-       COALESCE(eligible.observed_entry_count, 0)::integer AS observed_entry_count,
-       COALESCE(active.not_applicable_entry_count, 0)::integer AS not_applicable_entry_count,
-       COALESCE(canonical_scopes.expected_not_applicable_entry_count, 0)::integer
-         AS expected_not_applicable_entry_count,
-       GREATEST(
-         COALESCE(eligible.expected_entry_count, 0) - COALESCE(eligible.observed_entry_count, 0),
-         0
-       )::integer AS pending_correction_entry_count,
-       COALESCE(tournaments.expected_tournament_count, 0)::integer AS expected_tournament_count,
-       COALESCE(tournaments.observed_tournament_count, 0)::integer AS observed_tournament_count,
-       CASE WHEN active.kind IS NULL THEN 'NO_PUBLICATION'
-            WHEN GREATEST(COALESCE(eligible.expected_entry_count, 0) - COALESCE(eligible.observed_entry_count, 0), 0) > 0
-              OR COALESCE(tournaments.expected_tournament_count, 0)
-                   <> COALESCE(tournaments.observed_tournament_count, 0)
-              OR active.entry_scope_sha256 IS DISTINCT FROM canonical_scopes.expected_entry_scope_sha256
-              OR active.tournament_scope_sha256 IS DISTINCT FROM canonical_scopes.expected_tournament_scope_sha256
-              OR COALESCE(active.not_applicable_entry_count, 0) IS DISTINCT FROM
-                 COALESCE(canonical_scopes.expected_not_applicable_entry_count, 0)
-              THEN 'CORRECTION_PENDING'
-            ELSE 'COMPLETE' END AS coverage_state,
-       canonical_scopes.expected_entry_scope_sha256,
-       canonical_scopes.expected_tournament_scope_sha256,
-       active.entry_scope_sha256 AS observed_entry_scope_sha256,
-       active.tournament_scope_sha256 AS observed_tournament_scope_sha256
-FROM fpl.events event
-LEFT JOIN active
-  ON active.season_id = event.season_id
- AND active.event_id = event.event_id
-LEFT JOIN eligible
-  ON eligible.season_id = event.season_id
- AND eligible.event_id = event.event_id
-LEFT JOIN tournaments
-  ON tournaments.season_id = event.season_id
- AND tournaments.event_id = event.event_id
-LEFT JOIN canonical_scopes
-  ON canonical_scopes.season_id = event.season_id
- AND canonical_scopes.event_id = event.event_id`,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.expected_entry_count END AS expected_entry_count,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.ready_entry_count + shaped.empty_entry_count END
+         AS observed_entry_count,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.not_applicable_entry_count END AS not_applicable_entry_count,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.not_applicable_entry_count END AS expected_not_applicable_entry_count,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN GREATEST(shaped.expected_entry_count - shaped.ready_entry_count - shaped.empty_entry_count, 0)
+         END AS pending_correction_entry_count,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.expected_tournament_count END AS expected_tournament_count,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.ready_tournament_count END AS observed_tournament_count,
+       CASE
+         WHEN shaped.kind IS NULL THEN 'NO_PUBLICATION'
+         WHEN shaped.final_verified THEN 'COMPLETE'
+         WHEN shaped.kind = 'PROVISIONAL'
+          AND shaped.ready_entry_count + shaped.empty_entry_count = shaped.expected_entry_count
+          AND shaped.ready_tournament_count = shaped.expected_tournament_count
+           THEN 'COMPLETE'
+         ELSE 'CORRECTION_PENDING'
+       END AS coverage_state,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.entry_scope_sha256 END AS expected_entry_scope_sha256,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.tournament_scope_sha256 END AS expected_tournament_scope_sha256,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.entry_scope_sha256 END AS observed_entry_scope_sha256,
+       CASE WHEN shaped.final_verified OR shaped.kind = 'PROVISIONAL'
+            THEN shaped.tournament_scope_sha256 END AS observed_tournament_scope_sha256
+FROM shaped`,
   );

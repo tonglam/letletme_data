@@ -25,6 +25,7 @@ import {
   schedulerDueProgress,
   schedulerExecutionLanes,
   schedulerPlanKey,
+  schedulerPlanObservationCanBeRemembered,
 } from '../../src/scheduler/scheduler.service';
 import { mockFixture1 } from '../fixtures/fixtures.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
@@ -898,6 +899,74 @@ describe('standalone scheduler registry', () => {
         },
       }),
     );
+  });
+
+  test('revisits a My FPL obligation when event priority changes', () => {
+    const definition = { name: 'my-fpl-finalization' };
+    const base = {
+      scopeKey: '2627:event:1',
+      periodKey: 'event-1-final',
+    };
+    expect(
+      schedulerPlanKey(definition, {
+        ...base,
+        evidence: { eventPriority: 0 },
+      }),
+    ).not.toBe(
+      schedulerPlanKey(definition, {
+        ...base,
+        evidence: { eventPriority: 1 },
+      }),
+    );
+    expect(
+      schedulerPlanKey(
+        { name: 'entry-results' },
+        {
+          ...base,
+          evidence: { eventPriority: 0 },
+        },
+      ),
+    ).toBe(
+      schedulerPlanKey(
+        { name: 'entry-results' },
+        {
+          ...base,
+          evidence: { eventPriority: 1 },
+        },
+      ),
+    );
+  });
+
+  test('does not hide an unpersisted My FPL priority on an in-flight obligation', () => {
+    const definition = { name: 'my-fpl-finalization' };
+    const plan = {
+      terminalStatus: undefined,
+      evidence: { eventPriority: 0 },
+    };
+    expect(
+      schedulerPlanObservationCanBeRemembered(definition, plan, {
+        status: 'running',
+        evidence: { eventPriority: 1 },
+      }),
+    ).toBe(false);
+    expect(
+      schedulerPlanObservationCanBeRemembered(definition, plan, {
+        status: 'retrying',
+        evidence: { eventPriority: 1 },
+      }),
+    ).toBe(false);
+    expect(
+      schedulerPlanObservationCanBeRemembered(definition, plan, {
+        status: 'failed',
+        evidence: { eventPriority: 0 },
+      }),
+    ).toBe(true);
+    expect(
+      schedulerPlanObservationCanBeRemembered(definition, plan, {
+        status: 'succeeded',
+        evidence: { eventPriority: 1 },
+      }),
+    ).toBe(true);
   });
 
   test('keeps a corrected post-match plan retryable until its authority is persisted', () => {

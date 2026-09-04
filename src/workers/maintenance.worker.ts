@@ -23,16 +23,18 @@ import {
 } from '../jobs/entry-sync-enqueue';
 import { enqueueTournamentRosterSync } from '../jobs/tournament-sync.jobs';
 import {
+  captureMyFplSnapshotWithScopeGeneration,
   captureMyFplSnapshot,
   assessMyFplFinalizationReadiness,
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
+  getMyFplFinalizationControlStateWithScopeForEvent,
   invalidateMyFplSnapshotRedisManifest,
-  isManagerReviewV2MyFplPublication,
   isMyFplSnapshotRedisManifestForPublication,
   MyFplSnapshotIncompleteError,
   requeueDeliveredMyFplSnapshotPublication,
+  verifyMyFplSnapshotScopeGeneration,
   type MyFplSnapshotOutboxDeliveryEvidence,
   type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
@@ -378,10 +380,111 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             Boolean(job.data.snapshotActor) &&
             Boolean(job.data.snapshotReason) &&
             Boolean(job.data.snapshotIdempotencyKey);
-          // A previously published FINAL is not sufficient evidence by itself:
-          // the eligible scope can grow after that revision was written. Run
-          // the canonical readiness gate before the idempotent no-op path so a
-          // stale final header cannot hide a newly onboarded team.
+          // Read one event's durable scope fence before deciding whether a
+          // FINAL job can be a no-op. A clean fence plus a valid Redis
+          // manifest takes the lightweight verification path below; it never
+          // calls the deep readiness audit or full snapshot capture.
+          const finalizationControl =
+            snapshotKind === 'FINAL'
+              ? await getMyFplFinalizationControlStateWithScopeForEvent(season, eventId)
+              : null;
+          const activeFinalScopeGenerationVerified = Boolean(
+            snapshotKind === 'FINAL' &&
+              !hasExplicitFinalOverride &&
+              active &&
+              active.kind === 'FINAL' &&
+              finalizationControl?.scopeGenerationInstalled &&
+              finalizationControl.activeRevision === active.revision &&
+              finalizationControl.entryScopeGeneration !== null &&
+              finalizationControl.entryScopeGeneration ===
+                finalizationControl.verifiedEntryScopeGeneration &&
+              finalizationControl.tournamentScopeGeneration !== null &&
+              finalizationControl.tournamentScopeGeneration ===
+                finalizationControl.verifiedTournamentScopeGeneration &&
+              finalizationControl.verifiedRevision === active.revision,
+          );
+          // The migration backfill marks legacy FINAL payloads dirty, so a
+          // clean generation fence is sufficient here. No snapshot-child
+          // scan is needed on the stable worker path; legacy/missing finals
+          // fall through to the worker-only deep capture path.
+          if (activeFinalScopeGenerationVerified) {
+            if (!active || !finalizationControl) {
+              throw new MyFplSnapshotIncompleteError(
+                `My FPL finalization control is unavailable for event ${eventId}`,
+              );
+            }
+            const control = finalizationControl;
+            const entryScopeGeneration = control.entryScopeGeneration;
+            const tournamentScopeGeneration = control.tournamentScopeGeneration;
+            if (entryScopeGeneration === null || tournamentScopeGeneration === null) {
+              throw new MyFplSnapshotIncompleteError(
+                `My FPL scope generation is unavailable for event ${eventId}`,
+              );
+            }
+            let redisManifest = await getActiveMyFplSnapshotRedisManifest(
+              season.seasonCode,
+              eventId,
+            );
+            if (
+              !isMyFplSnapshotRedisManifestForPublication(
+                redisManifest,
+                active,
+                season.seasonCode,
+                eventId,
+              )
+            ) {
+              // A corrupt pointer cannot be overwritten by the activation
+              // Lua (it deliberately fails closed). Clear only the exact
+              // active revision before replaying its durable outbox receipt;
+              // a newer pointer is fenced and remains untouched.
+              await invalidateMyFplSnapshotRedisManifest(
+                season.seasonCode,
+                eventId,
+                active.revision,
+              );
+              await requeueDeliveredMyFplSnapshotPublication(season, eventId, active.revision);
+              const replay = await dispatchMyFplSnapshotPublicationOutbox({
+                limit: 1,
+                seasonCode: season.seasonCode,
+                eventId,
+              });
+              if (replay.failed > 0) {
+                throw new Error(
+                  `My FPL snapshot Redis replay left ${replay.failed} delivery receipt(s) for retry`,
+                );
+              }
+              redisManifest = await getActiveMyFplSnapshotRedisManifest(season.seasonCode, eventId);
+            }
+            if (
+              isMyFplSnapshotRedisManifestForPublication(
+                redisManifest,
+                active,
+                season.seasonCode,
+                eventId,
+              ) &&
+              (await verifyMyFplSnapshotScopeGeneration({
+                season,
+                eventId,
+                revision: active.revision,
+                generation: {
+                  entry: entryScopeGeneration,
+                  tournament: tournamentScopeGeneration,
+                },
+              }))
+            ) {
+              await recordMyFplOutboxRedisEvidence({
+                freshnessWindowId: job.data.freshnessWindowId,
+                publication: active,
+                redisRevision: redisManifest.revision,
+              });
+              return { status: 'noop', publication: active };
+            }
+          }
+
+          // A previously published FINAL is not sufficient evidence by itself
+          // when the generation fence is dirty or unavailable. Only this
+          // single-event worker runs the deep readiness audit, and only after
+          // the lightweight no-op path has failed.
           const finalizationReadiness =
             snapshotKind === 'FINAL'
               ? await assessMyFplFinalizationReadiness(season, eventId)
@@ -449,78 +552,6 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               readiness: finalizationReadiness,
               transferRefreshEnqueued,
             };
-          }
-          const activeFinalUsesManagerReviewV2 =
-            active?.kind === 'FINAL' &&
-            (await isManagerReviewV2MyFplPublication(season, eventId, active));
-          const activeFinalScopeMatchesCurrentReadiness = Boolean(
-            active &&
-              finalizationReadiness &&
-              active.expectedEntryCount === finalizationReadiness.expectedEntryCount &&
-              active.notApplicableEntryCount === finalizationReadiness.notApplicableEntryCount &&
-              active.entryScopeSha256 === finalizationReadiness.entryScopeSha256 &&
-              active.expectedTournamentCount === finalizationReadiness.expectedTournamentCount &&
-              active.tournamentScopeSha256 === finalizationReadiness.tournamentScopeSha256,
-          );
-          if (
-            activeFinalUsesManagerReviewV2 &&
-            activeFinalScopeMatchesCurrentReadiness &&
-            (!hasExplicitFinalOverride || active.idempotencyKey === job.data.snapshotIdempotencyKey)
-          ) {
-            const redisManifest = await getActiveMyFplSnapshotRedisManifest(
-              season.seasonCode,
-              eventId,
-            );
-            if (
-              isMyFplSnapshotRedisManifestForPublication(
-                redisManifest,
-                active,
-                season.seasonCode,
-                eventId,
-              )
-            ) {
-              await recordMyFplOutboxRedisEvidence({
-                freshnessWindowId: job.data.freshnessWindowId,
-                publication: active,
-                redisRevision: redisManifest.revision,
-              });
-              return { status: 'noop', publication: active };
-            }
-            // A corrupt pointer cannot be overwritten by the activation Lua
-            // (it deliberately fails closed). Clear only the exact active
-            // revision before replaying its durable outbox receipt; a newer
-            // pointer is fenced and remains untouched.
-            await invalidateMyFplSnapshotRedisManifest(season.seasonCode, eventId, active.revision);
-            await requeueDeliveredMyFplSnapshotPublication(season, eventId, active.revision);
-            const replay = await dispatchMyFplSnapshotPublicationOutbox({
-              limit: 1,
-              seasonCode: season.seasonCode,
-              eventId,
-            });
-            if (replay.failed > 0) {
-              throw new Error(
-                `My FPL snapshot Redis replay left ${replay.failed} delivery receipt(s) for retry`,
-              );
-            }
-            const replayedManifest = await getActiveMyFplSnapshotRedisManifest(
-              season.seasonCode,
-              eventId,
-            );
-            if (
-              isMyFplSnapshotRedisManifestForPublication(
-                replayedManifest,
-                active,
-                season.seasonCode,
-                eventId,
-              )
-            ) {
-              await recordMyFplOutboxRedisEvidence({
-                freshnessWindowId: job.data.freshnessWindowId,
-                publication: active,
-                redisRevision: replayedManifest.revision,
-              });
-              return { status: 'noop', publication: active };
-            }
           }
 
           if (snapshotKind !== 'FINAL') {
@@ -591,13 +622,22 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               }),
             ]);
           }
-          const capture = await captureMyFplSnapshot(season, eventId, snapshotKind, {
+          const captureOptions = {
             ...(job.data.snapshotActor ? { actor: job.data.snapshotActor } : {}),
             ...(job.data.snapshotReason ? { reason: job.data.snapshotReason } : {}),
             ...(job.data.snapshotIdempotencyKey
               ? { idempotencyKey: job.data.snapshotIdempotencyKey }
               : {}),
-          });
+          };
+          const capture =
+            snapshotKind === 'FINAL'
+              ? await captureMyFplSnapshotWithScopeGeneration(
+                  season,
+                  eventId,
+                  snapshotKind,
+                  captureOptions,
+                )
+              : await captureMyFplSnapshot(season, eventId, snapshotKind, captureOptions);
           // An idempotent FINAL override may resolve to its original inactive
           // publication after a newer revision has become active. Delivery
           // evidence must certify the current active publication, not the

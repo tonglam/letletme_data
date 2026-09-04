@@ -1796,6 +1796,81 @@ export const myFplSnapshotPublicationsInCompetition = competition.table(
   ],
 );
 
+export const myFplSnapshotScopeStateInCompetition = competition.table(
+  'my_fpl_snapshot_scope_state',
+  {
+    seasonId: smallint('season_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    entryScopeGeneration: bigint('entry_scope_generation', { mode: 'number' }).default(0).notNull(),
+    verifiedEntryScopeGeneration: bigint('verified_entry_scope_generation', { mode: 'number' })
+      .default(0)
+      .notNull(),
+    tournamentScopeGeneration: bigint('tournament_scope_generation', { mode: 'number' })
+      .default(0)
+      .notNull(),
+    verifiedTournamentScopeGeneration: bigint('verified_tournament_scope_generation', {
+      mode: 'number',
+    })
+      .default(0)
+      .notNull(),
+    entryDirtySince: timestamp('entry_dirty_since', { withTimezone: true, mode: 'date' }),
+    tournamentDirtySince: timestamp('tournament_dirty_since', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    verifiedRevision: bigint('verified_revision', { mode: 'number' }),
+    verifiedAt: timestamp('verified_at', { withTimezone: true, mode: 'date' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    index('my_fpl_snapshot_scope_state_dirty_idx')
+      .on(table.seasonId, table.eventId, table.updatedAt)
+      .where(
+        sql`entry_scope_generation > verified_entry_scope_generation OR tournament_scope_generation > verified_tournament_scope_generation`,
+      ),
+    index('my_fpl_snapshot_scope_state_revision_idx')
+      .on(table.seasonId, table.eventId, table.verifiedRevision)
+      .where(sql`verified_revision IS NOT NULL`),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'my_fpl_snapshot_scope_state_season_fk',
+    }),
+    foreignKey({
+      columns: [table.seasonId, table.eventId],
+      foreignColumns: [eventsInFpl.seasonId, eventsInFpl.eventId],
+      name: 'my_fpl_snapshot_scope_state_event_fk',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.seasonId, table.eventId, table.verifiedRevision],
+      foreignColumns: [
+        myFplSnapshotPublicationsInCompetition.seasonId,
+        myFplSnapshotPublicationsInCompetition.eventId,
+        myFplSnapshotPublicationsInCompetition.revision,
+      ],
+      name: 'my_fpl_snapshot_scope_state_revision_fk',
+    }).onDelete('cascade'),
+    primaryKey({
+      columns: [table.seasonId, table.eventId],
+      name: 'my_fpl_snapshot_scope_state_pkey',
+    }),
+    check(
+      'my_fpl_snapshot_scope_state_entry_generation_check',
+      sql`entry_scope_generation >= 0 AND verified_entry_scope_generation >= 0 AND verified_entry_scope_generation <= entry_scope_generation`,
+    ),
+    check(
+      'my_fpl_snapshot_scope_state_tournament_generation_check',
+      sql`tournament_scope_generation >= 0 AND verified_tournament_scope_generation >= 0 AND verified_tournament_scope_generation <= tournament_scope_generation`,
+    ),
+    check(
+      'my_fpl_snapshot_scope_state_revision_check',
+      sql`verified_revision IS NULL OR verified_revision > 0`,
+    ),
+  ],
+);
+
 export const myFplSnapshotPublicationOutboxInCompetition = competition.table(
   'my_fpl_snapshot_publication_outbox',
   {
