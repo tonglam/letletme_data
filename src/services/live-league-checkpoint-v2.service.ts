@@ -322,7 +322,10 @@ export async function checkpointLiveLeaguePublicationV2(
   const values = checkpointValues(read, new Date());
   try {
     return await db.transaction(async (tx) => {
-      await tx.execute(sql`SET LOCAL statement_timeout = 5000`);
+      // Lock contention must fail fast, while a validated multi-megabyte league
+      // publication gets a separate bounded budget for JSONB persistence.
+      await tx.execute(sql`SET LOCAL lock_timeout = '2s'`);
+      await tx.execute(sql`SET LOCAL statement_timeout = '20s'`);
       const seasonId = seasonIdFromCode(read.publication.season);
       const existing = await tx
         .select({
@@ -441,21 +444,21 @@ export async function checkpointLiveLeaguePublicationV2(
             liveLeagueCheckpointsInCompetition.scopeKind,
           ],
           set: {
-            publicationId: read.publication.publicationId,
-            generation: read.publication.generation,
-            state: read.publication.state,
-            manifest: values.manifest,
-            indexPayload: values.indexPayload,
-            payload: values.payload,
-            rowCount: values.rowCount,
-            payloadBytes: values.payloadBytes,
-            payloadSha256: values.payloadSha256,
-            sourceCheckedAt: values.sourceCheckedAt,
-            contentUpdatedAt: values.contentUpdatedAt,
-            publishedAt: values.publishedAt,
-            checkpointedAt: values.checkpointedAt,
-            expectedNextCheckAt: values.expectedNextCheckAt,
-            updatedAt: values.checkpointedAt,
+            publicationId: sql`excluded.publication_id`,
+            generation: sql`excluded.generation`,
+            state: sql`excluded.state`,
+            manifest: sql`excluded.manifest`,
+            indexPayload: sql`excluded.index_payload`,
+            payload: sql`excluded.payload`,
+            rowCount: sql`excluded.row_count`,
+            payloadBytes: sql`excluded.payload_bytes`,
+            payloadSha256: sql`excluded.payload_sha256`,
+            sourceCheckedAt: sql`excluded.source_checked_at`,
+            contentUpdatedAt: sql`excluded.content_updated_at`,
+            publishedAt: sql`excluded.published_at`,
+            checkpointedAt: sql`excluded.checkpointed_at`,
+            expectedNextCheckAt: sql`excluded.expected_next_check_at`,
+            updatedAt: sql`excluded.updated_at`,
           },
           where: sql`
             (
