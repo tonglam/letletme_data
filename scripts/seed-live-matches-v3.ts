@@ -16,6 +16,7 @@ import {
   readLiveMatchDetailPointerV3,
   setLiveMatchCheckpointDesiredV3,
   type MatchDeskRead,
+  type MatchDetailRead,
 } from '../src/cache/live-match-publication-v3';
 import { decideLiveLifecycle } from '../src/services/live-lifecycle-orchestrator';
 import {
@@ -86,6 +87,47 @@ function hasCanonicalPrices(
   );
 }
 
+type FinalSeedDeskCheckpoint = Pick<MatchDeskRead, 'fixtures'> & {
+  readonly publication: Pick<MatchDeskRead['publication'], 'generation' | 'state' | 'revisions'>;
+};
+
+type FinalSeedDetailCheckpoint = Pick<MatchDetailRead, 'fixtures'> & {
+  readonly publication: Pick<
+    MatchDetailRead['publication'],
+    'finalized' | 'fixtureIdentityRevision' | 'generation' | 'observedDeskGeneration'
+  >;
+};
+
+/**
+ * FINAL checkpoints are immutable. A deploy must reuse a complete durable
+ * result instead of re-observing an old event and manufacturing a publication
+ * that the final fence is correctly unable to overwrite.
+ */
+export function reusableFinalLiveMatchSeed(
+  desk: FinalSeedDeskCheckpoint | null,
+  detail: FinalSeedDetailCheckpoint | null,
+): {
+  readonly status: 'already-checkpointed' | 'no-player-detail';
+  readonly generation: number;
+} | null {
+  if (!desk || desk.publication.state !== 'FINALIZED') return null;
+  if (desk.fixtures.length === 0) {
+    return { status: 'no-player-detail', generation: desk.publication.generation };
+  }
+  if (
+    !detail ||
+    detail.publication.finalized !== true ||
+    detail.publication.observedDeskGeneration !== desk.publication.generation ||
+    detail.publication.fixtureIdentityRevision !==
+      desk.publication.revisions.fixtureIdentity.revision ||
+    detail.fixtures.length !== desk.fixtures.length ||
+    !hasCanonicalPrices(detail.fixtures)
+  ) {
+    return null;
+  }
+  return { status: 'already-checkpointed', generation: detail.publication.generation };
+}
+
 type FinalizationEvent = Pick<Event, 'finished' | 'dataChecked' | 'dataCheckedAt' | 'deadlineTime'>;
 
 /**
@@ -153,6 +195,20 @@ async function seedOne(seasonCode: string, eventId: number) {
   const season = explicitSeasonRef(seasonCode);
   const event = await eventRepository.findById(season, eventId);
   if (!event) throw new Error(`event ${eventId} does not exist in season ${seasonCode}`);
+
+  const [durableDesk, durableDetail] = await Promise.all([
+    readLiveMatchDeskCheckpointV3(season, eventId),
+    readLiveMatchDetailCheckpointV3(season, eventId),
+  ]);
+  const reusable = reusableFinalLiveMatchSeed(durableDesk, durableDetail);
+  if (reusable) {
+    return {
+      season: seasonCode,
+      eventId,
+      ...reusable,
+      checkpointed: true,
+    } as const;
+  }
 
   const deskBefore = await readLiveMatchDeskPointerV3({ season: seasonCode, eventId }, 'active');
 
