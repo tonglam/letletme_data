@@ -9,6 +9,7 @@ import type { DbEntryEventResult } from '../../src/db/schemas/platform.types';
 import { buildFinalEntryLiveInputFromBaseAndResult } from '../../src/services/entries.service';
 import {
   LiveFinalRetentionIncompleteError,
+  finalPublicationConflict,
   liveFinalRetentionCompletionEvidence,
   type LiveFinalRetentionResult,
 } from '../../src/services/live-final-retention.service';
@@ -100,6 +101,96 @@ function retentionResult(
 }
 
 describe('final entry retention recovery', () => {
+  test('allows an exact same-identity provisional pointer to be promoted to FINAL', () => {
+    const scope = { season: '2627', eventId: 2, entryId: 777 } as const;
+    const raw = JSON.stringify({
+      contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+      season: scope.season,
+      eventId: scope.eventId,
+      entryId: scope.entryId,
+      publicationId: '00000000-0000-4000-8000-000000000777',
+      generation: 5,
+      state: 'PROVISIONAL',
+    });
+
+    expect(
+      finalPublicationConflict(
+        raw,
+        { publicationId: '00000000-0000-4000-8000-000000000777', generation: 5 },
+        scope,
+        {
+          contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+          state: 'FINAL',
+          allowProvisionalSameIdentity: true,
+        },
+      ),
+    ).toBe(false);
+    expect(
+      finalPublicationConflict(
+        raw,
+        {
+          publicationId: '00000000-0000-4000-8000-000000000777',
+          generation: 5,
+        },
+        scope,
+        {
+          contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+          state: 'FINAL',
+        },
+      ),
+    ).toBe(true);
+  });
+
+  test('still fences a different identity while keeping an exact FINAL pointer idempotent', () => {
+    const scope = { season: '2627', eventId: 2, entryId: 777 } as const;
+    const base = {
+      contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+      season: scope.season,
+      eventId: scope.eventId,
+      entryId: scope.entryId,
+      generation: 5,
+      state: 'PROVISIONAL',
+    };
+    const marker = {
+      contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+      state: 'FINAL',
+      allowProvisionalSameIdentity: true,
+    } as const;
+
+    expect(
+      finalPublicationConflict(
+        JSON.stringify({ ...base, publicationId: '00000000-0000-4000-8000-000000000777' }),
+        { publicationId: '00000000-0000-4000-8000-000000000778', generation: 5 },
+        scope,
+        marker,
+      ),
+    ).toBe(true);
+    expect(
+      finalPublicationConflict(
+        JSON.stringify({
+          ...base,
+          publicationId: '00000000-0000-4000-8000-000000000777',
+          state: 'FINAL',
+        }),
+        { publicationId: '00000000-0000-4000-8000-000000000777', generation: 5 },
+        scope,
+        marker,
+      ),
+    ).toBe(false);
+    expect(
+      finalPublicationConflict(
+        JSON.stringify({
+          ...base,
+          publicationId: '00000000-0000-4000-8000-000000000778',
+          state: 'FINAL',
+        }),
+        { publicationId: '00000000-0000-4000-8000-000000000777', generation: 5 },
+        scope,
+        marker,
+      ),
+    ).toBe(true);
+  });
+
   test('builds FINAL input only from the exact provisional base and durable result', () => {
     const input = buildFinalEntryLiveInputFromBaseAndResult(
       provisionalInput(),

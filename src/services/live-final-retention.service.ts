@@ -275,7 +275,7 @@ function entryPublicationFromHead(
   };
 }
 
-function finalPublicationConflict(
+export function finalPublicationConflict(
   raw: string,
   expected: { publicationId: string; generation: number },
   scope: {
@@ -286,20 +286,36 @@ function finalPublicationConflict(
     scope?: string;
     matchId?: number;
   },
-  marker: { contractVersion: string; state?: string; finalized?: boolean },
+  marker: {
+    contractVersion: string;
+    state?: string;
+    finalized?: boolean;
+    /**
+     * Entry FINAL retention may promote an exact same-generation provisional
+     * pointer.  The Lua CAS still fences any identity change or FINAL conflict.
+     */
+    allowProvisionalSameIdentity?: boolean;
+  },
 ): boolean {
   const identity = pointerIdentity(raw, scope);
   if (!identity) return false;
   if (identity.contractVersion !== marker.contractVersion || !identity.scopeMatches) return true;
+  const sameIdentity =
+    identity.publicationId === expected.publicationId &&
+    identity.generation === expected.generation;
+  if (
+    marker.allowProvisionalSameIdentity &&
+    marker.state === 'FINAL' &&
+    identity.state === 'PROVISIONAL' &&
+    sameIdentity
+  ) {
+    return false;
+  }
   const isFinal =
     marker.state !== undefined
       ? identity.state === marker.state
       : identity.finalized === marker.finalized;
-  return (
-    !isFinal ||
-    identity.publicationId !== expected.publicationId ||
-    identity.generation !== expected.generation
-  );
+  return !isFinal || !sameIdentity;
 }
 
 async function processGlobal(
@@ -717,6 +733,7 @@ async function processEntryHead(
     finalPublicationConflict(activeRaw, publication, scope, {
       contractVersion: 'live-points-v2',
       state: 'FINAL',
+      allowProvisionalSameIdentity: true,
     }) ||
     (active &&
       (active.publication.publicationId !== publication.publicationId ||
