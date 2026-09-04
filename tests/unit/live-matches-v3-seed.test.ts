@@ -6,6 +6,7 @@ import {
   canSkipMissingDetailDuringSeed,
   hasCurrentMatchDeskSyncEvidence,
   parseLiveMatchSeedArguments,
+  reusableFinalLiveMatchSeed,
 } from '../../scripts/seed-live-matches-v3';
 import { isValidLiveMatchDetailCheckpointPayloadV3 } from '../../src/cache/live-match-publication-v3';
 
@@ -140,6 +141,53 @@ describe('live match V3 cutover seed arguments', () => {
     expect(canFinalizeLiveMatchSeed({ ...event, dataCheckedAt: null }, [finishedFixture])).toBe(
       false,
     );
+  });
+
+  it('reuses a complete immutable FINAL checkpoint instead of reseeding it', () => {
+    const desk = {
+      publication: {
+        generation: 2,
+        state: 'FINALIZED',
+        revisions: { fixtureIdentity: { revision: 'f'.repeat(64) } },
+      },
+      fixtures: [{ id: 11 }],
+    } as unknown as NonNullable<Parameters<typeof reusableFinalLiveMatchSeed>[0]>;
+    const detail = {
+      publication: {
+        finalized: true,
+        fixtureIdentityRevision: 'f'.repeat(64),
+        generation: 8,
+        observedDeskGeneration: 2,
+      },
+      fixtures: [{ fixtureId: 11, players: [{ price: 50 }] }],
+    } as unknown as NonNullable<Parameters<typeof reusableFinalLiveMatchSeed>[1]>;
+
+    expect(reusableFinalLiveMatchSeed(desk, detail)).toEqual({
+      status: 'already-checkpointed',
+      generation: 8,
+    });
+    expect(
+      reusableFinalLiveMatchSeed(desk, {
+        ...detail,
+        publication: { ...detail.publication, observedDeskGeneration: 3 },
+      }),
+    ).toBeNull();
+  });
+
+  it('reuses a finalized empty desk without requiring player detail', () => {
+    const desk = {
+      publication: {
+        generation: 3,
+        state: 'FINALIZED',
+        revisions: { fixtureIdentity: { revision: 'f'.repeat(64) } },
+      },
+      fixtures: [],
+    } as unknown as NonNullable<Parameters<typeof reusableFinalLiveMatchSeed>[0]>;
+
+    expect(reusableFinalLiveMatchSeed(desk, null)).toEqual({
+      status: 'no-player-detail',
+      generation: 3,
+    });
   });
 
   it('keeps the checked-in deploy helper on the same Match V3 seed path', () => {
