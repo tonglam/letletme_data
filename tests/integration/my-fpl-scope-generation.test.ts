@@ -115,13 +115,15 @@ describe('My FPL scope-generation event fence', () => {
         tournament_scope_generation: number;
         verified_tournament_scope_generation: number;
         verified_revision: number | null;
-        entry_dirty_since: Date | null;
-        tournament_dirty_since: Date | null;
+        entry_dirty: boolean;
+        tournament_dirty: boolean;
       }>
     >`
       SELECT entry_scope_generation::integer, verified_entry_scope_generation::integer,
              tournament_scope_generation::integer, verified_tournament_scope_generation::integer,
-             verified_revision::integer, entry_dirty_since, tournament_dirty_since
+             verified_revision::integer,
+             entry_dirty_since IS NOT NULL AS entry_dirty,
+             tournament_dirty_since IS NOT NULL AS tournament_dirty
       FROM competition.my_fpl_snapshot_scope_state
       WHERE season_id = ${SEASON_ID} AND event_id = ${EVENT_ID}
     `;
@@ -132,8 +134,7 @@ describe('My FPL scope-generation event fence', () => {
       verified_tournament_scope_generation: 0,
       verified_revision: null,
     });
-    expect(reopened[0]?.entry_dirty_since).toBeInstanceOf(Date);
-    expect(reopened[0]?.tournament_dirty_since).toBeInstanceOf(Date);
+    expect(reopened[0]).toMatchObject({ entry_dirty: true, tournament_dirty: true });
 
     await sql`
       UPDATE fpl.events
