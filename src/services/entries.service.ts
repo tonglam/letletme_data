@@ -891,7 +891,7 @@ function buildFinalEntryLiveInputFromCheckpoint(
 ): EntryLiveInputV2 | null {
   if (!result) return null;
   if (
-    (head.entryId !== undefined && head.entryId !== entryId) ||
+    head.entryId !== entryId ||
     head.state !== 'COMPLETE' ||
     head.rowCount !== 15 ||
     !Number.isSafeInteger(head.generation) ||
@@ -918,7 +918,7 @@ function buildFinalEntryLiveInputFromCheckpoint(
   ) {
     return null;
   }
-  if (head.inputPayload === null || head.inputPayload === undefined) return null;
+  if (head.inputPayload === null) return null;
   if (
     !validateEntryLiveInputV2(head.inputPayload, {
       season: season.seasonCode,
@@ -1027,7 +1027,7 @@ export async function rebuildFinalEntryLiveInputsV2(
   }
   const headsByEntry = new Map<number, EntryEventPickHeadMetadata>();
   for (const head of heads) {
-    if (head.entryId !== undefined) headsByEntry.set(head.entryId, head);
+    headsByEntry.set(head.entryId, head);
   }
   const resultsByEntry = new Map(results.map((result) => [result.entryId, result]));
   let rebuilt = 0;

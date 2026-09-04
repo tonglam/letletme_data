@@ -48,7 +48,7 @@ import {
   type EntryEventPickHeadMetadata,
 } from '../repositories/entry-event-picks';
 import {
-  listLiveLeagueFinalCheckpointScopesV2,
+  listRequiredLiveLeagueFinalCheckpointScopesV2,
   readLiveLeagueCheckpointV2,
 } from './live-league-checkpoint-v2.service';
 import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
@@ -238,7 +238,6 @@ function entryPublicationFromHead(
 ): EntryLivePublicationV2 | null {
   const entryId = head.entryId;
   if (
-    entryId === undefined ||
     !Number.isSafeInteger(entryId) ||
     entryId <= 0 ||
     !/^[0-9a-f-]{36}$/i.test(head.publicationId) ||
@@ -563,7 +562,6 @@ async function processEntryHead(
   family.checked += 1;
   const entryId = head.entryId;
   if (
-    entryId === undefined ||
     !Number.isSafeInteger(entryId) ||
     entryId <= 0 ||
     head.state !== 'COMPLETE' ||
@@ -1008,12 +1006,7 @@ export async function runLiveFinalRetentionV2(
     const durableResults = await entryEventResultsRepository.findByEventAndEntryIds(
       season,
       eventId,
-      page
-        .map((head) => head.entryId)
-        .filter(
-          (entryId): entryId is number =>
-            typeof entryId === 'number' && Number.isSafeInteger(entryId) && entryId > 0,
-        ),
+      page.map((head) => head.entryId),
     );
     const resultByEntry = new Map(
       durableResults.map((result) => [result.entryId, result] as const),
@@ -1024,12 +1017,12 @@ export async function runLiveFinalRetentionV2(
         eventId,
         event.dataCheckedAt!,
         head,
-        head.entryId === undefined ? undefined : resultByEntry.get(head.entryId),
+        resultByEntry.get(head.entryId),
         redis,
         families.entry,
       ),
     );
-    const nextCursor = Math.max(...page.map((head) => head.entryId ?? 0));
+    const nextCursor = Math.max(...page.map((head) => head.entryId));
     if (!Number.isSafeInteger(nextCursor) || nextCursor <= cursor) {
       throw new Error(`Live final retention entry cursor stalled at ${cursor}`);
     }
@@ -1037,8 +1030,8 @@ export async function runLiveFinalRetentionV2(
     if (page.length < LIVE_FINAL_RETENTION_ENTRY_PAGE_SIZE) break;
   }
 
-  const persistedScopes = await listLiveLeagueFinalCheckpointScopesV2(season, eventId);
-  const leagueCheckpoints = await mapWithConcurrency(persistedScopes, 8, async (scope) => ({
+  const requiredScopes = await listRequiredLiveLeagueFinalCheckpointScopesV2(season, eventId);
+  const leagueCheckpoints = await mapWithConcurrency(requiredScopes, 8, async (scope) => ({
     scope,
     checkpoint: await readLiveLeagueCheckpointV2(scope),
   }));

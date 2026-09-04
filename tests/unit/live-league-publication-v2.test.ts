@@ -19,6 +19,7 @@ import {
 import type { Exactly15Picks } from '../../src/cache/live-publication-v2';
 import { canonicalJson, contentHash } from '../../src/utils/content-hash';
 import {
+  isH2HTournamentPhaseActive,
   isLiveLeagueCheckpointGenerationCompatible,
   liveLeagueCheckpointIsDue,
 } from '../../src/services/live-league-checkpoint-v2.service';
@@ -26,7 +27,6 @@ import {
   hasCompleteH2HOfficialScores,
   hasExpectedH2HMatchSet,
   h2hSide,
-  isH2HTournamentPhaseActive,
   isTimestampAtOrAfter,
   selectRetainedH2HMatchPayload,
   standingsCoverageEventId,

@@ -23,6 +23,7 @@ import { createEventLiveRepository } from '../repositories/event-lives';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
 import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
 import { CORE_SNAPSHOT_WRITE_LOCK_KEY } from './core-snapshot-persistence.service';
+import { listRequiredLiveLeagueFinalCheckpointScopesV2 } from './live-league-checkpoint-v2.service';
 import { hasFinalLiveMatchCheckpointsV3 } from './live-match-v3-checkpoint.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import {
@@ -96,30 +97,6 @@ const rememberFinalCheckpointValidation = (
   }
 };
 
-type RequiredLiveLeagueCheckpointScope = {
-  tournamentId: number;
-  scopeKind: 'CLASSIC' | 'H2H_HEAD' | 'H2H_STANDINGS';
-};
-
-function h2hFinalizationPhaseActive(
-  groupStartedEventId: number | null,
-  groupEndedEventId: number | null,
-  knockoutStartedEventId: number | null,
-  knockoutEndedEventId: number | null,
-  eventId: number,
-): boolean {
-  const phases = [
-    [groupStartedEventId, groupEndedEventId],
-    [knockoutStartedEventId, knockoutEndedEventId],
-  ] as const;
-  if (!phases.some(([start, end]) => start !== null || end !== null)) return true;
-  return phases.some(
-    ([start, end]) =>
-      (start !== null && eventId >= start && (end === null || eventId <= end)) ||
-      (start === null && end !== null && eventId <= end),
-  );
-}
-
 /**
  * State columns are only a cheap fence. Validate every active tournament's
  * FINALIZED league checkpoint with the same self-contained contract used by
@@ -130,50 +107,7 @@ async function hasFinalLiveLeagueCheckpointsV2(
   eventId: number,
 ): Promise<boolean> {
   const db = await getDb();
-  const expectedTournaments = await db
-    .select({
-      tournamentId: tournamentsInCompetition.tournamentId,
-      leagueType: tournamentsInCompetition.leagueType,
-      rosterMode: tournamentsInCompetition.rosterMode,
-      groupMode: tournamentsInCompetition.groupMode,
-      groupStartedEventId: tournamentsInCompetition.groupStartedEventId,
-      groupEndedEventId: tournamentsInCompetition.groupEndedEventId,
-      knockoutStartedEventId: tournamentsInCompetition.knockoutStartedEventId,
-      knockoutEndedEventId: tournamentsInCompetition.knockoutEndedEventId,
-    })
-    .from(tournamentsInCompetition)
-    .where(
-      and(
-        eq(tournamentsInCompetition.seasonId, season.seasonId),
-        eq(tournamentsInCompetition.state, 'active'),
-        eq(tournamentsInCompetition.setupStatus, 'ready'),
-      ),
-    );
-  const requiredScopes: RequiredLiveLeagueCheckpointScope[] = [];
-  for (const tournament of expectedTournaments) {
-    if (tournament.leagueType === 'classic') {
-      requiredScopes.push({ tournamentId: tournament.tournamentId, scopeKind: 'CLASSIC' });
-      continue;
-    }
-    if (
-      tournament.leagueType !== 'h2h' ||
-      tournament.rosterMode !== 'official_sync' ||
-      tournament.groupMode !== 'battle_races' ||
-      !h2hFinalizationPhaseActive(
-        tournament.groupStartedEventId,
-        tournament.groupEndedEventId,
-        tournament.knockoutStartedEventId,
-        tournament.knockoutEndedEventId,
-        eventId,
-      )
-    ) {
-      continue;
-    }
-    requiredScopes.push(
-      { tournamentId: tournament.tournamentId, scopeKind: 'H2H_HEAD' },
-      { tournamentId: tournament.tournamentId, scopeKind: 'H2H_STANDINGS' },
-    );
-  }
+  const requiredScopes = await listRequiredLiveLeagueFinalCheckpointScopesV2(season, eventId, db);
   if (requiredScopes.length === 0) return true;
 
   const rows = await db
@@ -189,11 +123,6 @@ async function hasFinalLiveLeagueCheckpointsV2(
       rowCount: liveLeagueCheckpointsInCompetition.rowCount,
       payloadBytes: liveLeagueCheckpointsInCompetition.payloadBytes,
       payloadSha256: liveLeagueCheckpointsInCompetition.payloadSha256,
-      groupStartedEventId: tournamentsInCompetition.groupStartedEventId,
-      groupEndedEventId: tournamentsInCompetition.groupEndedEventId,
-      knockoutStartedEventId: tournamentsInCompetition.knockoutStartedEventId,
-      knockoutEndedEventId: tournamentsInCompetition.knockoutEndedEventId,
-      leagueType: tournamentsInCompetition.leagueType,
     })
     .from(liveLeagueCheckpointsInCompetition)
     .innerJoin(
@@ -216,7 +145,7 @@ async function hasFinalLiveLeagueCheckpointsV2(
     rows.map((row) => [`${row.tournamentId}:${row.scopeKind}`, row] as const),
   );
   for (const requiredScope of requiredScopes) {
-    const row = checkpointByScope.get(`${requiredScope.tournamentId}:${requiredScope.scopeKind}`);
+    const row = checkpointByScope.get(`${requiredScope.tournamentId}:${requiredScope.scope}`);
     if (!row || row.state !== 'FINALIZED') return false;
     if (
       row.scopeKind !== 'CLASSIC' &&
