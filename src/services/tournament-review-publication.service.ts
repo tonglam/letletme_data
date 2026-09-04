@@ -623,6 +623,48 @@ type PointsSourceRow = {
   history_group_mismatch_count: number | string | null;
 };
 
+type TournamentReviewPointsRowDraft = {
+  entryId: number;
+  entryName: string;
+  playerName: string;
+  applicable: boolean;
+  groupId: number | null;
+  rank: number | null;
+  previousRank: number | null;
+  grossPoints: number | null;
+  transferCost: number | null;
+  netPoints: number | null;
+  tournamentScore: number | null;
+  seasonNetPoints: number | null;
+  seasonGrossPoints: number | null;
+  eventRank: number | null;
+  overallPoints: number | null;
+  overallRank: number | null;
+};
+
+/** Keep tournament metrics absent for roster entries that were not yet
+ * eligible for the reviewed event. Overall FPL totals remain useful context,
+ * but copying zero/default tournament values would make the immutable payload
+ * fail the reader's applicability contract. */
+export function normalizeTournamentReviewPointsRow(
+  row: TournamentReviewPointsRowDraft,
+): TournamentReviewPointsRowDraft {
+  if (row.applicable) return row;
+  return {
+    ...row,
+    groupId: null,
+    rank: null,
+    previousRank: null,
+    grossPoints: null,
+    transferCost: null,
+    netPoints: null,
+    tournamentScore: null,
+    seasonNetPoints: null,
+    seasonGrossPoints: null,
+    eventRank: null,
+  };
+}
+
 async function buildPointsPayload(
   tx: postgres.TransactionSql,
   seasonId: number,
@@ -1123,24 +1165,26 @@ async function buildPointsPayload(
       return integer(right.event_net_points) - integer(left.event_net_points);
     })
     .forEach((row, index) => rankFallback.set(row.entry_id, index + 1));
-  const pointRows = rows.map((row) => ({
-    entryId: row.entry_id,
-    entryName: row.entry_name,
-    playerName: row.player_name,
-    applicable: !notApplicable.includes(row),
-    groupId: row.group_id,
-    rank: row.event_group_rank ?? rankFallback.get(row.entry_id) ?? null,
-    previousRank: row.previous_group_rank,
-    grossPoints: row.event_points,
-    transferCost: row.event_cost,
-    netPoints: row.event_net_points,
-    tournamentScore: row.group_event_net_points,
-    seasonNetPoints: row.season_net_points,
-    seasonGrossPoints: row.season_gross_points,
-    eventRank: row.event_rank,
-    overallPoints: row.overall_points,
-    overallRank: row.overall_rank,
-  }));
+  const pointRows = rows.map((row) =>
+    normalizeTournamentReviewPointsRow({
+      entryId: row.entry_id,
+      entryName: row.entry_name,
+      playerName: row.player_name,
+      applicable: !notApplicable.includes(row),
+      groupId: row.group_id,
+      rank: row.event_group_rank ?? rankFallback.get(row.entry_id) ?? null,
+      previousRank: row.previous_group_rank,
+      grossPoints: row.event_points,
+      transferCost: row.event_cost,
+      netPoints: row.event_net_points,
+      tournamentScore: row.group_event_net_points,
+      seasonNetPoints: row.season_net_points,
+      seasonGrossPoints: row.season_gross_points,
+      eventRank: row.event_rank,
+      overallPoints: row.overall_points,
+      overallRank: row.overall_rank,
+    }),
+  );
   // The trajectory section is a deliberate projection of the same frozen
   // roster, ordered by current rank and then rank movement.  It is not a
   // second copy of the roster-order standings section: consumers can render
