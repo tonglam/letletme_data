@@ -8,6 +8,7 @@ import {
   isContentConsumerPauseOwned,
   CONTENT_X_SCAN_QUEUE,
   CONTENT_CONSUMER_QUEUE_NAMES,
+  DEPLOYMENT_CONSUMER_QUEUE_NAMES,
   DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS,
   DEPLOY_QUEUE_ADMISSION_REASON,
   DEPLOY_QUEUE_ADMISSION_TTL_SECONDS,
@@ -321,22 +322,36 @@ printf 'CONTROL_IMAGE:%s\n' "$DEPLOY_CONTENT_WORKER_CONTROL_IMAGE"
         '--consumer-mode',
         'RESUME',
         '--consumer-queue',
-        'content-media-transcript',
+        'entry-sync',
       ]),
     ).toEqual({
       mode: 'RESUME',
-      queueName: 'content-media-transcript',
+      queueName: 'entry-sync',
     });
     expect(CONTENT_CONSUMER_QUEUE_NAMES).toEqual([
       'content-http-acquisition',
       'content-media-transcript',
       'content-x-scan',
     ]);
+    expect(DEPLOYMENT_CONSUMER_QUEUE_NAMES).toEqual([
+      'entry-sync',
+      'content-http-acquisition',
+      'content-media-transcript',
+      'content-x-scan',
+    ]);
+    expect(() =>
+      parseContentConsumerModeArguments([
+        '--consumer-mode',
+        'PAUSE',
+        '--consumer-queue',
+        'data-sync',
+      ]),
+    ).toThrow();
   });
 
   test('parses and bounds the deployment paused-queue allowlist', () => {
-    expect(parseAllowedPausedQueueNames(' content-x-scan, content-http-acquisition ')).toEqual([
-      'content-x-scan',
+    expect(parseAllowedPausedQueueNames(' entry-sync, content-http-acquisition ')).toEqual([
+      'entry-sync',
       'content-http-acquisition',
     ]);
     expect(() => parseAllowedPausedQueueNames('content-x-scan,content-x-scan')).toThrow(
@@ -355,6 +370,7 @@ drain_content_worker_queues_for_deploy
 [[ ! -e "$pause_dir/content-x-scan" ]]
 [[ ! -e "$pause_dir/content-http-acquisition" ]]
 [[ ! -e "$pause_dir/content-media-transcript" ]]
+[[ ! -e "$pause_dir/entry-sync" ]]
 [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]
 `);
     expect(
@@ -362,6 +378,8 @@ drain_content_worker_queues_for_deploy
       `${result.stderr?.toString() ?? ''}\n${result.stdout?.toString() ?? ''}`,
     ).toBe(0);
     const stdout = result.stdout?.toString() ?? '';
+    expect(stdout).toContain('STATUS:entry-sync');
+    expect(stdout).toContain('PAUSE:entry-sync');
     expect(stdout).toContain('STATUS:content-x-scan');
     expect(stdout).toContain('PAUSE:content-x-scan');
     expect(stdout).toContain('STATUS:content-http-acquisition');
@@ -372,6 +390,7 @@ drain_content_worker_queues_for_deploy
     expect(stdout).toContain('RESUME:content-x-scan');
     expect(stdout).toContain('RESUME:content-http-acquisition');
     expect(stdout).toContain('RESUME:content-media-transcript');
+    expect(stdout).toContain('RESUME:entry-sync');
     expect(stdout.lastIndexOf('RESUME:content-media-transcript')).toBeLessThan(
       stdout.indexOf('OPEN:content-x-scan'),
     );
@@ -722,9 +741,11 @@ printf 'result=%s\n' "$result"
   test('passes only the deployment-paused queue allowlist to the bounded probe', () => {
     const result = runQueueProbeShell(
       String.raw`
-[[ "$DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES" = content-x-scan,content-http-acquisition ]]
+[[ "$DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES" = entry-sync,content-x-scan,content-http-acquisition ]]
 return 0`,
-      { DEPLOY_CONTENT_WORKER_PAUSED_QUEUES: 'content-x-scan content-http-acquisition' },
+      {
+        DEPLOY_CONTENT_WORKER_PAUSED_QUEUES: 'entry-sync content-x-scan content-http-acquisition',
+      },
     );
     expect(result.exitCode).toBe(0);
     expect(result.stdout?.toString() ?? '').toContain('result=0');

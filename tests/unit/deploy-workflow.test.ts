@@ -147,7 +147,7 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
   });
 
-  test('pauses every content-worker consumer and drains active work before stopping the producer', () => {
+  test('pauses deployment consumers and drains active work before stopping their workers', () => {
     expect(queueQuiescence).toContain('export const CONTENT_X_SCAN_QUEUE = contentXScanQueueName');
     expect(queueQuiescence).toContain(
       ['CONTENT_CONSUMER_CONTRACT_VERSION = ', quote, 'content-worker-consumer-v1', quote].join(''),
@@ -161,6 +161,7 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('content-x-scan');
     expect(deployStateMachine).toContain('content-http-acquisition');
     expect(deployStateMachine).toContain('content-media-transcript');
+    expect(deployStateMachine).toContain('DEPLOY_QUIESCENCE_CONSUMER_QUEUE_NAMES=(\n  entry-sync');
     expect(deployStateMachine).toContain('DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES');
     expect(deployStateMachine).toContain('run_bounded_deploy_probe');
 

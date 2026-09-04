@@ -17,7 +17,12 @@ import {
   contentAcquisitionJobOutbox,
   contentAcquisitionRuns,
 } from '../src/db/schemas/content.schema';
-import { allQueueNames, contentQueueNames, contentXScanQueueName } from '../src/queues/names';
+import {
+  allQueueNames,
+  contentQueueNames,
+  contentXScanQueueName,
+  entrySyncQueueName,
+} from '../src/queues/names';
 import {
   beginQueueConsumerPauseRelease,
   abortQueueConsumerPauseAcquisition,
@@ -56,6 +61,7 @@ const DEPLOYMENT_PREPARE_PAUSED_CONTENT_RUNS = '--prepare-paused-content-runs';
 
 export const CONTENT_X_SCAN_QUEUE = contentXScanQueueName;
 export const CONTENT_CONSUMER_QUEUE_NAMES = contentQueueNames;
+export const DEPLOYMENT_CONSUMER_QUEUE_NAMES = [entrySyncQueueName, ...contentQueueNames] as const;
 export const CONTENT_CONSUMER_CONTRACT_VERSION = 'content-worker-consumer-v1' as const;
 export const DEPLOY_QUEUE_ADMISSION_TTL_SECONDS = 900;
 export const DEPLOY_QUEUE_ADMISSION_REASON = 'DEPLOY_QUEUE_QUIESCENCE';
@@ -64,11 +70,12 @@ export const DEPLOY_QUEUE_ADMISSION_CAS_ATTEMPTS = 3;
 export const CONTENT_CONSUMER_OWNER_TOKEN_ENV = 'DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN';
 
 type ContentConsumerQueueName = (typeof contentQueueNames)[number];
+type DeploymentConsumerQueueName = (typeof DEPLOYMENT_CONSUMER_QUEUE_NAMES)[number];
 export type ContentConsumerMode = 'STATUS' | 'PAUSE' | 'RESUME';
 
 export type ContentConsumerModeArguments = Readonly<{
   mode: ContentConsumerMode;
-  queueName: ContentConsumerQueueName;
+  queueName: DeploymentConsumerQueueName;
 }>;
 
 export type ContentWorkerAdmissionArguments = Readonly<{
@@ -129,6 +136,10 @@ function isContentConsumerQueueName(value: string): value is ContentConsumerQueu
   return (contentQueueNames as readonly string[]).includes(value);
 }
 
+function isDeploymentConsumerQueueName(value: string): value is DeploymentConsumerQueueName {
+  return (DEPLOYMENT_CONSUMER_QUEUE_NAMES as readonly string[]).includes(value);
+}
+
 function readContentConsumerOwnerToken(): string | null {
   const token = process.env[CONTENT_CONSUMER_OWNER_TOKEN_ENV]?.trim();
   return token ? token : null;
@@ -177,7 +188,7 @@ export function parseContentConsumerModeArguments(
   if (
     (mode !== 'STATUS' && mode !== 'PAUSE' && mode !== 'RESUME') ||
     !queueName ||
-    !isContentConsumerQueueName(queueName) ||
+    !isDeploymentConsumerQueueName(queueName) ||
     values.size !== 2
   ) {
     consumerUsage();
@@ -187,14 +198,14 @@ export function parseContentConsumerModeArguments(
 
 export function parseAllowedPausedQueueNames(
   raw = process.env.DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES ?? '',
-): readonly ContentConsumerQueueName[] {
+): readonly DeploymentConsumerQueueName[] {
   const names = raw
     .split(',')
     .map((value) => value.trim())
     .filter((value) => value.length > 0);
-  const unique = new Set<ContentConsumerQueueName>();
+  const unique = new Set<DeploymentConsumerQueueName>();
   for (const name of names) {
-    if (!isContentConsumerQueueName(name)) {
+    if (!isDeploymentConsumerQueueName(name)) {
       throw new Error(`Invalid deployment paused queue name: ${name}`);
     }
     if (unique.has(name)) throw new Error(`Duplicate deployment paused queue name: ${name}`);

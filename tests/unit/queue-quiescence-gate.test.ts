@@ -139,7 +139,7 @@ describe('queue quiescence gate', () => {
     );
   });
 
-  test('allows only deployment-paused content backlog while still rejecting active work', () => {
+  test('allows only deployment-paused backlog while still rejecting active work', () => {
     expect(() =>
       assertScopedQueueQuiescence(
         {
@@ -147,9 +147,10 @@ describe('queue quiescence gate', () => {
           runnableQueues: {
             'content-x-scan': { paused: 12 },
             'content-http-acquisition': { paused: 4 },
+            'entry-sync': { paused: 1 },
           },
         },
-        { allowPausedQueueNames: ['content-x-scan', 'content-http-acquisition'] },
+        { allowPausedQueueNames: ['entry-sync', 'content-x-scan', 'content-http-acquisition'] },
       ),
     ).not.toThrow();
     expect(() =>
