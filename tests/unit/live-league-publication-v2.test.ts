@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   liveLeagueV2ItemKey,
@@ -41,6 +42,15 @@ const scope: LeagueLiveScope = {
 };
 
 const revision = 'a'.repeat(64);
+
+const checkpointServiceSource = readFileSync(
+  new URL('../../src/services/live-league-checkpoint-v2.service.ts', import.meta.url),
+  'utf8',
+);
+const publicationServiceSource = readFileSync(
+  new URL('../../src/services/live-league-publication-v2.service.ts', import.meta.url),
+  'utf8',
+);
 
 function completeClassicCheckpointFixture() {
   const picks = Array.from({ length: 15 }, (_, index) => ({
@@ -556,6 +566,34 @@ describe('Live League V2 checkpoint cadence', () => {
       liveLeagueCheckpointIsDue(read, false, new Date(Date.now() + 60_000).toISOString()),
     ).toBe(false);
     expect(liveLeagueCheckpointIsDue(read)).toBe(true);
+  });
+});
+
+describe('Live League V2 checkpoint transaction contract', () => {
+  test('gives large JSONB writes a bounded budget without binding payloads twice', () => {
+    expect(checkpointServiceSource).toContain(String.raw`SET LOCAL lock_timeout = '2s'`);
+    expect(checkpointServiceSource).toContain(String.raw`SET LOCAL statement_timeout = '20s'`);
+
+    const checkpointStart = checkpointServiceSource.indexOf(
+      'export async function checkpointLiveLeaguePublicationV2',
+    );
+    const conflictStart = checkpointServiceSource.indexOf('.onConflictDoUpdate({', checkpointStart);
+    const conflictEnd = checkpointServiceSource.indexOf('.returning(', conflictStart);
+    expect(checkpointStart).toBeGreaterThanOrEqual(0);
+    expect(conflictStart).toBeGreaterThan(checkpointStart);
+    expect(conflictEnd).toBeGreaterThan(conflictStart);
+
+    const conflictClause = checkpointServiceSource.slice(conflictStart, conflictEnd);
+    expect(conflictClause).toContain('manifest: sql`excluded.manifest`');
+    expect(conflictClause).toContain('indexPayload: sql`excluded.index_payload`');
+    expect(conflictClause).toContain('payload: sql`excluded.payload`');
+    expect(conflictClause).not.toContain('values.manifest');
+    expect(conflictClause).not.toContain('values.indexPayload');
+    expect(conflictClause).not.toContain('values.payload');
+  });
+
+  test('normalizes provider rank zero before strict publication validation', () => {
+    expect(publicationServiceSource).toContain('NULLIF(entry.overall_rank, 0)');
   });
 });
 
