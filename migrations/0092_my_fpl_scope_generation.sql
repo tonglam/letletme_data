@@ -20,7 +20,8 @@ CREATE TABLE competition.my_fpl_snapshot_scope_state (
   CONSTRAINT my_fpl_snapshot_scope_state_season_fk
     FOREIGN KEY (season_id) REFERENCES fpl.seasons(season_id),
   CONSTRAINT my_fpl_snapshot_scope_state_event_fk
-    FOREIGN KEY (season_id, event_id) REFERENCES fpl.events(season_id, event_id),
+    FOREIGN KEY (season_id, event_id) REFERENCES fpl.events(season_id, event_id)
+      ON DELETE CASCADE,
   CONSTRAINT my_fpl_snapshot_scope_state_entry_generation_check
     CHECK (entry_scope_generation >= 0 AND verified_entry_scope_generation >= 0
       AND verified_entry_scope_generation <= entry_scope_generation),
