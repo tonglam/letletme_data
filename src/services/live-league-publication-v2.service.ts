@@ -194,7 +194,9 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
       entry.region,
       entry.started_event AS "startedEvent",
       entry.overall_points AS "overallPoints",
-      entry.overall_rank AS "overallRank",
+      -- FPL uses zero as the no-rank sentinel.  The V2 public contract
+      -- represents an unranked entry as null, never as a non-positive rank.
+      NULLIF(entry.overall_rank, 0) AS "overallRank",
       entry.bank,
       entry.team_value AS "teamValue",
       entry.total_transfers AS "totalTransfers",
