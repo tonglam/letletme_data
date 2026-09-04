@@ -3043,12 +3043,23 @@ export async function getMyFplSnapshotOperationalStatus(
     const finalDueAt = dataCheckedAt
       ? new Date(new Date(dataCheckedAt).getTime() + MY_FPL_FINALIZATION_TOTAL_SLA_MS)
       : null;
+    // This legacy diagnostic deliberately retains its deep provisional-entry
+    // check. Scheduler and /jobs/status use the control projection above, but
+    // onboarding callers still need to see a newly added entry before the
+    // next provisional publication is captured.
+    const deepPendingCorrectionEntryCount =
+      row.kind === 'PROVISIONAL'
+        ? row.missing_active_entry_count
+        : row.status_expected_entry_count !== null && row.status_observed_entry_count !== null
+          ? Math.max(row.status_expected_entry_count - row.status_observed_entry_count, 0)
+          : 0;
     const coverageComplete =
       row.status_coverage_state === 'COMPLETE' &&
       row.status_expected_entry_count !== null &&
       row.status_observed_entry_count === row.status_expected_entry_count &&
       row.status_expected_tournament_count !== null &&
-      row.status_observed_tournament_count === row.status_expected_tournament_count;
+      row.status_observed_tournament_count === row.status_expected_tournament_count &&
+      (row.kind !== 'PROVISIONAL' || deepPendingCorrectionEntryCount === 0);
     const settlementState: MyFplSnapshotOperationalStatus['settlementState'] = !row.data_checked
       ? 'PROVISIONAL'
       : row.kind === 'FINAL' && coverageComplete
@@ -3067,12 +3078,7 @@ export async function getMyFplSnapshotOperationalStatus(
     const expectedEntryCount = row.status_expected_entry_count ?? row.expected_entry_count;
     const observedEntryCount =
       row.status_observed_entry_count ?? row.current_entry_count - row.missing_active_entry_count;
-    const pendingCorrectionEntryCount =
-      row.status_expected_entry_count !== null && row.status_observed_entry_count !== null
-        ? Math.max(0, row.status_expected_entry_count - row.status_observed_entry_count)
-        : row.kind === 'PROVISIONAL'
-          ? row.missing_active_entry_count
-          : 0;
+    const pendingCorrectionEntryCount = deepPendingCorrectionEntryCount;
     return {
       eventId: row.event_id,
       deadlineTime: iso(row.deadline_time),
