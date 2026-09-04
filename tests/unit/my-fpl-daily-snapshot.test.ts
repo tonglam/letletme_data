@@ -406,7 +406,7 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(workerFastPathStart).toBeGreaterThanOrEqual(0);
     expect(workerCaptureStart).toBeGreaterThan(workerFastPathStart);
     expect(worker.slice(workerFastPathStart, workerCaptureStart)).not.toContain(
-      "return { status: 'noop', publication: active }",
+      String.raw`return { status: 'noop', publication: active }`,
     );
     expect(worker.slice(workerFastPathStart, workerCaptureStart)).not.toContain(
       'recordMyFplOutboxRedisEvidence',
