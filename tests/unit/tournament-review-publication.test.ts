@@ -69,6 +69,31 @@ describe('My Tournament Review V2 format and retry policy', () => {
     });
   });
 
+  test('normalizes zero FPL ranks for applicable deleted entries', () => {
+    const row = normalizeTournamentReviewPointsRow({
+      entryId: 2,
+      entryName: 'Deleted',
+      playerName: 'Deleted Player',
+      applicable: true,
+      groupId: 1,
+      rank: 2,
+      previousRank: 1,
+      grossPoints: 56,
+      transferCost: 0,
+      netPoints: 56,
+      tournamentScore: 56,
+      seasonNetPoints: 85,
+      seasonGrossPoints: 85,
+      eventRank: 0,
+      overallPoints: 0,
+      overallRank: 0,
+    });
+    expect(row.eventRank).toBeNull();
+    expect(row.overallRank).toBeNull();
+    expect(row.previousRank).toBe(1);
+    expect(row.overallPoints).toBe(0);
+  });
+
   test('handles the empty-database sentinel before requiring a current season', () => {
     expect(backfillSource.indexOf('WHERE season_id = 0')).toBeGreaterThan(-1);
     expect(backfillSource.indexOf('currentSeasonRows.length === 0')).toBeGreaterThan(-1);
