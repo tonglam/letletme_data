@@ -63,6 +63,8 @@ import { logError, logInfo } from '../utils/logger';
 import {
   buildFinalEntryLiveInputFromBaseAndResult,
   checkpointEntryLiveInputV2,
+  entryLiveFinalResultCheckpointHash,
+  entryLivePicksBaseCheckpointHash,
 } from './entries.service';
 
 export const LIVE_FINAL_RETENTION_INTERVAL_MS = 6 * 60 * 60_000;
@@ -356,14 +358,17 @@ async function processGlobal(
       active.publication.items.fixtures.key,
       `${active.publication.items.fixtures.key}:meta`,
     ]);
-    updateMinimum(family, ttl);
-    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) return active.publication;
+    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) {
+      updateMinimum(family, ttl);
+      return active.publication;
+    }
     const renewed = await renewLivePublicationV2FinalLease({
       publication: active.publication,
       observedRaw: activeRaw,
       redis,
     });
     if (renewed.status !== 'renewed') {
+      updateMinimum(family, ttl);
       family.failed += 1;
       return null;
     }
@@ -443,14 +448,17 @@ async function processMatchDesk(
     active.publication.state === 'FINALIZED'
   ) {
     const ttl = await minimumTtl(redis, keys(active.publication));
-    updateMinimum(family, ttl);
-    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) return active.publication;
+    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) {
+      updateMinimum(family, ttl);
+      return active.publication;
+    }
     const renewed = await renewLiveMatchDeskFinalLeaseV3({
       publication: active.publication,
       observedRaw: activeRaw,
       redis,
     });
     if (renewed.status !== 'renewed') {
+      updateMinimum(family, ttl);
       family.failed += 1;
       return null;
     }
@@ -520,14 +528,17 @@ async function processMatchDetail(
     active.publication.finalized
   ) {
     const ttl = await minimumTtl(redis, keys(active.publication));
-    updateMinimum(family, ttl);
-    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) return active.publication;
+    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) {
+      updateMinimum(family, ttl);
+      return active.publication;
+    }
     const renewed = await renewLiveMatchDetailFinalLeaseV3({
       publication: active.publication,
       observedRaw: activeRaw,
       redis,
     });
     if (renewed.status !== 'renewed') {
+      updateMinimum(family, ttl);
       family.failed += 1;
       return null;
     }
@@ -585,14 +596,6 @@ async function processEntryHead(
   // provider request or guessed previous totals are allowed on this path.
   if (head.inputPayload === null) {
     const current = existing;
-    const currentPicksBaseHash = current
-      ? contentHash({
-          picks: current.input.picksBase.picks,
-          chip: current.input.picksBase.chip,
-          transferCount: current.input.picksBase.transferCount,
-          transferCost: current.input.picksBase.transferCost,
-        })
-      : null;
     if (
       !current ||
       !durableResult ||
@@ -604,8 +607,7 @@ async function processEntryHead(
       current.publication.state !== 'PROVISIONAL' ||
       current.input.finalResult !== null ||
       current.input.picksBase.revision !== head.picksBaseRevision ||
-      current.input.picksBase.picks.length !== 15 ||
-      currentPicksBaseHash !== head.contentSha256
+      current.input.picksBase.picks.length !== 15
     ) {
       family.failed += 1;
       return;
@@ -636,7 +638,14 @@ async function processEntryHead(
       durableResult,
       dataCheckedAt,
     );
-    if (!finalInput || !durableResult.richSyncedAt) {
+    // picksBase.revision identifies the deadline-time input. contentSha256
+    // independently identifies the durable rows, whose multipliers may have
+    // changed at finalization. Never compare those two granular identities.
+    if (
+      !finalInput ||
+      entryLiveFinalResultCheckpointHash(finalInput) !== head.contentSha256 ||
+      !durableResult.richSyncedAt
+    ) {
       family.failed += 1;
       return;
     }
@@ -665,7 +674,10 @@ async function processEntryHead(
         durableAfter.publicationId !== published.publication.publicationId ||
         durableAfter.generation !== published.publication.generation ||
         durableAfter.picksBaseRevision !== finalInput.picksBase.revision ||
-        durableAfter.inputPayload === null
+        durableAfter.inputPayload === null ||
+        durableAfter.contentSha256 !== entryLivePicksBaseCheckpointHash(finalInput) ||
+        !validFinalEntryInput(durableAfter.inputPayload, season.seasonCode, eventId, entryId) ||
+        contentHash(durableAfter.inputPayload) !== contentHash(finalInput)
       ) {
         family.failed += 1;
         return;
@@ -705,7 +717,8 @@ async function processEntryHead(
     durableHead.checkpointedAt.getTime() !== head.checkpointedAt.getTime() ||
     durableHead.state !== 'COMPLETE' ||
     durableHead.inputPayload === null ||
-    !validFinalEntryInput(durableHead.inputPayload, season.seasonCode, eventId, entryId)
+    !validFinalEntryInput(durableHead.inputPayload, season.seasonCode, eventId, entryId) ||
+    entryLivePicksBaseCheckpointHash(durableHead.inputPayload) !== durableHead.contentSha256
   ) {
     family.failed += 1;
     return;
@@ -753,14 +766,17 @@ async function processEntryHead(
     validFinalEntryInput(active.input, season.seasonCode, eventId, entryId)
   ) {
     const ttl = await minimumTtl(redis, keys(active.publication));
-    updateMinimum(family, ttl);
-    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) return;
+    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) {
+      updateMinimum(family, ttl);
+      return;
+    }
     const renewed = await renewEntryLiveInputV2FinalLease({
       publication: active.publication,
       observedRaw: activeRaw,
       redis,
     });
     if (renewed.status !== 'renewed') {
+      updateMinimum(family, ttl);
       family.failed += 1;
       return;
     }
@@ -860,14 +876,17 @@ async function processLeagueScope(
     active.publication.state === 'FINALIZED'
   ) {
     const ttl = await minimumTtl(redis, keys(active));
-    updateMinimum(family, ttl);
-    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) return true;
+    if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) {
+      updateMinimum(family, ttl);
+      return true;
+    }
     const renewed = await renewLiveLeagueFinalLeaseV2({
       publication: active.publication,
       observedRaw: activeRaw,
       redis,
     });
     if (renewed.status !== 'renewed') {
+      updateMinimum(family, ttl);
       family.failed += 1;
       return false;
     }
@@ -922,14 +941,17 @@ async function processH2HMatchScope(
     `${active.publication.items.payload.key}:meta`,
   ];
   const ttl = await minimumTtl(redis, keys);
-  updateMinimum(family, ttl);
-  if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) return 'ready';
+  if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) {
+    updateMinimum(family, ttl);
+    return 'ready';
+  }
   const renewed = await renewLiveLeagueFinalLeaseV2({
     publication: active.publication,
     observedRaw: activeRaw,
     redis,
   });
   if (renewed.status !== 'renewed') {
+    updateMinimum(family, ttl);
     family.failed += 1;
     return 'failed';
   }
