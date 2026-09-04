@@ -11,6 +11,7 @@ import { loadDataPublicationDelivery } from '../repositories/data-publication-ou
 import { eventRepository } from '../repositories/events';
 import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { readLiveCheckpointDesiredV2 } from '../cache/live-publication-v2';
+import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../domain/job-schedules';
 
 export type ReadinessResult = {
   ready: boolean;
@@ -112,6 +113,17 @@ const PUBLICATION_MISMATCH_GRACE_MS = 120_000;
 const publicationMismatchSince = new Map<string, number>();
 
 /**
+ * Mutable Live Points score revisions deliberately checkpoint at most once per
+ * ten minutes. Give that obligation one normal coalescing interval plus the
+ * existing execution margin, while keeping every other publication mismatch
+ * on the strict two-minute boundary.
+ */
+export const publicationMismatchGraceMs = (key: string): number =>
+  key.startsWith('live-points-v2:')
+    ? LIVE_SCORE_CHECKPOINT_INTERVAL_MS + PUBLICATION_MISMATCH_GRACE_MS
+    : PUBLICATION_MISMATCH_GRACE_MS;
+
+/**
  * Keep a restarted API from granting a fresh grace window to an already-aged
  * Redis checkpoint obligation. The durable requestedAt is the earliest known
  * evidence for the mismatch; only an obligation without an evidence time may
@@ -205,7 +217,7 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
     );
     const pendingCheckpointWithinGrace =
       Number.isFinite(pendingCheckpointStartedAt) &&
-      Date.now() - pendingCheckpointStartedAt <= PUBLICATION_MISMATCH_GRACE_MS;
+      Date.now() - pendingCheckpointStartedAt <= publicationMismatchGraceMs(liveKey);
     const liveMatches =
       Boolean(redisLive) &&
       redisLive !== null &&
@@ -229,8 +241,8 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   }
   if (consistent) return true;
   const now = Date.now();
-  return [...publicationMismatchSince.values()].every(
-    (firstSeenAt) => now - firstSeenAt <= PUBLICATION_MISMATCH_GRACE_MS,
+  return [...publicationMismatchSince.entries()].every(
+    ([key, firstSeenAt]) => now - firstSeenAt <= publicationMismatchGraceMs(key),
   );
 };
 

@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
-import { checkReadiness, mismatchSinceForPublication } from '../../src/api/health';
+import {
+  checkReadiness,
+  mismatchSinceForPublication,
+  publicationMismatchGraceMs,
+} from '../../src/api/health';
+import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../../src/domain/job-schedules';
 
 describe('data API readiness', () => {
   test('preserves an aged checkpoint mismatch across an API restart', () => {
@@ -10,6 +15,14 @@ describe('data API readiness', () => {
     expect(mismatchSinceForPublication(undefined, requestedAt, now)).toBe(requestedAt);
     expect(mismatchSinceForPublication(now - 10_000, requestedAt, now)).toBe(requestedAt);
     expect(mismatchSinceForPublication(undefined, undefined, now)).toBe(now);
+  });
+
+  test('allows one score checkpoint interval only for mutable Live Points', () => {
+    expect(publicationMismatchGraceMs('fpl:core:2627:')).toBe(120_000);
+    expect(publicationMismatchGraceMs('fpl:market:2627:')).toBe(120_000);
+    expect(publicationMismatchGraceMs('live-points-v2:2627:3')).toBe(
+      LIVE_SCORE_CHECKPOINT_INTERVAL_MS + 120_000,
+    );
   });
 
   test('hot-path readiness ignores PostgreSQL and queue Redis', async () => {

@@ -1,5 +1,6 @@
 import { fplClient } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../domain/job-schedules';
 import type { RawFPLEventLiveResponse, RawFPLFixture } from '../types';
 import {
   markLivePublicationCheckpointedV2,
@@ -38,8 +39,6 @@ import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
 import { canonicalJson } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
-
-const SCORE_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
 export interface LiveSnapshotV2SyncOptions {
   /**
@@ -184,7 +183,7 @@ function shouldCheckpoint(
     if (desiredRequestedAt !== null) {
       const requestedAt = Date.parse(desiredRequestedAt);
       if (Number.isFinite(requestedAt)) {
-        return Date.now() - requestedAt >= SCORE_CHECKPOINT_INTERVAL_MS;
+        return Date.now() - requestedAt >= LIVE_SCORE_CHECKPOINT_INTERVAL_MS;
       }
     }
     return true;
@@ -192,12 +191,13 @@ function shouldCheckpoint(
   if (desiredRequestedAt !== null) {
     const requestedAt = Date.parse(desiredRequestedAt);
     if (Number.isFinite(requestedAt)) {
-      return Date.now() - requestedAt >= SCORE_CHECKPOINT_INTERVAL_MS;
+      return Date.now() - requestedAt >= LIVE_SCORE_CHECKPOINT_INTERVAL_MS;
     }
   }
   const checkpointedAt = Date.parse(current.publication.checkpointedAt);
   return (
-    !Number.isFinite(checkpointedAt) || Date.now() - checkpointedAt >= SCORE_CHECKPOINT_INTERVAL_MS
+    !Number.isFinite(checkpointedAt) ||
+    Date.now() - checkpointedAt >= LIVE_SCORE_CHECKPOINT_INTERVAL_MS
   );
 }
 
