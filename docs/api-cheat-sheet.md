@@ -76,10 +76,9 @@ curl "$LETLETME_DATA_URL/jobs/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 The global live lane observes event-live and fixtures together every 30 seconds while an event is
-active. A heartbeat updates `sourceCheckedAt` and `expectedNextCheckAt` without creating a new
-generation or database write. A content change creates one immutable generation and one merged
-checkpoint obligation. The reader order is Redis current, Redis previous, GraphQL process LKG, and
-then a complete PostgreSQL checkpoint; no request calls FPL, a Data manager API, or a queue.
+active. A content change creates one immutable generation and one merged checkpoint obligation.
+The reader order is Redis current, Redis previous, GraphQL process LKG, and then a complete
+PostgreSQL checkpoint; no request calls FPL, a Data manager API, or a queue.
 
 Entry picks are a one-time post-deadline canary plus per-entry single-flight publication. Once a
 complete same-event V2 input exists, it is not swept again on a ten-minute cohort cadence. If Redis
@@ -87,9 +86,18 @@ publishes before PostgreSQL is unavailable, the exact publication remains a Redi
 checkpoint and is repaired from Redis without refetching FPL.
 
 `sourceCheckedAt` describes the last successful coherent source check; `contentUpdatedAt`
-describes the last semantic change; `publishedAt` describes Redis promotion; `checkpointedAt`
-describes durable completion. Age changes delivery from `FRESH` to `STALE` or `DEGRADED`; it never
-deletes a same-event complete last-known-good response.
+describes the last semantic change; `publishedAt` describes the active publication time;
+`checkpointedAt` describes durable completion. Age changes delivery from `FRESH` to `STALE` or
+`DEGRADED`; it never deletes a same-event complete last-known-good response.
+
+## Live Matches V3 publication
+
+Live Matches V3 uses an independent desk/detail namespace. A no-content-change heartbeat updates
+`sourceCheckedAt` and `expectedNextCheckAt` without creating a generation or PostgreSQL row. It may
+advance `publishedAt` to keep `sourceCheckedAt <= publishedAt`, while retaining the checkpoint
+marker for the same publication identity because the durable payload is unchanged. Content changes
+create an immutable generation and an asynchronous checkpoint obligation; desk and detail pointers
+are promoted only after their complete manifests pass the scope, identity, size, and digest checks.
 
 ## Entries
 

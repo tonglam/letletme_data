@@ -153,8 +153,11 @@ Publication lifecycle:
    checkpoint retries directly from its immutable Redis input.
 
 No-content-change source checks update heartbeat metadata only. They do not
-create a new generation, database row, or client refresh. A finalized generation
-cannot be superseded by a provisional candidate. A corrupt pointer is ignored
+create a new generation, database row, or client refresh. The heartbeat may
+advance `publishedAt` to keep `sourceCheckedAt <= publishedAt`, while preserving
+the checkpoint marker for the same publication identity because the durable
+payload has not changed. A finalized generation cannot be superseded by a
+provisional candidate. A corrupt pointer is ignored
 only after the candidate itself passes the complete validation gate.
 
 | State | TTL |
