@@ -639,7 +639,6 @@ if ttl == -2 then return {'changed'} end
 value.sourceCheckedAt = ARGV[3]
 if type(value.publishedAt) ~= 'string' or value.publishedAt < ARGV[3] then
   value.publishedAt = ARGV[3]
-  value.checkpointedAt = cjson.null
 end
 value.expectedNextCheckAt = ARGV[4] == '' and cjson.null or ARGV[4]
 value.staleAt = ARGV[5] == '' and cjson.null or ARGV[5]
@@ -661,7 +660,6 @@ if ttl == -2 then return {'changed'} end
 value.sourceCheckedAt = ARGV[3]
 if type(value.publishedAt) ~= 'string' or value.publishedAt < ARGV[3] then
   value.publishedAt = ARGV[3]
-  value.checkpointedAt = cjson.null
 end
 value.expectedNextCheckAt = ARGV[4] == '' and cjson.null or ARGV[4]
 value.staleAt = ARGV[5] == '' and cjson.null or ARGV[5]
@@ -1517,6 +1515,9 @@ export async function publishLiveMatchDeskV3(input: {
     Math.max(input.generationFloor ?? 0, input.previous?.publication.generation ?? 0),
   );
   const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
+  const publishedAt = new Date(
+    Math.max(Date.parse(allocation.now), Date.parse(sourceCheckedAt)),
+  ).toISOString();
   const expectedNextCheckAt =
     input.expectedNextCheckAt == null ? null : sourceDate(input.expectedNextCheckAt);
   const staleAt = input.staleAt == null ? null : sourceDate(input.staleAt);
@@ -1538,7 +1539,7 @@ export async function publishLiveMatchDeskV3(input: {
     eventId: scope.eventId,
     state: input.state,
     sourceCheckedAt,
-    publishedAt: allocation.now,
+    publishedAt,
     checkpointedAt: null,
     expectedNextCheckAt,
     staleAt,
@@ -1681,6 +1682,9 @@ export async function publishLiveMatchDetailV3(input: {
     Math.max(input.generationFloor ?? 0, input.previous?.publication.generation ?? 0),
   );
   const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
+  const publishedAt = new Date(
+    Math.max(Date.parse(allocation.now), Date.parse(sourceCheckedAt)),
+  ).toISOString();
   const expectedNextCheckAt =
     input.expectedNextCheckAt == null ? null : sourceDate(input.expectedNextCheckAt);
   const staleAt = input.staleAt == null ? null : sourceDate(input.staleAt);
@@ -1714,7 +1718,7 @@ export async function publishLiveMatchDetailV3(input: {
     observedDeskGeneration: input.observedDeskGeneration,
     fixtureIdentityRevision: input.fixtureIdentityRevision,
     sourceCheckedAt,
-    publishedAt: allocation.now,
+    publishedAt,
     checkpointedAt: null,
     expectedNextCheckAt,
     staleAt,

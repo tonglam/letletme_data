@@ -495,7 +495,7 @@ describe('Live Matches V3 Redis publications', () => {
       generation: published.publication.generation,
       sourceCheckedAt: heartbeatAt,
       publishedAt: heartbeatAt,
-      checkpointedAt: null,
+      checkpointedAt: checkpointed?.checkpointedAt,
       revisions: published.publication.revisions,
     });
   });
@@ -534,9 +534,37 @@ describe('Live Matches V3 Redis publications', () => {
       generation: published.publication.generation,
       sourceCheckedAt: heartbeatAt,
       publishedAt: heartbeatAt,
-      checkpointedAt: null,
+      checkpointedAt: checkpointed?.checkpointedAt,
       detail: published.publication.detail,
     });
+  });
+
+  test('clamps a source clock ahead of Redis allocation time', async () => {
+    const sourceCheckedAt = new Date(Date.now() + 60_000).toISOString();
+    const desk = await publishLiveMatchDeskV3({
+      ...scope,
+      state: 'LIVE_ACTIVE',
+      fixtures: [deskFixture(1)],
+      sourceCheckedAt,
+      redis,
+    });
+    expect(desk.publication.publishedAt).toBe(sourceCheckedAt);
+    expect(Date.parse(desk.publication.revisions.lifecycle.contentUpdatedAt)).toBeLessThanOrEqual(
+      Date.parse(desk.publication.sourceCheckedAt),
+    );
+
+    const detail = await publishLiveMatchDetailV3({
+      ...scope,
+      observedDeskGeneration: desk.publication.generation,
+      fixtureIdentityRevision: desk.publication.revisions.fixtureIdentity.revision,
+      fixtures: detailFixtures(30),
+      sourceCheckedAt,
+      redis,
+    });
+    expect(detail.publication.publishedAt).toBe(sourceCheckedAt);
+    expect(Date.parse(detail.publication.detail.contentUpdatedAt)).toBeLessThanOrEqual(
+      Date.parse(detail.publication.publishedAt),
+    );
   });
 
   test('does not let an older desk heartbeat overwrite a newer publication', async () => {
