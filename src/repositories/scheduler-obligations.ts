@@ -1119,6 +1119,14 @@ export async function claimSchedulerObligations(
   const currentResultSlot = sql`${schedulerObligationsInOps.evidence}->>'resultSlot'`;
   const newerResultSlot = sql`newer.evidence->>'resultSlot'`;
   const currentDueAt = immutableScheduledDueAtSql();
+  const myFplEventPriority = sql`CASE
+    WHEN ${schedulerObligationsInOps.jobName} = 'my-fpl-finalization'
+      AND (${schedulerObligationsInOps.evidence}->>'eventPriority') ~ '^[0-9]+$'
+      THEN (${schedulerObligationsInOps.evidence}->>'eventPriority')::integer
+    ELSE 2147483647
+  END`;
+  const prioritizeMyFplEvents =
+    includedJobNames.length === 1 && includedJobNames[0] === 'my-fpl-finalization';
   const newerDueAt = immutableScheduledDueAtForSql(sql`newer.evidence`, sql`newer.due_at`);
   const currentAuthorityAt = postMatchAuthorityAtForSql(sql`${schedulerObligationsInOps.evidence}`);
   const newerAuthorityAt = postMatchAuthorityAtForSql(sql`newer.evidence`);
@@ -1199,7 +1207,11 @@ export async function claimSchedulerObligations(
       // by the scheduler prefilter. due_at remains mutable retry eligibility;
       // ordering by it here could dispatch a newer bucket and strand the
       // older deadline that selected this job name.
-      .orderBy(asc(currentDueAt), asc(schedulerObligationsInOps.obligationId))
+      .orderBy(
+        ...(prioritizeMyFplEvents ? [asc(myFplEventPriority)] : []),
+        asc(currentDueAt),
+        asc(schedulerObligationsInOps.obligationId),
+      )
       .limit(limit)
       .for('update', { skipLocked: true });
     const claimed: { obligation: SchedulerObligation; owner: string }[] = [];

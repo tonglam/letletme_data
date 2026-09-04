@@ -369,6 +369,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scopeGenerationMigration).toContain(
       'REFERENCES competition.my_fpl_snapshot_publications(season_id, event_id, revision)\n    ON DELETE CASCADE',
     );
+    expect(scopeGenerationMigration).toContain('was_terminal IS DISTINCT FROM is_terminal');
+    expect(scopeGenerationMigration).toContain('verified_revision = NULL');
     expect(scopeGenerationMigration).toContain(
       'CREATE OR REPLACE VIEW reporting.my_fpl_active_snapshot_status',
     );
@@ -381,6 +383,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(scheduler).toContain('scope-e${control.entryScopeGeneration');
     expect(scheduler).toContain('latestFinalizedEventId');
     expect(scheduler).toContain('const finalizationEvents = [...context.events]');
+    expect(scheduler).toContain('eventPriority');
+    expect(publicationService).toContain('current_tournament_scope_sha256');
+    expect(publicationService).toContain('current_not_applicable_entry_count');
     expect(publicationService).toContain('return readMyFplFinalizationControlState(season, false)');
     expect(publicationService).toContain('return readMyFplFinalizationControlState(season, true)');
     expect(scheduler).toContain('getMyFplFinalizationControlStateWithScope(context.season)');

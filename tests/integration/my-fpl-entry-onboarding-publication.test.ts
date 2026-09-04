@@ -30,6 +30,8 @@ const SEASON: FplSeasonRef = { seasonId: 2098, seasonCode: '9899' };
 const EVENT_ID = 1;
 const TEAM_ID = 998_100;
 const ENTRY_IDS = [998_201, 998_202] as const;
+const DRIFT_TOURNAMENT_ID = 998_901;
+const DRIFT_LEAGUE_ID = 998_901;
 const PLAYER_IDS = Array.from({ length: 15 }, (_, index) => 998_301 + index);
 const EVENT_PICKS = PLAYER_IDS.map((element, index) => ({
   element,
@@ -115,6 +117,14 @@ async function cleanup(): Promise<void> {
     DELETE FROM competition.entry_event_results
     WHERE season_id = ${SEASON.seasonId}
       AND entry_id = ANY(${sql.array([...ENTRY_IDS])}::integer[])
+  `;
+  await sql`
+    DELETE FROM competition.tournament_entries
+    WHERE season_id = ${SEASON.seasonId} AND tournament_id = ${DRIFT_TOURNAMENT_ID}
+  `;
+  await sql`
+    DELETE FROM competition.tournaments
+    WHERE season_id = ${SEASON.seasonId} AND tournament_id = ${DRIFT_TOURNAMENT_ID}
   `;
   await sql`
     DELETE FROM competition.entries
@@ -506,6 +516,63 @@ describe('My FPL onboarding publication correction', () => {
       pendingCorrectionEntryCount: 0,
       coverageState: 'COMPLETE',
     });
+
+    // A late entrant can move from the eligible scope to the future-start
+    // scope without changing the number of source rows. The retained deep
+    // diagnostic must still reject the old provisional publication.
+    await sql`
+      UPDATE competition.entries
+      SET started_event = 2
+      WHERE season_id = ${SEASON.seasonId} AND entry_id = ${ENTRY_IDS[0]}
+    `;
+    const futureStartStatus = (await getMyFplSnapshotOperationalStatus(SEASON)).find(
+      (row) => row.eventId === EVENT_ID,
+    );
+    expect(futureStartStatus).toMatchObject({
+      pendingCorrectionEntryCount: 1,
+      coverageState: 'CORRECTION_PENDING',
+    });
+    await sql`
+      UPDATE competition.entries
+      SET started_event = 1
+      WHERE season_id = ${SEASON.seasonId} AND entry_id = ${ENTRY_IDS[0]}
+    `;
+
+    // Tournament membership is an independent provisional scope family. A
+    // new roster row must not be hidden by matching publication counts.
+    await sql`
+      INSERT INTO competition.tournaments (
+        tournament_id, season_id, name, creator, admin_entry_id, league_id,
+        league_type, total_team_num, tournament_mode, group_mode,
+        group_auto_averages, state
+      ) VALUES (
+        ${DRIFT_TOURNAMENT_ID}, ${SEASON.seasonId}, 'Drift Tournament',
+        'integration-test', ${ENTRY_IDS[0]}, ${DRIFT_LEAGUE_ID}, 'classic', 1,
+        'normal', 'no_group', false, 'active'
+      )
+    `;
+    await sql`
+      INSERT INTO competition.tournament_entries (
+        tournament_id, season_id, league_id, entry_id
+      ) VALUES (
+        ${DRIFT_TOURNAMENT_ID}, ${SEASON.seasonId}, ${DRIFT_LEAGUE_ID}, ${ENTRY_IDS[0]}
+      )
+    `;
+    const tournamentDriftStatus = (await getMyFplSnapshotOperationalStatus(SEASON)).find(
+      (row) => row.eventId === EVENT_ID,
+    );
+    expect(tournamentDriftStatus).toMatchObject({
+      pendingCorrectionEntryCount: 1,
+      coverageState: 'CORRECTION_PENDING',
+    });
+    await sql`
+      DELETE FROM competition.tournament_entries
+      WHERE season_id = ${SEASON.seasonId} AND tournament_id = ${DRIFT_TOURNAMENT_ID}
+    `;
+    await sql`
+      DELETE FROM competition.tournaments
+      WHERE season_id = ${SEASON.seasonId} AND tournament_id = ${DRIFT_TOURNAMENT_ID}
+    `;
 
     await sql`
       UPDATE fpl.events

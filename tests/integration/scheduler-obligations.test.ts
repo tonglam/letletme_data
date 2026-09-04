@@ -37,6 +37,8 @@ const IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-00000000000
 const IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000010';
 const ACCEPTED_BACKOFF_OBLIGATION_ID = '30000000-0000-4000-8000-000000000011';
 const RETRYING_START_OBLIGATION_ID = '30000000-0000-4000-8000-000000000012';
+const MY_FPL_PRIORITY_HISTORICAL_OBLIGATION_ID = '30000000-0000-4000-8000-000000000013';
+const MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000014';
 const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
 const ACCEPTED_BACKOFF_SCOPE_KEY = 'integration:event:accepted-backoff';
 const ACCEPTED_BACKOFF_CASE_FINGERPRINT = 'integration:live-picks-backoff:breach';
@@ -57,7 +59,9 @@ async function cleanup(): Promise<void> {
       ${IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID}::uuid,
       ${IMMUTABLE_CLAIM_NEWER_OBLIGATION_ID}::uuid,
       ${ACCEPTED_BACKOFF_OBLIGATION_ID}::uuid,
-      ${RETRYING_START_OBLIGATION_ID}::uuid
+      ${RETRYING_START_OBLIGATION_ID}::uuid,
+      ${MY_FPL_PRIORITY_HISTORICAL_OBLIGATION_ID}::uuid,
+      ${MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID}::uuid
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
@@ -68,7 +72,8 @@ async function cleanup(): Promise<void> {
          'integration:event:lane-race',
          'integration:event:immutable-deadline',
          'integration:event:immutable-claim',
-         ${ACCEPTED_BACKOFF_SCOPE_KEY}
+         ${ACCEPTED_BACKOFF_SCOPE_KEY},
+         'integration:event:my-fpl-priority'
        )
   `;
   await sql`
@@ -283,6 +288,51 @@ describe('scheduler obligation generation fencing', () => {
       includedJobNames: ['integration-immutable-claim'],
     });
     expect(claimed?.obligation.obligationId).toBe(IMMUTABLE_CLAIM_OLDER_OBLIGATION_ID);
+  });
+
+  test('claims the current My FPL event before historical events at the same deadline', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES
+        (
+          ${MY_FPL_PRIORITY_HISTORICAL_OBLIGATION_ID}::uuid,
+          'my-fpl-finalization',
+          'integration:event:my-fpl-priority',
+          'event-1',
+          '30 seconds',
+          'UTC',
+          'pending',
+          'reconcile',
+          clock_timestamp() - interval '1 minute',
+          0,
+          0,
+          jsonb_build_object('eventPriority', 2, 'scheduledDueAtMs', 1000)
+        ),
+        (
+          ${MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID}::uuid,
+          'my-fpl-finalization',
+          'integration:event:my-fpl-priority',
+          'event-2',
+          '30 seconds',
+          'UTC',
+          'pending',
+          'reconcile',
+          clock_timestamp() - interval '1 minute',
+          0,
+          0,
+          jsonb_build_object('eventPriority', 0, 'scheduledDueAtMs', 1000)
+        )
+    `;
+
+    const [claimed] = await claimSchedulerObligations({
+      limit: 1,
+      includedJobNames: ['my-fpl-finalization'],
+    });
+    expect(claimed?.obligation.obligationId).toBe(MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID);
   });
 
   test('claims one atomic capacity lane and leaves a conflicting job pending', async () => {

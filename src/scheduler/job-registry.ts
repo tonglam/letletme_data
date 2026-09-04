@@ -711,19 +711,16 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
       // finalization worker.
       const controlStates = await getMyFplFinalizationControlStateWithScope(context.season);
       const statusByEventId = new Map(controlStates.map((status) => [status.eventId, status]));
+      const priorityForEvent = (eventId: number): number =>
+        eventId === context.currentEventId ? 0 : eventId === context.latestFinalizedEventId ? 1 : 2;
       const finalizationEvents = [...context.events]
         .filter((event) => event.finished && event.dataChecked)
         .sort((left, right) => {
-          const priority = (eventId: number): number =>
-            eventId === context.currentEventId
-              ? 0
-              : eventId === context.latestFinalizedEventId
-                ? 1
-                : 2;
-          return priority(left.id) - priority(right.id) || right.id - left.id;
+          return priorityForEvent(left.id) - priorityForEvent(right.id) || right.id - left.id;
         });
       for (const event of finalizationEvents) {
         const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
+        const eventPriority = priorityForEvent(event.id);
         const control = statusByEventId.get(event.id);
         const finalPublished = Boolean(
           control?.activeKind === 'FINAL' &&
@@ -805,6 +802,7 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
                 expectedNotApplicableEntryCount: control.notApplicableEntryCount,
                 expectedTournamentCount: control.expectedTournamentCount,
                 expectedTournamentScopeSha256: control.tournamentScopeSha256,
+                eventPriority,
               },
             });
           }
@@ -842,6 +840,7 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
             expectedNotApplicableEntryCount: control?.notApplicableEntryCount,
             expectedTournamentCount: control?.expectedTournamentCount,
             expectedTournamentScopeSha256: control?.tournamentScopeSha256,
+            eventPriority,
           },
         });
       }

@@ -2941,8 +2941,13 @@ export async function getMyFplSnapshotOperationalStatus(
       not_applicable_entry_count: number | null;
       expected_tournament_count: number | null;
       ready_tournament_count: number | null;
+      publication_entry_scope_sha256: string | null;
+      publication_tournament_scope_sha256: string | null;
       current_entry_count: number;
+      current_entry_scope_sha256: string;
+      current_not_applicable_entry_count: number;
       missing_active_entry_count: number;
+      current_tournament_scope_sha256: string;
       pending_outbox_count: number;
       active_outbox_delivered_count: number;
       outbox_attempts: number;
@@ -2966,8 +2971,12 @@ export async function getMyFplSnapshotOperationalStatus(
            publication.ready_entry_count, publication.empty_entry_count,
            publication.content_sha256,
            publication.expected_tournament_count, publication.ready_tournament_count,
-           coverage.current_entry_count, coverage.not_applicable_entry_count,
+           publication.entry_scope_sha256 AS publication_entry_scope_sha256,
+           publication.tournament_scope_sha256 AS publication_tournament_scope_sha256,
+           coverage.current_entry_count, coverage.current_entry_scope_sha256,
+           coverage.not_applicable_entry_count AS current_not_applicable_entry_count,
            coverage.missing_active_entry_count,
+           tournament_coverage.current_tournament_scope_sha256,
            COALESCE(outbox.pending_outbox_count, 0)::integer AS pending_outbox_count,
            COALESCE(outbox.active_outbox_delivered_count, 0)::integer
                AS active_outbox_delivered_count,
@@ -2992,6 +3001,23 @@ export async function getMyFplSnapshotOperationalStatus(
      AND publication.active
     LEFT JOIN LATERAL (
       SELECT count(*)::integer AS current_entry_count,
+             encode(
+               extensions.digest(
+                 convert_to(
+                   COALESCE(
+                     to_json(array_agg(current_entry.entry_id::text ORDER BY current_entry.entry_id)
+                       FILTER (
+                         WHERE current_entry.started_event IS NULL
+                            OR current_entry.started_event <= event.event_id
+                       ))::text,
+                     '[]'
+                   ),
+                   'UTF8'
+                 ),
+                 'sha256'
+               ),
+               'hex'
+             ) AS current_entry_scope_sha256,
              count(*) FILTER (
                WHERE current_entry.started_event IS NOT NULL
                  AND current_entry.started_event > event.event_id
@@ -3011,6 +3037,30 @@ export async function getMyFplSnapshotOperationalStatus(
       FROM competition.entries current_entry
       WHERE current_entry.season_id = event.season_id
     ) coverage ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT encode(
+               extensions.digest(
+                 convert_to(
+                   COALESCE(
+                     (
+                       SELECT to_json(array_agg(
+                         format('%s:%s', current_tournament_entry.tournament_id,
+                                current_tournament_entry.entry_id)
+                         ORDER BY current_tournament_entry.tournament_id,
+                                  current_tournament_entry.entry_id
+                       ))::text
+                       FROM competition.tournament_entries current_tournament_entry
+                       WHERE current_tournament_entry.season_id = event.season_id
+                     ),
+                     '[]'
+                   ),
+                   'UTF8'
+                 ),
+                 'sha256'
+               ),
+               'hex'
+             ) AS current_tournament_scope_sha256
+    ) tournament_coverage ON TRUE
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE status IN ('PENDING', 'PROCESSING'))::integer AS pending_outbox_count,
              count(*) FILTER (
@@ -3047,9 +3097,21 @@ export async function getMyFplSnapshotOperationalStatus(
     // check. Scheduler and /jobs/status use the control projection above, but
     // onboarding callers still need to see a newly added entry before the
     // next provisional publication is captured.
+    const provisionalEntryScopeDrift =
+      row.kind === 'PROVISIONAL' &&
+      row.current_entry_scope_sha256 !== row.publication_entry_scope_sha256;
+    const provisionalNotApplicableScopeDrift =
+      row.kind === 'PROVISIONAL' &&
+      row.current_not_applicable_entry_count !== row.not_applicable_entry_count;
+    const provisionalTournamentScopeDrift =
+      row.kind === 'PROVISIONAL' &&
+      row.current_tournament_scope_sha256 !== row.publication_tournament_scope_sha256;
     const deepPendingCorrectionEntryCount =
       row.kind === 'PROVISIONAL'
-        ? row.missing_active_entry_count
+        ? Math.max(
+            row.missing_active_entry_count,
+            provisionalEntryScopeDrift || provisionalNotApplicableScopeDrift ? 1 : 0,
+          ) + (provisionalTournamentScopeDrift ? 1 : 0)
         : row.status_expected_entry_count !== null && row.status_observed_entry_count !== null
           ? Math.max(row.status_expected_entry_count - row.status_observed_entry_count, 0)
           : 0;

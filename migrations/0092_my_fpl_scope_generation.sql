@@ -61,12 +61,39 @@ CREATE OR REPLACE FUNCTION competition.ensure_my_fpl_snapshot_scope_state()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  was_terminal boolean;
+  is_terminal boolean;
 BEGIN
-  IF NEW.finished AND NEW.data_checked THEN
+  is_terminal := COALESCE(NEW.finished, false) AND COALESCE(NEW.data_checked, false);
+  IF TG_OP = 'UPDATE' THEN
+    was_terminal := COALESCE(OLD.finished, false) AND COALESCE(OLD.data_checked, false);
+  ELSE
+    was_terminal := false;
+  END IF;
+
+  -- A first terminal INSERT needs a state row.  A transition in either
+  -- direction establishes a new finalization fence and must invalidate any
+  -- previously verified publication before the next terminal capture.
+  IF is_terminal OR was_terminal THEN
     INSERT INTO competition.my_fpl_snapshot_scope_state (season_id, event_id)
     VALUES (NEW.season_id, NEW.event_id)
     ON CONFLICT (season_id, event_id) DO NOTHING;
   END IF;
+
+  IF TG_OP = 'UPDATE' AND was_terminal IS DISTINCT FROM is_terminal THEN
+    UPDATE competition.my_fpl_snapshot_scope_state
+    SET entry_scope_generation = entry_scope_generation + 1,
+        tournament_scope_generation = tournament_scope_generation + 1,
+        entry_dirty_since = COALESCE(entry_dirty_since, clock_timestamp()),
+        tournament_dirty_since = COALESCE(tournament_dirty_since, clock_timestamp()),
+        verified_revision = NULL,
+        verified_at = NULL,
+        updated_at = clock_timestamp()
+    WHERE season_id = NEW.season_id
+      AND event_id = NEW.event_id;
+  END IF;
+
   RETURN NEW;
 END;
 $$;
