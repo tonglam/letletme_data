@@ -403,9 +403,8 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 finalizationControl.verifiedTournamentScopeGeneration &&
               finalizationControl.verifiedRevision === active.revision,
           );
-          // The migration backfill marks legacy FINAL payloads dirty, so a
-          // clean generation fence is sufficient here. No snapshot-child
-          // scan is needed on the stable worker path; legacy/missing finals
+          // A clean generation fence is sufficient here. No snapshot-child
+          // scan is needed on the stable worker path; missing or dirty FINALs
           // fall through to the worker-only deep capture path.
           if (activeFinalScopeGenerationVerified) {
             if (!active || !finalizationControl) {
@@ -631,12 +630,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           };
           const capture =
             snapshotKind === 'FINAL'
-              ? await captureMyFplSnapshotWithScopeGeneration(
-                  season,
-                  eventId,
-                  snapshotKind,
-                  captureOptions,
-                )
+              ? await captureMyFplSnapshotWithScopeGeneration(season, eventId, captureOptions)
               : await captureMyFplSnapshot(season, eventId, snapshotKind, captureOptions);
           // An idempotent FINAL override may resolve to its original inactive
           // publication after a newer revision has become active. Delivery
