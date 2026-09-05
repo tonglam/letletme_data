@@ -51,6 +51,8 @@
     "contract:stage-week": "bun scripts/stage-graphql-contract-week.ts",
     "ops:assert-queue-quiescence": "bun scripts/assert-queue-quiescence.ts",
     "ops:repair-live-points-v2": "bun scripts/repair-live-points-v2.ts",
+    "ops:rebind-player-gameweek-authority": "bun scripts/rebind-player-gameweek-authority.ts",
+    "ops:retire-player-stats-active-obligations": "bun scripts/retire-player-stats-active-obligations.ts",
     "db:backfill-tournament-review-v2": "bun scripts/backfill-tournament-review-v2.ts"
   },
   "repository": {

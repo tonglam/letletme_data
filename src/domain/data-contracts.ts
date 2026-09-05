@@ -390,19 +390,24 @@ export const dataContractRegistry = [
     contractKey: 'public-league-trends',
     dataset: 'competition:tournament-trends',
     lifecycleStages: ['active', 'review', 'finished', 'idle'],
-    eligibility: 'mechanical migration only',
+    eligibility: 'enabled public catalog cohorts with current-event READY publications',
     queueLane: dataRepairQueueName,
     schedulerJobs: ['tournament-trends-repair'],
     dispatchWithinMs: 60 * 60_000,
     executionBudgetMs: 60 * 60_000,
-    integrity: 'excluded from this acceptance cycle',
-    publicationEvidence: ['internal repair checkpoint'],
-    consumerEvidence: {},
+    freshnessEvidence: 'publication',
+    freshnessJobs: ['tournament-trends-repair'],
+    integrity:
+      'both configured public cohorts have positive complete snapshots and stable revision',
+    publicationEvidence: [
+      'public catalog revision',
+      'active event publication',
+      'snapshot checksum',
+    ],
+    consumerEvidence: publicConsumers('trendCohorts/trendCohortSnapshot', 'Public Trends'),
     retry: { maxGenerations: 3, policy: 'bounded repair' },
     compensator: 'repair lane reconcile',
-    visibility: 'excluded',
-    visibilityReason:
-      'Explicitly excluded from this acceptance cycle; retained only for mechanical repair migration.',
+    visibility: 'public',
   },
   {
     contractKey: 'bootstrap-archive',
@@ -509,6 +514,10 @@ export function assertQueueRuntimeCatalog(): void {
 const schedulerJobSet: Set<string> = new Set(
   dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
 );
+
+export function registeredSchedulerJobNames(): readonly string[] {
+  return [...schedulerJobSet].sort();
+}
 
 /** Contract jobs deliberately triggered by an API/event path rather than the
  * 30-second scheduler. They still need a lane, retry and consumer contract,

@@ -14,6 +14,12 @@ import { logError, logInfo } from '../utils/logger';
 
 export type EventLiveRepository = ReturnType<typeof createEventLiveRepository>;
 
+export type EventLiveCheckpointBinding = Readonly<{
+  publicationId: string;
+  generation: number;
+  eventLiveSha256: string;
+}>;
+
 /**
  * EventLiveRepository - Data Access Layer
  *
@@ -118,6 +124,7 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
     upsertBatch: async (
       season: FplSeasonRef,
       eventLiveData: EventLive[],
+      options: { checkpoint?: EventLiveCheckpointBinding } = {},
     ): Promise<DbEventLive[]> => {
       try {
         if (eventLiveData.length === 0) {
@@ -149,6 +156,9 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
           expectedGoalsConceded: data.expectedGoalsConceded,
           inDreamTeam: data.inDreamTeam,
           totalPoints: data.totalPoints,
+          publicationId: options.checkpoint?.publicationId ?? null,
+          publicationGeneration: options.checkpoint?.generation ?? null,
+          publicationEventLiveSha256: options.checkpoint?.eventLiveSha256 ?? null,
         }));
 
         const db = await getDbInstance();
@@ -183,6 +193,9 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
               expectedGoalsConceded: sql`excluded.expected_goals_conceded`,
               inDreamTeam: sql`excluded.in_dream_team`,
               totalPoints: sql`excluded.total_points`,
+              publicationId: sql`excluded.publication_id`,
+              publicationGeneration: sql`excluded.publication_generation`,
+              publicationEventLiveSha256: sql`excluded.publication_event_live_sha256`,
               updatedAt: sql`NOW()`,
             },
           })

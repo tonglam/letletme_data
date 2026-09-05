@@ -299,7 +299,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
         case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
           return repairPlayerSeasonSummaries();
         case MAINTENANCE_JOBS.TOURNAMENT_TRENDS:
-          return repairTournamentTrendScopes();
+          return repairTournamentTrendScopes({ freshnessWindowId: job.data.freshnessWindowId });
         case MAINTENANCE_JOBS.BUG_REPORT_CLEANUP: {
           const result = await runBugReportCleanup();
           if (result.retried > 0) {

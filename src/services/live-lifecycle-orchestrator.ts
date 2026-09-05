@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Elysia } from 'elysia';
 
 import { fplClient } from '../clients/fpl';
@@ -19,6 +20,7 @@ import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { entryInfoRepository } from '../repositories/entry-infos';
+import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
   liveV2LifecycleKey,
   liveV2PicksCoordinatorKey,
@@ -34,6 +36,7 @@ import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 import { normalizeMatchLifecycleState } from './live-match-v3';
+import { recordFreshnessObservation } from './data-governance.service';
 
 const runtimeConfig = getConfig();
 /** The live producer cadence is a data contract: one fresh poll every 30s by default. */
@@ -570,6 +573,56 @@ export async function resolveUniqueActiveTournamentEntryIds(
     .sort((a, b) => a - b);
 }
 
+export async function readLivePicksDurableFreshnessEvidence(season: FplSeasonRef, eventId: number) {
+  const expectedEntryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
+  const heads = await createEntryEventPicksRepository().findHeadsByEventAndEntryIds(
+    season,
+    eventId,
+    expectedEntryIds,
+  );
+  const headsByEntryId = new Map(heads.map((head) => [head.entryId, head]));
+  const completeHeads = expectedEntryIds.filter((entryId) => {
+    const head = headsByEntryId.get(entryId);
+    if (!head || head.state !== 'COMPLETE' || head.rowCount !== 15) return false;
+    if (!head.publicationId || !Number.isSafeInteger(head.generation) || head.generation <= 0) {
+      return false;
+    }
+    return (
+      /^[0-9a-f]{64}$/.test(head.contentSha256) && Number.isFinite(head.checkpointedAt.getTime())
+    );
+  });
+  const evidenceRows = completeHeads
+    .map((entryId) => headsByEntryId.get(entryId))
+    .filter((head): head is NonNullable<typeof head> => head !== undefined)
+    .sort((left, right) => left.entryId - right.entryId);
+  const revision = `live-picks-v1:${createHash('sha256')
+    .update(
+      evidenceRows
+        .map(
+          (head) =>
+            `${head.entryId}:${head.publicationId}:${head.generation}:${head.picksBaseRevision}:${head.contentSha256}:${head.checkpointedAt.toISOString()}`,
+        )
+        .join('|'),
+    )
+    .digest('hex')}`;
+  const sourceCheckedAt = evidenceRows.reduce<Date | null>(
+    (latest, head) => (!latest || head.sourceCheckedAt > latest ? head.sourceCheckedAt : latest),
+    null,
+  );
+  const pgPublishedAt = evidenceRows.reduce<Date | null>(
+    (latest, head) => (!latest || head.checkpointedAt > latest ? head.checkpointedAt : latest),
+    null,
+  );
+  return {
+    revision,
+    expectedCount: expectedEntryIds.length,
+    observedCount: completeHeads.length,
+    sourceCheckedAt,
+    pgPublishedAt,
+    complete: completeHeads.length === expectedEntryIds.length,
+  } as const;
+}
+
 function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: number): boolean {
   return payload.entry_history.event === eventId && isCompleteEntryPicks(payload.picks);
 }
@@ -686,6 +739,39 @@ export async function runPicksProbeAndSync(
     canarySucceeded: sharedState.canarySucceeded,
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
   };
+  const recordDurableFreshness = async (scanComplete: boolean): Promise<void> => {
+    const freshnessWindowId = obligation.freshnessWindowId;
+    if (
+      typeof freshnessWindowId !== 'number' ||
+      !Number.isSafeInteger(freshnessWindowId) ||
+      freshnessWindowId <= 0
+    ) {
+      return;
+    }
+    try {
+      const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId);
+      await recordFreshnessObservation({
+        windowId: freshnessWindowId,
+        sourceCheckedAt: evidence.sourceCheckedAt ?? undefined,
+        pgPublishedAt: evidence.pgPublishedAt ?? undefined,
+        producerRevision: evidence.revision,
+        expectedCount: evidence.expectedCount,
+        observedCount: evidence.observedCount,
+        completenessStatus: scanComplete && evidence.complete ? 'COMPLETE' : 'INCOMPLETE',
+        evidence: {
+          expectedCount: evidence.expectedCount,
+          observedCount: evidence.observedCount,
+          scanComplete,
+          pgPublishedAt: evidence.pgPublishedAt?.toISOString() ?? null,
+        },
+      });
+    } catch (error) {
+      logError('Live picks durable freshness evidence update failed', error, {
+        eventId,
+        windowId: obligation.freshnessWindowId,
+      });
+    }
+  };
   if (now.getTime() < state.nextProbeAt) {
     // The scheduler can resolve an obligation just before the coordinator
     // writes its next-probe fence. A fenced root whose source canary has
@@ -706,6 +792,7 @@ export async function runPicksProbeAndSync(
   }
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
   if (entryIds.length === 0) {
+    await recordDurableFreshness(true);
     return {
       canaryCount: 0,
       synced: 0,
@@ -729,12 +816,14 @@ export async function runPicksProbeAndSync(
       canarySucceeded: true,
       failedCanaryEntryIds: [],
     });
+    const scanComplete = pendingCheckpoints.length === 0;
+    await recordDurableFreshness(scanComplete);
     return {
       canaryCount: 0,
       synced: 0,
       pending: pendingCheckpoints.length,
       sourceReady: true,
-      scanComplete: pendingCheckpoints.length === 0,
+      scanComplete,
     };
   }
 
@@ -792,6 +881,7 @@ export async function runPicksProbeAndSync(
       eventId,
       canaries: canaries.length,
     });
+    await recordDurableFreshness(false);
     return {
       canaryCount,
       synced: 0,
@@ -885,13 +975,15 @@ export async function runPicksProbeAndSync(
     totalUniqueEntries: entryIds.length,
     queued: remaining.length,
   });
+  const scanComplete =
+    (pendingAfterQueue.length === 0 || reusedCompletedScan) && pendingCheckpointIds.length === 0;
+  await recordDurableFreshness(scanComplete);
   return {
     canaryCount,
     synced: canaryCount,
     pending: pendingAfterQueue.length + pendingCheckpointIds.length,
     sourceReady: true,
-    scanComplete:
-      (pendingAfterQueue.length === 0 || reusedCompletedScan) && pendingCheckpointIds.length === 0,
+    scanComplete,
   };
 }
 

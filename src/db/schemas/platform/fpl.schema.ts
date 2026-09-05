@@ -511,6 +511,9 @@ export const playerGameweekStatsInFpl = fpl.table(
     inDreamTeam: boolean('in_dream_team'),
     totalPoints: integer('total_points').default(0).notNull(),
     defensiveContribution: integer('defensive_contribution').default(0).notNull(),
+    publicationId: text('publication_id'),
+    publicationGeneration: bigint('publication_generation', { mode: 'number' }),
+    publicationEventLiveSha256: text('publication_event_live_sha256'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
@@ -550,6 +553,14 @@ export const playerGameweekStatsInFpl = fpl.table(
       sql`(event_id > 0) AND (element_id > 0) AND (source_live_id > 0)`,
     ),
     check('player_gameweek_stats_minutes_nonnegative', sql`(minutes IS NULL) OR (minutes >= 0)`),
+    check(
+      'player_gameweek_stats_publication_binding_all_or_none',
+      sql`((publication_id IS NULL) AND (publication_generation IS NULL) AND (publication_event_live_sha256 IS NULL)) OR ((publication_id IS NOT NULL) AND (publication_generation IS NOT NULL) AND (publication_event_live_sha256 IS NOT NULL))`,
+    ),
+    check(
+      'player_gameweek_stats_publication_binding_valid',
+      sql`(publication_generation IS NULL OR publication_generation > 0) AND (publication_event_live_sha256 IS NULL OR publication_event_live_sha256 ~ '^[0-9a-f]{64}$')`,
+    ),
   ],
 );
 

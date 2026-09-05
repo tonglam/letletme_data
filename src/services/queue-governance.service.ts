@@ -27,6 +27,9 @@ export type QueueHealthSnapshot = Readonly<{
   delayed: number;
   prioritized: number;
   waitingChildren: number;
+  consumerPaused: boolean;
+  pausedCount: number;
+  pauseOwnerState: QueueConsumerPauseOwnerState;
   failed: number;
   completed: number;
   runnable: number;
@@ -853,6 +856,7 @@ export async function inspectQueue(
     'delayed',
     'prioritized',
     'waiting-children',
+    'paused',
     'failed',
     'completed',
   );
@@ -861,6 +865,14 @@ export async function inspectQueue(
   const delayed = counts.delayed ?? 0;
   const prioritized = counts.prioritized ?? 0;
   const waitingChildren = counts['waiting-children'] ?? 0;
+  const pausedCount = counts.paused ?? 0;
+  const redis = await queueRedisSingleton.getClient();
+  const [pauseMarker, pauseOwner] = await Promise.all([
+    redis.hget(queueConsumerMetaKey(queue.name), 'paused'),
+    readQueueConsumerPauseOwner(queue.name),
+  ]);
+  const pauseOwnerState = queueConsumerPauseOwnerState(pauseOwner);
+  const consumerPaused = pauseMarker === '1' || pausedCount > 0;
   const failed = counts.failed ?? 0;
   const completed = counts.completed ?? 0;
   const oldest =
@@ -905,6 +917,9 @@ export async function inspectQueue(
     delayed,
     prioritized,
     waitingChildren,
+    consumerPaused,
+    pausedCount,
+    pauseOwnerState,
     failed,
     completed,
     runnable: waiting + prioritized,

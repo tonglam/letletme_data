@@ -7,6 +7,8 @@ import {
   resolveUniqueProviderAssignments,
   rosterEvidenceAligns,
   shouldConfirmProviderPlayerSeason,
+  understatMinutesMatchEvidence,
+  verifiedPlayerMappingConflict,
 } from '../../src/services/provider-matcher.service';
 
 const fpl = {
@@ -61,6 +63,32 @@ describe('provider roster matcher', () => {
     };
     expect(providerTeamConfirmedForSeason(link, '2627')).toBe(true);
     expect(providerTeamConfirmedForSeason(link, '2728')).toBe(false);
+  });
+
+  test('rejects verified player mappings that break one-to-one identity', () => {
+    const verified = {
+      id: 'verified-link',
+      entityType: 'player' as const,
+      leftProvider: 'understat',
+      leftEntityId: '8094',
+      rightProvider: 'fpl',
+      rightEntityId: '123',
+      status: 'manual_verified' as const,
+      method: 'manual',
+      ruleId: 'test',
+      evidence: {},
+      firstSeenSeason: '2627',
+      lastSeenSeason: '2627',
+      reviewedBy: 'operator',
+      reviewedAt: new Date(),
+    };
+    expect(verifiedPlayerMappingConflict([verified], 8094, 466052)?.id).toBe('verified-link');
+    expect(verifiedPlayerMappingConflict([verified], 8094, 123)).toBeUndefined();
+  });
+
+  test('requires the season aggregate minutes to equal fixture evidence', () => {
+    expect(understatMinutesMatchEvidence(108, [60, 48])).toBe(true);
+    expect(understatMinutesMatchEvidence(108, [60, 47])).toBe(false);
   });
 
   test('never silently rebinds verified or quarantined identities', () => {

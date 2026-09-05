@@ -165,6 +165,9 @@ describe('GW queue and data governance primitives', () => {
       delayed: 0,
       prioritized: 0,
       waitingChildren: 0,
+      consumerPaused: false,
+      pausedCount: 0,
+      pauseOwnerState: 'NONE' as const,
       failed: 0,
       completed: 100,
       runnable: 0,
@@ -228,6 +231,9 @@ describe('GW queue and data governance primitives', () => {
           delayed: 0,
           prioritized: 0,
           waitingChildren: 0,
+          consumerPaused: false,
+          pausedCount: 0,
+          pauseOwnerState: 'NONE' as const,
           failed: 0,
           completed: 0,
           runnable: 0,
@@ -448,10 +454,7 @@ describe('GW queue and data governance primitives', () => {
     });
     expect(
       dataContractRegistry
-        .filter(
-          (contract) =>
-            contract.visibility === 'internal-only' || contract.visibility === 'excluded',
-        )
+        .filter((contract) => contract.visibility === 'internal-only')
         .every((contract) => contract.visibilityReason?.trim().length),
     ).toBe(true);
     expect(

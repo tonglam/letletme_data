@@ -32,6 +32,7 @@ import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { eventRepository } from '../repositories/events';
 import { recordFreshnessObservation } from '../services/data-governance.service';
+import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
   completeSchedulerObligation,
@@ -212,14 +213,32 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     }
     if (job.data.freshnessWindowId !== undefined && snapshot.publicationId !== null) {
       const sourceCheckedAt = snapshot.sourceCheckedAt ? new Date(snapshot.sourceCheckedAt) : null;
-      if (sourceCheckedAt && Number.isFinite(sourceCheckedAt.getTime())) {
+      const durableCheckpoint = snapshot.checkpointed
+        ? await readLivePublicationV2Checkpoint(season, eventId).catch((error) => {
+            logError('Live snapshot durable checkpoint read failed for freshness evidence', error, {
+              eventId,
+              windowId: job.data.freshnessWindowId,
+            });
+            return null;
+          })
+        : null;
+      const checkpoint = durableCheckpoint;
+      const checkpointedAt = checkpoint?.publication.checkpointedAt;
+      const pgPublishedAt = checkpointedAt ? new Date(checkpointedAt) : null;
+      if (
+        sourceCheckedAt &&
+        Number.isFinite(sourceCheckedAt.getTime()) &&
+        pgPublishedAt &&
+        Number.isFinite(pgPublishedAt.getTime())
+      ) {
         try {
           await recordFreshnessObservation({
             windowId: job.data.freshnessWindowId,
             sourceCheckedAt,
+            pgPublishedAt,
             redisSeenAt: new Date(),
-            producerRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
-            redisRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
+            producerRevision: `${checkpoint!.publication.publicationId}:${checkpoint!.publication.generation}`,
+            redisRevision: `${checkpoint!.publication.publicationId}:${checkpoint!.publication.generation}`,
             completenessStatus: 'COMPLETE',
           });
         } catch (error) {

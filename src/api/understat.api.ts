@@ -5,6 +5,7 @@ import type { ProviderLinkStatus } from '../domain/provider-identity';
 import { providerIdentityRepository } from '../repositories/provider-identity';
 import {
   manualVerifyProviderTeam,
+  manualVerifyProviderPlayer,
   reconcileProviderMappings,
 } from '../services/provider-matcher.service';
 import { getUnderstatStatus } from '../services/understat-status.service';
@@ -97,6 +98,30 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
         season: t.String({ pattern: '^\\d{4}$' }),
         understatTeamId: t.Integer({ minimum: 1 }),
         fplTeamCode: t.Integer({ minimum: 1 }),
+        reviewedBy: t.String({ minLength: 1, maxLength: 200 }),
+      }),
+    },
+  )
+  .post(
+    '/mappings/player',
+    async ({ body }) => {
+      assertUnderstatSyncAllowed(body.season);
+      const result = await withMutationScopes(
+        {
+          queueName: 'understat-mappings',
+          jobName: 'understat-mappings-player',
+          scopes: ['understat:reference:all', `understat:reference:${body.season}`],
+        },
+        () => manualVerifyProviderPlayer(body),
+      );
+      await repairPlayerStateSeasons();
+      return { success: true, ...result };
+    },
+    {
+      body: t.Object({
+        season: t.String({ pattern: '^\\d{4}$' }),
+        understatPlayerId: t.Integer({ minimum: 1 }),
+        fplPlayerCode: t.Integer({ minimum: 1 }),
         reviewedBy: t.String({ minLength: 1, maxLength: 200 }),
       }),
     },

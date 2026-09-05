@@ -571,6 +571,7 @@ export async function recordFreshnessObservation(input: {
   completenessStatus?: FreshnessCompletenessStatus;
   invalid?: boolean;
   breachCode?: string | null;
+  evidence?: Record<string, unknown>;
   db?: DbHandle;
 }): Promise<FreshnessSloStatus | null> {
   const db = input.db ?? (await getDb());
@@ -645,6 +646,9 @@ export async function recordFreshnessObservation(input: {
           : null,
       updatedAt: sql`clock_timestamp()`,
     };
+    if (input.evidence) {
+      updates.evidence = sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify(input.evidence)}::jsonb`;
+    }
     // Observation events are partial by design: a Redis/cache probe may arrive
     // before the producer checkpoint. Never overwrite an earlier milestone with
     // undefined (or move an observed timestamp backwards).
@@ -1010,6 +1014,17 @@ export async function listQueueHealthWindows(
         waitingChildren: sql<number>`max(${queueHealthWindowsInOps.waitingChildren})`.as(
           'waiting_children',
         ),
+        consumerPaused: sql<boolean>`bool_or(${queueHealthWindowsInOps.consumerPaused})`.as(
+          'consumer_paused',
+        ),
+        pausedCount: sql<number>`max(${queueHealthWindowsInOps.pausedCount})`.as('paused_count'),
+        pauseOwnerState: sql<string>`CASE
+          WHEN bool_or(${queueHealthWindowsInOps.pauseOwnerState} = 'OPERATOR') THEN 'OPERATOR'
+          WHEN bool_or(${queueHealthWindowsInOps.pauseOwnerState} = 'ACQUIRING') THEN 'ACQUIRING'
+          WHEN bool_or(${queueHealthWindowsInOps.pauseOwnerState} = 'RELEASING') THEN 'RELEASING'
+          WHEN bool_or(${queueHealthWindowsInOps.pauseOwnerState} = 'DEPLOYMENT') THEN 'DEPLOYMENT'
+          ELSE 'NONE'
+        END`.as('pause_owner_state'),
         failed: sql<number>`max(${queueHealthWindowsInOps.failed})`.as('failed'),
         completed: sql<number>`max(${queueHealthWindowsInOps.completed})`.as('completed'),
         runnable: sql<number>`max(${queueHealthWindowsInOps.runnable})`.as('runnable'),
