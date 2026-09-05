@@ -27,11 +27,18 @@ type EnabledTournamentTrendPublication = Readonly<{
   tournamentId: number;
   publicationId: number | null;
   publicationRevision: number | null;
+  sourceWatermark: Date | null;
 }>;
 
 type TournamentTrendRepairResult = Pick<
   TournamentTrendScopePublication,
-  'tournamentId' | 'publicationId' | 'revision' | 'state' | 'publicationState' | 'isActive'
+  | 'tournamentId'
+  | 'publicationId'
+  | 'revision'
+  | 'state'
+  | 'publicationState'
+  | 'isActive'
+  | 'validatedAt'
 >;
 
 export function hasCompleteEnabledTournamentTrendRepair(input: {
@@ -83,6 +90,29 @@ export function isCompleteReusedTournamentTrendRepair(input: {
       (cohort) => resultByTournamentId.get(cohort.tournamentId)?.state === 'REUSED',
     )
   );
+}
+
+/**
+ * A reused active publication keeps its immutable source watermark, but this
+ * repair pass has just revalidated the exact checksum inside PostgreSQL. For a
+ * mixed READY/REUSED pass, use that validation clock only for reused cohorts;
+ * newly published cohorts must still carry their durable source watermark.
+ */
+export function resolveTournamentTrendRepairSourceCheckedAt(input: {
+  enabledCohorts: readonly EnabledTournamentTrendPublication[];
+  publicationResults: readonly TournamentTrendRepairResult[];
+}): Date | null {
+  const resultByTournamentId = new Map(
+    input.publicationResults.map((result) => [result.tournamentId, result] as const),
+  );
+  let oldest: Date | null = null;
+  for (const cohort of input.enabledCohorts) {
+    const result = resultByTournamentId.get(cohort.tournamentId);
+    const candidate = result?.state === 'REUSED' ? result.validatedAt : cohort.sourceWatermark;
+    if (!(candidate instanceof Date) || !Number.isFinite(candidate.getTime())) return null;
+    if (oldest === null || candidate < oldest) oldest = candidate;
+  }
+  return oldest;
 }
 
 async function settleTrendsFreshnessNotApplicable(
@@ -193,6 +223,7 @@ export async function repairTournamentTrendScopes(
     tournamentId: cohort.tournamentId,
     publicationId: cohort.publicationId,
     publicationRevision: cohort.publicationRevision,
+    sourceWatermark: cohort.sourceWatermark,
   }));
   if (
     !hasCompleteEnabledTournamentTrendRepair({
@@ -236,9 +267,16 @@ export async function repairTournamentTrendScopes(
       }
       return { ...after, ...prepublication, freshnessEvidenceRecorded: true };
     }
+    const repairSourceCheckedAt = resolveTournamentTrendRepairSourceCheckedAt({
+      enabledCohorts,
+      publicationResults: result.results,
+    });
+    if (!repairSourceCheckedAt) {
+      throw new Error('Tournament Trends repair validation timestamp is incomplete');
+    }
     const status = await recordFreshnessObservation({
       windowId: input.freshnessWindowId,
-      sourceCheckedAt: after.sourceCheckedAt,
+      sourceCheckedAt: repairSourceCheckedAt,
       pgPublishedAt: after.pgPublishedAt,
       producerRevision: after.revision,
       expectedCount: after.expectedCohortCount,
@@ -251,6 +289,12 @@ export async function repairTournamentTrendScopes(
         expectedEntryCount: after.expectedEntryCount,
         observedRowCount: after.observedRowCount,
         sourceCheckedAt: after.sourceCheckedAt.toISOString(),
+        repairSourceCheckedAt: repairSourceCheckedAt.toISOString(),
+        reusedCohortCount: result.results.filter(
+          (publication) =>
+            publication.state === 'REUSED' &&
+            enabledTournamentIds.includes(publication.tournamentId),
+        ).length,
         pgPublishedAt: after.pgPublishedAt.toISOString(),
         ...prepublication,
       },

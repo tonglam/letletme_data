@@ -9,12 +9,12 @@ import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import {
   listGovernanceCases,
   listQueueHealthWindows,
-  markLivePicksNoSourceWorkFreshnessWindowNotApplicable,
   markFreshnessWindowNotApplicable,
   openGovernanceCase,
   recordPendingLiveSnapshotCheckpointEvidence,
   retireLivePicksEmptyCohortFreshnessWindow,
   retirePublicTrendsIneligibleFreshnessWindow,
+  settleLivePicksNoSourceWorkFreshnessWindow,
   settlePublicTrendsReusedFreshnessWindow,
   upsertFreshnessWindow,
   transitionGovernanceCase,
@@ -499,8 +499,11 @@ describe('data governance case CAS', () => {
     expect(new Date(rows[1]!.maxSource!).toISOString()).toBe(sourceB.toISOString());
   });
 
-  test('retires a complete no-source-work Live Picks window without stale timestamps', async () => {
+  test('preserves a consumer breach and retires only a pending no-source-work Live Picks window', async () => {
     const sql = await getDbClient();
+    const sourceCheckedAt = new Date('2026-09-05T00:04:00.000Z');
+    const pgPublishedAt = new Date('2026-09-05T00:05:00.000Z');
+    const producerRevision = `live-picks-v1:${'a'.repeat(64)}`;
     await sql`
       INSERT INTO fpl.seasons (
         season_id, season_code, display_name, start_year, end_year, lifecycle_state, is_current
@@ -519,7 +522,7 @@ describe('data governance case CAS', () => {
       eventId: 3,
       eligibleAt: new Date('2026-09-05T00:00:00.000Z'),
       dueAt: new Date('2026-09-05T00:10:30.000Z'),
-      evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
+      evidence: { consumerEvidenceRequired: true, redisEvidenceRequired: false },
     });
     await sql`
       UPDATE ops.freshness_slo_windows
@@ -553,29 +556,38 @@ describe('data governance case CAS', () => {
     `;
 
     expect(
-      await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+      await settleLivePicksNoSourceWorkFreshnessWindow({
         windowId,
         eventId: 3,
         expectedCount: 12,
         observedCount: 11,
+        sourceCheckedAt,
+        pgPublishedAt,
+        producerRevision,
       }),
-    ).toBe(false);
+    ).toBeNull();
     expect(
-      await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+      await settleLivePicksNoSourceWorkFreshnessWindow({
         windowId,
         eventId: 4,
         expectedCount: 12,
         observedCount: 12,
+        sourceCheckedAt,
+        pgPublishedAt,
+        producerRevision,
       }),
-    ).toBe(false);
+    ).toBeNull();
     expect(
-      await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+      await settleLivePicksNoSourceWorkFreshnessWindow({
         windowId,
         eventId: 3,
         expectedCount: 12,
         observedCount: 12,
+        sourceCheckedAt,
+        pgPublishedAt,
+        producerRevision,
       }),
-    ).toBe(true);
+    ).toBe('BREACHED');
 
     const [window, governanceCase] = await Promise.all([
       sql<
@@ -585,14 +597,18 @@ describe('data governance case CAS', () => {
           reason: string | null;
           expectedCount: number;
           observedCount: number;
+          producerRevision: string | null;
+          recovered: boolean;
         }>
       >`
         SELECT
           status,
           completeness_status AS "completenessStatus",
-          evidence->>'notApplicableReason' AS reason,
+          evidence->>'reason' AS reason,
           (evidence->>'expectedCount')::integer AS "expectedCount",
-          (evidence->>'observedCount')::integer AS "observedCount"
+          (evidence->>'observedCount')::integer AS "observedCount",
+          producer_revision AS "producerRevision",
+          recovered_at IS NOT NULL AS recovered
         FROM ops.freshness_slo_windows
         WHERE window_id = ${windowId}
       `,
@@ -604,14 +620,52 @@ describe('data governance case CAS', () => {
       `,
     ]);
     expect(window[0]).toEqual({
-      status: 'NOT_APPLICABLE',
-      completenessStatus: 'NOT_APPLICABLE',
+      status: 'BREACHED',
+      completenessStatus: 'COMPLETE',
       reason: 'LIVE_PICKS_NO_SOURCE_WORK',
       expectedCount: 12,
       observedCount: 12,
+      producerRevision,
+      recovered: false,
     });
     expect(governanceCase[0]).toEqual({
-      status: 'DISMISSED',
+      status: 'AUTO_REPAIRING',
+      reason: null,
+    });
+
+    const pendingWindowId = await upsertFreshnessWindow({
+      sloKey: WINDOW_SLO_KEY,
+      contractKey: 'live-picks',
+      seasonId: NO_SOURCE_SEASON_ID,
+      scopeKey: WINDOW_SCOPE_KEY,
+      periodKey: 'no-source-work-pending-v1',
+      eventId: 3,
+      eligibleAt: new Date('2026-09-05T00:00:00.000Z'),
+      dueAt: new Date('2026-09-05T00:10:30.000Z'),
+      evidence: { consumerEvidenceRequired: true, redisEvidenceRequired: false },
+    });
+    expect(
+      await settleLivePicksNoSourceWorkFreshnessWindow({
+        windowId: pendingWindowId,
+        eventId: 3,
+        expectedCount: 12,
+        observedCount: 12,
+        sourceCheckedAt,
+        pgPublishedAt,
+        producerRevision,
+      }),
+    ).toBe('NOT_APPLICABLE');
+    const [pendingWindow] = await sql<
+      Array<{ status: string; completenessStatus: string; reason: string | null }>
+    >`
+      SELECT status, completeness_status AS "completenessStatus",
+        evidence->>'notApplicableReason' AS reason
+      FROM ops.freshness_slo_windows
+      WHERE window_id = ${pendingWindowId}
+    `;
+    expect(pendingWindow).toEqual({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
       reason: 'LIVE_PICKS_NO_SOURCE_WORK',
     });
   });

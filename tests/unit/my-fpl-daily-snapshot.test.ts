@@ -8,6 +8,7 @@ import {
   hasCompleteEnabledTournamentTrendRepair,
   isCompleteReusedTournamentTrendRepair,
   resolveTournamentTrendRepairEventId,
+  resolveTournamentTrendRepairSourceCheckedAt,
 } from '../../src/jobs/tournament-trends-repair.jobs';
 
 import {
@@ -129,8 +130,18 @@ describe('My FPL daily snapshot publication contract', () => {
   test('retires only a complete all-reused Public Trends repair pass', () => {
     const completeReused = {
       enabledCohorts: [
-        { tournamentId: 11, publicationId: 101, publicationRevision: 4 },
-        { tournamentId: 12, publicationId: 102, publicationRevision: 5 },
+        {
+          tournamentId: 11,
+          publicationId: 101,
+          publicationRevision: 4,
+          sourceWatermark: new Date('2026-09-05T00:00:00.000Z'),
+        },
+        {
+          tournamentId: 12,
+          publicationId: 102,
+          publicationRevision: 5,
+          sourceWatermark: new Date('2026-09-05T00:01:00.000Z'),
+        },
       ],
       publicationResults: [
         {
@@ -140,6 +151,7 @@ describe('My FPL daily snapshot publication contract', () => {
           state: 'REUSED',
           publicationState: 'READY',
           isActive: true,
+          validatedAt: new Date('2026-09-05T00:03:00.000Z'),
         },
         {
           tournamentId: 12,
@@ -148,6 +160,7 @@ describe('My FPL daily snapshot publication contract', () => {
           state: 'REUSED',
           publicationState: 'READY',
           isActive: true,
+          validatedAt: new Date('2026-09-05T00:04:00.000Z'),
         },
       ],
       expectedCohortCount: 2,
@@ -179,6 +192,7 @@ describe('My FPL daily snapshot publication contract', () => {
             state: 'READY',
             publicationState: 'READY',
             isActive: true,
+            validatedAt: new Date('2026-09-05T00:05:00.000Z'),
           },
         ],
       }),
@@ -214,6 +228,56 @@ describe('My FPL daily snapshot publication contract', () => {
         ],
       }),
     ).toBe(false);
+  });
+
+  test('uses within-window validation for reused cohorts in a mixed Trends repair', () => {
+    const enabledCohorts = [
+      {
+        tournamentId: 11,
+        publicationId: 101,
+        publicationRevision: 4,
+        sourceWatermark: new Date('2026-09-04T23:00:00.000Z'),
+      },
+      {
+        tournamentId: 12,
+        publicationId: 102,
+        publicationRevision: 6,
+        sourceWatermark: new Date('2026-09-05T00:04:00.000Z'),
+      },
+    ] as const;
+    const publicationResults = [
+      {
+        tournamentId: 11,
+        publicationId: 101,
+        revision: 4,
+        state: 'REUSED',
+        publicationState: 'READY',
+        isActive: true,
+        validatedAt: new Date('2026-09-05T00:03:00.000Z'),
+      },
+      {
+        tournamentId: 12,
+        publicationId: 102,
+        revision: 6,
+        state: 'READY',
+        publicationState: 'READY',
+        isActive: true,
+        validatedAt: new Date('2026-09-05T00:05:00.000Z'),
+      },
+    ] as const;
+
+    expect(
+      resolveTournamentTrendRepairSourceCheckedAt({ enabledCohorts, publicationResults }),
+    ).toEqual(new Date('2026-09-05T00:03:00.000Z'));
+    expect(
+      resolveTournamentTrendRepairSourceCheckedAt({
+        enabledCohorts,
+        publicationResults: [
+          { ...publicationResults[0], validatedAt: new Date('invalid') },
+          publicationResults[1],
+        ],
+      }),
+    ).toBeNull();
   });
 
   test('keeps Public Trends repairs on the event-scoped window across rollover', () => {

@@ -1037,46 +1037,105 @@ export async function retireLivePicksEmptyCohortFreshnessWindow(input: {
 /**
  * A recurring Live Picks sweep with a complete durable cohort can be a true
  * producer no-op: immutable same-event inputs need neither another FPL request
- * nor another publication. The caller holds the entry-cohort lock across its
- * durable scan; this exact contract/event fence permits a late BREACHED window
- * and its linked repair case to be retired atomically.
+ * nor another publication. A still-pending window is not applicable, while a
+ * historical breach keeps its status and governance case and receives only
+ * the exact producer proof. This prevents a missing consumer observation from
+ * being erased by a later producer no-op.
  */
-export async function markLivePicksNoSourceWorkFreshnessWindowNotApplicable(input: {
+export async function settleLivePicksNoSourceWorkFreshnessWindow(input: {
   windowId: number;
   eventId: number;
   expectedCount: number;
   observedCount: number;
+  sourceCheckedAt: Date;
+  pgPublishedAt: Date;
+  producerRevision: string;
   db?: DbOrTransaction;
-}): Promise<boolean> {
+}): Promise<'NOT_APPLICABLE' | 'BREACHED' | null> {
   if (
+    !Number.isSafeInteger(input.windowId) ||
+    input.windowId <= 0 ||
     !Number.isSafeInteger(input.eventId) ||
     input.eventId <= 0 ||
     !Number.isSafeInteger(input.expectedCount) ||
     input.expectedCount <= 0 ||
-    input.observedCount !== input.expectedCount
+    input.observedCount !== input.expectedCount ||
+    !Number.isFinite(input.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(input.pgPublishedAt.getTime()) ||
+    input.producerRevision.trim().length === 0
   ) {
-    return false;
+    return null;
   }
-  return setFreshnessWindowNotApplicable(
-    {
-      windowId: input.windowId,
-      reasonCode: 'LIVE_PICKS_NO_SOURCE_WORK',
-      evidence: {
-        reason: 'LIVE_PICKS_NO_SOURCE_WORK',
-        eventId: input.eventId,
+  const evidence = {
+    reason: 'LIVE_PICKS_NO_SOURCE_WORK',
+    eventId: input.eventId,
+    expectedCount: input.expectedCount,
+    observedCount: input.observedCount,
+    sourceCheckedAt: input.sourceCheckedAt.toISOString(),
+    pgPublishedAt: input.pgPublishedAt.toISOString(),
+    producerRevision: input.producerRevision,
+    scanComplete: true,
+  } as const;
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    // Match the cohort/read lock order used by the caller. A concurrent entry
+    // onboarding write must finish before this proof or wait until it commits.
+    await tx.execute(sql`LOCK TABLE ${entriesInCompetition} IN SHARE MODE`);
+    const [current] = await tx
+      .select({
+        status: freshnessSloWindowsInOps.status,
+        contractKey: freshnessSloWindowsInOps.contractKey,
+        eventId: freshnessSloWindowsInOps.eventId,
+      })
+      .from(freshnessSloWindowsInOps)
+      .where(eq(freshnessSloWindowsInOps.windowId, input.windowId))
+      .for('update')
+      .limit(1);
+    if (
+      !current ||
+      current.contractKey !== 'live-picks' ||
+      current.eventId !== input.eventId ||
+      !['PENDING', 'NOT_APPLICABLE', 'BREACHED'].includes(current.status)
+    ) {
+      return null;
+    }
+
+    if (current.status === 'BREACHED') {
+      const status = await recordFreshnessObservation({
+        windowId: input.windowId,
+        sourceCheckedAt: input.sourceCheckedAt,
+        pgPublishedAt: input.pgPublishedAt,
+        producerRevision: input.producerRevision,
         expectedCount: input.expectedCount,
         observedCount: input.observedCount,
-        scanComplete: true,
-      },
-      db: input.db,
-    },
-    {
-      kind: 'live-picks',
-      contractKey: 'live-picks',
-      eventId: input.eventId,
-      entryCohortFence: 'stable',
-    },
-  );
+        completenessStatus: 'COMPLETE',
+        evidence,
+        db: tx,
+      });
+      return status === 'BREACHED' ? 'BREACHED' : null;
+    }
+
+    const updated = await tx
+      .update(freshnessSloWindowsInOps)
+      .set({
+        status: 'NOT_APPLICABLE',
+        completenessStatus: 'NOT_APPLICABLE',
+        breachCode: null,
+        evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
+          ...evidence,
+          notApplicableReason: 'LIVE_PICKS_NO_SOURCE_WORK',
+        })}::jsonb`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(freshnessSloWindowsInOps.windowId, input.windowId),
+          inArray(freshnessSloWindowsInOps.status, ['PENDING', 'NOT_APPLICABLE']),
+        ),
+      )
+      .returning({ windowId: freshnessSloWindowsInOps.windowId });
+    return updated.length === 1 ? 'NOT_APPLICABLE' : null;
+  });
 }
 
 /** Retire a late Public Trends breach only while its ineligibility still holds. */

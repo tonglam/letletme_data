@@ -46,9 +46,9 @@ import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 import { normalizeMatchLifecycleState } from './live-match-v3';
 import {
-  markLivePicksNoSourceWorkFreshnessWindowNotApplicable,
   recordFreshnessObservation,
   retireLivePicksEmptyCohortFreshnessWindow,
+  settleLivePicksNoSourceWorkFreshnessWindow,
 } from './data-governance.service';
 
 const runtimeConfig = getConfig();
@@ -706,14 +706,22 @@ export async function persistLivePicksDurableFreshnessEvidence(
         options.sourceWorkPerformed !== false,
       )
     ) {
-      const recorded = await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+      if (!evidence.sourceCheckedAt || !evidence.pgPublishedAt) {
+        throw new Error('Live Picks no-source-work proof is missing durable timestamps');
+      }
+      const recorded = await settleLivePicksNoSourceWorkFreshnessWindow({
         windowId: freshnessWindowId,
         eventId,
         expectedCount: evidence.expectedCount,
         observedCount: evidence.observedCount,
+        sourceCheckedAt: evidence.sourceCheckedAt,
+        pgPublishedAt: evidence.pgPublishedAt,
+        producerRevision: evidence.revision,
         db: tx,
       });
-      if (!recorded) throw new Error('Live Picks no-source-work freshness window is unavailable');
+      if (recorded === null) {
+        throw new Error('Live Picks no-source-work freshness window is unavailable');
+      }
       return { evidence, terminalIncomplete: false } as const;
     }
     const status = await recordFreshnessObservation({

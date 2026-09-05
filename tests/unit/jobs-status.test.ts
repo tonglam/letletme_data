@@ -72,6 +72,28 @@ describe('queue pause status fallback', () => {
       pauseOwnerState: 'OPERATOR',
     });
   });
+
+  test('treats a rolling-deploy snapshot without pause evidence as unavailable', () => {
+    const legacySnapshot = {
+      queueName: 'live-data',
+      observedAt: '2026-09-05T00:00:00.000Z',
+    };
+    expect(resolveQueuePauseProjection(legacySnapshot as never, 2)).toEqual({
+      consumerPaused: true,
+      pausedCount: 2,
+      pauseOwnerState: 'UNAVAILABLE',
+    });
+    expect(
+      resolveQueuePauseProjection(
+        { ...legacySnapshot, consumerPaused: false, pausedCount: undefined } as never,
+        0,
+      ),
+    ).toEqual({
+      consumerPaused: false,
+      pausedCount: 0,
+      pauseOwnerState: 'UNAVAILABLE',
+    });
+  });
 });
 
 describe('selectCanonicalPriceChangeContext', () => {

@@ -90,6 +90,33 @@ export function safeSchedulerLaneErrorCode(lastError: string | null): string | n
 
 type QueueHealthSnapshot = Awaited<ReturnType<typeof readQueueHealthSnapshot>>;
 
+const QUEUE_PAUSE_OWNER_STATES = new Set([
+  'NONE',
+  'DEPLOYMENT',
+  'ACQUIRING',
+  'OPERATOR',
+  'RELEASING',
+]);
+
+function queuePauseEvidence(
+  snapshot: QueueHealthSnapshot,
+): Readonly<{ consumerPaused: boolean; pausedCount: number; pauseOwnerState: string }> | null {
+  if (!snapshot) return null;
+  const candidate = snapshot as unknown as Record<string, unknown>;
+  return typeof candidate.consumerPaused === 'boolean' &&
+    typeof candidate.pausedCount === 'number' &&
+    Number.isSafeInteger(candidate.pausedCount) &&
+    candidate.pausedCount >= 0 &&
+    typeof candidate.pauseOwnerState === 'string' &&
+    QUEUE_PAUSE_OWNER_STATES.has(candidate.pauseOwnerState)
+    ? {
+        consumerPaused: candidate.consumerPaused,
+        pausedCount: candidate.pausedCount,
+        pauseOwnerState: candidate.pauseOwnerState,
+      }
+    : null;
+}
+
 /** Keep direct Bull pause evidence visible when the richer monitor snapshot expired. */
 export function resolveQueuePauseProjection(
   snapshot: QueueHealthSnapshot,
@@ -97,12 +124,13 @@ export function resolveQueuePauseProjection(
 ): Readonly<{ consumerPaused: boolean; pausedCount: number; pauseOwnerState: string }> {
   const directPausedCount =
     Number.isSafeInteger(bullPausedCount) && bullPausedCount >= 0 ? bullPausedCount : 0;
-  if (snapshot) {
-    const pausedCount = Math.max(snapshot.pausedCount, directPausedCount);
+  const snapshotPause = queuePauseEvidence(snapshot);
+  if (snapshotPause) {
+    const pausedCount = Math.max(snapshotPause.pausedCount, directPausedCount);
     return {
-      consumerPaused: snapshot.consumerPaused || pausedCount > 0,
+      consumerPaused: snapshotPause.consumerPaused || pausedCount > 0,
       pausedCount,
-      pauseOwnerState: snapshot.pauseOwnerState,
+      pauseOwnerState: snapshotPause.pauseOwnerState,
     };
   }
   return {
