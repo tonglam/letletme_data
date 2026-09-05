@@ -9,6 +9,7 @@ import {
   resolveLivePicksProbeBackoffResult,
   resolveLivePicksRefreshFanout,
   resolveLiveLifecycleDelay,
+  shouldMarkLivePicksFreshnessNotApplicable,
   shouldPersistLiveLifecycleStatus,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
@@ -16,6 +17,20 @@ import {
 const quote = String.fromCharCode(39);
 
 describe('live lifecycle decisions', () => {
+  test('retires only a completed empty Live Picks cohort as not applicable', () => {
+    expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, true)).toBe(true);
+    expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, false)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNotApplicable(1, 0, true)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNotApplicable(0, 1, true)).toBe(false);
+
+    const source = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    expect(source).toContain('markFreshnessWindowNotApplicable({');
+    expect(source).toContain('reasonCode: ' + quote + 'LIVE_PICKS_NO_ELIGIBLE_ENTRIES' + quote);
+    expect(source).toContain(
+      'complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length',
+    );
+  });
+
   test('settles only fenced backoff roots and retries unfenced repairs', () => {
     expect(
       resolveLivePicksProbeBackoffResult(true, {

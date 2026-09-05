@@ -36,7 +36,10 @@ import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 import { normalizeMatchLifecycleState } from './live-match-v3';
-import { recordFreshnessObservation } from './data-governance.service';
+import {
+  markFreshnessWindowNotApplicable,
+  recordFreshnessObservation,
+} from './data-governance.service';
 
 const runtimeConfig = getConfig();
 /** The live producer cadence is a data contract: one fresh poll every 30s by default. */
@@ -619,8 +622,18 @@ export async function readLivePicksDurableFreshnessEvidence(season: FplSeasonRef
     observedCount: completeHeads.length,
     sourceCheckedAt,
     pgPublishedAt,
-    complete: completeHeads.length === expectedEntryIds.length,
+    // An empty eligible cohort is not a completed publication. It is retired
+    // as NOT_APPLICABLE by persistLivePicksDurableFreshnessEvidence instead.
+    complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length,
   } as const;
+}
+
+export function shouldMarkLivePicksFreshnessNotApplicable(
+  expectedCount: number,
+  observedCount: number,
+  scanComplete: boolean,
+): boolean {
+  return scanComplete && expectedCount === 0 && observedCount === 0;
 }
 
 export async function persistLivePicksDurableFreshnessEvidence(
@@ -630,6 +643,26 @@ export async function persistLivePicksDurableFreshnessEvidence(
   scanComplete: boolean,
 ) {
   const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId);
+  if (
+    shouldMarkLivePicksFreshnessNotApplicable(
+      evidence.expectedCount,
+      evidence.observedCount,
+      scanComplete,
+    )
+  ) {
+    const recorded = await markFreshnessWindowNotApplicable({
+      windowId: freshnessWindowId,
+      reasonCode: 'LIVE_PICKS_NO_ELIGIBLE_ENTRIES',
+      evidence: {
+        eventId,
+        expectedCount: 0,
+        observedCount: 0,
+        scanComplete: true,
+      },
+    });
+    if (!recorded) throw new Error('Live Picks empty-cohort freshness window is unavailable');
+    return evidence;
+  }
   const status = await recordFreshnessObservation({
     windowId: freshnessWindowId,
     sourceCheckedAt: evidence.sourceCheckedAt ?? undefined,
