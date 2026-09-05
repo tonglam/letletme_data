@@ -550,6 +550,7 @@ export async function syncLiveMatchesV3FromObservation(
       if (
         preparedDesk.state === 'FINALIZED' &&
         currentDetail?.publication.finalized === true &&
+        currentDetail.servedFrom === 'REDIS_CURRENT' &&
         currentDetail.publication.observedDeskGeneration === desk.generation &&
         currentDetail.publication.fixtureIdentityRevision ===
           desk.revisions.fixtureIdentity.revision
