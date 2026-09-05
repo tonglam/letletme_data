@@ -781,6 +781,25 @@ describe('Live League V2 Classic final-retention checkpoint recovery', () => {
         fixture.content,
       ),
     ).toBe(true);
+
+    const heartbeatDrift = {
+      ...fixture.active,
+      publication: {
+        ...fixture.active.publication,
+        times: {
+          ...fixture.active.publication.times,
+          sourceCheckedAt: '2026-08-30T00:05:00.000Z',
+        },
+      },
+    } as LeagueLiveRead;
+    expect(
+      isCanonicalFinalClassicPublicationForRetentionV2(
+        scope,
+        fixture.global,
+        heartbeatDrift,
+        fixture.content,
+      ),
+    ).toBe(true);
   });
 
   test('rejects previous-pointer inputs, stale profile evidence, and board drift', () => {
@@ -840,6 +859,7 @@ describe('Live League V2 Classic final-retention checkpoint recovery', () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     expect(source).toContain('findClassicRosters');
+    expect(source).toContain('findClassicRosters(season, eventId, scope.tournamentId)');
     expect(source).toContain('readEntryLiveInputsV2');
     expect(source).toContain('publishLiveLeaguePublicationV2');
     expect(source).toContain('setLiveLeagueCheckpointDesiredV2');

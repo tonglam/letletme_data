@@ -186,8 +186,14 @@ async function enqueueFinalizationProfileRefresh(
   }
 }
 
-async function findClassicRosters(season: FplSeasonRef, eventId: number): Promise<ClassicRoster[]> {
+async function findClassicRosters(
+  season: FplSeasonRef,
+  eventId: number,
+  tournamentId?: number,
+): Promise<ClassicRoster[]> {
   const client = await getDbClient();
+  const tournamentFilter =
+    tournamentId === undefined ? client`` : client`AND tournament.tournament_id = ${tournamentId}`;
   const rows = await client<ClassicRosterQueryRow[]>`
     SELECT
       tournament.tournament_id AS "tournamentId",
@@ -227,6 +233,7 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
       AND tournament.league_type = 'classic'
       AND tournament.state = 'active'
       AND tournament.setup_status = 'ready'
+      ${tournamentFilter}
     ORDER BY tournament.tournament_id, roster.entry_id
   `;
   const byTournament = new Map<number, ClassicRosterRow[]>();
@@ -557,7 +564,6 @@ export function isCanonicalFinalClassicPublicationForRetentionV2(
     active.publication.state === 'FINALIZED' &&
     active.publication.globalRef.publicationId === global.publicationId &&
     active.publication.globalRef.generation === global.generation &&
-    active.publication.times.sourceCheckedAt === global.sourceCheckedAt &&
     validateLiveLeaguePublicationV2Payload(
       scope,
       active.publication,
@@ -597,7 +603,7 @@ export async function restoreFinalClassicCheckpointForRetentionV2(
     return null;
   }
   const redis = redisClient ?? (await redisSingleton.getClient());
-  const roster = (await findClassicRosters(season, eventId)).find(
+  const roster = (await findClassicRosters(season, eventId, scope.tournamentId)).find(
     (candidate) => candidate.tournamentId === scope.tournamentId,
   );
   if (!roster) return null;
