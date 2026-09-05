@@ -31,7 +31,9 @@ import {
   contractHasConsumerEvidence,
   dataContractRegistry,
   canonicalQueueCatalog,
+  MANUAL_ONLY_CONTRACT_JOBS,
   queueRuntimeCatalog,
+  registeredSchedulerJobNames,
   type DataContract,
 } from '../../src/domain/data-contracts';
 import { MAINTENANCE_JOBS } from '../../src/queues/maintenance.queue';
@@ -438,7 +440,10 @@ describe('GW queue and data governance primitives', () => {
       dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
     );
     expect(registryJobs.size).toBeGreaterThanOrEqual(35);
-    expect(() => assertDataContractRegistry([...registryJobs])).not.toThrow();
+    const registeredJobs = registeredSchedulerJobNames();
+    const manualOnlyJobs = new Set<string>(MANUAL_ONLY_CONTRACT_JOBS);
+    expect(registeredJobs.every((jobName) => !manualOnlyJobs.has(jobName))).toBe(true);
+    expect(() => assertDataContractRegistry(registeredJobs)).not.toThrow();
     const contracts: readonly DataContract[] = dataContractRegistry;
     expect(
       contracts
@@ -497,6 +502,7 @@ describe('GW queue and data governance primitives', () => {
         eligible: true,
         consumerEvidenceRequired: false,
         redisEvidenceRequired: false,
+        eligibleAt: timestamp,
         dueAt: new Date('2026-08-27T00:05:00.000Z'),
         sourceCheckedAt: timestamp,
         pgPublishedAt: timestamp,
@@ -504,6 +510,31 @@ describe('GW queue and data governance primitives', () => {
         expectedCount: 15,
         observedCount: 15,
         completeness: 'COMPLETE',
+      }),
+    ).toBe('MET');
+  });
+
+  test('rejects producer evidence from before the reserved freshness window', () => {
+    const observation = {
+      eligible: true,
+      consumerEvidenceRequired: false,
+      redisEvidenceRequired: false,
+      eligibleAt: new Date('2026-08-27T00:00:00.000Z'),
+      dueAt: new Date('2026-08-27T00:05:00.000Z'),
+      now: new Date('2026-08-27T00:01:00.000Z'),
+      sourceCheckedAt: new Date('2026-08-26T23:59:59.999Z'),
+      pgPublishedAt: new Date('2026-08-27T00:00:01.000Z'),
+      producerRevision: 'checkpoint-1',
+      expectedCount: 15,
+      observedCount: 15,
+      completeness: 'COMPLETE' as const,
+    };
+    expect(evaluateFreshnessWindow(observation)).toBe('PENDING');
+    expect(applyFreshnessObservation('BREACHED', observation).recovered).toBe(false);
+    expect(
+      evaluateFreshnessWindow({
+        ...observation,
+        sourceCheckedAt: observation.eligibleAt,
       }),
     ).toBe('MET');
   });

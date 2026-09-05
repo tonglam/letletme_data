@@ -2,6 +2,7 @@ import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, sql } from 'd
 
 import {
   dataGovernanceCasesInOps,
+  entriesInCompetition,
   freshnessSloWindowsInOps,
   queueHealthWindowsInOps,
   seasonsInFpl,
@@ -619,6 +620,7 @@ export async function recordFreshnessObservation(input: {
       invalid,
       consumerEvidenceRequired,
       redisEvidenceRequired,
+      eligibleAt: current.eligibleAt,
       dueAt: current.dueAt,
       sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,
       pgPublishedAt: input.pgPublishedAt ?? current.pgPublishedAt,
@@ -739,7 +741,15 @@ async function setFreshnessWindowNotApplicable(
     notApplicableReason: reasonCode,
   };
   return db.transaction(async (tx) => {
-    // Match the lock order used by openGovernanceCase. A breach observer that
+    const reconcileBreachedWindow = breachedWindowFence !== null;
+    if (reconcileBreachedWindow) {
+      // The empty-cohort decision must be linearized with entry onboarding.
+      // A SHARE table lock lets an in-flight entry write commit before the
+      // eligibility recheck, or makes a later write wait until this exact
+      // window is retired. Ordinary N/A decisions do not take this lock.
+      await tx.execute(sql`LOCK TABLE ${entriesInCompetition} IN SHARE MODE`);
+    }
+    // Match the row lock used by openGovernanceCase. A breach observer that
     // wins this row first may create the linked case, but this transaction then
     // retires and dismisses it before committing. If retirement wins first,
     // the observer sees NOT_APPLICABLE and cannot create a stale repair case.
@@ -747,13 +757,13 @@ async function setFreshnessWindowNotApplicable(
       .select({
         status: freshnessSloWindowsInOps.status,
         contractKey: freshnessSloWindowsInOps.contractKey,
+        seasonId: freshnessSloWindowsInOps.seasonId,
         eventId: freshnessSloWindowsInOps.eventId,
       })
       .from(freshnessSloWindowsInOps)
       .where(eq(freshnessSloWindowsInOps.windowId, input.windowId))
       .for('update')
       .limit(1);
-    const reconcileBreachedWindow = breachedWindowFence !== null;
     const allowedStatuses = reconcileBreachedWindow
       ? ['PENDING', 'NOT_APPLICABLE', 'BREACHED']
       : ['PENDING', 'NOT_APPLICABLE'];
@@ -765,6 +775,21 @@ async function setFreshnessWindowNotApplicable(
           current.eventId !== breachedWindowFence.eventId))
     )
       return false;
+
+    if (reconcileBreachedWindow) {
+      if (!Number.isSafeInteger(current.seasonId) || current.seasonId! <= 0) return false;
+      const [eligibleEntry] = await tx
+        .select({ entryId: entriesInCompetition.entryId })
+        .from(entriesInCompetition)
+        .where(
+          and(
+            eq(entriesInCompetition.seasonId, current.seasonId!),
+            sql`(${entriesInCompetition.startedEvent} IS NULL OR ${entriesInCompetition.startedEvent} <= ${breachedWindowFence.eventId})`,
+          ),
+        )
+        .limit(1);
+      if (eligibleEntry) return false;
+    }
 
     const updated = await tx
       .update(freshnessSloWindowsInOps)

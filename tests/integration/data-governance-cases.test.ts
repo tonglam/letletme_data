@@ -21,6 +21,8 @@ const WINDOW_SCOPE_KEY = 'integration:consumer-evidence-freeze';
 const EMPTY_COHORT_SLO_KEY = 'integration:live-picks-empty-cohort';
 const EMPTY_COHORT_SCOPE_KEY = 'integration:live-picks-empty-cohort';
 const EMPTY_COHORT_FINGERPRINT = 'integration:live-picks-empty-cohort:breach';
+const EMPTY_COHORT_SEASON_ID = 2098;
+const EMPTY_COHORT_ENTRY_ID = 990_433;
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -33,6 +35,15 @@ async function cleanup(): Promise<void> {
     DELETE FROM ops.freshness_slo_windows
     WHERE (slo_key = ${WINDOW_SLO_KEY} AND scope_key = ${WINDOW_SCOPE_KEY})
        OR (slo_key = ${EMPTY_COHORT_SLO_KEY} AND scope_key = ${EMPTY_COHORT_SCOPE_KEY})
+  `;
+  await sql`
+    DELETE FROM competition.entries
+    WHERE season_id = ${EMPTY_COHORT_SEASON_ID}
+      AND entry_id = ${EMPTY_COHORT_ENTRY_ID}
+  `;
+  await sql`
+    DELETE FROM fpl.seasons
+    WHERE season_id = ${EMPTY_COHORT_SEASON_ID}
   `;
 }
 
@@ -128,9 +139,20 @@ describe('data governance case CAS', () => {
   });
 
   test('atomically retires a breached empty cohort and dismisses its repair case', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO fpl.seasons (
+        season_id, season_code, display_name, start_year, end_year, lifecycle_state, is_current
+      )
+      VALUES (
+        ${EMPTY_COHORT_SEASON_ID}, '9899', 'Empty cohort governance integration',
+        ${EMPTY_COHORT_SEASON_ID}, ${EMPTY_COHORT_SEASON_ID + 1}, 'completed', false
+      )
+    `;
     const windowId = await upsertFreshnessWindow({
       sloKey: EMPTY_COHORT_SLO_KEY,
       contractKey: 'live-picks',
+      seasonId: EMPTY_COHORT_SEASON_ID,
       scopeKey: EMPTY_COHORT_SCOPE_KEY,
       periodKey: 'event-3',
       eventId: 3,
@@ -138,7 +160,6 @@ describe('data governance case CAS', () => {
       dueAt: new Date('2026-09-05T00:10:30.000Z'),
       evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
     });
-    const sql = await getDbClient();
     await sql`
       UPDATE ops.freshness_slo_windows
       SET status = 'BREACHED',
@@ -195,6 +216,27 @@ describe('data governance case CAS', () => {
         eventId: 4,
       }),
     ).toBe(false);
+
+    await sql`
+      INSERT INTO competition.entries (
+        season_id, entry_id, entry_name, player_name, started_event
+      )
+      VALUES (
+        ${EMPTY_COHORT_SEASON_ID}, ${EMPTY_COHORT_ENTRY_ID},
+        'Eligible integration entry', 'Eligible integration player', 3
+      )
+    `;
+    expect(
+      await retireLivePicksEmptyCohortFreshnessWindow({
+        windowId,
+        eventId: 3,
+      }),
+    ).toBe(false);
+    await sql`
+      DELETE FROM competition.entries
+      WHERE season_id = ${EMPTY_COHORT_SEASON_ID}
+        AND entry_id = ${EMPTY_COHORT_ENTRY_ID}
+    `;
 
     expect(
       await retireLivePicksEmptyCohortFreshnessWindow({

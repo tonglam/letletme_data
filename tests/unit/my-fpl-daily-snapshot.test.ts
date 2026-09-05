@@ -100,6 +100,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(trendsCatalog).toContain('sourceCheckedAt: sourceWatermark');
     expect(trendsCatalog).not.toContain('sourceCheckedAt: publishedAt');
     expect(trendsCatalog).toContain('current_event.deadline_time_epoch DESC');
+    expect(trendsRepairJob).toContain('prepublicationFailedCount: result.failed');
+    expect(trendsRepairJob).not.toContain('if (result.failed > 0)');
     const repairTargets = trendsCatalog.slice(
       trendsCatalog.indexOf('export async function findPublicTrendRepairTournamentIds'),
       trendsCatalog.indexOf('export async function getPublicTrendsCatalog'),

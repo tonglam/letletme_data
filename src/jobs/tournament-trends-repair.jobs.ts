@@ -59,17 +59,20 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
     };
   }
   const result = await publishTournamentTrendScopes(season, currentEvent.id, repairTournamentIds);
-  if (result.failed > 0)
-    throw new Error(`Tournament Trends repair failed for ${result.failed} scope(s)`);
   const after = await readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id);
+  const prepublication = {
+    prepublishedCohortCount: result.succeeded,
+    prepublicationFailedCount: result.failed,
+  } as const;
   if (after.expectedCohortCount === 0) {
     return {
       ...after,
       ...(await settleTrendsFreshnessNotApplicable(
         input.freshnessWindowId,
         'PUBLIC_TRENDS_NO_ENABLED_COHORTS',
-        { prepublishedCohortCount: result.succeeded },
+        prepublication,
       )),
+      ...prepublication,
     };
   }
   if (!after.complete || !after.sourceCheckedAt || !after.pgPublishedAt) {
@@ -93,12 +96,13 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
         observedRowCount: after.observedRowCount,
         sourceCheckedAt: after.sourceCheckedAt.toISOString(),
         pgPublishedAt: after.pgPublishedAt.toISOString(),
+        ...prepublication,
       },
     });
     if (status === null) throw new Error('Tournament Trends freshness window is unavailable');
     freshnessEvidenceRecorded = true;
   }
-  return { ...after, freshnessEvidenceRecorded };
+  return { ...after, ...prepublication, freshnessEvidenceRecorded };
 }
 
 export function registerTournamentTrendsRepairJobs(app: Elysia) {

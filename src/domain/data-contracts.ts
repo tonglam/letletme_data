@@ -511,18 +511,20 @@ export function assertQueueRuntimeCatalog(): void {
   }
 }
 
-const schedulerJobSet: Set<string> = new Set(
-  dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
-);
-
-export function registeredSchedulerJobNames(): readonly string[] {
-  return [...schedulerJobSet].sort();
-}
-
 /** Contract jobs deliberately triggered by an API/event path rather than the
  * 30-second scheduler. They still need a lane, retry and consumer contract,
  * but must not be mistaken for an omitted scheduler definition. */
 export const MANUAL_ONLY_CONTRACT_JOBS = ['entry-onboarding'] as const;
+
+const manualOnlyContractJobSet = new Set<string>(MANUAL_ONLY_CONTRACT_JOBS);
+const schedulerJobSet: Set<string> = new Set(
+  dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
+);
+
+/** Jobs with an actual scheduler definition, excluding API/event-only work. */
+export function registeredSchedulerJobNames(): readonly string[] {
+  return [...schedulerJobSet].filter((jobName) => !manualOnlyContractJobSet.has(jobName)).sort();
+}
 
 export function contractForSchedulerJob(jobName: string): DataContract | undefined {
   return dataContractRegistry.find((contract) =>
