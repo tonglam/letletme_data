@@ -75,6 +75,7 @@ const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8
 const trendsRepairJob = readFileSync('src/jobs/tournament-trends-repair.jobs.ts', 'utf8');
 const trendsCatalog = readFileSync('src/services/trends-catalog.service.ts', 'utf8');
 const liveDataWorker = readFileSync('src/workers/live-data.worker.ts', 'utf8');
+const governanceWorker = readFileSync('src/workers/data-governance.worker.ts', 'utf8');
 const rebindPlayerAuthority = readFileSync('scripts/rebind-player-gameweek-authority.ts', 'utf8');
 const retirePlayerStatsObligations = readFileSync(
   'scripts/retire-player-stats-active-obligations.ts',
@@ -97,6 +98,10 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(trendsRepairJob).toContain('findPublicTrendRepairTournamentIds');
     expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_CURRENT_EVENT');
     expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_ENABLED_COHORTS');
+    expect(governanceWorker).toContain(
+      'case ' + singleQuote + 'public-league-trends' + singleQuote + ':',
+    );
+    expect(governanceWorker).toContain('enqueueTournamentTrendsRepair');
     expect(governanceService).toContain('PUBLIC_TRENDS_NO_SOURCE_WORK');
     expect(trendsCatalog).toContain('latest.source_watermark');
     expect(trendsCatalog).toContain('sourceCheckedAt: sourceWatermark');
@@ -113,10 +118,11 @@ describe('My FPL daily snapshot publication contract', () => {
 
   test('retires only a complete all-reused Public Trends repair pass', () => {
     const completeReused = {
-      repairTargetCount: 2,
-      succeededCount: 2,
-      failedCount: 0,
-      publicationStates: ['REUSED', 'REUSED'],
+      enabledTournamentIds: [11, 12],
+      publicationResults: [
+        { tournamentId: 11, state: 'REUSED' },
+        { tournamentId: 12, state: 'REUSED' },
+      ],
       expectedCohortCount: 2,
       observedCohortCount: 2,
       complete: true,
@@ -125,12 +131,29 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(
       isCompleteReusedTournamentTrendRepair({
         ...completeReused,
-        publicationStates: ['REUSED', 'READY'],
+        publicationResults: [
+          { tournamentId: 11, state: 'REUSED' },
+          { tournamentId: 12, state: 'READY' },
+        ],
       }),
     ).toBe(false);
-    expect(isCompleteReusedTournamentTrendRepair({ ...completeReused, failedCount: 1 })).toBe(
-      false,
-    );
+    expect(
+      isCompleteReusedTournamentTrendRepair({
+        ...completeReused,
+        publicationResults: [
+          ...completeReused.publicationResults,
+          // Disabled prepublication remains separate from the enabled public
+          // freshness decision, even when it creates a new READY row.
+          { tournamentId: 13, state: 'READY' },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isCompleteReusedTournamentTrendRepair({
+        ...completeReused,
+        publicationResults: [{ tournamentId: 11, state: 'REUSED' }],
+      }),
+    ).toBe(false);
     expect(
       isCompleteReusedTournamentTrendRepair({ ...completeReused, observedCohortCount: 1 }),
     ).toBe(false);
@@ -146,6 +169,9 @@ describe('My FPL daily snapshot publication contract', () => {
       'evidence}->>' + singleQuote + 'liveCheckpointPending' + singleQuote + ' = ' + singleQuote,
     );
     expect(governanceService).toContain('contractKey, ' + singleQuote + 'live-snapshot');
+    expect(governanceService).toContain('livePointsPublicationCheckpointsInCompetition');
+    expect(governanceService).toContain('freshnessSloWindowsInOps.producerRevision, revision');
+    expect(governanceService).toContain('freshnessSloWindowsInOps.redisRevision, revision');
     expect(rebindPlayerAuthority).toContain(
       'if (token === ' + singleQuote + '--apply' + singleQuote + ')',
     );

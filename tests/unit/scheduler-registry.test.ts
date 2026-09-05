@@ -497,6 +497,24 @@ describe('standalone scheduler registry', () => {
     });
   });
 
+  test('pins Public Trends obligations and freshness windows to the current event', async () => {
+    const trends = registry.find((definition) => definition.name === 'tournament-trends-repair');
+    const plans = await trends!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T12:03:00.000Z'),
+      currentEventId: 3,
+      events: [],
+    });
+
+    expect(plans).toEqual([
+      expect.objectContaining({
+        scopeKey: TEST_SEASON.seasonCode,
+        eventId: 3,
+        source: 'catchup',
+      }),
+    ]);
+  });
+
   test('schedules Understat lanes at staggered UTC+8 incremental checkpoints', async () => {
     const enqueue = mock(async (_input: { seasonCode?: string }) => ({
       id: 'understat-job',

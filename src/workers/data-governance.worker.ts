@@ -42,6 +42,7 @@ import {
   enqueueMyFplSnapshot,
   enqueueMyFplSnapshotOutbox,
   enqueuePlayerMarketFreshness,
+  enqueueTournamentTrendsRepair,
 } from '../jobs/maintenance.jobs';
 import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
 import {
@@ -176,6 +177,12 @@ async function enqueueFreshnessCaseRepair(input: {
         jobId,
         officialH2HMode: 'full-reconcile',
         officialH2HReconcileKey: `governance-case-${item.caseId}`,
+        freshnessWindowId: window.windowId,
+      });
+      return;
+    case 'public-league-trends':
+      await enqueueTournamentTrendsRepair(season, 'reconcile', {
+        jobId,
         freshnessWindowId: window.windowId,
       });
       return;

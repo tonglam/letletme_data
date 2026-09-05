@@ -4,6 +4,7 @@ import {
   dataGovernanceCasesInOps,
   entriesInCompetition,
   freshnessSloWindowsInOps,
+  livePointsPublicationCheckpointsInCompetition,
   queueHealthWindowsInOps,
   seasonsInFpl,
   schedulerObligationsInOps,
@@ -40,6 +41,7 @@ import {
   QUEUE_HEALTH_RETENTION_MAX_BATCHES,
   queueHealthRetentionCutoff,
 } from './queue-governance.service';
+import { readPublicTrendFreshnessEvidenceBySeasonId } from './trends-catalog.service';
 
 export type GovernanceCaseStatus =
   | 'OPEN'
@@ -741,11 +743,104 @@ type FreshnessWindowNotApplicableInput = {
   db?: DbOrTransaction;
 };
 
-type LateNotApplicableFence = Readonly<{
-  contractKey: string;
-  eventId: number;
-  entryCohortFence: 'empty' | 'stable' | null;
-}>;
+type LateNotApplicableFence =
+  | Readonly<{
+      kind: 'live-picks';
+      contractKey: 'live-picks';
+      eventId: number;
+      entryCohortFence: 'empty' | 'stable';
+    }>
+  | Readonly<{
+      kind: 'public-trends';
+      contractKey: 'public-league-trends';
+      eventId: number | null;
+      reason:
+        | 'PUBLIC_TRENDS_NO_CURRENT_EVENT'
+        | 'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS'
+        | 'PUBLIC_TRENDS_NO_ENABLED_COHORTS';
+    }>
+  | Readonly<{
+      kind: 'public-trends';
+      contractKey: 'public-league-trends';
+      eventId: number;
+      reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK';
+      expectedCohortCount: number;
+      observedCohortCount: number;
+      enabledTournamentIds: readonly number[];
+      catalogRevision: string;
+      producerRevision: string;
+    }>;
+
+async function lockPublicTrendsNotApplicableEvidence(tx: DbOrTransaction): Promise<void> {
+  await tx.execute(sql`
+    LOCK TABLE fpl.events,
+      competition.public_league_trends,
+      competition.tournaments,
+      reporting.tournament_selection_stat_publications,
+      reporting.tournament_selection_stat_rows
+    IN SHARE MODE
+  `);
+}
+
+async function validatePublicTrendsNotApplicableFence(
+  tx: DbOrTransaction,
+  seasonId: number,
+  fence: Extract<LateNotApplicableFence, { kind: 'public-trends' }>,
+): Promise<boolean> {
+  const currentEvents = (await tx.execute(sql`
+    SELECT event_id
+    FROM fpl.events
+    WHERE season_id = ${seasonId}
+      AND is_current
+    ORDER BY event_id
+    LIMIT 2
+  `)) as unknown as readonly { event_id: number }[];
+  if (fence.reason === 'PUBLIC_TRENDS_NO_CURRENT_EVENT') {
+    return currentEvents.length === 0;
+  }
+  if (
+    currentEvents.length !== 1 ||
+    Number(currentEvents[0]?.event_id) !== fence.eventId ||
+    !Number.isSafeInteger(fence.eventId) ||
+    fence.eventId <= 0
+  ) {
+    return false;
+  }
+
+  if (fence.reason === 'PUBLIC_TRENDS_NO_SOURCE_WORK') {
+    const current = await readPublicTrendFreshnessEvidenceBySeasonId(seasonId, fence.eventId, {
+      db: tx,
+    });
+    const currentIds = current.cohorts.map((cohort) => cohort.tournamentId).sort((a, b) => a - b);
+    const expectedIds = [...new Set(fence.enabledTournamentIds)].sort((a, b) => a - b);
+    return (
+      current.complete &&
+      current.expectedCohortCount === fence.expectedCohortCount &&
+      current.observedCohortCount === fence.observedCohortCount &&
+      current.expectedCohortCount === expectedIds.length &&
+      current.catalogRevision === fence.catalogRevision &&
+      current.revision === fence.producerRevision &&
+      currentIds.length === expectedIds.length &&
+      currentIds.every((id, index) => id === expectedIds[index])
+    );
+  }
+
+  const [counts] = (await tx.execute(sql`
+    SELECT
+      count(*) FILTER (WHERE catalog.enabled)::int AS enabled_count,
+      count(*) FILTER (WHERE tournament.setup_status = 'ready')::int AS repair_target_count
+    FROM competition.public_league_trends catalog
+    JOIN competition.tournaments tournament
+      ON tournament.season_id = catalog.season_id
+      AND tournament.tournament_id = catalog.tournament_id
+    WHERE catalog.season_id = ${seasonId}
+  `)) as unknown as readonly { enabled_count: number; repair_target_count: number }[];
+  const enabledCount = Number(counts?.enabled_count ?? 0);
+  const repairTargetCount = Number(counts?.repair_target_count ?? 0);
+  return fence.reason === 'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS'
+    ? enabledCount === 0 && repairTargetCount === 0
+    : enabledCount === 0;
+}
 
 async function setFreshnessWindowNotApplicable(
   input: FreshnessWindowNotApplicableInput,
@@ -761,13 +856,19 @@ async function setFreshnessWindowNotApplicable(
   };
   return db.transaction(async (tx) => {
     const reconcileBreachedWindow = breachedWindowFence !== null;
-    if (breachedWindowFence !== null && breachedWindowFence.entryCohortFence !== null) {
+    if (breachedWindowFence?.kind === 'live-picks') {
       // Live Picks cohort decisions must be linearized with entry onboarding.
       // A SHARE table lock lets an in-flight entry write commit before the
       // eligibility recheck, or makes a later write wait until this exact
       // window is retired. Public Trends and ordinary N/A decisions do not
       // take this entry-table lock.
       await tx.execute(sql`LOCK TABLE ${entriesInCompetition} IN SHARE MODE`);
+    }
+    if (breachedWindowFence?.kind === 'public-trends') {
+      // Acquire producer-table locks before the window row lock. This keeps a
+      // single lock order for a publication path that later records freshness
+      // evidence, and holds the proof stable through the terminal update.
+      await lockPublicTrendsNotApplicableEvidence(tx);
     }
     // Match the row lock used by openGovernanceCase. A breach observer that
     // wins this row first may create the linked case, but this transaction then
@@ -792,13 +893,26 @@ async function setFreshnessWindowNotApplicable(
       !allowedStatuses.includes(current.status) ||
       (breachedWindowFence !== null &&
         (current.contractKey !== breachedWindowFence.contractKey ||
-          current.eventId !== breachedWindowFence.eventId))
+          (breachedWindowFence.kind === 'live-picks'
+            ? current.eventId !== breachedWindowFence.eventId
+            : breachedWindowFence.eventId !== null &&
+              current.eventId !== null &&
+              current.eventId !== breachedWindowFence.eventId)))
     )
       return false;
 
     if (breachedWindowFence !== null) {
       if (!Number.isSafeInteger(current.seasonId) || current.seasonId! <= 0) return false;
-      if (breachedWindowFence.entryCohortFence === 'empty') {
+      if (
+        breachedWindowFence.kind === 'public-trends' &&
+        !(await validatePublicTrendsNotApplicableFence(tx, current.seasonId!, breachedWindowFence))
+      ) {
+        return false;
+      }
+      if (
+        breachedWindowFence.kind === 'live-picks' &&
+        breachedWindowFence.entryCohortFence === 'empty'
+      ) {
         const [eligibleEntry] = await tx
           .select({ entryId: entriesInCompetition.entryId })
           .from(entriesInCompetition)
@@ -892,7 +1006,12 @@ export async function retireLivePicksEmptyCohortFreshnessWindow(input: {
       },
       db: input.db,
     },
-    { contractKey: 'live-picks', eventId: input.eventId, entryCohortFence: 'empty' },
+    {
+      kind: 'live-picks',
+      contractKey: 'live-picks',
+      eventId: input.eventId,
+      entryCohortFence: 'empty',
+    },
   );
 }
 
@@ -932,7 +1051,45 @@ export async function markLivePicksNoSourceWorkFreshnessWindowNotApplicable(inpu
       },
       db: input.db,
     },
-    { contractKey: 'live-picks', eventId: input.eventId, entryCohortFence: 'stable' },
+    {
+      kind: 'live-picks',
+      contractKey: 'live-picks',
+      eventId: input.eventId,
+      entryCohortFence: 'stable',
+    },
+  );
+}
+
+/** Retire a late Public Trends breach only while its ineligibility still holds. */
+export async function retirePublicTrendsIneligibleFreshnessWindow(input: {
+  windowId: number;
+  reasonCode:
+    | 'PUBLIC_TRENDS_NO_CURRENT_EVENT'
+    | 'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS'
+    | 'PUBLIC_TRENDS_NO_ENABLED_COHORTS';
+  eventId?: number;
+  evidence?: Record<string, unknown>;
+  db?: DbOrTransaction;
+}): Promise<boolean> {
+  if (
+    input.reasonCode !== 'PUBLIC_TRENDS_NO_CURRENT_EVENT' &&
+    (!Number.isSafeInteger(input.eventId) || input.eventId! <= 0)
+  ) {
+    return false;
+  }
+  return setFreshnessWindowNotApplicable(
+    {
+      windowId: input.windowId,
+      reasonCode: input.reasonCode,
+      evidence: input.evidence,
+      db: input.db,
+    },
+    {
+      kind: 'public-trends',
+      contractKey: 'public-league-trends',
+      eventId: input.eventId ?? null,
+      reason: input.reasonCode,
+    },
   );
 }
 
@@ -948,8 +1105,10 @@ export async function retirePublicTrendsReusedFreshnessWindow(input: {
   eventId: number;
   expectedCohortCount: number;
   observedCohortCount: number;
+  enabledTournamentIds: readonly number[];
+  enabledReusedCount: number;
   repairTargetCount: number;
-  reusedCount: number;
+  succeededCount: number;
   failedCount: number;
   catalogRevision: string;
   producerRevision: string;
@@ -961,10 +1120,17 @@ export async function retirePublicTrendsReusedFreshnessWindow(input: {
     !Number.isSafeInteger(input.expectedCohortCount) ||
     input.expectedCohortCount <= 0 ||
     input.observedCohortCount !== input.expectedCohortCount ||
+    input.enabledTournamentIds.length !== input.expectedCohortCount ||
+    new Set(input.enabledTournamentIds).size !== input.enabledTournamentIds.length ||
+    input.enabledTournamentIds.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
+    input.enabledReusedCount !== input.expectedCohortCount ||
     !Number.isSafeInteger(input.repairTargetCount) ||
-    input.repairTargetCount <= 0 ||
-    input.reusedCount !== input.repairTargetCount ||
-    input.failedCount !== 0 ||
+    input.repairTargetCount < input.expectedCohortCount ||
+    !Number.isSafeInteger(input.succeededCount) ||
+    input.succeededCount < input.expectedCohortCount ||
+    !Number.isSafeInteger(input.failedCount) ||
+    input.failedCount < 0 ||
+    input.succeededCount + input.failedCount !== input.repairTargetCount ||
     !/^[0-9a-f]{64}$/.test(input.catalogRevision) ||
     !/^public-trends-v1:[0-9a-f]{64}$/.test(input.producerRevision)
   ) {
@@ -979,8 +1145,10 @@ export async function retirePublicTrendsReusedFreshnessWindow(input: {
         eventId: input.eventId,
         expectedCohortCount: input.expectedCohortCount,
         observedCohortCount: input.observedCohortCount,
+        enabledTournamentIds: input.enabledTournamentIds,
+        enabledReusedCount: input.enabledReusedCount,
         repairTargetCount: input.repairTargetCount,
-        reusedCount: input.reusedCount,
+        succeededCount: input.succeededCount,
         failedCount: input.failedCount,
         catalogRevision: input.catalogRevision,
         producerRevision: input.producerRevision,
@@ -989,9 +1157,15 @@ export async function retirePublicTrendsReusedFreshnessWindow(input: {
       db: input.db,
     },
     {
+      kind: 'public-trends',
       contractKey: 'public-league-trends',
       eventId: input.eventId,
-      entryCohortFence: null,
+      reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+      expectedCohortCount: input.expectedCohortCount,
+      observedCohortCount: input.observedCohortCount,
+      enabledTournamentIds: input.enabledTournamentIds,
+      catalogRevision: input.catalogRevision,
+      producerRevision: input.producerRevision,
     },
   );
 }
@@ -1065,11 +1239,12 @@ const LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE = 100;
  * Complete producer evidence for live windows whose Redis generation was
  * deliberately coalesced before PostgreSQL checkpointing. Each affected
  * window first records the exact Redis revision with
- * `liveCheckpointPending=true`; a later exact durable checkpoint advances a
- * bounded oldest-first batch to the newly proven revision. This keeps the
- * association in the existing governance ledger instead of widening the
- * Redis publication/desired-marker contract, and repeated checkpoints drain
- * any outage backlog without an unbounded hot-path scan.
+ * `liveCheckpointPending=true`; a later exact durable checkpoint settles a
+ * bounded oldest-first batch only when the window already records that same
+ * Redis revision. This keeps the association in the existing governance
+ * ledger instead of widening the Redis publication/desired-marker contract,
+ * and repeated exact callbacks drain an outage backlog without an unbounded
+ * hot-path scan or cross-generation evidence rewrite.
  */
 export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
   seasonId: number;
@@ -1081,6 +1256,8 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
   db?: DbHandle;
 }): Promise<number> {
   const revision = input.revision.trim();
+  const identity = /^([0-9a-f-]{36}):([1-9][0-9]*)$/.exec(revision);
+  const generation = Number(identity?.[2]);
   if (
     !Number.isSafeInteger(input.seasonId) ||
     input.seasonId <= 0 ||
@@ -1088,46 +1265,80 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
     input.eventId <= 0 ||
     !Number.isFinite(input.sourceCheckedAt.getTime()) ||
     !Number.isFinite(input.pgPublishedAt.getTime()) ||
-    revision.length === 0
+    !identity ||
+    !Number.isSafeInteger(generation)
   ) {
     return 0;
   }
   const db = input.db ?? (await getDb());
-  const windows = await db
-    .select({ windowId: freshnessSloWindowsInOps.windowId })
-    .from(freshnessSloWindowsInOps)
-    .where(
-      and(
-        eq(freshnessSloWindowsInOps.contractKey, 'live-snapshot'),
-        eq(freshnessSloWindowsInOps.seasonId, input.seasonId),
-        eq(freshnessSloWindowsInOps.eventId, input.eventId),
-        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED']),
-        isNull(freshnessSloWindowsInOps.recoveredAt),
-        sql`${freshnessSloWindowsInOps.evidence}->>'liveCheckpointPending' = 'true'`,
-      ),
-    )
-    .orderBy(asc(freshnessSloWindowsInOps.dueAt), asc(freshnessSloWindowsInOps.windowId))
-    .limit(LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE);
-  const redisSeenAt = input.redisSeenAt ?? new Date();
-  let updated = 0;
-  for (const window of windows) {
-    const status = await recordFreshnessObservation({
-      windowId: window.windowId,
-      sourceCheckedAt: input.sourceCheckedAt,
-      pgPublishedAt: input.pgPublishedAt,
-      redisSeenAt,
-      producerRevision: revision,
-      redisRevision: revision,
-      completenessStatus: 'COMPLETE',
-      evidence: {
-        liveCheckpointPending: false,
-        liveCheckpointRevision: revision,
-      },
-      db,
-    });
-    if (status !== null) updated += 1;
-  }
-  return updated;
+  return db.transaction(async (tx) => {
+    // Lock and re-read the durable head. An older callback that observed
+    // generation A must not update windows after generation B won the
+    // checkpoint race.
+    const [checkpoint] = await tx
+      .select({
+        publicationId: livePointsPublicationCheckpointsInCompetition.publicationId,
+        generation: livePointsPublicationCheckpointsInCompetition.generation,
+        sourceCheckedAt: livePointsPublicationCheckpointsInCompetition.sourceCheckedAt,
+        checkpointedAt: livePointsPublicationCheckpointsInCompetition.checkpointedAt,
+      })
+      .from(livePointsPublicationCheckpointsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationCheckpointsInCompetition.seasonId, input.seasonId),
+          eq(livePointsPublicationCheckpointsInCompetition.eventId, input.eventId),
+        ),
+      )
+      .for('share')
+      .limit(1);
+    if (
+      !checkpoint ||
+      checkpoint.publicationId !== identity[1] ||
+      checkpoint.generation !== generation ||
+      checkpoint.sourceCheckedAt.getTime() !== input.sourceCheckedAt.getTime() ||
+      checkpoint.checkpointedAt.getTime() !== input.pgPublishedAt.getTime()
+    ) {
+      return 0;
+    }
+
+    const windows = await tx
+      .select({ windowId: freshnessSloWindowsInOps.windowId })
+      .from(freshnessSloWindowsInOps)
+      .where(
+        and(
+          eq(freshnessSloWindowsInOps.contractKey, 'live-snapshot'),
+          eq(freshnessSloWindowsInOps.seasonId, input.seasonId),
+          eq(freshnessSloWindowsInOps.eventId, input.eventId),
+          eq(freshnessSloWindowsInOps.producerRevision, revision),
+          eq(freshnessSloWindowsInOps.redisRevision, revision),
+          inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED']),
+          isNull(freshnessSloWindowsInOps.recoveredAt),
+          sql`${freshnessSloWindowsInOps.evidence}->>'liveCheckpointPending' = 'true'`,
+        ),
+      )
+      .orderBy(asc(freshnessSloWindowsInOps.dueAt), asc(freshnessSloWindowsInOps.windowId))
+      .limit(LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE);
+    const redisSeenAt = input.redisSeenAt ?? new Date();
+    let updated = 0;
+    for (const window of windows) {
+      const status = await recordFreshnessObservation({
+        windowId: window.windowId,
+        sourceCheckedAt: input.sourceCheckedAt,
+        pgPublishedAt: input.pgPublishedAt,
+        redisSeenAt,
+        producerRevision: revision,
+        redisRevision: revision,
+        completenessStatus: 'COMPLETE',
+        evidence: {
+          liveCheckpointPending: false,
+          liveCheckpointRevision: revision,
+        },
+        db: tx,
+      });
+      if (status !== null) updated += 1;
+    }
+    return updated;
+  });
 }
 
 /**

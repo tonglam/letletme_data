@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { getDbClient } from '../db/singleton';
+import { sql } from 'drizzle-orm';
+import { getDb, getDbClient, type DbOrTransaction } from '../db/singleton';
 import { seasonRepository } from '../repositories/seasons';
 import { ValidationError } from '../utils/errors';
 
@@ -41,54 +42,9 @@ function timestampOrNull(value: unknown): Date | null {
   return Number.isFinite(timestamp.getTime()) ? timestamp : null;
 }
 
-/**
- * Read the public-trends publication window from PostgreSQL. The result is a
- * stable producer revision and deliberately contains counts/checksums only;
- * participant rows and identities never leave this authority boundary.
- */
-export async function readPublicTrendFreshnessEvidence(
-  seasonCode: string,
-  eventId: number,
-): Promise<PublicTrendFreshnessEvidence> {
-  const season = await seasonRepository.requireByCode(seasonCode);
-  const client = await getDbClient();
-  const rows = await client<Array<Record<string, unknown>>>`
-    SELECT catalog.tournament_id, catalog.display_name, catalog.sort_order,
-      tournament.setup_status,
-      latest.publication_id, latest.revision, latest.source_checksum, latest.publication_state,
-      latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state,
-      latest.transfers_state, latest.expected_entries, latest.complete_pick_entries,
-      latest.transfer_checkpoint_entries, latest.source_watermark, latest.published_at,
-      COALESCE(snapshot.row_count, 0)::int AS row_count
-    FROM competition.public_league_trends catalog
-    JOIN competition.tournaments tournament
-      ON tournament.season_id = catalog.season_id
-      AND tournament.tournament_id = catalog.tournament_id
-    LEFT JOIN LATERAL (
-      SELECT publication.publication_id, publication.revision, publication.source_checksum,
-        publication.publication_state,
-        publication.ownership_state, publication.captaincy_state,
-        publication.vice_captaincy_state, publication.transfers_state,
-        publication.expected_entries, publication.complete_pick_entries,
-        publication.transfer_checkpoint_entries, publication.source_watermark,
-        publication.published_at
-      FROM reporting.tournament_selection_stat_publications publication
-      WHERE publication.season_id = catalog.season_id
-        AND publication.tournament_id = catalog.tournament_id
-        AND publication.event_id = ${eventId}
-        AND publication.is_active
-      ORDER BY publication.revision DESC
-      LIMIT 1
-    ) latest ON true
-    LEFT JOIN LATERAL (
-      SELECT count(*)::int AS row_count
-      FROM reporting.tournament_selection_stat_rows snapshot_row
-      WHERE snapshot_row.publication_id = latest.publication_id
-    ) snapshot ON true
-    WHERE catalog.season_id = ${season.seasonId}
-      AND catalog.enabled
-    ORDER BY catalog.sort_order, catalog.tournament_id
-  `;
+function buildPublicTrendFreshnessEvidence(
+  rows: readonly Record<string, unknown>[],
+): PublicTrendFreshnessEvidence {
   const cohorts = rows.map((row) => ({
     tournamentId: Number(row.tournament_id),
     displayName: String(row.display_name),
@@ -174,6 +130,86 @@ export async function readPublicTrendFreshnessEvidence(
     complete,
     cohorts,
   };
+}
+
+/**
+ * Transaction-aware form used by the governance terminal transition. With
+ * `lock=true`, catalog enablement and immutable publication evidence cannot
+ * change between validation and the caller's update.
+ */
+export async function readPublicTrendFreshnessEvidenceBySeasonId(
+  seasonId: number,
+  eventId: number,
+  options: Readonly<{ db?: DbOrTransaction; lock?: boolean }> = {},
+): Promise<PublicTrendFreshnessEvidence> {
+  if (!Number.isSafeInteger(seasonId) || seasonId <= 0) {
+    throw new ValidationError('Public Trends season id is invalid', 'PUBLIC_TRENDS_SEASON_INVALID');
+  }
+  if (!Number.isSafeInteger(eventId) || eventId <= 0 || eventId > 38) {
+    throw new ValidationError('Public Trends event id is invalid', 'PUBLIC_TRENDS_EVENT_INVALID');
+  }
+  const db = options.db ?? (await getDb());
+  if (options.lock) {
+    await db.execute(sql`
+      LOCK TABLE fpl.events,
+        competition.public_league_trends,
+        competition.tournaments,
+        reporting.tournament_selection_stat_publications,
+        reporting.tournament_selection_stat_rows
+      IN SHARE MODE
+    `);
+  }
+  const rows = (await db.execute(sql`
+    SELECT catalog.tournament_id, catalog.display_name, catalog.sort_order,
+      tournament.setup_status,
+      latest.publication_id, latest.revision, latest.source_checksum, latest.publication_state,
+      latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state,
+      latest.transfers_state, latest.expected_entries, latest.complete_pick_entries,
+      latest.transfer_checkpoint_entries, latest.source_watermark, latest.published_at,
+      COALESCE(snapshot.row_count, 0)::int AS row_count
+    FROM competition.public_league_trends catalog
+    JOIN competition.tournaments tournament
+      ON tournament.season_id = catalog.season_id
+      AND tournament.tournament_id = catalog.tournament_id
+    LEFT JOIN LATERAL (
+      SELECT publication.publication_id, publication.revision, publication.source_checksum,
+        publication.publication_state,
+        publication.ownership_state, publication.captaincy_state,
+        publication.vice_captaincy_state, publication.transfers_state,
+        publication.expected_entries, publication.complete_pick_entries,
+        publication.transfer_checkpoint_entries, publication.source_watermark,
+        publication.published_at
+      FROM reporting.tournament_selection_stat_publications publication
+      WHERE publication.season_id = catalog.season_id
+        AND publication.tournament_id = catalog.tournament_id
+        AND publication.event_id = ${eventId}
+        AND publication.is_active
+      ORDER BY publication.revision DESC
+      LIMIT 1
+    ) latest ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*)::int AS row_count
+      FROM reporting.tournament_selection_stat_rows snapshot_row
+      WHERE snapshot_row.publication_id = latest.publication_id
+    ) snapshot ON true
+    WHERE catalog.season_id = ${seasonId}
+      AND catalog.enabled
+    ORDER BY catalog.sort_order, catalog.tournament_id
+  `)) as unknown as readonly Record<string, unknown>[];
+  return buildPublicTrendFreshnessEvidence(rows);
+}
+
+/**
+ * Read the public-trends publication window from PostgreSQL. The result is a
+ * stable producer revision and deliberately contains counts/checksums only;
+ * participant rows and identities never leave this authority boundary.
+ */
+export async function readPublicTrendFreshnessEvidence(
+  seasonCode: string,
+  eventId: number,
+): Promise<PublicTrendFreshnessEvidence> {
+  const season = await seasonRepository.requireByCode(seasonCode);
+  return readPublicTrendFreshnessEvidenceBySeasonId(season.seasonId, eventId);
 }
 
 /**

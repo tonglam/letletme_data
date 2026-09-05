@@ -9,8 +9,8 @@ import {
   readPublicTrendFreshnessEvidence,
 } from '../services/trends-catalog.service';
 import {
-  markFreshnessWindowNotApplicable,
   recordFreshnessObservation,
+  retirePublicTrendsIneligibleFreshnessWindow,
   retirePublicTrendsReusedFreshnessWindow,
 } from '../services/data-governance.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
@@ -20,35 +20,41 @@ import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 export const TOURNAMENT_TRENDS_REPAIR_SCHEDULE = '*/5 * * * *';
 
 export function isCompleteReusedTournamentTrendRepair(input: {
-  repairTargetCount: number;
-  succeededCount: number;
-  failedCount: number;
-  publicationStates: readonly string[];
+  enabledTournamentIds: readonly number[];
+  publicationResults: readonly Readonly<{ tournamentId: number; state: string }>[];
   expectedCohortCount: number;
   observedCohortCount: number;
   complete: boolean;
 }): boolean {
+  const enabledTournamentIds = [...new Set(input.enabledTournamentIds)];
+  const resultByTournamentId = new Map(
+    input.publicationResults.map((result) => [result.tournamentId, result.state] as const),
+  );
   return (
     input.complete &&
     input.expectedCohortCount > 0 &&
     input.observedCohortCount === input.expectedCohortCount &&
-    input.repairTargetCount > 0 &&
-    input.succeededCount === input.repairTargetCount &&
-    input.failedCount === 0 &&
-    input.publicationStates.length === input.repairTargetCount &&
-    input.publicationStates.every((state) => state === 'REUSED')
+    enabledTournamentIds.length === input.expectedCohortCount &&
+    enabledTournamentIds.every(
+      (tournamentId) => resultByTournamentId.get(tournamentId) === 'REUSED',
+    )
   );
 }
 
 async function settleTrendsFreshnessNotApplicable(
   freshnessWindowId: number | undefined,
-  reasonCode: string,
+  reasonCode:
+    | 'PUBLIC_TRENDS_NO_CURRENT_EVENT'
+    | 'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS'
+    | 'PUBLIC_TRENDS_NO_ENABLED_COHORTS',
+  eventId?: number,
   evidence?: Record<string, unknown>,
 ) {
   if (freshnessWindowId === undefined) return { freshnessEvidenceRecorded: false } as const;
-  const recorded = await markFreshnessWindowNotApplicable({
+  const recorded = await retirePublicTrendsIneligibleFreshnessWindow({
     windowId: freshnessWindowId,
     reasonCode,
+    ...(eventId === undefined ? {} : { eventId }),
     evidence,
   });
   if (!recorded) throw new Error(`Tournament Trends freshness window rejected ${reasonCode}`);
@@ -77,6 +83,7 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
       ...(await settleTrendsFreshnessNotApplicable(
         input.freshnessWindowId,
         'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS',
+        currentEvent.id,
       )),
     };
   }
@@ -92,6 +99,7 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
       ...(await settleTrendsFreshnessNotApplicable(
         input.freshnessWindowId,
         'PUBLIC_TRENDS_NO_ENABLED_COHORTS',
+        currentEvent.id,
         prepublication,
       )),
       ...prepublication,
@@ -102,23 +110,24 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
   }
   let freshnessEvidenceRecorded = false;
   if (input.freshnessWindowId) {
-    const allTargetsReused = isCompleteReusedTournamentTrendRepair({
-      repairTargetCount: repairTournamentIds.length,
-      succeededCount: result.succeeded,
-      failedCount: result.failed,
-      publicationStates: result.results.map((publication) => publication.state),
+    const enabledTournamentIds = after.cohorts.map((cohort) => cohort.tournamentId);
+    const enabledTargetsReused = isCompleteReusedTournamentTrendRepair({
+      enabledTournamentIds,
+      publicationResults: result.results,
       expectedCohortCount: after.expectedCohortCount,
       observedCohortCount: after.observedCohortCount,
       complete: after.complete,
     });
-    if (allTargetsReused) {
+    if (enabledTargetsReused) {
       const recorded = await retirePublicTrendsReusedFreshnessWindow({
         windowId: input.freshnessWindowId,
         eventId: currentEvent.id,
         expectedCohortCount: after.expectedCohortCount,
         observedCohortCount: after.observedCohortCount,
+        enabledTournamentIds,
+        enabledReusedCount: enabledTournamentIds.length,
         repairTargetCount: repairTournamentIds.length,
-        reusedCount: result.results.length,
+        succeededCount: result.succeeded,
         failedCount: result.failed,
         catalogRevision: after.catalogRevision,
         producerRevision: after.revision,
