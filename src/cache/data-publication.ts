@@ -764,6 +764,30 @@ export async function readActiveDataPublication(
   }
 }
 
+/**
+ * Read only the active manifest identity for operational control paths.
+ *
+ * This deliberately does not fetch or hash every publication item. Consumer
+ * reads and the explicit governance audit retain full item validation; a
+ * frequent health/status request must not turn that audit into a Redis/CPU
+ * hot path.
+ */
+export async function readActiveDataPublicationManifest(
+  scope: DataPublicationScope,
+  redisClient?: Redis,
+): Promise<DataPublicationManifest | null> {
+  assertScope(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  try {
+    const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
+    return manifest && assertManifestMatchesScope(manifest, scope) && manifest.items.length > 0
+      ? manifest
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function retireActiveDataPublication(
   scope: DataPublicationScope,
   redisClient?: Redis,

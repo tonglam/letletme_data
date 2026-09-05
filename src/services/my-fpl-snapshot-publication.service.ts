@@ -166,10 +166,8 @@ export type MyFplSnapshotOperationalStatus = Readonly<{
   invalidationAttempts: number;
   finalSla: 'NOT_DUE' | 'DUE' | 'MET' | 'BREACHED';
   /**
-   * The scheduler/status projection deliberately does not prove the current
-   * canonical scope.  The permanent generation projection will replace this
-   * marker; until then consumers must not interpret the publication metadata
-   * as a fresh completeness audit.
+   * The scheduler/status projection proves the durable generation fence, not
+   * the canonical business rows. Deep scope inspection remains worker-only.
    */
   scopeVerification?: 'UNVERIFIED' | 'VERIFIED';
   scopeGenerationInstalled?: boolean;
@@ -182,12 +180,9 @@ export type MyFplSnapshotOperationalStatus = Readonly<{
  * This query is intentionally limited to the event row, its active durable
  * publication, and the two small outboxes.  It must never read canonical
  * Entries, Tournament tables, immutable snapshot children, or the reporting
- * audit view.  Those are worker-only concerns until the scope-generation
- * projection is installed.
+ * audit view. Those are worker-only concerns.
  */
 export type MyFplFinalizationControlState = Readonly<{
-  /** False only for the P0 projection used before migration 0092. */
-  scopeGenerationInstalled: boolean;
   eventId: number;
   deadlineTime: string | null;
   finished: boolean;
@@ -2564,38 +2559,11 @@ type MyFplFinalizationControlRow = {
 
 async function readMyFplFinalizationControlState(
   season: FplSeasonRef,
-  includeScopeState: boolean,
   eventId?: number,
 ): Promise<readonly MyFplFinalizationControlState[]> {
   const client = await getDbClient();
   const rows = await client.begin(async (tx) => {
     await tx`SET LOCAL statement_timeout = '2s'`;
-    const scopeColumns = includeScopeState
-      ? tx`
-          scope.entry_scope_generation,
-          scope.verified_entry_scope_generation,
-          scope.tournament_scope_generation,
-          scope.verified_tournament_scope_generation,
-          scope.entry_dirty_since,
-          scope.tournament_dirty_since,
-          scope.verified_revision
-        `
-      : tx`
-          NULL::bigint AS entry_scope_generation,
-          NULL::bigint AS verified_entry_scope_generation,
-          NULL::bigint AS tournament_scope_generation,
-          NULL::bigint AS verified_tournament_scope_generation,
-          NULL::timestamptz AS entry_dirty_since,
-          NULL::timestamptz AS tournament_dirty_since,
-          NULL::bigint AS verified_revision
-        `;
-    const scopeJoin = includeScopeState
-      ? tx`
-          LEFT JOIN competition.my_fpl_snapshot_scope_state scope
-            ON scope.season_id = event.season_id
-           AND scope.event_id = event.event_id
-        `
-      : tx``;
     const eventFilter = eventId === undefined ? tx`` : tx`AND event.event_id = ${eventId}`;
     return tx<MyFplFinalizationControlRow[]>`
       SELECT event.event_id,
@@ -2623,7 +2591,13 @@ async function readMyFplFinalizationControlState(
              COALESCE(invalidation.pending_invalidation_count, 0)::integer
                AS pending_invalidation_count,
              COALESCE(invalidation.invalidation_attempts, 0)::integer AS invalidation_attempts,
-             ${scopeColumns}
+             scope.entry_scope_generation,
+             scope.verified_entry_scope_generation,
+             scope.tournament_scope_generation,
+             scope.verified_tournament_scope_generation,
+             scope.entry_dirty_since,
+             scope.tournament_dirty_since,
+             scope.verified_revision
       FROM fpl.events event
       LEFT JOIN competition.my_fpl_snapshot_publications publication
         ON publication.season_id = event.season_id
@@ -2650,7 +2624,9 @@ async function readMyFplFinalizationControlState(
           WHERE invalidation_row.season_id = event.season_id
             AND invalidation_row.event_id = event.event_id
       ) invalidation ON TRUE
-      ${scopeJoin}
+      LEFT JOIN competition.my_fpl_snapshot_scope_state scope
+        ON scope.season_id = event.season_id
+       AND scope.event_id = event.event_id
       WHERE event.season_id = ${season.seasonId}
         ${eventFilter}
       ORDER BY event.event_id
@@ -2658,7 +2634,6 @@ async function readMyFplFinalizationControlState(
   });
 
   return rows.map((row) => ({
-    scopeGenerationInstalled: includeScopeState,
     eventId: row.event_id,
     deadlineTime: iso(row.deadline_time),
     finished: row.finished,
@@ -2692,39 +2667,26 @@ async function readMyFplFinalizationControlState(
   }));
 }
 
-/**
- * P0 control query. It is deployable before the scope-generation migration:
- * the shared reader selects the no-scope branch and terminal scope remains
- * unverified.
- */
 export async function getMyFplFinalizationControlState(
   season: FplSeasonRef,
 ): Promise<readonly MyFplFinalizationControlState[]> {
-  return readMyFplFinalizationControlState(season, false);
-}
-
-/** P1 control query after migration 0092 exposes the durable scope fence. */
-export async function getMyFplFinalizationControlStateWithScope(
-  season: FplSeasonRef,
-): Promise<readonly MyFplFinalizationControlState[]> {
-  return readMyFplFinalizationControlState(season, true);
+  return readMyFplFinalizationControlState(season);
 }
 
 /** Read one event's scope fence without scanning the rest of the season. */
-export async function getMyFplFinalizationControlStateWithScopeForEvent(
+export async function getMyFplFinalizationControlStateForEvent(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<MyFplFinalizationControlState | null> {
-  return (await readMyFplFinalizationControlState(season, true, eventId))[0] ?? null;
+  return (await readMyFplFinalizationControlState(season, eventId))[0] ?? null;
 }
 
 /**
  * Verify a clean FINAL generation fence without inspecting canonical scope
  * tables or snapshot children. The no-op caller supplies the generation it
  * observed before deciding that the active publication can be reused. The
- * The row lock is taken with SELECT FOR UPDATE, so a concurrent mutation
- * either waits and fails the predicate or makes PostgreSQL retry the
- * repeatable-read transaction without generating a no-op row version.
+ * row lock is taken with SELECT FOR UPDATE, so a concurrent mutation either
+ * waits and fails the predicate or is observed before a no-op is returned.
  */
 export async function verifyMyFplSnapshotScopeGeneration(input: {
   season: FplSeasonRef;
@@ -2743,11 +2705,7 @@ export async function verifyMyFplSnapshotScopeGeneration(input: {
     throw new Error('My FPL scope generation verification input is invalid');
   }
   const client = await getDbClient();
-  const lockScopes = [
-    myFplSnapshotSeasonLockScope(input.season.seasonId),
-    myFplSnapshotEventLockScope(input.season.seasonId, input.eventId),
-  ] as const;
-  return runMyFplCaptureTransaction(client, lockScopes, async (tx) => {
+  return client.begin(async (tx) => {
     await tx`SET LOCAL statement_timeout = '2s'`;
     const rows = await tx<{ event_id: number }[]>`
       SELECT scope.event_id
@@ -2779,7 +2737,7 @@ export async function verifyMyFplSnapshotScopeGeneration(input: {
       FOR UPDATE OF scope
     `;
     return rows.length === 1;
-  });
+  }) as Promise<boolean>;
 }
 
 function resolveMyFplSnapshotScopeState(
@@ -2830,14 +2788,13 @@ function resolveMyFplSnapshotScopeState(
 /**
  * Status projection for `/jobs/status`.  It carries the durable publication
  * metadata for operators while keeping canonical scope generation state
- * separate from the deep audit. It is intentionally separate from
- * `getMyFplSnapshotOperationalStatus`, whose deep readiness audit is reserved
- * for the single-event finalization worker and compatibility tests.
+ * separate from the deep audit. It is intentionally separate from the
+ * explicit diagnostic below, which is never used by the scheduler or status
+ * endpoint.
  */
 function resolveMyFplSnapshotControlStatus(
   controls: readonly MyFplFinalizationControlState[],
   now: Date,
-  scopeGenerationInstalled: boolean,
 ): readonly MyFplSnapshotOperationalStatus[] {
   return controls.map((row) => {
     const dataCheckedAt = row.dataCheckedAt;
@@ -2938,31 +2895,25 @@ function resolveMyFplSnapshotControlStatus(
       invalidationAttempts: row.invalidationAttempts,
       finalSla,
       scopeVerification: scopeVerified || row.activeKind !== 'FINAL' ? 'VERIFIED' : 'UNVERIFIED',
-      scopeGenerationInstalled,
+      scopeGenerationInstalled: true,
       scopeState,
     };
   });
 }
 
-/** P0 status projection; terminal scope is explicitly UNVERIFIED. */
 export async function getMyFplSnapshotControlStatus(
   season: FplSeasonRef,
   now = new Date(),
 ): Promise<readonly MyFplSnapshotOperationalStatus[]> {
   const controls = await getMyFplFinalizationControlState(season);
-  return resolveMyFplSnapshotControlStatus(controls, now, false);
+  return resolveMyFplSnapshotControlStatus(controls, now);
 }
 
-/** P1 status projection after migration 0092 exposes scope generations. */
-export async function getMyFplSnapshotControlStatusWithScope(
-  season: FplSeasonRef,
-  now = new Date(),
-): Promise<readonly MyFplSnapshotOperationalStatus[]> {
-  const controls = await getMyFplFinalizationControlStateWithScope(season);
-  return resolveMyFplSnapshotControlStatus(controls, now, true);
-}
-
-export async function getMyFplSnapshotOperationalStatus(
+/**
+ * Explicit deep integrity audit for diagnostics and integration verification.
+ * Never call this from scheduler ticks, health/status endpoints, or read paths.
+ */
+export async function auditMyFplSnapshotIntegrity(
   season: FplSeasonRef,
   now = new Date(),
 ): Promise<readonly MyFplSnapshotOperationalStatus[]> {
@@ -3247,7 +3198,6 @@ async function captureMyFplSnapshotOnce(
   eventId: number,
   kind: MyFplSnapshotKind,
   options: MyFplSnapshotCaptureOptions = {},
-  useScopeGeneration = false,
 ): Promise<MyFplSnapshotCaptureResult> {
   const now = options.now ?? new Date();
   const snapshotDate = options.snapshotDate ?? utc8DateKey(now);
@@ -3273,10 +3223,19 @@ async function captureMyFplSnapshotOnce(
   // template serializer (which rejects Date at runtime).
   const nowIso = now.toISOString();
   const supersededBeforeIso = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
-  const lockScopes = [
-    myFplSnapshotSeasonLockScope(season.seasonId),
-    myFplSnapshotEventLockScope(season.seasonId, eventId),
-  ] as const;
+  // FINAL consistency is fenced by the per-event generation CAS below. It
+  // must not hold a season-wide advisory lock while it reads and builds every
+  // entry/tournament payload: that would block unrelated production writes
+  // for the full duration of a large capture. PROVISIONAL still uses the
+  // existing season -> event lock order because it has no terminal generation
+  // fence and remains mutable.
+  const lockScopes =
+    kind === 'FINAL'
+      ? []
+      : [
+          myFplSnapshotSeasonLockScope(season.seasonId),
+          myFplSnapshotEventLockScope(season.seasonId, eventId),
+        ];
   return runMyFplCaptureTransaction(client, lockScopes, async (tx) => {
     const eventRows = await tx<
       {
@@ -3317,7 +3276,7 @@ async function captureMyFplSnapshotOnce(
     // short row update while this worker is building the publication.  The
     // final CAS below then rejects a capture that raced a real scope change.
     let scopeGenerationAtStart: MyFplSnapshotScopeGeneration | null = null;
-    if (kind === 'FINAL' && useScopeGeneration) {
+    if (kind === 'FINAL') {
       await tx`
         INSERT INTO competition.my_fpl_snapshot_scope_state (season_id, event_id)
         VALUES (${season.seasonId}, ${eventId})
@@ -5064,26 +5023,11 @@ export function captureMyFplSnapshot(
   kind: MyFplSnapshotKind,
   options: MyFplSnapshotCaptureOptions = {},
 ): Promise<MyFplSnapshotCaptureResult> {
+  // FINAL is the rebuild-only path: stable workers return before this call,
+  // while a missing or dirty publication is rebuilt under the generation CAS.
+  // There is intentionally no legacy FINAL entrypoint without that fence.
   return serializeMyFplSnapshotCapture(myFplSnapshotEventLockScope(season.seasonId, eventId), () =>
     captureMyFplSnapshotOnce(season, eventId, kind, options),
-  );
-}
-
-/**
- * P1 finalization capture with a durable scope-generation CAS.
- *
- * This is a full rebuild entrypoint, not a health probe. The finalization
- * worker must use verifyMyFplSnapshotScopeGeneration for its normal
- * lightweight no-op decision and call this function only for a missing,
- * dirty, or explicitly overridden FINAL publication.
- */
-export function captureMyFplSnapshotWithScopeGeneration(
-  season: FplSeasonRef,
-  eventId: number,
-  options: MyFplSnapshotCaptureOptions = {},
-): Promise<MyFplSnapshotCaptureResult> {
-  return serializeMyFplSnapshotCapture(myFplSnapshotEventLockScope(season.seasonId, eventId), () =>
-    captureMyFplSnapshotOnce(season, eventId, 'FINAL', options, true),
   );
 }
 

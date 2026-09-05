@@ -178,7 +178,7 @@ describe('standalone scheduler registry', () => {
     ]);
   });
 
-  test('adds one stable repair identity only after delivery recovery', () => {
+  test('uses one stable identity for one My FPL scope generation', () => {
     const base = {
       eventId: 2,
       dataCheckedAt: '2026-09-01T13:06:20.040Z',
@@ -189,25 +189,6 @@ describe('standalone scheduler registry', () => {
     );
     expect(myFplFinalizationPeriodKey(base)).toBe(
       'final-2-2026-09-01T13:06:20.040Z-entries-tournaments-na0',
-    );
-    expect(
-      myFplFinalizationPeriodKey({
-        ...base,
-        repairFence: 'failed-obligation-delivery-recovered',
-      }),
-    ).toBe(
-      'final-2-2026-09-01T13:06:20.040Z-entries-tournaments-na0-repair-failed-obligation-delivery-recovered',
-    );
-    expect(
-      myFplFinalizationPeriodKey({
-        ...base,
-        repairFence: 'failed-obligation-delivery-recovered',
-      }),
-    ).toBe(
-      myFplFinalizationPeriodKey({
-        ...base,
-        repairFence: 'failed-obligation-delivery-recovered',
-      }),
     );
   });
 

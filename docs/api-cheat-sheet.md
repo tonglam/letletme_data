@@ -73,6 +73,8 @@ the hot read path.
 ```bash
 curl "$LETLETME_DATA_URL/internal/live/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
 curl "$LETLETME_DATA_URL/jobs/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl "$LETLETME_DATA_URL/jobs/status?window=15m&section=liveFinalRetention" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY"
 ```
 
 The global live lane observes event-live and fixtures together every 30 seconds while an event is
@@ -145,6 +147,10 @@ Mutation bodies include the verified `adminEntryId` contract documented by the W
 ```bash
 curl "$LETLETME_DATA_URL/jobs"
 curl "$LETLETME_DATA_URL/jobs/status" -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl "$LETLETME_DATA_URL/jobs/status?window=15m&section=myFplIntegrity" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY"
+curl "$LETLETME_DATA_URL/jobs/status?window=15m&section=tournamentReviewV2&watchEntryId=6953" \
+  -H "x-api-key: $LETLETME_DATA_API_KEY"
 curl -X POST "$LETLETME_DATA_URL/jobs/core-snapshot-sync/trigger" -H "x-api-key: $LETLETME_DATA_API_KEY"
 curl -X POST "$LETLETME_DATA_URL/jobs/live-snapshot/trigger" -H "x-api-key: $LETLETME_DATA_API_KEY"
 curl -X POST "$LETLETME_DATA_URL/jobs/player-prices/trigger" \

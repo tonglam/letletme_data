@@ -461,6 +461,21 @@ export const schedulerObligationsInOps = ops.table(
     index('scheduler_obligations_pending_job_scope_idx')
       .on(table.jobName, table.scopeKey, table.periodKey, table.obligationId)
       .where(sql`status IN ('pending', 'failed')`),
+    index('scheduler_obligations_latest_wins_idx')
+      .using(
+        'btree',
+        table.jobName.asc(),
+        table.scopeKey.asc(),
+        sql`(CASE
+          WHEN evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
+            AND (evidence->>'scheduledDueAtMs')::numeric BETWEEN 0 AND 8640000000000000
+            THEN to_timestamp((evidence->>'scheduledDueAtMs')::double precision / 1000)
+          ELSE due_at
+        END)`,
+        table.periodKey.asc(),
+        table.obligationId.asc(),
+      )
+      .where(sql`status IN ('pending', 'failed', 'enqueued')`),
     check(
       'scheduler_obligations_status_check',
       sql`status = ANY (ARRAY['pending'::text, 'enqueued'::text, 'running'::text, 'retrying'::text, 'succeeded'::text, 'failed'::text, 'skipped'::text, 'irrecoverable'::text])`,

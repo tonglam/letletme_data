@@ -1861,7 +1861,8 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
 export async function schedulerObligationStatus(input: {
   jobName: string;
   scopeKey: string;
-  db?: DbHandle;
+  db?: DbOrTransaction;
+  statementTimeoutMs?: number;
 }): Promise<{
   latest: {
     periodKey: string;
@@ -1877,6 +1878,18 @@ export async function schedulerObligationStatus(input: {
   overdue: boolean;
   consecutiveUnsuccessfulCycles: number;
 }> {
+  if (input.db === undefined && input.statementTimeoutMs !== undefined) {
+    if (!Number.isSafeInteger(input.statementTimeoutMs) || input.statementTimeoutMs <= 0) {
+      throw new Error('Scheduler obligation status timeout must be a positive integer');
+    }
+    const db = await getDb();
+    return db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT set_config('statement_timeout', ${`${input.statementTimeoutMs}ms`}, true)`,
+      );
+      return schedulerObligationStatus({ ...input, db: tx, statementTimeoutMs: undefined });
+    });
+  }
   const db = input.db ?? (await getDb());
   const immutableDueAt = immutableScheduledDueAtSql();
   const rows = await db

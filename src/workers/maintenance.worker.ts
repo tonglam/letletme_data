@@ -23,13 +23,12 @@ import {
 } from '../jobs/entry-sync-enqueue';
 import { enqueueTournamentRosterSync } from '../jobs/tournament-sync.jobs';
 import {
-  captureMyFplSnapshotWithScopeGeneration,
   captureMyFplSnapshot,
   assessMyFplFinalizationReadiness,
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
-  getMyFplFinalizationControlStateWithScopeForEvent,
+  getMyFplFinalizationControlStateForEvent,
   invalidateMyFplSnapshotRedisManifest,
   isMyFplSnapshotRedisManifestForPublication,
   MyFplSnapshotIncompleteError,
@@ -386,14 +385,14 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           // calls the deep readiness audit or full snapshot capture.
           const finalizationControl =
             snapshotKind === 'FINAL'
-              ? await getMyFplFinalizationControlStateWithScopeForEvent(season, eventId)
+              ? await getMyFplFinalizationControlStateForEvent(season, eventId)
               : null;
           const activeFinalScopeGenerationVerified = Boolean(
             snapshotKind === 'FINAL' &&
               !hasExplicitFinalOverride &&
               active &&
               active.kind === 'FINAL' &&
-              finalizationControl?.scopeGenerationInstalled &&
+              finalizationControl &&
               finalizationControl.activeRevision === active.revision &&
               finalizationControl.entryScopeGeneration !== null &&
               finalizationControl.entryScopeGeneration ===
@@ -628,10 +627,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               ? { idempotencyKey: job.data.snapshotIdempotencyKey }
               : {}),
           };
-          const capture =
-            snapshotKind === 'FINAL'
-              ? await captureMyFplSnapshotWithScopeGeneration(season, eventId, captureOptions)
-              : await captureMyFplSnapshot(season, eventId, snapshotKind, captureOptions);
+          const capture = await captureMyFplSnapshot(season, eventId, snapshotKind, captureOptions);
           // An idempotent FINAL override may resolve to its original inactive
           // publication after a newer revision has become active. Delivery
           // evidence must certify the current active publication, not the

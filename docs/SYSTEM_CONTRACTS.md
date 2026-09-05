@@ -45,7 +45,7 @@ cannot replace or remove the last accepted complete publication.
    boundary.
 
 The My Tournament Review V2.1 producer checkpoint is exposed only through the
-service-authenticated `GET /jobs/status` response under `tournamentReviewV2`.
+service-authenticated `GET /jobs/status?section=tournamentReviewV2` response.
 Operators may add `watchEntryId=6953` for a bounded watch list. Data resolves
 that FPL Entry ID to up to 100 tournament memberships before returning safe
 state/count/head-parity/freshness evidence for every matched tournament; an
@@ -57,7 +57,8 @@ The aggregate status remains global and is not replaced by the entry watch.
 The scheduler reserves a durable obligation before dispatching a BullMQ job.
 BullMQ is a delivery mechanism and retained history, not the source of
 schedule truth or business completion. `GET /jobs` is generated from the
-registry and explicit manual adapters; `GET /jobs/status` is protected.
+registry and explicit manual adapters; `GET /jobs/status` is a protected,
+sectioned control projection and never runs the deep MyFPL scope audit.
 
 Live Points V2 has no manager-live facade. Data owns coherent FPL publication and
 checkpoint obligations; GraphQL owns pure local score projection. Entry live

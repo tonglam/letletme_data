@@ -14,6 +14,7 @@ import { queueRedisSingleton } from './queues/redis';
 import { createShutdownController, installShutdownSignals } from './utils/shutdown-controller';
 
 const SCHEDULER_INTERVAL_MS = 30_000;
+const PUBLICATION_RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 getConfig();
 if (getConfig().NODE_ENV === 'production') await databaseSingleton.connect();
@@ -62,17 +63,24 @@ async function runPass(): Promise<void> {
     const now = new Date();
     const season = await seasonRepository.findCurrent();
     const halfMinute = Math.floor(now.getTime() / SCHEDULER_INTERVAL_MS);
+    const publicationReconcileBucket = Math.floor(
+      now.getTime() / PUBLICATION_RECONCILE_INTERVAL_MS,
+    );
+    const publicationReconcileDue =
+      now.getTime() % PUBLICATION_RECONCILE_INTERVAL_MS < SCHEDULER_INTERVAL_MS;
     const minute = Math.floor(now.getTime() / 60_000);
     if (getConfig().QUEUE_LANES_V2_ENABLED) {
-      await runIndependentSchedulerStage(
-        'publication-reconcile-enqueue',
-        () =>
-          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
-            jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
-            deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
-          }),
-        stageState,
-      );
+      if (publicationReconcileDue) {
+        await runIndependentSchedulerStage(
+          'publication-reconcile-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
+              jobId: `governance-publication-reconcile-${season.seasonCode}-${publicationReconcileBucket}`,
+              deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
+            }),
+          stageState,
+        );
+      }
       await runIndependentSchedulerStage(
         'data-publication-outbox-enqueue',
         () =>
@@ -121,15 +129,17 @@ async function runPass(): Promise<void> {
         );
       }
     } else {
-      await runIndependentSchedulerStage(
-        'publication-reconcile-enqueue',
-        () =>
-          enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
-            jobId: `governance-publication-reconcile-${season.seasonCode}-${halfMinute}`,
-            deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
-          }),
-        stageState,
-      );
+      if (publicationReconcileDue) {
+        await runIndependentSchedulerStage(
+          'publication-reconcile-enqueue',
+          () =>
+            enqueueDataGovernanceJob(season, DATA_GOVERNANCE_JOBS.PUBLICATION_RECONCILE, {
+              jobId: `governance-publication-reconcile-${season.seasonCode}-${publicationReconcileBucket}`,
+              deduplicationId: `governance-publication-reconcile-${season.seasonCode}`,
+            }),
+          stageState,
+        );
+      }
       await runIndependentSchedulerStage(
         'data-publication-outbox-enqueue',
         () =>

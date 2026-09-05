@@ -27,7 +27,7 @@ import { schedulerQueueLaneOverride, schedulerRegistry } from '../scheduler/job-
 import {
   getActiveMyFplPublication,
   getActiveMyFplSnapshotRedisManifest,
-  getMyFplSnapshotControlStatusWithScope,
+  getMyFplSnapshotControlStatus,
   isMyFplSnapshotRedisManifestForPublication,
 } from './my-fpl-snapshot-publication.service';
 import { getTournamentReviewV2OperationalStatus } from './tournament-review-publication.service';
@@ -145,7 +145,7 @@ function retentionFamilyStatus(value: unknown): Record<string, unknown> {
   };
 }
 
-async function getLiveFinalRetentionOperationalStatus(
+export async function getLiveFinalRetentionOperationalStatus(
   season: Awaited<ReturnType<typeof seasonRepository.findCurrent>>,
 ): Promise<Record<string, unknown>> {
   const checkedAt = new Date().toISOString();
@@ -374,7 +374,7 @@ export async function getJobsStatus(
     // control projection and never trigger the worker-only canonical scope
     // audit. Before scope generations are installed the projection marks
     // scope verification as UNVERIFIED; it must not claim COMPLETE.
-    getMyFplSnapshotControlStatusWithScope(season),
+    getMyFplSnapshotControlStatus(season),
     getTournamentReviewV2OperationalStatus(season, watchEntryId).catch(() => ({
       schemaVersion: 'my-tournament-review-v2.1' as const,
       metricVersion: 'settled-review-v2',

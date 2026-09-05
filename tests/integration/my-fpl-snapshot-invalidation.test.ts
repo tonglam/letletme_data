@@ -17,7 +17,7 @@ import {
   dispatchMyFplSnapshotInvalidationOutbox,
 } from '../../src/services/my-fpl-snapshot-invalidation.service';
 import {
-  getMyFplSnapshotOperationalStatus,
+  auditMyFplSnapshotIntegrity,
   myFplSnapshotRedisManifestKey,
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
@@ -250,7 +250,7 @@ describe('My FPL snapshot invalidation outbox', () => {
     const failed = await failedDispatcher({ outboxIds: [outboxId], limit: 1 });
     expect(failed).toMatchObject({ claimed: 1, failed: 1, delivered: 0 });
     expect((await readOutbox(outboxId!)).status).toBe('FAILED');
-    const failedOperationalStatus = (await getMyFplSnapshotOperationalStatus(SEASON)).find(
+    const failedOperationalStatus = (await auditMyFplSnapshotIntegrity(SEASON)).find(
       (status) => status.eventId === EVENT_ID,
     );
     expect(failedOperationalStatus).toMatchObject({

@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 
 import {
   clearLiveMatchCheckpointDesiredV3,
+  liveMatchActiveEventKey,
   LIVE_MATCHES_REDIS_PREFIX,
   markLiveMatchDeskCheckpointedV3,
   markLiveMatchDetailCheckpointedV3,
@@ -40,6 +41,7 @@ export type LiveMatchCheckpointHead = Readonly<{
   publicationId: string;
   generation: number;
   checkpointedAt: Date;
+  finalized: boolean;
 }>;
 
 type LiveMatchCurrent = Readonly<{
@@ -121,25 +123,19 @@ async function scanKeys(redis: Redis, pattern: string): Promise<readonly string[
 async function listRedisScopes(season: string): Promise<readonly LiveMatchCheckpointScope[]> {
   if (!/^\d{4}$/.test(season)) throw new Error('Live Match reconciler season is invalid');
   const redis = await redisSingleton.getClient();
-  const keys = (
-    await Promise.all([
-      scanKeys(redis, `${LIVE_MATCHES_REDIS_PREFIX}:desk:${season}:*:active`),
-      scanKeys(redis, `${LIVE_MATCHES_REDIS_PREFIX}:detail:${season}:*:active`),
-      scanKeys(redis, `${LIVE_MATCHES_REDIS_PREFIX}:checkpoint:${season}:*:*`),
-    ])
-  ).flat();
+  const [activeEventRaw, keys] = await Promise.all([
+    redis.get(liveMatchActiveEventKey(season)),
+    scanKeys(redis, `${LIVE_MATCHES_REDIS_PREFIX}:checkpoint:${season}:*:*`),
+  ]);
   const scopes = new Map<string, LiveMatchCheckpointScope>();
-  const activePattern = /^llm:data:v3:fpl:live-match:(desk|detail):(\d{4}):([1-9][0-9]*):active$/;
   const desiredPattern =
     /^llm:data:v3:fpl:live-match:checkpoint:(\d{4}):([1-9][0-9]*):(desk|detail)$/;
+  const activeEventId = Number(activeEventRaw);
+  if (Number.isSafeInteger(activeEventId) && activeEventId > 0) {
+    scopes.set(scopeKey(activeEventId, 'desk'), { eventId: activeEventId, kind: 'desk' });
+    scopes.set(scopeKey(activeEventId, 'detail'), { eventId: activeEventId, kind: 'detail' });
+  }
   for (const key of keys) {
-    const active = activePattern.exec(key);
-    if (active?.[2] === season) {
-      const kind = active[1] as MatchCheckpointKind;
-      const eventId = Number(active[3]);
-      scopes.set(scopeKey(eventId, kind), { eventId, kind });
-      continue;
-    }
     const desired = desiredPattern.exec(key);
     if (desired?.[1] === season) {
       const eventId = Number(desired[2]);
@@ -164,6 +160,7 @@ async function readCheckpointHeads(
         publicationId: liveMatchDeskCheckpointsInFpl.publicationId,
         generation: liveMatchDeskCheckpointsInFpl.generation,
         checkpointedAt: liveMatchDeskCheckpointsInFpl.checkpointedAt,
+        state: liveMatchDeskCheckpointsInFpl.state,
       })
       .from(liveMatchDeskCheckpointsInFpl)
       .where(eq(liveMatchDeskCheckpointsInFpl.seasonId, season.seasonId)),
@@ -173,6 +170,7 @@ async function readCheckpointHeads(
         publicationId: liveMatchDetailCheckpointsInFpl.publicationId,
         generation: liveMatchDetailCheckpointsInFpl.generation,
         checkpointedAt: liveMatchDetailCheckpointsInFpl.checkpointedAt,
+        state: liveMatchDetailCheckpointsInFpl.state,
       })
       .from(liveMatchDetailCheckpointsInFpl)
       .where(eq(liveMatchDetailCheckpointsInFpl.seasonId, season.seasonId)),
@@ -187,6 +185,7 @@ async function readCheckpointHeads(
         publicationId: row.publicationId,
         generation: row.generation,
         checkpointedAt: row.checkpointedAt,
+        finalized: row.state === 'FINALIZED',
       });
     }
   }
@@ -252,7 +251,49 @@ export async function reconcileLiveMatchCheckpointObligationsV3(
         continue;
       }
       const publication = current.publication;
+      const head = heads.get(scopeKey(scope.eventId, scope.kind));
+      if (head?.finalized && !sameIdentity(head, publication)) {
+        // PostgreSQL FINAL is immutable authority. A conflicting Redis FINAL
+        // must be repaired through the protected restore path; repeatedly
+        // enqueueing a checkpoint can never overwrite the durable final row.
+        results.push({
+          ...scope,
+          status: 'blocked-final',
+          publicationId: head.publicationId,
+          generation: head.generation,
+        });
+        continue;
+      }
       if (existingDesired?.final === true && !sameIdentity(existingDesired, publication)) {
+        if (head?.finalized && sameIdentity(head, publication)) {
+          const durable = await dependencies.readCheckpoint(season, scope.eventId, scope.kind);
+          if (durable && sameIdentity(durable.publication, publication)) {
+            if (publication.checkpointedAt === null) {
+              const marked = await dependencies.markCheckpointed(
+                scope.kind,
+                publication,
+                head.checkpointedAt,
+              );
+              if (!marked) {
+                results.push({
+                  ...scope,
+                  status: 'changed',
+                  publicationId: publication.publicationId,
+                  generation: publication.generation,
+                });
+                continue;
+              }
+            }
+            await dependencies.clearDesired(existingDesired);
+            results.push({
+              ...scope,
+              status: 'matched',
+              publicationId: publication.publicationId,
+              generation: publication.generation,
+            });
+            continue;
+          }
+        }
         results.push({
           ...scope,
           status: 'blocked-final',
@@ -274,7 +315,6 @@ export async function reconcileLiveMatchCheckpointObligationsV3(
         });
         continue;
       }
-      const head = heads.get(scopeKey(scope.eventId, scope.kind));
       if (head && sameIdentity(head, publication)) {
         const durable = await dependencies.readCheckpoint(season, scope.eventId, scope.kind);
         if (!durable || !sameIdentity(durable.publication, publication)) {
