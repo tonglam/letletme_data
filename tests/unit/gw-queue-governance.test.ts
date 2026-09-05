@@ -31,7 +31,9 @@ import {
   contractHasConsumerEvidence,
   dataContractRegistry,
   canonicalQueueCatalog,
+  MANUAL_ONLY_CONTRACT_JOBS,
   queueRuntimeCatalog,
+  registeredSchedulerJobNames,
   type DataContract,
 } from '../../src/domain/data-contracts';
 import { MAINTENANCE_JOBS } from '../../src/queues/maintenance.queue';
@@ -165,6 +167,9 @@ describe('GW queue and data governance primitives', () => {
       delayed: 0,
       prioritized: 0,
       waitingChildren: 0,
+      consumerPaused: false,
+      pausedCount: 0,
+      pauseOwnerState: 'NONE' as const,
       failed: 0,
       completed: 100,
       runnable: 0,
@@ -228,6 +233,9 @@ describe('GW queue and data governance primitives', () => {
           delayed: 0,
           prioritized: 0,
           waitingChildren: 0,
+          consumerPaused: false,
+          pausedCount: 0,
+          pauseOwnerState: 'NONE' as const,
           failed: 0,
           completed: 0,
           runnable: 0,
@@ -432,7 +440,10 @@ describe('GW queue and data governance primitives', () => {
       dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
     );
     expect(registryJobs.size).toBeGreaterThanOrEqual(35);
-    expect(() => assertDataContractRegistry([...registryJobs])).not.toThrow();
+    const registeredJobs = registeredSchedulerJobNames();
+    const manualOnlyJobs = new Set<string>(MANUAL_ONLY_CONTRACT_JOBS);
+    expect(registeredJobs.every((jobName) => !manualOnlyJobs.has(jobName))).toBe(true);
+    expect(() => assertDataContractRegistry(registeredJobs)).not.toThrow();
     const contracts: readonly DataContract[] = dataContractRegistry;
     expect(
       contracts
@@ -447,11 +458,19 @@ describe('GW queue and data governance primitives', () => {
       },
     });
     expect(
+      dataContractRegistry.find((contract) => contract.contractKey === 'public-league-trends'),
+    ).toMatchObject({
+      freshnessEvidence: 'checkpoint',
+      freshnessPublicationMustFollowEligibility: true,
+      freshnessJobs: ['tournament-trends-repair'],
+    });
+    expect(
+      contracts.find((contract) => contract.contractKey === 'live-snapshot')
+        ?.freshnessPublicationMustFollowEligibility,
+    ).toBeUndefined();
+    expect(
       dataContractRegistry
-        .filter(
-          (contract) =>
-            contract.visibility === 'internal-only' || contract.visibility === 'excluded',
-        )
+        .filter((contract) => contract.visibility === 'internal-only')
         .every((contract) => contract.visibilityReason?.trim().length),
     ).toBe(true);
     expect(
@@ -488,6 +507,7 @@ describe('GW queue and data governance primitives', () => {
         eligible: true,
         consumerEvidenceRequired: false,
         redisEvidenceRequired: false,
+        eligibleAt: timestamp,
         dueAt: new Date('2026-08-27T00:05:00.000Z'),
         sourceCheckedAt: timestamp,
         pgPublishedAt: timestamp,
@@ -495,6 +515,62 @@ describe('GW queue and data governance primitives', () => {
         expectedCount: 15,
         observedCount: 15,
         completeness: 'COMPLETE',
+      }),
+    ).toBe('MET');
+  });
+
+  test('rejects producer evidence from before the reserved freshness window', () => {
+    const observation = {
+      eligible: true,
+      consumerEvidenceRequired: false,
+      redisEvidenceRequired: false,
+      eligibleAt: new Date('2026-08-27T00:00:00.000Z'),
+      dueAt: new Date('2026-08-27T00:05:00.000Z'),
+      now: new Date('2026-08-27T00:01:00.000Z'),
+      sourceCheckedAt: new Date('2026-08-26T23:59:59.999Z'),
+      pgPublishedAt: new Date('2026-08-27T00:00:01.000Z'),
+      producerRevision: 'checkpoint-1',
+      expectedCount: 15,
+      observedCount: 15,
+      completeness: 'COMPLETE' as const,
+    };
+    expect(evaluateFreshnessWindow(observation)).toBe('PENDING');
+    expect(applyFreshnessObservation('BREACHED', observation).recovered).toBe(false);
+    expect(
+      evaluateFreshnessWindow({
+        ...observation,
+        sourceCheckedAt: observation.eligibleAt,
+      }),
+    ).toBe('MET');
+  });
+
+  test('requires a within-window PostgreSQL publication only for opted-in contracts', () => {
+    const observation = {
+      eligible: true,
+      consumerEvidenceRequired: false,
+      redisEvidenceRequired: false,
+      eligibleAt: new Date('2026-08-27T00:00:00.000Z'),
+      dueAt: new Date('2026-08-27T00:05:00.000Z'),
+      now: new Date('2026-08-27T00:01:00.000Z'),
+      sourceCheckedAt: new Date('2026-08-27T00:00:01.000Z'),
+      pgPublishedAt: new Date('2026-08-26T23:59:59.999Z'),
+      producerRevision: 'unchanged-publication-1',
+      expectedCount: 15,
+      observedCount: 15,
+      completeness: 'COMPLETE' as const,
+    };
+    expect(evaluateFreshnessWindow(observation)).toBe('MET');
+    expect(
+      evaluateFreshnessWindow({
+        ...observation,
+        freshnessPublicationMustFollowEligibility: true,
+      }),
+    ).toBe('PENDING');
+    expect(
+      evaluateFreshnessWindow({
+        ...observation,
+        freshnessPublicationMustFollowEligibility: true,
+        pgPublishedAt: observation.sourceCheckedAt,
       }),
     ).toBe('MET');
   });

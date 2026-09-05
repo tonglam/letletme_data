@@ -11,7 +11,7 @@ import {
   livePointsPublicationSeedClaimsInCompetition,
   tournamentsInCompetition,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { EventLive } from '../domain/event-lives';
 import type { EventLiveExplain } from '../domain/event-live-explains';
@@ -822,8 +822,9 @@ export async function reclaimAbandonedPromotedLivePublicationV2SeedClaim(
 export async function readLivePublicationV2Checkpoint(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<LivePublicationRead | null> {
-  const db = await getDb();
+  const db = dbInstance ?? (await getDb());
   const row = (
     await db
       .select()
@@ -1367,7 +1368,13 @@ export async function checkpointLivePublicationV2(
       // fixture rows, and freshness markers in the same short transaction as the
       // checkpoint head so recovery cannot expose a durable publication while
       // core reconciliation still points at an older fact set.
-      const savedLives = await createEventLiveRepository(tx).upsertBatch(season, [...eventLives]);
+      const savedLives = await createEventLiveRepository(tx).upsertBatch(season, [...eventLives], {
+        checkpoint: {
+          publicationId: publication.publicationId,
+          generation: publication.generation,
+          eventLiveSha256: publication.items.eventLive.sha256,
+        },
+      });
       if (savedLives.length !== eventLives.length) {
         throw new Error(
           `Incomplete event live checkpoint: expected ${eventLives.length}, persisted ${savedLives.length}`,

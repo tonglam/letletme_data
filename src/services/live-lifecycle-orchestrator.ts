@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { Elysia } from 'elysia';
+import { sql } from 'drizzle-orm';
 
 import { fplClient } from '../clients/fpl';
 import type { Event } from '../domain/events';
@@ -9,8 +11,14 @@ import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
-import { tournamentEntryRepository } from '../repositories/tournament-entries';
-import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import {
+  createTournamentEntryRepository,
+  tournamentEntryRepository,
+} from '../repositories/tournament-entries';
+import {
+  createTournamentInfoRepository,
+  tournamentInfoRepository,
+} from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { isMatchDayTime } from '../utils/conditions';
 import { logError, logInfo } from '../utils/logger';
@@ -18,7 +26,10 @@ import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './en
 import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
-import { entryInfoRepository } from '../repositories/entry-infos';
+import { createEntryInfoRepository, entryInfoRepository } from '../repositories/entry-infos';
+import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
+import { entriesInCompetition } from '../db/schemas/index.schema';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   liveV2LifecycleKey,
   liveV2PicksCoordinatorKey,
@@ -34,6 +45,11 @@ import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 import { normalizeMatchLifecycleState } from './live-match-v3';
+import {
+  markLivePicksNoSourceWorkFreshnessWindowNotApplicable,
+  recordFreshnessObservation,
+  retireLivePicksEmptyCohortFreshnessWindow,
+} from './data-governance.service';
 
 const runtimeConfig = getConfig();
 /** The live producer cadence is a data contract: one fresh poll every 30s by default. */
@@ -551,13 +567,19 @@ export function decideLiveLifecycle(
 export async function resolveUniqueActiveTournamentEntryIds(
   season: FplSeasonRef,
   eventId: number,
+  db?: DbOrTransaction,
 ): Promise<number[]> {
+  const tournamentsRepository = db ? createTournamentInfoRepository(db) : tournamentInfoRepository;
+  const entriesRepository = db ? createEntryInfoRepository(db) : entryInfoRepository;
+  const tournamentEntriesRepository = db
+    ? createTournamentEntryRepository(db)
+    : tournamentEntryRepository;
   const [tournaments, knownEntries] = await Promise.all([
-    tournamentInfoRepository.findActive(season),
-    entryInfoRepository.findAll(season),
+    tournamentsRepository.findActive(season),
+    entriesRepository.findAll(season),
   ]);
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
+    tournamentEntriesRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
   const candidateEntryIds = uniqueNumbers([
     ...entryLists.flat(),
@@ -568,6 +590,157 @@ export async function resolveUniqueActiveTournamentEntryIds(
   return findEventEligibleEntryIds(candidateEntryIds, knownEntries, eventId)
     .filter((entryId) => entryId > 0)
     .sort((a, b) => a - b);
+}
+
+export async function readLivePicksDurableFreshnessEvidence(
+  season: FplSeasonRef,
+  eventId: number,
+  db?: DbOrTransaction,
+) {
+  const expectedEntryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId, db);
+  const heads = await createEntryEventPicksRepository(db).findHeadsByEventAndEntryIds(
+    season,
+    eventId,
+    expectedEntryIds,
+  );
+  const headsByEntryId = new Map(heads.map((head) => [head.entryId, head]));
+  const completeHeads = expectedEntryIds.filter((entryId) => {
+    const head = headsByEntryId.get(entryId);
+    if (!head || head.state !== 'COMPLETE' || head.rowCount !== 15) return false;
+    if (!head.publicationId || !Number.isSafeInteger(head.generation) || head.generation <= 0) {
+      return false;
+    }
+    return (
+      /^[0-9a-f]{64}$/.test(head.contentSha256) && Number.isFinite(head.checkpointedAt.getTime())
+    );
+  });
+  const evidenceRows = completeHeads
+    .map((entryId) => headsByEntryId.get(entryId))
+    .filter((head): head is NonNullable<typeof head> => head !== undefined)
+    .sort((left, right) => left.entryId - right.entryId);
+  const revision = `live-picks-v1:${createHash('sha256')
+    .update(
+      evidenceRows
+        .map(
+          (head) =>
+            `${head.entryId}:${head.publicationId}:${head.generation}:${head.picksBaseRevision}:${head.contentSha256}:${head.checkpointedAt.toISOString()}`,
+        )
+        .join('|'),
+    )
+    .digest('hex')}`;
+  const sourceCheckedAt = evidenceRows.reduce<Date | null>(
+    (latest, head) => (!latest || head.sourceCheckedAt > latest ? head.sourceCheckedAt : latest),
+    null,
+  );
+  const pgPublishedAt = evidenceRows.reduce<Date | null>(
+    (latest, head) => (!latest || head.checkpointedAt > latest ? head.checkpointedAt : latest),
+    null,
+  );
+  return {
+    revision,
+    expectedCount: expectedEntryIds.length,
+    observedCount: completeHeads.length,
+    sourceCheckedAt,
+    pgPublishedAt,
+    // An empty eligible cohort is not a completed publication. It is retired
+    // as NOT_APPLICABLE by persistLivePicksDurableFreshnessEvidence instead.
+    complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length,
+  } as const;
+}
+
+export function shouldMarkLivePicksFreshnessNotApplicable(
+  expectedCount: number,
+  observedCount: number,
+  scanComplete: boolean,
+): boolean {
+  return scanComplete && expectedCount === 0 && observedCount === 0;
+}
+
+export function shouldMarkLivePicksFreshnessNoSourceWork(
+  expectedCount: number,
+  observedCount: number,
+  scanComplete: boolean,
+  sourceWorkPerformed: boolean,
+): boolean {
+  return (
+    scanComplete && !sourceWorkPerformed && expectedCount > 0 && observedCount === expectedCount
+  );
+}
+
+export async function persistLivePicksDurableFreshnessEvidence(
+  season: FplSeasonRef,
+  eventId: number,
+  freshnessWindowId: number,
+  scanComplete: boolean,
+  options: Readonly<{ sourceWorkPerformed?: boolean }> = {},
+) {
+  const db = await getDb();
+  const result = await db.transaction(async (tx) => {
+    // Hold the same table-level fence used by empty-cohort retirement across
+    // the cohort read, durable-head scan, and terminal freshness update. An
+    // in-flight onboarding write must commit before this scan or wait until
+    // its evidence has been recorded; neither COMPLETE nor N/A can describe a
+    // cohort which changed between counting and settlement.
+    await tx.execute(sql`LOCK TABLE ${entriesInCompetition} IN SHARE MODE`);
+    const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId, tx);
+    if (
+      shouldMarkLivePicksFreshnessNotApplicable(
+        evidence.expectedCount,
+        evidence.observedCount,
+        scanComplete,
+      )
+    ) {
+      const recorded = await retireLivePicksEmptyCohortFreshnessWindow({
+        windowId: freshnessWindowId,
+        eventId,
+        db: tx,
+      });
+      if (!recorded) throw new Error('Live Picks empty-cohort freshness window is unavailable');
+      return { evidence, terminalIncomplete: false } as const;
+    }
+    if (
+      shouldMarkLivePicksFreshnessNoSourceWork(
+        evidence.expectedCount,
+        evidence.observedCount,
+        scanComplete,
+        options.sourceWorkPerformed !== false,
+      )
+    ) {
+      const recorded = await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+        windowId: freshnessWindowId,
+        eventId,
+        expectedCount: evidence.expectedCount,
+        observedCount: evidence.observedCount,
+        db: tx,
+      });
+      if (!recorded) throw new Error('Live Picks no-source-work freshness window is unavailable');
+      return { evidence, terminalIncomplete: false } as const;
+    }
+    const status = await recordFreshnessObservation({
+      windowId: freshnessWindowId,
+      sourceCheckedAt: evidence.sourceCheckedAt ?? undefined,
+      pgPublishedAt: evidence.pgPublishedAt ?? undefined,
+      producerRevision: evidence.revision,
+      expectedCount: evidence.expectedCount,
+      observedCount: evidence.observedCount,
+      completenessStatus: scanComplete && evidence.complete ? 'COMPLETE' : 'INCOMPLETE',
+      evidence: {
+        expectedCount: evidence.expectedCount,
+        observedCount: evidence.observedCount,
+        scanComplete,
+        pgPublishedAt: evidence.pgPublishedAt?.toISOString() ?? null,
+      },
+      db: tx,
+    });
+    if (status === null) throw new Error('Live Picks freshness window is unavailable');
+    return { evidence, terminalIncomplete: scanComplete && !evidence.complete } as const;
+  });
+  if (result.terminalIncomplete) {
+    throw new Error(
+      `Live Picks durable evidence is incomplete: ${result.evidence.observedCount}/${result.evidence.expectedCount}`,
+    );
+  }
+  return result.evidence;
 }
 
 function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: number): boolean {
@@ -678,6 +851,8 @@ export async function runPicksProbeAndSync(
   sourceReady: boolean;
   /** The complete eligible-entry sweep reached its semantic finalizer. */
   scanComplete: boolean;
+  /** Exact aggregate evidence was persisted before a terminal completion. */
+  freshnessEvidenceRecorded?: boolean;
 }> {
   const sharedState = await readPicksCoordinatorState(season.seasonCode, eventId);
   const state: PicksProbeState = {
@@ -685,6 +860,35 @@ export async function runPicksProbeAndSync(
     nextProbeAt: sharedState.nextProbeAt,
     canarySucceeded: sharedState.canarySucceeded,
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
+  };
+  const recordDurableFreshness = async (
+    scanComplete: boolean,
+    sourceWorkPerformed = true,
+  ): Promise<boolean> => {
+    const freshnessWindowId = obligation.freshnessWindowId;
+    if (
+      typeof freshnessWindowId !== 'number' ||
+      !Number.isSafeInteger(freshnessWindowId) ||
+      freshnessWindowId <= 0
+    ) {
+      return false;
+    }
+    try {
+      await persistLivePicksDurableFreshnessEvidence(
+        season,
+        eventId,
+        freshnessWindowId,
+        scanComplete,
+        { sourceWorkPerformed },
+      );
+      return true;
+    } catch (error) {
+      logError('Live picks durable freshness evidence update failed', error, {
+        eventId,
+        windowId: obligation.freshnessWindowId,
+      });
+      return false;
+    }
   };
   if (now.getTime() < state.nextProbeAt) {
     // The scheduler can resolve an obligation just before the coordinator
@@ -706,12 +910,14 @@ export async function runPicksProbeAndSync(
   }
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
   if (entryIds.length === 0) {
+    const freshnessEvidenceRecorded = await recordDurableFreshness(true);
     return {
       canaryCount: 0,
       synced: 0,
       pending: 0,
       sourceReady: true,
       scanComplete: true,
+      freshnessEvidenceRecorded,
     };
   }
   const nowMs = now.getTime();
@@ -729,12 +935,15 @@ export async function runPicksProbeAndSync(
       canarySucceeded: true,
       failedCanaryEntryIds: [],
     });
+    const scanComplete = pendingCheckpoints.length === 0;
+    const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete, false);
     return {
       canaryCount: 0,
       synced: 0,
       pending: pendingCheckpoints.length,
       sourceReady: true,
-      scanComplete: pendingCheckpoints.length === 0,
+      scanComplete,
+      freshnessEvidenceRecorded,
     };
   }
 
@@ -792,12 +1001,14 @@ export async function runPicksProbeAndSync(
       eventId,
       canaries: canaries.length,
     });
+    const freshnessEvidenceRecorded = await recordDurableFreshness(false);
     return {
       canaryCount,
       synced: 0,
       pending: pending.length,
       sourceReady: false,
       scanComplete: false,
+      freshnessEvidenceRecorded,
     };
   }
 
@@ -885,13 +1096,16 @@ export async function runPicksProbeAndSync(
     totalUniqueEntries: entryIds.length,
     queued: remaining.length,
   });
+  const scanComplete =
+    (pendingAfterQueue.length === 0 || reusedCompletedScan) && pendingCheckpointIds.length === 0;
+  const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete);
   return {
     canaryCount,
     synced: canaryCount,
     pending: pendingAfterQueue.length + pendingCheckpointIds.length,
     sourceReady: true,
-    scanComplete:
-      (pendingAfterQueue.length === 0 || reusedCompletedScan) && pendingCheckpointIds.length === 0,
+    scanComplete,
+    freshnessEvidenceRecorded,
   };
 }
 

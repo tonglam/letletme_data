@@ -31,7 +31,11 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { eventRepository } from '../repositories/events';
-import { recordFreshnessObservation } from '../services/data-governance.service';
+import {
+  recordFreshnessObservation,
+  recordPendingLiveSnapshotCheckpointEvidence,
+} from '../services/data-governance.service';
+import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
   completeSchedulerObligation,
@@ -210,17 +214,48 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         eventId,
       });
     }
-    if (job.data.freshnessWindowId !== undefined && snapshot.publicationId !== null) {
+    if (
+      job.data.freshnessWindowId !== undefined &&
+      snapshot.publicationId !== null &&
+      snapshot.generation !== null
+    ) {
       const sourceCheckedAt = snapshot.sourceCheckedAt ? new Date(snapshot.sourceCheckedAt) : null;
-      if (sourceCheckedAt && Number.isFinite(sourceCheckedAt.getTime())) {
+      // A coalesced Redis publication can legitimately return
+      // `checkpointed: false` even when the durable checkpoint already holds
+      // the exact publication identity. Always read the checkpoint here; the
+      // freshness window is scoped to the returned publication, not to the
+      // boolean that says whether this invocation performed the checkpoint.
+      const durableCheckpoint = await readLivePublicationV2Checkpoint(season, eventId).catch(
+        (error) => {
+          logError('Live snapshot durable checkpoint read failed for freshness evidence', error, {
+            eventId,
+            windowId: job.data.freshnessWindowId,
+          });
+          return null;
+        },
+      );
+      const checkpoint = durableCheckpoint;
+      const checkpointedAt = checkpoint?.publication.checkpointedAt;
+      const pgPublishedAt = checkpointedAt ? new Date(checkpointedAt) : null;
+      const checkpointMatchesSnapshot =
+        checkpoint?.publication.publicationId === snapshot.publicationId &&
+        checkpoint.publication.generation === snapshot.generation;
+      const validSourceCheckedAt =
+        sourceCheckedAt !== null && Number.isFinite(sourceCheckedAt.getTime());
+      const validPgPublishedAt = pgPublishedAt !== null && Number.isFinite(pgPublishedAt.getTime());
+      const revision = `${snapshot.publicationId}:${snapshot.generation}`;
+      const redisSeenAt = new Date();
+      if (validSourceCheckedAt) {
         try {
           await recordFreshnessObservation({
             windowId: job.data.freshnessWindowId,
             sourceCheckedAt,
-            redisSeenAt: new Date(),
-            producerRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
-            redisRevision: `${snapshot.publicationId}:${snapshot.generation ?? 0}`,
+            ...(checkpointMatchesSnapshot && validPgPublishedAt ? { pgPublishedAt } : {}),
+            redisSeenAt,
+            producerRevision: revision,
+            redisRevision: revision,
             completenessStatus: 'COMPLETE',
+            evidence: { liveCheckpointPending: !(checkpointMatchesSnapshot && validPgPublishedAt) },
           });
         } catch (error) {
           // Freshness telemetry is additive. The Redis publication and the
@@ -232,6 +267,37 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             publicationId: snapshot.publicationId,
           });
         }
+      }
+      if (checkpointMatchesSnapshot && validSourceCheckedAt && validPgPublishedAt) {
+        try {
+          await recordPendingLiveSnapshotCheckpointEvidence({
+            seasonId: season.seasonId,
+            eventId,
+            sourceCheckedAt,
+            pgPublishedAt,
+            redisSeenAt,
+            revision,
+          });
+        } catch (error) {
+          logError('Live snapshot pending freshness checkpoint reconciliation failed', error, {
+            eventId,
+            windowId: job.data.freshnessWindowId,
+            publicationId: snapshot.publicationId,
+          });
+        }
+      } else if (checkpoint && !checkpointMatchesSnapshot) {
+        logError(
+          'Live snapshot freshness evidence checkpoint identity changed before observation',
+          new Error('live publication checkpoint identity mismatch'),
+          {
+            eventId,
+            windowId: job.data.freshnessWindowId,
+            snapshotPublicationId: snapshot.publicationId,
+            snapshotGeneration: snapshot.generation,
+            checkpointPublicationId: checkpoint.publication.publicationId,
+            checkpointGeneration: checkpoint.publication.generation,
+          },
+        );
       }
     }
     const classicGlobalIdentityMatches =

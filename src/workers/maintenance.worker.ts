@@ -67,6 +67,7 @@ import { resolveJobFreshAfter } from '../utils/job-freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { createQueueRunAttemptId } from '../utils/queue-run-id';
+import { seasonRefFromJobData } from '../domain/season-scoped-job';
 import type { WorkerRuntime } from './worker-runtime';
 import {
   markFreshnessWindowNotApplicable,
@@ -190,6 +191,9 @@ async function recordMyFplOutboxRedisEvidence(input: {
 function maintenanceCompletionEvidence(jobName: string, result: unknown): Record<string, unknown> {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return {};
   const value = result as Record<string, unknown>;
+  if (value.freshnessEvidenceRecorded === true) {
+    return { freshnessEvidenceRecorded: true };
+  }
   if (jobName === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT) {
     const publication = value.publication;
     if (!publication || typeof publication !== 'object' || Array.isArray(publication)) return {};
@@ -298,8 +302,13 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           });
         case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
           return repairPlayerSeasonSummaries();
-        case MAINTENANCE_JOBS.TOURNAMENT_TRENDS:
-          return repairTournamentTrendScopes();
+        case MAINTENANCE_JOBS.TOURNAMENT_TRENDS: {
+          const season = seasonRefFromJobData(job.data);
+          return repairTournamentTrendScopes({
+            freshnessWindowId: job.data.freshnessWindowId,
+            scope: { season, eventId: job.data.eventId ?? null },
+          });
+        }
         case MAINTENANCE_JOBS.BUG_REPORT_CLEANUP: {
           const result = await runBugReportCleanup();
           if (result.retried > 0) {

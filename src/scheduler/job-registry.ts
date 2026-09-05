@@ -828,6 +828,8 @@ function periodicMaintenanceDefinition(input: {
   cadence: string;
   periodMs: number;
   minuteOfHour?: number;
+  /** Persist the current event on the obligation and its freshness window. */
+  eventScoped?: boolean;
   /** Stable identity prefix used by governance repair routing. */
   periodPrefix?: string;
   criticality: ScheduledJobDefinition['criticality'];
@@ -858,6 +860,11 @@ function periodicMaintenanceDefinition(input: {
           periodKey: `${input.periodPrefix ?? 'maintenance'}-${bucket}`,
           dueAt,
           source: 'catchup' as const,
+          ...(input.eventScoped &&
+          Number.isSafeInteger(context.currentEventId) &&
+          context.currentEventId! > 0
+            ? { eventId: context.currentEventId }
+            : {}),
         },
       ];
     },
@@ -1737,13 +1744,16 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       name: MAINTENANCE_JOBS.TOURNAMENT_TRENDS,
       cadence: 'every five minutes',
       periodMs: 5 * 60_000,
+      eventScoped: true,
       criticality: 'normal',
       successPredicate: 'active tournament public trend scopes are published',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueueTournamentTrendsRepair(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
+          eventId: plan.eventId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },

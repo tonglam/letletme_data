@@ -105,6 +105,10 @@ export function createSchedulerObligationLifecycle(
       input.evidence && typeof input.evidence === 'object' && !Array.isArray(input.evidence)
         ? input.evidence
         : {};
+    // Some producers persist exact publication-bound evidence before the
+    // scheduler obligation is completed. Replacing it with generic worker
+    // completion timestamps or a run ID would corrupt that identity.
+    if (evidence.freshnessEvidenceRecorded === true) return;
     const windowIds = freshnessWindowIdsFromEvidence(evidence);
     if (windowIds.length === 0) return;
     const completedAt = input.completedAt ?? dependencies.now();

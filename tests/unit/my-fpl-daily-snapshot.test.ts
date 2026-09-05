@@ -2,6 +2,13 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, test } from 'bun:test';
 
+import { parseArguments as parsePlayerAuthorityArguments } from '../../scripts/rebind-player-gameweek-authority';
+import { parseArgs as parseRetirementArguments } from '../../scripts/retire-player-stats-active-obligations';
+import {
+  isCompleteReusedTournamentTrendRepair,
+  resolveTournamentTrendRepairEventId,
+} from '../../src/jobs/tournament-trends-repair.jobs';
+
 import {
   isAuthoritativeUnrankedDeletedEntryResult,
   isAuthoritativeUnrankedFirstEventResult,
@@ -68,9 +75,180 @@ const tournamentTransfers = readFileSync(
   'utf8',
 );
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
+const trendsRepairJob = readFileSync('src/jobs/tournament-trends-repair.jobs.ts', 'utf8');
+const trendsCatalog = readFileSync('src/services/trends-catalog.service.ts', 'utf8');
+const liveDataWorker = readFileSync('src/workers/live-data.worker.ts', 'utf8');
+const governanceWorker = readFileSync('src/workers/data-governance.worker.ts', 'utf8');
+const rebindPlayerAuthority = readFileSync('scripts/rebind-player-gameweek-authority.ts', 'utf8');
+const retirePlayerStatsObligations = readFileSync(
+  'scripts/retire-player-stats-active-obligations.ts',
+  'utf8',
+);
+const schedulerObligationRepository = readFileSync(
+  'src/repositories/scheduler-obligations.ts',
+  'utf8',
+);
 const singleQuote = String.fromCharCode(39);
 
 describe('My FPL daily snapshot publication contract', () => {
+  test('keeps Public Trends freshness and repair evidence fail closed', () => {
+    const trendsDefinition = scheduler.slice(
+      scheduler.indexOf('name: MAINTENANCE_JOBS.TOURNAMENT_TRENDS'),
+      scheduler.indexOf('name: MAINTENANCE_JOBS.TOURNAMENT_REVIEW'),
+    );
+    expect(trendsDefinition).toContain('freshnessWindowId');
+    expect(trendsDefinition).toContain('enqueueTournamentTrendsRepair');
+    expect(trendsDefinition).toContain('eventId: plan.eventId');
+    expect(trendsRepairJob).toContain('findPublicTrendRepairTournamentIds');
+    expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_CURRENT_EVENT');
+    expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_ENABLED_COHORTS');
+    expect(governanceWorker).toContain(
+      'case ' + singleQuote + 'public-league-trends' + singleQuote + ':',
+    );
+    expect(governanceWorker).toContain('enqueueTournamentTrendsRepair');
+    expect(governanceWorker).toContain('eventId,');
+    expect(worker).toContain('const season = seasonRefFromJobData(job.data)');
+    expect(worker).toContain('scope: { season, eventId: job.data.eventId ?? null }');
+    expect(governanceService).toContain('PUBLIC_TRENDS_NO_SOURCE_WORK');
+    expect(trendsCatalog).toContain('latest.source_watermark');
+    expect(trendsCatalog).toContain('sourceCheckedAt: sourceWatermark');
+    expect(trendsCatalog).not.toContain('sourceCheckedAt: publishedAt');
+    expect(trendsCatalog).toContain('current_event.deadline_time_epoch DESC');
+    expect(trendsRepairJob).toContain('prepublicationFailedCount: result.failed');
+    expect(trendsRepairJob).not.toContain('if (result.failed > 0)');
+    const repairTargets = trendsCatalog.slice(
+      trendsCatalog.indexOf('export async function findPublicTrendRepairTournamentIds'),
+      trendsCatalog.indexOf('export async function getPublicTrendsCatalog'),
+    );
+    expect(repairTargets).not.toContain('catalog.enabled');
+  });
+
+  test('retires only a complete all-reused Public Trends repair pass', () => {
+    const completeReused = {
+      enabledTournamentIds: [11, 12],
+      publicationResults: [
+        { tournamentId: 11, state: 'REUSED' },
+        { tournamentId: 12, state: 'REUSED' },
+      ],
+      expectedCohortCount: 2,
+      observedCohortCount: 2,
+      complete: true,
+    } as const;
+    expect(isCompleteReusedTournamentTrendRepair(completeReused)).toBe(true);
+    expect(
+      isCompleteReusedTournamentTrendRepair({
+        ...completeReused,
+        publicationResults: [
+          { tournamentId: 11, state: 'REUSED' },
+          { tournamentId: 12, state: 'READY' },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      isCompleteReusedTournamentTrendRepair({
+        ...completeReused,
+        publicationResults: [
+          ...completeReused.publicationResults,
+          // Disabled prepublication remains separate from the enabled public
+          // freshness decision, even when it creates a new READY row.
+          { tournamentId: 13, state: 'READY' },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isCompleteReusedTournamentTrendRepair({
+        ...completeReused,
+        publicationResults: [{ tournamentId: 11, state: 'REUSED' }],
+      }),
+    ).toBe(false);
+    expect(
+      isCompleteReusedTournamentTrendRepair({ ...completeReused, observedCohortCount: 1 }),
+    ).toBe(false);
+  });
+
+  test('keeps Public Trends repairs on the event-scoped window across rollover', () => {
+    expect(resolveTournamentTrendRepairEventId(2, 3)).toBe(2);
+    expect(resolveTournamentTrendRepairEventId(undefined, 3)).toBe(3);
+    expect(resolveTournamentTrendRepairEventId(null, null)).toBeNull();
+    expect(() => resolveTournamentTrendRepairEventId(null, 3)).toThrow(
+      'no-current-event scope changed to event 3',
+    );
+    expect(() => resolveTournamentTrendRepairEventId(39, 3)).toThrow('event scope is invalid');
+  });
+
+  test('binds live freshness and cleanup tools to exact bounded evidence', () => {
+    expect(liveDataWorker).toContain('checkpointMatchesSnapshot');
+    expect(liveDataWorker).toContain('checkpoint.publication.generation === snapshot.generation');
+    expect(liveDataWorker).toContain('liveCheckpointPending: !(');
+    expect(liveDataWorker).toContain('recordPendingLiveSnapshotCheckpointEvidence');
+    expect(governanceService).toContain('LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE = 100');
+    expect(governanceService).toContain(
+      'evidence}->>' + singleQuote + 'liveCheckpointPending' + singleQuote + ' = ' + singleQuote,
+    );
+    expect(governanceService).toContain('contractKey, ' + singleQuote + 'live-snapshot');
+    expect(governanceService).toContain('livePointsPublicationCheckpointsInCompetition');
+    expect(governanceService).toContain('freshnessSloWindowsInOps.producerRevision, revision');
+    expect(governanceService).toContain('freshnessSloWindowsInOps.redisRevision, revision');
+    expect(rebindPlayerAuthority).toContain(
+      'if (token === ' + singleQuote + '--apply' + singleQuote + ')',
+    );
+    const authorityApply = rebindPlayerAuthority.slice(
+      rebindPlayerAuthority.indexOf('if (args.apply)'),
+      rebindPlayerAuthority.indexOf('process.stdout.write'),
+    );
+    expect(authorityApply).toContain(
+      'LOCK TABLE ${playerGameweekStatsInFpl} IN SHARE ROW EXCLUSIVE MODE',
+    );
+    expect(authorityApply.indexOf('LOCK TABLE')).toBeLessThan(
+      authorityApply.indexOf('const { checkpoint, report: lockedReport }'),
+    );
+    expect(retirePlayerStatsObligations).toContain('BULL_SCAN_PAGE_SIZE');
+    expect(retirePlayerStatsObligations).toContain('BULL_SCAN_MAX_PER_STATE');
+    expect(retirePlayerStatsObligations).not.toContain('getJobs(JOB_TYPES, 0, -1');
+    expect(entryWorker).toContain('persistLivePicksDurableFreshnessEvidence');
+    expect(entryWorker).toContain('freshnessEvidenceRecorded');
+    expect(entryWorker).toContain(
+      'livePicksChildComplete ? livePicksCoverageComplete : scoped.value.scanComplete',
+    );
+    const orphanProjection = schedulerObligationRepository.slice(
+      schedulerObligationRepository.indexOf('export async function schedulerOrphanState'),
+      schedulerObligationRepository.indexOf('export async function schedulerObligationStatus'),
+    );
+    expect(orphanProjection).toContain(
+      'WHERE status NOT IN (' +
+        singleQuote +
+        'succeeded' +
+        singleQuote +
+        ', ' +
+        singleQuote +
+        'skipped' +
+        singleQuote +
+        ', ' +
+        singleQuote +
+        'irrecoverable' +
+        singleQuote +
+        ')',
+    );
+  });
+
+  test('keeps authority maintenance command lines explicit and fail closed', () => {
+    expect(
+      parsePlayerAuthorityArguments(['--season', '2627', '--events', '1,2', '--apply']),
+    ).toEqual({ season: '2627', events: [1, 2], apply: true });
+    expect(() =>
+      parsePlayerAuthorityArguments(['--season', '2627', '--events', '1', '--apply=false']),
+    ).toThrow();
+    expect(() =>
+      parsePlayerAuthorityArguments(['--season', '2627', '--events', '1', '--unknown', 'x']),
+    ).toThrow();
+    expect(parseRetirementArguments(['--expected-count', '2', '--apply'])).toEqual({
+      apply: true,
+      expectedCount: 2,
+    });
+    expect(() => parseRetirementArguments(['--apply'])).toThrow();
+    expect(() => parseRetirementArguments(['--expected-count', '2', '--unexpected'])).toThrow();
+  });
+
   test('counts projected auto-sub points before captain multipliers', () => {
     expect(
       projectedEventAutoSubPoints(

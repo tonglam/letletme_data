@@ -603,6 +603,9 @@ export const queueHealthWindowsInOps = ops.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
+    consumerPaused: boolean('consumer_paused').default(false).notNull(),
+    pausedCount: integer('paused_count').default(0).notNull(),
+    pauseOwnerState: text('pause_owner_state').default('NONE').notNull(),
   },
   (table) => [
     primaryKey({
@@ -616,7 +619,11 @@ export const queueHealthWindowsInOps = ops.table(
     check('queue_health_windows_queue_nonempty', sql`btrim(queue_name) <> ''`),
     check(
       'queue_health_windows_counts_nonnegative',
-      sql`waiting >= 0 AND active >= 0 AND delayed >= 0 AND prioritized >= 0 AND waiting_children >= 0 AND failed >= 0 AND completed >= 0 AND runnable >= 0 AND arrivals >= 0 AND completions >= 0 AND failures >= 0 AND stalled >= 0`,
+      sql`waiting >= 0 AND active >= 0 AND delayed >= 0 AND prioritized >= 0 AND waiting_children >= 0 AND paused_count >= 0 AND failed >= 0 AND completed >= 0 AND runnable >= 0 AND arrivals >= 0 AND completions >= 0 AND failures >= 0 AND stalled >= 0`,
+    ),
+    check(
+      'queue_health_windows_pause_owner_check',
+      sql`pause_owner_state = ANY (ARRAY['NONE','DEPLOYMENT','ACQUIRING','OPERATOR','RELEASING'])`,
     ),
     check(
       'queue_health_windows_backlog_class_check',

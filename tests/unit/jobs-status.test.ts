@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 import {
   retentionEvidenceCountsAreCoherent,
+  resolveQueuePauseProjection,
   safeSchedulerLaneErrorCode,
   safeSchedulerObligationLatest,
   selectCanonicalPriceChangeContext,
@@ -34,6 +35,44 @@ const dbDelivery = {
     },
   ],
 };
+
+describe('queue pause status fallback', () => {
+  test('keeps direct Bull paused counts visible when monitor telemetry is missing', () => {
+    expect(resolveQueuePauseProjection(null, 3)).toEqual({
+      consumerPaused: true,
+      pausedCount: 3,
+      pauseOwnerState: 'UNAVAILABLE',
+    });
+    expect(resolveQueuePauseProjection(null, 0)).toEqual({
+      consumerPaused: false,
+      pausedCount: 0,
+      pauseOwnerState: 'UNAVAILABLE',
+    });
+  });
+
+  test('merges a newer direct Bull pause count with cached monitor telemetry', () => {
+    const snapshot = {
+      consumerPaused: false,
+      pausedCount: 0,
+      pauseOwnerState: 'NONE',
+    };
+    expect(resolveQueuePauseProjection(snapshot as never, 2)).toEqual({
+      consumerPaused: true,
+      pausedCount: 2,
+      pauseOwnerState: 'NONE',
+    });
+    expect(
+      resolveQueuePauseProjection(
+        { ...snapshot, consumerPaused: true, pausedCount: 3, pauseOwnerState: 'OPERATOR' } as never,
+        1,
+      ),
+    ).toEqual({
+      consumerPaused: true,
+      pausedCount: 3,
+      pauseOwnerState: 'OPERATOR',
+    });
+  });
+});
 
 describe('selectCanonicalPriceChangeContext', () => {
   test('uses matching Redis delivery', () => {
@@ -174,6 +213,10 @@ describe('jobs status hot-path isolation', () => {
     expect(control).toContain(['case ', quote, 'tournamentReviewV2', quote].join(''));
     expect(control).toContain(['case ', quote, 'liveFinalRetention', quote].join(''));
     expect(control).toContain(['case ', quote, 'clientSignals', quote].join(''));
+    expect(control).toContain('pauseOwnerState: ' + quote + 'UNAVAILABLE' + quote);
+    expect(control).toContain('unavailable: true');
+    expect(control).toContain('readQueueHealthSnapshot(name)');
+    expect(control).not.toContain('new Queue(name');
   });
 });
 

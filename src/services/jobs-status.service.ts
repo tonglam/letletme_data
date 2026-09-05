@@ -88,6 +88,30 @@ export function safeSchedulerLaneErrorCode(lastError: string | null): string | n
   return safePersistedDataErrorCode(lastError);
 }
 
+type QueueHealthSnapshot = Awaited<ReturnType<typeof readQueueHealthSnapshot>>;
+
+/** Keep direct Bull pause evidence visible when the richer monitor snapshot expired. */
+export function resolveQueuePauseProjection(
+  snapshot: QueueHealthSnapshot,
+  bullPausedCount: number,
+): Readonly<{ consumerPaused: boolean; pausedCount: number; pauseOwnerState: string }> {
+  const directPausedCount =
+    Number.isSafeInteger(bullPausedCount) && bullPausedCount >= 0 ? bullPausedCount : 0;
+  if (snapshot) {
+    const pausedCount = Math.max(snapshot.pausedCount, directPausedCount);
+    return {
+      consumerPaused: snapshot.consumerPaused || pausedCount > 0,
+      pausedCount,
+      pauseOwnerState: snapshot.pauseOwnerState,
+    };
+  }
+  return {
+    consumerPaused: directPausedCount > 0,
+    pausedCount: directPausedCount,
+    pauseOwnerState: 'UNAVAILABLE',
+  };
+}
+
 type SchedulerObligationLatest = NonNullable<
   Awaited<ReturnType<typeof schedulerObligationStatus>>['latest']
 >;
@@ -994,17 +1018,20 @@ export async function getJobsStatus(
           snapshot: healthSnapshot,
           monitorState,
         });
+        const counts = await queue.getJobCounts(
+          'waiting',
+          'paused',
+          'active',
+          'delayed',
+          'prioritized',
+          'completed',
+          'failed',
+        );
+        const pause = resolveQueuePauseProjection(healthSnapshot, counts.paused);
         return {
           name,
-          counts: await queue.getJobCounts(
-            'waiting',
-            'paused',
-            'active',
-            'delayed',
-            'prioritized',
-            'completed',
-            'failed',
-          ),
+          counts,
+          ...pause,
           health: healthSnapshot,
           healthState,
           monitorState: monitorState ?? null,

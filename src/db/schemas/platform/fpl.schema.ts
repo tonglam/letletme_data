@@ -513,6 +513,9 @@ export const playerGameweekStatsInFpl = fpl.table(
     defensiveContribution: integer('defensive_contribution').default(0).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    publicationId: text('publication_id'),
+    publicationGeneration: bigint('publication_generation', { mode: 'number' }),
+    publicationEventLiveSha256: text('publication_event_live_sha256'),
   },
   (table) => [
     index('player_gameweek_stats_player_idx').using(
@@ -526,6 +529,15 @@ export const playerGameweekStatsInFpl = fpl.table(
       table.seasonId.asc().nullsLast(),
       table.sourceLiveId.asc().nullsLast(),
     ),
+    index('player_gameweek_stats_publication_binding_idx')
+      .using(
+        'btree',
+        table.seasonId.asc().nullsLast(),
+        table.eventId.asc().nullsLast(),
+        table.elementId.asc().nullsLast(),
+        table.publicationGeneration.asc().nullsLast(),
+      )
+      .where(sql`(publication_id IS NOT NULL)`),
     foreignKey({
       columns: [table.seasonId],
       foreignColumns: [seasonsInFpl.seasonId],
@@ -550,6 +562,14 @@ export const playerGameweekStatsInFpl = fpl.table(
       sql`(event_id > 0) AND (element_id > 0) AND (source_live_id > 0)`,
     ),
     check('player_gameweek_stats_minutes_nonnegative', sql`(minutes IS NULL) OR (minutes >= 0)`),
+    check(
+      'player_gameweek_stats_publication_binding_all_or_none',
+      sql`((publication_id IS NULL) AND (publication_generation IS NULL) AND (publication_event_live_sha256 IS NULL)) OR ((publication_id IS NOT NULL) AND (publication_generation IS NOT NULL) AND (publication_event_live_sha256 IS NOT NULL))`,
+    ),
+    check(
+      'player_gameweek_stats_publication_binding_valid',
+      sql`(publication_generation IS NULL OR publication_generation > 0) AND (publication_event_live_sha256 IS NULL OR publication_event_live_sha256 ~ '^[0-9a-f]{64}$')`,
+    ),
   ],
 );
 
