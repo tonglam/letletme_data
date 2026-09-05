@@ -29,6 +29,12 @@ import {
 } from '../../src/scheduler/scheduler.service';
 import { mockFixture1 } from '../fixtures/fixtures.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
+import {
+  LIVE_FINAL_RETENTION_POLICY_VERSION,
+  LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+  liveFinalRetentionDueAt,
+  liveFinalRetentionPeriodKey,
+} from '../../src/domain/live-final-retention-policy';
 
 describe('standalone scheduler registry', () => {
   const registry = createSchedulerRegistry();
@@ -72,16 +78,16 @@ describe('standalone scheduler registry', () => {
     expect(transfers?.successPredicate).toContain('entry transfers checkpoint');
   });
 
-  test('runs final retention only for the current finalized event and one six-hour bucket', async () => {
+  test('runs one distributed daily retention plan for every finalized current-season event', async () => {
     const retention = registry.find((definition) => definition.name === 'live-final-retention');
     expect(retention).toMatchObject({
-      cadence: 'every six hours while the current event is finalized',
+      cadence: 'daily per finalized current-season event',
       catchUpPolicy: 'latest-authoritative',
       criticality: 'critical',
       queueName: 'live-data',
       executionLanes: ['queue:live-data'],
     });
-    expect(retention?.successPredicate).toContain('above 24 hours');
+    expect(retention?.successPredicate).toContain('above seven days');
 
     const now = new Date('2026-08-23T12:00:00.000Z');
     const finalized = await retention!.resolve({
@@ -90,38 +96,78 @@ describe('standalone scheduler registry', () => {
       currentEventId: 12,
       events: [
         {
+          id: 11,
+          deadlineTime: new Date('2026-08-13T12:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: new Date('2026-08-14T12:00:00.000Z'),
+        },
+        {
           id: 12,
           deadlineTime: new Date('2026-08-20T12:00:00.000Z'),
           finished: true,
           dataChecked: true,
           dataCheckedAt: new Date('2026-08-21T12:00:00.000Z'),
         },
+        {
+          id: 13,
+          deadlineTime: new Date('2026-08-27T12:00:00.000Z'),
+          finished: false,
+          dataChecked: false,
+          dataCheckedAt: null,
+        },
       ],
     });
-    expect(finalized).toHaveLength(1);
-    expect(finalized[0]).toMatchObject({
+    expect(finalized).toHaveLength(2);
+    expect(finalized[1]).toMatchObject({
       scopeKey: `${TEST_SEASON.seasonCode}:event:12`,
       eventId: 12,
       source: 'reconcile',
-      evidence: { retentionOnly: true },
+      evidence: {
+        retentionOnly: true,
+        retentionPolicyVersion: LIVE_FINAL_RETENTION_POLICY_VERSION,
+        renewThresholdMs: LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+      },
     });
-    expect(finalized[0]?.periodKey).toBe(
-      `live-final-retention-12-${Math.floor(now.getTime() / (6 * 60 * 60_000))}`,
-    );
+    const event12DueAt = liveFinalRetentionDueAt({
+      eventId: 12,
+      dataCheckedAt: new Date('2026-08-21T12:00:00.000Z'),
+      now,
+    });
+    expect(finalized[1]?.dueAt).toEqual(event12DueAt);
+    expect(finalized[1]?.periodKey).toBe(liveFinalRetentionPeriodKey(12, event12DueAt));
+    expect(finalized[0]?.dueAt.getUTCHours()).toBe(10);
+    expect(finalized[1]?.dueAt.getUTCHours()).toBe(11);
 
     const repeated = await retention!.resolve({
       season: TEST_SEASON,
       now: new Date(now.getTime() + 30 * 60_000),
       currentEventId: 12,
-      events: [{ id: 12, deadlineTime: null, finished: true, dataChecked: true }],
+      events: [
+        {
+          id: 12,
+          deadlineTime: null,
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: new Date('2026-08-21T12:00:00.000Z'),
+        },
+      ],
     });
-    expect(repeated[0]?.periodKey).toBe(finalized[0]?.periodKey);
+    expect(repeated[0]?.periodKey).toBe(finalized[1]?.periodKey);
 
     const nonFinal = await retention!.resolve({
       season: TEST_SEASON,
       now,
       currentEventId: 12,
-      events: [{ id: 12, deadlineTime: null, finished: true, dataChecked: false }],
+      events: [
+        {
+          id: 12,
+          deadlineTime: null,
+          finished: true,
+          dataChecked: false,
+          dataCheckedAt: new Date('2026-08-21T12:00:00.000Z'),
+        },
+      ],
     });
     expect(nonFinal).toEqual([]);
 
@@ -129,9 +175,18 @@ describe('standalone scheduler registry', () => {
       season: TEST_SEASON,
       now,
       currentEventId: 13,
-      events: [{ id: 12, deadlineTime: null, finished: true, dataChecked: true }],
+      events: [
+        {
+          id: 12,
+          deadlineTime: null,
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: new Date('2026-08-21T12:00:00.000Z'),
+        },
+      ],
     });
-    expect(rotated).toEqual([]);
+    expect(rotated).toHaveLength(1);
+    expect(rotated[0]?.scopeKey).toBe(`${TEST_SEASON.seasonCode}:event:12`);
   });
 
   test('declares semantic recovery finalizers for durable scheduler chains', () => {

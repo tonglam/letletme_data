@@ -1970,3 +1970,194 @@ export async function schedulerObligationStatus(input: {
     consecutiveUnsuccessfulCycles,
   };
 }
+
+export type SchedulerObligationStatusSnapshot = Readonly<{
+  latest: {
+    periodKey: string;
+    status: SchedulerObligationStatus;
+    dueAt: Date;
+    generation: number;
+    attempts: number;
+    lastError: string | null;
+    nextAttemptAt: Date | null;
+    completedAt: Date | null;
+    evidence: Record<string, unknown>;
+  } | null;
+  latestSuccess: {
+    periodKey: string;
+    status: SchedulerObligationStatus;
+    dueAt: Date;
+    generation: number;
+    attempts: number;
+    lastError: string | null;
+    nextAttemptAt: Date | null;
+    completedAt: Date | null;
+    evidence: Record<string, unknown>;
+  } | null;
+  firstSucceededAt: Date | null;
+  lastSucceededAt: Date | null;
+  overdue: boolean;
+  consecutiveUnsuccessfulCycles: number;
+}>;
+
+function schedulerStatusDate(value: Date | string | null): Date | null {
+  if (value === null) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+/**
+ * Read all active-season retention scopes in one bounded query. Only the
+ * newest three rows per scope are returned; window aggregates retain the first
+ * and latest successful certification without loading daily history.
+ */
+export async function liveFinalRetentionObligationStatuses(input: {
+  scopeKeys: readonly string[];
+  policyVersion: string;
+  evidenceSchemaVersion: string;
+  db?: DbOrTransaction;
+  statementTimeoutMs?: number;
+}): Promise<ReadonlyMap<string, SchedulerObligationStatusSnapshot>> {
+  const scopeKeys = [...new Set(input.scopeKeys)];
+  if (scopeKeys.length === 0) return new Map();
+  if (input.db === undefined && input.statementTimeoutMs !== undefined) {
+    if (!Number.isSafeInteger(input.statementTimeoutMs) || input.statementTimeoutMs <= 0) {
+      throw new Error('Live final retention status timeout must be a positive integer');
+    }
+    const db = await getDb();
+    return db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT set_config('statement_timeout', ${`${input.statementTimeoutMs}ms`}, true)`,
+      );
+      return liveFinalRetentionObligationStatuses({
+        ...input,
+        db: tx,
+        statementTimeoutMs: undefined,
+      });
+    });
+  }
+  const db = input.db ?? (await getDb());
+  const scopeList = sql.join(
+    scopeKeys.map((scopeKey) => sql`${scopeKey}`),
+    sql`, `,
+  );
+  const rows = await db.execute<{
+    scopeKey: string;
+    periodKey: string;
+    status: string;
+    dueAt: Date | string;
+    generation: number | string;
+    attempts: number | string;
+    lastError: string | null;
+    nextAttemptAt: Date | string | null;
+    completedAt: Date | string | null;
+    evidence: Record<string, unknown> | null;
+    rowRank: number | string;
+    firstSucceededAt: Date | string | null;
+    lastSucceededAt: Date | string | null;
+  }>(sql`
+    WITH ranked AS (
+      SELECT
+        scope_key AS "scopeKey",
+        period_key AS "periodKey",
+        status,
+        CASE
+          WHEN evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
+            AND (evidence->>'scheduledDueAtMs')::numeric BETWEEN 0 AND 8640000000000000
+            THEN to_timestamp((evidence->>'scheduledDueAtMs')::double precision / 1000)
+          ELSE due_at
+        END AS "dueAt",
+        generation,
+        attempts,
+        last_error AS "lastError",
+        next_attempt_at AS "nextAttemptAt",
+        completed_at AS "completedAt",
+        evidence,
+        row_number() OVER (
+          PARTITION BY scope_key
+          ORDER BY
+            CASE
+              WHEN evidence->>'scheduledDueAtMs' ~ '^[0-9]+$'
+                AND (evidence->>'scheduledDueAtMs')::numeric BETWEEN 0 AND 8640000000000000
+                THEN to_timestamp((evidence->>'scheduledDueAtMs')::double precision / 1000)
+              ELSE due_at
+            END DESC,
+            updated_at DESC
+        ) AS "rowRank",
+        min(completed_at) FILTER (
+          WHERE status = 'succeeded'
+            AND evidence->'retention'->>'schemaVersion' = ${input.evidenceSchemaVersion}
+            AND evidence->'retention'->>'complete' = 'true'
+        ) OVER (PARTITION BY scope_key) AS "firstSucceededAt",
+        max(completed_at) FILTER (
+          WHERE status = 'succeeded'
+            AND evidence->'retention'->>'schemaVersion' = ${input.evidenceSchemaVersion}
+            AND evidence->'retention'->>'complete' = 'true'
+        ) OVER (PARTITION BY scope_key) AS "lastSucceededAt"
+      FROM ops.scheduler_obligations
+      WHERE job_name = 'live-final-retention'
+        AND scope_key IN (${scopeList})
+        AND evidence->>'retentionPolicyVersion' = ${input.policyVersion}
+    )
+    SELECT *
+    FROM ranked
+    WHERE "rowRank" <= 3
+    ORDER BY "scopeKey", "rowRank"
+  `);
+
+  type RetentionStatusRow = (typeof rows)[number];
+  const grouped = new Map<string, RetentionStatusRow[]>();
+  for (const row of rows) {
+    const group: RetentionStatusRow[] = grouped.get(row.scopeKey) ?? [];
+    group.push(row);
+    grouped.set(row.scopeKey, group);
+  }
+  const result = new Map<string, SchedulerObligationStatusSnapshot>();
+  for (const scopeKey of scopeKeys) {
+    const group = grouped.get(scopeKey) ?? [];
+    const mapStatus = (row: RetentionStatusRow | undefined) => {
+      if (!row) return null;
+      const dueAt = schedulerStatusDate(row.dueAt);
+      if (!dueAt) return null;
+      return {
+        periodKey: row.periodKey,
+        status: row.status as SchedulerObligationStatus,
+        dueAt,
+        generation: Number(row.generation),
+        attempts: Number(row.attempts),
+        lastError: row.lastError,
+        nextAttemptAt: schedulerStatusDate(row.nextAttemptAt),
+        completedAt: schedulerStatusDate(row.completedAt),
+        evidence: row.evidence ?? {},
+      };
+    };
+    const latest = mapStatus(group[0]);
+    const latestSuccess = mapStatus(
+      group.find(
+        (row) =>
+          row.status === 'succeeded' &&
+          (row.evidence?.retention as Record<string, unknown> | undefined)?.schemaVersion ===
+            input.evidenceSchemaVersion &&
+          (row.evidence?.retention as Record<string, unknown> | undefined)?.complete === true,
+      ),
+    );
+    let consecutiveUnsuccessfulCycles = 0;
+    for (const row of group) {
+      if (row.status === 'succeeded') break;
+      if (row.status === 'failed' || row.status === 'irrecoverable' || row.status === 'skipped') {
+        consecutiveUnsuccessfulCycles += 1;
+      }
+    }
+    const latestIsOverdueState =
+      latest?.status === 'pending' || latest?.status === 'failed' || latest?.status === 'retrying';
+    result.set(scopeKey, {
+      latest,
+      latestSuccess,
+      firstSucceededAt: schedulerStatusDate(group[0]?.firstSucceededAt ?? null),
+      lastSucceededAt: schedulerStatusDate(group[0]?.lastSucceededAt ?? null),
+      overdue: Boolean(latest && latest.dueAt.getTime() <= Date.now() && latestIsOverdueState),
+      consecutiveUnsuccessfulCycles,
+    });
+  }
+  return result;
+}

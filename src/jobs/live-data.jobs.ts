@@ -8,9 +8,10 @@ import {
   readLiveMatchCheckpointDesiredV3,
   readLiveMatchCheckpointLastAtV3,
 } from '../cache/live-match-publication-v3';
+import { LIVE_FINAL_RETENTION_CADENCE_MS } from '../domain/live-final-retention-policy';
 
 const LIVE_MATCH_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
-export const LIVE_FINAL_RETENTION_INTERVAL_MS = 6 * 60 * 60_000;
+export const LIVE_FINAL_RETENTION_INTERVAL_MS = LIVE_FINAL_RETENTION_CADENCE_MS;
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
 
@@ -346,7 +347,7 @@ export async function enqueueLiveSnapshot(
 }
 
 /**
- * Enqueue one current-event final-publication retention pass.  The six-hour
+ * Enqueue one finalized-event publication retention pass. The daily
  * bucket is deliberately part of the default job identity so a scheduler
  * restart cannot create duplicate work for the same retention window.
  */

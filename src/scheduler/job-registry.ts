@@ -27,11 +27,7 @@ import {
   enqueueTournamentTransfersPre,
   hasPendingOfficialH2HJob,
 } from '../jobs/tournament-sync.jobs';
-import {
-  enqueueLiveFinalRetention,
-  enqueueLiveSnapshot,
-  LIVE_FINAL_RETENTION_INTERVAL_MS,
-} from '../jobs/live-data.jobs';
+import { enqueueLiveFinalRetention, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueLivePicksRefresh } from '../jobs/live-picks.jobs';
 import {
   enqueueBugReportCleanup,
@@ -89,6 +85,12 @@ import {
   PRICE_CHANGE_WATCH_LEAD_MS,
   PRICE_CHANGE_WATCH_MAX_WINDOW_MS,
 } from '../domain/price-change-watch-policy';
+import {
+  LIVE_FINAL_RETENTION_POLICY_VERSION,
+  LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+  liveFinalRetentionDueAt,
+  liveFinalRetentionPeriodKey,
+} from '../domain/live-final-retention-policy';
 
 export type SchedulerSource = 'schedule' | 'catchup' | 'reconcile' | 'manual';
 export type CatchUpPolicy =
@@ -1434,7 +1436,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
 function liveFinalRetentionDefinition(): ScheduledJobDefinition {
   return {
     name: 'live-final-retention',
-    cadence: 'every six hours while the current event is finalized',
+    cadence: 'daily per finalized current-season event',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
@@ -1442,22 +1444,36 @@ function liveFinalRetentionDefinition(): ScheduledJobDefinition {
     executionLanes: ['queue:live-data'],
     claimPriority: 20,
     successPredicate:
-      'all current final live publication families are identity-correct and retained above 24 hours',
+      'all finalized-event live publication families are identity-correct and retained above seven days',
     resolve: async (context) => {
-      if (!context.currentEventId) return [];
-      const event = context.events.find(({ id }) => id === context.currentEventId);
-      if (!event?.finished || !event.dataChecked) return [];
-      const bucket = Math.floor(context.now.getTime() / LIVE_FINAL_RETENTION_INTERVAL_MS);
-      return [
-        {
-          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-final-retention-${event.id}-${bucket}`,
-          dueAt: new Date(bucket * LIVE_FINAL_RETENTION_INTERVAL_MS),
-          eventId: event.id,
-          source: 'reconcile' as const,
-          evidence: { retentionOnly: true },
-        },
-      ];
+      return context.events
+        .filter(
+          (event) =>
+            event.finished === true &&
+            event.dataChecked === true &&
+            event.dataCheckedAt instanceof Date &&
+            Number.isFinite(event.dataCheckedAt.getTime()),
+        )
+        .sort((left, right) => left.id - right.id)
+        .map((event) => {
+          const dueAt = liveFinalRetentionDueAt({
+            eventId: event.id,
+            dataCheckedAt: event.dataCheckedAt!,
+            now: context.now,
+          });
+          return {
+            scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+            periodKey: liveFinalRetentionPeriodKey(event.id, dueAt),
+            dueAt,
+            eventId: event.id,
+            source: 'reconcile' as const,
+            evidence: {
+              retentionOnly: true,
+              retentionPolicyVersion: LIVE_FINAL_RETENTION_POLICY_VERSION,
+              renewThresholdMs: LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+            },
+          };
+        });
     },
     enqueue: async ({ context, plan, obligationId, generation }) => {
       const eventId = plan.eventId ?? context.currentEventId;

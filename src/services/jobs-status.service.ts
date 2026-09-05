@@ -19,6 +19,7 @@ import { allQueueNames } from '../queues/names';
 import { getQueueConnection } from '../utils/queue';
 import { checkRuntimeHeartbeat, readRuntimeHeartbeat } from '../utils/runtime-heartbeat';
 import {
+  liveFinalRetentionObligationStatuses,
   schedulerObligationStatus,
   schedulerObligationSummary,
 } from '../repositories/scheduler-obligations';
@@ -46,7 +47,16 @@ import { calculateBurnRate } from '../domain/freshness-slo';
 import { safePersistedDataErrorCode } from '../domain/error-classification';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
-import { LIVE_FINAL_RETENTION_THRESHOLD_MS } from './live-final-retention.service';
+import {
+  effectiveLiveFinalRetentionTtl,
+  LIVE_FINAL_RETENTION_CRITICAL_TTL_MS,
+  LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION,
+  LIVE_FINAL_RETENTION_LEASE_MS,
+  LIVE_FINAL_RETENTION_POLICY_VERSION,
+  LIVE_FINAL_RETENTION_PROOF_MAX_AGE_MS,
+  LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+  LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
+} from '../domain/live-final-retention-policy';
 import { readPriceChangeHotSnapshotMetadata } from './price-change-hot.service';
 import {
   FPL_BULK_MAX_INFLIGHT_HARD_CAP,
@@ -126,7 +136,7 @@ const LIVE_FINAL_RETENTION_FAMILIES = [
 function retentionFamilyStatus(value: unknown): Record<string, unknown> {
   const family = asContext(value);
   if (!family) {
-    return { checked: 0, renewed: 0, restored: 0, failed: 1, minRemainingTtlMs: null };
+    return { checked: 0, renewed: 0, restored: 0, failed: 0, minRemainingTtlMs: null };
   }
   const integer = (key: string): number =>
     typeof family[key] === 'number' && Number.isSafeInteger(family[key]) && family[key] >= 0
@@ -145,95 +155,328 @@ function retentionFamilyStatus(value: unknown): Record<string, unknown> {
   };
 }
 
+function retentionDate(value: unknown): Date | null {
+  if (typeof value !== 'string') return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function retentionNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+export function retentionEvidenceCountsAreCoherent(value: Record<string, unknown> | null): boolean {
+  if (!value) return false;
+  const families = asContext(value.families);
+  const requiredArtifacts = value.requiredArtifacts;
+  const failed = value.failed;
+  if (
+    !families ||
+    typeof requiredArtifacts !== 'number' ||
+    !Number.isSafeInteger(requiredArtifacts) ||
+    requiredArtifacts <= 0 ||
+    typeof failed !== 'number' ||
+    !Number.isSafeInteger(failed) ||
+    failed < 0
+  ) {
+    return false;
+  }
+  let checkedTotal = 0;
+  let failedTotal = 0;
+  for (const name of LIVE_FINAL_RETENTION_FAMILIES) {
+    const family = asContext(families[name]);
+    if (!family) return false;
+    for (const key of ['checked', 'renewed', 'restored', 'failed'] as const) {
+      if (
+        typeof family[key] !== 'number' ||
+        !Number.isSafeInteger(family[key]) ||
+        family[key] < 0
+      ) {
+        return false;
+      }
+    }
+    const checked = Number(family.checked);
+    const familyFailed = Number(family.failed);
+    if (checked > 0 && retentionNumber(family.minRemainingTtlMs) === null) return false;
+    checkedTotal += checked;
+    failedTotal += familyFailed;
+  }
+  return checkedTotal === requiredArtifacts && failedTotal === failed;
+}
+
+function agedRetentionFamilyStatus(
+  value: unknown,
+  observedAt: Date | null,
+  now: Date,
+): Record<string, unknown> {
+  const family = retentionFamilyStatus(value);
+  return {
+    ...family,
+    minRemainingTtlMs: effectiveLiveFinalRetentionTtl({
+      observedTtlMs: retentionNumber(family.minRemainingTtlMs),
+      observedAt,
+      now,
+    }),
+  };
+}
+
+function emptyRetentionFamilies(): Record<string, Record<string, unknown>> {
+  return Object.fromEntries(
+    LIVE_FINAL_RETENTION_FAMILIES.map((family) => [
+      family,
+      { checked: 0, renewed: 0, restored: 0, failed: 0, minRemainingTtlMs: null },
+    ]),
+  );
+}
+
+function mergeRetentionFamilies(
+  aggregate: Record<string, Record<string, unknown>>,
+  families: Record<string, Record<string, unknown>>,
+): void {
+  for (const family of LIVE_FINAL_RETENTION_FAMILIES) {
+    const target = aggregate[family]!;
+    const source = families[family]!;
+    for (const key of ['checked', 'renewed', 'restored', 'failed'] as const) {
+      target[key] = Number(target[key] ?? 0) + Number(source[key] ?? 0);
+    }
+    const candidate = retentionNumber(source.minRemainingTtlMs);
+    const current = retentionNumber(target.minRemainingTtlMs);
+    target.minRemainingTtlMs =
+      candidate === null ? current : current === null ? candidate : Math.min(current, candidate);
+  }
+}
+
 export async function getLiveFinalRetentionOperationalStatus(
   season: Awaited<ReturnType<typeof seasonRepository.findCurrent>>,
 ): Promise<Record<string, unknown>> {
-  const checkedAt = new Date().toISOString();
-  const current = await eventRepository.findCurrent(season);
-  if (!current || !current.finished || !current.dataChecked) {
+  const now = new Date();
+  const checkedAt = now.toISOString();
+  const finalizedEvents = (await eventRepository.findAll(season)).filter(
+    (event) =>
+      event.finished &&
+      event.dataChecked &&
+      event.dataCheckedAt !== null &&
+      Number.isFinite(event.dataCheckedAt.getTime()),
+  );
+  const policy = {
+    mode: 'ACTIVE_SEASON_ALL_FINALIZED',
+    version: LIVE_FINAL_RETENTION_POLICY_VERSION,
+    evidenceSchemaVersion: LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION,
+    leaseTtlMs: LIVE_FINAL_RETENTION_LEASE_MS,
+    renewThresholdMs: LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+    criticalTtlMs: LIVE_FINAL_RETENTION_CRITICAL_TTL_MS,
+    proofMaxAgeMs: LIVE_FINAL_RETENTION_PROOF_MAX_AGE_MS,
+    cadence: 'daily-per-finalized-event',
+  };
+  if (finalizedEvents.length === 0) {
     return {
-      schemaVersion: 'live-final-retention-status-v1',
-      eventId: current?.id ?? null,
+      schemaVersion: LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
+      seasonCode: season.seasonCode,
       checkedAt,
-      lastRunAt: null,
+      policy,
       state: 'NOT_APPLICABLE',
-      overdue: false,
-      consecutiveUnsuccessfulCycles: 0,
+      coverage: {
+        expectedFinalizedEvents: 0,
+        certifiedEvents: 0,
+        readyEvents: 0,
+        warningEvents: 0,
+        criticalEvents: 0,
+        missingEventIds: [],
+      },
+      events: [],
       minRemainingTtlMs: null,
-      families: Object.fromEntries(
-        LIVE_FINAL_RETENTION_FAMILIES.map((family) => [family, retentionFamilyStatus(null)]),
-      ),
-      schedulerObligation: null,
-      reasonCodes: ['CURRENT_EVENT_NOT_FINAL'],
+      oldestProofAt: null,
+      families: emptyRetentionFamilies(),
+      reasonCodes: ['NO_FINALIZED_EVENTS'],
     };
   }
 
-  const obligation = await schedulerObligationStatus({
-    jobName: 'live-final-retention',
-    scopeKey: `${season.seasonCode}:event:${current.id}`,
-  }).catch(() => ({
-    latest: null,
-    overdue: true,
-    consecutiveUnsuccessfulCycles: 0,
-  }));
-  const latestEvidence = asContext(obligation.latest?.evidence);
-  const retention = asContext(latestEvidence?.retention);
-  const families = Object.fromEntries(
-    LIVE_FINAL_RETENTION_FAMILIES.map((family) => [
-      family,
-      retentionFamilyStatus(retention?.families && asContext(retention.families)?.[family]),
-    ]),
-  );
-  const minRemainingTtlMs =
-    retention && typeof retention.minRemainingTtlMs === 'number'
-      ? retention.minRemainingTtlMs
+  const scopeKeys = finalizedEvents.map((event) => `${season.seasonCode}:event:${event.id}`);
+  const obligationByScope = await liveFinalRetentionObligationStatuses({
+    scopeKeys,
+    policyVersion: LIVE_FINAL_RETENTION_POLICY_VERSION,
+    evidenceSchemaVersion: LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION,
+    statementTimeoutMs: 1_500,
+  });
+  const aggregateFamilies = emptyRetentionFamilies();
+  const eventStatuses = finalizedEvents.map((event) => {
+    const scopeKey = `${season.seasonCode}:event:${event.id}`;
+    const obligation = obligationByScope.get(scopeKey) ?? {
+      latest: null,
+      latestSuccess: null,
+      firstSucceededAt: null,
+      lastSucceededAt: null,
+      overdue: false,
+      consecutiveUnsuccessfulCycles: 0,
+    };
+    const latestRunEvidence = asContext(obligation.latest?.evidence);
+    const latestRunRetention = asContext(latestRunEvidence?.retention);
+    const latestSuccessEvidence = asContext(obligation.latestSuccess?.evidence);
+    const latestSuccessRetention = asContext(latestSuccessEvidence?.retention);
+    // Failed runs carry the bounded family evidence produced by the actual
+    // pass. Surface that evidence instead of masking it with an older success.
+    // A pending run has no result yet, so the latest success remains the best
+    // current lease observation while the scheduler state is shown separately.
+    const retention = latestRunRetention ?? latestSuccessRetention;
+    const observedAt = retentionDate(retention?.checkedAt);
+    const latestSuccessObservedAt = retentionDate(latestSuccessRetention?.checkedAt);
+    const observedMinTtlMs = retentionNumber(retention?.minRemainingTtlMs);
+    const minRemainingTtlMs = effectiveLiveFinalRetentionTtl({
+      observedTtlMs: observedMinTtlMs,
+      observedAt,
+      now,
+    });
+    const familySource = asContext(retention?.families);
+    const families = Object.fromEntries(
+      LIVE_FINAL_RETENTION_FAMILIES.map((family) => [
+        family,
+        agedRetentionFamilyStatus(familySource?.[family], observedAt, now),
+      ]),
+    );
+    mergeRetentionFamilies(aggregateFamilies, families);
+
+    const evidenceMatchesContract = (value: Record<string, unknown> | null): boolean =>
+      value !== null &&
+      value.eventId === event.id &&
+      value.schemaVersion === LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION &&
+      value.policyVersion === LIVE_FINAL_RETENTION_POLICY_VERSION;
+    const identityMismatch = retention !== null && retention.eventId !== event.id;
+    const schemaMismatch = retention !== null && !evidenceMatchesContract(retention);
+    const failed = retentionNumber(retention?.failed);
+    const requiredArtifacts = retentionNumber(retention?.requiredArtifacts);
+    const completeEvidence =
+      retention !== null &&
+      evidenceMatchesContract(retention) &&
+      retentionEvidenceCountsAreCoherent(retention) &&
+      retention.complete === true &&
+      failed === 0 &&
+      requiredArtifacts !== null &&
+      requiredArtifacts > 0 &&
+      observedAt !== null &&
+      minRemainingTtlMs !== null;
+    const latestSuccessMinTtlMs = effectiveLiveFinalRetentionTtl({
+      observedTtlMs: retentionNumber(latestSuccessRetention?.minRemainingTtlMs),
+      observedAt: latestSuccessObservedAt,
+      now,
+    });
+    const latestSuccessProofAgeMs = latestSuccessObservedAt
+      ? Math.max(0, now.getTime() - latestSuccessObservedAt.getTime())
       : null;
-  const identityMismatch = retention !== null && retention.eventId !== current.id;
-  const failed =
-    retention && typeof retention.failed === 'number' ? retention.failed : retention ? 1 : 0;
-  const critical =
-    !retention ||
-    identityMismatch ||
-    failed > 0 ||
-    retention.complete !== true ||
-    minRemainingTtlMs === null ||
-    minRemainingTtlMs < 12 * 60 * 60_000 ||
-    obligation.consecutiveUnsuccessfulCycles >= 2 ||
-    obligation.latest?.status === 'failed' ||
-    obligation.latest?.status === 'irrecoverable';
-  const warning =
-    !critical &&
-    (obligation.overdue ||
+    const certified =
+      latestSuccessRetention !== null &&
+      evidenceMatchesContract(latestSuccessRetention) &&
+      retentionEvidenceCountsAreCoherent(latestSuccessRetention) &&
+      latestSuccessRetention.complete === true &&
+      retentionNumber(latestSuccessRetention.failed) === 0 &&
+      retentionNumber(latestSuccessRetention.requiredArtifacts) !== null &&
+      retentionNumber(latestSuccessRetention.requiredArtifacts)! > 0 &&
+      latestSuccessObservedAt !== null &&
+      latestSuccessProofAgeMs !== null &&
+      latestSuccessProofAgeMs <= LIVE_FINAL_RETENTION_PROOF_MAX_AGE_MS &&
+      latestSuccessMinTtlMs !== null &&
+      latestSuccessMinTtlMs >= LIVE_FINAL_RETENTION_CRITICAL_TTL_MS;
+    const lastVerifiedAt = latestSuccessObservedAt ?? obligation.lastSucceededAt;
+    const proofAgeMs = lastVerifiedAt
+      ? Math.max(0, now.getTime() - lastVerifiedAt.getTime())
+      : null;
+    const latestFailed =
+      obligation.latest?.status === 'failed' || obligation.latest?.status === 'irrecoverable';
+    const critical =
+      !completeEvidence ||
+      latestFailed ||
+      obligation.consecutiveUnsuccessfulCycles >= 2 ||
       minRemainingTtlMs === null ||
-      minRemainingTtlMs <= LIVE_FINAL_RETENTION_THRESHOLD_MS);
-  const state = critical ? 'CRITICAL' : warning ? 'WARNING' : 'READY';
-  const reasonCodes = [
-    ...(!retention ? ['RETENTION_RESULT_MISSING'] : []),
-    ...(identityMismatch ? ['EVENT_IDENTITY_MISMATCH'] : []),
-    ...(failed > 0 ? ['RETENTION_PUBLICATION_FAILURE'] : []),
-    ...(minRemainingTtlMs === null ? ['RETENTION_TTL_UNAVAILABLE'] : []),
-    ...(minRemainingTtlMs !== null && minRemainingTtlMs < 12 * 60 * 60_000
-      ? ['RETENTION_TTL_CRITICAL']
-      : []),
-    ...(minRemainingTtlMs !== null && minRemainingTtlMs <= LIVE_FINAL_RETENTION_THRESHOLD_MS
-      ? ['RETENTION_TTL_WARNING']
-      : []),
-    ...(obligation.overdue ? ['RETENTION_JOB_OVERDUE'] : []),
-    ...(obligation.consecutiveUnsuccessfulCycles >= 2 ? ['RETENTION_TWO_UNSUCCESSFUL_CYCLES'] : []),
-  ];
+      minRemainingTtlMs < LIVE_FINAL_RETENTION_CRITICAL_TTL_MS ||
+      proofAgeMs === null ||
+      proofAgeMs > LIVE_FINAL_RETENTION_PROOF_MAX_AGE_MS;
+    const warning =
+      !critical &&
+      (obligation.overdue || minRemainingTtlMs <= LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS);
+    const state = critical ? 'CRITICAL' : warning ? 'WARNING' : 'READY';
+    const reasonCodes = [
+      ...(!retention ? ['RETENTION_RESULT_MISSING'] : []),
+      ...(identityMismatch ? ['EVENT_IDENTITY_MISMATCH'] : []),
+      ...(schemaMismatch ? ['RETENTION_EVIDENCE_SCHEMA_MISMATCH'] : []),
+      ...(retention && retention.complete !== true ? ['RETENTION_INCOMPLETE'] : []),
+      ...(retention && failed === null ? ['RETENTION_FAILED_COUNT_UNAVAILABLE'] : []),
+      ...(failed !== null && failed > 0 ? ['RETENTION_PUBLICATION_FAILURE'] : []),
+      ...(retention && requiredArtifacts === null ? ['RETENTION_ARTIFACT_COUNT_UNAVAILABLE'] : []),
+      ...(requiredArtifacts === 0 ? ['RETENTION_ARTIFACT_SET_EMPTY'] : []),
+      ...(minRemainingTtlMs === null ? ['RETENTION_TTL_UNAVAILABLE'] : []),
+      ...(minRemainingTtlMs !== null && minRemainingTtlMs < LIVE_FINAL_RETENTION_CRITICAL_TTL_MS
+        ? ['RETENTION_TTL_CRITICAL']
+        : []),
+      ...(minRemainingTtlMs !== null &&
+      minRemainingTtlMs >= LIVE_FINAL_RETENTION_CRITICAL_TTL_MS &&
+      minRemainingTtlMs <= LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS
+        ? ['RETENTION_TTL_WARNING']
+        : []),
+      ...(proofAgeMs === null ? ['RETENTION_PROOF_TIMESTAMP_UNAVAILABLE'] : []),
+      ...(proofAgeMs !== null && proofAgeMs > LIVE_FINAL_RETENTION_PROOF_MAX_AGE_MS
+        ? ['RETENTION_PROOF_STALE']
+        : []),
+      ...(latestFailed ? ['RETENTION_LATEST_CYCLE_FAILED'] : []),
+      ...(obligation.overdue ? ['RETENTION_JOB_OVERDUE'] : []),
+      ...(obligation.consecutiveUnsuccessfulCycles >= 2
+        ? ['RETENTION_TWO_UNSUCCESSFUL_CYCLES']
+        : []),
+    ];
+    return {
+      eventId: event.id,
+      dataCheckedAt: event.dataCheckedAt!.toISOString(),
+      state,
+      firstCertifiedAt: obligation.firstSucceededAt?.toISOString() ?? null,
+      lastVerifiedAt: lastVerifiedAt?.toISOString() ?? null,
+      lastRunAt: observedAt?.toISOString() ?? obligation.latest?.completedAt?.toISOString() ?? null,
+      proofAgeMs,
+      leaseValidUntil:
+        observedAt && observedMinTtlMs !== null
+          ? new Date(observedAt.getTime() + observedMinTtlMs).toISOString()
+          : null,
+      minRemainingTtlMs,
+      overdue: obligation.overdue,
+      consecutiveUnsuccessfulCycles: obligation.consecutiveUnsuccessfulCycles,
+      families,
+      schedulerObligation: {
+        scopeKey,
+        latest: safeSchedulerObligationLatest(obligation.latest),
+      },
+      reasonCodes,
+      certified,
+    };
+  });
+  const readyEvents = eventStatuses.filter((event) => event.state === 'READY').length;
+  const warningEvents = eventStatuses.filter((event) => event.state === 'WARNING').length;
+  const criticalEvents = eventStatuses.filter((event) => event.state === 'CRITICAL').length;
+  const certifiedEvents = eventStatuses.filter((event) => event.certified).length;
+  const observedTtls = eventStatuses
+    .map((event) => event.minRemainingTtlMs)
+    .filter((value): value is number => value !== null);
+  const proofTimes = eventStatuses
+    .map((event) => retentionDate(event.lastVerifiedAt)?.getTime() ?? null)
+    .filter((value): value is number => value !== null);
+  const state = criticalEvents > 0 ? 'CRITICAL' : warningEvents > 0 ? 'WARNING' : 'READY';
+  const missingEventIds = eventStatuses
+    .filter((event) => !event.certified)
+    .map((event) => event.eventId);
   return {
-    schemaVersion: 'live-final-retention-status-v1',
-    eventId: current.id,
+    schemaVersion: LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
+    seasonCode: season.seasonCode,
     checkedAt,
-    lastRunAt:
-      typeof retention?.checkedAt === 'string'
-        ? retention.checkedAt
-        : (obligation.latest?.completedAt?.toISOString() ?? null),
+    policy,
     state,
-    overdue: obligation.overdue,
-    consecutiveUnsuccessfulCycles: obligation.consecutiveUnsuccessfulCycles,
-    minRemainingTtlMs,
-    families,
+    coverage: {
+      expectedFinalizedEvents: finalizedEvents.length,
+      certifiedEvents,
+      readyEvents,
+      warningEvents,
+      criticalEvents,
+      missingEventIds,
+    },
+    events: eventStatuses,
+    minRemainingTtlMs: observedTtls.length > 0 ? Math.min(...observedTtls) : null,
+    oldestProofAt: proofTimes.length > 0 ? new Date(Math.min(...proofTimes)).toISOString() : null,
+    families: aggregateFamilies,
     schedulerObligation: {
       name: 'live-final-retention',
       cadence: schedulerRegistry.find((definition) => definition.name === 'live-final-retention')
@@ -241,9 +484,8 @@ export async function getLiveFinalRetentionOperationalStatus(
       criticality: schedulerRegistry.find(
         (definition) => definition.name === 'live-final-retention',
       )?.criticality,
-      latest: safeSchedulerObligationLatest(obligation.latest),
     },
-    reasonCodes,
+    reasonCodes: [...new Set(eventStatuses.flatMap((event) => event.reasonCodes))],
   };
 }
 
@@ -723,17 +965,16 @@ export async function getJobsStatus(
   }
 
   const liveFinalRetention = await getLiveFinalRetentionOperationalStatus(season).catch(() => ({
-    schemaVersion: 'live-final-retention-status-v1',
-    eventId: null,
+    schemaVersion: LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
+    seasonCode: season.seasonCode,
     checkedAt: new Date().toISOString(),
-    lastRunAt: null,
+    policy: null,
     state: 'UNAVAILABLE',
-    overdue: true,
-    consecutiveUnsuccessfulCycles: 0,
+    coverage: null,
+    events: [],
     minRemainingTtlMs: null,
-    families: Object.fromEntries(
-      LIVE_FINAL_RETENTION_FAMILIES.map((family) => [family, retentionFamilyStatus(null)]),
-    ),
+    oldestProofAt: null,
+    families: emptyRetentionFamilies(),
     schedulerObligation: null,
     reasonCodes: ['RETENTION_STATUS_UNAVAILABLE'],
   }));

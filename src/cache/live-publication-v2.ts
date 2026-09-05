@@ -8,6 +8,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
+import { LIVE_FINAL_RETENTION_LEASE_MS } from '../domain/live-final-retention-policy';
 import { redisSingleton } from './singleton';
 
 /**
@@ -18,7 +19,7 @@ import { redisSingleton } from './singleton';
  */
 export const LIVE_POINTS_CONTRACT_VERSION = 'live-points-v2' as const;
 export const LIVE_PUBLICATION_PREVIOUS_TTL_MS = 24 * 60 * 60_000;
-export const LIVE_PUBLICATION_FINAL_TTL_MS = 48 * 60 * 60_000;
+export const LIVE_PUBLICATION_FINAL_TTL_MS = LIVE_FINAL_RETENTION_LEASE_MS;
 const STAGING_TTL_MS = 15 * 60_000;
 
 export type LivePublicationState =
@@ -1600,7 +1601,7 @@ export type LiveFinalLeaseResult = Readonly<{
  * Extend a validated FINAL global publication without changing its manifest.
  * The caller owns the threshold decision; this function is intentionally
  * unconditional once invoked so tests and operators can prove the exact
- * 48-hour lease behavior independently of the scheduler.
+ * active-season lease behavior independently of the scheduler.
  */
 export async function renewLivePublicationV2FinalLease(input: {
   readonly publication: LivePublicationV2;

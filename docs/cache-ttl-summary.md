@@ -9,16 +9,16 @@ ownership, and cleanup guardrails are in [redis-contract.md](redis-contract.md).
 | --- | --- | ---: |
 | Core active manifest | `llm:data:fpl:core:{season}:active` | no expiry |
 | Core active items | `llm:data:fpl:core:{season}:{revision}:*` | no expiry |
-| Live V2 current manifest | `llm:data:v2:fpl:live:{season}:{event}:active` | event validity + 48h after final |
+| Live V2 current manifest | `llm:data:v2:fpl:live:{season}:{event}:active` | event validity + rolling 14-day final lease |
 | Live V2 previous manifest | `llm:data:v2:fpl:live:{season}:{event}:previous` | 24 hours |
 | Live V2 immutable items | `llm:data:v2:fpl:live:{season}:{event}:{generation}:*` | active lifetime; 24h after replacement |
-| Entry Live V2 current manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:active` | event validity + 48h after final |
+| Entry Live V2 current manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:active` | event validity + rolling 14-day final lease |
 | Entry Live V2 previous manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:previous` | 24 hours |
 | Entry Live V2 immutable input | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:{generation}:*` | active lifetime; 24h after replacement |
 | Live Matches V3 active-event pointer | `llm:data:v3:fpl:live-match:{season}:active-event` | active season control pointer |
-| Live Matches V3 desk current/active items | `llm:data:v3:fpl:live-match:desk:{season}:{event}:...` | no expiry until final; 48h after final |
+| Live Matches V3 desk current/active items | `llm:data:v3:fpl:live-match:desk:{season}:{event}:...` | no expiry until final; rolling 14-day final lease |
 | Live Matches V3 desk previous | `llm:data:v3:fpl:live-match:desk:{season}:{event}:previous` | 24 hours |
-| Live Matches V3 detail current/manifest/items | `llm:data:v3:fpl:live-match:detail:{season}:{event}:...` | no expiry until final; 48h after final |
+| Live Matches V3 detail current/manifest/items | `llm:data:v3:fpl:live-match:detail:{season}:{event}:...` | no expiry until final; rolling 14-day final lease |
 | Live Matches V3 detail previous/items | `llm:data:v3:fpl:live-match:detail:{season}:{event}:previous` and immutable items | 24 hours |
 | Live Matches V3 checkpoint desired/watermark | `llm:data:v3:fpl:live-match:checkpoint:{season}:{event}:{kind}*` | desired: 24h; watermark: 48h |
 | Unactivated publication staging | immutable item key | 15 minutes |
@@ -33,13 +33,13 @@ publication ID is idempotent. PostgreSQL is an asynchronous complete
 checkpoint/cold fallback, not a heartbeat write path.
 
 After an event is final, the `live-final-retention` scheduler obligation runs
-every six hours for the unique current event. It renews a complete publication
-only when its remaining TTL is at or below 24 hours, restoring from the exact
-PostgreSQL checkpoint/head when the Redis publication is missing or invalid.
+daily for every finalized event in the active season, with event IDs distributed
+across UTC hours. It renews a complete publication only when its remaining TTL
+is at or below seven days, restoring from the exact PostgreSQL checkpoint/head
+when the Redis publication is missing or invalid.
 The CAS lease path changes TTL only; it does not create a new publication or
-alter its identity and business timestamps. Once the event is no longer
-current, no further lease is granted and the final data expires naturally
-within the existing 48-hour window.
+alter its identity and business timestamps. The 14-day lease continues rolling
+for every finalized event until the season is no longer active.
 
 Live Matches V3 has one external root but two internal publications: compact
 desk and fixture-grain detail. Detail may lag desk but may never lead its desk

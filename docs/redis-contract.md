@@ -67,8 +67,9 @@ llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-standings:<generat
 
 `index` and `payload` are immutable siblings and are accepted only when their
 manifest metadata, byte length, and SHA-256 agree. Active pointers have no TTL
-during live operation; previous pointers/items retain 24 hours, finalized
-siblings retain 48 hours. Data alone promotes these keys. Finalization retry
+during live operation; previous pointers/items retain 24 hours, and active
+finalized siblings use a rolling 14-day lease for the active season. Data alone
+promotes these keys. Finalization retry
 state is durable in `ops.scheduler_obligations`; the latest checkpoint desired
 publication is retained in the scope's `checkpoint-desired` key. GraphQL is
 read-only and must select one coherent current/previous/checkpoint publication;
@@ -107,7 +108,7 @@ when its observed desk generation is not ahead of the selected desk and its
 fixture identity revision matches.
 
 Live Matches current pointers have no TTL; previous pointers and replaced
-items retain 24 hours, while final publications retain 48 hours. Heartbeat
+items retain 24 hours, while final publications use a rolling 14-day active-season lease. Heartbeat
 touches update source/next-check/stale timestamps only and never advance a
 generation, client content revision, PostgreSQL row, or checkpoint watermark.
 The `checkpoint:*` marker is latest-wins desired state; the `*:last` marker is
@@ -164,7 +165,7 @@ only after the candidate itself passes the complete validation gate.
 | --- | ---: |
 | Active manifest and active items | none |
 | Unactivated staging items | 15 minutes |
-| Previous generation items | 24 hours (48 hours after final handoff) |
+| Previous generation items | 24 hours |
 
 The `checkpoint-desired` key is one latest-wins control-plane obligation per scope. The picks
 coordinator and pending/coverage keys are bounded scheduler state; they never contain a second

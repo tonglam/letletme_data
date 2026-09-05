@@ -42,6 +42,7 @@ import {
 import { redisSingleton } from '../cache/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { eventRepository } from '../repositories/events';
+import { getSchedulerObligation } from '../repositories/scheduler-obligations';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import {
   entryEventPicksRepository,
@@ -56,7 +57,7 @@ import {
   readLiveMatchDeskCheckpointV3,
   readLiveMatchDetailCheckpointV3,
 } from './live-match-v3-checkpoint.service';
-import { syncLiveH2HLeaguePublicationsV2 } from './live-league-publication-v2.service';
+import { restoreFinalH2HMatchScopesForRetentionV2 } from './live-league-publication-v2.service';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
@@ -66,10 +67,17 @@ import {
   entryLiveFinalResultCheckpointHash,
   entryLivePicksBaseCheckpointHash,
 } from './entries.service';
+import {
+  LIVE_FINAL_RETENTION_CADENCE_MS,
+  LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION,
+  LIVE_FINAL_RETENTION_LEASE_MS,
+  LIVE_FINAL_RETENTION_POLICY_VERSION,
+  LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+} from '../domain/live-final-retention-policy';
 
-export const LIVE_FINAL_RETENTION_INTERVAL_MS = 6 * 60 * 60_000;
-export const LIVE_FINAL_RETENTION_THRESHOLD_MS = 24 * 60 * 60_000;
-export const LIVE_FINAL_RETENTION_TTL_MS = 48 * 60 * 60_000;
+export const LIVE_FINAL_RETENTION_INTERVAL_MS = LIVE_FINAL_RETENTION_CADENCE_MS;
+export const LIVE_FINAL_RETENTION_THRESHOLD_MS = LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS;
+export const LIVE_FINAL_RETENTION_TTL_MS = LIVE_FINAL_RETENTION_LEASE_MS;
 export const LIVE_FINAL_RETENTION_ENTRY_PAGE_SIZE = 250;
 export const LIVE_FINAL_RETENTION_ENTRY_CONCURRENCY = 2;
 
@@ -82,7 +90,8 @@ export type LiveFinalRetentionFamilyStats = {
 };
 
 export type LiveFinalRetentionResult = {
-  schemaVersion: 'live-final-retention-v1';
+  schemaVersion: typeof LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION;
+  policyVersion: typeof LIVE_FINAL_RETENTION_POLICY_VERSION;
   eventId: number;
   checkedAt: string;
   status: 'succeeded' | 'failed';
@@ -98,6 +107,10 @@ export type LiveFinalRetentionResult = {
     league: LiveFinalRetentionFamilyStats;
   };
 };
+
+export type LiveFinalRetentionAuthority =
+  | Readonly<{ kind: 'manual-current' }>
+  | Readonly<{ kind: 'scheduler'; obligationId: string; generation: number }>;
 
 /**
  * A final retention run remains a durable failed/irrecoverable scheduler
@@ -122,6 +135,7 @@ export function liveFinalRetentionCompletionEvidence(
 ): Record<string, unknown> {
   return {
     schemaVersion: result.schemaVersion,
+    policyVersion: result.policyVersion,
     eventId: result.eventId,
     checkedAt: result.checkedAt,
     status: result.status,
@@ -131,6 +145,32 @@ export function liveFinalRetentionCompletionEvidence(
     minRemainingTtlMs: result.minRemainingTtlMs,
     families: result.families,
   };
+}
+
+async function assertLiveFinalRetentionAuthority(
+  season: FplSeasonRef,
+  eventId: number,
+  currentEventId: number | null,
+  authority: LiveFinalRetentionAuthority,
+): Promise<void> {
+  if (authority.kind === 'manual-current') {
+    if (currentEventId !== eventId) {
+      throw new Error(`Manual live final retention event ${eventId} is not current`);
+    }
+    return;
+  }
+  const obligation = await getSchedulerObligation({ obligationId: authority.obligationId });
+  if (
+    !obligation ||
+    obligation.jobName !== 'live-final-retention' ||
+    obligation.scopeKey !== `${season.seasonCode}:event:${eventId}` ||
+    obligation.generation !== authority.generation ||
+    obligation.status !== 'running' ||
+    obligation.evidence.targetEventId !== eventId ||
+    obligation.evidence.retentionPolicyVersion !== LIVE_FINAL_RETENTION_POLICY_VERSION
+  ) {
+    throw new Error(`Live final retention authority does not match event ${eventId}`);
+  }
 }
 
 type MutableFamilyStats = LiveFinalRetentionFamilyStats;
@@ -986,24 +1026,23 @@ function h2hMatchScopesFromCheckpoint(
   return [...discovered.values()];
 }
 
-/** Execute the bounded current-event final publication retention pass. */
+/** Execute one bounded active-season final publication retention pass. */
 export async function runLiveFinalRetentionV2(
   season: FplSeasonRef,
   eventId: number,
-  redisClient?: Redis,
+  options: Readonly<{ authority: LiveFinalRetentionAuthority; redis?: Redis }>,
 ): Promise<LiveFinalRetentionResult> {
   const event = await eventRepository.findById(season, eventId);
   const current = await eventRepository.findCurrent(season);
-  if (!event || !current || current.id !== eventId) {
-    throw new Error(`Live final retention event ${eventId} is no longer current`);
-  }
+  if (!event) throw new Error(`Live final retention event ${eventId} does not exist`);
   if (!event.finished || !event.dataChecked) {
     throw new Error(`Live final retention event ${eventId} is not finished and data checked`);
   }
   if (!event.dataCheckedAt || !Number.isFinite(event.dataCheckedAt.getTime())) {
     throw new Error(`Live final retention event ${eventId} has no valid data_checked timestamp`);
   }
-  const redis = redisClient ?? (await redisSingleton.getClient());
+  await assertLiveFinalRetentionAuthority(season, eventId, current?.id ?? null, options.authority);
+  const redis = options.redis ?? (await redisSingleton.getClient());
   const families = {
     global: emptyFamily(),
     matchDesk: emptyFamily(),
@@ -1082,10 +1121,16 @@ export async function runLiveFinalRetentionV2(
     // the canonical head proves that a match scope should exist; unchanged
     // existing scopes use the TTL-only path above.
     try {
-      await syncLiveH2HLeaguePublicationsV2(season, eventId);
+      const restoredScopes = await restoreFinalH2HMatchScopesForRetentionV2(
+        season,
+        eventId,
+        missingH2HMatches,
+        redis,
+      );
       for (const scope of missingH2HMatches) {
         const read = await readLiveLeaguePublicationV2Pointer(scope, 'active', redis);
         if (
+          restoredScopes.has(`${scope.tournamentId}:${scope.matchId}`) &&
           read?.publication.state === 'FINALIZED' &&
           global &&
           read.publication.globalRef.publicationId === global.publicationId &&
@@ -1129,7 +1174,8 @@ export async function runLiveFinalRetentionV2(
     minRemainingTtlMs !== null &&
     minRemainingTtlMs > LIVE_FINAL_RETENTION_THRESHOLD_MS;
   const result: LiveFinalRetentionResult = {
-    schemaVersion: 'live-final-retention-v1',
+    schemaVersion: LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION,
+    policyVersion: LIVE_FINAL_RETENTION_POLICY_VERSION,
     eventId,
     checkedAt: new Date().toISOString(),
     status: complete ? 'succeeded' : 'failed',

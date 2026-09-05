@@ -112,7 +112,20 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
 
   return runTrackedJob(context, async () => {
     if (job.name === LIVE_JOBS.LIVE_FINAL_RETENTION) {
-      const result = await runLiveFinalRetentionV2(season, eventId);
+      const fence = inspectSchedulerObligationFence(job.data);
+      if (fence.kind === 'malformed') {
+        throw new Error(`Live final retention scheduler fence is malformed: ${fence.reason}`);
+      }
+      const result = await runLiveFinalRetentionV2(season, eventId, {
+        authority:
+          fence.kind === 'complete'
+            ? {
+                kind: 'scheduler',
+                obligationId: fence.obligationId,
+                generation: fence.generation,
+              }
+            : { kind: 'manual-current' },
+      });
       if (result.status !== 'succeeded') {
         throw new LiveFinalRetentionIncompleteError(result);
       }
@@ -327,7 +340,10 @@ export function createLiveDataWorker(): WorkerRuntime {
         jobName: job.name,
         eventId: job.data.eventId,
         ...(job.name === LIVE_JOBS.LIVE_FINAL_RETENTION && job.returnvalue
-          ? { retention: liveFinalRetentionCompletionEvidence(job.returnvalue) }
+          ? {
+              retentionPolicyVersion: job.returnvalue.policyVersion,
+              retention: liveFinalRetentionCompletionEvidence(job.returnvalue),
+            }
           : {}),
         ...(job.data.freshnessWindowId === undefined
           ? {}
@@ -357,7 +373,12 @@ export function createLiveDataWorker(): WorkerRuntime {
       void alertOnFinalFailure(job, err);
       const fence = inspectSchedulerObligationFence(job.data);
       const failureEvidence =
-        err instanceof LiveFinalRetentionIncompleteError ? { retention: err.evidence } : undefined;
+        err instanceof LiveFinalRetentionIncompleteError
+          ? {
+              retentionPolicyVersion: err.evidence.policyVersion,
+              retention: err.evidence,
+            }
+          : undefined;
       if (isTerminalJobFailure(job, err) && fence.kind === 'complete') {
         void failSchedulerObligation({
           obligationId: fence.obligationId,

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 import {
+  retentionEvidenceCountsAreCoherent,
   safeSchedulerLaneErrorCode,
   safeSchedulerObligationLatest,
   selectCanonicalPriceChangeContext,
@@ -173,5 +174,37 @@ describe('jobs status hot-path isolation', () => {
     expect(control).toContain(['case ', quote, 'tournamentReviewV2', quote].join(''));
     expect(control).toContain(['case ', quote, 'liveFinalRetention', quote].join(''));
     expect(control).toContain(['case ', quote, 'clientSignals', quote].join(''));
+  });
+});
+
+describe('live final retention status evidence', () => {
+  const family = {
+    checked: 2,
+    renewed: 1,
+    restored: 0,
+    failed: 0,
+    minRemainingTtlMs: 10 * 24 * 60 * 60_000,
+  };
+
+  test('accepts only a count-coherent all-family certificate', () => {
+    const evidence = {
+      requiredArtifacts: 10,
+      failed: 0,
+      families: {
+        global: family,
+        matchDesk: family,
+        matchDetail: family,
+        entry: family,
+        league: family,
+      },
+    };
+    expect(retentionEvidenceCountsAreCoherent(evidence)).toBe(true);
+    expect(retentionEvidenceCountsAreCoherent({ ...evidence, requiredArtifacts: 9 })).toBe(false);
+    expect(
+      retentionEvidenceCountsAreCoherent({
+        ...evidence,
+        families: { ...evidence.families, league: { ...family, minRemainingTtlMs: null } },
+      }),
+    ).toBe(false);
   });
 });
