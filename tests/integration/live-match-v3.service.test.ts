@@ -579,6 +579,63 @@ describe('Live Matches V3 observation publication', () => {
     expect(second.detailUnavailableReason).toBe('DETAIL_CANDIDATE_INVALID');
   });
 
+  test('keeps a complete finalized detail immutable across later identity observations', async () => {
+    const finalFixture = {
+      ...fixture(30),
+      finished: true,
+      finished_provisional: true,
+      minutes: 90,
+    } satisfies RawFPLFixture;
+    const pinnedReference = (price: number, webName: string): LiveSnapshotReferenceData => ({
+      ...referenceData(),
+      eventPinnedIdentities: Promise.resolve([
+        {
+          fixtureId: 401,
+          elementId: 101,
+          teamId: 10,
+          elementType: 3,
+          price,
+          webName,
+        },
+      ]),
+    });
+    const first = await syncLiveMatchesV3FromObservation({
+      season,
+      eventId,
+      rawFixtures: [finalFixture],
+      rawEventLive: { elements: eventLive() },
+      referenceData: pinnedReference(50, 'Player One'),
+      expectedFixtureIds: [401],
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      observedAt: '2026-08-29T10:01:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const second = await syncLiveMatchesV3FromObservation({
+      season,
+      eventId,
+      rawFixtures: [finalFixture],
+      rawEventLive: { elements: eventLive() },
+      referenceData: pinnedReference(51, 'Player Renamed'),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:02:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const stored = await readLiveMatchDetailV3({ season: season.seasonCode, eventId, redis });
+
+    expect(first.detail?.finalized).toBe(true);
+    expect(second.detailChanged).toBe(false);
+    expect(second.detail?.publicationId).toBe(first.detail?.publicationId);
+    expect(second.detail?.generation).toBe(first.detail?.generation);
+    expect(stored?.fixtures[0]?.players[0]).toMatchObject({
+      id: 101,
+      price: 50,
+      webName: 'Player One',
+    });
+  });
+
   test('retains complete detail when provider explain and BPS evidence becomes empty', async () => {
     const first = await syncLiveMatchesV3FromObservation({
       season,

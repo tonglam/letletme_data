@@ -22,14 +22,21 @@ import {
   liveMatchDeskKey,
   liveMatchDetailKey,
   liveMatchDetailManifestKey,
+  readLiveMatchDeskFenceV3,
   readLiveMatchDeskPointerV3,
+  readLiveMatchDetailFenceV3,
   readLiveMatchDetailPointerV3,
   renewLiveMatchDeskFinalLeaseV3,
   renewLiveMatchDetailFinalLeaseV3,
+  restoreLiveMatchEquivalentFinalPairV3,
   restoreLiveMatchDeskCheckpointV3,
   restoreLiveMatchDetailCheckpointV3,
+  type MatchDeskActiveFence,
   type MatchDeskPublication,
+  type MatchDeskRead,
+  type MatchDetailActiveFence,
   type MatchDetailPublication,
+  type MatchDetailRead,
 } from '../cache/live-match-publication-v3';
 import {
   liveLeagueV2Key,
@@ -57,7 +64,15 @@ import {
   readLiveMatchDeskCheckpointV3,
   readLiveMatchDetailCheckpointV3,
 } from './live-match-v3-checkpoint.service';
-import { restoreFinalH2HMatchScopesForRetentionV2 } from './live-league-publication-v2.service';
+import {
+  restoreFinalClassicCheckpointForRetentionV2,
+  restoreFinalH2HMatchScopesForRetentionV2,
+} from './live-league-publication-v2.service';
+import {
+  isLiveMatchDetailCompatibleWithDesk,
+  sameFinalLiveMatchDeskContent,
+  sameFinalLiveMatchDetailContent,
+} from './live-match-v3-repair.service';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
@@ -448,6 +463,125 @@ async function processGlobal(
     });
     return null;
   }
+}
+
+export type FinalMatchPairRetentionRecoveryPlan = 'restore' | 'already-canonical' | 'unavailable';
+
+/**
+ * Compare the immutable scoring identity of two validated final detail reads.
+ *
+ * Historical detail publications before the event-identity storage contract
+ * was completed could be republished solely because the current player price
+ * or display name changed. PostgreSQL remains the durable final authority in
+ * that case, but a score/stat/player/team/position change is never equivalent
+ * and must continue to fail closed.
+ */
+export function sameFinalLiveMatchDetailScoringContent(
+  left: MatchDetailRead | null,
+  right: MatchDetailRead | null,
+): boolean {
+  if (
+    !left ||
+    !right ||
+    left.publication.season !== right.publication.season ||
+    left.publication.eventId !== right.publication.eventId ||
+    !left.publication.finalized ||
+    !right.publication.finalized ||
+    left.publication.fixtureIdentityRevision !== right.publication.fixtureIdentityRevision ||
+    left.fixtures.length === 0 ||
+    left.fixtures.length !== right.fixtures.length
+  ) {
+    return false;
+  }
+  const scoringContent = (read: MatchDetailRead) =>
+    [...read.fixtures]
+      .sort((a, b) => a.fixtureId - b.fixtureId)
+      .map((fixture) => ({
+        fixtureId: fixture.fixtureId,
+        players: [...fixture.players]
+          .sort((a, b) => a.id - b.id)
+          .map(({ webName: _webName, price: _price, ...player }) => ({
+            ...player,
+            stats: [...player.stats].sort((a, b) => a.identifier.localeCompare(b.identifier)),
+          })),
+      }));
+  return canonicalJson(scoringContent(left)) === canonicalJson(scoringContent(right));
+}
+
+/** Decide whether a historical final pair can use the strict atomic restore path. */
+export function finalMatchPairRetentionRecoveryPlan(input: {
+  readonly deskCheckpoint: MatchDeskRead | null;
+  readonly detailCheckpoint: MatchDetailRead | null;
+  readonly observedDesk: MatchDeskActiveFence;
+  readonly observedDetail: MatchDetailActiveFence;
+}): FinalMatchPairRetentionRecoveryPlan {
+  const { deskCheckpoint, detailCheckpoint, observedDesk, observedDetail } = input;
+  if (
+    !deskCheckpoint ||
+    !detailCheckpoint ||
+    deskCheckpoint.publication.state !== 'FINALIZED' ||
+    !detailCheckpoint.publication.finalized ||
+    !isLiveMatchDetailCompatibleWithDesk(detailCheckpoint, deskCheckpoint)
+  ) {
+    return 'unavailable';
+  }
+  const currentDesk = observedDesk.read;
+  if (
+    !currentDesk ||
+    currentDesk.servedFrom !== 'REDIS_CURRENT' ||
+    currentDesk.publication.state !== 'FINALIZED' ||
+    !sameFinalLiveMatchDeskContent(currentDesk, deskCheckpoint)
+  ) {
+    return 'unavailable';
+  }
+  const currentDetail = observedDetail.read;
+  if (
+    observedDetail.observed !== '' &&
+    (!currentDetail ||
+      currentDetail.servedFrom !== 'REDIS_CURRENT' ||
+      (!sameFinalLiveMatchDetailContent(currentDetail, detailCheckpoint) &&
+        !sameFinalLiveMatchDetailScoringContent(currentDetail, detailCheckpoint)))
+  ) {
+    return 'unavailable';
+  }
+  const exactDesk =
+    currentDesk.publication.publicationId === deskCheckpoint.publication.publicationId &&
+    currentDesk.publication.generation === deskCheckpoint.publication.generation;
+  const exactDetail =
+    currentDetail?.publication.publicationId === detailCheckpoint.publication.publicationId &&
+    currentDetail.publication.generation === detailCheckpoint.publication.generation;
+  return exactDesk && exactDetail && isLiveMatchDetailCompatibleWithDesk(currentDetail, currentDesk)
+    ? 'already-canonical'
+    : 'restore';
+}
+
+async function restoreEquivalentFinalMatchPairForRetentionV2(
+  season: FplSeasonRef,
+  eventId: number,
+  redis: Redis,
+): Promise<boolean> {
+  const [deskCheckpoint, detailCheckpoint, observedDesk, observedDetail] = await Promise.all([
+    readLiveMatchDeskCheckpointV3(season, eventId),
+    readLiveMatchDetailCheckpointV3(season, eventId),
+    readLiveMatchDeskFenceV3({ season: season.seasonCode, eventId, redis }),
+    readLiveMatchDetailFenceV3({ season: season.seasonCode, eventId, redis }),
+  ]);
+  const plan = finalMatchPairRetentionRecoveryPlan({
+    deskCheckpoint,
+    detailCheckpoint,
+    observedDesk,
+    observedDetail,
+  });
+  if (plan !== 'restore' || !deskCheckpoint || !detailCheckpoint) return false;
+  const restored = await restoreLiveMatchEquivalentFinalPairV3({
+    deskCheckpoint,
+    detailCheckpoint,
+    observedDesk,
+    observedDetail,
+    promoteActiveEvent: false,
+    redis,
+  });
+  return restored.status === 'restored';
 }
 
 async function processMatchDesk(
@@ -1052,6 +1186,19 @@ export async function runLiveFinalRetentionV2(
   };
 
   const global = await processGlobal(season, eventId, redis, families.global);
+  try {
+    if (await restoreEquivalentFinalMatchPairForRetentionV2(season, eventId, redis)) {
+      families.matchDesk.restored += 1;
+      families.matchDetail.restored += 1;
+    }
+  } catch (error) {
+    // The ordinary per-family checks below retain the failure evidence. A CAS
+    // race or semantic conflict must never turn into a partial pair mutation.
+    logError('Live final retention equivalent Match pair restore failed', error, {
+      season: season.seasonCode,
+      eventId,
+    });
+  }
   const desk = await processMatchDesk(season, eventId, redis, families.matchDesk);
   await processMatchDetail(season, eventId, redis, desk, families.matchDetail);
 
@@ -1096,6 +1243,29 @@ export async function runLiveFinalRetentionV2(
     scope,
     checkpoint: await readLiveLeagueCheckpointV2(scope),
   }));
+  const restoredClassicScopes = new Set<number>();
+  for (const item of leagueCheckpoints) {
+    if (item.checkpoint || item.scope.scope !== 'CLASSIC' || !global) continue;
+    try {
+      const checkpoint = await restoreFinalClassicCheckpointForRetentionV2(
+        season,
+        eventId,
+        item.scope,
+        global,
+        redis,
+      );
+      if (checkpoint) {
+        item.checkpoint = checkpoint;
+        restoredClassicScopes.add(item.scope.tournamentId);
+      }
+    } catch (error) {
+      logError('Live final retention Classic checkpoint recovery failed', error, {
+        season: season.seasonCode,
+        eventId,
+        tournamentId: item.scope.tournamentId,
+      });
+    }
+  }
   let h2hMatchScopes = await scanH2HMatchScopes(season.seasonCode, eventId, redis);
   for (const item of leagueCheckpoints) {
     if (item.checkpoint) {
@@ -1109,6 +1279,9 @@ export async function runLiveFinalRetentionV2(
       continue;
     }
     await processLeagueScope(item.scope, item.checkpoint, global, redis, families.league);
+    if (item.scope.scope === 'CLASSIC' && restoredClassicScopes.has(item.scope.tournamentId)) {
+      families.league.restored += 1;
+    }
   }
 
   const missingH2HMatches: LeagueLiveScope[] = [];

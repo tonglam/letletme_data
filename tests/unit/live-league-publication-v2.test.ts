@@ -17,7 +17,11 @@ import {
   type LeagueLiveRead,
   type LeagueLiveScope,
 } from '../../src/cache/live-league-publication-v2';
-import type { Exactly15Picks } from '../../src/cache/live-publication-v2';
+import type {
+  EntryLivePublicationRead,
+  Exactly15Picks,
+  LivePublicationV2,
+} from '../../src/cache/live-publication-v2';
 import { canonicalJson, contentHash } from '../../src/utils/content-hash';
 import {
   isH2HTournamentPhaseActive,
@@ -25,13 +29,16 @@ import {
   liveLeagueCheckpointIsDue,
 } from '../../src/services/live-league-checkpoint-v2.service';
 import {
+  buildClassicPublicationContentV2,
   hasCompleteH2HOfficialScores,
   hasExpectedH2HMatchSet,
   h2hSide,
+  isCanonicalFinalClassicPublicationForRetentionV2,
   isTimestampAtOrAfter,
   selectRetainedH2HMatchPayload,
   standingsCoverageEventId,
   standingsFreshForFinalization,
+  type ClassicRoster,
 } from '../../src/services/live-league-publication-v2.service';
 
 const scope: LeagueLiveScope = {
@@ -134,6 +141,8 @@ function completeClassicCheckpointFixture() {
     },
   };
   return {
+    input,
+    inputRevision,
     checkpointManifest,
     index,
     payload,
@@ -201,6 +210,115 @@ const manifest = (): LeagueLiveManifest => ({
     },
   },
 });
+
+function classicRetentionFixture() {
+  const fixture = completeClassicCheckpointFixture();
+  const global = {
+    contractVersion: 'live-points-v2',
+    publicationId: fixture.checkpointManifest.globalRef.publicationId,
+    generation: fixture.checkpointManifest.globalRef.generation,
+    season: scope.season,
+    eventId: scope.eventId,
+    state: 'FINALIZED',
+    sourceCheckedAt: fixture.checkpointManifest.times.sourceCheckedAt,
+    revisions: {
+      scoreCore: { revision: 'b'.repeat(64), contentUpdatedAt: '2026-08-30T00:00:00.000Z' },
+      fixtureIdentity: {
+        revision: 'c'.repeat(64),
+        contentUpdatedAt: '2026-08-30T00:00:00.000Z',
+      },
+      rules: { revision: 'f'.repeat(64), contentUpdatedAt: '2026-08-30T00:00:00.000Z' },
+    },
+  } as unknown as LivePublicationV2;
+  const roster: ClassicRoster = {
+    tournamentId: scope.tournamentId,
+    expectedEntryCount: 2,
+    rows: [
+      {
+        tournamentId: scope.tournamentId,
+        expectedEntryCount: 2,
+        entryId: fixture.input.entryId,
+        entryName: 'Entry 101',
+        playerName: 'Player 101',
+        region: null,
+        startedEvent: null,
+        overallPoints: 100,
+        overallRank: 10,
+        bank: 0,
+        teamValue: 1000,
+        totalTransfers: 0,
+        lastEventId: null,
+        lastOverallPoints: null,
+        lastOverallRank: null,
+        lastTeamValue: null,
+        lastBank: null,
+        profileSourceCheckedAt: '2026-08-30T00:00:01.000Z',
+        finalizationAt: '2026-08-30T00:00:00.000Z',
+      },
+      {
+        tournamentId: scope.tournamentId,
+        expectedEntryCount: 2,
+        entryId: 202,
+        entryName: 'Entry 202',
+        playerName: 'Player 202',
+        region: null,
+        startedEvent: 2,
+        overallPoints: 0,
+        overallRank: null,
+        bank: 0,
+        teamValue: 1000,
+        totalTransfers: 0,
+        lastEventId: null,
+        lastOverallPoints: null,
+        lastOverallRank: null,
+        lastTeamValue: null,
+        lastBank: null,
+        profileSourceCheckedAt: null,
+        finalizationAt: '2026-08-30T00:00:00.000Z',
+      },
+    ],
+  };
+  const inputRead = {
+    publication: {
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000003',
+      generation: 1,
+      season: scope.season,
+      eventId: scope.eventId,
+      entryId: fixture.input.entryId,
+      state: 'FINAL',
+    },
+    input: fixture.input,
+    servedFrom: 'REDIS_CURRENT',
+  } as unknown as EntryLivePublicationRead;
+  const inputs = new Map([[fixture.input.entryId, inputRead]]);
+  const content = buildClassicPublicationContentV2(scope.eventId, global, roster, inputs);
+  if (!content) throw new Error('Classic retention fixture did not build');
+  const active = {
+    publication: {
+      ...fixture.checkpointManifest,
+      globalRef: { publicationId: global.publicationId, generation: global.generation },
+      revisions: content.revisions,
+      counts: content.counts,
+      times: {
+        ...fixture.checkpointManifest.times,
+        sourceCheckedAt: global.sourceCheckedAt,
+        checkpointedAt: null,
+      },
+      items: {
+        index: { ...fixture.checkpointManifest.items.index, count: content.index.length },
+        payload: {
+          ...fixture.checkpointManifest.items.payload,
+          count: Object.keys(content.payload).length,
+        },
+      },
+    },
+    index: content.index,
+    payload: content.payload,
+    servedFrom: 'REDIS_CURRENT',
+  } as LeagueLiveRead;
+  return { global, roster, inputs, content, active };
+}
 
 const h2hManifest = (): LeagueLiveManifest => {
   const base = manifest();
@@ -628,6 +746,107 @@ describe('Live League V2 checkpoint generation fence', () => {
         candidate,
       ),
     ).toBe(true);
+  });
+});
+
+describe('Live League V2 Classic final-retention checkpoint recovery', () => {
+  test('preserves the ordinary provisional publisher acceptance rules', () => {
+    const fixture = classicRetentionFixture();
+    const provisionalGlobal = { ...fixture.global, state: 'LIVE_ACTIVE' as const };
+
+    expect(
+      buildClassicPublicationContentV2(
+        scope.eventId,
+        provisionalGlobal,
+        fixture.roster,
+        fixture.inputs,
+      ),
+    ).not.toBeNull();
+  });
+
+  test('rebuilds the exact final board from current Redis inputs and canonical roster facts', () => {
+    const fixture = classicRetentionFixture();
+    expect(fixture.content.counts).toEqual({
+      expected: 2,
+      published: 2,
+      ready: 1,
+      noPicks: 1,
+    });
+    expect(fixture.content.payload['202']).toBeNull();
+    expect(
+      isCanonicalFinalClassicPublicationForRetentionV2(
+        scope,
+        fixture.global,
+        fixture.active,
+        fixture.content,
+      ),
+    ).toBe(true);
+  });
+
+  test('rejects previous-pointer inputs, stale profile evidence, and board drift', () => {
+    const fixture = classicRetentionFixture();
+    const previousInputs = new Map(
+      [...fixture.inputs].map(([entryId, read]) => [
+        entryId,
+        { ...read, servedFrom: 'REDIS_PREVIOUS' as const },
+      ]),
+    );
+    expect(
+      buildClassicPublicationContentV2(
+        scope.eventId,
+        fixture.global,
+        fixture.roster,
+        previousInputs,
+        { requireCurrentFinalInputs: true },
+      ),
+    ).toBeNull();
+
+    const staleRoster: ClassicRoster = {
+      ...fixture.roster,
+      rows: fixture.roster.rows.map((row) =>
+        row.entryId === 101 ? { ...row, profileSourceCheckedAt: '2026-08-29T23:59:59.999Z' } : row,
+      ),
+    };
+    expect(
+      buildClassicPublicationContentV2(scope.eventId, fixture.global, staleRoster, fixture.inputs),
+    ).toBeNull();
+
+    const drifted = {
+      ...fixture.active,
+      index: fixture.active.index.map((row) =>
+        'entryId' in row && row.entryId === 101 ? { ...row, overallRank: 11 } : row,
+      ),
+    } as LeagueLiveRead;
+    expect(
+      isCanonicalFinalClassicPublicationForRetentionV2(
+        scope,
+        fixture.global,
+        drifted,
+        fixture.content,
+      ),
+    ).toBe(false);
+  });
+
+  test('keeps the checkpoint recovery path provider-free and mutation-bounded', () => {
+    const start = publicationServiceSource.indexOf(
+      'export async function restoreFinalClassicCheckpointForRetentionV2',
+    );
+    const end = publicationServiceSource.indexOf(
+      '\n/**\n * Publishes complete Classic tournament boards',
+      start,
+    );
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('findClassicRosters');
+    expect(source).toContain('readEntryLiveInputsV2');
+    expect(source).toContain('publishLiveLeaguePublicationV2');
+    expect(source).toContain('setLiveLeagueCheckpointDesiredV2');
+    expect(source).toContain('reconcileLiveLeagueCheckpointV2');
+    expect(source).not.toContain('rebuildFinalEntryLiveInputsV2');
+    expect(source).not.toContain('enqueue');
+    expect(source).not.toContain('provider');
   });
 });
 

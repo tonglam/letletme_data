@@ -2,6 +2,7 @@ import {
   readEntryLiveInputsV2,
   readLivePublicationV2,
   type EntryLivePublicationRead,
+  type LivePublicationV2,
 } from '../cache/live-publication-v2';
 import {
   leagueEntryInputRevision,
@@ -12,6 +13,7 @@ import {
   publishLiveLeaguePublicationV2,
   retireLiveLeaguePublicationV2,
   setLiveLeagueCheckpointDesiredV2,
+  validateLiveLeaguePublicationV2Payload,
   type H2HMatchIndexRow,
   type H2HMatchPayload,
   type H2HMatchSide,
@@ -31,12 +33,13 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   isH2HTournamentPhaseActive,
   liveLeagueCheckpointIsDue,
+  readLiveLeagueCheckpointV2,
   readLiveLeagueCheckpointGenerationV2,
   reconcileLiveLeagueCheckpointV2,
 } from './live-league-checkpoint-v2.service';
 import { rebuildFinalEntryLiveInputsV2 } from './entries.service';
 import { enqueueEntryInfoSyncJob } from '../jobs/entry-sync-enqueue';
-import { contentHash } from '../utils/content-hash';
+import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { mapWithConcurrency } from '../utils/async';
 
@@ -45,7 +48,7 @@ const LIVE_ACTIVE_CADENCE_MS = 30_000;
 const LIVE_LEAGUE_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 const MAX_RETIREMENT_KEYS = 10_000;
 
-type ClassicRosterRow = {
+export type ClassicRosterRow = {
   tournamentId: number;
   expectedEntryCount: number;
   entryId: number;
@@ -76,7 +79,7 @@ type CompleteClassicRosterRow = ClassicRosterRow & {
   playerName: string;
 };
 
-type ClassicRoster = {
+export type ClassicRoster = {
   readonly tournamentId: number;
   readonly expectedEntryCount: number;
   readonly rows: readonly ClassicRosterRow[];
@@ -248,11 +251,10 @@ async function findClassicRosters(season: FplSeasonRef, eventId: number): Promis
 
 function buildRevisions(
   roster: ClassicRoster,
-  global: Awaited<ReturnType<typeof readLivePublicationV2>>,
+  global: LivePublicationV2,
   index: readonly LeagueLiveIndexRow[],
   payload: Record<string, unknown>,
 ): LeagueLiveRevisionVector {
-  if (!global) throw new Error('Cannot build a league publication without global publication');
   const identity = index.map((row) => ({
     entryId: row.entryId,
     entryName: row.entryName,
@@ -289,23 +291,146 @@ function buildRevisions(
         }) => row,
       ),
     ),
-    scoreCore: global.publication.revisions.scoreCore.revision,
-    fixtureIdentity: global.publication.revisions.fixtureIdentity.revision,
+    scoreCore: global.revisions.scoreCore.revision,
+    fixtureIdentity: global.revisions.fixtureIdentity.revision,
     entryInputSet: contentHash(entryInputSet),
     identity: contentHash(identity),
     officialRank: contentHash(index.map((row) => [row.entryId, row.overallRank])),
-    rules: global.publication.revisions.rules.revision,
+    rules: global.revisions.rules.revision,
     algorithm,
     schedule: null,
     averageSide: null,
     content: contentHash({
       index,
       payload,
-      scoreCore: global.publication.revisions.scoreCore.revision,
-      fixtureIdentity: global.publication.revisions.fixtureIdentity.revision,
-      rules: global.publication.revisions.rules.revision,
+      scoreCore: global.revisions.scoreCore.revision,
+      fixtureIdentity: global.revisions.fixtureIdentity.revision,
+      rules: global.revisions.rules.revision,
       algorithm,
     }),
+  };
+}
+
+export type ClassicPublicationContentV2 = Readonly<{
+  index: readonly LeagueLiveIndexRow[];
+  payload: Record<string, unknown>;
+  revisions: LeagueLiveRevisionVector;
+  counts: LeagueLiveManifest['counts'];
+}>;
+
+/**
+ * Build one Classic board only from an exact roster, one global publication,
+ * and already-validated Redis entry inputs. This helper is deliberately pure:
+ * it cannot call FPL, rebuild inputs, refresh profiles, or publish/checkpoint.
+ */
+export function buildClassicPublicationContentV2(
+  eventId: number,
+  global: LivePublicationV2,
+  roster: ClassicRoster,
+  inputs: ReadonlyMap<number, EntryLivePublicationRead>,
+  options: Readonly<{ requireCurrentFinalInputs?: boolean }> = {},
+): ClassicPublicationContentV2 | null {
+  if (
+    !Number.isSafeInteger(eventId) ||
+    eventId <= 0 ||
+    roster.expectedEntryCount <= 0 ||
+    roster.expectedEntryCount > LIVE_LEAGUE_MAX_ENTRIES ||
+    roster.rows.length !== roster.expectedEntryCount ||
+    new Set(roster.rows.map((row) => row.entryId)).size !== roster.rows.length
+  ) {
+    return null;
+  }
+  const completeRows = roster.rows.filter(hasCompleteClassicIdentity);
+  if (completeRows.length !== roster.rows.length) return null;
+  const eligibleRows = completeRows.filter(
+    (row) => row.startedEvent === null || row.startedEvent <= eventId,
+  );
+  if (inputs.size !== eligibleRows.length) return null;
+  const finalizationAt =
+    completeRows.find((row) => row.finalizationAt !== null)?.finalizationAt ?? null;
+  for (const row of eligibleRows) {
+    const read = inputs.get(row.entryId);
+    if (!read) return null;
+    if (
+      global.state === 'FINALIZED' &&
+      (read.input.finalResult === null ||
+        !isTimestampAtOrAfter(row.profileSourceCheckedAt, finalizationAt) ||
+        (options.requireCurrentFinalInputs &&
+          (read.servedFrom !== 'REDIS_CURRENT' || read.publication.state !== 'FINAL')))
+    ) {
+      return null;
+    }
+  }
+
+  const index: LeagueLiveIndexRow[] = completeRows.map((row) => {
+    if (row.startedEvent !== null && row.startedEvent > eventId) {
+      return {
+        entryId: row.entryId,
+        availability: 'NO_PICKS',
+        entryName: row.entryName,
+        playerName: row.playerName,
+        region: row.region,
+        startedEvent: row.startedEvent,
+        overallPoints: row.overallPoints,
+        overallRank: row.overallRank,
+        bank: row.bank,
+        teamValue: row.teamValue,
+        totalTransfers: row.totalTransfers,
+        lastEventId: row.lastEventId,
+        lastOverallPoints: row.lastOverallPoints,
+        lastOverallRank: row.lastOverallRank,
+        lastTeamValue: row.lastTeamValue,
+        lastBank: row.lastBank,
+        inputPublicationId: null,
+        inputGeneration: null,
+        inputRevision: null,
+        inputContentUpdatedAt: null,
+      } satisfies LeagueLiveIndexRow;
+    }
+    const read = inputs.get(row.entryId);
+    if (!read) throw new Error(`Missing complete live input for entry ${row.entryId}`);
+    return {
+      entryId: row.entryId,
+      availability: 'READY',
+      entryName: row.entryName,
+      playerName: row.playerName,
+      region: row.region,
+      startedEvent: row.startedEvent,
+      overallPoints:
+        global.state === 'FINALIZED'
+          ? (read.input.finalResult?.score.totalPoints ?? null)
+          : row.overallPoints,
+      overallRank: row.overallRank,
+      bank: row.bank,
+      teamValue: row.teamValue,
+      totalTransfers: row.totalTransfers,
+      lastEventId: row.lastEventId,
+      lastOverallPoints: row.lastOverallPoints,
+      lastOverallRank: row.lastOverallRank,
+      lastTeamValue: row.lastTeamValue,
+      lastBank: row.lastBank,
+      inputPublicationId: read.publication.publicationId,
+      inputGeneration: read.publication.generation,
+      inputRevision: leagueEntryInputRevision(read.input),
+      inputContentUpdatedAt: read.input.picksBase.contentUpdatedAt,
+    };
+  });
+  const payload = Object.fromEntries(
+    index.map((row) => [
+      String(row.entryId),
+      row.availability === 'NO_PICKS' ? null : inputs.get(row.entryId)!.input,
+    ]),
+  );
+  return {
+    index,
+    payload,
+    revisions: buildRevisions(roster, global, index, payload),
+    counts: {
+      expected: index.length,
+      published: index.length,
+      ready: index.filter((row) => row.availability === 'READY').length,
+      noPicks: index.filter((row) => row.availability === 'NO_PICKS').length,
+    },
   };
 }
 
@@ -372,81 +497,9 @@ async function publishClassicRoster(
       entriesNeedingProfileRefresh,
     );
   }
-  const allFinal =
-    global.publication.state !== 'FINALIZED' ||
-    eligibleRows.every((row) => {
-      const read = inputs.get(row.entryId);
-      return (
-        read?.input.finalResult !== null &&
-        read?.input.finalResult !== undefined &&
-        isTimestampAtOrAfter(row.profileSourceCheckedAt, finalizationAt)
-      );
-    });
-  if (inputs.size !== eligibleRows.length || !allFinal) {
-    return 'pending';
-  }
-
-  const index: LeagueLiveIndexRow[] = completeRows.map((row) => {
-    if (row.startedEvent !== null && row.startedEvent > eventId) {
-      return {
-        entryId: row.entryId,
-        availability: 'NO_PICKS',
-        entryName: row.entryName,
-        playerName: row.playerName,
-        region: row.region,
-        startedEvent: row.startedEvent,
-        overallPoints: row.overallPoints,
-        overallRank: row.overallRank,
-        bank: row.bank,
-        teamValue: row.teamValue,
-        totalTransfers: row.totalTransfers,
-        lastEventId: row.lastEventId,
-        lastOverallPoints: row.lastOverallPoints,
-        lastOverallRank: row.lastOverallRank,
-        lastTeamValue: row.lastTeamValue,
-        lastBank: row.lastBank,
-        inputPublicationId: null,
-        inputGeneration: null,
-        inputRevision: null,
-        inputContentUpdatedAt: null,
-      } satisfies LeagueLiveIndexRow;
-    }
-    const read = inputs.get(row.entryId);
-    if (!read) throw new Error(`Missing complete live input for entry ${row.entryId}`);
-    const finalResult = read.input.finalResult;
-    return {
-      entryId: row.entryId,
-      availability: 'READY',
-      entryName: row.entryName,
-      playerName: row.playerName,
-      region: row.region,
-      startedEvent: row.startedEvent,
-      overallPoints:
-        global.publication.state === 'FINALIZED'
-          ? (finalResult?.score.totalPoints ?? null)
-          : row.overallPoints,
-      overallRank: row.overallRank,
-      bank: row.bank,
-      teamValue: row.teamValue,
-      totalTransfers: row.totalTransfers,
-      lastEventId: row.lastEventId,
-      lastOverallPoints: row.lastOverallPoints,
-      lastOverallRank: row.lastOverallRank,
-      lastTeamValue: row.lastTeamValue,
-      lastBank: row.lastBank,
-      inputPublicationId: read.publication.publicationId,
-      inputGeneration: read.publication.generation,
-      inputRevision: leagueEntryInputRevision(read.input),
-      inputContentUpdatedAt: read.input.picksBase.contentUpdatedAt,
-    };
-  });
-  const payload = Object.fromEntries(
-    index.map((row) => [
-      String(row.entryId),
-      row.availability === 'NO_PICKS' ? null : inputs.get(row.entryId)!.input,
-    ]),
-  );
-  const revisions = buildRevisions(roster, global, index, payload);
+  const content = buildClassicPublicationContentV2(eventId, global.publication, roster, inputs);
+  if (!content) return 'pending';
+  const { index, payload, revisions, counts } = content;
   const scope = {
     season: season.seasonCode,
     eventId,
@@ -470,12 +523,7 @@ async function publishClassicRoster(
       generation: global.publication.generation,
     },
     revisions,
-    counts: {
-      expected: index.length,
-      published: index.length,
-      ready: index.filter((row) => row.availability === 'READY').length,
-      noPicks: index.filter((row) => row.availability === 'NO_PICKS').length,
-    },
+    counts,
     index,
     payload,
     generationFloorLoader: () => readLiveLeagueCheckpointGenerationV2(scope),
@@ -495,6 +543,117 @@ async function publishClassicRoster(
     await scheduleLeagueCheckpoint(result.publication, result.previous, scope, redis);
   }
   return result.published ? 'published' : 'unchanged';
+}
+
+export function isCanonicalFinalClassicPublicationForRetentionV2(
+  scope: LeagueLiveScope,
+  global: LivePublicationV2,
+  active: LeagueLiveRead,
+  content: ClassicPublicationContentV2,
+): boolean {
+  return (
+    scope.scope === 'CLASSIC' &&
+    active.servedFrom === 'REDIS_CURRENT' &&
+    active.publication.state === 'FINALIZED' &&
+    active.publication.globalRef.publicationId === global.publicationId &&
+    active.publication.globalRef.generation === global.generation &&
+    active.publication.times.sourceCheckedAt === global.sourceCheckedAt &&
+    validateLiveLeaguePublicationV2Payload(
+      scope,
+      active.publication,
+      active.index,
+      active.payload,
+    ) &&
+    canonicalJson(active.index) === canonicalJson(content.index) &&
+    canonicalJson(active.payload) === canonicalJson(content.payload) &&
+    canonicalJson(active.publication.revisions) === canonicalJson(content.revisions) &&
+    canonicalJson(active.publication.counts) === canonicalJson(content.counts)
+  );
+}
+
+/**
+ * Restore one missing Classic FINAL publication/checkpoint only from canonical
+ * PostgreSQL roster facts and current FINAL entry inputs. An existing Redis
+ * board must reproduce exactly; an absent board may be built from those same
+ * inputs. The ordinary publication CAS and desired-marker checkpoint paths
+ * remain the only writers, and this function never fetches a provider,
+ * rebuilds an entry input, refreshes a profile, or retires sibling scopes.
+ */
+export async function restoreFinalClassicCheckpointForRetentionV2(
+  season: FplSeasonRef,
+  eventId: number,
+  scope: LeagueLiveScope,
+  global: LivePublicationV2,
+  redisClient?: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<LeagueLiveRead | null> {
+  if (
+    scope.season !== season.seasonCode ||
+    scope.eventId !== eventId ||
+    scope.scope !== 'CLASSIC' ||
+    global.season !== season.seasonCode ||
+    global.eventId !== eventId ||
+    global.state !== 'FINALIZED'
+  ) {
+    return null;
+  }
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const roster = (await findClassicRosters(season, eventId)).find(
+    (candidate) => candidate.tournamentId === scope.tournamentId,
+  );
+  if (!roster) return null;
+  const eligibleEntryIds = roster.rows
+    .filter((row) => row.startedEvent === null || row.startedEvent <= eventId)
+    .map((row) => row.entryId);
+  const inputs = await readEntryLiveInputsV2(
+    eligibleEntryIds.map((entryId) => ({ season: season.seasonCode, eventId, entryId })),
+    redis,
+  );
+  const content = buildClassicPublicationContentV2(eventId, global, roster, inputs, {
+    requireCurrentFinalInputs: true,
+  });
+  if (!content) return null;
+
+  let active = await readLiveLeaguePublicationV2Pointer(scope, 'active', redis);
+  if (active && !isCanonicalFinalClassicPublicationForRetentionV2(scope, global, active, content)) {
+    return null;
+  }
+  if (!active) {
+    await publishLiveLeaguePublicationV2({
+      scope,
+      state: 'FINALIZED',
+      sourceCheckedAt: global.sourceCheckedAt,
+      contentUpdatedAt: maxIso([
+        global.revisions.scoreCore.contentUpdatedAt,
+        ...content.index.map((row) => row.inputContentUpdatedAt!).filter(Boolean),
+      ]),
+      expectedNextCheckAt: expectedNextCheckAt(global.sourceCheckedAt),
+      globalRef: { publicationId: global.publicationId, generation: global.generation },
+      revisions: content.revisions,
+      counts: content.counts,
+      index: content.index,
+      payload: content.payload,
+      generationFloorLoader: () => readLiveLeagueCheckpointGenerationV2(scope),
+      redis,
+    });
+    active = await readLiveLeaguePublicationV2Pointer(scope, 'active', redis);
+    if (
+      !active ||
+      !isCanonicalFinalClassicPublicationForRetentionV2(scope, global, active, content)
+    ) {
+      return null;
+    }
+  }
+
+  await setLiveLeagueCheckpointDesiredV2(active.publication, new Date(), {
+    force: true,
+    redis,
+  });
+  if (!(await reconcileLiveLeagueCheckpointV2(scope, redis))) return null;
+  const checkpoint = await readLiveLeagueCheckpointV2(scope);
+  return checkpoint?.publication.publicationId === active.publication.publicationId &&
+    checkpoint.publication.generation === active.publication.generation
+    ? checkpoint
+    : null;
 }
 
 /**
