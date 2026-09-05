@@ -529,6 +529,15 @@ export const playerGameweekStatsInFpl = fpl.table(
       table.seasonId.asc().nullsLast(),
       table.sourceLiveId.asc().nullsLast(),
     ),
+    index('player_gameweek_stats_publication_binding_idx')
+      .using(
+        'btree',
+        table.seasonId.asc().nullsLast(),
+        table.eventId.asc().nullsLast(),
+        table.elementId.asc().nullsLast(),
+        table.publicationGeneration.asc().nullsLast(),
+      )
+      .where(sql`(publication_id IS NOT NULL)`),
     foreignKey({
       columns: [table.seasonId],
       foreignColumns: [seasonsInFpl.seasonId],
