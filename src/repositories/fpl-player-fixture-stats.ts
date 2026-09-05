@@ -1,4 +1,5 @@
 import { and, eq, inArray, or, sql } from 'drizzle-orm';
+import type postgres from 'postgres';
 
 import {
   fixturesInFpl,
@@ -30,6 +31,42 @@ const EVENT_IDENTITY_QUERY_TIMEOUT_MS = 2_000;
 
 type EventIdentityRow = FplPlayerFixtureIdentity;
 
+export async function readEventPinnedIdentity(
+  client: postgres.Sql | postgres.TransactionSql,
+  seasonId: number,
+  eventId: number,
+): Promise<EventIdentityRow[]> {
+  const selectIdentity = (connection: postgres.Sql | postgres.TransactionSql) =>
+    connection<EventIdentityRow[]>`
+      SELECT
+        player_fixture_stats.fixture_id AS "fixtureId",
+        player_fixture_stats.element_id AS "elementId",
+        player_fixture_stats.team_id AS "teamId",
+        player_fixture_stats.element_type AS "elementType",
+        players.price AS "price",
+        players.web_name AS "webName"
+      FROM fpl.player_fixture_stats AS player_fixture_stats
+      INNER JOIN fpl.players AS players
+        ON players.season_id = player_fixture_stats.season_id
+       AND players.element_id = player_fixture_stats.element_id
+      WHERE player_fixture_stats.season_id = ${seasonId}
+        AND player_fixture_stats.event_id = ${eventId}
+    `;
+
+  // A TransactionSql is already pinned by its caller and has no begin(). Its
+  // owner also controls the transaction timeout, so do not narrow it here.
+  if (typeof (client as postgres.Sql).begin !== 'function') {
+    return selectIdentity(client);
+  }
+
+  // begin() may wait for a pooled connection. Start the database timeout only
+  // after that wait so pool contention cannot be reported as a cancelled SQL.
+  return (client as postgres.Sql).begin(async (transaction) => {
+    await transaction`SELECT set_config('statement_timeout', ${`${EVENT_IDENTITY_QUERY_TIMEOUT_MS}ms`}, true)`;
+    return selectIdentity(transaction);
+  }) as Promise<EventIdentityRow[]>;
+}
+
 export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
@@ -41,27 +78,7 @@ export const createFplPlayerFixtureStatsRepository = (dbInstance?: DbOrTransacti
       try {
         if (!dbInstance) {
           const client = await getDbClient();
-          const query = client<EventIdentityRow[]>`
-            SELECT
-              player_fixture_stats.fixture_id AS "fixtureId",
-              player_fixture_stats.element_id AS "elementId",
-              player_fixture_stats.team_id AS "teamId",
-              player_fixture_stats.element_type AS "elementType",
-              players.price AS "price",
-              players.web_name AS "webName"
-            FROM fpl.player_fixture_stats AS player_fixture_stats
-            INNER JOIN fpl.players AS players
-              ON players.season_id = player_fixture_stats.season_id
-             AND players.element_id = player_fixture_stats.element_id
-            WHERE player_fixture_stats.season_id = ${season.seasonId}
-              AND player_fixture_stats.event_id = ${eventId}
-          `;
-          const timeout = setTimeout(() => query.cancel(), EVENT_IDENTITY_QUERY_TIMEOUT_MS);
-          try {
-            return [...(await query)];
-          } finally {
-            clearTimeout(timeout);
-          }
+          return [...(await readEventPinnedIdentity(client, season.seasonId, eventId))];
         }
 
         const db = await getDbInstance();
