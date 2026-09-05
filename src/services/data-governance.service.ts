@@ -719,20 +719,17 @@ export async function recordFreshnessObservation(input: {
   });
 }
 
-/**
- * Mark a periodic checkpoint as not applicable when its durable producer has
- * no active work to deliver.  This is intentionally narrower than a generic
- * status mutation: only a still-pending window can be retired, while MET and
- * BREACHED history remains immutable for SLO accounting.  The evidence keeps
- * the reason machine-readable so an operator can distinguish a legitimate
- * outbox no-op from an unobserved or failed delivery.
- */
-export async function markFreshnessWindowNotApplicable(input: {
+type FreshnessWindowNotApplicableInput = {
   windowId: number;
   reasonCode: string;
   evidence?: Record<string, unknown>;
   db?: DbHandle;
-}): Promise<boolean> {
+};
+
+async function setFreshnessWindowNotApplicable(
+  input: FreshnessWindowNotApplicableInput,
+  breachedWindowFence: Readonly<{ contractKey: string; eventId: number }> | null,
+): Promise<boolean> {
   if (!Number.isSafeInteger(input.windowId) || input.windowId <= 0) return false;
   const reasonCode = input.reasonCode.trim();
   if (reasonCode.length === 0) throw new Error('Freshness N/A reason code is required');
@@ -741,23 +738,115 @@ export async function markFreshnessWindowNotApplicable(input: {
     ...asJsonObject(input.evidence),
     notApplicableReason: reasonCode,
   };
-  const updated = await db
-    .update(freshnessSloWindowsInOps)
-    .set({
-      status: 'NOT_APPLICABLE',
-      completenessStatus: 'NOT_APPLICABLE',
-      breachCode: null,
-      evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify(payload)}::jsonb`,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(freshnessSloWindowsInOps.windowId, input.windowId),
-        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'NOT_APPLICABLE']),
-      ),
+  return db.transaction(async (tx) => {
+    // Match the lock order used by openGovernanceCase. A breach observer that
+    // wins this row first may create the linked case, but this transaction then
+    // retires and dismisses it before committing. If retirement wins first,
+    // the observer sees NOT_APPLICABLE and cannot create a stale repair case.
+    const [current] = await tx
+      .select({
+        status: freshnessSloWindowsInOps.status,
+        contractKey: freshnessSloWindowsInOps.contractKey,
+        eventId: freshnessSloWindowsInOps.eventId,
+      })
+      .from(freshnessSloWindowsInOps)
+      .where(eq(freshnessSloWindowsInOps.windowId, input.windowId))
+      .for('update')
+      .limit(1);
+    const reconcileBreachedWindow = breachedWindowFence !== null;
+    const allowedStatuses = reconcileBreachedWindow
+      ? ['PENDING', 'NOT_APPLICABLE', 'BREACHED']
+      : ['PENDING', 'NOT_APPLICABLE'];
+    if (
+      !current ||
+      !allowedStatuses.includes(current.status) ||
+      (breachedWindowFence !== null &&
+        (current.contractKey !== breachedWindowFence.contractKey ||
+          current.eventId !== breachedWindowFence.eventId))
     )
-    .returning({ windowId: freshnessSloWindowsInOps.windowId });
-  return updated.length === 1;
+      return false;
+
+    const updated = await tx
+      .update(freshnessSloWindowsInOps)
+      .set({
+        status: 'NOT_APPLICABLE',
+        completenessStatus: 'NOT_APPLICABLE',
+        breachCode: null,
+        evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify(payload)}::jsonb`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(freshnessSloWindowsInOps.windowId, input.windowId),
+          inArray(freshnessSloWindowsInOps.status, allowedStatuses),
+        ),
+      )
+      .returning({ windowId: freshnessSloWindowsInOps.windowId });
+    if (updated.length !== 1) return false;
+
+    if (reconcileBreachedWindow) {
+      await tx
+        .update(dataGovernanceCasesInOps)
+        .set({
+          status: 'DISMISSED',
+          lastError: null,
+          repairJobId: null,
+          repairDeadlineAt: null,
+          evidence: sql`${dataGovernanceCasesInOps.evidence} || ${JSON.stringify(payload)}::jsonb`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(dataGovernanceCasesInOps.sloWindowId, input.windowId),
+            inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
+          ),
+        );
+    }
+    return true;
+  });
+}
+
+/**
+ * Mark a periodic checkpoint as not applicable when its durable producer has
+ * no active work to deliver.  This is intentionally narrower than a generic
+ * status mutation: only a still-pending window can be retired, while MET and
+ * BREACHED history remains immutable for SLO accounting.  The evidence keeps
+ * the reason machine-readable so an operator can distinguish a legitimate
+ * outbox no-op from an unobserved or failed delivery.
+ */
+export async function markFreshnessWindowNotApplicable(
+  input: FreshnessWindowNotApplicableInput,
+): Promise<boolean> {
+  return setFreshnessWindowNotApplicable(input, null);
+}
+
+/**
+ * Reconcile a late, durable not-applicable decision for one exact window.
+ * Unlike the ordinary helper, this may retire BREACHED because the window was
+ * never eligible; any already-opened repair case is dismissed in the same
+ * transaction so no stale automatic repair survives the eligibility proof.
+ */
+export async function retireLivePicksEmptyCohortFreshnessWindow(input: {
+  windowId: number;
+  eventId: number;
+  db?: DbHandle;
+}): Promise<boolean> {
+  if (!Number.isSafeInteger(input.eventId) || input.eventId <= 0) return false;
+  return setFreshnessWindowNotApplicable(
+    {
+      windowId: input.windowId,
+      reasonCode: 'LIVE_PICKS_NO_ELIGIBLE_ENTRIES',
+      evidence: {
+        reason: 'LIVE_PICKS_NO_ELIGIBLE_ENTRIES',
+        eventId: input.eventId,
+        expectedCount: 0,
+        observedCount: 0,
+        scanComplete: true,
+      },
+      db: input.db,
+    },
+    { contractKey: 'live-picks', eventId: input.eventId },
+  );
 }
 
 /**

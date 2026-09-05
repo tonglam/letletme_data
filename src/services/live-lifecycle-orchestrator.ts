@@ -37,8 +37,8 @@ import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 import { normalizeMatchLifecycleState } from './live-match-v3';
 import {
-  markFreshnessWindowNotApplicable,
   recordFreshnessObservation,
+  retireLivePicksEmptyCohortFreshnessWindow,
 } from './data-governance.service';
 
 const runtimeConfig = getConfig();
@@ -650,15 +650,9 @@ export async function persistLivePicksDurableFreshnessEvidence(
       scanComplete,
     )
   ) {
-    const recorded = await markFreshnessWindowNotApplicable({
+    const recorded = await retireLivePicksEmptyCohortFreshnessWindow({
       windowId: freshnessWindowId,
-      reasonCode: 'LIVE_PICKS_NO_ELIGIBLE_ENTRIES',
-      evidence: {
-        eventId,
-        expectedCount: 0,
-        observedCount: 0,
-        scanComplete: true,
-      },
+      eventId,
     });
     if (!recorded) throw new Error('Live Picks empty-cohort freshness window is unavailable');
     return evidence;

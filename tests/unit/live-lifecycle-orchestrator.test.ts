@@ -24,8 +24,7 @@ describe('live lifecycle decisions', () => {
     expect(shouldMarkLivePicksFreshnessNotApplicable(0, 1, true)).toBe(false);
 
     const source = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
-    expect(source).toContain('markFreshnessWindowNotApplicable({');
-    expect(source).toContain('reasonCode: ' + quote + 'LIVE_PICKS_NO_ELIGIBLE_ENTRIES' + quote);
+    expect(source).toContain('retireLivePicksEmptyCohortFreshnessWindow({');
     expect(source).toContain(
       'complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length',
     );
