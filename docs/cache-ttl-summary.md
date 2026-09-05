@@ -15,6 +15,7 @@ ownership, and cleanup guardrails are in [redis-contract.md](redis-contract.md).
 | Entry Live V2 current manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:active` | event validity + rolling 14-day final lease |
 | Entry Live V2 previous manifest | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:previous` | 24 hours |
 | Entry Live V2 immutable input | `llm:data:v2:fpl:entry-live:{season}:{event}:{entry}:{generation}:*` | active lifetime; 24h after replacement |
+| Live League V2 active/previous items | `llm:data:v2:fpl:league-live:{season}:{event}:{tournament}:*` | active lifetime; immediately previous 24h; superseded previous unlinked |
 | Live Matches V3 active-event pointer | `llm:data:v3:fpl:live-match:{season}:active-event` | active season control pointer |
 | Live Matches V3 desk current/active items | `llm:data:v3:fpl:live-match:desk:{season}:{event}:...` | no expiry until final; rolling 14-day final lease |
 | Live Matches V3 desk previous | `llm:data:v3:fpl:live-match:desk:{season}:{event}:previous` | 24 hours |

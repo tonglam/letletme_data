@@ -226,6 +226,39 @@ describe('Live League V2 checkpoint desired marker', () => {
     ).toBe('FINALIZED');
   });
 
+  test('retires the superseded previous generation after a third promotion', async () => {
+    await redis.del(...promotionKeys);
+
+    const first = await publishLiveLeaguePublicationV2(
+      promotionInput('LIVE_ACTIVE', '6'.repeat(64), '06'),
+    );
+    const second = await publishLiveLeaguePublicationV2(
+      promotionInput('LIVE_ACTIVE', '7'.repeat(64), '07'),
+    );
+
+    expect(await redis.exists(...promotionItemKeys(first.publication.generation))).toBe(4);
+
+    const third = await publishLiveLeaguePublicationV2(
+      promotionInput('LIVE_ACTIVE', '8'.repeat(64), '08'),
+    );
+
+    expect(await redis.exists(...promotionItemKeys(first.publication.generation))).toBe(0);
+    expect(await redis.exists(...promotionItemKeys(second.publication.generation))).toBe(4);
+    expect(await redis.exists(...promotionItemKeys(third.publication.generation))).toBe(4);
+    expect(
+      parseLiveLeaguePublicationV2Manifest(
+        await redis.get(liveLeagueV2Key(promotionScope, 'previous')),
+        promotionScope,
+      )?.generation,
+    ).toBe(second.publication.generation);
+    expect(
+      parseLiveLeaguePublicationV2Manifest(
+        await redis.get(liveLeagueV2Key(promotionScope, 'active')),
+        promotionScope,
+      )?.generation,
+    ).toBe(third.publication.generation);
+  });
+
   test('renews a complete final league lease without rewriting its manifest', async () => {
     await redis.del(...promotionKeys);
     const finalized = await publishLiveLeaguePublicationV2(
