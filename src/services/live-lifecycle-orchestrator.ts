@@ -623,6 +623,37 @@ export async function readLivePicksDurableFreshnessEvidence(season: FplSeasonRef
   } as const;
 }
 
+export async function persistLivePicksDurableFreshnessEvidence(
+  season: FplSeasonRef,
+  eventId: number,
+  freshnessWindowId: number,
+  scanComplete: boolean,
+) {
+  const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId);
+  const status = await recordFreshnessObservation({
+    windowId: freshnessWindowId,
+    sourceCheckedAt: evidence.sourceCheckedAt ?? undefined,
+    pgPublishedAt: evidence.pgPublishedAt ?? undefined,
+    producerRevision: evidence.revision,
+    expectedCount: evidence.expectedCount,
+    observedCount: evidence.observedCount,
+    completenessStatus: scanComplete && evidence.complete ? 'COMPLETE' : 'INCOMPLETE',
+    evidence: {
+      expectedCount: evidence.expectedCount,
+      observedCount: evidence.observedCount,
+      scanComplete,
+      pgPublishedAt: evidence.pgPublishedAt?.toISOString() ?? null,
+    },
+  });
+  if (status === null) throw new Error('Live Picks freshness window is unavailable');
+  if (scanComplete && !evidence.complete) {
+    throw new Error(
+      `Live Picks durable evidence is incomplete: ${evidence.observedCount}/${evidence.expectedCount}`,
+    );
+  }
+  return evidence;
+}
+
 function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: number): boolean {
   return payload.entry_history.event === eventId && isCompleteEntryPicks(payload.picks);
 }
@@ -731,6 +762,8 @@ export async function runPicksProbeAndSync(
   sourceReady: boolean;
   /** The complete eligible-entry sweep reached its semantic finalizer. */
   scanComplete: boolean;
+  /** Exact aggregate evidence was persisted before a terminal completion. */
+  freshnessEvidenceRecorded?: boolean;
 }> {
   const sharedState = await readPicksCoordinatorState(season.seasonCode, eventId);
   const state: PicksProbeState = {
@@ -739,37 +772,29 @@ export async function runPicksProbeAndSync(
     canarySucceeded: sharedState.canarySucceeded,
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
   };
-  const recordDurableFreshness = async (scanComplete: boolean): Promise<void> => {
+  const recordDurableFreshness = async (scanComplete: boolean): Promise<boolean> => {
     const freshnessWindowId = obligation.freshnessWindowId;
     if (
       typeof freshnessWindowId !== 'number' ||
       !Number.isSafeInteger(freshnessWindowId) ||
       freshnessWindowId <= 0
     ) {
-      return;
+      return false;
     }
     try {
-      const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId);
-      await recordFreshnessObservation({
-        windowId: freshnessWindowId,
-        sourceCheckedAt: evidence.sourceCheckedAt ?? undefined,
-        pgPublishedAt: evidence.pgPublishedAt ?? undefined,
-        producerRevision: evidence.revision,
-        expectedCount: evidence.expectedCount,
-        observedCount: evidence.observedCount,
-        completenessStatus: scanComplete && evidence.complete ? 'COMPLETE' : 'INCOMPLETE',
-        evidence: {
-          expectedCount: evidence.expectedCount,
-          observedCount: evidence.observedCount,
-          scanComplete,
-          pgPublishedAt: evidence.pgPublishedAt?.toISOString() ?? null,
-        },
-      });
+      await persistLivePicksDurableFreshnessEvidence(
+        season,
+        eventId,
+        freshnessWindowId,
+        scanComplete,
+      );
+      return true;
     } catch (error) {
       logError('Live picks durable freshness evidence update failed', error, {
         eventId,
         windowId: obligation.freshnessWindowId,
       });
+      return false;
     }
   };
   if (now.getTime() < state.nextProbeAt) {
@@ -792,13 +817,14 @@ export async function runPicksProbeAndSync(
   }
   const entryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
   if (entryIds.length === 0) {
-    await recordDurableFreshness(true);
+    const freshnessEvidenceRecorded = await recordDurableFreshness(true);
     return {
       canaryCount: 0,
       synced: 0,
       pending: 0,
       sourceReady: true,
       scanComplete: true,
+      freshnessEvidenceRecorded,
     };
   }
   const nowMs = now.getTime();
@@ -817,13 +843,14 @@ export async function runPicksProbeAndSync(
       failedCanaryEntryIds: [],
     });
     const scanComplete = pendingCheckpoints.length === 0;
-    await recordDurableFreshness(scanComplete);
+    const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete);
     return {
       canaryCount: 0,
       synced: 0,
       pending: pendingCheckpoints.length,
       sourceReady: true,
       scanComplete,
+      freshnessEvidenceRecorded,
     };
   }
 
@@ -881,13 +908,14 @@ export async function runPicksProbeAndSync(
       eventId,
       canaries: canaries.length,
     });
-    await recordDurableFreshness(false);
+    const freshnessEvidenceRecorded = await recordDurableFreshness(false);
     return {
       canaryCount,
       synced: 0,
       pending: pending.length,
       sourceReady: false,
       scanComplete: false,
+      freshnessEvidenceRecorded,
     };
   }
 
@@ -977,13 +1005,14 @@ export async function runPicksProbeAndSync(
   });
   const scanComplete =
     (pendingAfterQueue.length === 0 || reusedCompletedScan) && pendingCheckpointIds.length === 0;
-  await recordDurableFreshness(scanComplete);
+  const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete);
   return {
     canaryCount,
     synced: canaryCount,
     pending: pendingAfterQueue.length + pendingCheckpointIds.length,
     sourceReady: true,
     scanComplete,
+    freshnessEvidenceRecorded,
   };
 }
 

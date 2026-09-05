@@ -18,17 +18,29 @@ import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const TOURNAMENT_TRENDS_REPAIR_SCHEDULE = '*/5 * * * *';
 
+async function settleTrendsFreshnessNotApplicable(
+  freshnessWindowId: number | undefined,
+  reasonCode: string,
+  evidence?: Record<string, unknown>,
+) {
+  if (freshnessWindowId === undefined) return { freshnessEvidenceRecorded: false } as const;
+  const recorded = await markFreshnessWindowNotApplicable({
+    windowId: freshnessWindowId,
+    reasonCode,
+    evidence,
+  });
+  if (!recorded) throw new Error(`Tournament Trends freshness window rejected ${reasonCode}`);
+  return { freshnessEvidenceRecorded: true } as const;
+}
+
 export async function repairTournamentTrendScopes(input: { freshnessWindowId?: number } = {}) {
   const season = await seasonRepository.findCurrent();
   const currentEvent = await eventRepository.findCurrent(season);
   if (!currentEvent || currentEvent.id < 1 || currentEvent.id > 38) {
-    if (input.freshnessWindowId) {
-      await markFreshnessWindowNotApplicable({
-        windowId: input.freshnessWindowId,
-        reasonCode: 'PUBLIC_TRENDS_NO_CURRENT_EVENT',
-      });
-    }
-    return;
+    return settleTrendsFreshnessNotApplicable(
+      input.freshnessWindowId,
+      'PUBLIC_TRENDS_NO_CURRENT_EVENT',
+    );
   }
   const [before, repairTournamentIds] = await Promise.all([
     readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id),
@@ -38,35 +50,37 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
     if (before.expectedCohortCount > 0) {
       throw new Error('Enabled Public Trends cohorts have no setup-complete repair target');
     }
-    if (input.freshnessWindowId) {
-      await markFreshnessWindowNotApplicable({
-        windowId: input.freshnessWindowId,
-        reasonCode: 'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS',
-      });
-    }
-    return before;
+    return {
+      ...before,
+      ...(await settleTrendsFreshnessNotApplicable(
+        input.freshnessWindowId,
+        'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS',
+      )),
+    };
   }
   const result = await publishTournamentTrendScopes(season, currentEvent.id, repairTournamentIds);
   if (result.failed > 0)
     throw new Error(`Tournament Trends repair failed for ${result.failed} scope(s)`);
   const after = await readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id);
   if (after.expectedCohortCount === 0) {
-    if (input.freshnessWindowId) {
-      await markFreshnessWindowNotApplicable({
-        windowId: input.freshnessWindowId,
-        reasonCode: 'PUBLIC_TRENDS_NO_ENABLED_COHORTS',
-        evidence: { prepublishedCohortCount: result.succeeded },
-      });
-    }
-    return after;
+    return {
+      ...after,
+      ...(await settleTrendsFreshnessNotApplicable(
+        input.freshnessWindowId,
+        'PUBLIC_TRENDS_NO_ENABLED_COHORTS',
+        { prepublishedCohortCount: result.succeeded },
+      )),
+    };
   }
-  if (!after.complete) throw new Error('Tournament Trends publication is incomplete');
+  if (!after.complete || !after.sourceCheckedAt || !after.pgPublishedAt) {
+    throw new Error('Tournament Trends publication evidence is incomplete');
+  }
   let freshnessEvidenceRecorded = false;
   if (input.freshnessWindowId) {
     const status = await recordFreshnessObservation({
       windowId: input.freshnessWindowId,
-      sourceCheckedAt: after.sourceCheckedAt ?? new Date(),
-      pgPublishedAt: after.pgPublishedAt ?? undefined,
+      sourceCheckedAt: after.sourceCheckedAt,
+      pgPublishedAt: after.pgPublishedAt,
       producerRevision: after.revision,
       expectedCount: after.expectedCohortCount,
       observedCount: after.observedCohortCount,
@@ -77,7 +91,8 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
         observedCohortCount: after.observedCohortCount,
         expectedEntryCount: after.expectedEntryCount,
         observedRowCount: after.observedRowCount,
-        pgPublishedAt: after.pgPublishedAt?.toISOString() ?? null,
+        sourceCheckedAt: after.sourceCheckedAt.toISOString(),
+        pgPublishedAt: after.pgPublishedAt.toISOString(),
       },
     });
     if (status === null) throw new Error('Tournament Trends freshness window is unavailable');

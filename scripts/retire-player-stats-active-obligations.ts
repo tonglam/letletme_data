@@ -17,6 +17,8 @@ const JOB_TYPES: JobType[] = [
   'completed',
   'failed',
 ];
+const BULL_SCAN_PAGE_SIZE = 250;
+const BULL_SCAN_MAX_PER_STATE = 5_000;
 
 type Candidate = Readonly<{
   obligationId: string;
@@ -29,10 +31,26 @@ type Candidate = Readonly<{
   bullJobId: string | null;
 }>;
 
-function parseArgs(argv: readonly string[]) {
-  const apply = argv.includes('--apply');
-  const expectedIndex = argv.indexOf('--expected-count');
-  const expectedCount = expectedIndex < 0 ? null : Number(argv[expectedIndex + 1]);
+export function parseArgs(argv: readonly string[]) {
+  let apply = false;
+  let expectedCount: number | null = null;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === '--apply') {
+      if (apply) throw new Error('--apply may be provided only once');
+      apply = true;
+      continue;
+    }
+    if (token === '--expected-count') {
+      if (expectedCount !== null) throw new Error('--expected-count may be provided only once');
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) throw new Error('--expected-count requires N');
+      expectedCount = Number(value);
+      index += 1;
+      continue;
+    }
+    throw new Error(`unknown argument: ${token ?? ''}`);
+  }
   if (
     apply &&
     (expectedCount === null || !Number.isSafeInteger(expectedCount) || expectedCount < 0)
@@ -74,15 +92,34 @@ async function bullJobsForCandidates(candidates: readonly Candidate[]): Promise<
     try {
       const direct = await Promise.all([...expectedIds].map((id) => queue.getJob(id)));
       for (const job of direct) if (job) found.push(`${queueName}:${String(job.id)}`);
-      const jobs = await queue.getJobs(JOB_TYPES, 0, -1, false);
-      for (const job of jobs) {
-        const data = job.data as Record<string, unknown> | undefined;
-        if (
-          typeof data?.obligationId === 'string' &&
-          candidates.some((candidate) => candidate.obligationId === data.obligationId)
-        ) {
-          found.push(`${queueName}:${String(job.id)}`);
+      const countsBefore = await queue.getJobCounts(...JOB_TYPES);
+      for (const jobType of JOB_TYPES) {
+        const count = Number(countsBefore[jobType] ?? 0);
+        if (!Number.isSafeInteger(count) || count < 0 || count > BULL_SCAN_MAX_PER_STATE) {
+          throw new Error(
+            `${queueName}:${jobType} scan count ${String(count)} exceeds the safe bound`,
+          );
         }
+        for (let start = 0; start < count; start += BULL_SCAN_PAGE_SIZE) {
+          const end = Math.min(start + BULL_SCAN_PAGE_SIZE, count) - 1;
+          const jobs = await queue.getJobs([jobType], start, end, false);
+          if (jobs.length > BULL_SCAN_PAGE_SIZE) {
+            throw new Error(`${queueName}:${jobType} returned an oversized BullMQ page`);
+          }
+          for (const job of jobs) {
+            const data = job.data as Record<string, unknown> | undefined;
+            if (
+              typeof data?.obligationId === 'string' &&
+              candidates.some((candidate) => candidate.obligationId === data.obligationId)
+            ) {
+              found.push(`${queueName}:${String(job.id)}`);
+            }
+          }
+        }
+      }
+      const countsAfter = await queue.getJobCounts(...JOB_TYPES);
+      if (JOB_TYPES.some((jobType) => countsAfter[jobType] !== countsBefore[jobType])) {
+        throw new Error(`${queueName}: BullMQ state changed during the bounded retirement scan`);
       }
     } finally {
       await queue.close();

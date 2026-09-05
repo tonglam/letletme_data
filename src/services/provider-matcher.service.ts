@@ -58,6 +58,16 @@ type UnderstatRosterEvidence = {
   name: string;
 };
 
+type FplFixtureOutcomeEvidence = Pick<
+  FplFixturePlayerEvidence,
+  'teamCode' | 'minutes' | 'starts' | 'goals' | 'ownGoals' | 'yellowCards' | 'redCards'
+>;
+
+type UnderstatFixtureOutcomeEvidence = Pick<
+  UnderstatRosterEvidence,
+  'teamId' | 'minutes' | 'started' | 'goals' | 'ownGoals' | 'yellowCards' | 'redCards'
+>;
+
 function fplName(row: {
   firstName: string | null;
   secondName: string | null;
@@ -88,8 +98,24 @@ export function rosterEvidenceAligns(
   mappedTeamCode: number | undefined,
 ): boolean {
   return (
-    mappedTeamCode === fpl.teamCode &&
     understatPositionTypes(understat.position, understat.seasonPosition).has(fpl.elementType) &&
+    fixtureOutcomeEvidenceAligns(fpl, understat, mappedTeamCode)
+  );
+}
+
+/**
+ * Compare fixture-grain facts shared by automatic and manual player mapping.
+ * Assists are deliberately auxiliary because FPL and Understat can attribute
+ * the same goal differently; identity still requires team, participation,
+ * goals, own goals and card evidence to agree.
+ */
+export function fixtureOutcomeEvidenceAligns(
+  fpl: FplFixtureOutcomeEvidence,
+  understat: UnderstatFixtureOutcomeEvidence,
+  mappedTeamCode: number | undefined,
+): boolean {
+  return (
+    mappedTeamCode === fpl.teamCode &&
     (fpl.starts === null || understat.started === fpl.starts > 0) &&
     Math.abs(understat.minutes - fpl.minutes) <= 2 &&
     understat.goals === fpl.goals &&
@@ -433,15 +459,7 @@ export async function manualVerifyProviderPlayer(input: {
     if (
       fixtureCode === undefined ||
       !fplRow ||
-      mappedTeamCode === undefined ||
-      fplRow.teamCode !== mappedTeamCode ||
-      Math.abs(row.minutes - fplRow.minutes) > 2 ||
-      row.started !== (fplRow.starts === null ? row.started : fplRow.starts > 0) ||
-      row.goals !== fplRow.goals ||
-      row.assists !== fplRow.assists ||
-      row.ownGoals !== fplRow.ownGoals ||
-      row.yellowCards !== fplRow.yellowCards ||
-      row.redCards !== fplRow.redCards
+      !fixtureOutcomeEvidenceAligns(fplRow, row, mappedTeamCode)
     ) {
       throw new Error(`Match/fixture evidence does not support player ${input.understatPlayerId}`);
     }

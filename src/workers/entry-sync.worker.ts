@@ -71,6 +71,7 @@ import { getQueueConnection } from '../utils/queue';
 import {
   findMissingEntryLiveInputIds,
   markLivePicksEntryComplete,
+  persistLivePicksDurableFreshnessEvidence,
 } from '../services/live-lifecycle-orchestrator';
 import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
@@ -547,6 +548,9 @@ export function createEntrySyncWorker(
         return result;
       }
       if (result.scanComplete) {
+        if (job.data.freshnessWindowId !== undefined && result.freshnessEvidenceRecorded !== true) {
+          throw new Error('Live Picks root completed without durable freshness evidence');
+        }
         if (fence.kind === 'complete') {
           await completeSchedulerObligation({
             obligationId: fence.obligationId,
@@ -558,6 +562,7 @@ export function createEntrySyncWorker(
               eventId: job.data.eventId,
               canaryCount: result.canaryCount,
               finalizer: 'root-no-fanout',
+              freshnessEvidenceRecorded: result.freshnessEvidenceRecorded === true,
             },
           });
         }
@@ -844,6 +849,7 @@ export function createEntrySyncWorker(
           scoped.value.failedUnits === 0 &&
           scoped.value.hasMore === false;
         let livePicksCoverageComplete = false;
+        let livePicksFreshnessEvidenceRecorded = false;
         if (livePicksChildComplete && targetEventId !== undefined) {
           const entryIds = [...new Set(effectiveJobData?.entryIds ?? [])];
           const drained = await Promise.all(
@@ -855,11 +861,20 @@ export function createEntrySyncWorker(
           // settle the event-scoped scheduler obligation. A successful child
           // must never make a partial cohort look complete.
           livePicksCoverageComplete = drained.some(Boolean);
+          if (livePicksCoverageComplete && effectiveJobData?.freshnessWindowId !== undefined) {
+            await persistLivePicksDurableFreshnessEvidence(
+              season,
+              targetEventId,
+              effectiveJobData.freshnessWindowId,
+              true,
+            );
+            livePicksFreshnessEvidenceRecorded = true;
+          }
         }
         if (
           fence.kind === 'complete' &&
           scoped.value.failedUnits === 0 &&
-          (scoped.value.scanComplete || livePicksCoverageComplete)
+          (livePicksChildComplete ? livePicksCoverageComplete : scoped.value.scanComplete)
         ) {
           await completeSchedulerObligation({
             obligationId: fence.obligationId,
@@ -873,6 +888,7 @@ export function createEntrySyncWorker(
               succeededUnits: scoped.value.succeededUnits,
               reusedUnits: scoped.value.reusedUnits,
               skippedUnits: scoped.value.skippedUnits,
+              freshnessEvidenceRecorded: livePicksFreshnessEvidenceRecorded,
             },
           });
         }

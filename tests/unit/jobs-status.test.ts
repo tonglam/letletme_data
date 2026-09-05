@@ -174,6 +174,10 @@ describe('jobs status hot-path isolation', () => {
     expect(control).toContain(['case ', quote, 'tournamentReviewV2', quote].join(''));
     expect(control).toContain(['case ', quote, 'liveFinalRetention', quote].join(''));
     expect(control).toContain(['case ', quote, 'clientSignals', quote].join(''));
+    expect(control).toContain('pauseOwnerState: ' + quote + 'UNAVAILABLE' + quote);
+    expect(control).toContain('unavailable: true');
+    expect(control).toContain('readQueueHealthSnapshot(name)');
+    expect(control).not.toContain('new Queue(name');
   });
 });
 

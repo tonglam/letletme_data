@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   candidatesWithMinimumMatchObservations,
+  fixtureOutcomeEvidenceAligns,
   isAutoMappingProtectedStatus,
   providerTeamConfirmedForSeason,
   resolveUniqueProviderAssignments,
@@ -131,6 +132,12 @@ describe('provider roster matcher', () => {
     expect(
       rosterEvidenceAligns({ ...fpl, starts: null }, { ...understat, started: false }, 3),
     ).toBe(true);
+  });
+
+  test('keeps assists auxiliary during manual fixture verification', () => {
+    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 3)).toBe(true);
+    expect(fixtureOutcomeEvidenceAligns(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
+    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 4)).toBe(false);
   });
 
   test('requires two independent verified-match observations before auto verification', () => {

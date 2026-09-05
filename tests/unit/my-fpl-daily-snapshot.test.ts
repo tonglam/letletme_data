@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, test } from 'bun:test';
 
+import { parseArguments as parsePlayerAuthorityArguments } from '../../scripts/rebind-player-gameweek-authority';
+import { parseArgs as parseRetirementArguments } from '../../scripts/retire-player-stats-active-obligations';
+
 import {
   isAuthoritativeUnrankedDeletedEntryResult,
   isAuthoritativeUnrankedFirstEventResult,
@@ -68,9 +71,95 @@ const tournamentTransfers = readFileSync(
   'utf8',
 );
 const deployStateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
+const trendsRepairJob = readFileSync('src/jobs/tournament-trends-repair.jobs.ts', 'utf8');
+const trendsCatalog = readFileSync('src/services/trends-catalog.service.ts', 'utf8');
+const liveDataWorker = readFileSync('src/workers/live-data.worker.ts', 'utf8');
+const rebindPlayerAuthority = readFileSync('scripts/rebind-player-gameweek-authority.ts', 'utf8');
+const retirePlayerStatsObligations = readFileSync(
+  'scripts/retire-player-stats-active-obligations.ts',
+  'utf8',
+);
+const schedulerObligationRepository = readFileSync(
+  'src/repositories/scheduler-obligations.ts',
+  'utf8',
+);
 const singleQuote = String.fromCharCode(39);
 
 describe('My FPL daily snapshot publication contract', () => {
+  test('keeps Public Trends freshness and repair evidence fail closed', () => {
+    const trendsDefinition = scheduler.slice(
+      scheduler.indexOf('name: MAINTENANCE_JOBS.TOURNAMENT_TRENDS'),
+      scheduler.indexOf('name: MAINTENANCE_JOBS.TOURNAMENT_REVIEW'),
+    );
+    expect(trendsDefinition).toContain('freshnessWindowId');
+    expect(trendsDefinition).toContain('enqueueTournamentTrendsRepair');
+    expect(trendsRepairJob).toContain('findPublicTrendRepairTournamentIds');
+    expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_CURRENT_EVENT');
+    expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_ENABLED_COHORTS');
+    expect(trendsCatalog).toContain('latest.source_watermark');
+    expect(trendsCatalog).toContain('sourceCheckedAt: sourceWatermark');
+    expect(trendsCatalog).not.toContain('sourceCheckedAt: publishedAt');
+    expect(trendsCatalog).toContain('current_event.deadline_time_epoch DESC');
+    const repairTargets = trendsCatalog.slice(
+      trendsCatalog.indexOf('export async function findPublicTrendRepairTournamentIds'),
+      trendsCatalog.indexOf('export async function getPublicTrendsCatalog'),
+    );
+    expect(repairTargets).not.toContain('catalog.enabled');
+  });
+
+  test('binds live freshness and cleanup tools to exact bounded evidence', () => {
+    expect(liveDataWorker).toContain('checkpointMatchesSnapshot');
+    expect(liveDataWorker).toContain('checkpoint.publication.generation === snapshot.generation');
+    expect(rebindPlayerAuthority).toContain(
+      'if (token === ' + singleQuote + '--apply' + singleQuote + ')',
+    );
+    expect(retirePlayerStatsObligations).toContain('BULL_SCAN_PAGE_SIZE');
+    expect(retirePlayerStatsObligations).toContain('BULL_SCAN_MAX_PER_STATE');
+    expect(retirePlayerStatsObligations).not.toContain('getJobs(JOB_TYPES, 0, -1');
+    expect(entryWorker).toContain('persistLivePicksDurableFreshnessEvidence');
+    expect(entryWorker).toContain('freshnessEvidenceRecorded');
+    expect(entryWorker).toContain(
+      'livePicksChildComplete ? livePicksCoverageComplete : scoped.value.scanComplete',
+    );
+    const orphanProjection = schedulerObligationRepository.slice(
+      schedulerObligationRepository.indexOf('export async function schedulerOrphanState'),
+      schedulerObligationRepository.indexOf('export async function schedulerObligationStatus'),
+    );
+    expect(orphanProjection).toContain(
+      'WHERE status NOT IN (' +
+        singleQuote +
+        'succeeded' +
+        singleQuote +
+        ', ' +
+        singleQuote +
+        'skipped' +
+        singleQuote +
+        ', ' +
+        singleQuote +
+        'irrecoverable' +
+        singleQuote +
+        ')',
+    );
+  });
+
+  test('keeps authority maintenance command lines explicit and fail closed', () => {
+    expect(
+      parsePlayerAuthorityArguments(['--season', '2627', '--events', '1,2', '--apply']),
+    ).toEqual({ season: '2627', events: [1, 2], apply: true });
+    expect(() =>
+      parsePlayerAuthorityArguments(['--season', '2627', '--events', '1', '--apply=false']),
+    ).toThrow();
+    expect(() =>
+      parsePlayerAuthorityArguments(['--season', '2627', '--events', '1', '--unknown', 'x']),
+    ).toThrow();
+    expect(parseRetirementArguments(['--expected-count', '2', '--apply'])).toEqual({
+      apply: true,
+      expectedCount: 2,
+    });
+    expect(() => parseRetirementArguments(['--apply'])).toThrow();
+    expect(() => parseRetirementArguments(['--expected-count', '2', '--unexpected'])).toThrow();
+  });
+
   test('counts projected auto-sub points before captain multipliers', () => {
     expect(
       projectedEventAutoSubPoints(

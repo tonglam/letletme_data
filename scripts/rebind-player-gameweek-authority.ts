@@ -30,21 +30,27 @@ const usage = (): never => {
   );
 };
 
-function parseArguments(argv: readonly string[]): Arguments {
+export function parseArguments(argv: readonly string[]): Arguments {
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (!token?.startsWith('--')) usage();
     if (token === '--apply') {
+      if (values.has('apply')) usage();
       values.set('apply', 'true');
       continue;
     }
     const equals = token.indexOf('=');
-    if (equals > 2) values.set(token.slice(2, equals), token.slice(equals + 1));
-    else {
+    const key = equals > 2 ? token.slice(2, equals) : token.slice(2);
+    if ((key !== 'season' && key !== 'events') || values.has(key)) usage();
+    if (equals > 2) {
+      const value = token.slice(equals + 1);
+      if (!value) usage();
+      values.set(key, value);
+    } else {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) usage();
-      values.set(token.slice(2), value);
+      values.set(key, value);
       index += 1;
     }
   }

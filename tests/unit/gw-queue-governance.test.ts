@@ -453,6 +453,12 @@ describe('GW queue and data governance primitives', () => {
       },
     });
     expect(
+      dataContractRegistry.find((contract) => contract.contractKey === 'public-league-trends'),
+    ).toMatchObject({
+      freshnessEvidence: 'checkpoint',
+      freshnessJobs: ['tournament-trends-repair'],
+    });
+    expect(
       dataContractRegistry
         .filter((contract) => contract.visibility === 'internal-only')
         .every((contract) => contract.visibilityReason?.trim().length),

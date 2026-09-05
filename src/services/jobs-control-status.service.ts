@@ -1,5 +1,4 @@
 import { sql } from 'drizzle-orm';
-import { Queue } from 'bullmq';
 
 import {
   readActiveDataPublicationManifest,
@@ -7,14 +6,12 @@ import {
   type DataPublicationManifest,
 } from '../cache/data-publication';
 import { getDb } from '../db/singleton';
-import { queueRedisSingleton } from '../queues/redis';
 import { createSeasonRepository, type FplSeasonRecord } from '../repositories/seasons';
 import {
   schedulerObligationStatus,
   schedulerOrphanState,
 } from '../repositories/scheduler-obligations';
 import { allQueueNames } from '../queues/names';
-import { getQueueConnection } from '../utils/queue';
 import { createSyncOperationsRepository } from '../repositories/sync-operations';
 import {
   isRuntimeHeartbeatHealthy,
@@ -37,11 +34,7 @@ import {
 } from './jobs-status.service';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION } from '../domain/live-final-retention-policy';
-import {
-  queueConsumerMetaKey,
-  queueConsumerPauseOwnerState,
-  readQueueConsumerPauseOwner,
-} from './queue-governance.service';
+import { readQueueHealthSnapshot } from './queue-governance.service';
 
 export const JOBS_STATUS_SECTIONS = [
   'myFplIntegrity',
@@ -143,28 +136,39 @@ async function readRuntimeControlStatus(): Promise<
 }
 
 async function readQueuePauseStatus(): Promise<readonly Record<string, unknown>[]> {
-  const connection = getQueueConnection();
   return Promise.all(
     allQueueNames.map(async (name) => {
-      const queue = new Queue(name, { connection });
-      try {
-        const redis = await queueRedisSingleton.getClient();
-        const [counts, owner, pauseMarker] = await Promise.all([
-          queue.getJobCounts('paused'),
-          readQueueConsumerPauseOwner(name),
-          redis.hget(queueConsumerMetaKey(name), 'paused'),
-        ]);
-        const pausedCount = counts.paused ?? 0;
-        const ownerState = queueConsumerPauseOwnerState(owner);
+      // The queue monitor already owns the live BullMQ fan-out and publishes
+      // a short-lived snapshot. The frequent control endpoint reads that one
+      // bounded Redis record instead of opening one Queue connection per lane.
+      const snapshot = await readQueueHealthSnapshot(name);
+      if (
+        !snapshot ||
+        typeof snapshot.consumerPaused !== 'boolean' ||
+        !Number.isSafeInteger(snapshot.pausedCount) ||
+        snapshot.pausedCount < 0 ||
+        !['NONE', 'DEPLOYMENT', 'ACQUIRING', 'OPERATOR', 'RELEASING'].includes(
+          snapshot.pauseOwnerState,
+        ) ||
+        !Number.isFinite(Date.parse(snapshot.observedAt))
+      ) {
         return {
           queueName: name,
-          consumerPaused: pauseMarker === '1' || pausedCount > 0,
-          pausedCount,
-          pauseOwnerState: ownerState,
+          consumerPaused: null,
+          pausedCount: null,
+          pauseOwnerState: 'UNAVAILABLE',
+          observedAt: null,
+          unavailable: true,
         };
-      } finally {
-        await queue.close();
       }
+      return {
+        queueName: name,
+        consumerPaused: snapshot.consumerPaused,
+        pausedCount: snapshot.pausedCount,
+        pauseOwnerState: snapshot.pauseOwnerState,
+        observedAt: snapshot.observedAt,
+        unavailable: false,
+      };
     }),
   );
 }

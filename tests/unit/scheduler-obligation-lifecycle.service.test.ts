@@ -118,6 +118,28 @@ describe('scheduler obligation lifecycle service', () => {
     expect(dependencies.recordFreshness).not.toHaveBeenCalled();
   });
 
+  test('does not replace exact producer evidence with generic completion evidence', async () => {
+    const row = obligation({
+      jobName: 'live-picks-refresh',
+      evidence: {
+        freshnessWindowId: 7,
+        freshnessEvidenceRecorded: true,
+        producerRevision: 'live-picks-v1:exact',
+      },
+    });
+    const dependencies = fakes(row);
+    const lifecycle = createSchedulerObligationLifecycle(dependencies as never);
+
+    expect(
+      await lifecycle.completeSchedulerObligation({
+        obligationId: row.obligationId,
+        status: 'succeeded',
+        evidence: { freshnessEvidenceRecorded: true },
+      }),
+    ).toBe(true);
+    expect(dependencies.recordFreshness).not.toHaveBeenCalled();
+  });
+
   test('keeps freshness telemetry failures best effort', async () => {
     const dependencies = fakes(obligation({ evidence: { freshnessWindowId: 7, complete: true } }));
     dependencies.recordFreshness.mockImplementation(async () => {

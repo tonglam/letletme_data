@@ -29,10 +29,17 @@ export type PublicTrendFreshnessEvidence = Readonly<{
     completePickEntries: number;
     transferCheckpointEntries: number;
     rowCount: number;
+    sourceWatermark: Date | null;
     publishedAt: Date | null;
     setupStatus: string;
   }>[];
 }>;
+
+function timestampOrNull(value: unknown): Date | null {
+  if (value === null || value === undefined) return null;
+  const timestamp = value instanceof Date ? value : new Date(String(value));
+  return Number.isFinite(timestamp.getTime()) ? timestamp : null;
+}
 
 /**
  * Read the public-trends publication window from PostgreSQL. The result is a
@@ -51,7 +58,7 @@ export async function readPublicTrendFreshnessEvidence(
       latest.publication_id, latest.revision, latest.source_checksum, latest.publication_state,
       latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state,
       latest.transfers_state, latest.expected_entries, latest.complete_pick_entries,
-      latest.transfer_checkpoint_entries, latest.published_at,
+      latest.transfer_checkpoint_entries, latest.source_watermark, latest.published_at,
       COALESCE(snapshot.row_count, 0)::int AS row_count
     FROM competition.public_league_trends catalog
     JOIN competition.tournaments tournament
@@ -63,7 +70,8 @@ export async function readPublicTrendFreshnessEvidence(
         publication.ownership_state, publication.captaincy_state,
         publication.vice_captaincy_state, publication.transfers_state,
         publication.expected_entries, publication.complete_pick_entries,
-        publication.transfer_checkpoint_entries, publication.published_at
+        publication.transfer_checkpoint_entries, publication.source_watermark,
+        publication.published_at
       FROM reporting.tournament_selection_stat_publications publication
       WHERE publication.season_id = catalog.season_id
         AND publication.tournament_id = catalog.tournament_id
@@ -100,7 +108,8 @@ export async function readPublicTrendFreshnessEvidence(
     completePickEntries: Number(row.complete_pick_entries ?? 0),
     transferCheckpointEntries: Number(row.transfer_checkpoint_entries ?? 0),
     rowCount: Number(row.row_count ?? 0),
-    publishedAt: row.published_at == null ? null : new Date(String(row.published_at)),
+    sourceWatermark: timestampOrNull(row.source_watermark),
+    publishedAt: timestampOrNull(row.published_at),
     setupStatus: String(row.setup_status),
   }));
   const catalogRevision = createHash('sha256')
@@ -115,7 +124,7 @@ export async function readPublicTrendFreshnessEvidence(
       cohorts
         .map(
           (cohort) =>
-            `${cohort.tournamentId}:${cohort.publicationId ?? ''}:${cohort.publicationRevision ?? ''}:${cohort.sourceChecksum ?? ''}:${cohort.publicationState}:${cohort.ownershipState}:${cohort.captaincyState}:${cohort.viceCaptaincyState}:${cohort.transfersState}:${cohort.expectedEntries}:${cohort.completePickEntries}:${cohort.transferCheckpointEntries}:${cohort.rowCount}:${cohort.publishedAt?.toISOString() ?? ''}`,
+            `${cohort.tournamentId}:${cohort.publicationId ?? ''}:${cohort.publicationRevision ?? ''}:${cohort.sourceChecksum ?? ''}:${cohort.publicationState}:${cohort.ownershipState}:${cohort.captaincyState}:${cohort.viceCaptaincyState}:${cohort.transfersState}:${cohort.expectedEntries}:${cohort.completePickEntries}:${cohort.transferCheckpointEntries}:${cohort.rowCount}:${cohort.sourceWatermark?.toISOString() ?? ''}:${cohort.publishedAt?.toISOString() ?? ''}`,
         )
         .join('|'),
     )
@@ -127,6 +136,7 @@ export async function readPublicTrendFreshnessEvidence(
         cohort.setupStatus === 'ready' &&
         cohort.publicationId !== null &&
         cohort.sourceChecksum !== null &&
+        cohort.sourceWatermark !== null &&
         cohort.publicationState === 'READY' &&
         cohort.ownershipState === 'READY' &&
         cohort.captaincyState === 'READY' &&
@@ -142,6 +152,16 @@ export async function readPublicTrendFreshnessEvidence(
       cohort.publishedAt && (!latest || cohort.publishedAt > latest) ? cohort.publishedAt : latest,
     null,
   );
+  // A multi-cohort contract is only as fresh as its oldest source input.
+  // Publication time remains a separate PostgreSQL milestone and must never
+  // be substituted for the provider-derived watermark.
+  const sourceWatermark = cohorts.reduce<Date | null>(
+    (oldest, cohort) =>
+      cohort.sourceWatermark && (!oldest || cohort.sourceWatermark < oldest)
+        ? cohort.sourceWatermark
+        : oldest,
+    null,
+  );
   return {
     revision,
     catalogRevision,
@@ -150,7 +170,7 @@ export async function readPublicTrendFreshnessEvidence(
     expectedEntryCount: cohorts.reduce((sum, cohort) => sum + cohort.expectedEntries, 0),
     observedRowCount: cohorts.reduce((sum, cohort) => sum + cohort.rowCount, 0),
     pgPublishedAt: publishedAt,
-    sourceCheckedAt: publishedAt,
+    sourceCheckedAt: sourceWatermark,
     complete,
     cohorts,
   };
