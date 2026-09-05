@@ -461,8 +461,13 @@ describe('GW queue and data governance primitives', () => {
       dataContractRegistry.find((contract) => contract.contractKey === 'public-league-trends'),
     ).toMatchObject({
       freshnessEvidence: 'checkpoint',
+      freshnessPublicationMustFollowEligibility: true,
       freshnessJobs: ['tournament-trends-repair'],
     });
+    expect(
+      contracts.find((contract) => contract.contractKey === 'live-snapshot')
+        ?.freshnessPublicationMustFollowEligibility,
+    ).toBeUndefined();
     expect(
       dataContractRegistry
         .filter((contract) => contract.visibility === 'internal-only')
@@ -535,6 +540,37 @@ describe('GW queue and data governance primitives', () => {
       evaluateFreshnessWindow({
         ...observation,
         sourceCheckedAt: observation.eligibleAt,
+      }),
+    ).toBe('MET');
+  });
+
+  test('requires a within-window PostgreSQL publication only for opted-in contracts', () => {
+    const observation = {
+      eligible: true,
+      consumerEvidenceRequired: false,
+      redisEvidenceRequired: false,
+      eligibleAt: new Date('2026-08-27T00:00:00.000Z'),
+      dueAt: new Date('2026-08-27T00:05:00.000Z'),
+      now: new Date('2026-08-27T00:01:00.000Z'),
+      sourceCheckedAt: new Date('2026-08-27T00:00:01.000Z'),
+      pgPublishedAt: new Date('2026-08-26T23:59:59.999Z'),
+      producerRevision: 'unchanged-publication-1',
+      expectedCount: 15,
+      observedCount: 15,
+      completeness: 'COMPLETE' as const,
+    };
+    expect(evaluateFreshnessWindow(observation)).toBe('MET');
+    expect(
+      evaluateFreshnessWindow({
+        ...observation,
+        freshnessPublicationMustFollowEligibility: true,
+      }),
+    ).toBe('PENDING');
+    expect(
+      evaluateFreshnessWindow({
+        ...observation,
+        freshnessPublicationMustFollowEligibility: true,
+        pgPublishedAt: observation.sourceCheckedAt,
       }),
     ).toBe('MET');
   });

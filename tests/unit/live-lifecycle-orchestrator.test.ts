@@ -28,6 +28,17 @@ describe('live lifecycle decisions', () => {
     expect(source).toContain(
       'complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length',
     );
+    const persistence = source.slice(
+      source.indexOf('export async function persistLivePicksDurableFreshnessEvidence'),
+      source.indexOf('function isStablePicksResponse'),
+    );
+    expect(persistence).toContain('LOCK TABLE ${entriesInCompetition} IN SHARE MODE');
+    expect(persistence.indexOf('LOCK TABLE')).toBeLessThan(
+      persistence.indexOf('readLivePicksDurableFreshnessEvidence'),
+    );
+    expect(persistence.indexOf('readLivePicksDurableFreshnessEvidence')).toBeLessThan(
+      persistence.indexOf('recordFreshnessObservation'),
+    );
   });
 
   test('settles only fenced backoff roots and retries unfenced repairs', () => {

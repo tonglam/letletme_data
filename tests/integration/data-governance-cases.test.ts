@@ -5,6 +5,7 @@ assertIntegrationEnv();
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import { getDbClient } from '../../src/db/singleton';
+import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import {
   listGovernanceCases,
   markFreshnessWindowNotApplicable,
@@ -13,6 +14,7 @@ import {
   upsertFreshnessWindow,
   transitionGovernanceCase,
 } from '../../src/services/data-governance.service';
+import { persistLivePicksDurableFreshnessEvidence } from '../../src/services/live-lifecycle-orchestrator';
 
 const SCOPE_KEY = 'integration:governance-case-cas';
 const FINGERPRINT = 'integration:governance-case-cas:v1';
@@ -106,7 +108,7 @@ describe('data governance case CAS', () => {
     ).toBe(true);
   });
 
-  test('freezes consumer evidence requirements on freshness-window re-reservation', async () => {
+  test('freezes freshness reservation policies on re-reservation', async () => {
     const base = {
       sloKey: WINDOW_SLO_KEY,
       contractKey: 'my-fpl',
@@ -118,24 +120,33 @@ describe('data governance case CAS', () => {
 
     await upsertFreshnessWindow({
       ...base,
-      evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
+      evidence: {
+        consumerEvidenceRequired: false,
+        redisEvidenceRequired: false,
+        freshnessPublicationMustFollowEligibility: false,
+      },
     });
     await upsertFreshnessWindow({
       ...base,
-      evidence: { consumerEvidenceRequired: true, redisEvidenceRequired: true },
+      evidence: {
+        consumerEvidenceRequired: true,
+        redisEvidenceRequired: true,
+        freshnessPublicationMustFollowEligibility: true,
+      },
     });
 
     const sql = await getDbClient();
-    const [row] = await sql<Array<{ consumer: boolean; redis: boolean }>>`
+    const [row] = await sql<Array<{ consumer: boolean; redis: boolean; publication: boolean }>>`
       SELECT
         (evidence ->> 'consumerEvidenceRequired')::boolean AS consumer,
-        (evidence ->> 'redisEvidenceRequired')::boolean AS redis
+        (evidence ->> 'redisEvidenceRequired')::boolean AS redis,
+        (evidence ->> 'freshnessPublicationMustFollowEligibility')::boolean AS publication
       FROM ops.freshness_slo_windows
       WHERE slo_key = ${WINDOW_SLO_KEY}
         AND scope_key = ${WINDOW_SCOPE_KEY}
         AND period_key = 'freeze-v1'
     `;
-    expect(row).toEqual({ consumer: false, redis: true });
+    expect(row).toEqual({ consumer: false, redis: true, publication: false });
   });
 
   test('atomically retires a breached empty cohort and dismisses its repair case', async () => {
@@ -232,18 +243,48 @@ describe('data governance case CAS', () => {
         eventId: 3,
       }),
     ).toBe(false);
+    await expect(
+      persistLivePicksDurableFreshnessEvidence(explicitSeasonRef('9899'), 3, windowId, true),
+    ).rejects.toThrow('Live Picks durable evidence is incomplete: 0/1');
+    const [incomplete] = await sql<
+      Array<{
+        expectedCount: number;
+        observedCount: number;
+        completenessStatus: string;
+        scanComplete: boolean;
+      }>
+    >`
+      SELECT
+        expected_count AS "expectedCount",
+        observed_count AS "observedCount",
+        completeness_status AS "completenessStatus",
+        (evidence ->> 'scanComplete')::boolean AS "scanComplete"
+      FROM ops.freshness_slo_windows
+      WHERE window_id = ${windowId}
+    `;
+    expect(incomplete).toEqual({
+      expectedCount: 1,
+      observedCount: 0,
+      completenessStatus: 'INCOMPLETE',
+      scanComplete: true,
+    });
     await sql`
       DELETE FROM competition.entries
       WHERE season_id = ${EMPTY_COHORT_SEASON_ID}
         AND entry_id = ${EMPTY_COHORT_ENTRY_ID}
     `;
 
-    expect(
-      await retireLivePicksEmptyCohortFreshnessWindow({
-        windowId,
-        eventId: 3,
-      }),
-    ).toBe(true);
+    const evidence = await persistLivePicksDurableFreshnessEvidence(
+      explicitSeasonRef('9899'),
+      3,
+      windowId,
+      true,
+    );
+    expect(evidence).toMatchObject({
+      expectedCount: 0,
+      observedCount: 0,
+      complete: false,
+    });
 
     const [window, governanceCase] = await Promise.all([
       sql<

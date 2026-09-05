@@ -48,6 +48,8 @@ export type DataContract = Readonly<{
   executionBudgetMs: number;
   /** Evidence writer currently attached to this contract's producer. */
   freshnessEvidence?: 'publication' | 'checkpoint' | 'none';
+  /** A successful window must contain a PostgreSQL publication at or after eligibility. */
+  freshnessPublicationMustFollowEligibility?: boolean;
   /**
    * Scheduler definitions that own an SLO window for this contract.  A
    * contract can cover more jobs than its user-visible checkpoint (for
@@ -396,6 +398,7 @@ export const dataContractRegistry = [
     dispatchWithinMs: 60 * 60_000,
     executionBudgetMs: 60 * 60_000,
     freshnessEvidence: 'checkpoint',
+    freshnessPublicationMustFollowEligibility: true,
     freshnessJobs: ['tournament-trends-repair'],
     integrity:
       'both configured public cohorts have positive complete snapshots and stable revision',

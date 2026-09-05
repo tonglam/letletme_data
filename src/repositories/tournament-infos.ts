@@ -17,7 +17,7 @@ import {
   tournamentEntriesInCompetition,
   tournamentsInCompetition,
 } from '../db/schemas/index.schema';
-import { getDb, type DbHandle } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type {
   GroupMode,
@@ -197,7 +197,7 @@ function mapTournamentInfo(
   };
 }
 
-export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
+export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
   const tournamentScope = (season: FplSeasonRef, tournamentId: number) =>
     and(

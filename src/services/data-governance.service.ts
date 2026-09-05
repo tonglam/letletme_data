@@ -138,9 +138,10 @@ export async function upsertFreshnessWindow(input: {
         eligibleAt: sql`LEAST(${freshnessSloWindowsInOps.eligibleAt}, excluded.eligible_at)`,
         dueAt: sql`LEAST(${freshnessSloWindowsInOps.dueAt}, excluded.due_at)`,
         obligationDueAt: sql`COALESCE(${freshnessSloWindowsInOps.obligationDueAt}, excluded.obligation_due_at)`,
-        // `consumerEvidenceRequired` is a reservation-time decision.  Keep
-        // the first explicit value across scheduler restarts or configuration
-        // changes, while still merging newly discovered evidence fields.
+        // Consumer participation and the producer publication lower bound are
+        // reservation-time decisions. Keep the first explicit values across
+        // scheduler restarts or configuration changes, while still merging
+        // newly discovered evidence fields.
         evidence: sql`
           (${freshnessSloWindowsInOps.evidence} || excluded.evidence)
           || CASE
@@ -148,6 +149,14 @@ export async function upsertFreshnessWindow(input: {
             THEN jsonb_build_object(
               'consumerEvidenceRequired',
               ${freshnessSloWindowsInOps.evidence}->'consumerEvidenceRequired'
+            )
+            ELSE '{}'::jsonb
+          END
+          || CASE
+            WHEN ${freshnessSloWindowsInOps.evidence} ? 'freshnessPublicationMustFollowEligibility'
+            THEN jsonb_build_object(
+              'freshnessPublicationMustFollowEligibility',
+              ${freshnessSloWindowsInOps.evidence}->'freshnessPublicationMustFollowEligibility'
             )
             ELSE '{}'::jsonb
           END
@@ -573,7 +582,7 @@ export async function recordFreshnessObservation(input: {
   invalid?: boolean;
   breachCode?: string | null;
   evidence?: Record<string, unknown>;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }): Promise<FreshnessSloStatus | null> {
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
@@ -620,6 +629,10 @@ export async function recordFreshnessObservation(input: {
       invalid,
       consumerEvidenceRequired,
       redisEvidenceRequired,
+      freshnessPublicationMustFollowEligibility:
+        windowEvidence.freshnessPublicationMustFollowEligibility === true ||
+        (windowEvidence.freshnessPublicationMustFollowEligibility === undefined &&
+          contract?.freshnessPublicationMustFollowEligibility === true),
       eligibleAt: current.eligibleAt,
       dueAt: current.dueAt,
       sourceCheckedAt: input.sourceCheckedAt ?? current.sourceCheckedAt,
@@ -725,7 +738,7 @@ type FreshnessWindowNotApplicableInput = {
   windowId: number;
   reasonCode: string;
   evidence?: Record<string, unknown>;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 };
 
 async function setFreshnessWindowNotApplicable(
@@ -854,7 +867,7 @@ export async function markFreshnessWindowNotApplicable(
 export async function retireLivePicksEmptyCohortFreshnessWindow(input: {
   windowId: number;
   eventId: number;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }): Promise<boolean> {
   if (!Number.isSafeInteger(input.eventId) || input.eventId <= 0) return false;
   return setFreshnessWindowNotApplicable(

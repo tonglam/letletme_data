@@ -195,6 +195,11 @@ async function main(): Promise<void> {
 
   if (args.apply) {
     await db.transaction(async (tx) => {
+      // Event-live ingestion does not share this command's advisory-lock
+      // namespace. Block every concurrent INSERT/UPDATE/DELETE on the target
+      // table so validation and the binding update observe one closed set,
+      // including rows which would otherwise appear as phantoms.
+      await tx.execute(sql`LOCK TABLE ${playerGameweekStatsInFpl} IN SHARE ROW EXCLUSIVE MODE`);
       for (const eventId of args.events) {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${args.season}:${eventId}`}, 0))`,

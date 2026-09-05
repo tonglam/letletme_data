@@ -122,6 +122,16 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(rebindPlayerAuthority).toContain(
       'if (token === ' + singleQuote + '--apply' + singleQuote + ')',
     );
+    const authorityApply = rebindPlayerAuthority.slice(
+      rebindPlayerAuthority.indexOf('if (args.apply)'),
+      rebindPlayerAuthority.indexOf('process.stdout.write'),
+    );
+    expect(authorityApply).toContain(
+      'LOCK TABLE ${playerGameweekStatsInFpl} IN SHARE ROW EXCLUSIVE MODE',
+    );
+    expect(authorityApply.indexOf('LOCK TABLE')).toBeLessThan(
+      authorityApply.indexOf('const { checkpoint, report: lockedReport }'),
+    );
     expect(retirePlayerStatsObligations).toContain('BULL_SCAN_PAGE_SIZE');
     expect(retirePlayerStatsObligations).toContain('BULL_SCAN_MAX_PER_STATE');
     expect(retirePlayerStatsObligations).not.toContain('getJobs(JOB_TYPES, 0, -1');

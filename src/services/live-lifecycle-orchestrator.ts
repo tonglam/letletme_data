@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Elysia } from 'elysia';
+import { sql } from 'drizzle-orm';
 
 import { fplClient } from '../clients/fpl';
 import type { Event } from '../domain/events';
@@ -10,8 +11,14 @@ import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
 import { seasonRepository } from '../repositories/seasons';
-import { tournamentEntryRepository } from '../repositories/tournament-entries';
-import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import {
+  createTournamentEntryRepository,
+  tournamentEntryRepository,
+} from '../repositories/tournament-entries';
+import {
+  createTournamentInfoRepository,
+  tournamentInfoRepository,
+} from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { isMatchDayTime } from '../utils/conditions';
 import { logError, logInfo } from '../utils/logger';
@@ -19,8 +26,10 @@ import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './en
 import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
-import { entryInfoRepository } from '../repositories/entry-infos';
+import { createEntryInfoRepository, entryInfoRepository } from '../repositories/entry-infos';
 import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
+import { entriesInCompetition } from '../db/schemas/index.schema';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   liveV2LifecycleKey,
   liveV2PicksCoordinatorKey,
@@ -557,13 +566,19 @@ export function decideLiveLifecycle(
 export async function resolveUniqueActiveTournamentEntryIds(
   season: FplSeasonRef,
   eventId: number,
+  db?: DbOrTransaction,
 ): Promise<number[]> {
+  const tournamentsRepository = db ? createTournamentInfoRepository(db) : tournamentInfoRepository;
+  const entriesRepository = db ? createEntryInfoRepository(db) : entryInfoRepository;
+  const tournamentEntriesRepository = db
+    ? createTournamentEntryRepository(db)
+    : tournamentEntryRepository;
   const [tournaments, knownEntries] = await Promise.all([
-    tournamentInfoRepository.findActive(season),
-    entryInfoRepository.findAll(season),
+    tournamentsRepository.findActive(season),
+    entriesRepository.findAll(season),
   ]);
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
+    tournamentEntriesRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
   const candidateEntryIds = uniqueNumbers([
     ...entryLists.flat(),
@@ -576,9 +591,13 @@ export async function resolveUniqueActiveTournamentEntryIds(
     .sort((a, b) => a - b);
 }
 
-export async function readLivePicksDurableFreshnessEvidence(season: FplSeasonRef, eventId: number) {
-  const expectedEntryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId);
-  const heads = await createEntryEventPicksRepository().findHeadsByEventAndEntryIds(
+export async function readLivePicksDurableFreshnessEvidence(
+  season: FplSeasonRef,
+  eventId: number,
+  db?: DbOrTransaction,
+) {
+  const expectedEntryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId, db);
+  const heads = await createEntryEventPicksRepository(db).findHeadsByEventAndEntryIds(
     season,
     eventId,
     expectedEntryIds,
@@ -642,43 +661,55 @@ export async function persistLivePicksDurableFreshnessEvidence(
   freshnessWindowId: number,
   scanComplete: boolean,
 ) {
-  const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId);
-  if (
-    shouldMarkLivePicksFreshnessNotApplicable(
-      evidence.expectedCount,
-      evidence.observedCount,
-      scanComplete,
-    )
-  ) {
-    const recorded = await retireLivePicksEmptyCohortFreshnessWindow({
+  const db = await getDb();
+  const result = await db.transaction(async (tx) => {
+    // Hold the same table-level fence used by empty-cohort retirement across
+    // the cohort read, durable-head scan, and terminal freshness update. An
+    // in-flight onboarding write must commit before this scan or wait until
+    // its evidence has been recorded; neither COMPLETE nor N/A can describe a
+    // cohort which changed between counting and settlement.
+    await tx.execute(sql`LOCK TABLE ${entriesInCompetition} IN SHARE MODE`);
+    const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId, tx);
+    if (
+      shouldMarkLivePicksFreshnessNotApplicable(
+        evidence.expectedCount,
+        evidence.observedCount,
+        scanComplete,
+      )
+    ) {
+      const recorded = await retireLivePicksEmptyCohortFreshnessWindow({
+        windowId: freshnessWindowId,
+        eventId,
+        db: tx,
+      });
+      if (!recorded) throw new Error('Live Picks empty-cohort freshness window is unavailable');
+      return { evidence, terminalIncomplete: false } as const;
+    }
+    const status = await recordFreshnessObservation({
       windowId: freshnessWindowId,
-      eventId,
-    });
-    if (!recorded) throw new Error('Live Picks empty-cohort freshness window is unavailable');
-    return evidence;
-  }
-  const status = await recordFreshnessObservation({
-    windowId: freshnessWindowId,
-    sourceCheckedAt: evidence.sourceCheckedAt ?? undefined,
-    pgPublishedAt: evidence.pgPublishedAt ?? undefined,
-    producerRevision: evidence.revision,
-    expectedCount: evidence.expectedCount,
-    observedCount: evidence.observedCount,
-    completenessStatus: scanComplete && evidence.complete ? 'COMPLETE' : 'INCOMPLETE',
-    evidence: {
+      sourceCheckedAt: evidence.sourceCheckedAt ?? undefined,
+      pgPublishedAt: evidence.pgPublishedAt ?? undefined,
+      producerRevision: evidence.revision,
       expectedCount: evidence.expectedCount,
       observedCount: evidence.observedCount,
-      scanComplete,
-      pgPublishedAt: evidence.pgPublishedAt?.toISOString() ?? null,
-    },
+      completenessStatus: scanComplete && evidence.complete ? 'COMPLETE' : 'INCOMPLETE',
+      evidence: {
+        expectedCount: evidence.expectedCount,
+        observedCount: evidence.observedCount,
+        scanComplete,
+        pgPublishedAt: evidence.pgPublishedAt?.toISOString() ?? null,
+      },
+      db: tx,
+    });
+    if (status === null) throw new Error('Live Picks freshness window is unavailable');
+    return { evidence, terminalIncomplete: scanComplete && !evidence.complete } as const;
   });
-  if (status === null) throw new Error('Live Picks freshness window is unavailable');
-  if (scanComplete && !evidence.complete) {
+  if (result.terminalIncomplete) {
     throw new Error(
-      `Live Picks durable evidence is incomplete: ${evidence.observedCount}/${evidence.expectedCount}`,
+      `Live Picks durable evidence is incomplete: ${result.evidence.observedCount}/${result.evidence.expectedCount}`,
     );
   }
-  return evidence;
+  return result.evidence;
 }
 
 function isStablePicksResponse(payload: RawFPLEntryEventPicksResponse, eventId: number): boolean {

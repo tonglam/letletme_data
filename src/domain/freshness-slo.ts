@@ -24,6 +24,12 @@ export type FreshnessWindowObservation = Readonly<{
   redisEvidenceRequired?: boolean;
   /** Start of the exact evidence window reserved by the scheduler. */
   eligibleAt?: Date;
+  /**
+   * Most producers may reuse an unchanged durable publication after a fresh
+   * source check. Contracts which promise a new checkpoint inside every
+   * window opt in to this stricter publication lower bound.
+   */
+  freshnessPublicationMustFollowEligibility?: boolean;
   dueAt: Date;
   now?: Date;
   sourceCheckedAt?: Date | null;
@@ -73,10 +79,16 @@ export function milestonesAreComplete(input: FreshnessWindowObservation): boolea
 /** Producer evidence from before this exact window cannot settle or recover it. */
 function producerMilestonesMeetEligibility(input: FreshnessWindowObservation): boolean {
   if (!isFiniteDate(input.eligibleAt)) return true;
-  return (['sourceCheckedAt', 'pgPublishedAt'] as const).every((field) => {
-    const timestamp = input[field];
-    return isFiniteDate(timestamp) && timestamp.getTime() >= input.eligibleAt!.getTime();
-  });
+  if (
+    !isFiniteDate(input.sourceCheckedAt) ||
+    input.sourceCheckedAt.getTime() < input.eligibleAt.getTime()
+  ) {
+    return false;
+  }
+  if (input.freshnessPublicationMustFollowEligibility !== true) return true;
+  return (
+    isFiniteDate(input.pgPublishedAt) && input.pgPublishedAt.getTime() >= input.eligibleAt.getTime()
+  );
 }
 
 /** Evidence is only on time when no recorded hop crossed the SLO deadline. */
