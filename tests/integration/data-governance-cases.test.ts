@@ -12,6 +12,7 @@ import {
   markFreshnessWindowNotApplicable,
   openGovernanceCase,
   retireLivePicksEmptyCohortFreshnessWindow,
+  retirePublicTrendsReusedFreshnessWindow,
   upsertFreshnessWindow,
   transitionGovernanceCase,
 } from '../../src/services/data-governance.service';
@@ -21,6 +22,11 @@ const SCOPE_KEY = 'integration:governance-case-cas';
 const FINGERPRINT = 'integration:governance-case-cas:v1';
 const WINDOW_SLO_KEY = 'integration:consumer-evidence-freeze';
 const WINDOW_SCOPE_KEY = 'integration:consumer-evidence-freeze';
+const NO_SOURCE_FINGERPRINT = 'integration:live-picks-no-source-work:breach';
+const NO_SOURCE_SEASON_ID = 2097;
+const PUBLIC_TRENDS_SLO_KEY = 'integration:public-trends-reused';
+const PUBLIC_TRENDS_SCOPE_KEY = 'integration:public-trends-reused';
+const PUBLIC_TRENDS_FINGERPRINT = 'integration:public-trends-reused:breach';
 const EMPTY_COHORT_SLO_KEY = 'integration:live-picks-empty-cohort';
 const EMPTY_COHORT_SCOPE_KEY = 'integration:live-picks-empty-cohort';
 const EMPTY_COHORT_FINGERPRINT = 'integration:live-picks-empty-cohort:breach';
@@ -32,11 +38,14 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM ops.data_governance_cases
     WHERE (scope_key = ${SCOPE_KEY} AND fingerprint = ${FINGERPRINT})
+       OR (scope_key = ${WINDOW_SCOPE_KEY} AND fingerprint = ${NO_SOURCE_FINGERPRINT})
+       OR (scope_key = ${PUBLIC_TRENDS_SCOPE_KEY} AND fingerprint = ${PUBLIC_TRENDS_FINGERPRINT})
        OR (scope_key = ${EMPTY_COHORT_SCOPE_KEY} AND fingerprint = ${EMPTY_COHORT_FINGERPRINT})
   `;
   await sql`
     DELETE FROM ops.freshness_slo_windows
     WHERE (slo_key = ${WINDOW_SLO_KEY} AND scope_key = ${WINDOW_SCOPE_KEY})
+       OR (slo_key = ${PUBLIC_TRENDS_SLO_KEY} AND scope_key = ${PUBLIC_TRENDS_SCOPE_KEY})
        OR (slo_key = ${EMPTY_COHORT_SLO_KEY} AND scope_key = ${EMPTY_COHORT_SCOPE_KEY})
   `;
   await sql`
@@ -46,7 +55,7 @@ async function cleanup(): Promise<void> {
   `;
   await sql`
     DELETE FROM fpl.seasons
-    WHERE season_id = ${EMPTY_COHORT_SEASON_ID}
+    WHERE season_id IN (${NO_SOURCE_SEASON_ID}, ${EMPTY_COHORT_SEASON_ID})
   `;
 }
 
@@ -151,9 +160,20 @@ describe('data governance case CAS', () => {
   });
 
   test('retires a complete no-source-work Live Picks window without stale timestamps', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO fpl.seasons (
+        season_id, season_code, display_name, start_year, end_year, lifecycle_state, is_current
+      )
+      VALUES (
+        ${NO_SOURCE_SEASON_ID}, '9798', 'No source work governance integration',
+        ${NO_SOURCE_SEASON_ID}, ${NO_SOURCE_SEASON_ID + 1}, 'completed', false
+      )
+    `;
     const windowId = await upsertFreshnessWindow({
       sloKey: WINDOW_SLO_KEY,
       contractKey: 'live-picks',
+      seasonId: NO_SOURCE_SEASON_ID,
       scopeKey: WINDOW_SCOPE_KEY,
       periodKey: 'no-source-work-v1',
       eventId: 3,
@@ -161,6 +181,36 @@ describe('data governance case CAS', () => {
       dueAt: new Date('2026-09-05T00:10:30.000Z'),
       evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
     });
+    await sql`
+      UPDATE ops.freshness_slo_windows
+      SET status = 'BREACHED',
+          completeness_status = 'INCOMPLETE',
+          breach_code = 'DEADLINE_OR_INCOMPLETE'
+      WHERE window_id = ${windowId}
+    `;
+    await sql`
+      INSERT INTO ops.data_governance_cases (
+        case_kind, contract_key, lane, slo_window_id, scope_key,
+        error_class, error_code, fingerprint, evidence, repair_target,
+        compensator, status, repair_job_id, repair_deadline_at
+      )
+      VALUES (
+        'freshness-breach',
+        'live-picks',
+        'live-picks',
+        ${windowId}::bigint,
+        ${WINDOW_SCOPE_KEY},
+        'DATA_INCOMPLETE',
+        'FRESHNESS_DEADLINE_OR_INCOMPLETE',
+        ${NO_SOURCE_FINGERPRINT},
+        '{}'::jsonb,
+        jsonb_build_object('windowId', ${windowId}::bigint),
+        'integration test',
+        'AUTO_REPAIRING',
+        'integration-no-source-repair',
+        clock_timestamp() + interval '5 minutes'
+      )
+    `;
 
     expect(
       await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
@@ -173,37 +223,151 @@ describe('data governance case CAS', () => {
     expect(
       await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
         windowId,
+        eventId: 4,
+        expectedCount: 12,
+        observedCount: 12,
+      }),
+    ).toBe(false);
+    expect(
+      await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+        windowId,
         eventId: 3,
         expectedCount: 12,
         observedCount: 12,
       }),
     ).toBe(true);
 
-    const sql = await getDbClient();
-    const [window] = await sql<
-      Array<{
-        status: string;
-        completenessStatus: string;
-        reason: string | null;
-        expectedCount: number;
-        observedCount: number;
-      }>
-    >`
-      SELECT
-        status,
-        completeness_status AS "completenessStatus",
-        evidence->>'notApplicableReason' AS reason,
-        (evidence->>'expectedCount')::integer AS "expectedCount",
-        (evidence->>'observedCount')::integer AS "observedCount"
-      FROM ops.freshness_slo_windows
-      WHERE window_id = ${windowId}
-    `;
-    expect(window).toEqual({
+    const [window, governanceCase] = await Promise.all([
+      sql<
+        Array<{
+          status: string;
+          completenessStatus: string;
+          reason: string | null;
+          expectedCount: number;
+          observedCount: number;
+        }>
+      >`
+        SELECT
+          status,
+          completeness_status AS "completenessStatus",
+          evidence->>'notApplicableReason' AS reason,
+          (evidence->>'expectedCount')::integer AS "expectedCount",
+          (evidence->>'observedCount')::integer AS "observedCount"
+        FROM ops.freshness_slo_windows
+        WHERE window_id = ${windowId}
+      `,
+      sql<Array<{ status: string; reason: string | null }>>`
+        SELECT status, evidence->>'notApplicableReason' AS reason
+        FROM ops.data_governance_cases
+        WHERE slo_window_id = ${windowId}
+          AND fingerprint = ${NO_SOURCE_FINGERPRINT}
+      `,
+    ]);
+    expect(window[0]).toEqual({
       status: 'NOT_APPLICABLE',
       completenessStatus: 'NOT_APPLICABLE',
       reason: 'LIVE_PICKS_NO_SOURCE_WORK',
       expectedCount: 12,
       observedCount: 12,
+    });
+    expect(governanceCase[0]).toEqual({
+      status: 'DISMISSED',
+      reason: 'LIVE_PICKS_NO_SOURCE_WORK',
+    });
+  });
+
+  test('atomically retires a breached all-reused Public Trends window', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO fpl.seasons (
+        season_id, season_code, display_name, start_year, end_year, lifecycle_state, is_current
+      )
+      VALUES (
+        ${NO_SOURCE_SEASON_ID}, '9798', 'Reused trends governance integration',
+        ${NO_SOURCE_SEASON_ID}, ${NO_SOURCE_SEASON_ID + 1}, 'completed', false
+      )
+    `;
+    const windowId = await upsertFreshnessWindow({
+      sloKey: PUBLIC_TRENDS_SLO_KEY,
+      contractKey: 'public-league-trends',
+      seasonId: NO_SOURCE_SEASON_ID,
+      scopeKey: PUBLIC_TRENDS_SCOPE_KEY,
+      periodKey: 'reused-v1',
+      eventId: 3,
+      eligibleAt: new Date('2026-09-05T00:00:00.000Z'),
+      dueAt: new Date('2026-09-05T00:05:00.000Z'),
+      evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
+    });
+    await sql`
+      UPDATE ops.freshness_slo_windows
+      SET status = 'BREACHED',
+          completeness_status = 'INCOMPLETE',
+          breach_code = 'DEADLINE_OR_INCOMPLETE'
+      WHERE window_id = ${windowId}
+    `;
+    await sql`
+      INSERT INTO ops.data_governance_cases (
+        case_kind, contract_key, lane, slo_window_id, scope_key,
+        error_class, error_code, fingerprint, evidence, repair_target,
+        compensator, status, repair_job_id, repair_deadline_at
+      )
+      VALUES (
+        'freshness-breach',
+        'public-league-trends',
+        'data-repair',
+        ${windowId}::bigint,
+        ${PUBLIC_TRENDS_SCOPE_KEY},
+        'DATA_INCOMPLETE',
+        'FRESHNESS_DEADLINE_OR_INCOMPLETE',
+        ${PUBLIC_TRENDS_FINGERPRINT},
+        '{}'::jsonb,
+        jsonb_build_object('windowId', ${windowId}::bigint),
+        'integration test',
+        'AUTO_REPAIRING',
+        'integration-reused-trends-repair',
+        clock_timestamp() + interval '5 minutes'
+      )
+    `;
+    const evidence = {
+      windowId,
+      eventId: 3,
+      expectedCohortCount: 2,
+      observedCohortCount: 2,
+      repairTargetCount: 2,
+      reusedCount: 2,
+      failedCount: 0,
+      catalogRevision: 'a'.repeat(64),
+      producerRevision: `public-trends-v1:${'b'.repeat(64)}`,
+    } as const;
+
+    expect(await retirePublicTrendsReusedFreshnessWindow({ ...evidence, reusedCount: 1 })).toBe(
+      false,
+    );
+    expect(await retirePublicTrendsReusedFreshnessWindow({ ...evidence, eventId: 4 })).toBe(false);
+    expect(await retirePublicTrendsReusedFreshnessWindow(evidence)).toBe(true);
+
+    const [window, governanceCase] = await Promise.all([
+      sql<Array<{ status: string; completenessStatus: string; reason: string | null }>>`
+        SELECT status, completeness_status AS "completenessStatus",
+          evidence->>'notApplicableReason' AS reason
+        FROM ops.freshness_slo_windows
+        WHERE window_id = ${windowId}
+      `,
+      sql<Array<{ status: string; reason: string | null }>>`
+        SELECT status, evidence->>'notApplicableReason' AS reason
+        FROM ops.data_governance_cases
+        WHERE slo_window_id = ${windowId}
+          AND fingerprint = ${PUBLIC_TRENDS_FINGERPRINT}
+      `,
+    ]);
+    expect(window[0]).toEqual({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
+      reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+    });
+    expect(governanceCase[0]).toEqual({
+      status: 'DISMISSED',
+      reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
     });
   });
 

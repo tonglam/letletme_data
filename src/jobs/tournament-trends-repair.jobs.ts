@@ -11,12 +11,34 @@ import {
 import {
   markFreshnessWindowNotApplicable,
   recordFreshnessObservation,
+  retirePublicTrendsReusedFreshnessWindow,
 } from '../services/data-governance.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
 import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const TOURNAMENT_TRENDS_REPAIR_SCHEDULE = '*/5 * * * *';
+
+export function isCompleteReusedTournamentTrendRepair(input: {
+  repairTargetCount: number;
+  succeededCount: number;
+  failedCount: number;
+  publicationStates: readonly string[];
+  expectedCohortCount: number;
+  observedCohortCount: number;
+  complete: boolean;
+}): boolean {
+  return (
+    input.complete &&
+    input.expectedCohortCount > 0 &&
+    input.observedCohortCount === input.expectedCohortCount &&
+    input.repairTargetCount > 0 &&
+    input.succeededCount === input.repairTargetCount &&
+    input.failedCount === 0 &&
+    input.publicationStates.length === input.repairTargetCount &&
+    input.publicationStates.every((state) => state === 'REUSED')
+  );
+}
 
 async function settleTrendsFreshnessNotApplicable(
   freshnessWindowId: number | undefined,
@@ -80,6 +102,32 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
   }
   let freshnessEvidenceRecorded = false;
   if (input.freshnessWindowId) {
+    const allTargetsReused = isCompleteReusedTournamentTrendRepair({
+      repairTargetCount: repairTournamentIds.length,
+      succeededCount: result.succeeded,
+      failedCount: result.failed,
+      publicationStates: result.results.map((publication) => publication.state),
+      expectedCohortCount: after.expectedCohortCount,
+      observedCohortCount: after.observedCohortCount,
+      complete: after.complete,
+    });
+    if (allTargetsReused) {
+      const recorded = await retirePublicTrendsReusedFreshnessWindow({
+        windowId: input.freshnessWindowId,
+        eventId: currentEvent.id,
+        expectedCohortCount: after.expectedCohortCount,
+        observedCohortCount: after.observedCohortCount,
+        repairTargetCount: repairTournamentIds.length,
+        reusedCount: result.results.length,
+        failedCount: result.failed,
+        catalogRevision: after.catalogRevision,
+        producerRevision: after.revision,
+      });
+      if (!recorded) {
+        throw new Error('Tournament Trends reused freshness window is unavailable');
+      }
+      return { ...after, ...prepublication, freshnessEvidenceRecorded: true };
+    }
     const status = await recordFreshnessObservation({
       windowId: input.freshnessWindowId,
       sourceCheckedAt: after.sourceCheckedAt,

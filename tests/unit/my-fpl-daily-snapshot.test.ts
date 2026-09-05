@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { parseArguments as parsePlayerAuthorityArguments } from '../../scripts/rebind-player-gameweek-authority';
 import { parseArgs as parseRetirementArguments } from '../../scripts/retire-player-stats-active-obligations';
+import { isCompleteReusedTournamentTrendRepair } from '../../src/jobs/tournament-trends-repair.jobs';
 
 import {
   isAuthoritativeUnrankedDeletedEntryResult,
@@ -96,6 +97,7 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(trendsRepairJob).toContain('findPublicTrendRepairTournamentIds');
     expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_CURRENT_EVENT');
     expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_ENABLED_COHORTS');
+    expect(governanceService).toContain('PUBLIC_TRENDS_NO_SOURCE_WORK');
     expect(trendsCatalog).toContain('latest.source_watermark');
     expect(trendsCatalog).toContain('sourceCheckedAt: sourceWatermark');
     expect(trendsCatalog).not.toContain('sourceCheckedAt: publishedAt');
@@ -107,6 +109,31 @@ describe('My FPL daily snapshot publication contract', () => {
       trendsCatalog.indexOf('export async function getPublicTrendsCatalog'),
     );
     expect(repairTargets).not.toContain('catalog.enabled');
+  });
+
+  test('retires only a complete all-reused Public Trends repair pass', () => {
+    const completeReused = {
+      repairTargetCount: 2,
+      succeededCount: 2,
+      failedCount: 0,
+      publicationStates: ['REUSED', 'REUSED'],
+      expectedCohortCount: 2,
+      observedCohortCount: 2,
+      complete: true,
+    } as const;
+    expect(isCompleteReusedTournamentTrendRepair(completeReused)).toBe(true);
+    expect(
+      isCompleteReusedTournamentTrendRepair({
+        ...completeReused,
+        publicationStates: ['REUSED', 'READY'],
+      }),
+    ).toBe(false);
+    expect(isCompleteReusedTournamentTrendRepair({ ...completeReused, failedCount: 1 })).toBe(
+      false,
+    );
+    expect(
+      isCompleteReusedTournamentTrendRepair({ ...completeReused, observedCohortCount: 1 }),
+    ).toBe(false);
   });
 
   test('binds live freshness and cleanup tools to exact bounded evidence', () => {

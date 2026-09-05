@@ -741,9 +741,15 @@ type FreshnessWindowNotApplicableInput = {
   db?: DbOrTransaction;
 };
 
+type LateNotApplicableFence = Readonly<{
+  contractKey: string;
+  eventId: number;
+  entryCohortFence: 'empty' | 'stable' | null;
+}>;
+
 async function setFreshnessWindowNotApplicable(
   input: FreshnessWindowNotApplicableInput,
-  breachedWindowFence: Readonly<{ contractKey: string; eventId: number }> | null,
+  breachedWindowFence: LateNotApplicableFence | null,
 ): Promise<boolean> {
   if (!Number.isSafeInteger(input.windowId) || input.windowId <= 0) return false;
   const reasonCode = input.reasonCode.trim();
@@ -755,11 +761,12 @@ async function setFreshnessWindowNotApplicable(
   };
   return db.transaction(async (tx) => {
     const reconcileBreachedWindow = breachedWindowFence !== null;
-    if (reconcileBreachedWindow) {
-      // The empty-cohort decision must be linearized with entry onboarding.
+    if (breachedWindowFence !== null && breachedWindowFence.entryCohortFence !== null) {
+      // Live Picks cohort decisions must be linearized with entry onboarding.
       // A SHARE table lock lets an in-flight entry write commit before the
       // eligibility recheck, or makes a later write wait until this exact
-      // window is retired. Ordinary N/A decisions do not take this lock.
+      // window is retired. Public Trends and ordinary N/A decisions do not
+      // take this entry-table lock.
       await tx.execute(sql`LOCK TABLE ${entriesInCompetition} IN SHARE MODE`);
     }
     // Match the row lock used by openGovernanceCase. A breach observer that
@@ -789,19 +796,21 @@ async function setFreshnessWindowNotApplicable(
     )
       return false;
 
-    if (reconcileBreachedWindow) {
+    if (breachedWindowFence !== null) {
       if (!Number.isSafeInteger(current.seasonId) || current.seasonId! <= 0) return false;
-      const [eligibleEntry] = await tx
-        .select({ entryId: entriesInCompetition.entryId })
-        .from(entriesInCompetition)
-        .where(
-          and(
-            eq(entriesInCompetition.seasonId, current.seasonId!),
-            sql`(${entriesInCompetition.startedEvent} IS NULL OR ${entriesInCompetition.startedEvent} <= ${breachedWindowFence.eventId})`,
-          ),
-        )
-        .limit(1);
-      if (eligibleEntry) return false;
+      if (breachedWindowFence.entryCohortFence === 'empty') {
+        const [eligibleEntry] = await tx
+          .select({ entryId: entriesInCompetition.entryId })
+          .from(entriesInCompetition)
+          .where(
+            and(
+              eq(entriesInCompetition.seasonId, current.seasonId!),
+              sql`(${entriesInCompetition.startedEvent} IS NULL OR ${entriesInCompetition.startedEvent} <= ${breachedWindowFence.eventId})`,
+            ),
+          )
+          .limit(1);
+        if (eligibleEntry) return false;
+      }
     }
 
     const updated = await tx
@@ -860,8 +869,8 @@ export async function markFreshnessWindowNotApplicable(
 
 /**
  * Reconcile a late, durable not-applicable decision for one exact window.
- * Unlike the ordinary helper, this may retire BREACHED because the window was
- * never eligible; any already-opened repair case is dismissed in the same
+ * Unlike the ordinary helper, this may retire BREACHED after a protected
+ * empty-cohort proof; any already-opened repair case is dismissed in the same
  * transaction so no stale automatic repair survives the eligibility proof.
  */
 export async function retireLivePicksEmptyCohortFreshnessWindow(input: {
@@ -883,15 +892,16 @@ export async function retireLivePicksEmptyCohortFreshnessWindow(input: {
       },
       db: input.db,
     },
-    { contractKey: 'live-picks', eventId: input.eventId },
+    { contractKey: 'live-picks', eventId: input.eventId, entryCohortFence: 'empty' },
   );
 }
 
 /**
  * A recurring Live Picks sweep with a complete durable cohort can be a true
  * producer no-op: immutable same-event inputs need neither another FPL request
- * nor another publication. Retire only that exact still-pending window instead
- * of attaching historical source timestamps to a newly eligible window.
+ * nor another publication. The caller holds the entry-cohort lock across its
+ * durable scan; this exact contract/event fence permits a late BREACHED window
+ * and its linked repair case to be retired atomically.
  */
 export async function markLivePicksNoSourceWorkFreshnessWindowNotApplicable(input: {
   windowId: number;
@@ -922,7 +932,67 @@ export async function markLivePicksNoSourceWorkFreshnessWindowNotApplicable(inpu
       },
       db: input.db,
     },
-    null,
+    { contractKey: 'live-picks', eventId: input.eventId, entryCohortFence: 'stable' },
+  );
+}
+
+/**
+ * A complete Public Trends pass can legitimately reuse every target when the
+ * current PostgreSQL publications already match the source checksums. Do not
+ * claim the old source timestamps satisfy a newly eligible freshness window;
+ * retire that exact window (and any raced breach case) with bounded revision
+ * and cohort evidence instead.
+ */
+export async function retirePublicTrendsReusedFreshnessWindow(input: {
+  windowId: number;
+  eventId: number;
+  expectedCohortCount: number;
+  observedCohortCount: number;
+  repairTargetCount: number;
+  reusedCount: number;
+  failedCount: number;
+  catalogRevision: string;
+  producerRevision: string;
+  db?: DbOrTransaction;
+}): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(input.eventId) ||
+    input.eventId <= 0 ||
+    !Number.isSafeInteger(input.expectedCohortCount) ||
+    input.expectedCohortCount <= 0 ||
+    input.observedCohortCount !== input.expectedCohortCount ||
+    !Number.isSafeInteger(input.repairTargetCount) ||
+    input.repairTargetCount <= 0 ||
+    input.reusedCount !== input.repairTargetCount ||
+    input.failedCount !== 0 ||
+    !/^[0-9a-f]{64}$/.test(input.catalogRevision) ||
+    !/^public-trends-v1:[0-9a-f]{64}$/.test(input.producerRevision)
+  ) {
+    return false;
+  }
+  return setFreshnessWindowNotApplicable(
+    {
+      windowId: input.windowId,
+      reasonCode: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+      evidence: {
+        reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+        eventId: input.eventId,
+        expectedCohortCount: input.expectedCohortCount,
+        observedCohortCount: input.observedCohortCount,
+        repairTargetCount: input.repairTargetCount,
+        reusedCount: input.reusedCount,
+        failedCount: input.failedCount,
+        catalogRevision: input.catalogRevision,
+        producerRevision: input.producerRevision,
+        scanComplete: true,
+      },
+      db: input.db,
+    },
+    {
+      contractKey: 'public-league-trends',
+      eventId: input.eventId,
+      entryCohortFence: null,
+    },
   );
 }
 
