@@ -29,6 +29,7 @@ import {
   type JobsStatusWindow,
 } from './jobs-status.service';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
+import { LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION } from '../domain/live-final-retention-policy';
 
 export const JOBS_STATUS_SECTIONS = [
   'myFplIntegrity',
@@ -299,14 +300,15 @@ export async function getJobsControlStatus(
         liveFinalRetention: await getLiveFinalRetentionOperationalStatus(
           databaseState.season,
         ).catch(() => ({
-          schemaVersion: 'live-final-retention-status-v1',
-          eventId: null,
+          schemaVersion: LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
+          seasonCode: databaseState.season.seasonCode,
           checkedAt: new Date().toISOString(),
-          lastRunAt: null,
+          policy: null,
           state: 'UNAVAILABLE',
-          overdue: true,
-          consecutiveUnsuccessfulCycles: 0,
+          coverage: null,
+          events: [],
           minRemainingTtlMs: null,
+          oldestProofAt: null,
           families: {},
           schedulerObligation: null,
           reasonCodes: ['RETENTION_STATUS_UNAVAILABLE'],

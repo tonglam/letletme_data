@@ -18,6 +18,16 @@ import {
   liveFinalRetentionCompletionEvidence,
   type LiveFinalRetentionResult,
 } from '../../src/services/live-final-retention.service';
+import {
+  effectiveLiveFinalRetentionTtl,
+  LIVE_FINAL_RETENTION_CRITICAL_TTL_MS,
+  LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION,
+  LIVE_FINAL_RETENTION_LEASE_MS,
+  LIVE_FINAL_RETENTION_POLICY_VERSION,
+  LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS,
+  liveFinalRetentionDueAt,
+  liveFinalRetentionPeriodKey,
+} from '../../src/domain/live-final-retention-policy';
 import { contentHash } from '../../src/utils/content-hash';
 
 const picks = Array.from({ length: 15 }, (_, index) => ({
@@ -86,7 +96,8 @@ function retentionResult(
     minRemainingTtlMs: 86_400_001,
   };
   return {
-    schemaVersion: 'live-final-retention-v1',
+    schemaVersion: LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION,
+    policyVersion: LIVE_FINAL_RETENTION_POLICY_VERSION,
     eventId: 2,
     checkedAt: '2026-09-04T08:10:00.000Z',
     status: 'failed',
@@ -280,6 +291,46 @@ describe('Live final retention failure evidence', () => {
     expect(evidence).toEqual(result);
     expect(evidence).not.toHaveProperty('payload');
     expect(new LiveFinalRetentionIncompleteError(result).evidence).toEqual(evidence);
+  });
+});
+
+describe('Live final retention active-season policy', () => {
+  test('assigns adjacent gameweeks to adjacent UTC hours and keeps a stable daily period', () => {
+    const now = new Date('2026-09-05T12:30:00.000Z');
+    const finalizedAt = new Date('2026-09-03T08:00:00.000Z');
+    const gw1 = liveFinalRetentionDueAt({ eventId: 1, dataCheckedAt: finalizedAt, now });
+    const gw2 = liveFinalRetentionDueAt({ eventId: 2, dataCheckedAt: finalizedAt, now });
+
+    expect(gw1.toISOString()).toBe('2026-09-05T00:17:00.000Z');
+    expect(gw2.toISOString()).toBe('2026-09-05T01:17:00.000Z');
+    expect(liveFinalRetentionPeriodKey(1, gw1)).toBe(
+      'live-final-retention-v2-1-20260905T001700000Z',
+    );
+    expect(
+      liveFinalRetentionDueAt({
+        eventId: 1,
+        dataCheckedAt: finalizedAt,
+        now: new Date('2026-09-05T12:59:59.000Z'),
+      }),
+    ).toEqual(gw1);
+  });
+
+  test('makes a newly finalized event due immediately and ages proof TTL conservatively', () => {
+    const now = new Date('2026-09-05T12:30:00.000Z');
+    const finalizedAt = new Date('2026-09-05T12:29:59.000Z');
+    expect(liveFinalRetentionDueAt({ eventId: 38, dataCheckedAt: finalizedAt, now })).toEqual(
+      finalizedAt,
+    );
+    expect(
+      effectiveLiveFinalRetentionTtl({
+        observedTtlMs: LIVE_FINAL_RETENTION_LEASE_MS,
+        observedAt: new Date(now.getTime() - 24 * 60 * 60_000),
+        now,
+      }),
+    ).toBe(LIVE_FINAL_RETENTION_LEASE_MS - 24 * 60 * 60_000);
+    expect(LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS).toBeGreaterThan(
+      LIVE_FINAL_RETENTION_CRITICAL_TTL_MS,
+    );
   });
 });
 

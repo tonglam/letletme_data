@@ -12,6 +12,7 @@ import {
 import { redisSingleton } from './singleton';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
+import { LIVE_FINAL_RETENTION_LEASE_MS } from '../domain/live-final-retention-policy';
 
 /**
  * Live league publications are a separate immutable read model.  The global
@@ -20,7 +21,7 @@ import { CacheError } from '../utils/errors';
  */
 export const LIVE_LEAGUE_CONTRACT_VERSION = LIVE_POINTS_CONTRACT_VERSION;
 export const LIVE_LEAGUE_PREVIOUS_TTL_MS = 24 * 60 * 60_000;
-export const LIVE_LEAGUE_FINAL_TTL_MS = 48 * 60 * 60_000;
+export const LIVE_LEAGUE_FINAL_TTL_MS = LIVE_FINAL_RETENTION_LEASE_MS;
 export const LIVE_LEAGUE_STAGING_TTL_MS = 15 * 60_000;
 export const LIVE_LEAGUE_MAX_ENTRIES = 5_000;
 export const LIVE_LEAGUE_MAX_INDEX_BYTES = 8 * 1024 * 1024;

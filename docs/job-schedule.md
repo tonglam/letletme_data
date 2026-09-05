@@ -185,24 +185,27 @@ not a prerequisite for serving the live-points publication.
 
 | Job | Cadence | Gate / behavior |
 |---|---|---|
-| `live-final-retention` | every six hours | Only the unique current event with `finished = true` and `data_checked = true`; checks and renews Global Live Points, Match desk/detail, Entry final inputs, and Classic/H2H League publications in that order. |
+| `live-final-retention` | daily per finalized event, distributed by event ID across UTC hours | Every current-season event with `finished = true` and `data_checked = true`; checks and renews Global Live Points, Match desk/detail, Entry final inputs, and Classic/H2H League publications in that order. |
 
 The retention worker is a TTL lease reconciler, not a new publication writer.
-When a complete current publication has more than 24 hours remaining it records
+When a complete current publication has more than seven days remaining it records
 the identity check without writing. At or below the threshold, or after a
 missing/corrupt publication is found, it uses the existing PostgreSQL final
-checkpoint/head to restore the exact publication identity and a 48-hour lease.
+checkpoint/head to restore the exact publication identity and a 14-day lease.
 Every Redis write is a compare-and-swap against the active pointer; a renewal
 changes only TTL and never publication ID, generation, revision, or business
-timestamps. `H2H_MATCH` has no database checkpoint, so it is recomputed from
-canonical rows and uses the existing content-identical touch path.
+timestamps. `H2H_MATCH` has no database checkpoint, so the retention-only path
+recomputes only explicitly missing scopes from canonical rows and already-final
+Redis entry inputs; it never calls FPL, retires siblings, refreshes profiles, or
+enqueues provider work.
 
 Entry inputs are read from the durable completed head with a 250-row keyset
-page and concurrency eight. Incomplete heads are counted as failures and are
-left for finalization recovery; the retention worker never calls FPL or builds
+page and concurrency two. Incomplete heads are counted as failures and are
+left for finalization recovery; the retention worker never calls FPL or guesses
 an input payload. The protected `/jobs/status?section=liveFinalRetention`
-response exposes the bounded retention state, including family counts, minimum TTL, scheduler
-status, and failure reason codes for the Ops warning/critical probe.
+response exposes every finalized event, season coverage, aged minimum TTL,
+first/last certification, family counts, scheduler status, and failure reason
+codes for the Ops warning/critical probe.
 
 ## Selection publication window
 

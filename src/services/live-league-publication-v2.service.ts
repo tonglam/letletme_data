@@ -23,6 +23,7 @@ import {
   type LeagueLivePointerReadV2,
   type LeagueLiveRead,
   type LeagueLiveRevisionVector,
+  type LeagueLiveScope,
 } from '../cache/live-league-publication-v2';
 import { redisSingleton } from '../cache/singleton';
 import { getDbClient } from '../db/singleton';
@@ -1651,6 +1652,117 @@ async function publishH2HMatch(
     payload: selected,
     finalReady: selectedFinalReady,
   };
+}
+
+/**
+ * Restore only the explicitly requested finalized H2H match scopes from
+ * durable canonical rows and already-finalized entry inputs. Unlike the
+ * ordinary H2H sync, this retention path never retires sibling scopes,
+ * refreshes profiles, or enqueues provider work.
+ */
+export async function restoreFinalH2HMatchScopesForRetentionV2(
+  season: FplSeasonRef,
+  eventId: number,
+  scopes: readonly LeagueLiveScope[],
+  redisClient?: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<ReadonlySet<string>> {
+  const requested = [
+    ...new Map(
+      scopes
+        .filter(
+          (scope) =>
+            scope.season === season.seasonCode &&
+            scope.eventId === eventId &&
+            scope.scope === 'H2H_MATCH' &&
+            Number.isSafeInteger(scope.matchId) &&
+            (scope.matchId ?? 0) > 0,
+        )
+        .map((scope) => [`${scope.tournamentId}:${scope.matchId}`, scope]),
+    ).values(),
+  ];
+  if (requested.length === 0) return new Set();
+
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  if (
+    !global ||
+    global.servedFrom !== 'REDIS_CURRENT' ||
+    global.publication.state !== 'FINALIZED'
+  ) {
+    return new Set();
+  }
+
+  const rows = (
+    await mapWithConcurrency(
+      [...new Set(requested.map((scope) => scope.tournamentId))],
+      4,
+      (tournamentId) => findOfficialH2HMatches(season, tournamentId, eventId),
+    )
+  ).flat();
+  const rowByScope = new Map<string, H2HMatchRow>(
+    rows.map((row) => [`${row.tournamentId}:${row.officialMatchId}`, row] as const),
+  );
+  const requestedRows = requested
+    .map((scope) => rowByScope.get(`${scope.tournamentId}:${scope.matchId}`))
+    .filter((row): row is H2HMatchRow => row !== undefined);
+  const entryIds = [
+    ...new Set(
+      requestedRows
+        .flatMap((row) => [row.homeEntryId, row.awayEntryId])
+        .filter((entryId): entryId is number => entryId !== null),
+    ),
+  ];
+  const inputReads = await readEntryLiveInputsV2(
+    entryIds.map((entryId) => ({ season: season.seasonCode, eventId, entryId })),
+    redis,
+  );
+  const finalInputs = new Map(
+    [...inputReads].filter(
+      ([, read]) =>
+        read.servedFrom === 'REDIS_CURRENT' &&
+        read.publication.state === 'FINAL' &&
+        read.input.finalResult !== null,
+    ),
+  );
+  const [activePointers, previousPointers] = await Promise.all([
+    readLiveLeaguePublicationV2PointersV2(requested, 'active', redis),
+    readLiveLeaguePublicationV2PointersV2(requested, 'previous', redis),
+  ]);
+  const restored = new Set<string>();
+
+  await mapWithConcurrency(requested, 4, async (scope) => {
+    const identity = `${scope.tournamentId}:${scope.matchId}`;
+    const row = rowByScope.get(identity);
+    if (!row) return;
+    const requiredEntryIds = [row.homeEntryId, row.awayEntryId].filter(
+      (entryId): entryId is number => entryId !== null,
+    );
+    if (requiredEntryIds.some((entryId) => !finalInputs.has(entryId))) return;
+
+    const activeKey = liveLeagueV2Key(scope, 'active');
+    const previousKey = liveLeagueV2Key(scope, 'previous');
+    const prepared = await publishH2HMatch(
+      season,
+      eventId,
+      global,
+      row,
+      finalInputs,
+      activePointers.get(activeKey),
+      previousPointers.get(previousKey),
+      redis,
+    );
+    if (!prepared.finalReady) return;
+    const active = await readLiveLeaguePublicationV2Pointer(scope, 'active', redis);
+    if (
+      active?.publication.state === 'FINALIZED' &&
+      active.publication.globalRef.publicationId === global.publication.publicationId &&
+      active.publication.globalRef.generation === global.publication.generation
+    ) {
+      restored.add(identity);
+    }
+  });
+
+  return restored;
 }
 
 function standingsPayload(

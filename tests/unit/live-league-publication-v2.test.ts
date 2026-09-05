@@ -753,6 +753,23 @@ describe('Live League V2 H2H match retention', () => {
 
     expect(selectRetainedH2HMatchPayload(active, previous, payload('ERROR'))).toBe(active);
   });
+
+  test('keeps the final-retention repair path provider-free and scope-bounded', () => {
+    const start = publicationServiceSource.indexOf(
+      'export async function restoreFinalH2HMatchScopesForRetentionV2',
+    );
+    const end = publicationServiceSource.indexOf('\nfunction standingsPayload', start);
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('findOfficialH2HMatches');
+    expect(source).toContain('readEntryLiveInputsV2');
+    expect(source).toContain('publishH2HMatch');
+    expect(source).not.toContain('syncLiveH2HLeaguePublicationsV2');
+    expect(source).not.toContain('enqueue');
+    expect(source).not.toContain('refreshLiveLeagueProfiles');
+  });
 });
 
 describe('Live League V2 standings finalization helpers', () => {

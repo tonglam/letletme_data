@@ -175,7 +175,7 @@ describe('Live Points V2 snapshot enqueue', () => {
     expect(addCalls[0]?.data.expectedNextCheckAt).toBe('2026-08-09T12:35:26.000Z');
   });
 
-  test('uses one deterministic six-hour final-retention bucket and preserves scheduler evidence', async () => {
+  test('uses one deterministic daily final-retention bucket and preserves scheduler evidence', async () => {
     const now = new Date('2026-08-09T12:34:56.000Z');
     const job = await enqueueLiveFinalRetention(TEST_SEASON, 12, 'reconcile', {
       now,
@@ -184,7 +184,7 @@ describe('Live Points V2 snapshot enqueue', () => {
     });
 
     expect(job?.id).toBe(
-      `live-final-retention-2627-e12-${Math.floor(now.getTime() / (6 * 60 * 60_000))}`,
+      `live-final-retention-2627-e12-${Math.floor(now.getTime() / (24 * 60 * 60_000))}`,
     );
     expect(addCalls[0]).toMatchObject({
       name: 'live-final-retention',
@@ -202,7 +202,7 @@ describe('Live Points V2 snapshot enqueue', () => {
   test('coalesces a pending final-retention bucket', async () => {
     const now = new Date('2026-08-09T12:34:56.000Z');
     waitingJobs.push({
-      id: `live-final-retention-2627-e12-${Math.floor(now.getTime() / (6 * 60 * 60_000))}`,
+      id: `live-final-retention-2627-e12-${Math.floor(now.getTime() / (24 * 60 * 60_000))}`,
       state: 'delayed',
       name: 'live-final-retention',
       data: { seasonId: TEST_SEASON.seasonId, eventId: 12 },

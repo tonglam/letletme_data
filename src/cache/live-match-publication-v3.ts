@@ -12,11 +12,12 @@ import type {
   MatchLifecycleState,
 } from '../services/live-match-v3';
 import { isCanonicalPlayerPrice } from '../domain/players';
+import { LIVE_FINAL_RETENTION_LEASE_MS } from '../domain/live-final-retention-policy';
 
 export const LIVE_MATCHES_CONTRACT_VERSION = 'live-matches-v3' as const;
 export const LIVE_MATCHES_REDIS_PREFIX = 'llm:data:v3:fpl:live-match' as const;
 export const LIVE_MATCH_PREVIOUS_TTL_MS = 24 * 60 * 60_000;
-export const LIVE_MATCH_FINAL_TTL_MS = 48 * 60 * 60_000;
+export const LIVE_MATCH_FINAL_TTL_MS = LIVE_FINAL_RETENTION_LEASE_MS;
 export const LIVE_MATCH_STAGING_TTL_MS = 15 * 60_000;
 export const LIVE_MATCH_MAX_FIXTURES = 32;
 export const LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE = 64;
