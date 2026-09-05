@@ -128,10 +128,10 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
       success: true,
       generatedAt: new Date().toISOString(),
       window,
-      // Keep the governance envelope extensible while returning the same
-      // sanitized status catalog consumed by /jobs/status. The Web admin
-      // adapter filters this object by contract and never receives secrets or
-      // raw provider errors.
+      // Keep the explicit deep-governance envelope extensible. This endpoint
+      // is intentionally separate from the lightweight /jobs/status control
+      // projection; the Web admin adapter filters the object by contract and
+      // never receives secrets or raw provider errors.
       governance: status,
     };
   })

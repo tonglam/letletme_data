@@ -15,9 +15,11 @@ import {
   resolveQueueHealthState,
 } from '../../src/services/queue-governance.service';
 import {
+  queueHealthPersistenceFingerprint,
   resolveJobDispatchBudgetMs,
   resolveQueueDispatchBudgetMs,
   resolveQueueTimingMetrics,
+  shouldPersistQueueHealthWindow,
 } from '../../src/utils/queue-monitor';
 import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
 import { summarizeDataError } from '../../src/domain/error-classification';
@@ -152,6 +154,61 @@ describe('GW queue and data governance primitives', () => {
     expect(() => queueHealthRetentionCutoff(new Date(), 0)).toThrow(
       'Queue health retention days must be a positive integer',
     );
+  });
+
+  test('does not persist an unchanged healthy queue on every poll', () => {
+    const snapshot = {
+      queueName: 'data-sync',
+      observedAt: '2026-08-27T00:00:30.000Z',
+      waiting: 0,
+      active: 0,
+      delayed: 0,
+      prioritized: 0,
+      waitingChildren: 0,
+      failed: 0,
+      completed: 100,
+      runnable: 0,
+      oldestRunnableAgeMs: null,
+      arrivals: 0,
+      completions: 0,
+      failures: 0,
+      stalled: 0,
+      waitP50Ms: null,
+      waitP95Ms: null,
+      executionP50Ms: null,
+      executionP95Ms: null,
+      providerWaitP95Ms: null,
+      provider429Rate: null,
+      netGrowth: 0,
+      drainEtaMs: 0,
+      backlogClass: 'HEALTHY' as const,
+      admissionMode: 'OPEN' as const,
+      consumerHeartbeatAt: '2026-08-27T00:00:29.000Z',
+      releaseSha: 'a'.repeat(40),
+    };
+    const fingerprint = queueHealthPersistenceFingerprint(snapshot);
+
+    expect(
+      shouldPersistQueueHealthWindow({
+        snapshot: { ...snapshot, observedAt: '2026-08-27T00:01:00.000Z', completed: 101 },
+        lastFingerprint: fingerprint,
+        lastPersistedAtMs: Date.parse(snapshot.observedAt),
+      }),
+    ).toBe(false);
+    expect(
+      shouldPersistQueueHealthWindow({
+        snapshot: { ...snapshot, observedAt: '2026-08-27T00:01:00.000Z', waiting: 1, runnable: 1 },
+        lastFingerprint: fingerprint,
+        lastPersistedAtMs: Date.parse(snapshot.observedAt),
+      }),
+    ).toBe(true);
+    expect(
+      shouldPersistQueueHealthWindow({
+        snapshot: { ...snapshot, observedAt: '2026-08-27T01:00:30.000Z' },
+        lastFingerprint: fingerprint,
+        lastPersistedAtMs: Date.parse(snapshot.observedAt),
+      }),
+    ).toBe(true);
   });
 
   test('distinguishes disabled optional monitors from missing observations', () => {

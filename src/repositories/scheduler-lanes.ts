@@ -142,6 +142,7 @@ function mapObligation(row: typeof schedulerObligationsInOps.$inferSelect): Sche
 function scheduledDueAtSql() {
   return sql`CASE
     WHEN ${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
+      AND (${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::numeric BETWEEN 0 AND 8640000000000000
       THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::double precision / 1000)
     ELSE ${schedulerObligationsInOps.dueAt}
   END`;

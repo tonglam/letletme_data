@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   safeSchedulerLaneErrorCode,
   safeSchedulerObligationLatest,
   selectCanonicalPriceChangeContext,
 } from '../../src/services/jobs-status.service';
+
+const quote = String.fromCharCode(39);
 
 const dbActive = {
   publicationId: '00000000-0000-4000-8000-000000000010',
@@ -142,5 +145,33 @@ describe('safeSchedulerObligationLatest', () => {
 
   test('returns null when there is no latest obligation', () => {
     expect(safeSchedulerObligationLatest(null)).toBeNull();
+  });
+});
+
+describe('jobs status hot-path isolation', () => {
+  test('routes frequent status probes through the sectioned control projection', () => {
+    const route = readFileSync('src/api/jobs.api.ts', 'utf8');
+    const control = readFileSync('src/services/jobs-control-status.service.ts', 'utf8');
+
+    expect(route).toContain('getJobsControlStatus');
+    expect(route).not.toContain(
+      ['from ', quote, '../services/jobs-status.service', quote].join(''),
+    );
+    for (const forbidden of [
+      'schedulerObligationSummary',
+      'listFreshnessWindows',
+      'listQueueHealthWindows',
+      'listGovernanceCases',
+      'countGovernanceCases',
+    ]) {
+      expect(control).not.toContain(forbidden);
+    }
+    expect(control).toContain(
+      ['publicationConsistencyMode: ', quote, 'IDENTITY_ONLY', quote].join(''),
+    );
+    expect(control).toContain(['case ', quote, 'myFplIntegrity', quote].join(''));
+    expect(control).toContain(['case ', quote, 'tournamentReviewV2', quote].join(''));
+    expect(control).toContain(['case ', quote, 'liveFinalRetention', quote].join(''));
+    expect(control).toContain(['case ', quote, 'clientSignals', quote].join(''));
   });
 });

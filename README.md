@@ -47,8 +47,9 @@ API-only deployment can enqueue work but cannot complete it.
 
 The canonical queue inventory contains 24 names (21 core plus three content)
 and lives in [`src/queues/names.ts`](src/queues/names.ts). `GET /jobs` is
-generated from the scheduler registry and explicit manual adapters; `GET /jobs/status`
-is protected operational evidence.
+generated from the scheduler registry and explicit manual adapters. Protected
+`GET /jobs/status` is a lightweight control projection; callers request one
+bounded producer section when they need more than runtime and identity state.
 
 PostgreSQL is the durable checkpoint and cold fallback. Redis V2 current and
 previous are the live serving state. A failed FPL request, validation error, or

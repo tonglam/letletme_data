@@ -8,7 +8,7 @@ import {
   getPublicErrorMessage,
 } from '../utils/errors';
 import { logError } from '../utils/logger';
-import { getJobsStatus } from '../services/jobs-status.service';
+import { getJobsControlStatus } from '../services/jobs-control-status.service';
 import { apiKeyFailureHttpResponse, verifyRequestApiKey } from './auth.guard';
 
 /**
@@ -39,7 +39,7 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       const window = query.window ?? '1h';
       return {
         success: true,
-        ...(await getJobsStatus(window, query.watchEntryId)),
+        ...(await getJobsControlStatus(window, query.section, query.watchEntryId)),
       };
     },
     {
@@ -56,6 +56,14 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
           ]),
         ),
         watchEntryId: t.Optional(t.Number({ minimum: 1, multipleOf: 1 })),
+        section: t.Optional(
+          t.Union([
+            t.Literal('myFplIntegrity'),
+            t.Literal('tournamentReviewV2'),
+            t.Literal('liveFinalRetention'),
+            t.Literal('clientSignals'),
+          ]),
+        ),
       }),
     },
   )

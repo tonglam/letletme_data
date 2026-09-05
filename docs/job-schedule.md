@@ -4,8 +4,9 @@ The standalone `scheduler` service is the durable schedule authority. Its
 `ScheduledJobDefinition` registry resolves scope, period, catch-up policy and
 success evidence into `ops.scheduler_obligations`; BullMQ is only the delivery
 mechanism. `GET /jobs` is generated from the same registry plus the explicitly
-supported maintenance/manual adapters, and `GET /jobs/status` exposes overdue,
-failed and runtime-heartbeat evidence. Live Points V2 has one scheduler
+supported maintenance/manual adapters. `GET /jobs/status` exposes a lightweight
+runtime/identity control projection; producer evidence is opt-in through one
+bounded `section` query. Live Points V2 has one scheduler
 authority and one queue contract; it has no legacy timer mode or alternate
 live-points enqueue path.
 
@@ -199,8 +200,8 @@ canonical rows and uses the existing content-identical touch path.
 Entry inputs are read from the durable completed head with a 250-row keyset
 page and concurrency eight. Incomplete heads are counted as failures and are
 left for finalization recovery; the retention worker never calls FPL or builds
-an input payload. The protected `/jobs/status` response exposes the bounded
-`liveFinalRetention` state, including family counts, minimum TTL, scheduler
+an input payload. The protected `/jobs/status?section=liveFinalRetention`
+response exposes the bounded retention state, including family counts, minimum TTL, scheduler
 status, and failure reason codes for the Ops warning/critical probe.
 
 ## Selection publication window
@@ -344,7 +345,10 @@ partial backfill.
 
 Manual triggers are listed by `GET /jobs`; scheduler definitions and their
 catch-up policies are included in that response. `GET /jobs/status` requires
-the service API key and reports obligations, runtime heartbeats, queue counts,
-and DB/Redis publication consistency. Some manual paths intentionally
+the service API key and reports current runtime, scheduler progress, and
+DB/Redis identity consistency. The optional `section` values are
+`myFplIntegrity`, `tournamentReviewV2`, `liveFinalRetention`, and
+`clientSignals`; historical SLO/governance scans remain on the explicit
+`/ops/data-governance/overview` endpoint. Some manual paths intentionally
 bypass a cron time gate for recovery; operators must verify upstream readiness
 before using them.

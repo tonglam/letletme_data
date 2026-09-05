@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import type {
   MatchCheckpointDesired,
@@ -96,6 +97,14 @@ function dependencies(input: {
 }
 
 describe('Live Matches V3 checkpoint reconciler', () => {
+  test('discovers only the current active event plus retained desired markers', () => {
+    const source = readFileSync('src/services/live-match-v3-reconciler.service.ts', 'utf8');
+    expect(source).toContain('liveMatchActiveEventKey(season)');
+    expect(source).toContain('checkpoint:${season}:*:*');
+    expect(source).not.toContain('desk:${season}:*:active');
+    expect(source).not.toContain('detail:${season}:*:active');
+  });
+
   test('retries a retained desired marker after the first enqueue fails', async () => {
     const current = publication();
     const retained = desired(current);
@@ -167,6 +176,7 @@ describe('Live Matches V3 checkpoint reconciler', () => {
         publicationId: current.publicationId,
         generation: current.generation,
         checkpointedAt,
+        finalized: false,
       },
       markCheckpointed: async (_kind, value, clock) => {
         order.push(`mark:${clock.toISOString()}`);
@@ -194,6 +204,7 @@ describe('Live Matches V3 checkpoint reconciler', () => {
         publicationId: current.publicationId,
         generation: current.generation,
         checkpointedAt: new Date('2026-08-31T10:00:05.000Z'),
+        finalized: false,
       },
       readCheckpoint: async () => null,
       enqueue: async () => {
@@ -213,5 +224,65 @@ describe('Live Matches V3 checkpoint reconciler', () => {
       },
     ]);
     expect(enqueued).toBe(1);
+  });
+
+  test('does not enqueue a Redis identity that conflicts with an immutable final checkpoint', async () => {
+    const current = publication({ generation: 13, finalized: true });
+    let writes = 0;
+    const deps = dependencies({
+      current,
+      desired: desired(current, true),
+      head: {
+        publicationId: '00000000-0000-4000-8000-000000000012',
+        generation: 12,
+        checkpointedAt: new Date('2026-08-31T09:59:00.000Z'),
+        finalized: true,
+      },
+      enqueue: async () => {
+        writes += 1;
+      },
+      setDesired: async () => {
+        writes += 1;
+        return desired(current, true);
+      },
+    });
+
+    const result = await reconcileLiveMatchCheckpointObligationsV3(season, deps);
+
+    expect(result).toEqual([
+      {
+        eventId: 2,
+        kind: 'desk',
+        status: 'blocked-final',
+        publicationId: '00000000-0000-4000-8000-000000000012',
+        generation: 12,
+      },
+    ]);
+    expect(writes).toBe(0);
+  });
+
+  test('clears a stale final desired marker after Redis is restored to the durable final', async () => {
+    const current = publication({ generation: 12, finalized: true, checkpointedAt: now });
+    const stale = desired(publication({ generation: 13, finalized: true }), true);
+    const cleared: MatchCheckpointDesired[] = [];
+    const deps = dependencies({
+      current,
+      desired: stale,
+      head: {
+        publicationId: current.publicationId,
+        generation: current.generation,
+        checkpointedAt: new Date(now),
+        finalized: true,
+      },
+      readCheckpoint: async () => ({ publication: current }),
+      clearDesired: async (value) => {
+        cleared.push(value);
+      },
+    });
+
+    const result = await reconcileLiveMatchCheckpointObligationsV3(season, deps);
+
+    expect(result[0]?.status).toBe('matched');
+    expect(cleared).toEqual([stale]);
   });
 });

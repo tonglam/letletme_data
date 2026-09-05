@@ -4586,9 +4586,27 @@ export async function getTournamentReviewV2OperationalStatus(
   season: FplSeasonRef,
   watchEntryId?: number,
   now = new Date(),
-  options: { verifySemanticIntegrity?: boolean } = {},
+  options: {
+    verifySemanticIntegrity?: boolean;
+    statementTimeoutMs?: number;
+    transaction?: postgres.TransactionSql;
+  } = {},
 ): Promise<TournamentReviewV2OperationalStatus> {
-  const db = await getDbClient();
+  if (options.transaction === undefined && options.statementTimeoutMs !== undefined) {
+    if (!Number.isSafeInteger(options.statementTimeoutMs) || options.statementTimeoutMs <= 0) {
+      throw new Error('Tournament review status timeout must be a positive integer');
+    }
+    const client = await getDbClient();
+    return client.begin(async (transaction) => {
+      await transaction`SELECT set_config('statement_timeout', ${`${options.statementTimeoutMs}ms`}, true)`;
+      return getTournamentReviewV2OperationalStatus(season, watchEntryId, now, {
+        ...options,
+        statementTimeoutMs: undefined,
+        transaction,
+      });
+    }) as Promise<TournamentReviewV2OperationalStatus>;
+  }
+  const db = options.transaction ?? (await getDbClient());
   const aggregateRows = await db<TournamentReviewOperationalAggregateRow[]>`
       WITH joined AS (
         SELECT obligation.*,

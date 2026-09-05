@@ -74,7 +74,7 @@ import {
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import {
-  getMyFplFinalizationControlStateWithScope,
+  getMyFplFinalizationControlState,
   hasFinalMyFplPublication,
 } from '../services/my-fpl-snapshot-publication.service';
 import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
@@ -678,11 +678,8 @@ export function myFplFinalizationPeriodKey(input: {
   eventId: number;
   dataCheckedAt: string;
   scopeFence: string;
-  repairFence?: string | null;
 }): string {
-  const base = `final-${input.eventId}-${input.dataCheckedAt}-${input.scopeFence}`;
-  const repairFence = input.repairFence?.trim();
-  return repairFence ? `${base}-repair-${repairFence}` : base;
+  return `final-${input.eventId}-${input.dataCheckedAt}-${input.scopeFence}`;
 }
 
 function myFplFinalizationDefinition(): ScheduledJobDefinition {
@@ -709,7 +706,7 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
       // deep readiness audit here: it scans canonical Entries/Tournaments and
       // immutable snapshot children, which belongs only to the single-event
       // finalization worker.
-      const controlStates = await getMyFplFinalizationControlStateWithScope(context.season);
+      const controlStates = await getMyFplFinalizationControlState(context.season);
       const statusByEventId = new Map(controlStates.map((status) => [status.eventId, status]));
       const priorityForEvent = (eventId: number): number =>
         eventId === context.currentEventId ? 0 : eventId === context.latestFinalizedEventId ? 1 : 2;
@@ -744,92 +741,9 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
             control.verifiedRevision === control.activeRevision,
         );
         // A stable, delivered FINAL is terminal and must not create an
-        // obligation on every 30-second tick. A dirty generation, a missing
-        // state row, or a delivery-recovery predecessor remains dispatchable.
-        if (finalPublished && control && (!control.scopeGenerationInstalled || scopeClean)) {
-          const scopeKey = `${context.season.seasonCode}:event:${event.id}`;
-          const scopeFence = scopeStateAvailable
-            ? `scope-e${control.entryScopeGeneration}-t${control.tournamentScopeGeneration}`
-            : [
-                control.entryScopeSha256 ?? 'missing-entry-scope',
-                control.tournamentScopeSha256 ?? 'missing-tournament-scope',
-                `na${control.notApplicableEntryCount ?? 0}`,
-              ].join('-');
-          const stablePeriodKey = myFplFinalizationPeriodKey({
-            eventId: event.id,
-            dataCheckedAt: checkedAt,
-            scopeFence,
-          });
-          let predecessor = await getSchedulerObligationByIdentity({
-            jobName: 'my-fpl-finalization',
-            scopeKey,
-            periodKey: stablePeriodKey,
-          });
-          let repairSucceeded = false;
-          let repairPeriodKey: string | null = null;
-          while (predecessor?.status === 'irrecoverable') {
-            repairPeriodKey = myFplFinalizationPeriodKey({
-              eventId: event.id,
-              dataCheckedAt: checkedAt,
-              scopeFence,
-              repairFence: `${predecessor.obligationId}-delivery-recovered`,
-            });
-            const repairObligation = await getSchedulerObligationByIdentity({
-              jobName: 'my-fpl-finalization',
-              scopeKey,
-              periodKey: repairPeriodKey,
-            });
-            if (repairObligation?.status === 'succeeded') {
-              repairSucceeded = true;
-              break;
-            }
-            predecessor = repairObligation;
-          }
-          if (repairSucceeded) continue;
-          if (repairPeriodKey) {
-            plans.push({
-              scopeKey,
-              periodKey: repairPeriodKey,
-              dueAt: context.now,
-              eventId: event.id,
-              source: 'reconcile',
-              evidence: {
-                snapshotKind: 'FINAL',
-                dataCheckedAt: checkedAt,
-                reconciliation: 'delivery-recovered',
-                expectedEntryCount: control.expectedEntryCount,
-                expectedEntryScopeSha256: control.entryScopeSha256,
-                expectedNotApplicableEntryCount: control.notApplicableEntryCount,
-                expectedTournamentCount: control.expectedTournamentCount,
-                expectedTournamentScopeSha256: control.tournamentScopeSha256,
-                eventPriority,
-              },
-            });
-          } else if (predecessor) {
-            // A delivered FINAL normally has no dispatchable plan. Keep the
-            // existing identity visible for one pass when its event changes
-            // from current to historical (or vice versa), so the scheduler
-            // can refresh the mutable priority evidence without reserving a
-            // duplicate obligation or re-running a settled capture.
-            plans.push({
-              scopeKey,
-              periodKey: stablePeriodKey,
-              dueAt: context.now,
-              eventId: event.id,
-              source: 'reconcile',
-              evidence: {
-                snapshotKind: 'FINAL',
-                dataCheckedAt: checkedAt,
-                reconciliation: 'priority-refresh',
-                expectedEntryCount: control.expectedEntryCount,
-                expectedEntryScopeSha256: control.entryScopeSha256,
-                expectedNotApplicableEntryCount: control.notApplicableEntryCount,
-                expectedTournamentCount: control.expectedTournamentCount,
-                expectedTournamentScopeSha256: control.tournamentScopeSha256,
-                eventPriority,
-              },
-            });
-          }
+        // obligation or query historical obligation state on a 30-second
+        // tick. A dirty generation or missing state row remains dispatchable.
+        if (finalPublished && control && scopeClean) {
           continue;
         }
 

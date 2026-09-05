@@ -20,7 +20,7 @@ import { getDbClient } from '../../src/db/singleton';
 import {
   captureMyFplSnapshot,
   dispatchMyFplSnapshotPublicationOutbox,
-  getMyFplSnapshotOperationalStatus,
+  auditMyFplSnapshotIntegrity,
   myFplSnapshotRedisManifestKey,
   MyFplSnapshotIncompleteError,
   type MyFplSnapshotRedisManifest,
@@ -382,7 +382,7 @@ describe('My FPL onboarding publication correction', () => {
     });
 
     await seedEntry(ENTRY_IDS[1], false);
-    const pendingStatus = (await getMyFplSnapshotOperationalStatus(SEASON)).find(
+    const pendingStatus = (await auditMyFplSnapshotIntegrity(SEASON)).find(
       (row) => row.eventId === EVENT_ID,
     );
     expect(pendingStatus).toMatchObject({
@@ -508,7 +508,7 @@ describe('My FPL onboarding publication correction', () => {
       contentSha256: databaseActive.content_sha256,
     });
 
-    const completeStatus = (await getMyFplSnapshotOperationalStatus(SEASON)).find(
+    const completeStatus = (await auditMyFplSnapshotIntegrity(SEASON)).find(
       (row) => row.eventId === EVENT_ID,
     );
     expect(completeStatus).toMatchObject({
@@ -525,7 +525,7 @@ describe('My FPL onboarding publication correction', () => {
       SET started_event = 2
       WHERE season_id = ${SEASON.seasonId} AND entry_id = ${ENTRY_IDS[0]}
     `;
-    const futureStartStatus = (await getMyFplSnapshotOperationalStatus(SEASON)).find(
+    const futureStartStatus = (await auditMyFplSnapshotIntegrity(SEASON)).find(
       (row) => row.eventId === EVENT_ID,
     );
     expect(futureStartStatus).toMatchObject({
@@ -558,7 +558,7 @@ describe('My FPL onboarding publication correction', () => {
         ${DRIFT_TOURNAMENT_ID}, ${SEASON.seasonId}, ${DRIFT_LEAGUE_ID}, ${ENTRY_IDS[0]}
       )
     `;
-    const tournamentDriftStatus = (await getMyFplSnapshotOperationalStatus(SEASON)).find(
+    const tournamentDriftStatus = (await auditMyFplSnapshotIntegrity(SEASON)).find(
       (row) => row.eventId === EVENT_ID,
     );
     expect(tournamentDriftStatus).toMatchObject({

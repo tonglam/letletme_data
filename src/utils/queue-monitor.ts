@@ -199,7 +199,49 @@ function windowStart(
   return new Date(Math.floor(now / intervalMs) * intervalMs);
 }
 
-async function persistWindow(snapshot: QueueHealthSnapshot, intervalMs: number) {
+export const QUEUE_HEALTH_STABLE_PERSIST_INTERVAL_MS = 60 * 60_000;
+
+/**
+ * Persist changes that affect queue control or incident reconstruction, not
+ * continuously changing observation timestamps and retained completion
+ * counters. The complete current snapshot remains in Redis.
+ */
+export function queueHealthPersistenceFingerprint(snapshot: QueueHealthSnapshot): string {
+  return JSON.stringify([
+    snapshot.releaseSha,
+    snapshot.backlogClass,
+    snapshot.admissionMode,
+    snapshot.waiting,
+    snapshot.active,
+    snapshot.delayed,
+    snapshot.prioritized,
+    snapshot.waitingChildren,
+    snapshot.failed,
+    snapshot.runnable,
+    snapshot.arrivals,
+    snapshot.completions,
+    snapshot.failures,
+    snapshot.stalled,
+  ]);
+}
+
+export function shouldPersistQueueHealthWindow(input: {
+  snapshot: QueueHealthSnapshot;
+  lastFingerprint: string | null;
+  lastPersistedAtMs: number;
+  stablePersistIntervalMs?: number;
+}): boolean {
+  const observedAtMs = Date.parse(input.snapshot.observedAt);
+  const nowMs = Number.isFinite(observedAtMs) ? observedAtMs : Date.now();
+  return (
+    input.lastFingerprint === null ||
+    input.lastFingerprint !== queueHealthPersistenceFingerprint(input.snapshot) ||
+    nowMs - input.lastPersistedAtMs >=
+      (input.stablePersistIntervalMs ?? QUEUE_HEALTH_STABLE_PERSIST_INTERVAL_MS)
+  );
+}
+
+async function persistWindow(snapshot: QueueHealthSnapshot, intervalMs: number): Promise<boolean> {
   try {
     const db = await getDb();
     const window = windowStart(Date.parse(snapshot.observedAt), intervalMs);
@@ -289,10 +331,12 @@ async function persistWindow(snapshot: QueueHealthSnapshot, intervalMs: number) 
           updatedAt: window,
         },
       });
+    return true;
   } catch (error) {
     // Queue telemetry is an observability side channel. A migration or a
     // transient PG outage must not stop consumers from draining work.
     logError('Queue health window persistence failed', error, { queue: snapshot.queueName });
+    return false;
   }
 }
 
@@ -317,6 +361,8 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   let started = false;
   const leaseOwner = randomUUID();
   let lastRetentionAttemptAt = 0;
+  let lastPersistedFingerprint: string | null = null;
+  let lastPersistedAtMs = 0;
 
   const logCounts = async (context: string) => {
     try {
@@ -464,7 +510,19 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         await evaluateAutomaticAdmission(withEvents).catch((error) =>
           logError('Automatic queue admission evaluation failed', error, { queue: queueName }),
         );
-        await persistWindow(withEvents, windowIntervalMs);
+        if (
+          shouldPersistQueueHealthWindow({
+            snapshot: withEvents,
+            lastFingerprint: lastPersistedFingerprint,
+            lastPersistedAtMs,
+          })
+        ) {
+          const persisted = await persistWindow(withEvents, windowIntervalMs);
+          if (persisted) {
+            lastPersistedFingerprint = queueHealthPersistenceFingerprint(withEvents);
+            lastPersistedAtMs = Date.parse(withEvents.observedAt);
+          }
+        }
         // Queue health is sampled frequently, so retain only a bounded
         // 35-day operational history. A global Redis lease ensures one
         // monitor performs the bounded cleanup per hour during rollouts.
