@@ -31,6 +31,8 @@ export type TournamentTrendScopePublication = {
   publicationId: number | null;
   revision: number | null;
   state: 'READY' | 'COLLECTING' | 'FAILED' | 'REUSED';
+  publicationState: 'READY' | 'COLLECTING';
+  isActive: boolean;
   ownershipState: string;
   transfersState: string;
   rows: number;
@@ -206,19 +208,25 @@ export async function publishTournamentTrendScope(
           .digest('hex');
 
         const existing = await tx<
-          Array<{ publication_id: number; revision: number; publication_state: string }>
+          Array<{
+            publication_id: number;
+            revision: number;
+            publication_state: string;
+            is_active: boolean;
+          }>
         >`
-      SELECT publication_id, revision, publication_state
+      SELECT publication_id, revision, publication_state, is_active
       FROM reporting.tournament_selection_stat_publications
       WHERE season_id = ${season.seasonId}
         AND tournament_id = ${tournamentId}
         AND event_id = ${eventId}
         AND source_checksum = ${checksum}
-      ORDER BY revision DESC
+        AND publication_state IN ('READY', 'COLLECTING')
+      ORDER BY (publication_state = 'READY' AND is_active) DESC, revision DESC
       LIMIT 1
     `;
         if (
-          existing[0]?.publication_state === 'READY' ||
+          (existing[0]?.publication_state === 'READY' && existing[0].is_active) ||
           existing[0]?.publication_state === 'COLLECTING'
         ) {
           return {
@@ -227,6 +235,8 @@ export async function publishTournamentTrendScope(
             publicationId: Number(existing[0].publication_id),
             revision: Number(existing[0].revision),
             state: 'REUSED',
+            publicationState: existing[0].publication_state,
+            isActive: existing[0].is_active,
             ownershipState: picksReady ? 'READY' : 'NOT_READY',
             transfersState: transfersReady ? 'READY' : 'NOT_READY',
             rows: 0,
@@ -365,6 +375,8 @@ export async function publishTournamentTrendScope(
           publicationId,
           revision,
           state: publicationState,
+          publicationState,
+          isActive: picksReady,
           ownershipState,
           transfersState,
           rows,

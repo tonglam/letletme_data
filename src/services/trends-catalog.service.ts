@@ -364,17 +364,7 @@ export async function updatePublicTrendsCatalog(
           AND publication.event_id = event.event_id
           AND publication.is_active
         WHERE event.season_id = ${season.seasonId}
-          AND event.deadline_time_epoch IS NOT NULL
-          AND event.deadline_time_epoch <= EXTRACT(EPOCH FROM now())::bigint
-          AND event.event_id = (
-            SELECT current_event.event_id
-            FROM fpl.events current_event
-            WHERE current_event.season_id = ${season.seasonId}
-              AND current_event.deadline_time_epoch IS NOT NULL
-              AND current_event.deadline_time_epoch <= EXTRACT(EPOCH FROM now())::bigint
-            ORDER BY current_event.deadline_time_epoch DESC, current_event.event_id DESC
-            LIMIT 1
-          )
+          AND event.is_current
           AND publication.publication_state = 'READY'
           AND publication.source_checksum ~ '^[0-9a-f]{64}$'
           AND publication.expected_entries > 0
@@ -390,6 +380,7 @@ export async function updatePublicTrendsCatalog(
             WHERE snapshot_row.publication_id = publication.publication_id
           )
         LIMIT 1
+        FOR SHARE OF event, publication
       `;
       if (!readyCurrentEvent[0]) {
         throw new ValidationError(

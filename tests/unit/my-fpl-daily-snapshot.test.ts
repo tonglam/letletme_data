@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import { parseArguments as parsePlayerAuthorityArguments } from '../../scripts/rebind-player-gameweek-authority';
 import { parseArgs as parseRetirementArguments } from '../../scripts/retire-player-stats-active-obligations';
 import {
+  hasCompleteEnabledTournamentTrendRepair,
   isCompleteReusedTournamentTrendRepair,
   resolveTournamentTrendRepairEventId,
 } from '../../src/jobs/tournament-trends-repair.jobs';
@@ -35,6 +36,7 @@ const scopeGenerationMigration = readFileSync(
   'migrations/0092_my_fpl_scope_generation.sql',
   'utf8',
 );
+const queuePauseMigration = readFileSync('migrations/0095_queue_pause_evidence.sql', 'utf8');
 const scopeGenerationView = scopeGenerationMigration.slice(
   scopeGenerationMigration.indexOf(
     'CREATE OR REPLACE VIEW reporting.my_fpl_active_snapshot_status',
@@ -113,7 +115,8 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(trendsCatalog).toContain('latest.source_watermark');
     expect(trendsCatalog).toContain('sourceCheckedAt: sourceWatermark');
     expect(trendsCatalog).not.toContain('sourceCheckedAt: publishedAt');
-    expect(trendsCatalog).toContain('current_event.deadline_time_epoch DESC');
+    expect(trendsCatalog).toContain('AND event.is_current');
+    expect(trendsCatalog).not.toContain('current_event.deadline_time_epoch DESC');
     expect(trendsRepairJob).toContain('prepublicationFailedCount: result.failed');
     expect(trendsRepairJob).not.toContain('if (result.failed > 0)');
     const repairTargets = trendsCatalog.slice(
@@ -125,22 +128,40 @@ describe('My FPL daily snapshot publication contract', () => {
 
   test('retires only a complete all-reused Public Trends repair pass', () => {
     const completeReused = {
-      enabledTournamentIds: [11, 12],
+      enabledCohorts: [
+        { tournamentId: 11, publicationId: 101, publicationRevision: 4 },
+        { tournamentId: 12, publicationId: 102, publicationRevision: 5 },
+      ],
       publicationResults: [
-        { tournamentId: 11, state: 'REUSED' },
-        { tournamentId: 12, state: 'REUSED' },
+        {
+          tournamentId: 11,
+          publicationId: 101,
+          revision: 4,
+          state: 'REUSED',
+          publicationState: 'READY',
+          isActive: true,
+        },
+        {
+          tournamentId: 12,
+          publicationId: 102,
+          revision: 5,
+          state: 'REUSED',
+          publicationState: 'READY',
+          isActive: true,
+        },
       ],
       expectedCohortCount: 2,
       observedCohortCount: 2,
       complete: true,
     } as const;
     expect(isCompleteReusedTournamentTrendRepair(completeReused)).toBe(true);
+    expect(hasCompleteEnabledTournamentTrendRepair(completeReused)).toBe(true);
     expect(
       isCompleteReusedTournamentTrendRepair({
         ...completeReused,
         publicationResults: [
-          { tournamentId: 11, state: 'REUSED' },
-          { tournamentId: 12, state: 'READY' },
+          completeReused.publicationResults[0],
+          { ...completeReused.publicationResults[1], state: 'READY' },
         ],
       }),
     ).toBe(false);
@@ -151,18 +172,47 @@ describe('My FPL daily snapshot publication contract', () => {
           ...completeReused.publicationResults,
           // Disabled prepublication remains separate from the enabled public
           // freshness decision, even when it creates a new READY row.
-          { tournamentId: 13, state: 'READY' },
+          {
+            tournamentId: 13,
+            publicationId: 103,
+            revision: 1,
+            state: 'READY',
+            publicationState: 'READY',
+            isActive: true,
+          },
         ],
       }),
     ).toBe(true);
     expect(
       isCompleteReusedTournamentTrendRepair({
         ...completeReused,
-        publicationResults: [{ tournamentId: 11, state: 'REUSED' }],
+        publicationResults: [completeReused.publicationResults[0]],
       }),
     ).toBe(false);
     expect(
       isCompleteReusedTournamentTrendRepair({ ...completeReused, observedCohortCount: 1 }),
+    ).toBe(false);
+    expect(
+      hasCompleteEnabledTournamentTrendRepair({
+        ...completeReused,
+        publicationResults: [
+          completeReused.publicationResults[0],
+          {
+            ...completeReused.publicationResults[1],
+            publicationState: 'COLLECTING',
+            isActive: false,
+          },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      hasCompleteEnabledTournamentTrendRepair({
+        ...completeReused,
+        publicationResults: [
+          completeReused.publicationResults[0],
+          { ...completeReused.publicationResults[1], publicationId: 999 },
+        ],
+      }),
     ).toBe(false);
   });
 
@@ -199,6 +249,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(authorityApply).toContain(
       'LOCK TABLE ${playerGameweekStatsInFpl} IN SHARE ROW EXCLUSIVE MODE',
     );
+    expect(authorityApply.indexOf('pg_advisory_xact_lock')).toBeLessThan(
+      authorityApply.indexOf('LOCK TABLE'),
+    );
     expect(authorityApply.indexOf('LOCK TABLE')).toBeLessThan(
       authorityApply.indexOf('const { checkpoint, report: lockedReport }'),
     );
@@ -228,6 +281,17 @@ describe('My FPL daily snapshot publication contract', () => {
         'irrecoverable' +
         singleQuote +
         ')',
+    );
+  });
+
+  test('keeps pre-migration queue pause evidence unknown', () => {
+    expect(queuePauseMigration).toContain('ADD COLUMN IF NOT EXISTS consumer_paused boolean,');
+    expect(queuePauseMigration).toContain('ALTER COLUMN consumer_paused DROP NOT NULL');
+    expect(queuePauseMigration).toContain('ALTER COLUMN paused_count DROP NOT NULL');
+    expect(queuePauseMigration).toContain('ALTER COLUMN pause_owner_state DROP NOT NULL');
+    expect(queuePauseMigration).not.toContain('consumer_paused boolean NOT NULL DEFAULT false');
+    expect(governanceService).toContain(
+      'WHEN count(${queueHealthWindowsInOps.pauseOwnerState}) = 0 THEN NULL',
     );
   });
 

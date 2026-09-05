@@ -785,27 +785,37 @@ async function lockPublicTrendsNotApplicableEvidence(tx: DbOrTransaction): Promi
 async function validatePublicTrendsNotApplicableFence(
   tx: DbOrTransaction,
   seasonId: number,
+  windowEventId: number | null,
   fence: Extract<LateNotApplicableFence, { kind: 'public-trends' }>,
 ): Promise<boolean> {
-  const currentEvents = (await tx.execute(sql`
-    SELECT event_id
-    FROM fpl.events
-    WHERE season_id = ${seasonId}
-      AND is_current
-    ORDER BY event_id
-    LIMIT 2
-  `)) as unknown as readonly { event_id: number }[];
   if (fence.reason === 'PUBLIC_TRENDS_NO_CURRENT_EVENT') {
+    if (windowEventId !== null) return false;
+    const currentEvents = (await tx.execute(sql`
+      SELECT event_id
+      FROM fpl.events
+      WHERE season_id = ${seasonId}
+        AND is_current
+      ORDER BY event_id
+      LIMIT 1
+    `)) as unknown as readonly { event_id: number }[];
     return currentEvents.length === 0;
   }
   if (
-    currentEvents.length !== 1 ||
-    Number(currentEvents[0]?.event_id) !== fence.eventId ||
+    fence.eventId === null ||
     !Number.isSafeInteger(fence.eventId) ||
-    fence.eventId <= 0
+    fence.eventId <= 0 ||
+    windowEventId !== fence.eventId
   ) {
     return false;
   }
+  const exactEvents = (await tx.execute(sql`
+    SELECT event_id
+    FROM fpl.events
+    WHERE season_id = ${seasonId}
+      AND event_id = ${fence.eventId}
+    LIMIT 1
+  `)) as unknown as readonly { event_id: number }[];
+  if (exactEvents.length !== 1) return false;
 
   if (fence.reason === 'PUBLIC_TRENDS_NO_SOURCE_WORK') {
     const current = await readPublicTrendFreshnessEvidenceBySeasonId(seasonId, fence.eventId, {
@@ -855,7 +865,12 @@ async function setFreshnessWindowNotApplicable(
     notApplicableReason: reasonCode,
   };
   return db.transaction(async (tx) => {
-    const reconcileBreachedWindow = breachedWindowFence !== null;
+    const reconcileBreachedWindow =
+      breachedWindowFence !== null &&
+      !(
+        breachedWindowFence.kind === 'public-trends' &&
+        breachedWindowFence.reason === 'PUBLIC_TRENDS_NO_SOURCE_WORK'
+      );
     if (breachedWindowFence?.kind === 'live-picks') {
       // Live Picks cohort decisions must be linearized with entry onboarding.
       // A SHARE table lock lets an in-flight entry write commit before the
@@ -896,7 +911,6 @@ async function setFreshnessWindowNotApplicable(
           (breachedWindowFence.kind === 'live-picks'
             ? current.eventId !== breachedWindowFence.eventId
             : breachedWindowFence.eventId !== null &&
-              current.eventId !== null &&
               current.eventId !== breachedWindowFence.eventId)))
     )
       return false;
@@ -905,7 +919,12 @@ async function setFreshnessWindowNotApplicable(
       if (!Number.isSafeInteger(current.seasonId) || current.seasonId! <= 0) return false;
       if (
         breachedWindowFence.kind === 'public-trends' &&
-        !(await validatePublicTrendsNotApplicableFence(tx, current.seasonId!, breachedWindowFence))
+        !(await validatePublicTrendsNotApplicableFence(
+          tx,
+          current.seasonId!,
+          current.eventId,
+          breachedWindowFence,
+        ))
       ) {
         return false;
       }
@@ -1096,13 +1115,15 @@ export async function retirePublicTrendsIneligibleFreshnessWindow(input: {
 /**
  * A complete Public Trends pass can legitimately reuse every target when the
  * current PostgreSQL publications already match the source checksums. Do not
- * claim the old source timestamps satisfy a newly eligible freshness window;
- * retire that exact window (and any raced breach case) with bounded revision
- * and cohort evidence instead.
+ * claim the old source timestamps satisfy a newly eligible freshness window.
+ * A still-pending no-op window is N/A; an existing breach remains a breach
+ * and receives producer evidence only, so consumer recovery stays truthful.
  */
-export async function retirePublicTrendsReusedFreshnessWindow(input: {
+export async function settlePublicTrendsReusedFreshnessWindow(input: {
   windowId: number;
   eventId: number;
+  sourceCheckedAt: Date;
+  pgPublishedAt: Date;
   expectedCohortCount: number;
   observedCohortCount: number;
   enabledTournamentIds: readonly number[];
@@ -1113,8 +1134,10 @@ export async function retirePublicTrendsReusedFreshnessWindow(input: {
   catalogRevision: string;
   producerRevision: string;
   db?: DbOrTransaction;
-}): Promise<boolean> {
+}): Promise<'NOT_APPLICABLE' | 'BREACHED' | null> {
   if (
+    !Number.isSafeInteger(input.windowId) ||
+    input.windowId <= 0 ||
     !Number.isSafeInteger(input.eventId) ||
     input.eventId <= 0 ||
     !Number.isSafeInteger(input.expectedCohortCount) ||
@@ -1134,40 +1157,108 @@ export async function retirePublicTrendsReusedFreshnessWindow(input: {
     !/^[0-9a-f]{64}$/.test(input.catalogRevision) ||
     !/^public-trends-v1:[0-9a-f]{64}$/.test(input.producerRevision)
   ) {
-    return false;
+    return null;
   }
-  return setFreshnessWindowNotApplicable(
-    {
-      windowId: input.windowId,
-      reasonCode: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
-      evidence: {
-        reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
-        eventId: input.eventId,
-        expectedCohortCount: input.expectedCohortCount,
-        observedCohortCount: input.observedCohortCount,
-        enabledTournamentIds: input.enabledTournamentIds,
-        enabledReusedCount: input.enabledReusedCount,
-        repairTargetCount: input.repairTargetCount,
-        succeededCount: input.succeededCount,
-        failedCount: input.failedCount,
-        catalogRevision: input.catalogRevision,
+  if (
+    !Number.isFinite(input.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(input.pgPublishedAt.getTime())
+  ) {
+    return null;
+  }
+  const evidence = {
+    reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+    eventId: input.eventId,
+    expectedCohortCount: input.expectedCohortCount,
+    observedCohortCount: input.observedCohortCount,
+    enabledTournamentIds: input.enabledTournamentIds,
+    enabledReusedCount: input.enabledReusedCount,
+    repairTargetCount: input.repairTargetCount,
+    succeededCount: input.succeededCount,
+    failedCount: input.failedCount,
+    catalogRevision: input.catalogRevision,
+    producerRevision: input.producerRevision,
+    sourceCheckedAt: input.sourceCheckedAt.toISOString(),
+    pgPublishedAt: input.pgPublishedAt.toISOString(),
+    scanComplete: true,
+  } as const;
+  const fence: Extract<LateNotApplicableFence, { reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK' }> = {
+    kind: 'public-trends',
+    contractKey: 'public-league-trends',
+    eventId: input.eventId,
+    reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+    expectedCohortCount: input.expectedCohortCount,
+    observedCohortCount: input.observedCohortCount,
+    enabledTournamentIds: input.enabledTournamentIds,
+    catalogRevision: input.catalogRevision,
+    producerRevision: input.producerRevision,
+  };
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    // The source proof and window transition share one lock order. A rollover
+    // is irrelevant here: the durable window's exact event remains authority.
+    await lockPublicTrendsNotApplicableEvidence(tx);
+    const [current] = await tx
+      .select({
+        status: freshnessSloWindowsInOps.status,
+        contractKey: freshnessSloWindowsInOps.contractKey,
+        seasonId: freshnessSloWindowsInOps.seasonId,
+        eventId: freshnessSloWindowsInOps.eventId,
+      })
+      .from(freshnessSloWindowsInOps)
+      .where(eq(freshnessSloWindowsInOps.windowId, input.windowId))
+      .for('update')
+      .limit(1);
+    if (
+      !current ||
+      current.contractKey !== fence.contractKey ||
+      current.eventId !== fence.eventId ||
+      !Number.isSafeInteger(current.seasonId) ||
+      current.seasonId! <= 0 ||
+      !['PENDING', 'NOT_APPLICABLE', 'BREACHED'].includes(current.status) ||
+      !(await validatePublicTrendsNotApplicableFence(tx, current.seasonId!, current.eventId, fence))
+    ) {
+      return null;
+    }
+
+    if (current.status === 'BREACHED') {
+      // A breach can be solely a missing GraphQL/Web observation. Preserve
+      // that historical failure and its governance case; only attach exact
+      // producer evidence so a later matching consumer revision can recover.
+      const status = await recordFreshnessObservation({
+        windowId: input.windowId,
+        sourceCheckedAt: input.sourceCheckedAt,
+        pgPublishedAt: input.pgPublishedAt,
         producerRevision: input.producerRevision,
-        scanComplete: true,
-      },
-      db: input.db,
-    },
-    {
-      kind: 'public-trends',
-      contractKey: 'public-league-trends',
-      eventId: input.eventId,
-      reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
-      expectedCohortCount: input.expectedCohortCount,
-      observedCohortCount: input.observedCohortCount,
-      enabledTournamentIds: input.enabledTournamentIds,
-      catalogRevision: input.catalogRevision,
-      producerRevision: input.producerRevision,
-    },
-  );
+        expectedCount: input.expectedCohortCount,
+        observedCount: input.observedCohortCount,
+        completenessStatus: 'COMPLETE',
+        evidence,
+        db: tx,
+      });
+      return status === 'BREACHED' ? 'BREACHED' : null;
+    }
+
+    const updated = await tx
+      .update(freshnessSloWindowsInOps)
+      .set({
+        status: 'NOT_APPLICABLE',
+        completenessStatus: 'NOT_APPLICABLE',
+        breachCode: null,
+        evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
+          ...evidence,
+          notApplicableReason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+        })}::jsonb`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(freshnessSloWindowsInOps.windowId, input.windowId),
+          inArray(freshnessSloWindowsInOps.status, ['PENDING', 'NOT_APPLICABLE']),
+        ),
+      )
+      .returning({ windowId: freshnessSloWindowsInOps.windowId });
+    return updated.length === 1 ? 'NOT_APPLICABLE' : null;
+  });
 }
 
 /**
@@ -1272,9 +1363,10 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
   }
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
-    // Lock and re-read the durable head. An older callback that observed
-    // generation A must not update windows after generation B won the
-    // checkpoint race.
+    // Lock and re-read the durable head. Publication id, generation and the
+    // PostgreSQL checkpoint clock are immutable identity. Redis may advance
+    // sourceCheckedAt on an unchanged heartbeat, so use the durable source
+    // timestamp as evidence instead of making that mutable heartbeat a fence.
     const [checkpoint] = await tx
       .select({
         publicationId: livePointsPublicationCheckpointsInCompetition.publicationId,
@@ -1295,7 +1387,7 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
       !checkpoint ||
       checkpoint.publicationId !== identity[1] ||
       checkpoint.generation !== generation ||
-      checkpoint.sourceCheckedAt.getTime() !== input.sourceCheckedAt.getTime() ||
+      input.sourceCheckedAt.getTime() < checkpoint.sourceCheckedAt.getTime() ||
       checkpoint.checkpointedAt.getTime() !== input.pgPublishedAt.getTime()
     ) {
       return 0;
@@ -1323,8 +1415,8 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
     for (const window of windows) {
       const status = await recordFreshnessObservation({
         windowId: window.windowId,
-        sourceCheckedAt: input.sourceCheckedAt,
-        pgPublishedAt: input.pgPublishedAt,
+        sourceCheckedAt: checkpoint.sourceCheckedAt,
+        pgPublishedAt: checkpoint.checkpointedAt,
         redisSeenAt,
         producerRevision: revision,
         redisRevision: revision,
@@ -1532,11 +1624,14 @@ export async function listQueueHealthWindows(
         waitingChildren: sql<number>`max(${queueHealthWindowsInOps.waitingChildren})`.as(
           'waiting_children',
         ),
-        consumerPaused: sql<boolean>`bool_or(${queueHealthWindowsInOps.consumerPaused})`.as(
+        consumerPaused: sql<boolean | null>`bool_or(${queueHealthWindowsInOps.consumerPaused})`.as(
           'consumer_paused',
         ),
-        pausedCount: sql<number>`max(${queueHealthWindowsInOps.pausedCount})`.as('paused_count'),
-        pauseOwnerState: sql<string>`CASE
+        pausedCount: sql<number | null>`max(${queueHealthWindowsInOps.pausedCount})`.as(
+          'paused_count',
+        ),
+        pauseOwnerState: sql<string | null>`CASE
+          WHEN count(${queueHealthWindowsInOps.pauseOwnerState}) = 0 THEN NULL
           WHEN bool_or(${queueHealthWindowsInOps.pauseOwnerState} = 'OPERATOR') THEN 'OPERATOR'
           WHEN bool_or(${queueHealthWindowsInOps.pauseOwnerState} = 'ACQUIRING') THEN 'ACQUIRING'
           WHEN bool_or(${queueHealthWindowsInOps.pauseOwnerState} = 'RELEASING') THEN 'RELEASING'

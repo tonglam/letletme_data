@@ -195,16 +195,18 @@ async function main(): Promise<void> {
 
   if (args.apply) {
     await db.transaction(async (tx) => {
-      // Event-live ingestion does not share this command's advisory-lock
-      // namespace. Block every concurrent INSERT/UPDATE/DELETE on the target
-      // table so validation and the binding update observe one closed set,
-      // including rows which would otherwise appear as phantoms.
-      await tx.execute(sql`LOCK TABLE ${playerGameweekStatsInFpl} IN SHARE ROW EXCLUSIVE MODE`);
+      // Match the live checkpoint writer's scope-first lock order. Taking the
+      // table lock first could deadlock with a checkpoint writer that already
+      // owns this advisory lock and is waiting to update the same rows.
       for (const eventId of args.events) {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${args.season}:${eventId}`}, 0))`,
         );
       }
+      // Event-live ingestion does not otherwise share this command's lock
+      // namespace. Block concurrent row writes after all sorted scope locks
+      // are held so validation and the binding update observe one closed set.
+      await tx.execute(sql`LOCK TABLE ${playerGameweekStatsInFpl} IN SHARE ROW EXCLUSIVE MODE`);
       for (const report of reports) {
         const eventId = Number(report.eventId);
         const { checkpoint, report: lockedReport } = await validateScope(

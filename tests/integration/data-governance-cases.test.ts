@@ -8,18 +8,22 @@ import { getDbClient } from '../../src/db/singleton';
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import {
   listGovernanceCases,
+  listQueueHealthWindows,
   markLivePicksNoSourceWorkFreshnessWindowNotApplicable,
   markFreshnessWindowNotApplicable,
   openGovernanceCase,
   recordPendingLiveSnapshotCheckpointEvidence,
   retireLivePicksEmptyCohortFreshnessWindow,
   retirePublicTrendsIneligibleFreshnessWindow,
-  retirePublicTrendsReusedFreshnessWindow,
+  settlePublicTrendsReusedFreshnessWindow,
   upsertFreshnessWindow,
   transitionGovernanceCase,
 } from '../../src/services/data-governance.service';
 import { persistLivePicksDurableFreshnessEvidence } from '../../src/services/live-lifecycle-orchestrator';
-import { readPublicTrendFreshnessEvidence } from '../../src/services/trends-catalog.service';
+import {
+  readPublicTrendFreshnessEvidence,
+  updatePublicTrendsCatalog,
+} from '../../src/services/trends-catalog.service';
 
 const SCOPE_KEY = 'integration:governance-case-cas';
 const FINGERPRINT = 'integration:governance-case-cas:v1';
@@ -42,9 +46,14 @@ const EMPTY_COHORT_SCOPE_KEY = 'integration:live-picks-empty-cohort';
 const EMPTY_COHORT_FINGERPRINT = 'integration:live-picks-empty-cohort:breach';
 const EMPTY_COHORT_SEASON_ID = 2098;
 const EMPTY_COHORT_ENTRY_ID = 990_433;
+const LEGACY_QUEUE_EVIDENCE_NAME = 'integration-legacy-pause-evidence';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
+  await sql`
+    DELETE FROM ops.queue_health_windows
+    WHERE queue_name = ${LEGACY_QUEUE_EVIDENCE_NAME}
+  `;
   await sql`
     DELETE FROM ops.data_governance_cases
     WHERE (scope_key = ${SCOPE_KEY} AND fingerprint = ${FINGERPRINT})
@@ -273,7 +282,65 @@ describe('data governance case CAS', () => {
     expect(row).toEqual({ consumer: false, redis: true, publication: false });
   });
 
-  test('does not let an older live checkpoint regress a newer pending window', async () => {
+  test('keeps legacy queue pause evidence unknown in raw and hourly history', async () => {
+    const sql = await getDbClient();
+    const legacyAt = new Date('2096-09-05T00:00:00.000Z');
+    const explicitAt = new Date('2096-09-05T01:00:00.000Z');
+    await sql`
+      INSERT INTO ops.queue_health_windows (window_start, queue_name)
+      VALUES (${legacyAt.toISOString()}, ${LEGACY_QUEUE_EVIDENCE_NAME})
+    `;
+    await sql`
+      INSERT INTO ops.queue_health_windows (
+        window_start, queue_name, consumer_paused, paused_count, pause_owner_state
+      )
+      VALUES (${explicitAt.toISOString()}, ${LEGACY_QUEUE_EVIDENCE_NAME}, true, 2, 'OPERATOR')
+    `;
+
+    const raw = (await listQueueHealthWindows({ since: legacyAt, limit: 10 })).filter(
+      (item) => item.queueName === LEGACY_QUEUE_EVIDENCE_NAME,
+    );
+    expect(raw).toHaveLength(2);
+    expect(raw[1]).toMatchObject({
+      consumerPaused: null,
+      pausedCount: null,
+      pauseOwnerState: null,
+    });
+
+    const hourly = (
+      await listQueueHealthWindows({
+        since: legacyAt,
+        limit: 10,
+        bucket: 'hour',
+      })
+    ).filter((item) => item.queueName === LEGACY_QUEUE_EVIDENCE_NAME);
+    expect(hourly).toHaveLength(2);
+    expect(hourly[1]).toMatchObject({
+      consumerPaused: null,
+      pausedCount: null,
+      pauseOwnerState: null,
+    });
+    expect(hourly[0]).toMatchObject({
+      consumerPaused: true,
+      pausedCount: 2,
+      pauseOwnerState: 'OPERATOR',
+    });
+  });
+
+  test('enables a Trends cohort only from the canonical current event', async () => {
+    const sql = await getDbClient();
+    await seedPublicTrendsEvidence();
+    const tournamentId = PUBLIC_TRENDS_TOURNAMENT_IDS[0];
+    await sql`
+      UPDATE competition.public_league_trends
+      SET enabled = false
+      WHERE season_id = ${NO_SOURCE_SEASON_ID} AND tournament_id = ${tournamentId}
+    `;
+    const enabled = await updatePublicTrendsCatalog('9798', tournamentId, { enabled: true });
+    expect(enabled).toMatchObject({ tournamentId, enabled: true });
+  });
+
+  test('drains a coalesced live checkpoint backlog without trusting a mutable heartbeat', async () => {
     const sql = await getDbClient();
     const publicationA = '00000000-0000-4000-8000-000000000111';
     const publicationB = '00000000-0000-4000-8000-000000000222';
@@ -346,6 +413,25 @@ describe('data governance case CAS', () => {
           evidence = evidence || jsonb_build_object('liveCheckpointPending', true)
       WHERE window_id IN (${windowA}, ${windowB})
     `;
+    await sql`
+      INSERT INTO ops.freshness_slo_windows (
+        slo_key, contract_key, season_id, scope_key, period_key, event_id,
+        eligible_at, due_at, producer_revision, redis_revision, evidence
+      )
+      SELECT
+        ${LIVE_CHECKPOINT_SLO_KEY}, 'live-snapshot', ${LIVE_CHECKPOINT_SEASON_ID},
+        ${LIVE_CHECKPOINT_SCOPE_KEY}, 'generation-b-backlog-' || item::text, 3,
+        ${sourceB.toISOString()}::timestamptz,
+        ${new Date('2026-09-05T00:12:00.000Z').toISOString()}::timestamptz
+          + item * interval '1 second',
+        ${revisionB}, ${revisionB},
+        jsonb_build_object(
+          'consumerEvidenceRequired', false,
+          'redisEvidenceRequired', false,
+          'liveCheckpointPending', true
+        )
+      FROM generate_series(1, 149) AS item
+    `;
 
     expect(
       await recordPendingLiveSnapshotCheckpointEvidence({
@@ -360,23 +446,57 @@ describe('data governance case CAS', () => {
       await recordPendingLiveSnapshotCheckpointEvidence({
         seasonId: LIVE_CHECKPOINT_SEASON_ID,
         eventId: 3,
-        sourceCheckedAt: sourceB,
+        sourceCheckedAt: new Date('2026-09-05T00:04:00.000Z'),
         pgPublishedAt: checkpointB,
         revision: revisionB,
       }),
-    ).toBe(1);
+    ).toBe(100);
+    expect(
+      await recordPendingLiveSnapshotCheckpointEvidence({
+        seasonId: LIVE_CHECKPOINT_SEASON_ID,
+        eventId: 3,
+        sourceCheckedAt: new Date('2026-09-05T00:05:00.000Z'),
+        pgPublishedAt: checkpointB,
+        revision: revisionB,
+      }),
+    ).toBe(50);
+    expect(
+      await recordPendingLiveSnapshotCheckpointEvidence({
+        seasonId: LIVE_CHECKPOINT_SEASON_ID,
+        eventId: 3,
+        sourceCheckedAt: new Date('2026-09-05T00:06:00.000Z'),
+        pgPublishedAt: checkpointB,
+        revision: revisionB,
+      }),
+    ).toBe(0);
 
-    const rows = await sql<Array<{ windowId: number; producerRevision: string; pending: boolean }>>`
-      SELECT window_id::integer AS "windowId", producer_revision AS "producerRevision",
-        (evidence->>'liveCheckpointPending')::boolean AS pending
+    const rows = await sql<
+      Array<{
+        revision: string;
+        total: number;
+        pending: number;
+        minSource: string | Date | null;
+        maxSource: string | Date | null;
+      }>
+    >`
+      SELECT producer_revision AS revision, count(*)::integer AS total,
+        count(*) FILTER (
+          WHERE (evidence->>'liveCheckpointPending')::boolean
+        )::integer AS pending,
+        min(source_checked_at) AS "minSource",
+        max(source_checked_at) AS "maxSource"
       FROM ops.freshness_slo_windows
-      WHERE window_id IN (${windowA}, ${windowB})
-      ORDER BY window_id
+      WHERE slo_key = ${LIVE_CHECKPOINT_SLO_KEY}
+        AND scope_key = ${LIVE_CHECKPOINT_SCOPE_KEY}
+      GROUP BY producer_revision
+      ORDER BY producer_revision
     `;
-    expect([...rows]).toEqual([
-      { windowId: windowA, producerRevision: revisionA, pending: true },
-      { windowId: windowB, producerRevision: revisionB, pending: false },
-    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ revision: revisionA, total: 1, pending: 1 });
+    expect(rows[0]?.minSource).toBeNull();
+    expect(rows[1]).toMatchObject({ revision: revisionB, total: 150, pending: 0 });
+    expect(new Date(rows[1]!.minSource!).toISOString()).toBe(sourceB.toISOString());
+    expect(new Date(rows[1]!.maxSource!).toISOString()).toBe(sourceB.toISOString());
   });
 
   test('retires a complete no-source-work Live Picks window without stale timestamps', async () => {
@@ -496,7 +616,7 @@ describe('data governance case CAS', () => {
     });
   });
 
-  test('atomically retires a breached all-reused Public Trends window', async () => {
+  test('keeps a reused Trends breach and retires only a pending historical window', async () => {
     const sql = await getDbClient();
     const currentEvidence = await seedPublicTrendsEvidence();
     const windowId = await upsertFreshnessWindow({
@@ -505,9 +625,10 @@ describe('data governance case CAS', () => {
       seasonId: NO_SOURCE_SEASON_ID,
       scopeKey: PUBLIC_TRENDS_SCOPE_KEY,
       periodKey: 'reused-v1',
+      eventId: 3,
       eligibleAt: new Date('2026-09-05T00:00:00.000Z'),
       dueAt: new Date('2026-09-05T00:05:00.000Z'),
-      evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
+      evidence: { consumerEvidenceRequired: true, redisEvidenceRequired: false },
     });
     await sql`
       UPDATE ops.freshness_slo_windows
@@ -551,31 +672,51 @@ describe('data governance case CAS', () => {
       failedCount: 0,
       catalogRevision: currentEvidence.catalogRevision,
       producerRevision: currentEvidence.revision,
+      sourceCheckedAt: currentEvidence.sourceCheckedAt!,
+      pgPublishedAt: currentEvidence.pgPublishedAt!,
     } as const;
 
     expect(
-      await retirePublicTrendsReusedFreshnessWindow({ ...evidence, enabledReusedCount: 1 }),
-    ).toBe(false);
-    expect(await retirePublicTrendsReusedFreshnessWindow({ ...evidence, eventId: 4 })).toBe(false);
+      await settlePublicTrendsReusedFreshnessWindow({ ...evidence, enabledReusedCount: 1 }),
+    ).toBeNull();
+    expect(await settlePublicTrendsReusedFreshnessWindow({ ...evidence, eventId: 4 })).toBeNull();
     await sql`
       UPDATE competition.public_league_trends
       SET enabled = false
       WHERE season_id = ${NO_SOURCE_SEASON_ID}
         AND tournament_id = ${PUBLIC_TRENDS_TOURNAMENT_IDS[1]}
     `;
-    expect(await retirePublicTrendsReusedFreshnessWindow(evidence)).toBe(false);
+    expect(await settlePublicTrendsReusedFreshnessWindow(evidence)).toBeNull();
     await sql`
       UPDATE competition.public_league_trends
       SET enabled = true
       WHERE season_id = ${NO_SOURCE_SEASON_ID}
         AND tournament_id = ${PUBLIC_TRENDS_TOURNAMENT_IDS[1]}
     `;
-    expect(await retirePublicTrendsReusedFreshnessWindow(evidence)).toBe(true);
+    await sql`
+      UPDATE fpl.events
+      SET is_current = false
+      WHERE season_id = ${NO_SOURCE_SEASON_ID} AND event_id = 3
+    `;
+    await sql`
+      INSERT INTO fpl.events (season_id, event_id, name, is_current)
+      VALUES (${NO_SOURCE_SEASON_ID}, 4, 'Gameweek 4', true)
+    `;
+    expect(await settlePublicTrendsReusedFreshnessWindow(evidence)).toBe('BREACHED');
 
     const [window, governanceCase] = await Promise.all([
-      sql<Array<{ status: string; completenessStatus: string; reason: string | null }>>`
+      sql<
+        Array<{
+          status: string;
+          completenessStatus: string;
+          reason: string | null;
+          recovered: boolean;
+          producerRevision: string | null;
+        }>
+      >`
         SELECT status, completeness_status AS "completenessStatus",
-          evidence->>'notApplicableReason' AS reason
+          evidence->>'reason' AS reason, recovered_at IS NOT NULL AS recovered,
+          producer_revision AS "producerRevision"
         FROM ops.freshness_slo_windows
         WHERE window_id = ${windowId}
       `,
@@ -587,12 +728,45 @@ describe('data governance case CAS', () => {
       `,
     ]);
     expect(window[0]).toEqual({
-      status: 'NOT_APPLICABLE',
-      completenessStatus: 'NOT_APPLICABLE',
+      status: 'BREACHED',
+      completenessStatus: 'COMPLETE',
       reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
+      recovered: false,
+      producerRevision: currentEvidence.revision,
     });
     expect(governanceCase[0]).toEqual({
-      status: 'DISMISSED',
+      status: 'AUTO_REPAIRING',
+      reason: null,
+    });
+
+    const pendingWindowId = await upsertFreshnessWindow({
+      sloKey: PUBLIC_TRENDS_SLO_KEY,
+      contractKey: 'public-league-trends',
+      seasonId: NO_SOURCE_SEASON_ID,
+      scopeKey: PUBLIC_TRENDS_SCOPE_KEY,
+      periodKey: 'reused-pending-v1',
+      eventId: 3,
+      eligibleAt: new Date('2026-09-05T00:00:00.000Z'),
+      dueAt: new Date('2026-09-05T00:05:00.000Z'),
+      evidence: { consumerEvidenceRequired: true, redisEvidenceRequired: false },
+    });
+    expect(
+      await settlePublicTrendsReusedFreshnessWindow({
+        ...evidence,
+        windowId: pendingWindowId,
+      }),
+    ).toBe('NOT_APPLICABLE');
+    const [pendingWindow] = await sql<
+      Array<{ status: string; completenessStatus: string; reason: string | null }>
+    >`
+      SELECT status, completeness_status AS "completenessStatus",
+        evidence->>'notApplicableReason' AS reason
+      FROM ops.freshness_slo_windows
+      WHERE window_id = ${pendingWindowId}
+    `;
+    expect(pendingWindow).toEqual({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
       reason: 'PUBLIC_TRENDS_NO_SOURCE_WORK',
     });
   });

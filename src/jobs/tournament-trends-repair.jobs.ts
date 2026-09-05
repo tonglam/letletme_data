@@ -4,7 +4,10 @@ import type { Elysia } from 'elysia';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
-import { publishTournamentTrendScopes } from '../services/tournament-trends-publication.service';
+import {
+  publishTournamentTrendScopes,
+  type TournamentTrendScopePublication,
+} from '../services/tournament-trends-publication.service';
 import {
   findPublicTrendRepairTournamentIds,
   readPublicTrendFreshnessEvidence,
@@ -12,7 +15,7 @@ import {
 import {
   recordFreshnessObservation,
   retirePublicTrendsIneligibleFreshnessWindow,
-  retirePublicTrendsReusedFreshnessWindow,
+  settlePublicTrendsReusedFreshnessWindow,
 } from '../services/data-governance.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
@@ -20,24 +23,64 @@ import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
 
 export const TOURNAMENT_TRENDS_REPAIR_SCHEDULE = '*/5 * * * *';
 
-export function isCompleteReusedTournamentTrendRepair(input: {
-  enabledTournamentIds: readonly number[];
-  publicationResults: readonly Readonly<{ tournamentId: number; state: string }>[];
+type EnabledTournamentTrendPublication = Readonly<{
+  tournamentId: number;
+  publicationId: number | null;
+  publicationRevision: number | null;
+}>;
+
+type TournamentTrendRepairResult = Pick<
+  TournamentTrendScopePublication,
+  'tournamentId' | 'publicationId' | 'revision' | 'state' | 'publicationState' | 'isActive'
+>;
+
+export function hasCompleteEnabledTournamentTrendRepair(input: {
+  enabledCohorts: readonly EnabledTournamentTrendPublication[];
+  publicationResults: readonly TournamentTrendRepairResult[];
   expectedCohortCount: number;
   observedCohortCount: number;
   complete: boolean;
 }): boolean {
-  const enabledTournamentIds = [...new Set(input.enabledTournamentIds)];
+  const enabledTournamentIds = new Set(input.enabledCohorts.map((cohort) => cohort.tournamentId));
   const resultByTournamentId = new Map(
-    input.publicationResults.map((result) => [result.tournamentId, result.state] as const),
+    input.publicationResults.map((result) => [result.tournamentId, result] as const),
   );
   return (
     input.complete &&
     input.expectedCohortCount > 0 &&
     input.observedCohortCount === input.expectedCohortCount &&
-    enabledTournamentIds.length === input.expectedCohortCount &&
-    enabledTournamentIds.every(
-      (tournamentId) => resultByTournamentId.get(tournamentId) === 'REUSED',
+    enabledTournamentIds.size === input.expectedCohortCount &&
+    input.enabledCohorts.length === input.expectedCohortCount &&
+    input.enabledCohorts.every((cohort) => {
+      const result = resultByTournamentId.get(cohort.tournamentId);
+      return (
+        cohort.publicationId !== null &&
+        cohort.publicationRevision !== null &&
+        result !== undefined &&
+        (result.state === 'READY' || result.state === 'REUSED') &&
+        result.publicationState === 'READY' &&
+        result.isActive &&
+        result.publicationId === cohort.publicationId &&
+        result.revision === cohort.publicationRevision
+      );
+    })
+  );
+}
+
+export function isCompleteReusedTournamentTrendRepair(input: {
+  enabledCohorts: readonly EnabledTournamentTrendPublication[];
+  publicationResults: readonly TournamentTrendRepairResult[];
+  expectedCohortCount: number;
+  observedCohortCount: number;
+  complete: boolean;
+}): boolean {
+  const resultByTournamentId = new Map(
+    input.publicationResults.map((result) => [result.tournamentId, result] as const),
+  );
+  return (
+    hasCompleteEnabledTournamentTrendRepair(input) &&
+    input.enabledCohorts.every(
+      (cohort) => resultByTournamentId.get(cohort.tournamentId)?.state === 'REUSED',
     )
   );
 }
@@ -146,20 +189,38 @@ export async function repairTournamentTrendScopes(
   if (!after.complete || !after.sourceCheckedAt || !after.pgPublishedAt) {
     throw new Error('Tournament Trends publication evidence is incomplete');
   }
+  const enabledCohorts = after.cohorts.map((cohort) => ({
+    tournamentId: cohort.tournamentId,
+    publicationId: cohort.publicationId,
+    publicationRevision: cohort.publicationRevision,
+  }));
+  if (
+    !hasCompleteEnabledTournamentTrendRepair({
+      enabledCohorts,
+      publicationResults: result.results,
+      expectedCohortCount: after.expectedCohortCount,
+      observedCohortCount: after.observedCohortCount,
+      complete: after.complete,
+    })
+  ) {
+    throw new Error('Tournament Trends enabled cohort publication did not complete');
+  }
   let freshnessEvidenceRecorded = false;
   if (input.freshnessWindowId) {
-    const enabledTournamentIds = after.cohorts.map((cohort) => cohort.tournamentId);
+    const enabledTournamentIds = enabledCohorts.map((cohort) => cohort.tournamentId);
     const enabledTargetsReused = isCompleteReusedTournamentTrendRepair({
-      enabledTournamentIds,
+      enabledCohorts,
       publicationResults: result.results,
       expectedCohortCount: after.expectedCohortCount,
       observedCohortCount: after.observedCohortCount,
       complete: after.complete,
     });
     if (enabledTargetsReused) {
-      const recorded = await retirePublicTrendsReusedFreshnessWindow({
+      const settlement = await settlePublicTrendsReusedFreshnessWindow({
         windowId: input.freshnessWindowId,
         eventId: targetEvent.id,
+        sourceCheckedAt: after.sourceCheckedAt,
+        pgPublishedAt: after.pgPublishedAt,
         expectedCohortCount: after.expectedCohortCount,
         observedCohortCount: after.observedCohortCount,
         enabledTournamentIds,
@@ -170,7 +231,7 @@ export async function repairTournamentTrendScopes(
         catalogRevision: after.catalogRevision,
         producerRevision: after.revision,
       });
-      if (!recorded) {
+      if (settlement === null) {
         throw new Error('Tournament Trends reused freshness window is unavailable');
       }
       return { ...after, ...prepublication, freshnessEvidenceRecorded: true };
