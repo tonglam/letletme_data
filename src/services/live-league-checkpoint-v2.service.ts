@@ -487,8 +487,11 @@ export async function checkpointLiveLeaguePublicationV2(
 }
 
 /** Reconcile only the latest desired publication for one exact scope. */
-export async function reconcileLiveLeagueCheckpointV2(scope: LeagueLiveScope): Promise<boolean> {
-  const redis = await redisSingleton.getClient();
+export async function reconcileLiveLeagueCheckpointV2(
+  scope: LeagueLiveScope,
+  redisClient?: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+): Promise<boolean> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
   const desired = await readLiveLeagueCheckpointDesiredV2(scope, redis);
   if (!desired) return false;
   const read = await readLiveLeaguePublicationV2(scope, redis);

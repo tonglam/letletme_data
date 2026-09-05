@@ -6,6 +6,12 @@ import {
   type EntryLiveInputV2,
 } from '../../src/cache/live-publication-v2';
 import type { DbEntryEventResult } from '../../src/db/schemas/platform.types';
+import type {
+  MatchDeskActiveFence,
+  MatchDeskRead,
+  MatchDetailActiveFence,
+  MatchDetailRead,
+} from '../../src/cache/live-match-publication-v3';
 import {
   buildFinalEntryLiveInputFromBaseAndResult,
   entryLiveFinalResultCheckpointHash,
@@ -14,8 +20,10 @@ import {
 import { requiredLiveLeagueFinalCheckpointScopesV2 } from '../../src/services/live-league-checkpoint-v2.service';
 import {
   LiveFinalRetentionIncompleteError,
+  finalMatchPairRetentionRecoveryPlan,
   finalPublicationConflict,
   liveFinalRetentionCompletionEvidence,
+  sameFinalLiveMatchDetailScoringContent,
   type LiveFinalRetentionResult,
 } from '../../src/services/live-final-retention.service';
 import {
@@ -291,6 +299,217 @@ describe('Live final retention failure evidence', () => {
     expect(evidence).toEqual(result);
     expect(evidence).not.toHaveProperty('payload');
     expect(new LiveFinalRetentionIncompleteError(result).evidence).toEqual(evidence);
+  });
+});
+
+function finalMatchPairFixture(): {
+  deskCheckpoint: MatchDeskRead;
+  detailCheckpoint: MatchDetailRead;
+  observedDesk: MatchDeskActiveFence;
+  observedDetail: MatchDetailActiveFence;
+} {
+  const deskCheckpoint = {
+    publication: {
+      contractVersion: 'live-matches-v3',
+      publicationId: '00000000-0000-4000-8000-000000000101',
+      generation: 1,
+      season: '2627',
+      eventId: 1,
+      state: 'FINALIZED',
+      desk: {
+        name: 'desk',
+        key: 'desk:1',
+        type: 'string',
+        count: 10,
+        bytes: 100,
+        sha256: 'a'.repeat(64),
+      },
+      revisions: {
+        lifecycle: { revision: 'b'.repeat(64) },
+        fixtureIdentity: { revision: 'c'.repeat(64) },
+        scoreState: { revision: 'd'.repeat(64) },
+      },
+    },
+    fixtures: [],
+    servedFrom: 'POSTGRES_CHECKPOINT',
+  } as unknown as MatchDeskRead;
+  const detailCheckpoint = {
+    publication: {
+      contractVersion: 'live-matches-v3',
+      publicationId: '00000000-0000-4000-8000-000000000102',
+      generation: 1,
+      season: '2627',
+      eventId: 1,
+      finalized: true,
+      observedDeskGeneration: 1,
+      fixtureIdentityRevision: 'c'.repeat(64),
+      detail: { revision: 'e'.repeat(64) },
+      fixtures: [],
+    },
+    fixtures: [],
+    servedFrom: 'POSTGRES_CHECKPOINT',
+  } as unknown as MatchDetailRead;
+  const currentDesk = {
+    ...deskCheckpoint,
+    publication: {
+      ...deskCheckpoint.publication,
+      publicationId: '00000000-0000-4000-8000-000000000201',
+      generation: 7,
+    },
+    servedFrom: 'REDIS_CURRENT',
+  } as MatchDeskRead;
+  return {
+    deskCheckpoint,
+    detailCheckpoint,
+    observedDesk: { observed: JSON.stringify(currentDesk.publication), read: currentDesk },
+    observedDetail: { observed: '', read: null },
+  };
+}
+
+describe('Live final retention Match pair recovery plan', () => {
+  test('restores an equivalent different-identity desk when detail is missing', () => {
+    expect(finalMatchPairRetentionRecoveryPlan(finalMatchPairFixture())).toBe('restore');
+  });
+
+  test('restores an equivalent pair to the exact durable identity', () => {
+    const fixture = finalMatchPairFixture();
+    const currentDetail = {
+      ...fixture.detailCheckpoint,
+      publication: {
+        ...fixture.detailCheckpoint.publication,
+        publicationId: '00000000-0000-4000-8000-000000000202',
+        generation: 7,
+        observedDeskGeneration: 7,
+      },
+      servedFrom: 'REDIS_CURRENT',
+    } as unknown as MatchDetailRead;
+    expect(
+      finalMatchPairRetentionRecoveryPlan({
+        ...fixture,
+        observedDetail: {
+          observed: JSON.stringify(currentDetail.publication),
+          read: currentDetail,
+        },
+      }),
+    ).toBe('restore');
+  });
+
+  test('allows only historical price or display-name drift, never scoring drift', () => {
+    const fixture = finalMatchPairFixture();
+    const player = {
+      id: 101,
+      webName: 'Old Name',
+      position: 3,
+      teamId: 10,
+      price: 50,
+      totalPoints: 7,
+      stats: [{ identifier: 'goals_scored', value: 1, awardedPoints: 4 }],
+    };
+    const checkpoint = {
+      ...fixture.detailCheckpoint,
+      fixtures: [{ fixtureId: 401, players: [player] }],
+      publication: {
+        ...fixture.detailCheckpoint.publication,
+        fixtures: [{ fixtureId: 401, count: 1, bytes: 100, sha256: 'e'.repeat(64) }],
+      },
+    } as unknown as MatchDetailRead;
+    const presentationDrift = {
+      ...checkpoint,
+      fixtures: [
+        {
+          fixtureId: 401,
+          players: [{ ...player, webName: 'New Name', price: 51 }],
+        },
+      ],
+      publication: {
+        ...checkpoint.publication,
+        publicationId: '00000000-0000-4000-8000-000000000203',
+        generation: 7,
+        observedDeskGeneration: 7,
+        detail: { revision: 'f'.repeat(64) },
+        fixtures: [{ fixtureId: 401, count: 1, bytes: 102, sha256: 'f'.repeat(64) }],
+      },
+      servedFrom: 'REDIS_CURRENT',
+    } as unknown as MatchDetailRead;
+
+    expect(sameFinalLiveMatchDetailScoringContent(presentationDrift, checkpoint)).toBe(true);
+    expect(
+      finalMatchPairRetentionRecoveryPlan({
+        ...fixture,
+        detailCheckpoint: checkpoint,
+        observedDetail: {
+          observed: JSON.stringify(presentationDrift.publication),
+          read: presentationDrift,
+        },
+      }),
+    ).toBe('restore');
+
+    const scoringDrift = {
+      ...presentationDrift,
+      fixtures: [
+        {
+          fixtureId: 401,
+          players: [{ ...player, totalPoints: 8 }],
+        },
+      ],
+    } as MatchDetailRead;
+    expect(sameFinalLiveMatchDetailScoringContent(scoringDrift, checkpoint)).toBe(false);
+    expect(
+      finalMatchPairRetentionRecoveryPlan({
+        ...fixture,
+        detailCheckpoint: checkpoint,
+        observedDetail: {
+          observed: JSON.stringify(scoringDrift.publication),
+          read: scoringDrift,
+        },
+      }),
+    ).toBe('unavailable');
+  });
+
+  test('keeps an exact compatible durable pair idempotent', () => {
+    const fixture = finalMatchPairFixture();
+    const currentDesk = {
+      ...fixture.deskCheckpoint,
+      servedFrom: 'REDIS_CURRENT',
+    } as MatchDeskRead;
+    const currentDetail = {
+      ...fixture.detailCheckpoint,
+      servedFrom: 'REDIS_CURRENT',
+    } as MatchDetailRead;
+    expect(
+      finalMatchPairRetentionRecoveryPlan({
+        ...fixture,
+        observedDesk: { observed: JSON.stringify(currentDesk.publication), read: currentDesk },
+        observedDetail: {
+          observed: JSON.stringify(currentDetail.publication),
+          read: currentDetail,
+        },
+      }),
+    ).toBe('already-canonical');
+  });
+
+  test('rejects a conflicting or invalid active detail without changing pointers', () => {
+    const fixture = finalMatchPairFixture();
+    const conflicting = {
+      ...fixture.detailCheckpoint,
+      publication: {
+        ...fixture.detailCheckpoint.publication,
+        detail: { revision: 'f'.repeat(64) },
+      },
+      servedFrom: 'REDIS_CURRENT',
+    } as MatchDetailRead;
+    expect(
+      finalMatchPairRetentionRecoveryPlan({
+        ...fixture,
+        observedDetail: { observed: JSON.stringify(conflicting.publication), read: conflicting },
+      }),
+    ).toBe('unavailable');
+    expect(
+      finalMatchPairRetentionRecoveryPlan({
+        ...fixture,
+        observedDetail: { observed: '{malformed', read: null },
+      }),
+    ).toBe('unavailable');
   });
 });
 

@@ -10,6 +10,7 @@ import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
 import {
   liveMatchDeskKey,
+  liveMatchDetailKey,
   readLiveMatchDeskFenceV3,
   readLiveMatchDeskV3,
   readLiveMatchDetailFenceV3,
@@ -577,6 +578,117 @@ describe('Live Matches V3 observation publication', () => {
     expect(second.detailChanged).toBe(false);
     expect(second.detail?.generation).toBe(first.detail?.generation);
     expect(second.detailUnavailableReason).toBe('DETAIL_CANDIDATE_INVALID');
+  });
+
+  test('keeps a complete finalized detail immutable across later identity observations', async () => {
+    const finalFixture = {
+      ...fixture(30),
+      finished: true,
+      finished_provisional: true,
+      minutes: 90,
+    } satisfies RawFPLFixture;
+    const pinnedReference = (price: number, webName: string): LiveSnapshotReferenceData => ({
+      ...referenceData(),
+      eventPinnedIdentities: Promise.resolve([
+        {
+          fixtureId: 401,
+          elementId: 101,
+          teamId: 10,
+          elementType: 3,
+          price,
+          webName,
+        },
+      ]),
+    });
+    const first = await syncLiveMatchesV3FromObservation({
+      season,
+      eventId,
+      rawFixtures: [finalFixture],
+      rawEventLive: { elements: eventLive() },
+      referenceData: pinnedReference(50, 'Player One'),
+      expectedFixtureIds: [401],
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      observedAt: '2026-08-29T10:01:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const second = await syncLiveMatchesV3FromObservation({
+      season,
+      eventId,
+      rawFixtures: [finalFixture],
+      rawEventLive: { elements: eventLive() },
+      referenceData: pinnedReference(51, 'Player Renamed'),
+      expectedFixtureIds: [401],
+      observedAt: '2026-08-29T10:02:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    });
+    const stored = await readLiveMatchDetailV3({ season: season.seasonCode, eventId, redis });
+
+    expect(first.detail?.finalized).toBe(true);
+    expect(second.detailChanged).toBe(false);
+    expect(second.detail?.publicationId).toBe(first.detail?.publicationId);
+    expect(second.detail?.generation).toBe(first.detail?.generation);
+    expect(stored?.fixtures[0]?.players[0]).toMatchObject({
+      id: 101,
+      price: 50,
+      webName: 'Player One',
+    });
+  });
+
+  test('republishes a finalized previous detail when the active pointer is missing', async () => {
+    const finalFixture = {
+      ...fixture(30),
+      finished: true,
+      finished_provisional: true,
+      minutes: 90,
+    } satisfies RawFPLFixture;
+    const input = {
+      season,
+      eventId,
+      rawFixtures: [finalFixture],
+      rawEventLive: { elements: eventLive() },
+      referenceData: {
+        ...referenceData(),
+        eventPinnedIdentities: Promise.resolve([
+          {
+            fixtureId: 401,
+            elementId: 101,
+            teamId: 10,
+            elementType: 3,
+            price: 50,
+            webName: 'Player One',
+          },
+        ]),
+      },
+      expectedFixtureIds: [401],
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      observedAt: '2026-08-29T10:03:00.000Z',
+      redis,
+      enqueueCheckpoint,
+    } as const;
+    const first = await syncLiveMatchesV3FromObservation(input);
+    const scope = { season: season.seasonCode, eventId } as const;
+    const activeKey = liveMatchDetailKey(scope, 'active');
+    const previousKey = liveMatchDetailKey(scope, 'previous');
+    const activeRaw = await redis.get(activeKey);
+    expect(activeRaw).not.toBeNull();
+    await redis.set(previousKey, activeRaw!, 'PX', 60_000);
+    await redis.del(activeKey);
+    expect((await readLiveMatchDetailV3({ ...scope, redis }))?.servedFrom).toBe('REDIS_PREVIOUS');
+
+    const second = await syncLiveMatchesV3FromObservation({
+      ...input,
+      observedAt: '2026-08-29T10:04:00.000Z',
+    });
+    const restored = await readLiveMatchDetailV3({ ...scope, redis });
+
+    expect(second.detailChanged).toBe(true);
+    expect(second.detail?.publicationId).not.toBe(first.detail?.publicationId);
+    expect(restored?.servedFrom).toBe('REDIS_CURRENT');
+    expect(restored?.publication.publicationId).toBe(second.detail?.publicationId);
   });
 
   test('retains complete detail when provider explain and BPS evidence becomes empty', async () => {

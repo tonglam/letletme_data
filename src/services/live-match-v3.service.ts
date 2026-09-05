@@ -547,7 +547,20 @@ export async function syncLiveMatchesV3FromObservation(
         )
           ? loadedDetail
           : null;
-      if (!preparedDetailComplete) {
+      if (
+        preparedDesk.state === 'FINALIZED' &&
+        currentDetail?.publication.finalized === true &&
+        currentDetail.servedFrom === 'REDIS_CURRENT' &&
+        currentDetail.publication.observedDeskGeneration === desk.generation &&
+        currentDetail.publication.fixtureIdentityRevision ===
+          desk.revisions.fixtureIdentity.revision
+      ) {
+        // A complete FINAL detail is immutable. In particular, do not create
+        // a new final generation merely because the current player roster has
+        // since changed a price or display name for this historical event.
+        // The dedicated retention lane owns its lease and durable recovery.
+        detail = currentDetail.publication;
+      } else if (!preparedDetailComplete) {
         // Empty explain/BPS evidence is a transient provider regression, not a
         // valid new detail publication. Keep the complete same-fixture LKG and
         // wait for a candidate with the required player coverage.
