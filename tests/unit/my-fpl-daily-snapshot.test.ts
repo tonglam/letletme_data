@@ -110,6 +110,13 @@ describe('My FPL daily snapshot publication contract', () => {
   test('binds live freshness and cleanup tools to exact bounded evidence', () => {
     expect(liveDataWorker).toContain('checkpointMatchesSnapshot');
     expect(liveDataWorker).toContain('checkpoint.publication.generation === snapshot.generation');
+    expect(liveDataWorker).toContain('liveCheckpointPending: !(');
+    expect(liveDataWorker).toContain('recordPendingLiveSnapshotCheckpointEvidence');
+    expect(governanceService).toContain('LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE = 100');
+    expect(governanceService).toContain(
+      'evidence}->>' + singleQuote + 'liveCheckpointPending' + singleQuote + ' = ' + singleQuote,
+    );
+    expect(governanceService).toContain('contractKey, ' + singleQuote + 'live-snapshot');
     expect(rebindPlayerAuthority).toContain(
       'if (token === ' + singleQuote + '--apply' + singleQuote + ')',
     );

@@ -823,6 +823,77 @@ export async function recordMyFplPublicationRedisEvidence(input: {
   return updated;
 }
 
+const LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE = 100;
+
+/**
+ * Complete producer evidence for live windows whose Redis generation was
+ * deliberately coalesced before PostgreSQL checkpointing. Each affected
+ * window first records the exact Redis revision with
+ * `liveCheckpointPending=true`; a later exact durable checkpoint advances a
+ * bounded oldest-first batch to the newly proven revision. This keeps the
+ * association in the existing governance ledger instead of widening the
+ * Redis publication/desired-marker contract, and repeated checkpoints drain
+ * any outage backlog without an unbounded hot-path scan.
+ */
+export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
+  seasonId: number;
+  eventId: number;
+  sourceCheckedAt: Date;
+  pgPublishedAt: Date;
+  redisSeenAt?: Date;
+  revision: string;
+  db?: DbHandle;
+}): Promise<number> {
+  const revision = input.revision.trim();
+  if (
+    !Number.isSafeInteger(input.seasonId) ||
+    input.seasonId <= 0 ||
+    !Number.isSafeInteger(input.eventId) ||
+    input.eventId <= 0 ||
+    !Number.isFinite(input.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(input.pgPublishedAt.getTime()) ||
+    revision.length === 0
+  ) {
+    return 0;
+  }
+  const db = input.db ?? (await getDb());
+  const windows = await db
+    .select({ windowId: freshnessSloWindowsInOps.windowId })
+    .from(freshnessSloWindowsInOps)
+    .where(
+      and(
+        eq(freshnessSloWindowsInOps.contractKey, 'live-snapshot'),
+        eq(freshnessSloWindowsInOps.seasonId, input.seasonId),
+        eq(freshnessSloWindowsInOps.eventId, input.eventId),
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'BREACHED']),
+        isNull(freshnessSloWindowsInOps.recoveredAt),
+        sql`${freshnessSloWindowsInOps.evidence}->>'liveCheckpointPending' = 'true'`,
+      ),
+    )
+    .orderBy(asc(freshnessSloWindowsInOps.dueAt), asc(freshnessSloWindowsInOps.windowId))
+    .limit(LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE);
+  const redisSeenAt = input.redisSeenAt ?? new Date();
+  let updated = 0;
+  for (const window of windows) {
+    const status = await recordFreshnessObservation({
+      windowId: window.windowId,
+      sourceCheckedAt: input.sourceCheckedAt,
+      pgPublishedAt: input.pgPublishedAt,
+      redisSeenAt,
+      producerRevision: revision,
+      redisRevision: revision,
+      completenessStatus: 'COMPLETE',
+      evidence: {
+        liveCheckpointPending: false,
+        liveCheckpointRevision: revision,
+      },
+      db,
+    });
+    if (status !== null) updated += 1;
+  }
+  return updated;
+}
+
 /**
  * Retire historical My FPL outbox windows that were created by a periodic
  * no-op before the outbox worker learned to classify that condition.  The
