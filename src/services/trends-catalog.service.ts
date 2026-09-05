@@ -156,6 +156,27 @@ export async function readPublicTrendFreshnessEvidence(
   };
 }
 
+/**
+ * Select every configured, setup-complete catalog scope that the repair lane
+ * may prepublish. Disabled rows are included deliberately so a cohort can be
+ * made durable before the public enablement transaction checks it.
+ */
+export async function findPublicTrendRepairTournamentIds(seasonCode: string): Promise<number[]> {
+  const season = await seasonRepository.requireByCode(seasonCode);
+  const client = await getDbClient();
+  const rows = await client<Array<{ tournament_id: number }>>`
+    SELECT catalog.tournament_id
+    FROM competition.public_league_trends catalog
+    JOIN competition.tournaments tournament
+      ON tournament.season_id = catalog.season_id
+      AND tournament.tournament_id = catalog.tournament_id
+    WHERE catalog.season_id = ${season.seasonId}
+      AND tournament.setup_status = 'ready'
+    ORDER BY catalog.sort_order, catalog.tournament_id
+  `;
+  return rows.map((row) => Number(row.tournament_id));
+}
+
 export async function getPublicTrendsCatalog(seasonCode: string) {
   const season = await seasonRepository.requireByCode(seasonCode);
   const client = await getDbClient();
@@ -289,6 +310,15 @@ export async function updatePublicTrendsCatalog(
         WHERE event.season_id = ${season.seasonId}
           AND event.deadline_time_epoch IS NOT NULL
           AND event.deadline_time_epoch <= EXTRACT(EPOCH FROM now())::bigint
+          AND event.event_id = (
+            SELECT current_event.event_id
+            FROM fpl.events current_event
+            WHERE current_event.season_id = ${season.seasonId}
+              AND current_event.deadline_time_epoch IS NOT NULL
+              AND current_event.deadline_time_epoch <= EXTRACT(EPOCH FROM now())::bigint
+            ORDER BY current_event.deadline_time_epoch DESC, current_event.event_id DESC
+            LIMIT 1
+          )
           AND publication.publication_state = 'READY'
           AND publication.source_checksum ~ '^[0-9a-f]{64}$'
           AND publication.expected_entries > 0
@@ -303,7 +333,6 @@ export async function updatePublicTrendsCatalog(
             FROM reporting.tournament_selection_stat_rows snapshot_row
             WHERE snapshot_row.publication_id = publication.publication_id
           )
-        ORDER BY event.deadline_time_epoch DESC
         LIMIT 1
       `;
       if (!readyCurrentEvent[0]) {

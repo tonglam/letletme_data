@@ -35,6 +35,10 @@ function parseArguments(argv: readonly string[]): Arguments {
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (!token?.startsWith('--')) usage();
+    if (token === '--apply') {
+      values.set('apply', 'true');
+      continue;
+    }
     const equals = token.indexOf('=');
     if (equals > 2) values.set(token.slice(2, equals), token.slice(equals + 1));
     else {

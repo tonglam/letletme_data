@@ -4,8 +4,14 @@ import type { Elysia } from 'elysia';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { publishTournamentTrendScopes } from '../services/tournament-trends-publication.service';
-import { readPublicTrendFreshnessEvidence } from '../services/trends-catalog.service';
-import { recordFreshnessObservation } from '../services/data-governance.service';
+import {
+  findPublicTrendRepairTournamentIds,
+  readPublicTrendFreshnessEvidence,
+} from '../services/trends-catalog.service';
+import {
+  markFreshnessWindowNotApplicable,
+  recordFreshnessObservation,
+} from '../services/data-governance.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
 import { isStandaloneSchedulerEnabled } from '../utils/scheduler-mode';
@@ -15,20 +21,49 @@ export const TOURNAMENT_TRENDS_REPAIR_SCHEDULE = '*/5 * * * *';
 export async function repairTournamentTrendScopes(input: { freshnessWindowId?: number } = {}) {
   const season = await seasonRepository.findCurrent();
   const currentEvent = await eventRepository.findCurrent(season);
-  if (!currentEvent || currentEvent.id < 1 || currentEvent.id > 38) return;
-  const before = await readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id);
-  if (before.expectedCohortCount === 0) return;
-  const result = await publishTournamentTrendScopes(
-    season,
-    currentEvent.id,
-    before.cohorts.map((cohort) => cohort.tournamentId),
-  );
+  if (!currentEvent || currentEvent.id < 1 || currentEvent.id > 38) {
+    if (input.freshnessWindowId) {
+      await markFreshnessWindowNotApplicable({
+        windowId: input.freshnessWindowId,
+        reasonCode: 'PUBLIC_TRENDS_NO_CURRENT_EVENT',
+      });
+    }
+    return;
+  }
+  const [before, repairTournamentIds] = await Promise.all([
+    readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id),
+    findPublicTrendRepairTournamentIds(season.seasonCode),
+  ]);
+  if (repairTournamentIds.length === 0) {
+    if (before.expectedCohortCount > 0) {
+      throw new Error('Enabled Public Trends cohorts have no setup-complete repair target');
+    }
+    if (input.freshnessWindowId) {
+      await markFreshnessWindowNotApplicable({
+        windowId: input.freshnessWindowId,
+        reasonCode: 'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS',
+      });
+    }
+    return before;
+  }
+  const result = await publishTournamentTrendScopes(season, currentEvent.id, repairTournamentIds);
   if (result.failed > 0)
     throw new Error(`Tournament Trends repair failed for ${result.failed} scope(s)`);
   const after = await readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id);
+  if (after.expectedCohortCount === 0) {
+    if (input.freshnessWindowId) {
+      await markFreshnessWindowNotApplicable({
+        windowId: input.freshnessWindowId,
+        reasonCode: 'PUBLIC_TRENDS_NO_ENABLED_COHORTS',
+        evidence: { prepublishedCohortCount: result.succeeded },
+      });
+    }
+    return after;
+  }
   if (!after.complete) throw new Error('Tournament Trends publication is incomplete');
+  let freshnessEvidenceRecorded = false;
   if (input.freshnessWindowId) {
-    await recordFreshnessObservation({
+    const status = await recordFreshnessObservation({
       windowId: input.freshnessWindowId,
       sourceCheckedAt: after.sourceCheckedAt ?? new Date(),
       pgPublishedAt: after.pgPublishedAt ?? undefined,
@@ -45,8 +80,10 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
         pgPublishedAt: after.pgPublishedAt?.toISOString() ?? null,
       },
     });
+    if (status === null) throw new Error('Tournament Trends freshness window is unavailable');
+    freshnessEvidenceRecorded = true;
   }
-  return after;
+  return { ...after, freshnessEvidenceRecorded };
 }
 
 export function registerTournamentTrendsRepairJobs(app: Elysia) {

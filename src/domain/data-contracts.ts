@@ -395,7 +395,7 @@ export const dataContractRegistry = [
     schedulerJobs: ['tournament-trends-repair'],
     dispatchWithinMs: 60 * 60_000,
     executionBudgetMs: 60 * 60_000,
-    freshnessEvidence: 'publication',
+    freshnessEvidence: 'checkpoint',
     freshnessJobs: ['tournament-trends-repair'],
     integrity:
       'both configured public cohorts have positive complete snapshots and stable revision',

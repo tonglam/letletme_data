@@ -1894,9 +1894,11 @@ export async function schedulerOrphanState(input: { db?: DbHandle } = {}): Promi
     orphaned_job_names: string[] | null;
   }>(sql`
     SELECT
-      count(*) FILTER (WHERE job_name NOT IN (${registeredSql}) AND status NOT IN ('succeeded', 'skipped', 'irrecoverable'))::integer AS orphaned_non_terminal,
-      COALESCE(array_agg(DISTINCT job_name ORDER BY job_name) FILTER (WHERE job_name NOT IN (${registeredSql}) AND status NOT IN ('succeeded', 'skipped', 'irrecoverable')), ARRAY[]::text[]) AS orphaned_job_names
+      count(*)::integer AS orphaned_non_terminal,
+      COALESCE(array_agg(DISTINCT job_name ORDER BY job_name), ARRAY[]::text[]) AS orphaned_job_names
     FROM ops.scheduler_obligations
+    WHERE status NOT IN ('succeeded', 'skipped', 'irrecoverable')
+      AND job_name NOT IN (${registeredSql})
   `);
   const row = rows[0];
   return {

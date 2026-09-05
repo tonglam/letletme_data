@@ -190,6 +190,9 @@ async function recordMyFplOutboxRedisEvidence(input: {
 function maintenanceCompletionEvidence(jobName: string, result: unknown): Record<string, unknown> {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return {};
   const value = result as Record<string, unknown>;
+  if (value.freshnessEvidenceRecorded === true) {
+    return { freshnessEvidenceRecorded: true };
+  }
   if (jobName === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT) {
     const publication = value.publication;
     if (!publication || typeof publication !== 'object' || Array.isArray(publication)) return {};

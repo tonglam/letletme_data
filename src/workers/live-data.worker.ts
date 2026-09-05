@@ -225,7 +225,11 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       const checkpoint = durableCheckpoint;
       const checkpointedAt = checkpoint?.publication.checkpointedAt;
       const pgPublishedAt = checkpointedAt ? new Date(checkpointedAt) : null;
+      const checkpointMatchesSnapshot =
+        checkpoint?.publication.publicationId === snapshot.publicationId &&
+        checkpoint.publication.generation === snapshot.generation;
       if (
+        checkpointMatchesSnapshot &&
         sourceCheckedAt &&
         Number.isFinite(sourceCheckedAt.getTime()) &&
         pgPublishedAt &&
@@ -251,6 +255,19 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             publicationId: snapshot.publicationId,
           });
         }
+      } else if (checkpoint && !checkpointMatchesSnapshot) {
+        logError(
+          'Live snapshot freshness evidence checkpoint identity changed before observation',
+          new Error('live publication checkpoint identity mismatch'),
+          {
+            eventId,
+            windowId: job.data.freshnessWindowId,
+            snapshotPublicationId: snapshot.publicationId,
+            snapshotGeneration: snapshot.generation,
+            checkpointPublicationId: checkpoint.publication.publicationId,
+            checkpointGeneration: checkpoint.publication.generation,
+          },
+        );
       }
     }
     const classicGlobalIdentityMatches =

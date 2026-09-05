@@ -1739,11 +1739,12 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       periodMs: 5 * 60_000,
       criticality: 'normal',
       successPredicate: 'active tournament public trend scopes are published',
-      enqueue: async ({ context, obligationId, generation }) => {
+      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
         const job = await enqueueTournamentTrendsRepair(context.season, 'catchup', {
           jobId: `scheduler-${obligationId}-g${generation}`,
           obligationId,
           obligationGeneration: generation,
+          freshnessWindowId,
         });
         return { bullJobId: job.id, runId: job.data.runId };
       },
