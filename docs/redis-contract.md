@@ -69,7 +69,9 @@ llm:data:v2:fpl:league-live:<season>:<event>:<tournament>:h2h-standings:<generat
 manifest metadata, byte length, and SHA-256 agree. Active pointers have no TTL
 during live operation; previous pointers/items retain 24 hours, and active
 finalized siblings use a rolling 14-day lease for the active season. Data alone
-promotes these keys. Finalization retry
+promotes these keys. A healthy promotion unlinks the validated immutable items
+from the superseded previous pointer before replacing that pointer, so each
+scope retains only its active and immediately previous item sets. Finalization retry
 state is durable in `ops.scheduler_obligations`; the latest checkpoint desired
 publication is retained in the scope's `checkpoint-desired` key. GraphQL is
 read-only and must select one coherent current/previous/checkpoint publication;

@@ -1219,6 +1219,7 @@ local expectedTournamentId = tonumber(ARGV[8])
 local expectedScope = ARGV[9]
 local expectedMatchId = ARGV[10] == '' and nil or tonumber(ARGV[10])
 local currentRaw = redis.call('GET', KEYS[1]) or ''
+local previousRaw = redis.call('GET', KEYS[2]) or ''
 if currentRaw ~= observed then return {'changed', currentRaw} end
 local scopePrefix = string.sub(KEYS[1], 1, string.len(KEYS[1]) - string.len(':active'))
 if not candidateOk or type(candidate) ~= 'table' or candidate.contractVersion ~= 'live-points-v2' or type(candidate.items) ~= 'table' or type(candidate.generation) ~= 'number' or candidate.generation <= 0 then return {'invalid_candidate'} end
@@ -1345,6 +1346,15 @@ redis.call('SET', KEYS[1], ARGV[1])
 if candidate.state == 'FINALIZED' then redis.call('PEXPIRE', KEYS[1], ARGV[3]) else redis.call('PERSIST', KEYS[1]) end
 local sequence = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
 if sequence < candidate.generation then redis.call('SET', KEYS[3], tostring(candidate.generation)) end
+if currentItemsHealthy then
+  local previousOk, previous = pcall(cjson.decode, previousRaw)
+  if previousOk and validPointer(previous) and previous.generation < current.generation then
+    for _, name in ipairs({'index', 'payload'}) do
+      local oldPrevious = previous.items[name]
+      redis.call('UNLINK', oldPrevious.key, oldPrevious.key .. ':meta')
+    end
+  end
+end
 return {'published', currentRaw}
 `;
 
