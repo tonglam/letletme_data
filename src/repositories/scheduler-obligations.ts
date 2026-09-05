@@ -9,7 +9,11 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-registry';
-import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
+import {
+  contractForSchedulerJob,
+  contractHasFreshnessWindow,
+  registeredSchedulerJobNames,
+} from '../domain/data-contracts';
 import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
 import { getConfig } from '../utils/config';
 
@@ -1825,8 +1829,15 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
   running: number;
   irrecoverable: number;
   succeeded: number;
+  orphanedNonTerminal: number;
+  orphanedJobNames: readonly string[];
 }> {
   const db = input.db ?? (await getDb());
+  const registeredJobs = registeredSchedulerJobNames();
+  const registeredSql = sql.join(
+    registeredJobs.map((jobName) => sql`${jobName}`),
+    sql`, `,
+  );
   const rows = await db.execute<{
     total: number | string;
     overdue: number | string;
@@ -1835,6 +1846,8 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
     running: number | string;
     irrecoverable: number | string;
     succeeded: number | string;
+    orphaned_non_terminal: number | string;
+    orphaned_job_names: string[] | null;
   }>(sql`
     SELECT
       count(*)::integer AS total,
@@ -1843,7 +1856,9 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
       count(*) FILTER (WHERE status = 'retrying')::integer AS retrying,
       count(*) FILTER (WHERE status IN ('enqueued', 'running', 'retrying'))::integer AS running,
       count(*) FILTER (WHERE status = 'irrecoverable')::integer AS irrecoverable,
-      count(*) FILTER (WHERE status = 'succeeded')::integer AS succeeded
+      count(*) FILTER (WHERE status = 'succeeded')::integer AS succeeded,
+      count(*) FILTER (WHERE job_name NOT IN (${registeredSql}) AND status NOT IN ('succeeded', 'skipped', 'irrecoverable'))::integer AS orphaned_non_terminal,
+      COALESCE(array_agg(DISTINCT job_name ORDER BY job_name) FILTER (WHERE job_name NOT IN (${registeredSql}) AND status NOT IN ('succeeded', 'skipped', 'irrecoverable')), ARRAY[]::text[]) AS orphaned_job_names
     FROM ops.scheduler_obligations
   `);
   const row = rows[0];
@@ -1855,6 +1870,40 @@ export async function schedulerObligationSummary(input: { db?: DbHandle } = {}):
     running: Number(row?.running ?? 0),
     irrecoverable: Number(row?.irrecoverable ?? 0),
     succeeded: Number(row?.succeeded ?? 0),
+    orphanedNonTerminal: Number(row?.orphaned_non_terminal ?? 0),
+    orphanedJobNames: row?.orphaned_job_names ?? [],
+  };
+}
+
+/**
+ * Keep the frequent control projection aware of orphaned work without pulling
+ * its full historical obligation aggregate onto the hot path.
+ */
+export async function schedulerOrphanState(input: { db?: DbHandle } = {}): Promise<{
+  orphanedNonTerminal: number;
+  orphanedJobNames: readonly string[];
+}> {
+  const db = input.db ?? (await getDb());
+  const registeredJobs = registeredSchedulerJobNames();
+  const registeredSql = sql.join(
+    registeredJobs.map((jobName) => sql`${jobName}`),
+    sql`, `,
+  );
+  const rows = await db.execute<{
+    orphaned_non_terminal: number | string;
+    orphaned_job_names: string[] | null;
+  }>(sql`
+    SELECT
+      count(*)::integer AS orphaned_non_terminal,
+      COALESCE(array_agg(DISTINCT job_name ORDER BY job_name), ARRAY[]::text[]) AS orphaned_job_names
+    FROM ops.scheduler_obligations
+    WHERE status NOT IN ('succeeded', 'skipped', 'irrecoverable')
+      AND job_name NOT IN (${registeredSql})
+  `);
+  const row = rows[0];
+  return {
+    orphanedNonTerminal: Number(row?.orphaned_non_terminal ?? 0),
+    orphanedJobNames: row?.orphaned_job_names ?? [],
   };
 }
 

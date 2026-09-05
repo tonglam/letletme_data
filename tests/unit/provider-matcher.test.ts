@@ -2,11 +2,15 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   candidatesWithMinimumMatchObservations,
+  fixtureOutcomeEvidenceAligns,
+  hasUnderstatFixtureParticipation,
   isAutoMappingProtectedStatus,
   providerTeamConfirmedForSeason,
   resolveUniqueProviderAssignments,
   rosterEvidenceAligns,
   shouldConfirmProviderPlayerSeason,
+  understatMinutesMatchEvidence,
+  verifiedPlayerMappingConflict,
 } from '../../src/services/provider-matcher.service';
 
 const fpl = {
@@ -63,6 +67,32 @@ describe('provider roster matcher', () => {
     expect(providerTeamConfirmedForSeason(link, '2728')).toBe(false);
   });
 
+  test('rejects verified player mappings that break one-to-one identity', () => {
+    const verified = {
+      id: 'verified-link',
+      entityType: 'player' as const,
+      leftProvider: 'understat',
+      leftEntityId: '8094',
+      rightProvider: 'fpl',
+      rightEntityId: '123',
+      status: 'manual_verified' as const,
+      method: 'manual',
+      ruleId: 'test',
+      evidence: {},
+      firstSeenSeason: '2627',
+      lastSeenSeason: '2627',
+      reviewedBy: 'operator',
+      reviewedAt: new Date(),
+    };
+    expect(verifiedPlayerMappingConflict([verified], 8094, 466052)?.id).toBe('verified-link');
+    expect(verifiedPlayerMappingConflict([verified], 8094, 123)).toBeUndefined();
+  });
+
+  test('requires the season aggregate minutes to equal fixture evidence', () => {
+    expect(understatMinutesMatchEvidence(108, [60, 48])).toBe(true);
+    expect(understatMinutesMatchEvidence(108, [60, 47])).toBe(false);
+  });
+
   test('never silently rebinds verified or quarantined identities', () => {
     expect(isAutoMappingProtectedStatus('auto_verified')).toBe(true);
     expect(isAutoMappingProtectedStatus('manual_verified')).toBe(true);
@@ -103,6 +133,28 @@ describe('provider roster matcher', () => {
     expect(
       rosterEvidenceAligns({ ...fpl, starts: null }, { ...understat, started: false }, 3),
     ).toBe(true);
+  });
+
+  test('keeps assists auxiliary during manual fixture verification', () => {
+    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 3)).toBe(true);
+    expect(fixtureOutcomeEvidenceAligns(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
+    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 4)).toBe(false);
+  });
+
+  test('ignores only a true zero-participation Understat bench row', () => {
+    const unused = {
+      minutes: 0,
+      started: false,
+      goals: 0,
+      assists: 0,
+      ownGoals: 0,
+      yellowCards: 0,
+      redCards: 0,
+    };
+    expect(hasUnderstatFixtureParticipation(unused)).toBe(false);
+    expect(hasUnderstatFixtureParticipation({ ...unused, minutes: 1 })).toBe(true);
+    expect(hasUnderstatFixtureParticipation({ ...unused, yellowCards: 1 })).toBe(true);
+    expect(hasUnderstatFixtureParticipation({ ...unused, started: true })).toBe(true);
   });
 
   test('requires two independent verified-match observations before auto verification', () => {

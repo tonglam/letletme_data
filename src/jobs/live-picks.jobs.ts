@@ -16,6 +16,7 @@ export type LivePicksRefreshResult = Readonly<{
   outcome?: 'accepted-backoff';
   sourceReady: boolean;
   scanComplete: boolean;
+  freshnessEvidenceRecorded?: boolean;
 }>;
 
 export type LivePicksRefreshJobData = Readonly<{

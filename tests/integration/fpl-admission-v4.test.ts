@@ -46,6 +46,11 @@ async function readyContenderCount(): Promise<number> {
   return count;
 }
 
+async function redisNowMs(redis: Awaited<ReturnType<typeof queueRedisSingleton.getClient>>) {
+  const [seconds, microseconds] = await redis.time();
+  return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000);
+}
+
 function spawnContender(priority: 'deadline-critical' | 'live' | 'bulk') {
   const source = `
     import { acquireFplRequest } from './src/utils/fpl-admission.ts';
@@ -212,7 +217,7 @@ describe('distributed FPL admission v4', () => {
 
   test('recovers the adaptive bulk limit while reporting idle stats', async () => {
     const redis = await queueRedisSingleton.getClient();
-    const previousErrorAt = Date.now() - 300_001;
+    const previousErrorAt = (await redisNowMs(redis)) - 300_001;
     await redis.hset(`${PREFIX}:state`, {
       bulkLimit: '1',
       lastBulkErrorMs: String(previousErrorAt),
@@ -222,6 +227,6 @@ describe('distributed FPL admission v4', () => {
     expect(stats.bulkMaxInflight).toBeGreaterThan(1);
     const lastErrorAt = Number(await redis.hget(`${PREFIX}:state`, 'lastBulkErrorMs'));
     expect(lastErrorAt).toBeGreaterThan(previousErrorAt);
-    expect(lastErrorAt).toBeLessThanOrEqual(Date.now());
+    expect(lastErrorAt).toBeLessThanOrEqual(await redisNowMs(redis));
   });
 });

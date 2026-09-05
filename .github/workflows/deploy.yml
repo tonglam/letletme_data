@@ -110,6 +110,7 @@ jobs:
           severity: HIGH,CRITICAL
 
       - name: Deploy exact image digest over pinned OpenSSH
+        id: runtime_deploy
         uses: ./.github/actions/pinned-openssh
         env:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
@@ -150,11 +151,46 @@ jobs:
             export APP_IMAGE="$IMAGE_REF"
             source scripts/deploy.sh deploy
 
-      - name: Promote verified digest to latest
-        if: success()
+      - name: Promote verified digest to latest (bounded, no redeploy)
+        id: latest_promotion
+        if: steps.runtime_deploy.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
-          docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_REF}"
           expected_digest="${IMAGE_REF##*@}"
-          latest_digest=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/ { print $2; exit }')
-          test "$latest_digest" = "$expected_digest"
+          for attempt in 1 2 3; do
+            if docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_REF}"; then
+              latest_digest=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/ { print $2; exit }' || true)
+              if test "$latest_digest" = "$expected_digest"; then
+                echo "latest tag verified at ${latest_digest} on attempt ${attempt}"
+                exit 0
+              fi
+              echo "latest digest mismatch on attempt ${attempt}: expected=${expected_digest} actual=${latest_digest:-missing}" >&2
+            else
+              echo "latest promotion command failed on attempt ${attempt}" >&2
+            fi
+            sleep $((attempt * 5))
+          done
+          {
+            echo "### Deployment state"
+            echo "Runtime deployment succeeded for ${IMAGE_REF}."
+            echo "GHCR latest promotion or digest verification failed after 3 bounded attempts."
+            echo "No runtime deployment retry was performed; repair the tag separately."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Fail with explicit deployment classification
+        if: always()
+        env:
+          RUNTIME_DEPLOY_OUTCOME: ${{ steps.runtime_deploy.outcome }}
+          LATEST_PROMOTION_OUTCOME: ${{ steps.latest_promotion.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNTIME_DEPLOY_OUTCOME" != "success" ]; then
+            echo "Deployment failed before runtime acceptance; latest was not promoted."
+            exit 1
+          fi
+          if [ "$LATEST_PROMOTION_OUTCOME" != "success" ]; then
+            echo "Runtime deployment succeeded, but GHCR latest tag verification failed."
+            exit 1
+          fi

@@ -7,7 +7,11 @@ import {
 } from '../cache/data-publication';
 import { getDb } from '../db/singleton';
 import { createSeasonRepository, type FplSeasonRecord } from '../repositories/seasons';
-import { schedulerObligationStatus } from '../repositories/scheduler-obligations';
+import {
+  schedulerObligationStatus,
+  schedulerOrphanState,
+} from '../repositories/scheduler-obligations';
+import { allQueueNames } from '../queues/names';
 import { createSyncOperationsRepository } from '../repositories/sync-operations';
 import {
   isRuntimeHeartbeatHealthy,
@@ -30,6 +34,7 @@ import {
 } from './jobs-status.service';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION } from '../domain/live-final-retention-policy';
+import { readQueueHealthSnapshot } from './queue-governance.service';
 
 export const JOBS_STATUS_SECTIONS = [
   'myFplIntegrity',
@@ -127,6 +132,44 @@ async function readRuntimeControlStatus(): Promise<
         heartbeat: heartbeats[index] ?? null,
       },
     ]),
+  );
+}
+
+async function readQueuePauseStatus(): Promise<readonly Record<string, unknown>[]> {
+  return Promise.all(
+    allQueueNames.map(async (name) => {
+      // The queue monitor already owns the live BullMQ fan-out and publishes
+      // a short-lived snapshot. The frequent control endpoint reads that one
+      // bounded Redis record instead of opening one Queue connection per lane.
+      const snapshot = await readQueueHealthSnapshot(name);
+      if (
+        !snapshot ||
+        typeof snapshot.consumerPaused !== 'boolean' ||
+        !Number.isSafeInteger(snapshot.pausedCount) ||
+        snapshot.pausedCount < 0 ||
+        !['NONE', 'DEPLOYMENT', 'ACQUIRING', 'OPERATOR', 'RELEASING'].includes(
+          snapshot.pauseOwnerState,
+        ) ||
+        !Number.isFinite(Date.parse(snapshot.observedAt))
+      ) {
+        return {
+          queueName: name,
+          consumerPaused: null,
+          pausedCount: null,
+          pauseOwnerState: 'UNAVAILABLE',
+          observedAt: null,
+          unavailable: true,
+        };
+      }
+      return {
+        queueName: name,
+        consumerPaused: snapshot.consumerPaused,
+        pausedCount: snapshot.pausedCount,
+        pauseOwnerState: snapshot.pauseOwnerState,
+        observedAt: snapshot.observedAt,
+        unavailable: false,
+      };
+    }),
   );
 }
 
@@ -239,10 +282,12 @@ export async function getJobsControlStatus(
   section?: JobsStatusSection,
   watchEntryId?: number,
 ): Promise<Record<string, unknown>> {
-  const [databaseState, runtime, schedulerProgress] = await Promise.all([
+  const [databaseState, runtime, schedulerProgress, queuePause, orphanState] = await Promise.all([
     readControlDatabaseState(),
     readRuntimeControlStatus(),
     readSchedulerProgress(),
+    readQueuePauseStatus(),
+    schedulerOrphanState(),
   ]);
   const publicationConsistency = await readPublicationIdentityParity(databaseState);
   const base: Record<string, unknown> = {
@@ -257,6 +302,8 @@ export async function getJobsControlStatus(
       healthy: schedulerProgress ? isSchedulerProgressHealthy(schedulerProgress) : false,
       value: schedulerProgress,
     },
+    queuePause,
+    obligations: orphanState,
   };
 
   switch (section) {

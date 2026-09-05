@@ -9,6 +9,8 @@ import {
   resolveLivePicksProbeBackoffResult,
   resolveLivePicksRefreshFanout,
   resolveLiveLifecycleDelay,
+  shouldMarkLivePicksFreshnessNotApplicable,
+  shouldMarkLivePicksFreshnessNoSourceWork,
   shouldPersistLiveLifecycleStatus,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
@@ -16,6 +18,37 @@ import {
 const quote = String.fromCharCode(39);
 
 describe('live lifecycle decisions', () => {
+  test('retires only a completed empty Live Picks cohort as not applicable', () => {
+    expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, true)).toBe(true);
+    expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, false)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNotApplicable(1, 0, true)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNotApplicable(0, 1, true)).toBe(false);
+
+    const source = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    expect(source).toContain('retireLivePicksEmptyCohortFreshnessWindow({');
+    expect(source).toContain(
+      'complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length',
+    );
+    const persistence = source.slice(
+      source.indexOf('export async function persistLivePicksDurableFreshnessEvidence'),
+      source.indexOf('function isStablePicksResponse'),
+    );
+    expect(persistence).toContain('LOCK TABLE ${entriesInCompetition} IN SHARE MODE');
+    expect(persistence.indexOf('LOCK TABLE')).toBeLessThan(
+      persistence.indexOf('readLivePicksDurableFreshnessEvidence'),
+    );
+    expect(persistence.indexOf('readLivePicksDurableFreshnessEvidence')).toBeLessThan(
+      persistence.indexOf('recordFreshnessObservation'),
+    );
+  });
+
+  test('retires a complete immutable cohort only when the sweep performed no source work', () => {
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 12, true, false)).toBe(true);
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 12, true, true)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 11, true, false)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 12, false, false)).toBe(false);
+  });
+
   test('settles only fenced backoff roots and retries unfenced repairs', () => {
     expect(
       resolveLivePicksProbeBackoffResult(true, {

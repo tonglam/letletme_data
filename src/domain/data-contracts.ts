@@ -48,6 +48,8 @@ export type DataContract = Readonly<{
   executionBudgetMs: number;
   /** Evidence writer currently attached to this contract's producer. */
   freshnessEvidence?: 'publication' | 'checkpoint' | 'none';
+  /** A successful window must contain a PostgreSQL publication at or after eligibility. */
+  freshnessPublicationMustFollowEligibility?: boolean;
   /**
    * Scheduler definitions that own an SLO window for this contract.  A
    * contract can cover more jobs than its user-visible checkpoint (for
@@ -390,19 +392,25 @@ export const dataContractRegistry = [
     contractKey: 'public-league-trends',
     dataset: 'competition:tournament-trends',
     lifecycleStages: ['active', 'review', 'finished', 'idle'],
-    eligibility: 'mechanical migration only',
+    eligibility: 'enabled public catalog cohorts with current-event READY publications',
     queueLane: dataRepairQueueName,
     schedulerJobs: ['tournament-trends-repair'],
     dispatchWithinMs: 60 * 60_000,
     executionBudgetMs: 60 * 60_000,
-    integrity: 'excluded from this acceptance cycle',
-    publicationEvidence: ['internal repair checkpoint'],
-    consumerEvidence: {},
+    freshnessEvidence: 'checkpoint',
+    freshnessPublicationMustFollowEligibility: true,
+    freshnessJobs: ['tournament-trends-repair'],
+    integrity:
+      'both configured public cohorts have positive complete snapshots and stable revision',
+    publicationEvidence: [
+      'public catalog revision',
+      'active event publication',
+      'snapshot checksum',
+    ],
+    consumerEvidence: publicConsumers('trendCohorts/trendCohortSnapshot', 'Public Trends'),
     retry: { maxGenerations: 3, policy: 'bounded repair' },
     compensator: 'repair lane reconcile',
-    visibility: 'excluded',
-    visibilityReason:
-      'Explicitly excluded from this acceptance cycle; retained only for mechanical repair migration.',
+    visibility: 'public',
   },
   {
     contractKey: 'bootstrap-archive',
@@ -506,14 +514,20 @@ export function assertQueueRuntimeCatalog(): void {
   }
 }
 
-const schedulerJobSet: Set<string> = new Set(
-  dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
-);
-
 /** Contract jobs deliberately triggered by an API/event path rather than the
  * 30-second scheduler. They still need a lane, retry and consumer contract,
  * but must not be mistaken for an omitted scheduler definition. */
 export const MANUAL_ONLY_CONTRACT_JOBS = ['entry-onboarding'] as const;
+
+const manualOnlyContractJobSet = new Set<string>(MANUAL_ONLY_CONTRACT_JOBS);
+const schedulerJobSet: Set<string> = new Set(
+  dataContractRegistry.flatMap((contract) => contract.schedulerJobs),
+);
+
+/** Jobs with an actual scheduler definition, excluding API/event-only work. */
+export function registeredSchedulerJobNames(): readonly string[] {
+  return [...schedulerJobSet].filter((jobName) => !manualOnlyContractJobSet.has(jobName)).sort();
+}
 
 export function contractForSchedulerJob(jobName: string): DataContract | undefined {
   return dataContractRegistry.find((contract) =>

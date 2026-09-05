@@ -176,6 +176,8 @@ describe('tournament setup transaction recovery', () => {
       expect(publication).toMatchObject({
         tournamentId: SUCCESS_TOURNAMENT_ID,
         eventId: 1,
+        publicationState: 'COLLECTING',
+        isActive: false,
         ownershipState: 'NOT_READY',
         transfersState: 'NOT_READY',
         rows: 0,

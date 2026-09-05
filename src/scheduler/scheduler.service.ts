@@ -229,6 +229,8 @@ async function recordFreshnessWindowForPlan(
         getConfig().FRESHNESS_CONSUMER_PROBES_ENABLED && contractHasConsumerEvidence(contract),
       redisEvidenceRequired:
         contract.freshnessEvidence === 'publication' || Boolean(contract.consumerEvidence.redis),
+      freshnessPublicationMustFollowEligibility:
+        contract.freshnessPublicationMustFollowEligibility === true,
     },
   }).catch((error) => {
     logError('Freshness window reservation evidence failed', error, {
