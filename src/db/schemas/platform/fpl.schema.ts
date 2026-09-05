@@ -511,11 +511,11 @@ export const playerGameweekStatsInFpl = fpl.table(
     inDreamTeam: boolean('in_dream_team'),
     totalPoints: integer('total_points').default(0).notNull(),
     defensiveContribution: integer('defensive_contribution').default(0).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     publicationId: text('publication_id'),
     publicationGeneration: bigint('publication_generation', { mode: 'number' }),
     publicationEventLiveSha256: text('publication_event_live_sha256'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
     index('player_gameweek_stats_player_idx').using(

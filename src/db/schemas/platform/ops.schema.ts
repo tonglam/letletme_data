@@ -576,9 +576,6 @@ export const queueHealthWindowsInOps = ops.table(
     delayed: integer().default(0).notNull(),
     prioritized: integer().default(0).notNull(),
     waitingChildren: integer('waiting_children').default(0).notNull(),
-    consumerPaused: boolean('consumer_paused').default(false).notNull(),
-    pausedCount: integer('paused_count').default(0).notNull(),
-    pauseOwnerState: text('pause_owner_state').default('NONE').notNull(),
     failed: integer().default(0).notNull(),
     completed: integer().default(0).notNull(),
     runnable: integer().default(0).notNull(),
@@ -606,6 +603,9 @@ export const queueHealthWindowsInOps = ops.table(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .default(sql`clock_timestamp()`)
       .notNull(),
+    consumerPaused: boolean('consumer_paused').default(false).notNull(),
+    pausedCount: integer('paused_count').default(0).notNull(),
+    pauseOwnerState: text('pause_owner_state').default('NONE').notNull(),
   },
   (table) => [
     primaryKey({
