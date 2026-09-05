@@ -1,6 +1,7 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { eventRepository } from '../repositories/events';
 import { seasonRepository } from '../repositories/seasons';
 import { publishTournamentTrendScopes } from '../services/tournament-trends-publication.service';
@@ -61,17 +62,54 @@ async function settleTrendsFreshnessNotApplicable(
   return { freshnessEvidenceRecorded: true } as const;
 }
 
-export async function repairTournamentTrendScopes(input: { freshnessWindowId?: number } = {}) {
-  const season = await seasonRepository.findCurrent();
+export function resolveTournamentTrendRepairEventId(
+  scopedEventId: number | null | undefined,
+  currentEventId: number | null,
+): number | null {
+  if (scopedEventId === null) {
+    if (currentEventId !== null) {
+      throw new Error(
+        `Tournament Trends no-current-event scope changed to event ${currentEventId}`,
+      );
+    }
+    return null;
+  }
+  const eventId = scopedEventId ?? currentEventId;
+  if (eventId === null) return null;
+  if (!Number.isSafeInteger(eventId) || eventId < 1 || eventId > 38) {
+    throw new Error(`Tournament Trends event scope is invalid: ${eventId}`);
+  }
+  return eventId;
+}
+
+export async function repairTournamentTrendScopes(
+  input: {
+    freshnessWindowId?: number;
+    /** Explicit job scope; omitted only by the legacy in-process cron. */
+    scope?: Readonly<{ season: FplSeasonRef; eventId: number | null }>;
+  } = {},
+) {
+  const season = input.scope?.season ?? (await seasonRepository.findCurrent());
   const currentEvent = await eventRepository.findCurrent(season);
-  if (!currentEvent || currentEvent.id < 1 || currentEvent.id > 38) {
+  const targetEventId = resolveTournamentTrendRepairEventId(
+    input.scope?.eventId,
+    currentEvent?.id ?? null,
+  );
+  if (targetEventId === null) {
     return settleTrendsFreshnessNotApplicable(
       input.freshnessWindowId,
       'PUBLIC_TRENDS_NO_CURRENT_EVENT',
     );
   }
+  const targetEvent =
+    currentEvent?.id === targetEventId
+      ? currentEvent
+      : await eventRepository.findById(season, targetEventId);
+  if (!targetEvent) {
+    throw new Error(`Tournament Trends event ${targetEventId} does not exist in the job season`);
+  }
   const [before, repairTournamentIds] = await Promise.all([
-    readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id),
+    readPublicTrendFreshnessEvidence(season.seasonCode, targetEvent.id),
     findPublicTrendRepairTournamentIds(season.seasonCode),
   ]);
   if (repairTournamentIds.length === 0) {
@@ -83,12 +121,12 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
       ...(await settleTrendsFreshnessNotApplicable(
         input.freshnessWindowId,
         'PUBLIC_TRENDS_NO_ELIGIBLE_COHORTS',
-        currentEvent.id,
+        targetEvent.id,
       )),
     };
   }
-  const result = await publishTournamentTrendScopes(season, currentEvent.id, repairTournamentIds);
-  const after = await readPublicTrendFreshnessEvidence(season.seasonCode, currentEvent.id);
+  const result = await publishTournamentTrendScopes(season, targetEvent.id, repairTournamentIds);
+  const after = await readPublicTrendFreshnessEvidence(season.seasonCode, targetEvent.id);
   const prepublication = {
     prepublishedCohortCount: result.succeeded,
     prepublicationFailedCount: result.failed,
@@ -99,7 +137,7 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
       ...(await settleTrendsFreshnessNotApplicable(
         input.freshnessWindowId,
         'PUBLIC_TRENDS_NO_ENABLED_COHORTS',
-        currentEvent.id,
+        targetEvent.id,
         prepublication,
       )),
       ...prepublication,
@@ -121,7 +159,7 @@ export async function repairTournamentTrendScopes(input: { freshnessWindowId?: n
     if (enabledTargetsReused) {
       const recorded = await retirePublicTrendsReusedFreshnessWindow({
         windowId: input.freshnessWindowId,
-        eventId: currentEvent.id,
+        eventId: targetEvent.id,
         expectedCohortCount: after.expectedCohortCount,
         observedCohortCount: after.observedCohortCount,
         enabledTournamentIds,

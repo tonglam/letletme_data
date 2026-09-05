@@ -184,6 +184,7 @@ async function enqueueFreshnessCaseRepair(input: {
       await enqueueTournamentTrendsRepair(season, 'reconcile', {
         jobId,
         freshnessWindowId: window.windowId,
+        eventId,
       });
       return;
     case 'player-stats':

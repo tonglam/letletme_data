@@ -67,6 +67,7 @@ import { resolveJobFreshAfter } from '../utils/job-freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { createQueueRunAttemptId } from '../utils/queue-run-id';
+import { seasonRefFromJobData } from '../domain/season-scoped-job';
 import type { WorkerRuntime } from './worker-runtime';
 import {
   markFreshnessWindowNotApplicable,
@@ -301,8 +302,13 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           });
         case MAINTENANCE_JOBS.PLAYER_SEASON_SUMMARY:
           return repairPlayerSeasonSummaries();
-        case MAINTENANCE_JOBS.TOURNAMENT_TRENDS:
-          return repairTournamentTrendScopes({ freshnessWindowId: job.data.freshnessWindowId });
+        case MAINTENANCE_JOBS.TOURNAMENT_TRENDS: {
+          const season = seasonRefFromJobData(job.data);
+          return repairTournamentTrendScopes({
+            freshnessWindowId: job.data.freshnessWindowId,
+            scope: { season, eventId: job.data.eventId ?? null },
+          });
+        }
         case MAINTENANCE_JOBS.BUG_REPORT_CLEANUP: {
           const result = await runBugReportCleanup();
           if (result.retried > 0) {

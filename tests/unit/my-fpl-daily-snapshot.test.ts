@@ -4,7 +4,10 @@ import { describe, expect, test } from 'bun:test';
 
 import { parseArguments as parsePlayerAuthorityArguments } from '../../scripts/rebind-player-gameweek-authority';
 import { parseArgs as parseRetirementArguments } from '../../scripts/retire-player-stats-active-obligations';
-import { isCompleteReusedTournamentTrendRepair } from '../../src/jobs/tournament-trends-repair.jobs';
+import {
+  isCompleteReusedTournamentTrendRepair,
+  resolveTournamentTrendRepairEventId,
+} from '../../src/jobs/tournament-trends-repair.jobs';
 
 import {
   isAuthoritativeUnrankedDeletedEntryResult,
@@ -95,6 +98,7 @@ describe('My FPL daily snapshot publication contract', () => {
     );
     expect(trendsDefinition).toContain('freshnessWindowId');
     expect(trendsDefinition).toContain('enqueueTournamentTrendsRepair');
+    expect(trendsDefinition).toContain('eventId: plan.eventId');
     expect(trendsRepairJob).toContain('findPublicTrendRepairTournamentIds');
     expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_CURRENT_EVENT');
     expect(trendsRepairJob).toContain('PUBLIC_TRENDS_NO_ENABLED_COHORTS');
@@ -102,6 +106,9 @@ describe('My FPL daily snapshot publication contract', () => {
       'case ' + singleQuote + 'public-league-trends' + singleQuote + ':',
     );
     expect(governanceWorker).toContain('enqueueTournamentTrendsRepair');
+    expect(governanceWorker).toContain('eventId,');
+    expect(worker).toContain('const season = seasonRefFromJobData(job.data)');
+    expect(worker).toContain('scope: { season, eventId: job.data.eventId ?? null }');
     expect(governanceService).toContain('PUBLIC_TRENDS_NO_SOURCE_WORK');
     expect(trendsCatalog).toContain('latest.source_watermark');
     expect(trendsCatalog).toContain('sourceCheckedAt: sourceWatermark');
@@ -157,6 +164,16 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(
       isCompleteReusedTournamentTrendRepair({ ...completeReused, observedCohortCount: 1 }),
     ).toBe(false);
+  });
+
+  test('keeps Public Trends repairs on the event-scoped window across rollover', () => {
+    expect(resolveTournamentTrendRepairEventId(2, 3)).toBe(2);
+    expect(resolveTournamentTrendRepairEventId(undefined, 3)).toBe(3);
+    expect(resolveTournamentTrendRepairEventId(null, null)).toBeNull();
+    expect(() => resolveTournamentTrendRepairEventId(null, 3)).toThrow(
+      'no-current-event scope changed to event 3',
+    );
+    expect(() => resolveTournamentTrendRepairEventId(39, 3)).toThrow('event scope is invalid');
   });
 
   test('binds live freshness and cleanup tools to exact bounded evidence', () => {
