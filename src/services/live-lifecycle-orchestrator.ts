@@ -46,6 +46,7 @@ import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 import { normalizeMatchLifecycleState } from './live-match-v3';
 import {
+  markLivePicksNoSourceWorkFreshnessWindowNotApplicable,
   recordFreshnessObservation,
   retireLivePicksEmptyCohortFreshnessWindow,
 } from './data-governance.service';
@@ -655,11 +656,23 @@ export function shouldMarkLivePicksFreshnessNotApplicable(
   return scanComplete && expectedCount === 0 && observedCount === 0;
 }
 
+export function shouldMarkLivePicksFreshnessNoSourceWork(
+  expectedCount: number,
+  observedCount: number,
+  scanComplete: boolean,
+  sourceWorkPerformed: boolean,
+): boolean {
+  return (
+    scanComplete && !sourceWorkPerformed && expectedCount > 0 && observedCount === expectedCount
+  );
+}
+
 export async function persistLivePicksDurableFreshnessEvidence(
   season: FplSeasonRef,
   eventId: number,
   freshnessWindowId: number,
   scanComplete: boolean,
+  options: Readonly<{ sourceWorkPerformed?: boolean }> = {},
 ) {
   const db = await getDb();
   const result = await db.transaction(async (tx) => {
@@ -683,6 +696,24 @@ export async function persistLivePicksDurableFreshnessEvidence(
         db: tx,
       });
       if (!recorded) throw new Error('Live Picks empty-cohort freshness window is unavailable');
+      return { evidence, terminalIncomplete: false } as const;
+    }
+    if (
+      shouldMarkLivePicksFreshnessNoSourceWork(
+        evidence.expectedCount,
+        evidence.observedCount,
+        scanComplete,
+        options.sourceWorkPerformed !== false,
+      )
+    ) {
+      const recorded = await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+        windowId: freshnessWindowId,
+        eventId,
+        expectedCount: evidence.expectedCount,
+        observedCount: evidence.observedCount,
+        db: tx,
+      });
+      if (!recorded) throw new Error('Live Picks no-source-work freshness window is unavailable');
       return { evidence, terminalIncomplete: false } as const;
     }
     const status = await recordFreshnessObservation({
@@ -830,7 +861,10 @@ export async function runPicksProbeAndSync(
     canarySucceeded: sharedState.canarySucceeded,
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
   };
-  const recordDurableFreshness = async (scanComplete: boolean): Promise<boolean> => {
+  const recordDurableFreshness = async (
+    scanComplete: boolean,
+    sourceWorkPerformed = true,
+  ): Promise<boolean> => {
     const freshnessWindowId = obligation.freshnessWindowId;
     if (
       typeof freshnessWindowId !== 'number' ||
@@ -845,6 +879,7 @@ export async function runPicksProbeAndSync(
         eventId,
         freshnessWindowId,
         scanComplete,
+        { sourceWorkPerformed },
       );
       return true;
     } catch (error) {
@@ -901,7 +936,7 @@ export async function runPicksProbeAndSync(
       failedCanaryEntryIds: [],
     });
     const scanComplete = pendingCheckpoints.length === 0;
-    const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete);
+    const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete, false);
     return {
       canaryCount: 0,
       synced: 0,

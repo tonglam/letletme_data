@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   candidatesWithMinimumMatchObservations,
   fixtureOutcomeEvidenceAligns,
+  hasUnderstatFixtureParticipation,
   isAutoMappingProtectedStatus,
   providerTeamConfirmedForSeason,
   resolveUniqueProviderAssignments,
@@ -138,6 +139,22 @@ describe('provider roster matcher', () => {
     expect(fixtureOutcomeEvidenceAligns(fpl, understat, 3)).toBe(true);
     expect(fixtureOutcomeEvidenceAligns(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
     expect(fixtureOutcomeEvidenceAligns(fpl, understat, 4)).toBe(false);
+  });
+
+  test('ignores only a true zero-participation Understat bench row', () => {
+    const unused = {
+      minutes: 0,
+      started: false,
+      goals: 0,
+      assists: 0,
+      ownGoals: 0,
+      yellowCards: 0,
+      redCards: 0,
+    };
+    expect(hasUnderstatFixtureParticipation(unused)).toBe(false);
+    expect(hasUnderstatFixtureParticipation({ ...unused, minutes: 1 })).toBe(true);
+    expect(hasUnderstatFixtureParticipation({ ...unused, yellowCards: 1 })).toBe(true);
+    expect(hasUnderstatFixtureParticipation({ ...unused, started: true })).toBe(true);
   });
 
   test('requires two independent verified-match observations before auto verification', () => {

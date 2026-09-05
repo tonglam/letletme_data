@@ -8,6 +8,7 @@ import { getDbClient } from '../../src/db/singleton';
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import {
   listGovernanceCases,
+  markLivePicksNoSourceWorkFreshnessWindowNotApplicable,
   markFreshnessWindowNotApplicable,
   openGovernanceCase,
   retireLivePicksEmptyCohortFreshnessWindow,
@@ -147,6 +148,63 @@ describe('data governance case CAS', () => {
         AND period_key = 'freeze-v1'
     `;
     expect(row).toEqual({ consumer: false, redis: true, publication: false });
+  });
+
+  test('retires a complete no-source-work Live Picks window without stale timestamps', async () => {
+    const windowId = await upsertFreshnessWindow({
+      sloKey: WINDOW_SLO_KEY,
+      contractKey: 'live-picks',
+      scopeKey: WINDOW_SCOPE_KEY,
+      periodKey: 'no-source-work-v1',
+      eventId: 3,
+      eligibleAt: new Date('2026-09-05T00:00:00.000Z'),
+      dueAt: new Date('2026-09-05T00:10:30.000Z'),
+      evidence: { consumerEvidenceRequired: false, redisEvidenceRequired: false },
+    });
+
+    expect(
+      await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+        windowId,
+        eventId: 3,
+        expectedCount: 12,
+        observedCount: 11,
+      }),
+    ).toBe(false);
+    expect(
+      await markLivePicksNoSourceWorkFreshnessWindowNotApplicable({
+        windowId,
+        eventId: 3,
+        expectedCount: 12,
+        observedCount: 12,
+      }),
+    ).toBe(true);
+
+    const sql = await getDbClient();
+    const [window] = await sql<
+      Array<{
+        status: string;
+        completenessStatus: string;
+        reason: string | null;
+        expectedCount: number;
+        observedCount: number;
+      }>
+    >`
+      SELECT
+        status,
+        completeness_status AS "completenessStatus",
+        evidence->>'notApplicableReason' AS reason,
+        (evidence->>'expectedCount')::integer AS "expectedCount",
+        (evidence->>'observedCount')::integer AS "observedCount"
+      FROM ops.freshness_slo_windows
+      WHERE window_id = ${windowId}
+    `;
+    expect(window).toEqual({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
+      reason: 'LIVE_PICKS_NO_SOURCE_WORK',
+      expectedCount: 12,
+      observedCount: 12,
+    });
   });
 
   test('atomically retires a breached empty cohort and dismisses its repair case', async () => {

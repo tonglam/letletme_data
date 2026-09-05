@@ -888,6 +888,45 @@ export async function retireLivePicksEmptyCohortFreshnessWindow(input: {
 }
 
 /**
+ * A recurring Live Picks sweep with a complete durable cohort can be a true
+ * producer no-op: immutable same-event inputs need neither another FPL request
+ * nor another publication. Retire only that exact still-pending window instead
+ * of attaching historical source timestamps to a newly eligible window.
+ */
+export async function markLivePicksNoSourceWorkFreshnessWindowNotApplicable(input: {
+  windowId: number;
+  eventId: number;
+  expectedCount: number;
+  observedCount: number;
+  db?: DbOrTransaction;
+}): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(input.eventId) ||
+    input.eventId <= 0 ||
+    !Number.isSafeInteger(input.expectedCount) ||
+    input.expectedCount <= 0 ||
+    input.observedCount !== input.expectedCount
+  ) {
+    return false;
+  }
+  return setFreshnessWindowNotApplicable(
+    {
+      windowId: input.windowId,
+      reasonCode: 'LIVE_PICKS_NO_SOURCE_WORK',
+      evidence: {
+        reason: 'LIVE_PICKS_NO_SOURCE_WORK',
+        eventId: input.eventId,
+        expectedCount: input.expectedCount,
+        observedCount: input.observedCount,
+        scanComplete: true,
+      },
+      db: input.db,
+    },
+    null,
+  );
+}
+
+/**
  * A Redis manifest delivery can settle more than the periodic outbox window
  * that initiated it. Update only event windows for the same snapshot kind and
  * immutable publication so a delayed outbox retry completes the original

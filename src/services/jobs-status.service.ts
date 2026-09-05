@@ -95,18 +95,19 @@ export function resolveQueuePauseProjection(
   snapshot: QueueHealthSnapshot,
   bullPausedCount: number,
 ): Readonly<{ consumerPaused: boolean; pausedCount: number; pauseOwnerState: string }> {
+  const directPausedCount =
+    Number.isSafeInteger(bullPausedCount) && bullPausedCount >= 0 ? bullPausedCount : 0;
   if (snapshot) {
+    const pausedCount = Math.max(snapshot.pausedCount, directPausedCount);
     return {
-      consumerPaused: snapshot.consumerPaused,
-      pausedCount: snapshot.pausedCount,
+      consumerPaused: snapshot.consumerPaused || pausedCount > 0,
+      pausedCount,
       pauseOwnerState: snapshot.pauseOwnerState,
     };
   }
-  const pausedCount =
-    Number.isSafeInteger(bullPausedCount) && bullPausedCount >= 0 ? bullPausedCount : 0;
   return {
-    consumerPaused: pausedCount > 0,
-    pausedCount,
+    consumerPaused: directPausedCount > 0,
+    pausedCount: directPausedCount,
     pauseOwnerState: 'UNAVAILABLE',
   };
 }

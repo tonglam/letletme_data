@@ -49,6 +49,29 @@ describe('queue pause status fallback', () => {
       pauseOwnerState: 'UNAVAILABLE',
     });
   });
+
+  test('merges a newer direct Bull pause count with cached monitor telemetry', () => {
+    const snapshot = {
+      consumerPaused: false,
+      pausedCount: 0,
+      pauseOwnerState: 'NONE',
+    };
+    expect(resolveQueuePauseProjection(snapshot as never, 2)).toEqual({
+      consumerPaused: true,
+      pausedCount: 2,
+      pauseOwnerState: 'NONE',
+    });
+    expect(
+      resolveQueuePauseProjection(
+        { ...snapshot, consumerPaused: true, pausedCount: 3, pauseOwnerState: 'OPERATOR' } as never,
+        1,
+      ),
+    ).toEqual({
+      consumerPaused: true,
+      pausedCount: 3,
+      pauseOwnerState: 'OPERATOR',
+    });
+  });
 });
 
 describe('selectCanonicalPriceChangeContext', () => {

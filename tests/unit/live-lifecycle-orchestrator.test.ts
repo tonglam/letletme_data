@@ -10,6 +10,7 @@ import {
   resolveLivePicksRefreshFanout,
   resolveLiveLifecycleDelay,
   shouldMarkLivePicksFreshnessNotApplicable,
+  shouldMarkLivePicksFreshnessNoSourceWork,
   shouldPersistLiveLifecycleStatus,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
@@ -39,6 +40,13 @@ describe('live lifecycle decisions', () => {
     expect(persistence.indexOf('readLivePicksDurableFreshnessEvidence')).toBeLessThan(
       persistence.indexOf('recordFreshnessObservation'),
     );
+  });
+
+  test('retires a complete immutable cohort only when the sweep performed no source work', () => {
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 12, true, false)).toBe(true);
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 12, true, true)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 11, true, false)).toBe(false);
+    expect(shouldMarkLivePicksFreshnessNoSourceWork(12, 12, false, false)).toBe(false);
   });
 
   test('settles only fenced backoff roots and retries unfenced repairs', () => {

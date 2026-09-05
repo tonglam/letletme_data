@@ -68,6 +68,24 @@ type UnderstatFixtureOutcomeEvidence = Pick<
   'teamId' | 'minutes' | 'started' | 'goals' | 'ownGoals' | 'yellowCards' | 'redCards'
 >;
 
+/** Ignore a completed-match roster row only when it proves no participation. */
+export function hasUnderstatFixtureParticipation(
+  row: Pick<
+    UnderstatRosterEvidence,
+    'minutes' | 'started' | 'goals' | 'assists' | 'ownGoals' | 'yellowCards' | 'redCards'
+  >,
+): boolean {
+  return (
+    row.minutes > 0 ||
+    row.started ||
+    row.goals !== 0 ||
+    row.assists !== 0 ||
+    row.ownGoals !== 0 ||
+    row.yellowCards !== 0 ||
+    row.redCards !== 0
+  );
+}
+
 function fplName(row: {
   firstName: string | null;
   secondName: string | null;
@@ -404,13 +422,14 @@ export async function manualVerifyProviderPlayer(input: {
   if (!Number.isInteger(understatPlayer.timeMinutes) || understatPlayer.timeMinutes < 0) {
     throw new Error('Understat player minutes evidence is invalid');
   }
-  if (understatEvidence.length === 0) {
+  const participatingUnderstatEvidence = understatEvidence.filter(hasUnderstatFixtureParticipation);
+  if (participatingUnderstatEvidence.length === 0) {
     throw new Error('No completed Understat match evidence exists for the selected player');
   }
   if (
     !understatMinutesMatchEvidence(
       understatPlayer.timeMinutes,
-      understatEvidence.map((row) => row.minutes),
+      participatingUnderstatEvidence.map((row) => row.minutes),
     )
   ) {
     throw new Error('Understat player minutes do not match fixture evidence');
@@ -452,7 +471,7 @@ export async function manualVerifyProviderPlayer(input: {
       .filter((row) => row.playerCode === input.fplPlayerCode)
       .map((row) => [row.fixtureCode, row]),
   );
-  const evidence = understatEvidence.map((row) => {
+  const evidence = participatingUnderstatEvidence.map((row) => {
     const fixtureCode = verifiedMatchByUnderstatId.get(row.matchId);
     const fplRow = fixtureCode === undefined ? undefined : fplRowsByFixture.get(fixtureCode);
     const mappedTeamCode = verifiedTeamMap.get(row.teamId);
