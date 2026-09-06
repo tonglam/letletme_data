@@ -1861,8 +1861,7 @@ export async function appendSchedulerObligationRecovery(input: {
   const db = input.db ?? (await getDb());
   const updated = await db.execute<{ obligation_id: string }>(sql`
     UPDATE ops.scheduler_obligations AS obligation
-    SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || ${recoveryEvidence}::jsonb,
-        updated_at = clock_timestamp()
+    SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || ${recoveryEvidence}::jsonb
     WHERE obligation.obligation_id = ${input.obligationId}::uuid
       AND obligation.job_name = ${input.jobName}
       AND obligation.scope_key = ${input.scopeKey}

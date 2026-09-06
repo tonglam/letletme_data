@@ -227,7 +227,7 @@ describe('scheduler recovery evidence', () => {
         2,
         2,
         'newer concurrent failure',
-        jsonb_build_object('scheduledDueAtMs', ${Date.parse('2026-09-01T02:00:00.000Z')}::bigint)
+        jsonb_build_object('scheduledDueAtMs', ${latestScheduledDueAtMs}::bigint)
       )
     `;
 
