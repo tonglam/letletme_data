@@ -726,7 +726,7 @@ run_deploy_probe_command() {
     queue)
       APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false \
         -e "DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES=${DEPLOY_PROBE_ALLOW_PAUSED_QUEUES:-}" api \
-        bun scripts/assert-queue-quiescence.ts --redis-only --scoped
+        bun scripts/assert-queue-quiescence.ts --scoped
       ;;
     consumer)
       APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false \

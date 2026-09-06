@@ -104,9 +104,12 @@ DEPLOY_RUNNER_PROBE_SUCCEEDED=false
 DEPLOY_RUNNER_PREVIOUS_TARGET=''
 DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_OLD_MEDIA_PRESENT=false
+DEPLOY_OLD_MEDIA_ENABLED=false
 DEPLOY_SERVICES_STOPPED=false
 DEPLOY_CONTENT_WORKER_FENCED=false
+DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false
 DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
+DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -168,6 +171,175 @@ compose() {
 # startup state machine as the GitHub workflow.
 source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 
+container_boolean_env() {
+  local container_id=$1
+  local key=$2
+  local fallback=$3
+  local raw normalized
+  if ! raw=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    "$container_id" 2>/dev/null | awk -F= -v key="$key" '
+      $1 == key {
+        sub("^[^=]*=", "", $0)
+        value = $0
+      }
+      END {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        print value
+      }
+    '); then
+    return 1
+  fi
+  normalized=$(printf '%s' "${raw:-$fallback}" | tr '[:upper:]' '[:lower:]')
+  case "$normalized" in
+    true|1|yes|on) printf 'true' ;;
+    false|0|no|off) printf 'false' ;;
+    *) return 1 ;;
+  esac
+}
+
+source_media_deploy_fence_is_exact() {
+  local container_id=$1
+  local service oneoff
+  service=$(docker inspect \
+    --format '{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$container_id" 2>/dev/null || true)
+  oneoff=$(docker inspect \
+    --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' \
+    "$container_id" 2>/dev/null || true)
+  [[ "$service" = backup && "$oneoff" = True ]]
+}
+
+release_source_media_deploy_fence() {
+  local container_id=${DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER:-}
+  if [[ -z "$container_id" ]]; then return 0; fi
+  if ! docker inspect "$container_id" >/dev/null 2>&1; then
+    DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+    return 0
+  fi
+  if ! source_media_deploy_fence_is_exact "$container_id"; then
+    if ! docker inspect "$container_id" >/dev/null 2>&1; then
+      DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+      return 0
+    fi
+    log_error "Refusing to remove an unverified source-media deployment fence container"
+    return 1
+  fi
+  if ! docker rm --force "$container_id" >/dev/null; then
+    if ! docker inspect "$container_id" >/dev/null 2>&1; then
+      DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+      return 0
+    fi
+    log_error "Could not remove the exact source-media deployment fence container"
+    return 1
+  fi
+  if docker inspect "$container_id" >/dev/null 2>&1; then
+    log_error "Source-media deployment fence container still exists after removal"
+    return 1
+  fi
+  DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+}
+
+acquire_source_media_deploy_fence() {
+  local create_output container_id service_state fence_logs
+  local ready_deadline=$(( $(date +%s) + 310 ))
+  if ! create_output=$(run_deploy_command_with_pause_renewal \
+    compose_direct --profile migration run --rm -T --interactive=false -d --no-deps \
+    --entrypoint bash backup \
+    /app/scripts/hold-source-media-deploy-fence.sh); then
+    log_error "Could not start the source-media deployment fence container"
+    return 1
+  fi
+  container_id=$(printf '%s\n' "$create_output" | tail -n 1 | tr -d '\r')
+  if ! [[ "$container_id" =~ ^[0-9a-f]{12,64}$ ]] || \
+    ! source_media_deploy_fence_is_exact "$container_id"; then
+    log_error "Source-media deployment fence returned an invalid container identity"
+    return 1
+  fi
+  DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=$container_id
+
+  while (( $(date +%s) < ready_deadline )); do
+    fence_logs=$(docker logs "$container_id" 2>&1 || true)
+    if grep -Fq 'SOURCE_MEDIA_DEPLOY_FENCE_READY' <<<"$fence_logs"; then
+      service_state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+      if [[ "$service_state" = running ]]; then
+        log_info "Source-media deployment claim fence is active"
+        return 0
+      fi
+      break
+    fi
+    service_state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+    case "$service_state" in
+      created|running) ;;
+      *) break ;;
+    esac
+    if [[ -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}" &&
+      -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then
+      break
+    fi
+    sleep 1
+  done
+
+  log_error "Source-media deployment claim fence did not become ready"
+  release_source_media_deploy_fence || true
+  return 1
+}
+
+# The sourced deployment state machine consumes the tracked stage PID during
+# exit cleanup even though shellcheck cannot follow the dynamic source path.
+# shellcheck disable=SC2034
+stop_media_worker_with_deadline() {
+  local stop_pid stop_group_pid=''
+  local stop_status
+  local stop_deadline=$(( $(date +%s) + 40 ))
+
+  # Keep the Compose stop and all of its descendants inside a host-side
+  # deadline that expires well before the 60-second database fence. Docker's
+  # own `-t` controls the container grace period but does not bound a stalled
+  # daemon or Compose client.
+  if command -v setsid >/dev/null 2>&1; then
+    (
+      trap - EXIT
+      cd "$PROJECT_DIR" || exit 1
+      exec setsid "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" stop -t 30 media-worker
+    ) &
+    stop_pid=$!
+    stop_group_pid=$stop_pid
+  else
+    (
+      trap - EXIT
+      compose_direct stop -t 30 media-worker
+    ) &
+    stop_pid=$!
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=$stop_pid
+
+  while scoped_queue_probe_is_alive "$stop_pid" "$stop_group_pid"; do
+    if [[ -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}" &&
+      -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then
+      terminate_scoped_queue_probe "$stop_pid" "$stop_group_pid" 2 true || true
+      DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+      return 1
+    fi
+    if (( $(date +%s) >= stop_deadline )); then
+      terminate_scoped_queue_probe "$stop_pid" "$stop_group_pid" 2 true || true
+      DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+      return 124
+    fi
+    sleep 0.1
+  done
+  if wait "$stop_pid"; then
+    stop_status=0
+  else
+    stop_status=$?
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+  if [[ -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}" &&
+    -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then
+    return 1
+  fi
+  return "$stop_status"
+}
+
 restore_stopped_services() {
   local restored=false
   if [[ "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
@@ -206,6 +378,7 @@ restore_stopped_services() {
     fi
     DEPLOY_SERVICES_STOPPED=false
     DEPLOY_CONTENT_WORKER_FENCED=false
+    DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false
     DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
   fi
 }
@@ -217,6 +390,7 @@ deploy() {
     trap - EXIT
     set +e
     local controls_restored=true
+    if ! release_source_media_deploy_fence; then status=1; fi
     if [[ "$DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED" = true ||
       -n "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES" ]]; then
       controls_restored=false
@@ -246,6 +420,7 @@ deploy() {
       elif [[ "$DEPLOY_COMMITTED" = false &&
         ( "$DEPLOY_SERVICES_STOPPED" = true ||
           "$DEPLOY_CONTENT_WORKER_FENCED" = true ||
+          "$DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED" = true ||
           "$DEPLOY_SCHEDULER_STOP_ATTEMPTED" = true ) &&
         "$controls_restored" != true ]]; then
         if restore_stopped_services; then controls_restored=true; fi
@@ -303,8 +478,20 @@ deploy() {
       fi
     fi
   fi
-  old_media_container=$(compose ps -aq media-worker 2>/dev/null | head -n 1)
-  if [[ -n "$old_media_container" ]]; then DEPLOY_OLD_MEDIA_PRESENT=true; fi
+  old_media_container=$(compose ps -q media-worker 2>/dev/null | head -n 1)
+  if [[ -n "$old_media_container" ]]; then
+    old_media_state=$(docker inspect --format '{{.State.Status}}' "$old_media_container" 2>/dev/null || true)
+    if [[ "$old_media_state" != running ]]; then
+      log_error "Serving media-worker is not in a stable running state (state=${old_media_state:-unknown})"
+      exit 1
+    fi
+    if ! DEPLOY_OLD_MEDIA_ENABLED=$(container_boolean_env \
+      "$old_media_container" CONTENT_MEDIA_WORKER_ENABLED false); then
+      log_error "Serving media-worker has an invalid CONTENT_MEDIA_WORKER_ENABLED value"
+      exit 1
+    fi
+    DEPLOY_OLD_MEDIA_PRESENT=true
+  fi
   start_stage pull
   if [[ -n "${APP_IMAGE:-}" ]]; then
     export APP_IMAGE
@@ -410,11 +597,6 @@ deploy() {
   DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)
   [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
   log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"
-  log_info "Checking queue quiescence before stopping services"
-  if ! compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
-    log_error "Database work is not quiescent; services were not stopped."
-    exit 1
-  fi
   # Pause every queue consumed by content-worker before accepting the scoped
   # result so delayed and prioritized content jobs cannot become active in the
   # stop race. Keep the combined worker alive while active work (including HTTP
@@ -425,6 +607,10 @@ deploy() {
     "$old_container" "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_REVISION" \
     "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
     DEPLOY_ROLLBACK_ELIGIBLE=true
+  fi
+  if [[ "$DEPLOY_OLD_MEDIA_PRESENT" = true && "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
+    log_error "Previous runtime is not rollback-eligible; media-worker was not stopped."
+    exit 1
   fi
   # The scheduler must stop before the scoped wait; otherwise it can keep
   # claiming/enqueuing work while the gate is waiting for the active set to
@@ -437,9 +623,42 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  # The bounded scoped probe covers both PostgreSQL work and Redis queues. Let
+  # the serving media-worker finish naturally here; the row-lock fence below
+  # closes the otherwise unavoidable gap between this zero count and its stop.
   if ! wait_for_scoped_queue_quiescence 150 2; then
-    log_error "Queue work is not quiescent; services were not stopped."
+    log_error "Database or queue work is not quiescent; services were not stopped."
     exit 1
+  fi
+  # An enabled serving media-worker may run an older image that does not know
+  # the current deployment admission protocol. Once every producer and consumer
+  # is quiescent, lock its non-terminal gate rows before stopping it. The
+  # worker's SKIP LOCKED claim then remains empty, while a zero RUNNING count
+  # proves that shutdown does not abort work or consume an attempt. A disabled
+  # serving worker has no database claim path and needs only the bounded stop.
+  # The helper releases its row locks automatically even if deploy disappears.
+  if [[ "$DEPLOY_OLD_MEDIA_PRESENT" = true ]]; then
+    if [[ "$DEPLOY_OLD_MEDIA_ENABLED" = true ]]; then
+      if ! acquire_source_media_deploy_fence; then
+        log_error "Could not fence source-media claims; media-worker was not stopped."
+        exit 1
+      fi
+    else
+      log_info "Serving media-worker is disabled; no database claim fence is required"
+    fi
+    DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true
+    log_info "Stopping idle media-worker with a bounded host deadline"
+    if ! stop_media_worker_with_deadline; then
+      log_error "Media worker did not stop cleanly; services were not stopped."
+      release_source_media_deploy_fence || true
+      restore_stopped_services
+      exit 1
+    fi
+    if ! release_source_media_deploy_fence; then
+      log_error "Could not release the source-media claim fence after worker shutdown."
+      restore_stopped_services
+      exit 1
+    fi
   fi
   DEPLOY_CONTENT_WORKER_FENCED=true
   log_info "Stopping content-worker after active content work drained"
@@ -464,11 +683,6 @@ deploy() {
   DEPLOY_SERVICES_STOPPED=true
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."
-    restore_stopped_services
-    exit 1
-  fi
-  if ! compose stop -t 45 media-worker; then
-    log_error "Media worker did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi
