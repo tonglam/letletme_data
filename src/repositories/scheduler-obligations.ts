@@ -49,9 +49,47 @@ export type SchedulerObligation = Readonly<{
   evidence: Record<string, unknown>;
 }>;
 
+export type SchedulerObligationRecoveryEvidence = Readonly<{
+  status: 'succeeded';
+  recoveredAt: string;
+  recoveryRevision: string;
+  recoveryActor?: string;
+  recoveryReason?: string;
+}>;
+
 const SUPERSEDED_BY_LATEST_AUTHORITATIVE = 'superseded-by-latest-authoritative';
 const LIVE_PICKS_ACCEPTED_BACKOFF_REASON = 'live-picks-probe-backoff-accepted';
 const LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON = 'LIVE_PICKS_BACKOFF_ACCEPTED';
+const SCHEDULER_RECOVERY_EVIDENCE_KEY = 'schedulerRecovery';
+
+export function schedulerObligationRecoveryFromEvidence(
+  evidence: unknown,
+): SchedulerObligationRecoveryEvidence | null {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return null;
+  const candidate = (evidence as Record<string, unknown>)[SCHEDULER_RECOVERY_EVIDENCE_KEY];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+  const recovery = candidate as Record<string, unknown>;
+  if (
+    recovery.status !== 'succeeded' ||
+    typeof recovery.recoveredAt !== 'string' ||
+    !Number.isFinite(Date.parse(recovery.recoveredAt)) ||
+    typeof recovery.recoveryRevision !== 'string' ||
+    recovery.recoveryRevision.trim() === ''
+  ) {
+    return null;
+  }
+  return {
+    status: 'succeeded',
+    recoveredAt: recovery.recoveredAt,
+    recoveryRevision: recovery.recoveryRevision,
+    ...(typeof recovery.recoveryActor === 'string' && recovery.recoveryActor.trim() !== ''
+      ? { recoveryActor: recovery.recoveryActor }
+      : {}),
+    ...(typeof recovery.recoveryReason === 'string' && recovery.recoveryReason.trim() !== ''
+      ? { recoveryReason: recovery.recoveryReason }
+      : {}),
+  };
+}
 
 // A scheduled job may own one obligation while it scans a bounded batch of
 // entries. The lease is progress evidence for monitoring and explicit
@@ -1598,6 +1636,69 @@ export async function markSchedulerObligationRetrying(input: {
   return updated.length === 1;
 }
 
+/**
+ * Append consumer-visible recovery evidence to the latest failed terminal
+ * obligation without rewriting its historical status or error. Manual,
+ * explicitly authorized FINAL repairs use this path after the publication and
+ * Redis outbox have both completed successfully.
+ */
+export async function appendSchedulerObligationRecovery(input: {
+  jobName: string;
+  scopeKey: string;
+  recoveryRevision: string | number;
+  recoveryActor: string;
+  recoveryReason: string;
+  recoveredAt?: Date;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const recoveryRevision = String(input.recoveryRevision).trim();
+  const recoveryActor = input.recoveryActor.trim();
+  const recoveryReason = input.recoveryReason.trim();
+  if (!input.jobName.trim() || !input.scopeKey.trim()) {
+    throw new Error('Scheduler recovery identity is required');
+  }
+  if (!recoveryRevision || !recoveryActor || !recoveryReason) {
+    throw new Error('Scheduler recovery evidence is incomplete');
+  }
+  const recoveredAt = input.recoveredAt ?? new Date();
+  if (!Number.isFinite(recoveredAt.getTime())) {
+    throw new Error('Scheduler recovery timestamp is invalid');
+  }
+  const recoveryEvidence = JSON.stringify({
+    [SCHEDULER_RECOVERY_EVIDENCE_KEY]: {
+      status: 'succeeded',
+      recoveredAt: recoveredAt.toISOString(),
+      recoveryRevision,
+      recoveryActor,
+      recoveryReason,
+    },
+  });
+  const db = input.db ?? (await getDb());
+  const updated = await db.execute<{ obligation_id: string }>(sql`
+    WITH candidate AS (
+      SELECT obligation_id
+      FROM ops.scheduler_obligations
+      WHERE job_name = ${input.jobName}
+        AND scope_key = ${input.scopeKey}
+        AND status IN ('failed', 'irrecoverable')
+      ORDER BY due_at DESC, updated_at DESC
+      LIMIT 1
+      FOR UPDATE
+    )
+    UPDATE ops.scheduler_obligations AS obligation
+    SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || ${recoveryEvidence}::jsonb,
+        updated_at = clock_timestamp()
+    FROM candidate
+    WHERE obligation.obligation_id = candidate.obligation_id
+      AND (
+        obligation.evidence->'schedulerRecovery'->>'recoveryRevision' IS DISTINCT FROM ${recoveryRevision}
+        OR obligation.evidence->'schedulerRecovery'->>'status' IS DISTINCT FROM 'succeeded'
+      )
+    RETURNING obligation.obligation_id
+  `);
+  return updated.length === 1;
+}
+
 export async function completeSchedulerObligation(input: {
   obligationId: string;
   status: Extract<SchedulerObligationStatus, 'succeeded' | 'skipped' | 'irrecoverable'>;
@@ -1997,6 +2098,12 @@ export async function schedulerObligationStatus(input: {
     : null;
   let consecutiveUnsuccessfulCycles = 0;
   for (const row of rows) {
+    if (schedulerObligationRecoveryFromEvidence(row.evidence)?.status === 'succeeded') {
+      // Keep the original failed/irrecoverable row immutable while treating
+      // its explicit consumer-visible recovery marker as the end of the
+      // current failure streak.
+      break;
+    }
     if (
       row.status === 'succeeded' ||
       (row.status === 'skipped' && row.reason === 'official_fields_not_open')

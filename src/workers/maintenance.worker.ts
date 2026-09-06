@@ -50,6 +50,7 @@ import {
   type MaintenanceJobData,
 } from '../queues/maintenance.queue';
 import {
+  appendSchedulerObligationRecovery,
   deferSchedulerObligationForWorker,
   markSchedulerObligationRetrying,
   renewSchedulerObligation,
@@ -774,12 +775,50 @@ export function createMaintenanceWorker(): WorkerRuntime {
       if (maintenanceResultDeferredSchedulerObligation(job.name, result)) return;
       if (job.id !== undefined) {
         const fence = inspectSchedulerObligationFence(job.data);
+        const completionEvidence = maintenanceCompletionEvidence(job.name, result);
         const evidence = {
           queue: queueName,
           lane,
           jobName: job.name,
-          ...maintenanceCompletionEvidence(job.name, result),
+          ...completionEvidence,
         };
+        const recoveryRevision = completionEvidence.revision;
+        if (
+          fence.kind === 'none' &&
+          job.name === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT &&
+          job.data.source === 'manual' &&
+          job.data.snapshotKind === 'FINAL' &&
+          Number.isSafeInteger(recoveryRevision) &&
+          Number(recoveryRevision) > 0 &&
+          Number.isSafeInteger(job.data.eventId) &&
+          (job.data.eventId ?? 0) > 0 &&
+          job.data.snapshotActor &&
+          job.data.snapshotReason &&
+          job.data.snapshotIdempotencyKey
+        ) {
+          void appendSchedulerObligationRecovery({
+            jobName: 'my-fpl-finalization',
+            scopeKey: `${job.data.seasonCode}:event:${job.data.eventId}`,
+            recoveryRevision: Number(recoveryRevision),
+            recoveryActor: job.data.snapshotActor,
+            recoveryReason: job.data.snapshotReason,
+          })
+            .then((changed) => {
+              if (changed) {
+                logInfo('Manual My FPL FINAL recovery evidence appended', {
+                  eventId: job.data.eventId,
+                  revision: recoveryRevision,
+                  source: job.data.source,
+                });
+              }
+            })
+            .catch((error) => {
+              logError('Manual My FPL FINAL recovery evidence failed', error, {
+                eventId: job.data.eventId,
+                revision: recoveryRevision,
+              });
+            });
+        }
         const completion =
           fence.kind === 'complete'
             ? completeSchedulerObligation({
