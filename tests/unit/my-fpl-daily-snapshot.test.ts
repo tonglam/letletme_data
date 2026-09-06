@@ -18,6 +18,7 @@ import {
   isMatchingProvisionalMyFplPublication,
   isMyFplSnapshotRedisManifestForPublication,
   myFplSnapshotRedisManifestKey,
+  overlayFinalResultPicks,
   serializeMyFplSnapshotCapture,
   resolveMyFplSnapshotCoverageState,
   getMyFplSnapshotTimeliness,
@@ -638,6 +639,122 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('result.event_picks');
     expect(publicationService).toContain('overlayFinalResultPicks');
     expect(publicationService).toContain('final result picks are incomplete or changed for event');
+  });
+
+  test('overlays finalized automatic-substitution order by element identity', () => {
+    const deadlineRows = Array.from({ length: 15 }, (_, index) => ({
+      element: 101 + index,
+      position: index + 1,
+      active_chip: index === 0 ? 'wildcard' : null,
+      transfers: index === 0 ? 2 : null,
+      transfers_cost: index === 0 ? 4 : null,
+      display: `player-${101 + index}`,
+    }));
+    const finalElements = [
+      112,
+      ...Array.from({ length: 10 }, (_, index) => 102 + index),
+      101,
+      113,
+      114,
+      115,
+    ];
+    const eventPicks = finalElements.map((element, index) => ({
+      element,
+      position: index + 1,
+      multiplier: index < 11 ? 1 : 0,
+      is_captain: index === 1,
+      is_vice_captain: index === 2,
+    }));
+
+    const overlaid = overlayFinalResultPicks(
+      {
+        event_picks: eventPicks,
+        automatic_substitutions: [{ element_in: 112, element_out: 101 }],
+      },
+      deadlineRows,
+    );
+
+    expect(overlaid).not.toBeNull();
+    expect(overlaid?.map((pick) => pick.element)).toEqual(finalElements);
+    expect(overlaid?.[0]).toMatchObject({
+      element: 112,
+      position: 1,
+      multiplier: 1,
+      display: 'player-112',
+      active_chip: 'wildcard',
+      transfers: 2,
+      transfers_cost: 4,
+    });
+    expect(overlaid?.[11]).toMatchObject({
+      element: 101,
+      position: 12,
+      multiplier: 0,
+      display: 'player-101',
+      active_chip: null,
+      transfers: null,
+      transfers_cost: null,
+    });
+    expect(overlaid?.[1]).toMatchObject({ is_captain: true, is_vice_captain: false });
+    expect(overlaid?.[2]).toMatchObject({ is_captain: false, is_vice_captain: true });
+  });
+
+  test('rejects a finalized pick set that changes the selected elements', () => {
+    const deadlineRows = Array.from({ length: 15 }, (_, index) => ({
+      element: 101 + index,
+      position: index + 1,
+      active_chip: null,
+      transfers: null,
+      transfers_cost: null,
+    }));
+    const eventPicks = deadlineRows.map((pick, index) => ({
+      element: index === 11 ? 999 : pick.element,
+      position: index + 1,
+      multiplier: index < 11 ? 1 : 0,
+      is_captain: index === 0,
+      is_vice_captain: index === 1,
+    }));
+
+    expect(
+      overlayFinalResultPicks(
+        { event_picks: eventPicks, automatic_substitutions: [] },
+        deadlineRows,
+      ),
+    ).toBeNull();
+  });
+
+  test('rejects a same-team reorder without matching official substitutions', () => {
+    const deadlineRows = Array.from({ length: 15 }, (_, index) => ({
+      element: 101 + index,
+      position: index + 1,
+      active_chip: null,
+      transfers: null,
+      transfers_cost: null,
+    }));
+    const reordered = [
+      112,
+      ...deadlineRows.slice(1, 11).map((pick) => pick.element),
+      101,
+      113,
+      114,
+      115,
+    ];
+    const eventPicks = reordered.map((element, index) => ({
+      element,
+      position: index + 1,
+      multiplier: index < 11 ? 1 : 0,
+      is_captain: index === 1,
+      is_vice_captain: index === 2,
+    }));
+
+    expect(
+      overlayFinalResultPicks(
+        {
+          event_picks: eventPicks,
+          automatic_substitutions: [{ element_in: 113, element_out: 101 }],
+        },
+        deadlineRows,
+      ),
+    ).toBeNull();
   });
 
   test('serializes publication timestamps for the production postgres adapter', () => {
