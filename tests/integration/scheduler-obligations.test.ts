@@ -14,6 +14,7 @@ import {
   appendSchedulerObligationRecovery,
   findDueSchedulerObligationCandidates,
   findDueSchedulerJobNames,
+  getLatestFailedSchedulerObligation,
   listExpiredSchedulerObligations,
   markSchedulerObligationIrrecoverable,
   reconcilePostMatchSchedulerObligations,
@@ -44,6 +45,8 @@ const MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000
 const MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID = '30000000-0000-4000-8000-000000000015';
 const RECOVERY_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000016';
 const RECOVERY_LATEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000017';
+const RECOVERY_NEWEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000018';
+const RECOVERY_SUPERSEDING_SUCCESS_ID = '30000000-0000-4000-8000-000000000019';
 const RECOVERY_JOB_NAME = 'integration-scheduler-recovery';
 const RECOVERY_SCOPE_KEY = 'integration:event:scheduler-recovery';
 const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
@@ -71,7 +74,9 @@ async function cleanup(): Promise<void> {
       ${MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID}::uuid,
       ${MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID}::uuid,
       ${RECOVERY_OLDER_OBLIGATION_ID}::uuid,
-      ${RECOVERY_LATEST_OBLIGATION_ID}::uuid
+      ${RECOVERY_LATEST_OBLIGATION_ID}::uuid,
+      ${RECOVERY_NEWEST_OBLIGATION_ID}::uuid,
+      ${RECOVERY_SUPERSEDING_SUCCESS_ID}::uuid
     )
        OR scope_key IN (
          'integration:event:atomic-reschedule',
@@ -102,6 +107,56 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler recovery evidence', () => {
+  test('does not target a historical failure behind a newer successful obligation', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, completed_at, last_error, evidence
+      )
+      VALUES
+        (
+          ${RECOVERY_OLDER_OBLIGATION_ID}::uuid,
+          ${RECOVERY_JOB_NAME},
+          ${RECOVERY_SCOPE_KEY},
+          'failed-period',
+          'integration',
+          'UTC',
+          'failed',
+          'catchup',
+          '2026-09-01T00:05:00Z'::timestamptz,
+          1,
+          1,
+          '2026-09-01T00:06:00Z'::timestamptz,
+          'historical failure',
+          jsonb_build_object('scheduledDueAtMs', ${Date.parse('2026-09-01T00:00:00.000Z')}::bigint)
+        ),
+        (
+          ${RECOVERY_SUPERSEDING_SUCCESS_ID}::uuid,
+          ${RECOVERY_JOB_NAME},
+          ${RECOVERY_SCOPE_KEY},
+          'successful-period',
+          'integration',
+          'UTC',
+          'succeeded',
+          'catchup',
+          '2026-09-01T01:05:00Z'::timestamptz,
+          1,
+          1,
+          '2026-09-01T01:06:00Z'::timestamptz,
+          NULL,
+          jsonb_build_object('scheduledDueAtMs', ${Date.parse('2026-09-01T01:00:00.000Z')}::bigint)
+        )
+    `;
+
+    expect(
+      await getLatestFailedSchedulerObligation({
+        jobName: RECOVERY_JOB_NAME,
+        scopeKey: RECOVERY_SCOPE_KEY,
+      }),
+    ).toBeNull();
+  });
+
   test('uses immutable schedule time and prevents redispatch of recovered failures', async () => {
     const sql = await getDbClient();
     const olderScheduledDueAtMs = Date.parse('2026-09-01T00:00:00.000Z');
@@ -144,25 +199,82 @@ describe('scheduler recovery evidence', () => {
         )
     `;
 
+    const captured = await getLatestFailedSchedulerObligation({
+      jobName: RECOVERY_JOB_NAME,
+      scopeKey: RECOVERY_SCOPE_KEY,
+    });
+    expect(captured).toMatchObject({
+      obligationId: RECOVERY_LATEST_OBLIGATION_ID,
+      periodKey: 'latest-period',
+      generation: 1,
+    });
+
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, last_error, evidence
+      )
+      VALUES (
+        ${RECOVERY_NEWEST_OBLIGATION_ID}::uuid,
+        ${RECOVERY_JOB_NAME},
+        ${RECOVERY_SCOPE_KEY},
+        'newest-period',
+        'integration',
+        'UTC',
+        'irrecoverable',
+        'catchup',
+        '2026-09-01T02:05:00Z'::timestamptz,
+        2,
+        2,
+        'newer concurrent failure',
+        jsonb_build_object('scheduledDueAtMs', ${Date.parse('2026-09-01T02:00:00.000Z')}::bigint)
+      )
+    `;
+
     expect(
       await appendSchedulerObligationRecovery({
         jobName: RECOVERY_JOB_NAME,
         scopeKey: RECOVERY_SCOPE_KEY,
-        obligationId: RECOVERY_LATEST_OBLIGATION_ID,
-        periodKey: 'latest-period',
-        generation: 1,
+        obligationId: captured!.obligationId,
+        periodKey: captured!.periodKey,
+        generation: captured!.generation,
         recoveryRevision: 'recovery-99',
         recoveryActor: 'integration-test',
         recoveryReason: 'verify immutable recovery target',
       }),
     ).toBe(true);
+    expect(
+      await appendSchedulerObligationRecovery({
+        jobName: RECOVERY_JOB_NAME,
+        scopeKey: RECOVERY_SCOPE_KEY,
+        obligationId: captured!.obligationId,
+        periodKey: captured!.periodKey,
+        generation: captured!.generation,
+        recoveryRevision: 'recovery-99',
+        recoveryActor: 'integration-test',
+        recoveryReason: 'verify idempotent retry',
+      }),
+    ).toBe(true);
+    expect(
+      await appendSchedulerObligationRecovery({
+        jobName: RECOVERY_JOB_NAME,
+        scopeKey: RECOVERY_SCOPE_KEY,
+        obligationId: captured!.obligationId,
+        periodKey: captured!.periodKey,
+        generation: captured!.generation,
+        recoveryRevision: 'recovery-100',
+        recoveryActor: 'integration-test',
+        recoveryReason: 'must not overwrite first recovery',
+      }),
+    ).toBe(false);
 
     const rows = await sql<Array<{ obligation_id: string; evidence: Record<string, unknown> }>>`
       SELECT obligation_id, evidence
       FROM ops.scheduler_obligations
       WHERE obligation_id IN (
         ${RECOVERY_OLDER_OBLIGATION_ID}::uuid,
-        ${RECOVERY_LATEST_OBLIGATION_ID}::uuid
+        ${RECOVERY_LATEST_OBLIGATION_ID}::uuid,
+        ${RECOVERY_NEWEST_OBLIGATION_ID}::uuid
       )
       ORDER BY obligation_id
     `;
@@ -180,6 +292,37 @@ describe('scheduler recovery evidence', () => {
     expect(
       rows.find((row) => row.obligation_id === RECOVERY_OLDER_OBLIGATION_ID)?.evidence,
     ).not.toHaveProperty('schedulerRecovery');
+    expect(
+      rows.find((row) => row.obligation_id === RECOVERY_NEWEST_OBLIGATION_ID)?.evidence,
+    ).not.toHaveProperty('schedulerRecovery');
+
+    const newest = await getLatestFailedSchedulerObligation({
+      jobName: RECOVERY_JOB_NAME,
+      scopeKey: RECOVERY_SCOPE_KEY,
+    });
+    expect(newest).toMatchObject({
+      obligationId: RECOVERY_NEWEST_OBLIGATION_ID,
+      periodKey: 'newest-period',
+      generation: 2,
+    });
+    expect(
+      await appendSchedulerObligationRecovery({
+        jobName: RECOVERY_JOB_NAME,
+        scopeKey: RECOVERY_SCOPE_KEY,
+        obligationId: newest!.obligationId,
+        periodKey: newest!.periodKey,
+        generation: newest!.generation,
+        recoveryRevision: 'recovery-100',
+        recoveryActor: 'integration-test',
+        recoveryReason: 'recover newest exact target',
+      }),
+    ).toBe(true);
+    expect(
+      await getLatestFailedSchedulerObligation({
+        jobName: RECOVERY_JOB_NAME,
+        scopeKey: RECOVERY_SCOPE_KEY,
+      }),
+    ).toBeNull();
 
     expect(await findDueSchedulerJobNames({})).not.toContain(RECOVERY_JOB_NAME);
     expect(await findDueSchedulerObligationCandidates({})).not.toContainEqual(
@@ -199,11 +342,11 @@ describe('scheduler recovery evidence', () => {
     expect(status.overdue).toBe(false);
     expect(status.consecutiveUnsuccessfulCycles).toBe(0);
     expect(status.latest).toMatchObject({
-      obligationId: RECOVERY_LATEST_OBLIGATION_ID,
-      periodKey: 'latest-period',
-      status: 'failed',
-      lastError: 'latest failure',
-      generation: 1,
+      obligationId: RECOVERY_NEWEST_OBLIGATION_ID,
+      periodKey: 'newest-period',
+      status: 'irrecoverable',
+      lastError: 'newer concurrent failure',
+      generation: 2,
     });
   });
 });

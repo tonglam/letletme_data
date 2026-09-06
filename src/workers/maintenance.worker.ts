@@ -830,12 +830,11 @@ export function createMaintenanceWorker(): WorkerRuntime {
       if (maintenanceResultDeferredSchedulerObligation(job.name, result)) return;
       if (job.id !== undefined) {
         const fence = inspectSchedulerObligationFence(job.data);
-        const completionEvidence = maintenanceCompletionEvidence(job.name, result);
         const evidence = {
           queue: queueName,
           lane,
           jobName: job.name,
-          ...completionEvidence,
+          ...maintenanceCompletionEvidence(job.name, result),
         };
         const completion =
           fence.kind === 'complete'

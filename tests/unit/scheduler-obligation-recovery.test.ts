@@ -46,6 +46,18 @@ describe('scheduler obligation recovery evidence', () => {
     expect(
       schedulerObligationRecoveryFromEvidence({
         schedulerRecovery: {
+          status: 'succeeded',
+          recoveredAt: '2026-09-06T05:00:00+00:00',
+          recoveryRevision: '98',
+          obligationId: '00000000-0000-4000-8000-000000000001',
+          periodKey: '2627:event:2',
+          generation: 1,
+        },
+      }),
+    ).toBeNull();
+    expect(
+      schedulerObligationRecoveryFromEvidence({
+        schedulerRecovery: {
           status: 'failed',
           recoveredAt: '2026-09-06T05:00:00Z',
           recoveryRevision: '98',

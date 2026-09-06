@@ -167,9 +167,9 @@ type SchedulerRecoverySummary = Readonly<{
 }>;
 
 /**
- * Keep the price-change operational summary useful without leaking the
- * persisted scheduler error text.  The detailed error belongs to the
- * protected governance case feed and is never part of `/jobs/status`.
+ * Keep the operational scheduler summary useful without leaking persisted
+ * error text or manual-recovery provenance. The detailed error, actor and
+ * reason are never part of `/jobs/status`.
  */
 export function safeSchedulerObligationLatest(latest: SchedulerObligationLatestInput | null):
   | (Omit<SchedulerObligationLatestInput, 'lastError' | 'completedAt' | 'evidence'> & {

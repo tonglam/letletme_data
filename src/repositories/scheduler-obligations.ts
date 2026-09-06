@@ -60,16 +60,13 @@ export type SchedulerObligationRecoveryEvidence = Readonly<{
   recoveryReason?: string;
 }>;
 
-export type SchedulerObligationRecoveryTarget = Readonly<{
-  obligationId: string;
-  periodKey: string;
-  generation: number;
-}>;
-
 const SUPERSEDED_BY_LATEST_AUTHORITATIVE = 'superseded-by-latest-authoritative';
 const LIVE_PICKS_ACCEPTED_BACKOFF_REASON = 'live-picks-probe-backoff-accepted';
 const LIVE_PICKS_ACCEPTED_BACKOFF_FRESHNESS_REASON = 'LIVE_PICKS_BACKOFF_ACCEPTED';
 const SCHEDULER_RECOVERY_EVIDENCE_KEY = 'schedulerRecovery';
+const SCHEDULER_RECOVERY_UTC_TIMESTAMP_PATTERN =
+  '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$';
+const SCHEDULER_RECOVERY_UTC_TIMESTAMP_REGEX = new RegExp(SCHEDULER_RECOVERY_UTC_TIMESTAMP_PATTERN);
 
 export function schedulerObligationRecoveryFromEvidence(
   evidence: unknown,
@@ -81,6 +78,7 @@ export function schedulerObligationRecoveryFromEvidence(
   if (
     recovery.status !== 'succeeded' ||
     typeof recovery.recoveredAt !== 'string' ||
+    !SCHEDULER_RECOVERY_UTC_TIMESTAMP_REGEX.test(recovery.recoveredAt) ||
     !Number.isFinite(Date.parse(recovery.recoveredAt)) ||
     typeof recovery.recoveryRevision !== 'string' ||
     recovery.recoveryRevision.trim() === '' ||
@@ -264,7 +262,7 @@ function validSchedulerRecoveryEvidenceSql(
   return sql`(
     ${evidence}->'schedulerRecovery'->>'status' = 'succeeded'
     AND NULLIF(BTRIM(${evidence}->'schedulerRecovery'->>'recoveryRevision'), '') IS NOT NULL
-    AND ${evidence}->'schedulerRecovery'->>'recoveredAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$'
+    AND ${evidence}->'schedulerRecovery'->>'recoveredAt' ~ ${SCHEDULER_RECOVERY_UTC_TIMESTAMP_PATTERN}
     AND NULLIF(BTRIM(${evidence}->'schedulerRecovery'->>'obligationId'), '') IS NOT NULL
     AND NULLIF(BTRIM(${evidence}->'schedulerRecovery'->>'periodKey'), '') IS NOT NULL
     AND (${evidence}->'schedulerRecovery'->>'generation') ~ '^[0-9]+$'
@@ -547,9 +545,11 @@ export async function getSchedulerObligation(input: {
 }
 
 /**
- * Capture the terminal obligation that a controlled manual recovery is
- * allowed to repair. The identity is copied into the Bull payload before the
- * job is enqueued; the worker must never select a different row later.
+ * Capture the current terminal failure that a controlled manual recovery is
+ * allowed to repair. The newest obligation is authoritative even when it is
+ * not failed, so a later pending/succeeded row must not expose older history
+ * as a recovery target. The identity is copied into the Bull payload before
+ * the job is enqueued; the worker must never select a different row later.
  */
 export async function getLatestFailedSchedulerObligation(input: {
   jobName: string;
@@ -565,12 +565,6 @@ export async function getLatestFailedSchedulerObligation(input: {
       and(
         eq(schedulerObligationsInOps.jobName, input.jobName),
         eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
-        inArray(schedulerObligationsInOps.status, ['failed', 'irrecoverable']),
-        sql`NOT ${validSchedulerRecoveryEvidenceSql(sql`${schedulerObligationsInOps.evidence}`, {
-          obligationId: sql`${schedulerObligationsInOps.obligationId}`,
-          periodKey: sql`${schedulerObligationsInOps.periodKey}`,
-          generation: sql`${schedulerObligationsInOps.generation}`,
-        })}`,
       ),
     )
     .orderBy(
@@ -579,7 +573,10 @@ export async function getLatestFailedSchedulerObligation(input: {
       desc(schedulerObligationsInOps.obligationId),
     )
     .limit(1);
-  return rows[0] ? mapRow(rows[0]) : null;
+  const latest = rows[0] ? mapRow(rows[0]) : null;
+  if (!latest) return null;
+  if (latest.status !== 'failed' && latest.status !== 'irrecoverable') return null;
+  return schedulerObligationRecoveryMatches(latest.evidence, latest) ? null : latest;
 }
 
 export async function getSchedulerObligationByIdentity(input: {
@@ -1849,22 +1846,22 @@ export async function appendSchedulerObligationRecovery(input: {
   if (!Number.isFinite(recoveredAt.getTime())) {
     throw new Error('Scheduler recovery timestamp is invalid');
   }
+  const recoveryEvidence = JSON.stringify({
+    schedulerRecovery: {
+      status: 'succeeded',
+      recoveredAt: recoveredAt.toISOString(),
+      recoveryRevision,
+      obligationId: input.obligationId,
+      periodKey: input.periodKey,
+      generation: input.generation,
+      recoveryActor,
+      recoveryReason,
+    },
+  });
   const db = input.db ?? (await getDb());
   const updated = await db.execute<{ obligation_id: string }>(sql`
     UPDATE ops.scheduler_obligations AS obligation
-    SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || jsonb_build_object(
-          'schedulerRecovery',
-          jsonb_build_object(
-            'status', 'succeeded',
-            'recoveredAt', ${recoveredAt.toISOString()},
-            'recoveryRevision', ${recoveryRevision},
-            'obligationId', ${input.obligationId},
-            'periodKey', ${input.periodKey},
-            'generation', ${input.generation},
-            'recoveryActor', ${recoveryActor},
-            'recoveryReason', ${recoveryReason}
-          )
-        ),
+    SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || ${recoveryEvidence}::jsonb,
         updated_at = clock_timestamp()
     WHERE obligation.obligation_id = ${input.obligationId}::uuid
       AND obligation.job_name = ${input.jobName}
@@ -1872,13 +1869,11 @@ export async function appendSchedulerObligationRecovery(input: {
       AND obligation.period_key = ${input.periodKey}
       AND obligation.generation = ${input.generation}
       AND obligation.status IN ('failed', 'irrecoverable')
-      AND (
-        obligation.evidence->'schedulerRecovery'->>'recoveryRevision' IS DISTINCT FROM ${recoveryRevision}
-        OR obligation.evidence->'schedulerRecovery'->>'status' IS DISTINCT FROM 'succeeded'
-        OR obligation.evidence->'schedulerRecovery'->>'obligationId' IS DISTINCT FROM ${input.obligationId}
-        OR obligation.evidence->'schedulerRecovery'->>'periodKey' IS DISTINCT FROM ${input.periodKey}
-        OR obligation.evidence->'schedulerRecovery'->>'generation' IS DISTINCT FROM ${input.generation}::text
-      )
+      AND NOT ${validSchedulerRecoveryEvidenceSql(sql`obligation.evidence`, {
+        obligationId: sql`obligation.obligation_id`,
+        periodKey: sql`obligation.period_key`,
+        generation: sql`obligation.generation`,
+      })}
     RETURNING obligation.obligation_id
   `);
   if (updated.length === 1) return true;
