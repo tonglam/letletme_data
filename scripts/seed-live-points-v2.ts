@@ -27,6 +27,7 @@ import {
   setLiveCheckpointDesiredV2,
   type EntryLiveInputV2,
   type Exactly15Picks,
+  type LivePublicationRead,
   type LivePublicationV2,
   type LivePublicationV2OrderingFence,
   type LivePublicationState,
@@ -107,6 +108,28 @@ export type SeedArguments = {
   readonly season: string | null;
   readonly eventId: number | null;
 };
+
+/**
+ * A live producer may have promoted a newer, valid Redis head while its
+ * durable PostgreSQL checkpoint is still inside the coalescing window.  That
+ * head must not be overwritten by replaying the older checkpoint during a
+ * deployment seed.  It remains pending until the normal checkpoint worker
+ * settles it.
+ */
+export function isNewerServingLivePublication(
+  checkpoint: Pick<LivePublicationRead, 'publication'>,
+  current: Pick<LivePublicationRead, 'publication' | 'servedFrom'> | null,
+): boolean {
+  return Boolean(
+    current &&
+      current.servedFrom === 'REDIS_CURRENT' &&
+      checkpoint.publication.state !== 'FINALIZED' &&
+      current.publication.state !== 'FINALIZED' &&
+      current.publication.season === checkpoint.publication.season &&
+      current.publication.eventId === checkpoint.publication.eventId &&
+      current.publication.generation > checkpoint.publication.generation,
+  );
+}
 
 type SeedDatabaseEnvironment = {
   readonly DATABASE_URL?: string;
@@ -2730,7 +2753,7 @@ async function restoreExistingLiveCheckpoint(
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
 ): Promise<{
   readonly status: 'unchanged' | 'restored';
-  readonly checkpoint: 'already-checkpointed';
+  readonly checkpoint: 'already-checkpointed' | 'pending';
   readonly generation: number;
   readonly publicationId: string;
 }> {
@@ -2751,6 +2774,14 @@ async function restoreExistingLiveCheckpoint(
       checkpoint: 'already-checkpointed',
       generation: checkpoint.publication.generation,
       publicationId: checkpoint.publication.publicationId,
+    };
+  }
+  if (isNewerServingLivePublication(checkpoint, current) && current) {
+    return {
+      status: 'unchanged',
+      checkpoint: 'pending',
+      generation: current.publication.generation,
+      publicationId: current.publication.publicationId,
     };
   }
   const restored = await restoreLivePublicationV2Checkpoint({ checkpoint, redis });
@@ -3119,7 +3150,9 @@ async function main(): Promise<void> {
         }
         const blockedGlobalResults = cacheResults.filter(
           (result) =>
-            result.checkpoint !== 'checkpointed' && result.checkpoint !== 'already-checkpointed',
+            result.checkpoint !== 'checkpointed' &&
+            result.checkpoint !== 'already-checkpointed' &&
+            result.checkpoint !== 'pending',
         );
         const blockedEntryResults = entryResults.filter(
           (result) =>
