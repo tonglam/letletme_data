@@ -36,6 +36,7 @@ const composeFile = readFileSync('docker-compose.yml', 'utf8');
 const mediaWorker = readFileSync('src/media-worker.ts', 'utf8');
 const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'utf8');
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
+const sourceMediaDeployFence = readFileSync('scripts/hold-source-media-deploy-fence.sh', 'utf8');
 const quote = String.fromCharCode(39);
 
 function expectNonInteractiveComposeRuns(source: string, label: string) {
@@ -192,6 +193,11 @@ describe('release workflow gates', () => {
     const localMediaStop = deployScript.indexOf('if ! compose stop -t 45 media-worker; then');
     const localSchedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
+    const localMediaFence = deployScript.indexOf('if ! acquire_source_media_deploy_fence; then');
+    const localMediaFenceRelease = deployScript.indexOf(
+      'if ! release_source_media_deploy_fence; then',
+      localMediaStop,
+    );
     const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
     const localPrepare = deployScript.indexOf(
       'if ! prepare_content_worker_paused_runs_for_deploy; then',
@@ -199,11 +205,12 @@ describe('release workflow gates', () => {
     const localRenew = deployScript.indexOf('if ! renew_content_worker_admission; then');
     expect(localPause).toBeGreaterThan(-1);
     expect(localPause).toBeLessThan(localAdmission);
-    expect(localAdmission).toBeLessThan(localMediaStop);
-    expect(localMediaStop).toBeLessThan(localSchedulerStop);
     expect(localAdmission).toBeLessThan(localProbe);
     expect(localAdmission).toBeLessThan(localSchedulerStop);
     expect(localSchedulerStop).toBeLessThan(localProbe);
+    expect(localProbe).toBeLessThan(localMediaFence);
+    expect(localMediaFence).toBeLessThan(localMediaStop);
+    expect(localMediaStop).toBeLessThan(localMediaFenceRelease);
     expect(localProbe).toBeLessThan(localStop);
     expect(localStop).toBeLessThan(localPrepare);
     expect(localPrepare).toBeLessThan(localRenew);
@@ -246,6 +253,21 @@ describe('release workflow gates', () => {
     expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
+    expect(deployScript).toContain('old_media_container=$(compose ps -q media-worker');
+    expect(deployScript).not.toContain('compose ps -aq media-worker');
+    expect(sourceMediaDeployFence).toContain('FOR UPDATE;');
+    expect(sourceMediaDeployFence).toContain(
+      String.raw`status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE', 'RUNNING')`,
+    );
+    expect(sourceMediaDeployFence).toContain(String.raw`status = 'RUNNING'`);
+    expect(sourceMediaDeployFence).toContain('repair_until_at <= clock_timestamp()');
+    expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
+    expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_BUSY');
+    expect(sourceMediaDeployFence).toContain('PERFORM pg_sleep(${hold_seconds});');
+    expect(sourceMediaDeployFence).not.toMatch(/\b(INSERT|DELETE|TRUNCATE)\b|^\s*UPDATE\b/m);
+    expect(deployScript).toContain('release_source_media_deploy_fence()');
+    expect(deployScript).toContain('docker rm --force "$container_id"');
+    expect(deployScript).toContain('run --rm -T --interactive=false -d --no-deps');
     expect(deployScript).toContain('--provision-and-probe');
     expect(deployScript).toContain('--probe-fpl-raw-snapshot-storage');
     expect(deployScript).toContain('bootstrap-briefing-source-media-env.sh');
@@ -695,7 +717,7 @@ describe('release workflow gates', () => {
     );
     expect(rollbackAdmission).toBeGreaterThan(deployScript.indexOf('rollback_runtime_is_eligible'));
     expect(rollbackAdmission).toBeLessThan(
-      deployScript.indexOf('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true'),
+      deployScript.indexOf('if ! acquire_source_media_deploy_fence; then'),
     );
     expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
     expect(deployScript.lastIndexOf('rollback_runtime_is_eligible')).toBeGreaterThan(

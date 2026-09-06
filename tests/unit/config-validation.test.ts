@@ -204,6 +204,7 @@ describe('production environment preflight', () => {
     );
     const combinedQuiescence = deployScript.indexOf('wait_for_scoped_queue_quiescence 150 2');
     const mediaWorkerStop = deployScript.indexOf('if ! compose stop -t 45 media-worker; then');
+    const mediaWorkerFence = deployScript.indexOf('if ! acquire_source_media_deploy_fence; then');
     const schedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const migrate = deployScript.indexOf('bun run db:migrate');
     const canonicalContract = deployScript.indexOf('bun run db:migration-contract', migrate);
@@ -223,8 +224,9 @@ describe('production environment preflight', () => {
     expect(stopServices).toBeGreaterThan(identityContract);
     expect(schedulerStop).toBeGreaterThan(identityContract);
     expect(mediaWorkerStop).toBeGreaterThan(identityContract);
-    expect(mediaWorkerStop).toBeLessThan(schedulerStop);
     expect(schedulerStop).toBeLessThan(combinedQuiescence);
+    expect(combinedQuiescence).toBeLessThan(mediaWorkerFence);
+    expect(mediaWorkerFence).toBeLessThan(mediaWorkerStop);
     expect(combinedQuiescence).toBeLessThan(stopServices);
     expect(postStopDatabaseQuiescence).toBeGreaterThan(stopServices);
     const postStopCombinedQuiescence = deployScript.indexOf(
@@ -353,8 +355,11 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('DEPLOY_SCHEDULER_STOP_ATTEMPTED=true');
     expect(deployScript).toContain('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false');
     expect(deployScript).toContain('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true');
+    expect(deployScript).toContain('old_media_container=$(compose ps -q media-worker');
+    expect(deployScript).not.toContain('compose ps -aq media-worker');
+    expect(deployScript).toContain('release_source_media_deploy_fence');
     expect(deployScript).toMatch(
-      /if \[\[ "\$DEPLOY_OLD_MEDIA_PRESENT" = true && "\$DEPLOY_ROLLBACK_ELIGIBLE" != true \]\]; then[\s\S]*?media-worker was not stopped[\s\S]*?exit 1[\s\S]*?fi[\s\S]*?DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true/,
+      /if \[\[ "\$DEPLOY_OLD_MEDIA_PRESENT" = true && "\$DEPLOY_ROLLBACK_ELIGIBLE" != true \]\]; then[\s\S]*?media-worker was not stopped[\s\S]*?exit 1[\s\S]*?fi[\s\S]*?acquire_source_media_deploy_fence[\s\S]*?DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true/,
     );
     expect(deployScript).toContain('"$DEPLOY_COMMITTED" = false &&');
     expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');
