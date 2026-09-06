@@ -315,13 +315,12 @@ export function isAuthoritativeUnrankedFirstEventResult(
 }
 
 /**
- * FPL keeps deleted entries in the current-season feed, but reports their
- * source cumulative total and overall rank as zero and never assigns an event
- * rank.  The entry identity is the only durable discriminator available to
- * us (`Deleted` / `Deleted Player`). Treat that source fact as the explicit
- * rank-zero sentinel. The cumulative total is intentionally not required to
- * reconcile here: FPL can keep it at zero even when the deleted entry has
- * points in the current event. Ordinary entries with a missing rank remain
+ * FPL keeps deleted entries in the current-season feed. The entry summary can
+ * retain a non-negative cumulative score, while the finalized history row
+ * reports zero cumulative points and zero ranks. The entry identity is the
+ * durable discriminator available to us (`Deleted` / `Deleted Player`). Treat
+ * that exact source shape as the rank-zero sentinel without accepting a null
+ * or negative identity total. Ordinary entries with a missing rank remain
  * ineligible for FINAL.
  */
 export function isAuthoritativeUnrankedDeletedEntryResult(
@@ -338,7 +337,7 @@ export function isAuthoritativeUnrankedDeletedEntryResult(
   return (
     input.entryName.trim() === 'Deleted' &&
     input.playerName.trim() === 'Deleted Player' &&
-    input.identityOverallPoints === 0 &&
+    isNonNegativeSafeInteger(input.identityOverallPoints) &&
     input.identityOverallRank === 0 &&
     input.resultOverallPoints === 0 &&
     input.eventRank === 0 &&
