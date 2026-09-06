@@ -525,9 +525,11 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 publication: active,
                 redisRevision: redisManifest.revision,
               });
-              const result = { status: 'noop', publication: active };
-              await persistManualMyFplRecoveryEvidence(job, result);
-              return result;
+              await persistManualMyFplRecoveryEvidence(job, {
+                status: 'noop',
+                publication: active,
+              });
+              return { status: 'noop', publication: active };
             }
           }
 
