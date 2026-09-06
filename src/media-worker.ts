@@ -14,9 +14,7 @@ import type { SourceMediaProbeMode } from './content/media/source-media-storage'
 import { runSourceMediaRetention } from './content/media/source-media-retention';
 import { databaseSingleton } from './db/singleton';
 import { redisSingleton } from './cache/singleton';
-import { contentMediaTranscriptQueueName } from './queues/names';
 import { queueRedisSingleton } from './queues/redis';
-import { isQueueDrainOnly } from './services/queue-governance.service';
 import { getConfig } from './utils/config';
 import { logError, logInfo, logWarn } from './utils/logger';
 import { startRuntimeHeartbeat } from './utils/runtime-heartbeat';
@@ -164,11 +162,6 @@ async function poll(): Promise<void> {
   if (availableSlots <= 0) return;
   polling = true;
   try {
-    // The durable media worker claims PostgreSQL gates directly rather than
-    // consuming the BullMQ transcript queue. Honour the same deployment
-    // admission fence so a deploy can wait for existing leases to drain
-    // without this worker creating a new one behind the quiescence probe.
-    if (await isQueueDrainOnly(contentMediaTranscriptQueueName)) return;
     const gates = await claimSourceMediaGates({
       workerId,
       limit: availableSlots,

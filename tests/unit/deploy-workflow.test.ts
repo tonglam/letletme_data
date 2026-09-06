@@ -189,6 +189,7 @@ describe('release workflow gates', () => {
     const localAdmission = deployScript.indexOf(
       'if ! drain_content_worker_queues_for_deploy; then',
     );
+    const localMediaStop = deployScript.indexOf('if ! compose stop -t 45 media-worker; then');
     const localSchedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
@@ -198,6 +199,8 @@ describe('release workflow gates', () => {
     const localRenew = deployScript.indexOf('if ! renew_content_worker_admission; then');
     expect(localPause).toBeGreaterThan(-1);
     expect(localPause).toBeLessThan(localAdmission);
+    expect(localAdmission).toBeLessThan(localMediaStop);
+    expect(localMediaStop).toBeLessThan(localSchedulerStop);
     expect(localAdmission).toBeLessThan(localProbe);
     expect(localAdmission).toBeLessThan(localSchedulerStop);
     expect(localSchedulerStop).toBeLessThan(localProbe);
@@ -240,10 +243,6 @@ describe('release workflow gates', () => {
     expect(mediaWorker).toContain('controller.abort');
     expect(mediaWorker).toContain('retentionController?.abort');
     expect(mediaWorker).toContain('if (polling || shuttingDown || !flags.enabled) return;');
-    expect(mediaWorker).toContain('isQueueDrainOnly(contentMediaTranscriptQueueName)');
-    expect(mediaWorker.indexOf('isQueueDrainOnly(contentMediaTranscriptQueueName)')).toBeLessThan(
-      mediaWorker.indexOf('claimSourceMediaGates({'),
-    );
     expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);

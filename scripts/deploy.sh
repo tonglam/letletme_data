@@ -106,6 +106,7 @@ DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_OLD_MEDIA_PRESENT=false
 DEPLOY_SERVICES_STOPPED=false
 DEPLOY_CONTENT_WORKER_FENCED=false
+DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false
 DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
 
 start_stage() {
@@ -206,6 +207,7 @@ restore_stopped_services() {
     fi
     DEPLOY_SERVICES_STOPPED=false
     DEPLOY_CONTENT_WORKER_FENCED=false
+    DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false
     DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
   fi
 }
@@ -246,6 +248,7 @@ deploy() {
       elif [[ "$DEPLOY_COMMITTED" = false &&
         ( "$DEPLOY_SERVICES_STOPPED" = true ||
           "$DEPLOY_CONTENT_WORKER_FENCED" = true ||
+          "$DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED" = true ||
           "$DEPLOY_SCHEDULER_STOP_ATTEMPTED" = true ) &&
         "$controls_restored" != true ]]; then
         if restore_stopped_services; then controls_restored=true; fi
@@ -421,6 +424,20 @@ deploy() {
     "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
     DEPLOY_ROLLBACK_ELIGIBLE=true
   fi
+  # The serving media-worker may run an older image that does not know the
+  # current deployment admission protocol. Stop it gracefully before the
+  # combined wait so it releases active PostgreSQL leases and cannot claim a
+  # replacement behind a successful probe. Recovery restarts the exact prior
+  # image when any later pre-migration gate fails.
+  if [[ "$DEPLOY_OLD_MEDIA_PRESENT" = true ]]; then
+    DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true
+    log_info "Stopping media-worker before waiting for database quiescence"
+    if ! compose stop -t 45 media-worker; then
+      log_error "Media worker did not stop cleanly; services were not stopped."
+      restore_stopped_services
+      exit 1
+    fi
+  fi
   # The scheduler must stop before the scoped wait; otherwise it can keep
   # claiming/enqueuing work while the gate is waiting for the active set to
   # drain. Record the attempt before Docker is called so a partial stop is
@@ -432,10 +449,9 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  # The bounded scoped probe covers both PostgreSQL work and Redis queues.
-  # media-worker observes the transcript admission fence before every direct
-  # database claim, so existing source-media leases can finish without being
-  # replaced while this wait is in progress.
+  # The bounded scoped probe covers both PostgreSQL work and Redis queues. The
+  # direct database media claimant is already stopped, so its released leases
+  # cannot be replaced while this wait is in progress.
   if ! wait_for_scoped_queue_quiescence 150 2; then
     log_error "Database or queue work is not quiescent; services were not stopped."
     exit 1
@@ -463,11 +479,6 @@ deploy() {
   DEPLOY_SERVICES_STOPPED=true
   if ! compose stop -t 45 api worker; then
     log_error "Services did not stop cleanly; migration was not started."
-    restore_stopped_services
-    exit 1
-  fi
-  if ! compose stop -t 45 media-worker; then
-    log_error "Media worker did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi
