@@ -148,6 +148,9 @@ describe('scheduler recovery evidence', () => {
       await appendSchedulerObligationRecovery({
         jobName: RECOVERY_JOB_NAME,
         scopeKey: RECOVERY_SCOPE_KEY,
+        obligationId: RECOVERY_LATEST_OBLIGATION_ID,
+        periodKey: 'latest-period',
+        generation: 1,
         recoveryRevision: 'recovery-99',
         recoveryActor: 'integration-test',
         recoveryReason: 'verify immutable recovery target',

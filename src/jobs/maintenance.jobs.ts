@@ -13,6 +13,7 @@ import { logError, logInfo } from '../utils/logger';
 import { getConfig } from '../utils/config';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 import { MY_FPL_FINALIZATION_BULL_ATTEMPTS } from '../domain/data-contracts';
+import { getLatestFailedSchedulerObligation } from '../repositories/scheduler-obligations';
 
 export type MaintenanceEnqueueOptions = Readonly<{
   jobId?: string;
@@ -101,6 +102,16 @@ export async function enqueueMaintenanceJob(
   if (await isQueueDrainOnly(lane)) {
     throw new QueueDrainOnlyError(lane);
   }
+  const schedulerRecoveryTarget =
+    jobName === MAINTENANCE_JOBS.MY_FPL_SNAPSHOT &&
+    source === 'manual' &&
+    options.snapshotKind === 'FINAL' &&
+    options.eventId !== undefined
+      ? await getLatestFailedSchedulerObligation({
+          jobName: 'my-fpl-finalization',
+          scopeKey: `${season.seasonCode}:event:${options.eventId}`,
+        })
+      : null;
   const data: MaintenanceJobData = {
     jobName,
     ...(lane === 'maintenance' ? {} : { lane }),
@@ -135,6 +146,15 @@ export async function enqueueMaintenanceJob(
     ...(options.snapshotIdempotencyKey === undefined
       ? {}
       : { snapshotIdempotencyKey: options.snapshotIdempotencyKey }),
+    ...(schedulerRecoveryTarget
+      ? {
+          schedulerRecoveryTarget: {
+            obligationId: schedulerRecoveryTarget.obligationId,
+            periodKey: schedulerRecoveryTarget.periodKey,
+            generation: schedulerRecoveryTarget.generation,
+          },
+        }
+      : {}),
     ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
   };
   try {

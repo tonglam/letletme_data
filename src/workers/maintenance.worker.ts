@@ -263,7 +263,8 @@ async function persistManualMyFplRecoveryEvidence(
     (job.data.eventId ?? 0) <= 0 ||
     !job.data.snapshotActor ||
     !job.data.snapshotReason ||
-    !job.data.snapshotIdempotencyKey
+    !job.data.snapshotIdempotencyKey ||
+    !job.data.schedulerRecoveryTarget
   ) {
     return;
   }
@@ -279,10 +280,18 @@ async function persistManualMyFplRecoveryEvidence(
   const changed = await appendSchedulerObligationRecovery({
     jobName: 'my-fpl-finalization',
     scopeKey: `${job.data.seasonCode}:event:${job.data.eventId}`,
+    obligationId: job.data.schedulerRecoveryTarget.obligationId,
+    periodKey: job.data.schedulerRecoveryTarget.periodKey,
+    generation: job.data.schedulerRecoveryTarget.generation,
     recoveryRevision: Number(recoveryRevision),
     recoveryActor: job.data.snapshotActor,
     recoveryReason: job.data.snapshotReason,
   });
+  if (!changed) {
+    throw new Error(
+      `Manual My FPL FINAL recovery target ${job.data.schedulerRecoveryTarget.obligationId} is no longer eligible`,
+    );
+  }
   logInfo('Manual My FPL FINAL recovery evidence persisted before completion', {
     eventId: job.data.eventId,
     revision: recoveryRevision,
