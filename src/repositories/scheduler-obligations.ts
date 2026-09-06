@@ -218,6 +218,42 @@ function immutableScheduledDueAtForSql(evidence: SQL, dueAt: SQL) {
   END`;
 }
 
+function validSchedulerRecoveryEvidenceSql(evidence: SQL) {
+  return sql`(
+    ${evidence}->'schedulerRecovery'->>'status' = 'succeeded'
+    AND NULLIF(BTRIM(${evidence}->'schedulerRecovery'->>'recoveryRevision'), '') IS NOT NULL
+    AND ${evidence}->'schedulerRecovery'->>'recoveredAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$'
+  )`;
+}
+
+function newerValidSchedulerRecoverySql(input: {
+  jobName: SQL;
+  scopeKey: SQL;
+  periodKey: SQL;
+  evidence: SQL;
+  dueAt: SQL;
+}) {
+  const currentDueAt = immutableScheduledDueAtForSql(input.evidence, input.dueAt);
+  const recoveredDueAt = immutableScheduledDueAtForSql(
+    sql`recovered.evidence`,
+    sql`recovered.due_at`,
+  );
+  return sql`EXISTS (
+    SELECT 1
+    FROM ops.scheduler_obligations AS recovered
+    WHERE recovered.job_name = ${input.jobName}
+      AND recovered.scope_key = ${input.scopeKey}
+      AND ${validSchedulerRecoveryEvidenceSql(sql`recovered.evidence`)}
+      AND (
+        ${recoveredDueAt} > ${currentDueAt}
+        OR (
+          ${recoveredDueAt} = ${currentDueAt}
+          AND recovered.period_key > ${input.periodKey}
+        )
+      )
+  )`;
+}
+
 function immutableScheduledDueAtSql() {
   return immutableScheduledDueAtForSql(
     sql`${schedulerObligationsInOps.evidence}`,
@@ -1200,6 +1236,16 @@ export async function claimSchedulerObligations(
     sql`${schedulerObligationsInOps.evidence}`,
   );
   const newerScheduleAnchor = postMatchScheduleAnchorForSql(sql`newer.evidence`);
+  const currentHasValidRecovery = validSchedulerRecoveryEvidenceSql(
+    sql`${schedulerObligationsInOps.evidence}`,
+  );
+  const currentHasNewerValidRecovery = newerValidSchedulerRecoverySql({
+    jobName: sql`${schedulerObligationsInOps.jobName}`,
+    scopeKey: sql`${schedulerObligationsInOps.scopeKey}`,
+    periodKey: sql`${schedulerObligationsInOps.periodKey}`,
+    evidence: sql`${schedulerObligationsInOps.evidence}`,
+    dueAt: sql`${schedulerObligationsInOps.dueAt}`,
+  });
   const latestAuthoritativeScope = input.enforceLatestAuthoritativeScope
     ? sql`NOT EXISTS (
         SELECT 1
@@ -1260,6 +1306,8 @@ export async function claimSchedulerObligations(
         and(
           lte(schedulerObligationsInOps.dueAt, dbNow),
           inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+          sql`NOT ${currentHasValidRecovery}`,
+          sql`NOT ${currentHasNewerValidRecovery}`,
           includedJobNames.length > 0
             ? inArray(schedulerObligationsInOps.jobName, includedJobNames)
             : undefined,
@@ -1349,6 +1397,14 @@ export async function findDueSchedulerJobNames(input: {
       and(
         sql`${schedulerObligationsInOps.dueAt} <= clock_timestamp()`,
         inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+        sql`NOT ${validSchedulerRecoveryEvidenceSql(sql`${schedulerObligationsInOps.evidence}`)}`,
+        sql`NOT ${newerValidSchedulerRecoverySql({
+          jobName: sql`${schedulerObligationsInOps.jobName}`,
+          scopeKey: sql`${schedulerObligationsInOps.scopeKey}`,
+          periodKey: sql`${schedulerObligationsInOps.periodKey}`,
+          evidence: sql`${schedulerObligationsInOps.evidence}`,
+          dueAt: sql`${schedulerObligationsInOps.dueAt}`,
+        })}`,
         excludedJobNames.length > 0
           ? notInArray(schedulerObligationsInOps.jobName, excludedJobNames)
           : undefined,
@@ -1382,29 +1438,49 @@ export async function findDueSchedulerObligationCandidates(
   const excludedJobNames = [...new Set(input.excludedJobNames ?? [])].filter(
     (name) => name.length > 0,
   );
-  const scheduledDueAt = immutableScheduledDueAtSql();
   const rows = await db.execute<{
     jobName: string;
     earliestDueAt: Date | string;
     earliestScheduledDueAt: Date | string;
   }>(sql`
     SELECT
-      job_name AS "jobName",
-      min(due_at) AS "earliestDueAt",
-      min(${scheduledDueAt}) AS "earliestScheduledDueAt"
-    FROM ops.scheduler_obligations
-    WHERE due_at <= clock_timestamp()
-      AND status IN ('pending', 'failed')
+      current.job_name AS "jobName",
+      min(current.due_at) AS "earliestDueAt",
+      min(${immutableScheduledDueAtForSql(sql`current.evidence`, sql`current.due_at`)}) AS "earliestScheduledDueAt"
+    FROM ops.scheduler_obligations AS current
+    WHERE current.due_at <= clock_timestamp()
+      AND current.status IN ('pending', 'failed')
+      AND NOT (
+        current.evidence->'schedulerRecovery'->>'status' = 'succeeded'
+        AND NULLIF(BTRIM(current.evidence->'schedulerRecovery'->>'recoveryRevision'), '') IS NOT NULL
+        AND current.evidence->'schedulerRecovery'->>'recoveredAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$'
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM ops.scheduler_obligations AS recovered
+        WHERE recovered.job_name = current.job_name
+          AND recovered.scope_key = current.scope_key
+          AND recovered.evidence->'schedulerRecovery'->>'status' = 'succeeded'
+          AND NULLIF(BTRIM(recovered.evidence->'schedulerRecovery'->>'recoveryRevision'), '') IS NOT NULL
+          AND recovered.evidence->'schedulerRecovery'->>'recoveredAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$'
+          AND (
+            ${immutableScheduledDueAtForSql(sql`recovered.evidence`, sql`recovered.due_at`)} > ${immutableScheduledDueAtForSql(sql`current.evidence`, sql`current.due_at`)}
+            OR (
+              ${immutableScheduledDueAtForSql(sql`recovered.evidence`, sql`recovered.due_at`)} = ${immutableScheduledDueAtForSql(sql`current.evidence`, sql`current.due_at`)}
+              AND recovered.period_key > current.period_key
+            )
+          )
+      )
       ${
         excludedJobNames.length > 0
-          ? sql`AND job_name NOT IN (${sql.join(
+          ? sql`AND current.job_name NOT IN (${sql.join(
               excludedJobNames.map((name) => sql`${name}`),
               sql`, `,
             )})`
           : sql``
       }
-    GROUP BY job_name
-    ORDER BY min(${scheduledDueAt}) ASC, min(obligation_id::text) ASC
+    GROUP BY current.job_name
+    ORDER BY min(${immutableScheduledDueAtForSql(sql`current.evidence`, sql`current.due_at`)}) ASC, min(current.obligation_id::text) ASC
   `);
   return rows
     .map((row) => {
@@ -1681,7 +1757,9 @@ export async function appendSchedulerObligationRecovery(input: {
       WHERE job_name = ${input.jobName}
         AND scope_key = ${input.scopeKey}
         AND status IN ('failed', 'irrecoverable')
-      ORDER BY due_at DESC, updated_at DESC
+      ORDER BY ${immutableScheduledDueAtForSql(sql`evidence`, sql`due_at`)} DESC,
+               updated_at DESC,
+               obligation_id DESC
       LIMIT 1
       FOR UPDATE
     )
