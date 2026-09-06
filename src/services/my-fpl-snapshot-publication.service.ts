@@ -1090,32 +1090,93 @@ const parseCanonicalEventPicks = (value: unknown): CanonicalEventPick[] | null =
  * Final score rows carry the immutable pick payload used by FPL to calculate
  * the result. Display fields (player name, fixture and live stats) still come
  * from the event pick read model, but score-bearing fields must be overlaid
- * from the result payload. A mismatch fails closed instead of combining two
- * different team revisions.
+ * from the result payload. FPL can reorder positions when it applies an
+ * automatic substitution, so the stable join key is the complete element set,
+ * not the deadline-time position. Any lineup delta must exactly match the
+ * canonical automatic-substitution rows; element or substitution mismatches
+ * fail closed instead of combining two different team revisions.
  */
-const overlayFinalResultPicks = (
-  result: EventResult,
-  displayRows: readonly PickRow[],
-): PickRow[] | null => {
+type FinalPickOverlayDisplayRow = Pick<
+  PickRow,
+  'element' | 'position' | 'active_chip' | 'transfers' | 'transfers_cost'
+>;
+type FinalPickOverlayResult<T extends FinalPickOverlayDisplayRow> = T &
+  Pick<
+    PickRow,
+    | 'position'
+    | 'multiplier'
+    | 'is_captain'
+    | 'is_vice_captain'
+    | 'active_chip'
+    | 'transfers'
+    | 'transfers_cost'
+  >;
+
+export const overlayFinalResultPicks = <T extends FinalPickOverlayDisplayRow>(
+  result: Pick<EventResult, 'event_picks' | 'automatic_substitutions'>,
+  displayRows: readonly T[],
+): FinalPickOverlayResult<T>[] | null => {
   const finalPicks = parseCanonicalEventPicks(result.event_picks);
   if (!finalPicks || displayRows.length !== 15) return null;
+  const finalElementSet = new Set(finalPicks.map((pick) => pick.element));
+  const substitutions = parseCanonicalAutomaticSubstitutions(
+    result.automatic_substitutions,
+    finalElementSet,
+  );
+  if (substitutions === null) return null;
   const displayByElement = new Map(displayRows.map((row) => [row.element, row] as const));
-  if (displayByElement.size !== 15) return null;
-  const merged = finalPicks.map((pick) => {
+  const displayPositions = new Set(displayRows.map((row) => row.position));
+  if (
+    displayByElement.size !== 15 ||
+    displayPositions.size !== 15 ||
+    displayRows.some((row) => row.position < 1 || row.position > 15)
+  ) {
+    return null;
+  }
+  const eventMetadata = displayRows.find((row) => row.position === 1);
+  if (!eventMetadata) return null;
+  const positionsChanged = finalPicks.some(
+    (pick) => displayByElement.get(pick.element)?.position !== pick.position,
+  );
+  if (positionsChanged) {
+    const originalLineup = new Set(
+      displayRows.filter((row) => row.position <= 11).map((row) => row.element),
+    );
+    const finalLineup = new Set(
+      finalPicks.filter((pick) => pick.position <= 11).map((pick) => pick.element),
+    );
+    const enteredLineup = new Set(
+      [...finalLineup].filter((element) => !originalLineup.has(element)),
+    );
+    const leftLineup = new Set([...originalLineup].filter((element) => !finalLineup.has(element)));
+    const declaredIncoming = new Set(substitutions.map((substitution) => substitution.elementIn));
+    const declaredOutgoing = new Set(substitutions.map((substitution) => substitution.elementOut));
+    const sameSet = (left: ReadonlySet<number>, right: ReadonlySet<number>) =>
+      left.size === right.size && [...left].every((element) => right.has(element));
+    if (
+      substitutions.length === 0 ||
+      !sameSet(enteredLineup, declaredIncoming) ||
+      !sameSet(leftLineup, declaredOutgoing)
+    ) {
+      return null;
+    }
+  }
+  const merged: FinalPickOverlayResult<T>[] = [];
+  for (const pick of finalPicks) {
     const display = displayByElement.get(pick.element);
-    if (!display || display.position !== pick.position) return null;
-    return {
+    if (!display) return null;
+    merged.push({
       ...display,
       position: pick.position,
       multiplier: pick.multiplier,
       is_captain: pick.is_captain,
       is_vice_captain: pick.is_vice_captain,
-      active_chip: pick.position === 1 ? display.active_chip : null,
-      transfers: pick.position === 1 ? display.transfers : null,
-      transfers_cost: pick.position === 1 ? display.transfers_cost : null,
-    } satisfies PickRow;
-  });
-  return merged.every((row): row is PickRow => row !== null) ? merged : null;
+      active_chip: pick.position === 1 ? eventMetadata.active_chip : null,
+      transfers: pick.position === 1 ? eventMetadata.transfers : null,
+      transfers_cost: pick.position === 1 ? eventMetadata.transfers_cost : null,
+    });
+  }
+  return merged;
 };
 
 /**
