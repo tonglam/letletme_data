@@ -184,6 +184,7 @@ describe('safeSchedulerLaneErrorCode', () => {
 describe('safeSchedulerObligationLatest', () => {
   test('keeps operational fields and replaces raw error text with a code', () => {
     const result = safeSchedulerObligationLatest({
+      obligationId: '00000000-0000-4000-8000-000000000001',
       periodKey: 'price-change-1',
       status: 'failed',
       dueAt: new Date('2026-08-27T03:00:00.000Z'),
@@ -194,6 +195,7 @@ describe('safeSchedulerObligationLatest', () => {
     });
 
     expect(result).toEqual({
+      obligationId: '00000000-0000-4000-8000-000000000001',
       periodKey: 'price-change-1',
       status: 'failed',
       dueAt: new Date('2026-08-27T03:00:00.000Z'),
@@ -201,6 +203,7 @@ describe('safeSchedulerObligationLatest', () => {
       attempts: 2,
       nextAttemptAt: null,
       lastErrorCode: 'TRANSIENT_INFRA',
+      schedulerRecovery: null,
     });
     expect(result).not.toHaveProperty('lastError');
   });

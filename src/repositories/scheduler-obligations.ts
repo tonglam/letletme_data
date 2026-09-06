@@ -53,6 +53,9 @@ export type SchedulerObligationRecoveryEvidence = Readonly<{
   status: 'succeeded';
   recoveredAt: string;
   recoveryRevision: string;
+  obligationId: string;
+  periodKey: string;
+  generation: number;
   recoveryActor?: string;
   recoveryReason?: string;
 }>;
@@ -74,7 +77,14 @@ export function schedulerObligationRecoveryFromEvidence(
     typeof recovery.recoveredAt !== 'string' ||
     !Number.isFinite(Date.parse(recovery.recoveredAt)) ||
     typeof recovery.recoveryRevision !== 'string' ||
-    recovery.recoveryRevision.trim() === ''
+    recovery.recoveryRevision.trim() === '' ||
+    typeof recovery.obligationId !== 'string' ||
+    recovery.obligationId.trim() === '' ||
+    typeof recovery.periodKey !== 'string' ||
+    recovery.periodKey.trim() === '' ||
+    typeof recovery.generation !== 'number' ||
+    !Number.isSafeInteger(recovery.generation) ||
+    recovery.generation < 0
   ) {
     return null;
   }
@@ -82,6 +92,9 @@ export function schedulerObligationRecoveryFromEvidence(
     status: 'succeeded',
     recoveredAt: recovery.recoveredAt,
     recoveryRevision: recovery.recoveryRevision,
+    obligationId: recovery.obligationId,
+    periodKey: recovery.periodKey,
+    generation: recovery.generation,
     ...(typeof recovery.recoveryActor === 'string' && recovery.recoveryActor.trim() !== ''
       ? { recoveryActor: recovery.recoveryActor }
       : {}),
@@ -89,6 +102,19 @@ export function schedulerObligationRecoveryFromEvidence(
       ? { recoveryReason: recovery.recoveryReason }
       : {}),
   };
+}
+
+export function schedulerObligationRecoveryMatches(
+  evidence: unknown,
+  identity: Readonly<{ obligationId: string; periodKey: string; generation: number }>,
+): SchedulerObligationRecoveryEvidence | null {
+  const recovery = schedulerObligationRecoveryFromEvidence(evidence);
+  return recovery &&
+    recovery.obligationId === identity.obligationId &&
+    recovery.periodKey === identity.periodKey &&
+    recovery.generation === identity.generation
+    ? recovery
+    : null;
 }
 
 // A scheduled job may own one obligation while it scans a bounded batch of
@@ -218,11 +244,25 @@ function immutableScheduledDueAtForSql(evidence: SQL, dueAt: SQL) {
   END`;
 }
 
-function validSchedulerRecoveryEvidenceSql(evidence: SQL) {
+function validSchedulerRecoveryEvidenceSql(
+  evidence: SQL,
+  identity?: Readonly<{ obligationId: SQL; periodKey: SQL; generation: SQL }>,
+) {
+  const identityMatch = identity
+    ? sql`
+      AND ${evidence}->'schedulerRecovery'->>'obligationId' = (${identity.obligationId})::text
+      AND ${evidence}->'schedulerRecovery'->>'periodKey' = (${identity.periodKey})::text
+      AND ${evidence}->'schedulerRecovery'->>'generation' = (${identity.generation})::text
+    `
+    : sql``;
   return sql`(
     ${evidence}->'schedulerRecovery'->>'status' = 'succeeded'
     AND NULLIF(BTRIM(${evidence}->'schedulerRecovery'->>'recoveryRevision'), '') IS NOT NULL
     AND ${evidence}->'schedulerRecovery'->>'recoveredAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$'
+    AND NULLIF(BTRIM(${evidence}->'schedulerRecovery'->>'obligationId'), '') IS NOT NULL
+    AND NULLIF(BTRIM(${evidence}->'schedulerRecovery'->>'periodKey'), '') IS NOT NULL
+    AND (${evidence}->'schedulerRecovery'->>'generation') ~ '^[0-9]+$'
+    ${identityMatch}
   )`;
 }
 
@@ -243,7 +283,11 @@ function newerValidSchedulerRecoverySql(input: {
     FROM ops.scheduler_obligations AS recovered
     WHERE recovered.job_name = ${input.jobName}
       AND recovered.scope_key = ${input.scopeKey}
-      AND ${validSchedulerRecoveryEvidenceSql(sql`recovered.evidence`)}
+      AND ${validSchedulerRecoveryEvidenceSql(sql`recovered.evidence`, {
+        obligationId: sql`recovered.obligation_id`,
+        periodKey: sql`recovered.period_key`,
+        generation: sql`recovered.generation`,
+      })}
       AND (
         ${recoveredDueAt} > ${currentDueAt}
         OR (
@@ -1238,6 +1282,11 @@ export async function claimSchedulerObligations(
   const newerScheduleAnchor = postMatchScheduleAnchorForSql(sql`newer.evidence`);
   const currentHasValidRecovery = validSchedulerRecoveryEvidenceSql(
     sql`${schedulerObligationsInOps.evidence}`,
+    {
+      obligationId: sql`${schedulerObligationsInOps.obligationId}`,
+      periodKey: sql`${schedulerObligationsInOps.periodKey}`,
+      generation: sql`${schedulerObligationsInOps.generation}`,
+    },
   );
   const currentHasNewerValidRecovery = newerValidSchedulerRecoverySql({
     jobName: sql`${schedulerObligationsInOps.jobName}`,
@@ -1397,7 +1446,11 @@ export async function findDueSchedulerJobNames(input: {
       and(
         sql`${schedulerObligationsInOps.dueAt} <= clock_timestamp()`,
         inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
-        sql`NOT ${validSchedulerRecoveryEvidenceSql(sql`${schedulerObligationsInOps.evidence}`)}`,
+        sql`NOT ${validSchedulerRecoveryEvidenceSql(sql`${schedulerObligationsInOps.evidence}`, {
+          obligationId: sql`${schedulerObligationsInOps.obligationId}`,
+          periodKey: sql`${schedulerObligationsInOps.periodKey}`,
+          generation: sql`${schedulerObligationsInOps.generation}`,
+        })}`,
         sql`NOT ${newerValidSchedulerRecoverySql({
           jobName: sql`${schedulerObligationsInOps.jobName}`,
           scopeKey: sql`${schedulerObligationsInOps.scopeKey}`,
@@ -1450,19 +1503,21 @@ export async function findDueSchedulerObligationCandidates(
     FROM ops.scheduler_obligations AS current
     WHERE current.due_at <= clock_timestamp()
       AND current.status IN ('pending', 'failed')
-      AND NOT (
-        current.evidence->'schedulerRecovery'->>'status' = 'succeeded'
-        AND NULLIF(BTRIM(current.evidence->'schedulerRecovery'->>'recoveryRevision'), '') IS NOT NULL
-        AND current.evidence->'schedulerRecovery'->>'recoveredAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$'
-      )
+      AND NOT ${validSchedulerRecoveryEvidenceSql(sql`current.evidence`, {
+        obligationId: sql`current.obligation_id`,
+        periodKey: sql`current.period_key`,
+        generation: sql`current.generation`,
+      })}
       AND NOT EXISTS (
         SELECT 1
         FROM ops.scheduler_obligations AS recovered
         WHERE recovered.job_name = current.job_name
           AND recovered.scope_key = current.scope_key
-          AND recovered.evidence->'schedulerRecovery'->>'status' = 'succeeded'
-          AND NULLIF(BTRIM(recovered.evidence->'schedulerRecovery'->>'recoveryRevision'), '') IS NOT NULL
-          AND recovered.evidence->'schedulerRecovery'->>'recoveredAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$'
+          AND ${validSchedulerRecoveryEvidenceSql(sql`recovered.evidence`, {
+            obligationId: sql`recovered.obligation_id`,
+            periodKey: sql`recovered.period_key`,
+            generation: sql`recovered.generation`,
+          })}
           AND (
             ${immutableScheduledDueAtForSql(sql`recovered.evidence`, sql`recovered.due_at`)} > ${immutableScheduledDueAtForSql(sql`current.evidence`, sql`current.due_at`)}
             OR (
@@ -1740,19 +1795,10 @@ export async function appendSchedulerObligationRecovery(input: {
   if (!Number.isFinite(recoveredAt.getTime())) {
     throw new Error('Scheduler recovery timestamp is invalid');
   }
-  const recoveryEvidence = JSON.stringify({
-    [SCHEDULER_RECOVERY_EVIDENCE_KEY]: {
-      status: 'succeeded',
-      recoveredAt: recoveredAt.toISOString(),
-      recoveryRevision,
-      recoveryActor,
-      recoveryReason,
-    },
-  });
   const db = input.db ?? (await getDb());
   const updated = await db.execute<{ obligation_id: string }>(sql`
     WITH candidate AS (
-      SELECT obligation_id
+      SELECT obligation_id, period_key, generation
       FROM ops.scheduler_obligations
       WHERE job_name = ${input.jobName}
         AND scope_key = ${input.scopeKey}
@@ -1764,15 +1810,30 @@ export async function appendSchedulerObligationRecovery(input: {
       FOR UPDATE
     )
     UPDATE ops.scheduler_obligations AS obligation
-    SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || ${recoveryEvidence}::jsonb,
+    SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || jsonb_build_object(
+          ${SCHEDULER_RECOVERY_EVIDENCE_KEY},
+          jsonb_build_object(
+            'status', 'succeeded',
+            'recoveredAt', ${recoveredAt.toISOString()},
+            'recoveryRevision', ${recoveryRevision},
+            'obligationId', candidate.obligation_id::text,
+            'periodKey', candidate.period_key,
+            'generation', candidate.generation,
+            'recoveryActor', ${recoveryActor},
+            'recoveryReason', ${recoveryReason}
+          )
+        ),
         updated_at = clock_timestamp()
     FROM candidate
     WHERE obligation.obligation_id = candidate.obligation_id
       AND (
         obligation.evidence->'schedulerRecovery'->>'recoveryRevision' IS DISTINCT FROM ${recoveryRevision}
         OR obligation.evidence->'schedulerRecovery'->>'status' IS DISTINCT FROM 'succeeded'
+        OR obligation.evidence->'schedulerRecovery'->>'obligationId' IS DISTINCT FROM candidate.obligation_id::text
+        OR obligation.evidence->'schedulerRecovery'->>'periodKey' IS DISTINCT FROM candidate.period_key
+        OR obligation.evidence->'schedulerRecovery'->>'generation' IS DISTINCT FROM candidate.generation::text
       )
-    RETURNING obligation.obligation_id
+      RETURNING obligation.obligation_id
   `);
   return updated.length === 1;
 }
@@ -2093,6 +2154,7 @@ export async function schedulerObligationStatus(input: {
   statementTimeoutMs?: number;
 }): Promise<{
   latest: {
+    obligationId: string;
     periodKey: string;
     status: SchedulerObligationStatus;
     dueAt: Date;
@@ -2122,6 +2184,7 @@ export async function schedulerObligationStatus(input: {
   const immutableDueAt = immutableScheduledDueAtSql();
   const rows = await db
     .select({
+      obligationId: schedulerObligationsInOps.obligationId,
       periodKey: schedulerObligationsInOps.periodKey,
       status: schedulerObligationsInOps.status,
       dueAt: schedulerObligationsInOps.dueAt,
@@ -2163,6 +2226,7 @@ export async function schedulerObligationStatus(input: {
     .orderBy(desc(immutableDueAt), desc(schedulerObligationsInOps.updatedAt));
   const latest = rows[0]
     ? {
+        obligationId: rows[0].obligationId,
         periodKey: rows[0].periodKey,
         status: rows[0].status as SchedulerObligationStatus,
         dueAt: immutableScheduledDueAt(rows[0].dueAt, rows[0].scheduledDueAtMs),
@@ -2176,7 +2240,13 @@ export async function schedulerObligationStatus(input: {
     : null;
   let consecutiveUnsuccessfulCycles = 0;
   for (const row of rows) {
-    if (schedulerObligationRecoveryFromEvidence(row.evidence)?.status === 'succeeded') {
+    if (
+      schedulerObligationRecoveryMatches(row.evidence, {
+        obligationId: row.obligationId,
+        periodKey: row.periodKey,
+        generation: row.generation,
+      })
+    ) {
       // Keep the original failed/irrecoverable row immutable while treating
       // its explicit consumer-visible recovery marker as the end of the
       // current failure streak.
@@ -2196,17 +2266,28 @@ export async function schedulerObligationStatus(input: {
       consecutiveUnsuccessfulCycles += 1;
     }
   }
+  const latestHasRecovery = Boolean(
+    latest &&
+      schedulerObligationRecoveryMatches(latest.evidence, {
+        obligationId: latest.obligationId,
+        periodKey: latest.periodKey,
+        generation: latest.generation,
+      }),
+  );
   const latestIsOverdueState =
     latest?.status === 'pending' || latest?.status === 'failed' || latest?.status === 'retrying';
   return {
     latest,
-    overdue: Boolean(latest && latest.dueAt.getTime() <= Date.now() && latestIsOverdueState),
+    overdue: Boolean(
+      latest && !latestHasRecovery && latest.dueAt.getTime() <= Date.now() && latestIsOverdueState,
+    ),
     consecutiveUnsuccessfulCycles,
   };
 }
 
 export type SchedulerObligationStatusSnapshot = Readonly<{
   latest: {
+    obligationId: string;
     periodKey: string;
     status: SchedulerObligationStatus;
     dueAt: Date;
@@ -2218,6 +2299,7 @@ export type SchedulerObligationStatusSnapshot = Readonly<{
     evidence: Record<string, unknown>;
   } | null;
   latestSuccess: {
+    obligationId: string;
     periodKey: string;
     status: SchedulerObligationStatus;
     dueAt: Date;
@@ -2276,6 +2358,7 @@ export async function liveFinalRetentionObligationStatuses(input: {
     sql`, `,
   );
   const rows = await db.execute<{
+    obligationId: string;
     scopeKey: string;
     periodKey: string;
     status: string;
@@ -2292,6 +2375,7 @@ export async function liveFinalRetentionObligationStatuses(input: {
   }>(sql`
     WITH ranked AS (
       SELECT
+        obligation_id AS "obligationId",
         scope_key AS "scopeKey",
         period_key AS "periodKey",
         status,
@@ -2354,6 +2438,7 @@ export async function liveFinalRetentionObligationStatuses(input: {
       const dueAt = schedulerStatusDate(row.dueAt);
       if (!dueAt) return null;
       return {
+        obligationId: row.obligationId,
         periodKey: row.periodKey,
         status: row.status as SchedulerObligationStatus,
         dueAt,

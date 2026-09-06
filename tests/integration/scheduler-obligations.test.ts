@@ -166,7 +166,13 @@ describe('scheduler recovery evidence', () => {
     expect(
       rows.find((row) => row.obligation_id === RECOVERY_LATEST_OBLIGATION_ID)?.evidence,
     ).toMatchObject({
-      schedulerRecovery: { recoveryRevision: 'recovery-99', status: 'succeeded' },
+      schedulerRecovery: {
+        recoveryRevision: 'recovery-99',
+        status: 'succeeded',
+        obligationId: RECOVERY_LATEST_OBLIGATION_ID,
+        periodKey: 'latest-period',
+        generation: 1,
+      },
     });
     expect(
       rows.find((row) => row.obligation_id === RECOVERY_OLDER_OBLIGATION_ID)?.evidence,
@@ -182,6 +188,20 @@ describe('scheduler recovery evidence', () => {
         includedJobNames: [RECOVERY_JOB_NAME],
       }),
     ).toHaveLength(0);
+
+    const status = await schedulerObligationStatus({
+      jobName: RECOVERY_JOB_NAME,
+      scopeKey: RECOVERY_SCOPE_KEY,
+    });
+    expect(status.overdue).toBe(false);
+    expect(status.consecutiveUnsuccessfulCycles).toBe(0);
+    expect(status.latest).toMatchObject({
+      obligationId: RECOVERY_LATEST_OBLIGATION_ID,
+      periodKey: 'latest-period',
+      status: 'failed',
+      lastError: 'latest failure',
+      generation: 1,
+    });
   });
 });
 

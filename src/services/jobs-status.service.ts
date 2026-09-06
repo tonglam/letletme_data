@@ -20,6 +20,7 @@ import { getQueueConnection } from '../utils/queue';
 import { checkRuntimeHeartbeat, readRuntimeHeartbeat } from '../utils/runtime-heartbeat';
 import {
   liveFinalRetentionObligationStatuses,
+  schedulerObligationRecoveryMatches,
   schedulerObligationStatus,
   schedulerObligationSummary,
 } from '../repositories/scheduler-obligations';
@@ -145,9 +146,25 @@ type SchedulerObligationLatest = NonNullable<
 >;
 type SchedulerObligationLatestInput = Pick<
   SchedulerObligationLatest,
-  'periodKey' | 'status' | 'dueAt' | 'generation' | 'attempts' | 'lastError' | 'nextAttemptAt'
+  | 'obligationId'
+  | 'periodKey'
+  | 'status'
+  | 'dueAt'
+  | 'generation'
+  | 'attempts'
+  | 'lastError'
+  | 'nextAttemptAt'
 > &
   Partial<Pick<SchedulerObligationLatest, 'completedAt' | 'evidence'>>;
+
+type SchedulerRecoverySummary = Readonly<{
+  status: 'succeeded';
+  recoveredAt: string;
+  recoveryRevision: string;
+  obligationId: string;
+  periodKey: string;
+  generation: number;
+}>;
 
 /**
  * Keep the price-change operational summary useful without leaking the
@@ -157,10 +174,17 @@ type SchedulerObligationLatestInput = Pick<
 export function safeSchedulerObligationLatest(latest: SchedulerObligationLatestInput | null):
   | (Omit<SchedulerObligationLatestInput, 'lastError' | 'completedAt' | 'evidence'> & {
       lastErrorCode: string | null;
+      schedulerRecovery: SchedulerRecoverySummary | null;
     })
   | null {
   if (!latest) return null;
+  const recovery = schedulerObligationRecoveryMatches(latest.evidence, {
+    obligationId: latest.obligationId,
+    periodKey: latest.periodKey,
+    generation: latest.generation,
+  });
   return {
+    obligationId: latest.obligationId,
     periodKey: latest.periodKey,
     status: latest.status,
     dueAt: latest.dueAt,
@@ -168,6 +192,16 @@ export function safeSchedulerObligationLatest(latest: SchedulerObligationLatestI
     attempts: latest.attempts,
     nextAttemptAt: latest.nextAttemptAt,
     lastErrorCode: safeSchedulerLaneErrorCode(latest.lastError),
+    schedulerRecovery: recovery
+      ? {
+          status: recovery.status,
+          recoveredAt: recovery.recoveredAt,
+          recoveryRevision: recovery.recoveryRevision,
+          obligationId: recovery.obligationId,
+          periodKey: recovery.periodKey,
+          generation: recovery.generation,
+        }
+      : null,
   };
 }
 
