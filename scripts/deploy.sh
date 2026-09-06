@@ -104,6 +104,7 @@ DEPLOY_RUNNER_PROBE_SUCCEEDED=false
 DEPLOY_RUNNER_PREVIOUS_TARGET=''
 DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_OLD_MEDIA_PRESENT=false
+DEPLOY_OLD_MEDIA_ENABLED=false
 DEPLOY_SERVICES_STOPPED=false
 DEPLOY_CONTENT_WORKER_FENCED=false
 DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false
@@ -169,6 +170,32 @@ compose() {
 # Keep local/manual deploys on the same host lock, migration plan and staged
 # startup state machine as the GitHub workflow.
 source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
+
+container_boolean_env() {
+  local container_id=$1
+  local key=$2
+  local fallback=$3
+  local raw normalized
+  if ! raw=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    "$container_id" 2>/dev/null | awk -F= -v key="$key" '
+      $1 == key {
+        sub("^[^=]*=", "", $0)
+        value = $0
+      }
+      END {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        print value
+      }
+    '); then
+    return 1
+  fi
+  normalized=$(printf '%s' "${raw:-$fallback}" | tr '[:upper:]' '[:lower:]')
+  case "$normalized" in
+    true|1|yes|on) printf 'true' ;;
+    false|0|no|off) printf 'false' ;;
+    *) return 1 ;;
+  esac
+}
 
 source_media_deploy_fence_is_exact() {
   local container_id=$1
@@ -255,6 +282,62 @@ acquire_source_media_deploy_fence() {
   log_error "Source-media deployment claim fence did not become ready"
   release_source_media_deploy_fence || true
   return 1
+}
+
+# The sourced deployment state machine consumes the tracked stage PID during
+# exit cleanup even though shellcheck cannot follow the dynamic source path.
+# shellcheck disable=SC2034
+stop_media_worker_with_deadline() {
+  local stop_pid stop_group_pid=''
+  local stop_status
+  local stop_deadline=$(( $(date +%s) + 40 ))
+
+  # Keep the Compose stop and all of its descendants inside a host-side
+  # deadline that expires well before the 60-second database fence. Docker's
+  # own `-t` controls the container grace period but does not bound a stalled
+  # daemon or Compose client.
+  if command -v setsid >/dev/null 2>&1; then
+    (
+      trap - EXIT
+      cd "$PROJECT_DIR" || exit 1
+      exec setsid "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" stop -t 30 media-worker
+    ) &
+    stop_pid=$!
+    stop_group_pid=$stop_pid
+  else
+    (
+      trap - EXIT
+      compose_direct stop -t 30 media-worker
+    ) &
+    stop_pid=$!
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=$stop_pid
+
+  while scoped_queue_probe_is_alive "$stop_pid" "$stop_group_pid"; do
+    if [[ -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}" &&
+      -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then
+      terminate_scoped_queue_probe "$stop_pid" "$stop_group_pid" 2 true || true
+      DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+      return 1
+    fi
+    if (( $(date +%s) >= stop_deadline )); then
+      terminate_scoped_queue_probe "$stop_pid" "$stop_group_pid" 2 true || true
+      DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+      return 124
+    fi
+    sleep 0.1
+  done
+  if wait "$stop_pid"; then
+    stop_status=0
+  else
+    stop_status=$?
+  fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_STAGE_PID=''
+  if [[ -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}" &&
+    -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then
+    return 1
+  fi
+  return "$stop_status"
 }
 
 restore_stopped_services() {
@@ -402,6 +485,11 @@ deploy() {
       log_error "Serving media-worker is not in a stable running state (state=${old_media_state:-unknown})"
       exit 1
     fi
+    if ! DEPLOY_OLD_MEDIA_ENABLED=$(container_boolean_env \
+      "$old_media_container" CONTENT_MEDIA_WORKER_ENABLED false); then
+      log_error "Serving media-worker has an invalid CONTENT_MEDIA_WORKER_ENABLED value"
+      exit 1
+    fi
     DEPLOY_OLD_MEDIA_PRESENT=true
   fi
   start_stage pull
@@ -542,20 +630,25 @@ deploy() {
     log_error "Database or queue work is not quiescent; services were not stopped."
     exit 1
   fi
-  # The serving media-worker may run an older image that does not know the
-  # current deployment admission protocol. Once every producer and consumer is
-  # quiescent, lock its non-terminal gate rows before stopping it. The worker's
-  # SKIP LOCKED claim then remains empty, while a zero RUNNING count proves that
-  # shutdown does not abort work or consume an attempt. The bounded helper
-  # releases its row locks automatically even if the deploy process disappears.
+  # An enabled serving media-worker may run an older image that does not know
+  # the current deployment admission protocol. Once every producer and consumer
+  # is quiescent, lock its non-terminal gate rows before stopping it. The
+  # worker's SKIP LOCKED claim then remains empty, while a zero RUNNING count
+  # proves that shutdown does not abort work or consume an attempt. A disabled
+  # serving worker has no database claim path and needs only the bounded stop.
+  # The helper releases its row locks automatically even if deploy disappears.
   if [[ "$DEPLOY_OLD_MEDIA_PRESENT" = true ]]; then
-    if ! acquire_source_media_deploy_fence; then
-      log_error "Could not fence source-media claims; media-worker was not stopped."
-      exit 1
+    if [[ "$DEPLOY_OLD_MEDIA_ENABLED" = true ]]; then
+      if ! acquire_source_media_deploy_fence; then
+        log_error "Could not fence source-media claims; media-worker was not stopped."
+        exit 1
+      fi
+    else
+      log_info "Serving media-worker is disabled; no database claim fence is required"
     fi
     DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true
-    log_info "Stopping idle media-worker behind the source-media claim fence"
-    if ! compose stop -t 45 media-worker; then
+    log_info "Stopping idle media-worker with a bounded host deadline"
+    if ! stop_media_worker_with_deadline; then
       log_error "Media worker did not stop cleanly; services were not stopped."
       release_source_media_deploy_fence || true
       restore_stopped_services

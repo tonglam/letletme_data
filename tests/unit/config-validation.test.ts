@@ -203,7 +203,7 @@ describe('production environment preflight', () => {
       'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
     );
     const combinedQuiescence = deployScript.indexOf('wait_for_scoped_queue_quiescence 150 2');
-    const mediaWorkerStop = deployScript.indexOf('if ! compose stop -t 45 media-worker; then');
+    const mediaWorkerStop = deployScript.indexOf('if ! stop_media_worker_with_deadline; then');
     const mediaWorkerFence = deployScript.indexOf('if ! acquire_source_media_deploy_fence; then');
     const schedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const migrate = deployScript.indexOf('bun run db:migrate');
@@ -310,7 +310,7 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 content-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose stop -t 45 media-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! stop_media_worker_with_deadline; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
       /if ! compose run --rm -T --interactive=false migration bun scripts\/assert-queue-quiescence\.ts --database-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
@@ -355,9 +355,19 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('DEPLOY_SCHEDULER_STOP_ATTEMPTED=true');
     expect(deployScript).toContain('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false');
     expect(deployScript).toContain('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true');
+    expect(deployScript).toContain('DEPLOY_OLD_MEDIA_ENABLED=false');
+    expect(deployScript).toContain('container_boolean_env');
+    expect(deployScript).toContain('CONTENT_MEDIA_WORKER_ENABLED false');
     expect(deployScript).toContain('old_media_container=$(compose ps -q media-worker');
     expect(deployScript).not.toContain('compose ps -aq media-worker');
     expect(deployScript).toContain('release_source_media_deploy_fence');
+    expect(deployScript).toContain('if [[ "$DEPLOY_OLD_MEDIA_ENABLED" = true ]]; then');
+    expect(deployScript).toContain('stop_media_worker_with_deadline()');
+    expect(deployScript).toContain('local stop_deadline=$(( $(date +%s) + 40 ))');
+    expect(deployScript).toContain('stop -t 30 media-worker');
+    expect(deployScript).toContain(
+      'terminate_scoped_queue_probe "$stop_pid" "$stop_group_pid" 2 true',
+    );
     expect(deployScript).toMatch(
       /if \[\[ "\$DEPLOY_OLD_MEDIA_PRESENT" = true && "\$DEPLOY_ROLLBACK_ELIGIBLE" != true \]\]; then[\s\S]*?media-worker was not stopped[\s\S]*?exit 1[\s\S]*?fi[\s\S]*?acquire_source_media_deploy_fence[\s\S]*?DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true/,
     );

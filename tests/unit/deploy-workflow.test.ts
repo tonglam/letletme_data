@@ -190,7 +190,7 @@ describe('release workflow gates', () => {
     const localAdmission = deployScript.indexOf(
       'if ! drain_content_worker_queues_for_deploy; then',
     );
-    const localMediaStop = deployScript.indexOf('if ! compose stop -t 45 media-worker; then');
+    const localMediaStop = deployScript.indexOf('if ! stop_media_worker_with_deadline; then');
     const localSchedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const localMediaFence = deployScript.indexOf('if ! acquire_source_media_deploy_fence; then');
