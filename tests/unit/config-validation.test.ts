@@ -199,10 +199,10 @@ describe('production environment preflight', () => {
     const identityContract = deployScript.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     const stopServices = deployScript.indexOf('if ! compose stop -t 45 api worker; then');
-    const databaseQuiescence = deployScript.indexOf(
+    const postStopDatabaseQuiescence = deployScript.indexOf(
       'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
     );
-    const redisQuiescence = deployScript.indexOf('wait_for_scoped_queue_quiescence 150 2');
+    const combinedQuiescence = deployScript.indexOf('wait_for_scoped_queue_quiescence 150 2');
     const schedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const migrate = deployScript.indexOf('bun run db:migrate');
     const canonicalContract = deployScript.indexOf('bun run db:migration-contract', migrate);
@@ -220,21 +220,16 @@ describe('production environment preflight', () => {
     expect(configuredRuntimeUrl).toBeLessThan(preflight);
     expect(identityContract).toBeGreaterThan(preflight);
     expect(stopServices).toBeGreaterThan(identityContract);
-    expect(databaseQuiescence).toBeLessThan(stopServices);
-    expect(redisQuiescence).toBeLessThan(stopServices);
-    expect(schedulerStop).toBeGreaterThan(databaseQuiescence);
-    expect(schedulerStop).toBeLessThan(redisQuiescence);
-    const postStopDatabaseQuiescence = deployScript.indexOf(
-      'bun scripts/assert-queue-quiescence.ts --database-only --scoped',
-      stopServices,
-    );
-    const postStopRedisQuiescence = deployScript.indexOf(
+    expect(schedulerStop).toBeGreaterThan(identityContract);
+    expect(schedulerStop).toBeLessThan(combinedQuiescence);
+    expect(combinedQuiescence).toBeLessThan(stopServices);
+    expect(postStopDatabaseQuiescence).toBeGreaterThan(stopServices);
+    const postStopCombinedQuiescence = deployScript.indexOf(
       'run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10',
       stopServices,
     );
-    expect(postStopDatabaseQuiescence).toBeGreaterThan(stopServices);
-    expect(postStopRedisQuiescence).toBeGreaterThan(postStopDatabaseQuiescence);
-    expect(migrate).toBeGreaterThan(postStopRedisQuiescence);
+    expect(postStopCombinedQuiescence).toBeGreaterThan(postStopDatabaseQuiescence);
+    expect(migrate).toBeGreaterThan(postStopCombinedQuiescence);
     expect(canonicalContract).toBeGreaterThan(migrate);
     expect(roleVerify).toBeGreaterThan(canonicalContract);
     expect(publishCore).toBeGreaterThan(canonicalContract);
@@ -290,15 +285,15 @@ describe('production environment preflight', () => {
       stopServices,
     );
     const queueDrainWaitBeforeStop = deployScript.indexOf('wait_for_scoped_queue_quiescence 150 2');
+    const schedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
     const databaseQuiescenceAfterStop = deployScript.indexOf(
       databaseQuiescenceCommand,
       stopServices,
     );
     const redisQuiescenceAfterStop = deployScript.indexOf(redisQuiescenceCommand, stopServices);
 
-    expect(databaseQuiescenceBeforeStop).toBeGreaterThan(0);
-    expect(queueDrainWaitBeforeStop).toBeGreaterThan(databaseQuiescenceBeforeStop);
-    expect(databaseQuiescenceBeforeStop).toBeLessThan(stopServices);
+    expect(databaseQuiescenceBeforeStop).toBe(-1);
+    expect(queueDrainWaitBeforeStop).toBeGreaterThan(schedulerStop);
     expect(queueDrainWaitBeforeStop).toBeLessThan(stopServices);
     expect(databaseQuiescenceAfterStop).toBeGreaterThan(stopServices);
     expect(redisQuiescenceAfterStop).toBeGreaterThan(databaseQuiescenceAfterStop);
@@ -333,7 +328,8 @@ describe('production environment preflight', () => {
     expect(stateMachine).toContain('--admission-mode');
     expect(stateMachine).toContain('--admission-queue');
     expect(stateMachine).not.toContain('set-content-x-scan-admission.ts');
-    expect(stateMachine).toContain('assert-queue-quiescence.ts --redis-only --scoped');
+    expect(stateMachine).toContain('assert-queue-quiescence.ts --scoped');
+    expect(stateMachine).not.toContain('assert-queue-quiescence.ts --redis-only --scoped');
     expect(deployScript).toContain(
       '"$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA"',
     );

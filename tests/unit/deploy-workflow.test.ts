@@ -145,6 +145,10 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('--admission-queue');
     expect(deployStateMachine).toContain('deadline_seconds=${3:-300}');
     expect(deployStateMachine).toContain('probe_timeout_seconds=${4:-10}');
+    expect(deployStateMachine).toContain('bun scripts/assert-queue-quiescence.ts --scoped');
+    expect(deployStateMachine).not.toContain(
+      'bun scripts/assert-queue-quiescence.ts --redis-only --scoped',
+    );
   });
 
   test('pauses deployment consumers and drains active work before stopping their workers', () => {
@@ -236,6 +240,10 @@ describe('release workflow gates', () => {
     expect(mediaWorker).toContain('controller.abort');
     expect(mediaWorker).toContain('retentionController?.abort');
     expect(mediaWorker).toContain('if (polling || shuttingDown || !flags.enabled) return;');
+    expect(mediaWorker).toContain('isQueueDrainOnly(contentMediaTranscriptQueueName)');
+    expect(mediaWorker.indexOf('isQueueDrainOnly(contentMediaTranscriptQueueName)')).toBeLessThan(
+      mediaWorker.indexOf('claimSourceMediaGates({'),
+    );
     expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);

@@ -410,11 +410,6 @@ deploy() {
   DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)
   [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
   log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"
-  log_info "Checking queue quiescence before stopping services"
-  if ! compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
-    log_error "Database work is not quiescent; services were not stopped."
-    exit 1
-  fi
   # Pause every queue consumed by content-worker before accepting the scoped
   # result so delayed and prioritized content jobs cannot become active in the
   # stop race. Keep the combined worker alive while active work (including HTTP
@@ -437,8 +432,12 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  # The bounded scoped probe covers both PostgreSQL work and Redis queues.
+  # media-worker observes the transcript admission fence before every direct
+  # database claim, so existing source-media leases can finish without being
+  # replaced while this wait is in progress.
   if ! wait_for_scoped_queue_quiescence 150 2; then
-    log_error "Queue work is not quiescent; services were not stopped."
+    log_error "Database or queue work is not quiescent; services were not stopped."
     exit 1
   fi
   DEPLOY_CONTENT_WORKER_FENCED=true

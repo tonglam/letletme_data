@@ -738,10 +738,12 @@ printf 'result=%s\n' "$result"
     expect(result.stdout?.toString() ?? '').toContain('result=0');
   });
 
-  test('passes only the deployment-paused queue allowlist to the bounded probe', () => {
+  test('passes the paused allowlist to the bounded combined database and queue probe', () => {
     const result = runQueueProbeShell(
       String.raw`
 [[ "$*" == *"-e DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES=entry-sync,content-x-scan,content-http-acquisition"* ]]
+[[ "$*" == *"bun scripts/assert-queue-quiescence.ts --scoped"* ]]
+[[ "$*" != *"--redis-only"* ]]
 return 0`,
       {
         DEPLOY_CONTENT_WORKER_PAUSED_QUEUES: 'entry-sync content-x-scan content-http-acquisition',
