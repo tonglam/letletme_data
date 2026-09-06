@@ -184,6 +184,7 @@ describe('safeSchedulerLaneErrorCode', () => {
 describe('safeSchedulerObligationLatest', () => {
   test('keeps operational fields and replaces raw error text with a code', () => {
     const result = safeSchedulerObligationLatest({
+      obligationId: '00000000-0000-4000-8000-000000000001',
       periodKey: 'price-change-1',
       status: 'failed',
       dueAt: new Date('2026-08-27T03:00:00.000Z'),
@@ -194,6 +195,7 @@ describe('safeSchedulerObligationLatest', () => {
     });
 
     expect(result).toEqual({
+      obligationId: '00000000-0000-4000-8000-000000000001',
       periodKey: 'price-change-1',
       status: 'failed',
       dueAt: new Date('2026-08-27T03:00:00.000Z'),
@@ -201,12 +203,57 @@ describe('safeSchedulerObligationLatest', () => {
       attempts: 2,
       nextAttemptAt: null,
       lastErrorCode: 'TRANSIENT_INFRA',
+      schedulerRecovery: null,
     });
     expect(result).not.toHaveProperty('lastError');
   });
 
   test('returns null when there is no latest obligation', () => {
     expect(safeSchedulerObligationLatest(null)).toBeNull();
+  });
+
+  test('projects only matching bounded recovery evidence', () => {
+    expect(
+      safeSchedulerObligationLatest({
+        obligationId: '00000000-0000-4000-8000-000000000001',
+        periodKey: '2627:event:2',
+        status: 'irrecoverable',
+        dueAt: new Date('2026-09-06T05:00:00.000Z'),
+        generation: 2,
+        attempts: 3,
+        lastError: 'SOURCE_NOT_READY:FINAL_INCOMPLETE private detail',
+        nextAttemptAt: null,
+        evidence: {
+          schedulerRecovery: {
+            status: 'succeeded',
+            recoveredAt: '2026-09-06T06:00:00.000Z',
+            recoveryRevision: '101',
+            obligationId: '00000000-0000-4000-8000-000000000001',
+            periodKey: '2627:event:2',
+            generation: 2,
+            recoveryActor: 'private-actor',
+            recoveryReason: 'private reason',
+          },
+        },
+      }),
+    ).toEqual({
+      obligationId: '00000000-0000-4000-8000-000000000001',
+      periodKey: '2627:event:2',
+      status: 'irrecoverable',
+      dueAt: new Date('2026-09-06T05:00:00.000Z'),
+      generation: 2,
+      attempts: 3,
+      nextAttemptAt: null,
+      lastErrorCode: 'SOURCE_NOT_READY:FINAL_INCOMPLETE',
+      schedulerRecovery: {
+        status: 'succeeded',
+        recoveredAt: '2026-09-06T06:00:00.000Z',
+        recoveryRevision: '101',
+        obligationId: '00000000-0000-4000-8000-000000000001',
+        periodKey: '2627:event:2',
+        generation: 2,
+      },
+    });
   });
 });
 

@@ -75,6 +75,12 @@ export type MaintenanceJobData = {
   snapshotActor?: string;
   snapshotReason?: string;
   snapshotIdempotencyKey?: string;
+  /** Immutable scheduler obligation identity captured before a manual FINAL is enqueued. */
+  schedulerRecoveryTarget?: {
+    obligationId: string;
+    periodKey: string;
+    generation: number;
+  };
   /** Stable source checkpoint shared by all My FPL child refreshes. */
   freshAfter?: string;
 };

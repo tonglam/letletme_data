@@ -50,6 +50,7 @@ import {
   type MaintenanceJobData,
 } from '../queues/maintenance.queue';
 import {
+  appendSchedulerObligationRecovery,
   deferSchedulerObligationForWorker,
   markSchedulerObligationRetrying,
   renewSchedulerObligation,
@@ -248,6 +249,55 @@ function maintenanceResultDeferredSchedulerObligation(jobName: string, result: u
   if (jobName !== MAINTENANCE_JOBS.MY_FPL_SNAPSHOT) return false;
   if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
   return (result as Record<string, unknown>).status === 'waiting-dependencies';
+}
+
+async function persistManualMyFplRecoveryEvidence(
+  job: Job<MaintenanceJobData>,
+  result: unknown,
+): Promise<void> {
+  if (
+    job.name !== MAINTENANCE_JOBS.MY_FPL_SNAPSHOT ||
+    job.data.source !== 'manual' ||
+    job.data.snapshotKind !== 'FINAL' ||
+    !Number.isSafeInteger(job.data.eventId) ||
+    (job.data.eventId ?? 0) <= 0 ||
+    !job.data.snapshotActor ||
+    !job.data.snapshotReason ||
+    !job.data.snapshotIdempotencyKey ||
+    !job.data.schedulerRecoveryTarget
+  ) {
+    return;
+  }
+  const completionEvidence = maintenanceCompletionEvidence(job.name, result);
+  const recoveryRevision = completionEvidence.revision;
+  if (
+    !Number.isSafeInteger(recoveryRevision) ||
+    Number(recoveryRevision) <= 0 ||
+    !job.data.seasonCode
+  ) {
+    return;
+  }
+  const changed = await appendSchedulerObligationRecovery({
+    jobName: 'my-fpl-finalization',
+    scopeKey: `${job.data.seasonCode}:event:${job.data.eventId}`,
+    obligationId: job.data.schedulerRecoveryTarget.obligationId,
+    periodKey: job.data.schedulerRecoveryTarget.periodKey,
+    generation: job.data.schedulerRecoveryTarget.generation,
+    recoveryRevision: Number(recoveryRevision),
+    recoveryActor: job.data.snapshotActor,
+    recoveryReason: job.data.snapshotReason,
+  });
+  if (!changed) {
+    throw new Error(
+      `Manual My FPL FINAL recovery target ${job.data.schedulerRecoveryTarget.obligationId} is no longer eligible`,
+    );
+  }
+  logInfo('Manual My FPL FINAL recovery evidence persisted before completion', {
+    eventId: job.data.eventId,
+    revision: recoveryRevision,
+    changed,
+    source: job.data.source,
+  });
 }
 
 function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
@@ -484,6 +534,10 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 publication: active,
                 redisRevision: redisManifest.revision,
               });
+              await persistManualMyFplRecoveryEvidence(job, {
+                status: 'noop',
+                publication: active,
+              });
               return { status: 'noop', publication: active };
             }
           }
@@ -680,7 +734,9 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             publication: publicationForDelivery,
             redisRevision: activeRedisManifest.revision,
           });
-          return { ...capture, publication: publicationForDelivery, invalidation, redis };
+          const result = { ...capture, publication: publicationForDelivery, invalidation, redis };
+          await persistManualMyFplRecoveryEvidence(job, result);
+          return result;
         }
         case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX: {
           // Invalidation receipts are intentionally delivered before normal
