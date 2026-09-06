@@ -1811,7 +1811,7 @@ export async function appendSchedulerObligationRecovery(input: {
     )
     UPDATE ops.scheduler_obligations AS obligation
     SET evidence = COALESCE(obligation.evidence, '{}'::jsonb) || jsonb_build_object(
-          ${SCHEDULER_RECOVERY_EVIDENCE_KEY},
+          'schedulerRecovery',
           jsonb_build_object(
             'status', 'succeeded',
             'recoveredAt', ${recoveredAt.toISOString()},
