@@ -424,6 +424,10 @@ deploy() {
     "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_IMAGE_ID"; then
     DEPLOY_ROLLBACK_ELIGIBLE=true
   fi
+  if [[ "$DEPLOY_OLD_MEDIA_PRESENT" = true && "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
+    log_error "Previous runtime is not rollback-eligible; media-worker was not stopped."
+    exit 1
+  fi
   # The serving media-worker may run an older image that does not know the
   # current deployment admission protocol. Stop it gracefully before the
   # combined wait so it releases active PostgreSQL leases and cannot claim a

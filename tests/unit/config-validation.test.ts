@@ -353,6 +353,9 @@ describe('production environment preflight', () => {
     expect(deployScript).toContain('DEPLOY_SCHEDULER_STOP_ATTEMPTED=true');
     expect(deployScript).toContain('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=false');
     expect(deployScript).toContain('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true');
+    expect(deployScript).toMatch(
+      /if \[\[ "\$DEPLOY_OLD_MEDIA_PRESENT" = true && "\$DEPLOY_ROLLBACK_ELIGIBLE" != true \]\]; then[\s\S]*?media-worker was not stopped[\s\S]*?exit 1[\s\S]*?fi[\s\S]*?DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true/,
+    );
     expect(deployScript).toContain('"$DEPLOY_COMMITTED" = false &&');
     expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');
     expect(deployScript).toContain('deploy-host-grok-runner.sh');

@@ -690,6 +690,13 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=false');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
     expect(deployScript).toContain('"$DEPLOY_ROLLBACK_ELIGIBLE" != true');
+    const rollbackAdmission = deployScript.indexOf(
+      'if [[ "$DEPLOY_OLD_MEDIA_PRESENT" = true && "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then',
+    );
+    expect(rollbackAdmission).toBeGreaterThan(deployScript.indexOf('rollback_runtime_is_eligible'));
+    expect(rollbackAdmission).toBeLessThan(
+      deployScript.indexOf('DEPLOY_MEDIA_WORKER_STOP_ATTEMPTED=true'),
+    );
     expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
     expect(deployScript.lastIndexOf('rollback_runtime_is_eligible')).toBeGreaterThan(
       deployScript.indexOf('Migration plan and queue quiescence passed before stopping services'),
