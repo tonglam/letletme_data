@@ -17,6 +17,7 @@ const SCHEDULER_INTERVAL_MS = 30_000;
 const PUBLICATION_RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 getConfig();
+databaseSingleton.useSchedulerQueryTimeout(getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS / 2);
 if (getConfig().NODE_ENV === 'production') await databaseSingleton.connect();
 
 const schedulerHeartbeatPath = process.env.SCHEDULER_HEARTBEAT_PATH ?? '/tmp/scheduler-heartbeat';

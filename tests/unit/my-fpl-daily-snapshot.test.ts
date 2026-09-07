@@ -294,6 +294,9 @@ describe('My FPL daily snapshot publication contract', () => {
   test('binds live freshness and cleanup tools to exact bounded evidence', () => {
     expect(liveDataWorker).toContain('checkpointMatchesSnapshot');
     expect(liveDataWorker).toContain('checkpoint.publication.generation === snapshot.generation');
+    expect(liveDataWorker).toContain('checkpoint.publication.generation > snapshot.generation');
+    expect(liveDataWorker).toContain('checkpoint remains pending after coalescing');
+    expect(liveDataWorker).toContain('checkpointIsAheadOfSnapshot || snapshot.checkpointed');
     expect(liveDataWorker).toContain('liveCheckpointPending: !(');
     expect(liveDataWorker).toContain('recordPendingLiveSnapshotCheckpointEvidence');
     expect(governanceService).toContain('LIVE_SNAPSHOT_CHECKPOINT_BACKLOG_BATCH_SIZE = 100');

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
 import {
+  dataGovernanceCasesInOps,
   freshnessSloWindowsInOps,
   schedulerLanesInOps,
   schedulerObligationsInOps,
@@ -426,7 +427,10 @@ export async function advanceSchedulerLane(input: {
           sql`${schedulerObligationsInOps.obligationId} <> ${selectedDesired.obligationId}`,
         ),
       )
-      .returning({ obligationId: schedulerObligationsInOps.obligationId });
+      .returning({
+        obligationId: schedulerObligationsInOps.obligationId,
+        periodKey: schedulerObligationsInOps.periodKey,
+      });
 
     if (supersedable.length > 0) {
       const [counted] = await tx
@@ -445,8 +449,33 @@ export async function advanceSchedulerLane(input: {
     // denominator as well; otherwise the selected target is the only one that
     // can publish while every superseded window eventually breaches.
     const contract = contractForSchedulerJob(input.jobName);
-    if (contract && contractHasFreshnessWindow(contract, input.jobName)) {
-      await tx
+    const retiredPeriods = supersedable.map((item) => item.periodKey);
+    if (input.desiredObligation.obligationId !== selectedDesired.obligationId) {
+      // An older replica may insert its window after a newer replica already
+      // superseded the obligation. Reconcile this exact persisted identity,
+      // including the legacy cutover case, without scanning historical SLOs.
+      const [retiredCaller] = await tx
+        .select({ periodKey: schedulerObligationsInOps.periodKey })
+        .from(schedulerObligationsInOps)
+        .where(
+          and(
+            eq(schedulerObligationsInOps.obligationId, input.desiredObligation.obligationId),
+            eq(schedulerObligationsInOps.status, 'skipped'),
+            sql`${schedulerObligationsInOps.evidence}->>'reason' IN (${LANE_SUPERSEDED_REASON}, ${CUTOVER_SUPERSEDED_REASON})`,
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (retiredCaller && !retiredPeriods.includes(retiredCaller.periodKey)) {
+        retiredPeriods.push(retiredCaller.periodKey);
+      }
+    }
+    if (
+      retiredPeriods.length > 0 &&
+      contract &&
+      contractHasFreshnessWindow(contract, input.jobName)
+    ) {
+      const retiredWindows = await tx
         .update(freshnessSloWindowsInOps)
         .set({
           status: 'NOT_APPLICABLE',
@@ -461,17 +490,41 @@ export async function advanceSchedulerLane(input: {
         .where(
           and(
             eq(freshnessSloWindowsInOps.contractKey, contract.contractKey),
+            eq(freshnessSloWindowsInOps.sloKey, contract.contractKey),
             eq(freshnessSloWindowsInOps.scopeKey, input.scopeKey),
-            inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
-            sql`(
-              ${freshnessSloWindowsInOps.obligationDueAt} < ${selectedDueAtIso}::timestamptz
-              OR (
-                ${freshnessSloWindowsInOps.obligationDueAt} = ${selectedDueAtIso}::timestamptz
-                AND ${freshnessSloWindowsInOps.periodKey} < ${selectedDesired.periodKey}
-              )
-            )`,
+            inArray(freshnessSloWindowsInOps.periodKey, retiredPeriods),
+            inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID', 'BREACHED']),
           ),
-        );
+        )
+        .returning({ windowId: freshnessSloWindowsInOps.windowId });
+      if (retiredWindows.length > 0) {
+        await tx
+          .update(dataGovernanceCasesInOps)
+          .set({
+            status: 'DISMISSED',
+            lastError: null,
+            repairJobId: null,
+            repairDeadlineAt: null,
+            evidence: sql`${dataGovernanceCasesInOps.evidence} || ${JSON.stringify({
+              reason: 'SUPERSEDED_BY_LATEST',
+              supersededByPeriodKey: selectedDesired.periodKey,
+            })}::jsonb`,
+            updatedAt: dbNow.toISOString(),
+          })
+          .where(
+            and(
+              inArray(
+                dataGovernanceCasesInOps.sloWindowId,
+                retiredWindows.map((window) => window.windowId),
+              ),
+              inArray(dataGovernanceCasesInOps.status, [
+                'OPEN',
+                'AUTO_REPAIRING',
+                'REQUIRES_REVIEW',
+              ]),
+            ),
+          );
+      }
     }
 
     const [desiredRow] = await tx

@@ -10,6 +10,7 @@ import {
   findMissingPickScopes,
   isNoOpLegacyFixtureEvidence,
   inspectPickScope,
+  isNewerServingLivePublication,
   liveSeedActivePointerSha256,
   parseSeedArguments,
   rebaseLegacyFixturesAtCanonicalFence,
@@ -679,5 +680,46 @@ describe('Live Points V2 entry-pick seed', () => {
     expect(shouldSkipLegacyLivePublication(2, existingCheckpoints)).toBe(true);
     expect(shouldSkipLegacyLivePublication(5, existingCheckpoints)).toBe(true);
     expect(shouldSkipLegacyLivePublication(3, existingCheckpoints)).toBe(false);
+  });
+
+  test('keeps a newer valid Redis live head pending instead of overwriting it with an older checkpoint', () => {
+    const checkpoint = {
+      publication: {
+        season: '2627',
+        eventId: 3,
+        generation: 352,
+        state: 'LIVE_ACTIVE',
+      },
+    } as unknown as import('../../src/cache/live-publication-v2').LivePublicationRead;
+    const current = {
+      servedFrom: 'REDIS_CURRENT',
+      publication: {
+        season: '2627',
+        eventId: 3,
+        generation: 353,
+        checkpointedAt: null,
+        state: 'LIVE_ACTIVE',
+      },
+    } as unknown as import('../../src/cache/live-publication-v2').LivePublicationRead;
+
+    expect(isNewerServingLivePublication(checkpoint, current)).toBe(true);
+    expect(
+      isNewerServingLivePublication(checkpoint, {
+        ...current,
+        publication: { ...current.publication, checkpointedAt: '2026-09-07T00:00:00.000Z' },
+      }),
+    ).toBe(false);
+    expect(
+      isNewerServingLivePublication(checkpoint, {
+        ...current,
+        publication: { ...current.publication, state: 'FINALIZED' },
+      }),
+    ).toBe(false);
+    expect(
+      isNewerServingLivePublication(checkpoint, {
+        ...current,
+        servedFrom: 'REDIS_PREVIOUS',
+      }),
+    ).toBe(false);
   });
 });
