@@ -426,7 +426,10 @@ export async function advanceSchedulerLane(input: {
           sql`${schedulerObligationsInOps.obligationId} <> ${selectedDesired.obligationId}`,
         ),
       )
-      .returning({ obligationId: schedulerObligationsInOps.obligationId });
+      .returning({
+        obligationId: schedulerObligationsInOps.obligationId,
+        periodKey: schedulerObligationsInOps.periodKey,
+      });
 
     if (supersedable.length > 0) {
       const [counted] = await tx
@@ -445,7 +448,11 @@ export async function advanceSchedulerLane(input: {
     // denominator as well; otherwise the selected target is the only one that
     // can publish while every superseded window eventually breaches.
     const contract = contractForSchedulerJob(input.jobName);
-    if (contract && contractHasFreshnessWindow(contract, input.jobName)) {
+    if (
+      supersedable.length > 0 &&
+      contract &&
+      contractHasFreshnessWindow(contract, input.jobName)
+    ) {
       await tx
         .update(freshnessSloWindowsInOps)
         .set({
@@ -461,15 +468,13 @@ export async function advanceSchedulerLane(input: {
         .where(
           and(
             eq(freshnessSloWindowsInOps.contractKey, contract.contractKey),
+            eq(freshnessSloWindowsInOps.sloKey, contract.contractKey),
             eq(freshnessSloWindowsInOps.scopeKey, input.scopeKey),
+            inArray(
+              freshnessSloWindowsInOps.periodKey,
+              supersedable.map((item) => item.periodKey),
+            ),
             inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
-            sql`(
-              ${freshnessSloWindowsInOps.obligationDueAt} < ${selectedDueAtIso}::timestamptz
-              OR (
-                ${freshnessSloWindowsInOps.obligationDueAt} = ${selectedDueAtIso}::timestamptz
-                AND ${freshnessSloWindowsInOps.periodKey} < ${selectedDesired.periodKey}
-              )
-            )`,
           ),
         );
     }

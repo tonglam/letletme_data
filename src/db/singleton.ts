@@ -6,6 +6,7 @@ import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import { isTransactionPoolerConnection } from './postgres-connection';
 import { assertDataRuntimeRole } from './runtime-role-contract';
+import { withSchedulerQueryTimeout } from './scheduler-query-timeout';
 import * as schema from './schemas/index.schema';
 
 /**
@@ -34,6 +35,11 @@ class DatabaseSingleton {
   private db: ReturnType<typeof drizzle> | null = null;
   private isConnected = false;
   private connectPromise: Promise<void> | null = null;
+  private schedulerQueryTimeoutMs: number | undefined;
+
+  public useSchedulerQueryTimeout(timeoutMs: number): void {
+    this.schedulerQueryTimeoutMs = timeoutMs;
+  }
 
   private constructor() {
     // Private constructor prevents direct instantiation
@@ -83,6 +89,9 @@ class DatabaseSingleton {
         connect_timeout: 10,
         prepare: !transactionPooler,
       });
+      if (this.schedulerQueryTimeoutMs !== undefined) {
+        this.client = withSchedulerQueryTimeout(this.client, this.schedulerQueryTimeoutMs);
+      }
 
       // Test the connection before exposing it. Production must use the
       // dedicated least-privilege writer LOGIN, never the migration or owner

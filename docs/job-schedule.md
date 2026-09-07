@@ -15,6 +15,17 @@ registry declares each obligation's timezone explicitly. Cron ticks are
 candidates, not guarantees of a write: each job applies its documented season,
 current event, fixture-window, and data-availability gates before enqueueing.
 
+The scheduler requests PostgreSQL statement cancellation after half of
+`SCHEDULER_RESOLVE_TIMEOUT_MS` (5 seconds at the default 10-second definition
+deadline), including time waiting for its connection pool. This applies only
+to the scheduler process, including its transaction and savepoint queries;
+workers keep their existing database policy. Cancellation is a request, not
+proof of rollback: the caller awaits the driver's actual result, and a write
+that wins the cancellation race is reported as successful. Definition
+single-flight tracking remains in place until the underlying work settles.
+An unavailable cancellation connection can still delay settlement; progress
+and heartbeat guards must continue to expose that condition.
+
 ## Canonical executable inventory
 
 The following names are the current `schedulerRegistry` entries. Cadence,
