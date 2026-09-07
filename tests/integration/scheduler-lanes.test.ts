@@ -30,6 +30,7 @@ const DEFINITION = {
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
+  await sql`DELETE FROM ops.data_governance_cases WHERE scope_key = ${SCOPE_KEY}`;
   await sql`DELETE FROM ops.freshness_slo_windows WHERE scope_key = ${SCOPE_KEY}`;
   await sql`DELETE FROM ops.scheduler_lanes WHERE lane_key = ${LANE_KEY}`;
   await sql`
@@ -55,25 +56,35 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler latest-wins lanes', () => {
-  test('retires an exact window inserted by an older replica after supersession', async () => {
-    const older = await reserve('2026-08-25T01:00:00.000Z', 'late-window-older');
-    const newer = await reserve('2026-08-25T01:05:00.000Z', 'late-window-newer');
-    const input = {
-      laneKey: LANE_KEY,
-      jobName: DEFINITION.name,
-      scopeKey: SCOPE_KEY,
-      queueName: 'fpl-critical-sync',
-    };
-    await advanceSchedulerLane({ ...input, desiredObligation: newer });
-    const sql = await getDbClient();
-    await sql`INSERT INTO ops.freshness_slo_windows
-      (slo_key, contract_key, scope_key, period_key, eligible_at, due_at, obligation_due_at)
-      VALUES ('market-price', 'market-price', ${SCOPE_KEY}, ${older.periodKey}, now(), now(), ${older.dueAt.toISOString()}::timestamptz)`;
-    await advanceSchedulerLane({ ...input, desiredObligation: older });
-    const [window] = await sql`SELECT status FROM ops.freshness_slo_windows
+  test.each(['PENDING', 'BREACHED'])(
+    'retires a late %s window and its open case after supersession',
+    async (status) => {
+      const older = await reserve('2026-08-25T01:00:00.000Z', 'late-window-older');
+      const newer = await reserve('2026-08-25T01:05:00.000Z', 'late-window-newer');
+      const input = {
+        laneKey: LANE_KEY,
+        jobName: DEFINITION.name,
+        scopeKey: SCOPE_KEY,
+        queueName: 'fpl-critical-sync',
+      };
+      await advanceSchedulerLane({ ...input, desiredObligation: newer });
+      const sql = await getDbClient();
+      await sql`INSERT INTO ops.freshness_slo_windows
+      (slo_key, contract_key, scope_key, period_key, eligible_at, due_at, obligation_due_at, status)
+      VALUES ('market-price', 'market-price', ${SCOPE_KEY}, ${older.periodKey}, now(), now(), ${older.dueAt.toISOString()}::timestamptz, ${status})`;
+      await sql`INSERT INTO ops.data_governance_cases
+      (case_kind, contract_key, lane, slo_window_id, scope_key, error_class, error_code, fingerprint, compensator)
+      SELECT 'freshness', 'market-price', 'test', window_id, scope_key, 'test', 'test', 'test', 'test'
+      FROM ops.freshness_slo_windows WHERE scope_key=${SCOPE_KEY} AND period_key=${older.periodKey}`;
+      await advanceSchedulerLane({ ...input, desiredObligation: older });
+      const [window] = await sql`SELECT status FROM ops.freshness_slo_windows
       WHERE slo_key='market-price' AND scope_key=${SCOPE_KEY} AND period_key=${older.periodKey}`;
-    expect(window?.status).toBe('NOT_APPLICABLE');
-  });
+      expect(window?.status).toBe('NOT_APPLICABLE');
+      const [repairCase] =
+        await sql`SELECT status FROM ops.data_governance_cases WHERE scope_key=${SCOPE_KEY}`;
+      expect(repairCase?.status).toBe('DISMISSED');
+    },
+  );
 
   test('retires only newly superseded windows, keeping the running target and other SLOs intact', async () => {
     const active = await reserve('2026-08-25T02:00:00.000Z', 'window-active');

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
 import {
+  dataGovernanceCasesInOps,
   freshnessSloWindowsInOps,
   schedulerLanesInOps,
   schedulerObligationsInOps,
@@ -474,7 +475,7 @@ export async function advanceSchedulerLane(input: {
       contract &&
       contractHasFreshnessWindow(contract, input.jobName)
     ) {
-      await tx
+      const retiredWindows = await tx
         .update(freshnessSloWindowsInOps)
         .set({
           status: 'NOT_APPLICABLE',
@@ -492,9 +493,38 @@ export async function advanceSchedulerLane(input: {
             eq(freshnessSloWindowsInOps.sloKey, contract.contractKey),
             eq(freshnessSloWindowsInOps.scopeKey, input.scopeKey),
             inArray(freshnessSloWindowsInOps.periodKey, retiredPeriods),
-            inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
+            inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID', 'BREACHED']),
           ),
-        );
+        )
+        .returning({ windowId: freshnessSloWindowsInOps.windowId });
+      if (retiredWindows.length > 0) {
+        await tx
+          .update(dataGovernanceCasesInOps)
+          .set({
+            status: 'DISMISSED',
+            lastError: null,
+            repairJobId: null,
+            repairDeadlineAt: null,
+            evidence: sql`${dataGovernanceCasesInOps.evidence} || ${JSON.stringify({
+              reason: 'SUPERSEDED_BY_LATEST',
+              supersededByPeriodKey: selectedDesired.periodKey,
+            })}::jsonb`,
+            updatedAt: dbNow.toISOString(),
+          })
+          .where(
+            and(
+              inArray(
+                dataGovernanceCasesInOps.sloWindowId,
+                retiredWindows.map((window) => window.windowId),
+              ),
+              inArray(dataGovernanceCasesInOps.status, [
+                'OPEN',
+                'AUTO_REPAIRING',
+                'REQUIRES_REVIEW',
+              ]),
+            ),
+          );
+      }
     }
 
     const [desiredRow] = await tx

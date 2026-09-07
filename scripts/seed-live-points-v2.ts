@@ -123,6 +123,7 @@ export function isNewerServingLivePublication(
   return Boolean(
     current &&
       current.servedFrom === 'REDIS_CURRENT' &&
+      current.publication.checkpointedAt === null &&
       checkpoint.publication.state !== 'FINALIZED' &&
       current.publication.state !== 'FINALIZED' &&
       current.publication.season === checkpoint.publication.season &&
