@@ -45,6 +45,21 @@ function fixture() {
 }
 
 describe('scheduler database query cancellation', () => {
+  test('removes expired queued operations without executing them after recovery', async () => {
+    const f = fixture();
+    const active = Promise.resolve(f.client`active`);
+    const queued = Array.from({ length: 8 }, () =>
+      Promise.resolve(f.client`queued`).catch((error: Error) => error),
+    );
+    await Bun.sleep(35);
+    expect(f.counts().executionCount).toBe(1);
+    expect((await Promise.all(queued)).every((result) => result instanceof Error)).toBe(true);
+    f.resolve([]);
+    await active;
+    await f.client`after recovery`;
+    expect(f.counts().executionCount).toBe(2);
+  });
+
   test('keeps unconsumed SQL fragments lazy', async () => {
     const f = fixture();
     void f.client`fragment`;

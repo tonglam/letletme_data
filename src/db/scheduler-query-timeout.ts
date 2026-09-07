@@ -19,7 +19,45 @@ export function withSchedulerQueryTimeout<T extends postgres.Sql | postgres.Tran
   // Keep scheduler work out of the driver's wire pipeline until the previous
   // operation settles. Queued deadlines can then discard work before it is
   // sent, rather than racing a cancellation against a later statement.
-  let connectionWork: Promise<unknown> = Promise.resolve();
+  const waiting: Array<() => void> = [];
+  let running = false;
+  function enqueueWork(operation: () => unknown) {
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<unknown>((resolve, fail) => {
+      reject = fail;
+      waiting.push(() => {
+        running = true;
+        void Promise.resolve()
+          .then(operation)
+          .then(
+            (value) => {
+              resolve(value);
+              finish();
+            },
+            (error: unknown) => {
+              fail(error);
+              finish();
+            },
+          );
+      });
+    });
+    const queued = waiting.at(-1)!;
+    function finish() {
+      running = false;
+      waiting.shift()?.();
+    }
+    if (!running) waiting.shift()?.();
+    return {
+      promise,
+      cancelQueued(error: Error): boolean {
+        const index = waiting.indexOf(queued);
+        if (index < 0) return false;
+        waiting.splice(index, 1);
+        reject(error);
+        return true;
+      },
+    };
+  }
   let abandonedAcquisition: Promise<unknown> | undefined;
 
   function transactionCall(
@@ -35,10 +73,10 @@ export function withSchedulerQueryTimeout<T extends postgres.Sql | postgres.Tran
     });
     const timer = setTimeout(() => {
       expired = true;
-      abandonedAcquisition = operation;
+      if (!scheduled.cancelQueued(error)) abandonedAcquisition = operation;
       rejectDeadline(error);
     }, timeoutMs);
-    const operation = connectionWork.then(() => {
+    const scheduled = enqueueWork(() => {
       if (expired) throw error;
       return Reflect.apply(
         method,
@@ -54,7 +92,7 @@ export function withSchedulerQueryTimeout<T extends postgres.Sql | postgres.Tran
         ),
       );
     });
-    connectionWork = operation.catch(() => undefined);
+    const operation = scheduled.promise;
     void operation
       .finally(() => {
         clearTimeout(timer);
@@ -79,29 +117,12 @@ export function withSchedulerQueryTimeout<T extends postgres.Sql | postgres.Tran
     let pending: Promise<unknown> | undefined;
     function start(): Promise<unknown> {
       if (!pending) {
-        let started = false;
-        let expired = false;
-        pending = new Promise((resolve, reject) => {
-          const timer = setTimeout(() => {
-            if (started) query.cancel();
-            else {
-              expired = true;
-              reject(new TimeoutError('Scheduler SQL queue wait exceeded its deadline'));
-            }
-          }, timeoutMs);
-          const operation = connectionWork.then(async () => {
-            if (expired) return;
-            started = true;
-            try {
-              resolve(await query);
-            } catch (error) {
-              reject(error);
-            } finally {
-              clearTimeout(timer);
-            }
-          });
-          connectionWork = operation.catch(() => undefined);
-        });
+        const scheduled = enqueueWork(() => query);
+        const timer = setTimeout(() => {
+          const error = new TimeoutError('Scheduler SQL queue wait exceeded its deadline');
+          if (!scheduled.cancelQueued(error)) query.cancel();
+        }, timeoutMs);
+        pending = scheduled.promise.finally(() => clearTimeout(timer));
       }
       return pending;
     }
