@@ -28,7 +28,7 @@ import {
 } from '../services/live-league-publication-v2.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
-import { logError, logInfo } from '../utils/logger';
+import { logDebug, logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { eventRepository } from '../repositories/events';
 import {
@@ -240,6 +240,12 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       const checkpointMatchesSnapshot =
         checkpoint?.publication.publicationId === snapshot.publicationId &&
         checkpoint.publication.generation === snapshot.generation;
+      const checkpointIsAheadOfSnapshot = Boolean(
+        checkpoint &&
+          (checkpoint.publication.generation > snapshot.generation ||
+            (checkpoint.publication.generation === snapshot.generation &&
+              checkpoint.publication.publicationId !== snapshot.publicationId)),
+      );
       const validSourceCheckedAt =
         sourceCheckedAt !== null && Number.isFinite(sourceCheckedAt.getTime());
       const validPgPublishedAt = pgPublishedAt !== null && Number.isFinite(pgPublishedAt.getTime());
@@ -286,18 +292,27 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
           });
         }
       } else if (checkpoint && !checkpointMatchesSnapshot) {
-        logError(
-          'Live snapshot freshness evidence checkpoint identity changed before observation',
-          new Error('live publication checkpoint identity mismatch'),
-          {
-            eventId,
-            windowId: job.data.freshnessWindowId,
-            snapshotPublicationId: snapshot.publicationId,
-            snapshotGeneration: snapshot.generation,
-            checkpointPublicationId: checkpoint.publication.publicationId,
-            checkpointGeneration: checkpoint.publication.generation,
-          },
-        );
+        const context = {
+          eventId,
+          windowId: job.data.freshnessWindowId,
+          snapshotPublicationId: snapshot.publicationId,
+          snapshotGeneration: snapshot.generation,
+          checkpointPublicationId: checkpoint.publication.publicationId,
+          checkpointGeneration: checkpoint.publication.generation,
+        };
+        if (checkpointIsAheadOfSnapshot) {
+          // A durable checkpoint that is ahead of the Redis serving head, or
+          // swaps publication identity at the same generation, is a real
+          // ordering violation. A lower durable generation is expected while
+          // the ten-minute checkpoint coalescing window is still pending.
+          logError(
+            'Live snapshot freshness evidence checkpoint is ahead of serving publication',
+            new Error('live publication checkpoint ordering mismatch'),
+            context,
+          );
+        } else {
+          logDebug('Live snapshot freshness checkpoint remains pending after coalescing', context);
+        }
       }
     }
     const classicGlobalIdentityMatches =
