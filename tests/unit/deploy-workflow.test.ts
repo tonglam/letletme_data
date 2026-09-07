@@ -77,6 +77,7 @@ function runRollbackEligibility(overrides: Record<string, string> = {}) {
       fi
       if [[ "$1" = inspect && "$2" = --format ]]; then
         case "$3" in
+          '{{.Config.Image}}') printf '%s\n' "$MOCK_CONTAINER_IMAGE_REF" ;;
           '{{.Image}}') printf '%s\n' "$MOCK_CONTAINER_IMAGE_ID" ;;
           *org.opencontainers.image.revision*) printf '%s\n' "$MOCK_CONTAINER_RELEASE" ;;
           *Config.Env*) printf 'DEPLOY_SHA=%s\n' "$MOCK_CONTAINER_ENV_RELEASE" ;;
@@ -101,6 +102,7 @@ function runRollbackEligibility(overrides: Record<string, string> = {}) {
       ...process.env,
       MOCK_CONTAINER_HEALTH: 'healthy',
       MOCK_CONTAINER_IMAGE_ID: 'sha256:old',
+      MOCK_CONTAINER_IMAGE_REF: 'ghcr.io/example/data@sha256:abc',
       MOCK_CONTAINER_RELEASE: exactRelease,
       MOCK_CONTAINER_ENV_RELEASE: exactRelease,
       MOCK_CONTAINER_STATE: 'running',
@@ -740,6 +742,26 @@ describe('release workflow gates', () => {
     ).not.toBe(0);
     expect(runRollbackEligibility({ MOCK_CONTAINER_HEALTH: 'unhealthy' }).exitCode).not.toBe(0);
     expect(runRollbackEligibility({ MOCK_STRICT_HEALTH_STATUS: '1' }).exitCode).not.toBe(0);
+  });
+
+  test('uses the local application release instead of an inherited Bun revision', () => {
+    const local = {
+      MOCK_CONTAINER_IMAGE_REF: 'letletme-data:local',
+      MOCK_CONTAINER_RELEASE: '0d9b296af33f2b851fcbf4df3e9ec89751734ba4',
+    };
+    expect(runRollbackEligibility(local).exitCode).toBe(0);
+    expect(runRollbackEligibility({ ...local, MOCK_CONTAINER_ENV_RELEASE: '' }).exitCode).not.toBe(
+      0,
+    );
+    expect(
+      runRollbackEligibility({ ...local, MOCK_CONTAINER_IMAGE_ID: 'sha256:other' }).exitCode,
+    ).not.toBe(0);
+    expect(runRollbackEligibility({ ...local, MOCK_STRICT_HEALTH_STATUS: '1' }).exitCode).not.toBe(
+      0,
+    );
+    expect(
+      runRollbackEligibility({ MOCK_CONTAINER_RELEASE: local.MOCK_CONTAINER_RELEASE }).exitCode,
+    ).not.toBe(0);
   });
 
   test('weekly security workflow scans a freshly built production image', () => {

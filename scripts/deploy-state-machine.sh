@@ -1088,21 +1088,27 @@ release_sha_for_image() {
 
 release_sha_for_container() {
   local container_id=${1:-}
-  local release_sha container_env_release_sha
+  local release_sha container_env_release_sha container_image_ref
   [[ -n "$container_id" ]] || {
     printf '%s\n' unknown
     return 0
   }
-  release_sha=$(docker inspect \
-    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+  container_image_ref=$(docker inspect --format '{{.Config.Image}}' \
     "$container_id" 2>/dev/null || true)
-  if [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
-    printf '%s\n' "$release_sha"
-    return 0
+  # The local build inherits the Bun base image's OCI revision label. Its
+  # application identity is the Compose-controlled DEPLOY_SHA, subsequently
+  # checked against the exact image ID, Git commit and strict deploy health.
+  # Registry images continue to use their explicitly stamped OCI revision.
+  if [[ "$container_image_ref" != letletme-data:local ]]; then
+    release_sha=$(docker inspect \
+      --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+      "$container_id" 2>/dev/null || true)
+    if [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      printf '%s\n' "$release_sha"
+      return 0
+    fi
   fi
-  # Local images may not carry OCI labels, but every runtime started by the
-  # compose contract receives DEPLOY_SHA. Read only that controlled dimension;
-  # never dump the complete container environment into deploy logs.
+  # Read only the controlled release dimension, never the full environment.
   container_env_release_sha=$(docker inspect \
     --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" \
     2>/dev/null | awk -F= '$1 == "DEPLOY_SHA" { print substr($0, index($0, "=") + 1); exit }' || true)
