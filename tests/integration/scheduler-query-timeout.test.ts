@@ -17,6 +17,40 @@ afterAll(async () => {
 });
 
 describe('scheduler SQL deadlines against PostgreSQL', () => {
+  test('bounds pool acquisition and never runs an expired transaction callback later', async () => {
+    let release!: () => void;
+    let acquired!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const owner = raw.begin(async () => {
+      acquired();
+      await hold;
+    });
+    await ready;
+    let calls = 0;
+    const started = Date.now();
+    await expect(
+      bounded.begin(async () => {
+        calls += 1;
+      }),
+    ).rejects.toThrow('transaction acquisition');
+    expect(Date.now() - started).toBeLessThan(1000);
+    await expect(
+      bounded.begin(async () => {
+        calls += 1;
+      }),
+    ).rejects.toThrow('transaction acquisition');
+    release();
+    await owner;
+    await Bun.sleep(100);
+    expect(calls).toBe(0);
+    expect((await bounded.begin((tx) => tx`SELECT 42 AS answer`))[0]?.answer).toBe(42);
+  });
+
   test('cancels pg_sleep and lets the single connection execute the next query', async () => {
     await bounded`SELECT 1`;
     const started = Date.now();
@@ -47,32 +81,24 @@ describe('scheduler SQL deadlines against PostgreSQL', () => {
     expect(rows[0]).toEqual([42]);
   });
 
-  test('reports the actual outcome when a pipelined write races cancellation', async () => {
-    await raw`CREATE TEMP TABLE scheduler_queued_test (value integer)`;
-    const busy = Promise.resolve(raw`SELECT pg_sleep(0.5)`);
-    await Bun.sleep(20);
-    let reported = false;
-    const outcome = Promise.resolve(bounded`INSERT INTO scheduler_queued_test VALUES (1)`)
-      .then(
-        () => 'committed',
-        () => 'cancelled',
-      )
-      .finally(() => {
-        reported = true;
-      });
-    await Bun.sleep(200);
-    // Cancellation is a request, not proof of rollback. In particular, never
-    // reject a caller while its already-sent write can still commit later.
-    expect(reported).toBe(false);
+  test('discards queued writes before sending them and keeps later work usable', async () => {
+    await bounded`CREATE TEMP TABLE scheduler_queued_test (value integer)`;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const busy = bounded.begin(async () => {
+      started();
+      await Bun.sleep(500);
+    });
+    await ready;
+    await expect(
+      Promise.resolve(bounded`INSERT INTO scheduler_queued_test VALUES (1)`),
+    ).rejects.toThrow('queue wait');
     await busy;
-    const expectedCount = (await outcome) === 'committed' ? 1 : 0;
-    expect((await raw`SELECT count(*)::int AS count FROM scheduler_queued_test`)[0]?.count).toBe(
-      expectedCount,
-    );
-    await Bun.sleep(200);
-    expect((await raw`SELECT count(*)::int AS count FROM scheduler_queued_test`)[0]?.count).toBe(
-      expectedCount,
-    );
+    expect(
+      (await bounded`SELECT count(*)::int AS count FROM scheduler_queued_test`)[0]?.count,
+    ).toBe(0);
   });
 
   test('a cancelled savepoint does not poison the outer transaction', async () => {

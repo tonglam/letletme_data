@@ -55,6 +55,26 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler latest-wins lanes', () => {
+  test('retires an exact window inserted by an older replica after supersession', async () => {
+    const older = await reserve('2026-08-25T01:00:00.000Z', 'late-window-older');
+    const newer = await reserve('2026-08-25T01:05:00.000Z', 'late-window-newer');
+    const input = {
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+    };
+    await advanceSchedulerLane({ ...input, desiredObligation: newer });
+    const sql = await getDbClient();
+    await sql`INSERT INTO ops.freshness_slo_windows
+      (slo_key, contract_key, scope_key, period_key, eligible_at, due_at, obligation_due_at)
+      VALUES ('market-price', 'market-price', ${SCOPE_KEY}, ${older.periodKey}, now(), now(), ${older.dueAt.toISOString()}::timestamptz)`;
+    await advanceSchedulerLane({ ...input, desiredObligation: older });
+    const [window] = await sql`SELECT status FROM ops.freshness_slo_windows
+      WHERE slo_key='market-price' AND scope_key=${SCOPE_KEY} AND period_key=${older.periodKey}`;
+    expect(window?.status).toBe('NOT_APPLICABLE');
+  });
+
   test('retires only newly superseded windows, keeping the running target and other SLOs intact', async () => {
     const active = await reserve('2026-08-25T02:00:00.000Z', 'window-active');
     const older = await reserve('2026-08-25T02:05:00.000Z', 'window-older');

@@ -17,7 +17,11 @@ current event, fixture-window, and data-availability gates before enqueueing.
 
 The scheduler requests PostgreSQL statement cancellation after half of
 `SCHEDULER_RESOLVE_TIMEOUT_MS` (5 seconds at the default 10-second definition
-deadline), including time waiting for its connection pool. This applies only
+deadline), including time waiting for its connection pool. Scheduler SQL is
+serialized before it reaches the driver's wire pipeline, so an expired queued
+statement is discarded without being sent. Transaction acquisition has the
+same budget: an expired acquisition cannot execute its callback, and at most
+one abandoned acquisition is retained until the driver releases it. This applies only
 to the scheduler process, including its transaction and savepoint queries;
 workers keep their existing database policy. Cancellation is a request, not
 proof of rollback: the caller awaits the driver's actual result, and a write

@@ -300,13 +300,14 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
           checkpointPublicationId: checkpoint.publication.publicationId,
           checkpointGeneration: checkpoint.publication.generation,
         };
-        if (checkpointIsAheadOfSnapshot) {
+        if (checkpointIsAheadOfSnapshot || snapshot.checkpointed) {
           // A durable checkpoint that is ahead of the Redis serving head, or
           // swaps publication identity at the same generation, is a real
-          // ordering violation. A lower durable generation is expected while
-          // the ten-minute checkpoint coalescing window is still pending.
+          // ordering violation. A lower durable generation is expected only
+          // for an uncheckpointed head inside the coalescing window; a Redis
+          // checkpoint marker with missing durable evidence is an error too.
           logError(
-            'Live snapshot freshness evidence checkpoint is ahead of serving publication',
+            'Live snapshot freshness evidence checkpoint identity is inconsistent',
             new Error('live publication checkpoint ordering mismatch'),
             context,
           );

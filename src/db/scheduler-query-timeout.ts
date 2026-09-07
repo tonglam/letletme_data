@@ -1,4 +1,5 @@
 import type postgres from 'postgres';
+import { TimeoutError } from '../utils/async';
 
 /**
  * Request cancellation before the scheduler definition's caller deadline.
@@ -11,6 +12,58 @@ export function withSchedulerQueryTimeout<T extends postgres.Sql | postgres.Tran
   client: T,
   timeoutMs: number,
 ): T {
+  // postgres.js does not expose its queued BEGIN as a cancellable query.
+  // Fence an expired acquisition before its callback can execute, and retain
+  // at most one abandoned acquisition until the driver rolls it back. This
+  // prevents both a hung pass and accumulating new BEGIN waiters each pass.
+  // Keep scheduler work out of the driver's wire pipeline until the previous
+  // operation settles. Queued deadlines can then discard work before it is
+  // sent, rather than racing a cancellation against a later statement.
+  let connectionWork: Promise<unknown> = Promise.resolve();
+  let abandonedAcquisition: Promise<unknown> | undefined;
+
+  function transactionCall(
+    method: (...args: unknown[]) => unknown,
+    args: unknown[],
+  ): Promise<unknown> {
+    const error = new TimeoutError('Scheduler transaction acquisition exceeded its deadline');
+    if (abandonedAcquisition) return Promise.reject(error);
+    let expired = false;
+    let rejectDeadline!: (reason: Error) => void;
+    const deadline = new Promise<never>((_, reject) => {
+      rejectDeadline = reject;
+    });
+    const timer = setTimeout(() => {
+      expired = true;
+      abandonedAcquisition = operation;
+      rejectDeadline(error);
+    }, timeoutMs);
+    const operation = connectionWork.then(() => {
+      if (expired) throw error;
+      return Reflect.apply(
+        method,
+        client,
+        args.map((arg) =>
+          typeof arg === 'function'
+            ? (transaction: postgres.TransactionSql) => {
+                clearTimeout(timer);
+                if (expired) throw error;
+                return arg(withSchedulerQueryTimeout(transaction, timeoutMs));
+              }
+            : arg,
+        ),
+      );
+    });
+    connectionWork = operation.catch(() => undefined);
+    void operation
+      .finally(() => {
+        clearTimeout(timer);
+        if (abandonedAcquisition === operation) abandonedAcquisition = undefined;
+      })
+      .catch(() => undefined);
+    return Promise.race([operation, deadline]);
+  }
+
   function queryResult(result: unknown): unknown {
     if (
       !result ||
@@ -26,17 +79,29 @@ export function withSchedulerQueryTimeout<T extends postgres.Sql | postgres.Tran
     let pending: Promise<unknown> | undefined;
     function start(): Promise<unknown> {
       if (!pending) {
-        const timer = setTimeout(() => query.cancel(), timeoutMs);
-        pending = query.then(
-          (rows) => {
-            clearTimeout(timer);
-            return rows;
-          },
-          (error: unknown) => {
-            clearTimeout(timer);
-            throw error;
-          },
-        );
+        let started = false;
+        let expired = false;
+        pending = new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            if (started) query.cancel();
+            else {
+              expired = true;
+              reject(new TimeoutError('Scheduler SQL queue wait exceeded its deadline'));
+            }
+          }, timeoutMs);
+          const operation = connectionWork.then(async () => {
+            if (expired) return;
+            started = true;
+            try {
+              resolve(await query);
+            } catch (error) {
+              reject(error);
+            } finally {
+              clearTimeout(timer);
+            }
+          });
+          connectionWork = operation.catch(() => undefined);
+        });
       }
       return pending;
     }
@@ -73,16 +138,7 @@ export function withSchedulerQueryTimeout<T extends postgres.Sql | postgres.Tran
       if (typeof value !== 'function') return value;
       if (property === 'begin' || property === 'savepoint') {
         return (...args: unknown[]) =>
-          Reflect.apply(
-            value,
-            target,
-            args.map((arg) =>
-              typeof arg === 'function'
-                ? (transaction: postgres.TransactionSql) =>
-                    arg(withSchedulerQueryTimeout(transaction, timeoutMs))
-                : arg,
-            ),
-          );
+          transactionCall(value as (...args: unknown[]) => unknown, args);
       }
       if (property === 'unsafe' || property === 'file') {
         return (...args: unknown[]) => queryResult(Reflect.apply(value, target, args));

@@ -448,8 +448,29 @@ export async function advanceSchedulerLane(input: {
     // denominator as well; otherwise the selected target is the only one that
     // can publish while every superseded window eventually breaches.
     const contract = contractForSchedulerJob(input.jobName);
+    const retiredPeriods = supersedable.map((item) => item.periodKey);
+    if (input.desiredObligation.obligationId !== selectedDesired.obligationId) {
+      // An older replica may insert its window after a newer replica already
+      // superseded the obligation. Reconcile this exact persisted identity,
+      // including the legacy cutover case, without scanning historical SLOs.
+      const [retiredCaller] = await tx
+        .select({ periodKey: schedulerObligationsInOps.periodKey })
+        .from(schedulerObligationsInOps)
+        .where(
+          and(
+            eq(schedulerObligationsInOps.obligationId, input.desiredObligation.obligationId),
+            eq(schedulerObligationsInOps.status, 'skipped'),
+            sql`${schedulerObligationsInOps.evidence}->>'reason' IN (${LANE_SUPERSEDED_REASON}, ${CUTOVER_SUPERSEDED_REASON})`,
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (retiredCaller && !retiredPeriods.includes(retiredCaller.periodKey)) {
+        retiredPeriods.push(retiredCaller.periodKey);
+      }
+    }
     if (
-      supersedable.length > 0 &&
+      retiredPeriods.length > 0 &&
       contract &&
       contractHasFreshnessWindow(contract, input.jobName)
     ) {
@@ -470,10 +491,7 @@ export async function advanceSchedulerLane(input: {
             eq(freshnessSloWindowsInOps.contractKey, contract.contractKey),
             eq(freshnessSloWindowsInOps.sloKey, contract.contractKey),
             eq(freshnessSloWindowsInOps.scopeKey, input.scopeKey),
-            inArray(
-              freshnessSloWindowsInOps.periodKey,
-              supersedable.map((item) => item.periodKey),
-            ),
+            inArray(freshnessSloWindowsInOps.periodKey, retiredPeriods),
             inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
           ),
         );
