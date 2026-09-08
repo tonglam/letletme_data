@@ -109,10 +109,8 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   if (queue === 'entry-sync') {
     switch (jobName) {
       case 'entry-info':
-        // The entry-info worker resolves its concrete chunk and supplies one
-        // entry-core:{season}:{entryId} scope per entry.  Keeping a fallback
-        // global lock here would serialize every table scan and defeat the
-        // per-entry setup/repair concurrency guarantee.
+        // syncEntryInfo owns its per-entry write scope after fetching FPL data.
+        // The batch worker must not wrap concurrent entries in one transaction.
         return [];
       case 'entry-picks':
         return [withEvent('entry-event-picks', eventId)];
