@@ -21,6 +21,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { contentHash } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
 import {
   clearEntryCheckpointDesiredV2,
@@ -204,23 +205,32 @@ export async function checkpointEntryLiveInputV2(
   if (!Number.isFinite(sourceCheckedAt.getTime())) return 'missing';
   const checkpointedAt = new Date();
   const picks = rawPicksFromEntryLiveInput(candidate.input);
-  await withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
-    await createEntryEventPicksRepository(tx).upsertFromPicks(
-      season,
-      entryId,
+  await withMutationScopes(
+    {
+      queueName: 'entry-sync',
+      jobName: 'entry-picks',
       eventId,
-      picks,
-      sourceCheckedAt,
-      {
-        publicationId: candidate.publication.publicationId,
-        generation: candidate.publication.generation,
-        picksBaseRevision: candidate.input.picksBase.revision,
-        inputPayload: candidate.input,
-        contentUpdatedAt: candidate.input.picksBase.contentUpdatedAt,
-        checkpointedAt,
-      },
-    );
-  });
+      scopes: [`entry-event-picks:event:${eventId}`],
+    },
+    () =>
+      withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
+        await createEntryEventPicksRepository(tx).upsertFromPicks(
+          season,
+          entryId,
+          eventId,
+          picks,
+          sourceCheckedAt,
+          {
+            publicationId: candidate.publication.publicationId,
+            generation: candidate.publication.generation,
+            picksBaseRevision: candidate.input.picksBase.revision,
+            inputPayload: candidate.input,
+            contentUpdatedAt: candidate.input.picksBase.contentUpdatedAt,
+            checkpointedAt,
+          },
+        );
+      }),
+  );
   // The repository deliberately reports no-op writes as successful at the
   // transaction boundary. Re-read the durable head after commit and fence the
   // Redis checkpoint marker on the exact publication identity; otherwise a
@@ -589,13 +599,22 @@ export async function syncEntryEventTransfers(
     const transfers = await fplClient.getEntryTransfers(entryId);
     const pointsByElement =
       options?.pointsByElement ?? (await getPointsByElement(season.seasonCode, eventId));
-    await entryEventTransfersRepository.replaceForEvent(
-      season,
-      entryId,
-      eventId,
-      transfers,
-      pointsByElement,
-      { sourceCheckedAt: transferSyncStartedAt.exact },
+    await withMutationScopes(
+      {
+        queueName: 'entry-sync',
+        jobName: 'entry-transfers',
+        eventId,
+        scopes: [`entry-event-transfers:event:${eventId}`],
+      },
+      () =>
+        entryEventTransfersRepository.replaceForEvent(
+          season,
+          entryId,
+          eventId,
+          transfers,
+          pointsByElement,
+          { sourceCheckedAt: transferSyncStartedAt.exact },
+        ),
     );
     logInfo('Entry event transfers sync completed', { entryId, eventId });
     return { entryId, eventId };
@@ -620,16 +639,28 @@ export async function syncEntryEventResults(
       fplClient.getEntryEventPicks(entryId, eventId),
       fplClient.getEventLive(eventId),
     ]);
-    await withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
-      await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
-        season,
-        entryId,
+    const accepted = await withMutationScopes(
+      {
+        queueName: 'entry-sync',
+        jobName: 'entry-results',
         eventId,
-        picks,
-        live,
-        richSyncStartedAt.exact,
-      );
-    });
+        scopes: [`entry-event-results:event:${eventId}`],
+      },
+      () =>
+        withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
+          return createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+            season,
+            entryId,
+            eventId,
+            picks,
+            live,
+            richSyncStartedAt.exact,
+          );
+        }),
+    );
+    // A newer canonical result can win while this provider request is in
+    // flight. Its rejected picks must never create a fresh publication.
+    if (!accepted) return { entryId, eventId };
     const event = await eventRepository.findById(season, eventId);
     if (event?.finished && event.dataChecked && event.dataCheckedAt) {
       // Establish the V2 base publication before attaching the final

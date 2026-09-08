@@ -465,6 +465,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       }
     },
 
+    /** False means a newer/equal source won; callers must not publish the rejected payload. */
     upsertFromPicksAndLive: async (
       season: FplSeasonRef,
       entryId: number,
@@ -472,7 +473,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       picks: RawFPLEntryEventPicksResponse,
       live: EventPointsPayload,
       richSyncedAt: Date | string,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       if (!isEntryPicksPayloadForEvent(picks, eventId)) {
         throw new Error(
           `Refusing rich picks for an unexpected event for entry ${entryId}, event ${eventId}`,
@@ -632,7 +633,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           richSyncedAt: exactRichSyncedAt,
         };
 
-        await db
+        const written = await db
           .insert(entryEventResultsInCompetition)
           .values(insert)
           .onConflictDoUpdate({
@@ -665,12 +666,15 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               richSyncedAt: exactRichSyncedAt,
               updatedAt: new Date(),
             },
-          });
+          })
+          .returning({ entryId: entryEventResultsInCompetition.entryId });
+        if (written.length === 0) return false;
         logInfo('Upserted entry event results', {
           season: season.seasonCode,
           entryId,
           eventId,
         });
+        return true;
       } catch (error) {
         logError('Failed to upsert entry event results', error, {
           season: season.seasonCode,
