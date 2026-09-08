@@ -458,6 +458,9 @@ export const schedulerObligationsInOps = ops.table(
     index('scheduler_obligations_inflight_job_idx')
       .on(table.jobName, table.obligationId)
       .where(sql`status IN ('enqueued', 'running', 'retrying')`),
+    index('scheduler_obligations_nonterminal_job_idx')
+      .on(table.jobName)
+      .where(sql`status NOT IN ('succeeded', 'skipped', 'irrecoverable')`),
     index('scheduler_obligations_pending_job_scope_idx')
       .on(table.jobName, table.scopeKey, table.periodKey, table.obligationId)
       .where(sql`status IN ('pending', 'failed')`),

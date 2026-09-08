@@ -433,6 +433,9 @@ export const contentAcquisitionRuns = content.table(
     uniqueIndex('content_acquisition_runs_provider_job_idx')
       .on(table.provider, table.providerJobId)
       .where(sql`provider IS NOT NULL AND provider_job_id IS NOT NULL`),
+    index('content_acquisition_runs_active_x_lease_idx')
+      .on(table.leaseExpiresAt)
+      .where(sql`adapter_kind IN ('X_ACCOUNT', 'X_SEMANTIC') AND status IN ('PENDING', 'RUNNING')`),
     index('content_acquisition_runs_lease_idx')
       .on(table.leaseExpiresAt, table.runId)
       .where(sql`status = 'RUNNING' AND lease_expires_at IS NOT NULL`),
