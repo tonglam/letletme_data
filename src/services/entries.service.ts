@@ -639,7 +639,7 @@ export async function syncEntryEventResults(
       fplClient.getEntryEventPicks(entryId, eventId),
       fplClient.getEventLive(eventId),
     ]);
-    await withMutationScopes(
+    const accepted = await withMutationScopes(
       {
         queueName: 'entry-sync',
         jobName: 'entry-results',
@@ -648,7 +648,7 @@ export async function syncEntryEventResults(
       },
       () =>
         withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
-          await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+          return createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
             season,
             entryId,
             eventId,
@@ -658,6 +658,9 @@ export async function syncEntryEventResults(
           );
         }),
     );
+    // A newer canonical result can win while this provider request is in
+    // flight. Its rejected picks must never create a fresh publication.
+    if (!accepted) return { entryId, eventId };
     const event = await eventRepository.findById(season, eventId);
     if (event?.finished && event.dataChecked && event.dataCheckedAt) {
       // Establish the V2 base publication before attaching the final
