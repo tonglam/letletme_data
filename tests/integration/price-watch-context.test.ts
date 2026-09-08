@@ -1,0 +1,100 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+assertIntegrationEnv();
+
+import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
+import postgres from 'postgres';
+import { prepareDataPublication } from '../../src/cache/data-publication';
+import { databaseSingleton } from '../../src/db/singleton';
+import { loadActivePriceChangeContext } from '../../src/repositories/data-publication-outbox';
+import { getPriceChangeWatchDeadlines } from '../../src/services/price-change-predictions.service';
+
+const db = postgres(process.env.DATABASE_URL!, { max: 1 });
+const season = { seasonId: 2093, seasonCode: '9394' };
+const now = new Date('2093-08-22T00:00:00Z');
+const publicationId = '00000000-0000-4000-8000-000000009394';
+const context = {
+  schemaVersion: 2,
+  source: 'FPL_BOOTSTRAP',
+  fetchedAt: now.toISOString(),
+  staleAt: '2093-08-22T00:10:00.000Z',
+  hardExpiresAt: '2093-08-22T01:00:00.000Z',
+  deadline: '2093-08-22T01:30:00.000Z',
+  nextDeadlines: ['2093-08-22T01:30:00.000Z'],
+  expectedPlayerCount: 1,
+  observedPlayerCount: 1,
+  latestEvent: null,
+};
+const prepared = prepareDataPublication({
+  dataset: 'fpl:price-changes',
+  seasonCode: season.seasonCode,
+  revision: 9394,
+  publicationId,
+  sourceCheckedAt: now,
+  state: 'active',
+  items: [
+    { name: 'context', value: context },
+    { name: 'players', value: [{ unused: 'x'.repeat(400000) }] },
+  ],
+});
+beforeAll(async () => {
+  await db`INSERT INTO fpl.seasons (season_id, season_code, display_name, start_year, end_year, lifecycle_state)
+    VALUES (2093, '9394', '2093/94', 2093, 2094, 'reference_only')`;
+});
+beforeEach(async () => {
+  await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
+  await db`INSERT INTO ops.dataset_publications (publication_id, dataset, season_id, revision, status, activated_at, manifest)
+    VALUES (${publicationId}, 'fpl:price-changes', 2093, 9394, 'active', now(), ${db.json(prepared.manifest as never)})`;
+  for (const item of prepared.items) {
+    await db`INSERT INTO ops.dataset_publication_items (publication_id,item_name,payload,item_count,checksum)
+      VALUES (${publicationId},${item.manifest.name},${db.json(JSON.parse(item.payload))},${item.manifest.count},${item.manifest.sha256})`;
+  }
+});
+afterAll(async () => {
+  await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
+  await db`DELETE FROM fpl.seasons WHERE season_id=2093`;
+  await databaseSingleton.disconnect();
+  await db.end();
+});
+test('returns context only and discovers deadlines without Redis or season discovery', async () => {
+  const result = await loadActivePriceChangeContext(season);
+  expect(Object.keys(result!.items)).toEqual(['context']);
+  expect(JSON.stringify(result).length).toBeLessThan(2000);
+  expect(await getPriceChangeWatchDeadlines(season, now)).toEqual({
+    status: 'READY',
+    nextDeadlines: context.nextDeadlines,
+  });
+  expect(await loadActivePriceChangeContext({ ...season, seasonCode: '9495' })).toBeNull();
+});
+test('does not accept a missing or retired active context', async () => {
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
+  expect(await loadActivePriceChangeContext(season)).toBeNull();
+  await db`UPDATE ops.dataset_publications SET status='active', retired_at=null WHERE publication_id=${publicationId}`;
+  await db`DELETE FROM ops.dataset_publication_items WHERE publication_id=${publicationId} AND item_name='context'`;
+  expect(await loadActivePriceChangeContext(season)).toBeNull();
+});
+test.each(['payload', 'checksum', 'count', 'bytes', 'identity', 'revision'])(
+  'rejects corrupted %s',
+  async (field) => {
+    if (field === 'payload')
+      await db`UPDATE ops.dataset_publication_items SET payload=jsonb_set(payload,'{deadline}','"2093-08-22T02:00:00Z"') WHERE publication_id=${publicationId} AND item_name='context'`;
+    if (field === 'checksum')
+      await db`UPDATE ops.dataset_publication_items SET checksum=repeat('0',64) WHERE publication_id=${publicationId} AND item_name='context'`;
+    if (field === 'count')
+      await db`UPDATE ops.dataset_publication_items SET item_count=11 WHERE publication_id=${publicationId} AND item_name='context'`;
+    if (field === 'bytes') {
+      const manifest = structuredClone(prepared.manifest);
+      const changed = {
+        ...manifest,
+        items: manifest.items.map((item) =>
+          item.name === 'context' ? { ...item, bytes: item.bytes + 1 } : item,
+        ),
+      };
+      await db`UPDATE ops.dataset_publications SET manifest=${db.json(changed as never)} WHERE publication_id=${publicationId}`;
+    }
+    if (field === 'identity')
+      await db`UPDATE ops.dataset_publications SET manifest=jsonb_set(manifest,'{publicationId}','"00000000-0000-4000-8000-000000009395"') WHERE publication_id=${publicationId}`;
+    if (field === 'revision')
+      await db`UPDATE ops.dataset_publications SET revision=9395 WHERE publication_id=${publicationId}`;
+    expect(await loadActivePriceChangeContext(season)).toBeNull();
+  },
+);

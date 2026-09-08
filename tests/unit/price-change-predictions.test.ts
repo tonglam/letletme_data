@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 
+import {
+  prepareDataPublication,
+  type DataPublicationReadResult,
+} from '../../src/cache/data-publication';
 import type { FPLBootstrapResponse } from '../../src/clients/fpl';
 import {
   normalizePriceChangeBoard,
   parsePublishedPriceChangeBoard,
+  parsePriceChangeWatchDeadlines,
   priceChangeObservedEventFromBaseline,
   priceChangeBoardTriggerFingerprint,
   priceChangeBoardValueFingerprint,
@@ -546,5 +551,97 @@ describe('price-change prediction normalization', () => {
       status: 'UNAVAILABLE',
       latestEvent: event,
     });
+  });
+});
+
+describe('price-watch context-only discovery', () => {
+  const fetchedAt = new Date('2026-08-22T00:00:00.000Z');
+  function publication(): DataPublicationReadResult {
+    const board = normalizePriceChangeBoard(bootstrapFixture(), fetchedAt);
+    const context = {
+      schemaVersion: 2,
+      source: 'FPL_BOOTSTRAP',
+      fetchedAt: fetchedAt.toISOString(),
+      staleAt: new Date(+fetchedAt + PRICE_CHANGE_READY_MS).toISOString(),
+      hardExpiresAt: new Date(+fetchedAt + PRICE_CHANGE_MAX_AGE_MS).toISOString(),
+      deadline: board.deadline,
+      nextDeadlines: board.nextDeadlines,
+      expectedPlayerCount: board.expectedPlayerCount,
+      observedPlayerCount: board.observedPlayerCount,
+      latestEvent: null,
+    };
+    const { manifest } = prepareDataPublication({
+      dataset: 'fpl:price-changes',
+      seasonCode: '2627',
+      revision: 1,
+      publicationId: '00000000-0000-4000-8000-000000000091',
+      sourceCheckedAt: fetchedAt,
+      state: 'active',
+      items: [
+        { name: 'context', value: context },
+        { name: 'players', value: board.players },
+      ],
+    });
+    return { manifest, items: { context } };
+  }
+  it('resolves without accessing players and preserves the exact freshness boundaries', () => {
+    const value = publication();
+    Object.defineProperty(value.items, 'players', {
+      get() {
+        throw new Error('Must not read players');
+      },
+    });
+    expect(parsePriceChangeWatchDeadlines(value, fetchedAt)?.status).toBe('READY');
+    expect(
+      parsePriceChangeWatchDeadlines(value, new Date(+fetchedAt + PRICE_CHANGE_READY_MS))?.status,
+    ).toBe('STALE');
+    expect(
+      parsePriceChangeWatchDeadlines(value, new Date(+fetchedAt + PRICE_CHANGE_MAX_AGE_MS - 1))
+        ?.nextDeadlines.length,
+    ).toBeGreaterThan(0);
+    expect(
+      parsePriceChangeWatchDeadlines(value, new Date(+fetchedAt + PRICE_CHANGE_MAX_AGE_MS)),
+    ).toBeNull();
+    expect(parsePriceChangeWatchDeadlines(value, new Date(+fetchedAt - 1))).toBeNull();
+    expect(parsePriceChangeWatchDeadlines(value, new Date(NaN))).toBeNull();
+  });
+  it.each([
+    { schemaVersion: 1 },
+    { nextDeadlines: [] },
+    { nextDeadlines: ['bad'] },
+    { deadline: '2026-08-22T01:00:00Z' },
+    { observedPlayerCount: 999 },
+    { staleAt: '2026-08-22T00:11:00Z' },
+    { hardExpiresAt: '2026-08-22T02:00:00Z' },
+    { unexpected: true },
+  ])('rejects invalid scheduling context %j', (change) => {
+    const value = publication();
+    Object.assign(value.items.context as object, change);
+    expect(parsePriceChangeWatchDeadlines(value, fetchedAt)).toBeNull();
+    expect(
+      parsePublishedPriceChangeBoard(
+        {
+          ...value,
+          items: {
+            ...value.items,
+            players: normalizePriceChangeBoard(bootstrapFixture(), fetchedAt).players,
+          },
+        },
+        fetchedAt,
+      ),
+    ).toBeNull();
+  });
+  it('rejects a count inconsistent with the same manifest', () => {
+    const value = publication();
+    const bad = {
+      ...value,
+      manifest: {
+        ...value.manifest,
+        items: value.manifest.items.map((item) =>
+          item.name === 'players' ? { ...item, count: item.count + 1 } : item,
+        ),
+      },
+    };
+    expect(parsePriceChangeWatchDeadlines(bad, fetchedAt)).toBeNull();
   });
 });

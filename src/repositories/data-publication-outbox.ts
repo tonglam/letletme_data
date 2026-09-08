@@ -14,6 +14,7 @@ import {
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
 } from '../cache/data-publication';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { canonicalJson } from '../utils/content-hash';
 
 type DatabaseClock = Date | string;
@@ -33,6 +34,73 @@ export type ClaimedDataPublicationOutbox = Readonly<{
   manifest: DataPublicationManifest;
   items: readonly DataPublicationDeliveryItem[];
 }>;
+
+/** Read only scheduling context, bound to the active row in one SQL snapshot. */
+export async function loadActivePriceChangeContext(season: FplSeasonRef) {
+  const db = await getDb();
+  const rows = await db
+    .select({
+      publicationId: datasetPublicationsInOps.publicationId,
+      revision: datasetPublicationsInOps.revision,
+      manifest: datasetPublicationsInOps.manifest,
+      payload: datasetPublicationItemsInOps.payload,
+      itemCount: datasetPublicationItemsInOps.itemCount,
+      checksum: datasetPublicationItemsInOps.checksum,
+    })
+    .from(datasetPublicationsInOps)
+    .innerJoin(
+      datasetPublicationItemsInOps,
+      and(
+        eq(datasetPublicationItemsInOps.publicationId, datasetPublicationsInOps.publicationId),
+        eq(datasetPublicationItemsInOps.itemName, 'context'),
+      ),
+    )
+    .where(
+      and(
+        eq(datasetPublicationsInOps.dataset, 'fpl:price-changes'),
+        eq(datasetPublicationsInOps.seasonId, season.seasonId),
+        isNull(datasetPublicationsInOps.eventId),
+        eq(datasetPublicationsInOps.status, 'active'),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  const manifest = parseDataPublicationManifest(JSON.stringify(row.manifest));
+  if (
+    !manifest ||
+    manifest.publicationId !== row.publicationId ||
+    manifest.revision !== row.revision ||
+    manifest.dataset !== 'fpl:price-changes' ||
+    manifest.seasonCode !== season.seasonCode ||
+    manifest.eventId !== null
+  )
+    return null;
+  const item = manifest.items.find((candidate) => candidate.name === 'context');
+  if (
+    !item ||
+    row.itemCount !== item.count ||
+    !row.payload ||
+    typeof row.payload !== 'object' ||
+    Array.isArray(row.payload) ||
+    Object.keys(row.payload).length !== item.count ||
+    !verifiedItemPayload(row, item)
+  )
+    return null;
+  return { manifest, items: { context: row.payload } };
+}
+
+function verifiedItemPayload(
+  row: { payload: unknown; checksum: string },
+  item: DataPublicationManifest['items'][number],
+): string | undefined {
+  return [canonicalJson(row.payload), JSON.stringify(row.payload)].find(
+    (candidate) =>
+      Buffer.byteLength(candidate, 'utf8') === item.bytes &&
+      createSha256(candidate) === item.sha256 &&
+      row.checksum === item.sha256,
+  );
+}
 
 async function loadPreparedPublication(
   db: DbOrTransaction,
@@ -54,13 +122,7 @@ async function loadPreparedPublication(
   for (const itemManifest of manifest.items) {
     const row = rows.find((candidate) => candidate.itemName === itemManifest.name);
     if (!row) throw new Error(`Publication ${publicationId} is missing ${itemManifest.name}`);
-    const payloadCandidates = [canonicalJson(row.payload), JSON.stringify(row.payload)];
-    const payload = payloadCandidates.find(
-      (candidate) =>
-        Buffer.byteLength(candidate, 'utf8') === itemManifest.bytes &&
-        createSha256(candidate) === itemManifest.sha256 &&
-        row.checksum === itemManifest.sha256,
-    );
+    const payload = verifiedItemPayload(row, itemManifest);
     if (!payload) {
       throw new Error(`Publication ${publicationId} has invalid proof for ${itemManifest.name}`);
     }
