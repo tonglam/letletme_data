@@ -125,9 +125,9 @@ export async function syncEntryInfo(
             eq(entriesInCompetition.entryId, entryId),
           ),
         );
-      if (existing?.sourceCheckedAt && existing.sourceCheckedAt > profileSourceCheckedAt) {
+      if (existing?.sourceCheckedAt && existing.sourceCheckedAt >= profileSourceCheckedAt) {
         throw new ValidationError(
-          'A newer entry profile was committed while fetching FPL data.',
+          'An equal or newer entry profile observation has already committed.',
           'ENTRY_PROFILE_SOURCE_STALE',
         );
       }

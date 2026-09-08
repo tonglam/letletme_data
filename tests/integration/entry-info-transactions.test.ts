@@ -182,3 +182,42 @@ test('worker batch scope leaves profiles independent and tournament callers reta
     await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 ORDER BY entry_id`;
   expect(rows.map((row) => row.entry_name)).toEqual(['batch one', 'batch two']);
 }, 15000);
+
+test('equal millisecond observations cannot overwrite the first committed profile', async () => {
+  // Mock only the source clock in a subprocess so the shared integration module
+  // registry and the real database transaction/locking implementation stay intact.
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      '-e',
+      `
+    import { mock } from 'bun:test';
+    import assert from 'node:assert/strict';
+    const observed = new Date('2091-01-01T00:00:00.123Z');
+    mock.module('./src/db/ordering-timestamp', () => ({
+      readDatabaseOrderingTimestamp: async () => ({date: observed, exact: observed.toISOString()}),
+    }));
+    const { syncEntryInfo } = await import('./src/services/entry-info.service');
+    const { databaseSingleton } = await import('./src/db/singleton');
+    const { recordedEntrySummary } = await import('./tests/fixtures/entry-info.fixtures');
+    const client = (name) => ({
+      getEntrySummary: async (id) => ({...recordedEntrySummary, id, name, leagues: {classic: [], h2h: []}}),
+      getEntryHistory: async () => ({current: [], past: [], chips: []}),
+    });
+    try {
+      await syncEntryInfo({seasonId:2091, seasonCode:'9192'}, 919203, client('first committed'), 0);
+      await assert.rejects(
+        syncEntryInfo({seasonId:2091, seasonCode:'9192'}, 919203, client('equal contender'), 0),
+        {code:'ENTRY_PROFILE_SOURCE_STALE'},
+      );
+    } finally { await databaseSingleton.disconnect(); }
+  `,
+    ],
+    { stdout: 'pipe', stderr: 'pipe' },
+  );
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+  const rows =
+    await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=919203`;
+  expect(rows[0]?.entry_name).toBe('first committed');
+}, 15000);
