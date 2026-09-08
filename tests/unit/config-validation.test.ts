@@ -194,7 +194,6 @@ describe('production environment preflight', () => {
   test('uses bounded preflight, verifies roles read-only, and publishes before restart', () => {
     const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
     const preflight = deployScript.indexOf('bun run env:check');
-    const screenshotProbe = deployScript.indexOf('--probe-bug-report-storage');
     const fplSourceProbe = deployScript.indexOf('--probe-fpl-raw-snapshot-storage');
     const identityContract = deployScript.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
@@ -215,8 +214,7 @@ describe('production environment preflight', () => {
     const replaceServices = deployScript.indexOf('start_runtime_services', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
-    expect(screenshotProbe).toBeGreaterThan(preflight);
-    expect(fplSourceProbe).toBeGreaterThan(screenshotProbe);
+    expect(fplSourceProbe).toBeGreaterThan(preflight);
     expect(fplSourceProbe).toBeLessThan(identityContract);
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(configuredRuntimeUrl).toBeLessThan(preflight);
@@ -318,7 +316,7 @@ describe('production environment preflight', () => {
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).toContain('bun scripts/wait-for-migration-login.ts');
-    expect(deployScript).toContain('bun validate-env.ts --probe-bug-report-storage');
+    expect(deployScript).not.toContain('--probe-bug-report-storage');
     expect(deployScript).toContain('bun validate-env.ts --probe-fpl-raw-snapshot-storage');
     expect(deployScript).toContain('bun run db:verify-runtime-logins');
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
