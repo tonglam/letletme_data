@@ -4,7 +4,7 @@ function transientDatabaseError(error: unknown): boolean {
   const seen = new Set<unknown>();
   while (error && typeof error === 'object' && !seen.has(error)) {
     seen.add(error);
-    const value = error as { code?: unknown; cause?: unknown };
+    const value = error as { code?: unknown; message?: unknown; cause?: unknown };
     if (
       typeof value.code === 'string' &&
       (/^08[0-9A-Z]{3}$/.test(value.code) ||
@@ -15,6 +15,8 @@ function transientDatabaseError(error: unknown): boolean {
           '53300',
           '40001',
           '40P01',
+          'ECIRCUITBREAKER',
+          'ECONNABORTED',
           'CONNECT_TIMEOUT',
           'CONNECTION_CLOSED',
           'CONNECTION_ENDED',
@@ -26,6 +28,15 @@ function transientDatabaseError(error: unknown): boolean {
           'ETIMEDOUT',
           'EPIPE',
         ].includes(value.code))
+    )
+      return true;
+    // Match the connection-only messages used by the existing login preflight;
+    // unclassified validation and SQL errors remain terminal.
+    if (
+      typeof value.message === 'string' &&
+      /connection terminated unexpectedly|server closed the connection unexpectedly|cannot connect now|remaining connection slots|timeout expired/i.test(
+        value.message,
+      )
     )
       return true;
     error = value.cause;

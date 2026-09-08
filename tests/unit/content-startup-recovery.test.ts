@@ -29,7 +29,13 @@ describe('content registry startup recovery', () => {
   });
 
   test('recovers transient DNS and routing failures through wrapped causes', async () => {
-    for (const code of ['EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']) {
+    for (const code of [
+      'EAI_AGAIN',
+      'EHOSTUNREACH',
+      'ENETUNREACH',
+      'ECIRCUITBREAKER',
+      'ECONNABORTED',
+    ]) {
       let calls = 0;
       const value = await recoverContentDatabaseStartup(
         async () => {
@@ -39,6 +45,25 @@ describe('content registry startup recovery', () => {
         { signal: new AbortController().signal, retryDelayMs: 1, onRetry: () => {} },
       );
       expect(value).toBe('ready');
+      expect(calls).toBe(2);
+    }
+  });
+
+  test('retries connection-only failures that arrive without a code', async () => {
+    for (const message of [
+      'connection terminated unexpectedly',
+      'server closed the connection unexpectedly',
+      'cannot connect now',
+      'remaining connection slots are reserved',
+      'timeout expired',
+    ]) {
+      let calls = 0;
+      await recoverContentDatabaseStartup(
+        async () => {
+          if (++calls === 1) throw new Error(message);
+        },
+        { signal: new AbortController().signal, retryDelayMs: 1, onRetry: () => {} },
+      );
       expect(calls).toBe(2);
     }
   });
