@@ -417,3 +417,164 @@ test('equal millisecond observations cannot overwrite the first committed profil
     await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=919203`;
   expect(rows[0]?.entry_name).toBe('first committed');
 }, 15000);
+
+test('entry deadline cancels a lock wait and never runs its write after the lock is released', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  const locked = gate();
+  const release = gate();
+  const owner = db.begin(async (tx) => {
+    await tx`SELECT entry_id FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!} FOR UPDATE`;
+    locked.resolve();
+    await release.promise;
+  });
+  await locked.promise;
+  let writes = 0;
+  try {
+    await expect(
+      withEntrySeasonSyncTransaction(
+        season,
+        ids[0]!,
+        async (tx) => {
+          writes += 1;
+          await tx.execute(
+            sql`UPDATE competition.entries SET entry_name='late write' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+          );
+        },
+        { timeoutMs: 150 },
+      ),
+    ).rejects.toThrow();
+    expect(writes).toBe(0);
+  } finally {
+    release.resolve();
+    await owner;
+  }
+  await Bun.sleep(200);
+  expect(writes).toBe(0);
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);
+
+test('deadline cancels SQL in a nested savepoint and rolls back earlier entry writes before rejection', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await expect(
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+        await tx.transaction(async (nested) => {
+          await nested.execute(sql`SELECT pg_sleep(3)`);
+        });
+      },
+      { timeoutMs: 150 },
+    ),
+  ).rejects.toThrow();
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+  // Cancellation has settled: the fence and row lock are immediately reusable.
+  await withEntrySeasonSyncTransaction(
+    season,
+    ids[0]!,
+    async (tx) => {
+      await tx.execute(
+        sql`UPDATE competition.entries SET entry_name='recovered' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+      );
+    },
+    { timeoutMs: 1000 },
+  );
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('recovered');
+}, 10000);
+
+test('one absolute deadline covers multiple individually short statements', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  let completed = 0;
+  await expect(
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+        for (let n = 0; n < 4; n += 1) {
+          await tx.execute(sql`SELECT pg_sleep(0.12)`);
+          completed += 1;
+        }
+      },
+      { timeoutMs: 300 },
+    ),
+  ).rejects.toThrow();
+  expect(completed).toBeLessThan(4);
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);
+
+test('an expired entry savepoint leaves its enclosing transaction usable without leaking the deadline', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await withMutationScopes(
+    { queueName: 'test', jobName: 'outer-deadline', scopes: [`entry-core:2091:${ids[0]!}`] },
+    async () => {
+      await expect(
+        withEntrySeasonSyncTransaction(
+          season,
+          ids[0]!,
+          async (tx) => {
+            await tx.execute(
+              sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+            );
+            await tx.execute(sql`SELECT pg_sleep(3)`);
+          },
+          { timeoutMs: 150 },
+        ),
+      ).rejects.toThrow();
+      await withEntrySeasonSyncTransaction(season, ids[0]!, async (tx) => {
+        await tx.execute(sql`SELECT pg_sleep(0.2)`);
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='outer recovered' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+      });
+    },
+  );
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('outer recovered');
+}, 10000);
+
+test('an expired callback cannot commit even when no SQL is in flight at its deadline', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await expect(
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+        await Bun.sleep(250);
+      },
+      { timeoutMs: 150 },
+    ),
+  ).rejects.toThrow('persistence deadline');
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);

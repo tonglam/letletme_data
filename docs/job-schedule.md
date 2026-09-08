@@ -30,6 +30,13 @@ single-flight tracking remains in place until the underlying work settles.
 An unavailable cancellation connection can still delay settlement; progress
 and heartbeat guards must continue to expose that condition.
 
+Tournament entry result and transfer-history persistence also requests real SQL
+cancellation, using `TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS` as one deadline shared
+by that entry's writes and nested savepoints. The caller awaits driver settlement
+and rollback before reporting failure. Results, picks and any fetched transfer
+history are written in the same entry transaction. Provider fetch timeouts remain
+separate; entry write fences and enclosing tournament ownership are preserved.
+
 ## Canonical executable inventory
 
 The following names are the current `schedulerRegistry` entries. Cadence,

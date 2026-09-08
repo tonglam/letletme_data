@@ -1,3 +1,6 @@
+import type postgres from 'postgres';
+import { withPostgresQueryTimeout } from '../db/postgres-query-timeout';
+import { TimeoutError } from '../utils/async';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
@@ -6,7 +9,7 @@ import {
   type DbEntryEventTransfer,
   type DbEntryEventTransferInsert,
 } from '../db/schemas/index.schema';
-import { getDb, type DbHandle, type TransactionHandle } from '../db/singleton';
+import { getDb, type DbOrTransaction, type TransactionHandle } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryTransfersResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
@@ -75,11 +78,27 @@ export async function withEntrySeasonSyncTransaction<T>(
   season: FplSeasonRef,
   entryId: number,
   operation: (tx: TransactionHandle) => Promise<T>,
+  options?: { timeoutMs: number },
 ): Promise<T> {
+  const deadlineAt = options ? Date.now() + options.timeoutMs : undefined;
+  const assertDeadline = () => {
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+      throw new TimeoutError('Entry persistence deadline exceeded');
+    }
+  };
   const db = await getDb();
   return db.transaction(async (tx) => {
+    // The session belongs only to this transaction/savepoint. Its children
+    // inherit the bounded client; the enclosing transaction keeps its policy.
+    assertDeadline();
+    if (options) {
+      const session = (tx as unknown as { session: { client: postgres.TransactionSql } }).session;
+      session.client = withPostgresQueryTimeout(session.client, options.timeoutMs, deadlineAt);
+    }
     await lockEntry(tx, season, entryId);
-    return operation(tx);
+    const result = await operation(tx);
+    assertDeadline();
+    return result;
   });
 }
 
@@ -151,7 +170,7 @@ export function buildTransferReplacementRows({
     });
 }
 
-export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
+export const createEntryEventTransfersRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
