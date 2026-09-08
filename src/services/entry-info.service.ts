@@ -1,6 +1,15 @@
+import { and, eq } from 'drizzle-orm';
+import { entriesInCompetition } from '../db/schemas/index.schema';
+import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
-import { getDb } from '../db/singleton';
+import {
+  databaseTransactionStorage,
+  getDb,
+  registerDatabasePostCommit,
+  type TransactionHandle,
+} from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { createEntryHistoryInfoRepository } from '../repositories/entry-history-infos';
 import { createEntryInfoRepository } from '../repositories/entry-infos';
@@ -98,37 +107,62 @@ export async function syncEntryInfo(
   const lastEventId = currentEvent ? currentEvent.id - 1 : null;
 
   const transactionStartedAt = performance.now();
-  const saved = await db.transaction(async (tx) => {
-    await acquireEntrySeasonWriteFence(tx, season, [entryId]);
+  const saved = await withMutationScopes(
+    {
+      queueName: 'entry-sync',
+      jobName: 'entry-info',
+      scopes: tournamentEntryCoreScopes(season.seasonId, [entryId]),
+    },
+    async () => {
+      const tx = databaseTransactionStorage.getStore()!.db as TransactionHandle;
+      await acquireEntrySeasonWriteFence(tx, season, [entryId]);
+      const [existing] = await tx
+        .select({ sourceCheckedAt: entriesInCompetition.profileSourceCheckedAt })
+        .from(entriesInCompetition)
+        .where(
+          and(
+            eq(entriesInCompetition.seasonId, season.seasonId),
+            eq(entriesInCompetition.entryId, entryId),
+          ),
+        );
+      if (existing?.sourceCheckedAt && existing.sourceCheckedAt > profileSourceCheckedAt) {
+        throw new ValidationError(
+          'A newer entry profile was committed while fetching FPL data.',
+          'ENTRY_PROFILE_SOURCE_STALE',
+        );
+      }
 
-    const entryInfoRepository = createEntryInfoRepository(tx);
-    const entryHistoryInfoRepository = createEntryHistoryInfoRepository(tx);
-    const entryLeagueInfoRepository = createEntryLeagueInfoRepository(tx);
-    const entryEventResultsRepository = createEntryEventResultsRepository(tx);
+      const entryInfoRepository = createEntryInfoRepository(tx);
+      const entryHistoryInfoRepository = createEntryHistoryInfoRepository(tx);
+      const entryLeagueInfoRepository = createEntryLeagueInfoRepository(tx);
+      const entryEventResultsRepository = createEntryEventResultsRepository(tx);
 
-    // Child tables reference entry_infos. Persist the parent first, then fan
-    // out independent child writes inside the same transaction so a partial
-    // entry snapshot can never become visible.
-    const entry = await entryInfoRepository.upsertFromSummary(
-      season,
-      summary,
-      lastEventId,
-      snapshotSyncedThroughEventId,
-      profileSourceCheckedAt,
-    );
-    await Promise.all([
-      entryHistoryInfoRepository.upsertFromHistory(season, entryId, history),
-      entryLeagueInfoRepository.upsertFromLeagues(season, entryId, summary.leagues),
-      entryEventResultsRepository.upsertCoreFromHistory(season, entryId, finalizedHistory),
-    ]);
-    return entry;
-  });
+      // Child tables reference entry_infos. Persist the parent first, then fan
+      // out independent child writes inside the same transaction so a partial
+      // entry snapshot can never become visible.
+      const entry = await entryInfoRepository.upsertFromSummary(
+        season,
+        summary,
+        lastEventId,
+        snapshotSyncedThroughEventId,
+        profileSourceCheckedAt,
+      );
+      await Promise.all([
+        entryHistoryInfoRepository.upsertFromHistory(season, entryId, history),
+        entryLeagueInfoRepository.upsertFromLeagues(season, entryId, summary.leagues),
+        entryEventResultsRepository.upsertCoreFromHistory(season, entryId, finalizedHistory),
+      ]);
+      registerDatabasePostCommit(() => {
+        logInfo('Entry info sync completed', {
+          season: season.seasonCode,
+          leaguesSourcePresent: summary.leagues !== undefined,
+          transactionDurationMs: Math.round(performance.now() - transactionStartedAt),
+          totalDurationMs: Math.round(performance.now() - startedAt),
+        });
+      });
+      return entry;
+    },
+  );
 
-  logInfo('Entry info sync completed', {
-    season: season.seasonCode,
-    leaguesSourcePresent: summary.leagues !== undefined,
-    transactionDurationMs: Math.round(performance.now() - transactionStartedAt),
-    totalDurationMs: Math.round(performance.now() - startedAt),
-  });
   return saved;
 }

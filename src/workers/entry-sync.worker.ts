@@ -58,7 +58,6 @@ import {
   runDataSyncAttempt,
   type DataSyncAttemptContext,
 } from '../utils/data-sync-attempt';
-import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
 import { latestFreshnessTimestamp } from '../domain/freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
@@ -607,13 +606,6 @@ export function createEntrySyncWorker(
         targetEventId !== undefined ? { ...job.data, eventId: targetEventId } : job.data;
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
-      const entryInfoScopes =
-        job.name === 'entry-info'
-          ? tournamentEntryCoreScopes(
-              season.seasonId,
-              (await loadEntryIdsForSync(season, effectiveJobData)).entryIds,
-            )
-          : undefined;
       const runMutation = async (): Promise<EntrySyncMutationResult> => {
         switch (job.name) {
           case 'entry-info': {
@@ -835,7 +827,6 @@ export function createEntrySyncWorker(
             jobName: job.name,
             jobId,
             eventId: targetEventId,
-            scopes: entryInfoScopes,
           },
           runMutation,
         );
