@@ -4,6 +4,7 @@ import { isSafeIntegrationDatabaseUrl } from './helpers/safe-database-target';
 assertIntegrationEnv();
 
 import { expect, test } from 'bun:test';
+import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
@@ -719,9 +720,30 @@ persistenceTest(
           const [previous] = await repository.findByEventAndEntryIds(season, 1, [entryIds[0]]);
           expect(previous!.overallPoints).toBeGreaterThan(0);
           const cases = [
-            { rank: null, overall_rank: 0, total_points: 0, expectedRank: 0, zeroTotal: true },
-            { rank: 0, overall_rank: 0, total_points: 0, expectedRank: 0, zeroTotal: true },
-            { rank: 100, overall_rank: 1000, total_points: 0, expectedRank: 100, zeroTotal: false },
+            {
+              rank: null,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: true,
+              deleted: true,
+            },
+            {
+              rank: 0,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: true,
+              deleted: true,
+            },
+            {
+              rank: 100,
+              overall_rank: 1000,
+              total_points: 0,
+              expectedRank: 100,
+              zeroTotal: false,
+              deleted: false,
+            },
             {
               rank: null,
               overall_rank: 1000,
@@ -729,9 +751,48 @@ persistenceTest(
               expectedRank: null,
               zeroTotal: false,
             },
-            { rank: null, overall_rank: 0, total_points: 60, expectedRank: null, zeroTotal: false },
+            {
+              rank: null,
+              overall_rank: 0,
+              total_points: 60,
+              expectedRank: null,
+              zeroTotal: false,
+              deleted: false,
+            },
           ];
+          cases.push(
+            {
+              rank: null,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: false,
+              deleted: false,
+            },
+            {
+              rank: 0,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: false,
+              deleted: false,
+            },
+          );
           for (const [index, edge] of cases.entries()) {
+            await transaction
+              .update(schema.entriesInCompetition)
+              .set({
+                entryName: edge.deleted ? 'Deleted' : 'Ordinary Entry',
+                playerName: edge.deleted ? 'Deleted Player' : 'Ordinary Player',
+                overallPoints: 60,
+                overallRank: 0,
+              })
+              .where(
+                and(
+                  eq(schema.entriesInCompetition.seasonId, season.seasonId),
+                  eq(schema.entriesInCompetition.entryId, entryIds[0]),
+                ),
+              );
             const input = buildPicks(2);
             Object.assign(input.entry_history, {
               rank: edge.rank,

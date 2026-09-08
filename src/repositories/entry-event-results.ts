@@ -1,6 +1,7 @@
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from 'drizzle-orm';
 
 import {
+  entriesInCompetition,
   entryEventResultsInCompetition,
   eventsInFpl,
   type DbEntryEventResult,
@@ -510,8 +511,33 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         // Keep the provider's unranked total paired with its rank sentinel.
         // Reconstructing a cumulative score here makes deleted entries fail
         // FINAL's zero-total/zero-rank contract indefinitely.
-        const authoritativeUnranked =
-          eventRank === 0 && entryHistory.overall_rank === 0 && entryHistory.total_points === 0;
+        let authoritativeUnrankedDeleted = false;
+        if (eventRank === 0 && entryHistory.overall_rank === 0 && entryHistory.total_points === 0) {
+          const [identity] = await db
+            .select({
+              entryName: entriesInCompetition.entryName,
+              playerName: entriesInCompetition.playerName,
+              overallPoints: entriesInCompetition.overallPoints,
+              overallRank: entriesInCompetition.overallRank,
+            })
+            .from(entriesInCompetition)
+            .where(
+              and(
+                eq(entriesInCompetition.seasonId, season.seasonId),
+                eq(entriesInCompetition.entryId, entryId),
+              ),
+            )
+            .limit(1);
+          authoritativeUnrankedDeleted = Boolean(
+            identity &&
+              identity.entryName.trim() === 'Deleted' &&
+              identity.playerName.trim() === 'Deleted Player' &&
+              identity.overallPoints !== null &&
+              Number.isSafeInteger(identity.overallPoints) &&
+              identity.overallPoints >= 0 &&
+              identity.overallRank === 0,
+          );
+        }
         const captainPick = resolveScoringCaptainPick(picks.picks);
         const elementsPoints = new Map<number, number>();
         for (const element of live.elements) {
@@ -543,7 +569,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           (picks.entry_history.points - picks.entry_history.event_transfers_cost);
         let persistedPreviousOverallPoints: number | null = null;
         if (
-          !authoritativeUnranked &&
+          !authoritativeUnrankedDeleted &&
           (!Number.isSafeInteger(sourcePreviousOverallPoints) || sourcePreviousOverallPoints < 0)
         ) {
           const previous = await db
@@ -566,7 +592,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventTransfersCost: picks.entry_history.event_transfers_cost,
           persistedPreviousOverallPoints,
         });
-        if (!authoritativeUnranked && baseline.usedPersistedFallback) {
+        if (!authoritativeUnrankedDeleted && baseline.usedPersistedFallback) {
           logWarn('FPL entry history cumulative total was inconsistent; derived prior score', {
             season: season.seasonCode,
             eventId,
@@ -597,7 +623,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
             is_vice_captain: pick.is_vice_captain,
           })),
           automaticSubstitutions: autoSubs,
-          overallPoints: authoritativeUnranked
+          overallPoints: authoritativeUnrankedDeleted
             ? entryHistory.total_points
             : baseline.previousOverallPoints + eventLiveScore.netEventPoints,
           overallRank: entryHistory.overall_rank ?? 0,
