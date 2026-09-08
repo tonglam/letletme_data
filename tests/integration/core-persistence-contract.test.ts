@@ -4,6 +4,7 @@ import { isSafeIntegrationDatabaseUrl } from './helpers/safe-database-target';
 assertIntegrationEnv();
 
 import { expect, test } from 'bun:test';
+import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
@@ -709,6 +710,112 @@ persistenceTest(
           ),
         ).toBe(true);
       }
+
+      // Exercise the real writer with a nonzero persisted previous score.
+      // Roll back these edge cases so the broader parity fixture is unchanged.
+      const edgeCasesDone = new Error('unranked regression rollback');
+      await expect(
+        db.transaction(async (transaction) => {
+          const repository = createEntryEventResultsRepository(transaction);
+          const [previous] = await repository.findByEventAndEntryIds(season, 1, [entryIds[0]]);
+          expect(previous!.overallPoints).toBeGreaterThan(0);
+          const cases = [
+            {
+              rank: null,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: true,
+              deleted: true,
+            },
+            {
+              rank: 0,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: true,
+              deleted: true,
+            },
+            {
+              rank: 100,
+              overall_rank: 1000,
+              total_points: 0,
+              expectedRank: 100,
+              zeroTotal: false,
+              deleted: false,
+            },
+            {
+              rank: null,
+              overall_rank: 1000,
+              total_points: 0,
+              expectedRank: null,
+              zeroTotal: false,
+            },
+            {
+              rank: null,
+              overall_rank: 0,
+              total_points: 60,
+              expectedRank: null,
+              zeroTotal: false,
+              deleted: false,
+            },
+          ];
+          cases.push(
+            {
+              rank: null,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: false,
+              deleted: false,
+            },
+            {
+              rank: 0,
+              overall_rank: 0,
+              total_points: 0,
+              expectedRank: 0,
+              zeroTotal: false,
+              deleted: false,
+            },
+          );
+          for (const [index, edge] of cases.entries()) {
+            await transaction
+              .update(schema.entriesInCompetition)
+              .set({
+                entryName: edge.deleted ? 'Deleted' : 'Ordinary Entry',
+                playerName: edge.deleted ? 'Deleted Player' : 'Ordinary Player',
+                overallPoints: 60,
+                overallRank: 0,
+              })
+              .where(
+                and(
+                  eq(schema.entriesInCompetition.seasonId, season.seasonId),
+                  eq(schema.entriesInCompetition.entryId, entryIds[0]),
+                ),
+              );
+            const input = buildPicks(2);
+            Object.assign(input.entry_history, {
+              rank: edge.rank,
+              overall_rank: edge.overall_rank,
+              total_points: edge.total_points,
+            });
+            await repository.upsertFromPicksAndLive(
+              season,
+              entryIds[0],
+              2,
+              input,
+              eventPoints,
+              new Date(Date.parse('2026-08-10T12:00:00Z') + index * 1000),
+            );
+            const [result] = await repository.findByEventAndEntryIds(season, 2, [entryIds[0]]);
+            expect(result?.eventRank).toBe(edge.expectedRank);
+            expect(result?.eventPoints).toBeGreaterThan(0);
+            if (edge.zeroTotal) expect(result?.overallPoints).toBe(0);
+            else expect(result?.overallPoints).toBeGreaterThan(0);
+          }
+          throw edgeCasesDone;
+        }),
+      ).rejects.toBe(edgeCasesDone);
 
       const historyRepository = createEntryHistoryInfoRepository(db);
       await historyRepository.upsertFromHistory(season, entryIds[0], {
