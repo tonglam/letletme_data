@@ -502,6 +502,16 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const richSyncedAtIso = exactRichSyncedAt.toISOString();
 
         const entryHistory = picks.entry_history;
+        const eventRank = normalizeAuthoritativeUnrankedEventRank({
+          rank: entryHistory.rank,
+          overallRank: entryHistory.overall_rank,
+          sourceTotalPoints: entryHistory.total_points,
+        });
+        // Keep the provider's unranked total paired with its rank sentinel.
+        // Reconstructing a cumulative score here makes deleted entries fail
+        // FINAL's zero-total/zero-rank contract indefinitely.
+        const authoritativeUnranked =
+          eventRank === 0 && entryHistory.overall_rank === 0 && entryHistory.total_points === 0;
         const captainPick = resolveScoringCaptainPick(picks.picks);
         const elementsPoints = new Map<number, number>();
         for (const element of live.elements) {
@@ -532,7 +542,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           picks.entry_history.total_points -
           (picks.entry_history.points - picks.entry_history.event_transfers_cost);
         let persistedPreviousOverallPoints: number | null = null;
-        if (!Number.isSafeInteger(sourcePreviousOverallPoints) || sourcePreviousOverallPoints < 0) {
+        if (
+          !authoritativeUnranked &&
+          (!Number.isSafeInteger(sourcePreviousOverallPoints) || sourcePreviousOverallPoints < 0)
+        ) {
           const previous = await db
             .select({ overallPoints: entryEventResultsInCompetition.overallPoints })
             .from(entryEventResultsInCompetition)
@@ -553,7 +566,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventTransfersCost: picks.entry_history.event_transfers_cost,
           persistedPreviousOverallPoints,
         });
-        if (baseline.usedPersistedFallback) {
+        if (!authoritativeUnranked && baseline.usedPersistedFallback) {
           logWarn('FPL entry history cumulative total was inconsistent; derived prior score', {
             season: season.seasonCode,
             eventId,
@@ -572,11 +585,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventNetPoints: eventLiveScore.netEventPoints,
           eventBenchPoints: benchPoints,
           eventAutoSubPoints: getAutoSubPoints(autoSubs, elementsPoints),
-          eventRank: normalizeAuthoritativeUnrankedEventRank({
-            rank: entryHistory.rank,
-            overallRank: entryHistory.overall_rank,
-            sourceTotalPoints: entryHistory.total_points,
-          }),
+          eventRank,
           eventChip: toNullableDbChip(picks.active_chip),
           playedCaptainElementId: captainPick ? captainPick.element : null,
           captainPoints: captainPick ? captainPointsBase * captainPick.multiplier : null,
@@ -588,7 +597,9 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
             is_vice_captain: pick.is_vice_captain,
           })),
           automaticSubstitutions: autoSubs,
-          overallPoints: baseline.previousOverallPoints + eventLiveScore.netEventPoints,
+          overallPoints: authoritativeUnranked
+            ? entryHistory.total_points
+            : baseline.previousOverallPoints + eventLiveScore.netEventPoints,
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,
