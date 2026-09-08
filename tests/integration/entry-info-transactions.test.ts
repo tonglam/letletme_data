@@ -5,7 +5,7 @@ assertIntegrationEnv();
 import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
-import { databaseSingleton, databaseTransactionStorage } from '../../src/db/singleton';
+import { databaseSingleton, databaseTransactionStorage, getDb } from '../../src/db/singleton';
 import { syncEntryInfo, type EntryInfoClient } from '../../src/services/entry-info.service';
 import { acquireMutationScopes, withMutationScopes } from '../../src/utils/mutation-scopes';
 import { recordedEntrySummary } from '../fixtures/entry-info.fixtures';
@@ -577,4 +577,48 @@ test('an expired callback cannot commit even when no SQL is in flight at its dea
       await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
     )[0]?.entry_name,
   ).toBe('original');
+}, 10000);
+
+test('entry persistence bounds outer pool acquisition and fences abandoned callbacks', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  const handle = await getDb();
+  const occupied = gate();
+  const release = gate();
+  const owner = handle.transaction(async () => {
+    occupied.resolve();
+    await release.promise;
+  });
+  await occupied.promise;
+  let writes = 0;
+  const write = () =>
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        writes += 1;
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='late write' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+      },
+      { timeoutMs: 150 },
+    );
+  const started = Date.now();
+  try {
+    await expect(write()).rejects.toThrow('transaction acquisition');
+    expect(Date.now() - started).toBeLessThan(1000);
+    for (let n = 0; n < 3; n += 1) await expect(write()).rejects.toThrow('transaction acquisition');
+    expect(writes).toBe(0);
+  } finally {
+    release.resolve();
+    await owner;
+  }
+  await Bun.sleep(200);
+  expect(writes).toBe(0);
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+  await write();
+  expect(writes).toBe(1);
 }, 10000);

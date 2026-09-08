@@ -74,19 +74,49 @@ async function lockEntry(
   }
 }
 
+// Reuse the acquisition gate for a client/policy so repeated deadlines cannot
+// accumulate abandoned BEGIN requests behind an occupied single-connection pool.
+const persistenceClients = new WeakMap<
+  object,
+  Map<number, postgres.Sql | postgres.TransactionSql>
+>();
+
 export async function withEntrySeasonSyncTransaction<T>(
   season: FplSeasonRef,
   entryId: number,
   operation: (tx: TransactionHandle) => Promise<T>,
   options?: { timeoutMs: number },
 ): Promise<T> {
+  let db = await getDb();
   const deadlineAt = options ? Date.now() + options.timeoutMs : undefined;
   const assertDeadline = () => {
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
       throw new TimeoutError('Entry persistence deadline exceeded');
     }
   };
-  const db = await getDb();
+  if (options) {
+    const session = (
+      db as unknown as { session: { client: postgres.Sql | postgres.TransactionSql } }
+    ).session;
+    let policies = persistenceClients.get(session.client);
+    if (!policies) {
+      policies = new Map();
+      persistenceClients.set(session.client, policies);
+    }
+    let boundedClient = policies.get(options.timeoutMs);
+    if (!boundedClient) {
+      boundedClient = withPostgresQueryTimeout(session.client, options.timeoutMs);
+      policies.set(options.timeoutMs, boundedClient);
+    }
+    // Clone only the handle/session shell; never replace the shared database
+    // client's policy. Drizzle's root transaction and nested savepoint methods
+    // both acquire through this session client, before invoking our callback.
+    const boundedSession = Object.create(session) as typeof session;
+    boundedSession.client = boundedClient;
+    const boundedDb = Object.create(db) as typeof db & { session: typeof session };
+    boundedDb.session = boundedSession;
+    db = boundedDb;
+  }
   return db.transaction(async (tx) => {
     // The session belongs only to this transaction/savepoint. Its children
     // inherit the bounded client; the enclosing transaction keeps its policy.
