@@ -16,6 +16,8 @@ import {
   LiveFinalRetentionIncompleteError,
   liveFinalRetentionCompletionEvidence,
   runLiveFinalRetentionV2,
+  recordManualLiveFinalRetentionRecovery,
+  assertManualLiveFinalRetentionRecoveryTarget,
 } from '../services/live-final-retention.service';
 import { syncLiveMatchObservationV3 } from '../services/live-match-observation-v3.service';
 import {
@@ -120,6 +122,19 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       if (fence.kind === 'malformed') {
         throw new Error(`Live final retention scheduler fence is malformed: ${fence.reason}`);
       }
+      if (
+        job.data.retentionRecoveryTarget &&
+        (job.data.source !== 'manual' || fence.kind !== 'none')
+      ) {
+        throw new Error('Retention recovery requires an unfenced manual job');
+      }
+      if (job.data.retentionRecoveryTarget) {
+        await assertManualLiveFinalRetentionRecoveryTarget({
+          season,
+          eventId,
+          target: job.data.retentionRecoveryTarget,
+        });
+      }
       const result = await runLiveFinalRetentionV2(season, eventId, {
         authority:
           fence.kind === 'complete'
@@ -132,6 +147,15 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       });
       if (result.status !== 'succeeded') {
         throw new LiveFinalRetentionIncompleteError(result);
+      }
+      if (job.data.retentionRecoveryTarget) {
+        await recordManualLiveFinalRetentionRecovery({
+          season,
+          eventId,
+          target: job.data.retentionRecoveryTarget,
+          result,
+          jobId: String(job.id),
+        });
       }
       return result;
     }

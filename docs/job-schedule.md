@@ -222,6 +222,14 @@ response exposes every finalized event, season coverage, aged minimum TTL,
 first/last certification, family counts, scheduler status, and failure reason
 codes for the Ops warning/critical probe.
 
+An authorized manual current-event retention trigger captures the latest failed
+terminal obligation identity before enqueueing. A complete pass appends its
+five-family proof to that exact obligation's `schedulerRecovery` evidence before
+acknowledging the job. The original failure status and evidence remain intact.
+Status projects recovery only when the obligation/period/generation and full
+retention proof match; a newer failed daily cycle still remains critical.
+A plain manual pass without a failed target does not manufacture a certificate.
+
 ## Selection publication window
 
 Live picks use a deadline canary and then one per-entry single-flight fetch. A complete same-event

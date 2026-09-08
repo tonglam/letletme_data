@@ -71,3 +71,50 @@ export function effectiveLiveFinalRetentionTtl(input: {
     input.observedTtlMs - Math.max(0, input.now.getTime() - input.observedAt.getTime()),
   );
 }
+
+/** A recovery is a full producer proof, never merely a manual job acknowledgement. */
+export function validLiveFinalRetentionRecovery(
+  value: unknown,
+  scopeKey: string,
+): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const event = /^\d{4}:event:([1-9]\d*)$/.exec(scopeKey);
+  if (
+    !event ||
+    v.eventId !== Number(event[1]) ||
+    v.schemaVersion !== LIVE_FINAL_RETENTION_EVIDENCE_SCHEMA_VERSION ||
+    v.policyVersion !== LIVE_FINAL_RETENTION_POLICY_VERSION ||
+    v.status !== 'succeeded' ||
+    v.complete !== true ||
+    v.failed !== 0 ||
+    typeof v.checkedAt !== 'string' ||
+    !Number.isFinite(Date.parse(v.checkedAt)) ||
+    typeof v.minRemainingTtlMs !== 'number' ||
+    !Number.isFinite(v.minRemainingTtlMs) ||
+    v.minRemainingTtlMs <= LIVE_FINAL_RETENTION_RENEW_THRESHOLD_MS ||
+    !v.families ||
+    typeof v.families !== 'object' ||
+    Array.isArray(v.families)
+  )
+    return false;
+  let checked = 0;
+  for (const name of ['global', 'matchDesk', 'matchDetail', 'entry', 'league']) {
+    const f = (v.families as Record<string, Record<string, unknown>>)[name];
+    if (!f || typeof f !== 'object' || Array.isArray(f) || f.failed !== 0) return false;
+    for (const key of ['checked', 'renewed', 'restored', 'failed']) {
+      if (typeof f[key] !== 'number' || !Number.isSafeInteger(f[key]) || f[key] < 0) return false;
+    }
+    if (
+      (['global', 'matchDesk', 'matchDetail'].includes(name) && f.checked !== 1) ||
+      Number(f.renewed) + Number(f.restored) > Number(f.checked) ||
+      (Number(f.checked) > 0 &&
+        (typeof f.minRemainingTtlMs !== 'number' ||
+          !Number.isFinite(f.minRemainingTtlMs) ||
+          f.minRemainingTtlMs < v.minRemainingTtlMs))
+    )
+      return false;
+    checked += Number(f.checked);
+  }
+  return Number.isSafeInteger(checked) && checked === v.requiredArtifacts;
+}

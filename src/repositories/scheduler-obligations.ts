@@ -1,3 +1,4 @@
+import { validLiveFinalRetentionRecovery } from '../domain/live-final-retention-policy';
 import { randomUUID } from 'node:crypto';
 
 import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
@@ -1822,9 +1823,16 @@ export async function appendSchedulerObligationRecovery(input: {
   recoveryRevision: string | number;
   recoveryActor: string;
   recoveryReason: string;
+  retention?: Record<string, unknown>;
   recoveredAt?: Date;
   db?: DbHandle;
 }): Promise<boolean> {
+  if (
+    input.jobName === 'live-final-retention' &&
+    !validLiveFinalRetentionRecovery(input.retention, input.scopeKey)
+  ) {
+    throw new Error('Complete live final retention recovery proof is required');
+  }
   const recoveryRevision = String(input.recoveryRevision).trim();
   const recoveryActor = input.recoveryActor.trim();
   const recoveryReason = input.recoveryReason.trim();
@@ -1846,6 +1854,9 @@ export async function appendSchedulerObligationRecovery(input: {
   if (!Number.isFinite(recoveredAt.getTime())) {
     throw new Error('Scheduler recovery timestamp is invalid');
   }
+  if (input.retention && Date.parse(String(input.retention.checkedAt)) > recoveredAt.getTime()) {
+    throw new Error('Retention proof cannot be newer than its recovery timestamp');
+  }
   const recoveryEvidence = JSON.stringify({
     schedulerRecovery: {
       status: 'succeeded',
@@ -1856,6 +1867,7 @@ export async function appendSchedulerObligationRecovery(input: {
       generation: input.generation,
       recoveryActor,
       recoveryReason,
+      ...(input.retention ? { retention: input.retention } : {}),
     },
   });
   const db = input.db ?? (await getDb());
@@ -1868,6 +1880,7 @@ export async function appendSchedulerObligationRecovery(input: {
       AND obligation.period_key = ${input.periodKey}
       AND obligation.generation = ${input.generation}
       AND obligation.status IN ('failed', 'irrecoverable')
+      AND ${input.retention ? sql`obligation.completed_at <= ${String(input.retention.checkedAt)}::timestamptz` : sql`true`}
       AND NOT ${validSchedulerRecoveryEvidenceSql(sql`obligation.evidence`, {
         obligationId: sql`obligation.obligation_id`,
         periodKey: sql`obligation.period_key`,
@@ -2418,6 +2431,23 @@ export async function liveFinalRetentionObligationStatuses(input: {
     scopeKeys.map((scopeKey) => sql`${scopeKey}`),
     sql`, `,
   );
+  const recoveryIdentity = validSchedulerRecoveryEvidenceSql(sql`evidence`, {
+    obligationId: sql`obligation_id`,
+    periodKey: sql`period_key`,
+    generation: sql`generation`,
+  });
+  const certificationTime = sql`CASE
+    WHEN status = 'succeeded'
+      AND evidence->'retention'->>'schemaVersion' = ${input.evidenceSchemaVersion}
+      AND evidence->'retention'->>'complete' = 'true' THEN completed_at
+    WHEN status IN ('failed', 'irrecoverable') AND ${recoveryIdentity}
+      AND evidence->'schedulerRecovery'->'retention'->>'schemaVersion' = ${input.evidenceSchemaVersion}
+      AND evidence->'schedulerRecovery'->'retention'->>'policyVersion' = ${input.policyVersion}
+      AND evidence->'schedulerRecovery'->'retention'->>'complete' = 'true'
+      AND evidence->'schedulerRecovery'->'retention'->>'failed' = '0'
+      AND evidence->'schedulerRecovery'->'retention'->>'checkedAt' ~ ${SCHEDULER_RECOVERY_UTC_TIMESTAMP_PATTERN}
+      THEN (evidence->'schedulerRecovery'->'retention'->>'checkedAt')::timestamptz
+    ELSE NULL END`;
   const rows = await db.execute<{
     obligationId: string;
     scopeKey: string;
@@ -2463,16 +2493,8 @@ export async function liveFinalRetentionObligationStatuses(input: {
             END DESC,
             updated_at DESC
         ) AS "rowRank",
-        min(completed_at) FILTER (
-          WHERE status = 'succeeded'
-            AND evidence->'retention'->>'schemaVersion' = ${input.evidenceSchemaVersion}
-            AND evidence->'retention'->>'complete' = 'true'
-        ) OVER (PARTITION BY scope_key) AS "firstSucceededAt",
-        max(completed_at) FILTER (
-          WHERE status = 'succeeded'
-            AND evidence->'retention'->>'schemaVersion' = ${input.evidenceSchemaVersion}
-            AND evidence->'retention'->>'complete' = 'true'
-        ) OVER (PARTITION BY scope_key) AS "lastSucceededAt"
+        min(${certificationTime}) OVER (PARTITION BY scope_key) AS "firstSucceededAt",
+        max(${certificationTime}) OVER (PARTITION BY scope_key) AS "lastSucceededAt"
       FROM ops.scheduler_obligations
       WHERE job_name = 'live-final-retention'
         AND scope_key IN (${scopeList})
@@ -2483,6 +2505,30 @@ export async function liveFinalRetentionObligationStatuses(input: {
     WHERE "rowRank" <= 3
     ORDER BY "scopeKey", "rowRank"
   `);
+
+  for (const row of rows) {
+    if (row.status !== 'failed' && row.status !== 'irrecoverable') continue;
+    const recovery = schedulerObligationRecoveryMatches(row.evidence, {
+      obligationId: row.obligationId,
+      periodKey: row.periodKey,
+      generation: Number(row.generation),
+    });
+    const record = row.evidence?.schedulerRecovery as Record<string, unknown> | undefined;
+    const proof = record?.retention;
+    if (
+      !recovery ||
+      !validLiveFinalRetentionRecovery(proof, row.scopeKey) ||
+      proof.schemaVersion !== input.evidenceSchemaVersion ||
+      proof.policyVersion !== input.policyVersion ||
+      Date.parse(String(proof.checkedAt)) > Date.parse(recovery.recoveredAt) ||
+      (row.completedAt !== null &&
+        Date.parse(String(proof.checkedAt)) < new Date(row.completedAt).getTime())
+    )
+      continue;
+    row.status = 'succeeded';
+    row.completedAt = String(proof.checkedAt);
+    row.evidence = { ...row.evidence, retention: proof };
+  }
 
   type RetentionStatusRow = (typeof rows)[number];
   const grouped = new Map<string, RetentionStatusRow[]>();
@@ -2533,8 +2579,19 @@ export async function liveFinalRetentionObligationStatuses(input: {
     result.set(scopeKey, {
       latest,
       latestSuccess,
-      firstSucceededAt: schedulerStatusDate(group[0]?.firstSucceededAt ?? null),
-      lastSucceededAt: schedulerStatusDate(group[0]?.lastSucceededAt ?? null),
+      firstSucceededAt:
+        [
+          schedulerStatusDate(group[0]?.firstSucceededAt ?? null),
+          ...group
+            .filter((row) => row.status === 'succeeded')
+            .map((row) => schedulerStatusDate(row.completedAt)),
+        ]
+          .filter((date): date is Date => date !== null)
+          .sort((a, b) => a.getTime() - b.getTime())[0] ?? null,
+      lastSucceededAt:
+        [schedulerStatusDate(group[0]?.lastSucceededAt ?? null), latestSuccess?.completedAt ?? null]
+          .filter((date): date is Date => date !== null)
+          .sort((a, b) => b.getTime() - a.getTime())[0] ?? null,
       overdue: Boolean(latest && latest.dueAt.getTime() <= Date.now() && latestIsOverdueState),
       consecutiveUnsuccessfulCycles,
     });
