@@ -1,3 +1,4 @@
+import { getLatestFailedSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
   enqueueCoreSnapshotJob,
   enqueuePlayerPricesSyncJob,
@@ -505,7 +506,19 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       if (!currentEvent) {
         throw new Error('No current event found');
       }
+      const latest = await getLatestFailedSchedulerObligation({
+        jobName: 'live-final-retention',
+        scopeKey: `${season.seasonCode}:event:${currentEvent.id}`,
+      });
+      const retentionRecoveryTarget = latest
+        ? {
+            obligationId: latest.obligationId,
+            periodKey: latest.periodKey,
+            generation: latest.generation,
+          }
+        : undefined;
       return enqueueLiveFinalRetention(season, currentEvent.id, 'manual', {
+        retentionRecoveryTarget,
         jobId: `manual-live-final-retention-e${currentEvent.id}-${Date.now()}`,
       });
     },

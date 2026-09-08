@@ -22,6 +22,8 @@ export interface LiveDataJobData {
   source: 'cron' | 'manual' | 'cascade' | 'catchup' | 'reconcile';
   triggeredAt: string;
   runId?: string;
+  /** Failed terminal cycle captured before an authorized manual retention pass. */
+  retentionRecoveryTarget?: { obligationId: string; periodKey: string; generation: number };
   /** Durable scheduler obligation identity carried through worker completion. */
   obligationId?: string;
   obligationGeneration?: number;

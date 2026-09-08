@@ -359,6 +359,7 @@ export async function enqueueLiveFinalRetention(
     now?: Date;
     jobId?: string;
     runId?: string;
+    retentionRecoveryTarget?: LiveDataJobData['retentionRecoveryTarget'];
     obligationId?: string;
     obligationGeneration?: number;
     /** Scheduler reconciliation may join an already-enqueued deterministic job. */
@@ -407,6 +408,9 @@ export async function enqueueLiveFinalRetention(
         seasonCode: season.seasonCode,
         eventId,
         source,
+        ...(options.retentionRecoveryTarget
+          ? { retentionRecoveryTarget: options.retentionRecoveryTarget }
+          : {}),
         triggeredAt: new Date().toISOString(),
         runId:
           options.runId ??

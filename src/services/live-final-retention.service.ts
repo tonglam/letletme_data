@@ -49,7 +49,10 @@ import {
 import { redisSingleton } from '../cache/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { eventRepository } from '../repositories/events';
-import { getSchedulerObligation } from '../repositories/scheduler-obligations';
+import {
+  appendSchedulerObligationRecovery,
+  getSchedulerObligation,
+} from '../repositories/scheduler-obligations';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import {
   entryEventPicksRepository,
@@ -1367,4 +1370,42 @@ export async function runLiveFinalRetentionV2(
     minRemainingTtlMs,
   });
   return result;
+}
+
+/** Persist success before the manual worker acknowledges completion. */
+export async function recordManualLiveFinalRetentionRecovery(input: {
+  season: FplSeasonRef;
+  eventId: number;
+  target: { obligationId: string; periodKey: string; generation: number };
+  result: LiveFinalRetentionResult;
+  jobId: string;
+}): Promise<void> {
+  const changed = await appendSchedulerObligationRecovery({
+    jobName: 'live-final-retention',
+    scopeKey: `${input.season.seasonCode}:event:${input.eventId}`,
+    ...input.target,
+    recoveryRevision: input.jobId,
+    recoveryActor: 'manual-live-final-retention',
+    recoveryReason: 'Authorized current-event retention verification',
+    retention: liveFinalRetentionCompletionEvidence(input.result),
+  });
+  if (!changed) throw new Error('Live final retention recovery target is no longer eligible');
+}
+
+export async function assertManualLiveFinalRetentionRecoveryTarget(input: {
+  season: FplSeasonRef;
+  eventId: number;
+  target: { obligationId: string; periodKey: string; generation: number };
+}): Promise<void> {
+  const target = await getSchedulerObligation({ obligationId: input.target.obligationId });
+  if (
+    !target ||
+    target.jobName !== 'live-final-retention' ||
+    target.scopeKey !== `${input.season.seasonCode}:event:${input.eventId}` ||
+    target.periodKey !== input.target.periodKey ||
+    target.generation !== input.target.generation ||
+    !['failed', 'irrecoverable'].includes(target.status)
+  ) {
+    throw new Error('Live final retention recovery target changed before verification');
+  }
 }
