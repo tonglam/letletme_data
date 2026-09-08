@@ -15,6 +15,7 @@ import {
   findDueSchedulerObligationCandidates,
   findDueSchedulerJobNames,
   getLatestFailedSchedulerObligation,
+  liveFinalRetentionObligationStatuses,
   listExpiredSchedulerObligations,
   markSchedulerObligationIrrecoverable,
   reconcilePostMatchSchedulerObligations,
@@ -107,6 +108,75 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler recovery evidence', () => {
+  test('manual retention certifies a failed row with null completion and excludes it from later targets', async () => {
+    const sql = await getDbClient();
+    await sql`INSERT INTO ops.scheduler_obligations
+      (obligation_id, job_name, scope_key, period_key, cadence, timezone, status, source,
+       due_at, generation, attempts, last_error, completed_at, updated_at, evidence)
+      VALUES (${OBLIGATION_ID}::uuid, 'live-final-retention', '2627:event:3', 'retention-test',
+        'daily', 'UTC', 'failed', 'manual', '2026-09-01T00:00:00Z', 2, 3, 'incomplete',
+        NULL, '2026-09-01T01:00:00Z', ${JSON.stringify({ retentionPolicyVersion: 'active-season-v1', retention: { failed: 1718, complete: false } })}::jsonb)`;
+    const target = await getLatestFailedSchedulerObligation({
+      jobName: 'live-final-retention',
+      scopeKey: '2627:event:3',
+    });
+    expect(target?.obligationId).toBe(OBLIGATION_ID);
+    expect(target?.completedAt).toBeNull();
+    const retention = {
+      schemaVersion: 'live-final-retention-v2',
+      policyVersion: 'active-season-v1',
+      eventId: 3,
+      status: 'succeeded',
+      complete: true,
+      failed: 0,
+      requiredArtifacts: 5,
+      checkedAt: '2026-09-09T00:00:00.000Z',
+      minRemainingTtlMs: 900_000_000,
+      families: Object.fromEntries(
+        ['global', 'matchDesk', 'matchDetail', 'entry', 'league'].map((name) => [
+          name,
+          { checked: 1, renewed: 0, restored: 0, failed: 0, minRemainingTtlMs: 900_000_000 },
+        ]),
+      ),
+    };
+    const recovery = {
+      jobName: 'live-final-retention',
+      scopeKey: '2627:event:3',
+      obligationId: target!.obligationId,
+      periodKey: target!.periodKey,
+      generation: target!.generation,
+      recoveryRevision: 'manual-retention-test',
+      recoveryActor: 'integration-test',
+      recoveryReason: 'bounded proof',
+      recoveredAt: new Date('2026-09-09T00:00:01Z'),
+      retention,
+    };
+    expect(await appendSchedulerObligationRecovery({ ...recovery, generation: 99 })).toBe(false);
+    expect(await appendSchedulerObligationRecovery(recovery)).toBe(true);
+    expect(await appendSchedulerObligationRecovery(recovery)).toBe(true);
+    expect(
+      await getLatestFailedSchedulerObligation({
+        jobName: recovery.jobName,
+        scopeKey: recovery.scopeKey,
+      }),
+    ).toBeNull();
+    const status = (
+      await liveFinalRetentionObligationStatuses({
+        scopeKeys: [recovery.scopeKey],
+        policyVersion: 'active-season-v1',
+        evidenceSchemaVersion: 'live-final-retention-v2',
+      })
+    ).get(recovery.scopeKey)!;
+    expect(status.latest?.status).toBe('succeeded');
+    expect(status.latestSuccess?.evidence.retention).toEqual(retention);
+    expect(status.firstSucceededAt?.toISOString()).toBe(retention.checkedAt);
+    const [stored] =
+      await sql`SELECT status, completed_at, evidence FROM ops.scheduler_obligations WHERE obligation_id=${OBLIGATION_ID}::uuid`;
+    expect(stored!.status).toBe('failed');
+    expect(stored!.completed_at).toBeNull();
+    expect(stored!.evidence.retention.failed).toBe(1718);
+  });
+
   test('does not target a historical failure behind a newer successful obligation', async () => {
     const sql = await getDbClient();
     await sql`

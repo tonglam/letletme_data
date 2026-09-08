@@ -1880,7 +1880,7 @@ export async function appendSchedulerObligationRecovery(input: {
       AND obligation.period_key = ${input.periodKey}
       AND obligation.generation = ${input.generation}
       AND obligation.status IN ('failed', 'irrecoverable')
-      AND ${input.retention ? sql`obligation.completed_at <= ${String(input.retention.checkedAt)}::timestamptz` : sql`true`}
+      AND ${input.retention ? sql`COALESCE(obligation.completed_at, obligation.updated_at) <= ${String(input.retention.checkedAt)}::timestamptz` : sql`true`}
       AND NOT ${validSchedulerRecoveryEvidenceSql(sql`obligation.evidence`, {
         obligationId: sql`obligation.obligation_id`,
         periodKey: sql`obligation.period_key`,
