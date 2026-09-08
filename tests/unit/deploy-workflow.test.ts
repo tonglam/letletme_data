@@ -274,7 +274,7 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('--probe-fpl-raw-snapshot-storage');
     expect(deployScript).toContain('bootstrap-briefing-source-media-env.sh');
     expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
-      deployScript.indexOf('bun validate-env.ts --probe-bug-report-storage'),
+      deployScript.indexOf('bun validate-env.ts --probe-fpl-raw-snapshot-storage'),
     );
     expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeLessThan(
       deployScript.indexOf('status()'),
