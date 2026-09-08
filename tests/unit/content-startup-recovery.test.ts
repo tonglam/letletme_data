@@ -28,6 +28,21 @@ describe('content registry startup recovery', () => {
     });
   });
 
+  test('recovers transient DNS and routing failures through wrapped causes', async () => {
+    for (const code of ['EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']) {
+      let calls = 0;
+      const value = await recoverContentDatabaseStartup(
+        async () => {
+          if (++calls === 1) throw new Error('query failed', { cause: { code } });
+          return 'ready';
+        },
+        { signal: new AbortController().signal, retryDelayMs: 1, onRetry: () => {} },
+      );
+      expect(value).toBe('ready');
+      expect(calls).toBe(2);
+    }
+  });
+
   test('keeps invalid manifest and permanent SQL failures stopped', async () => {
     for (const error of [new Error('invalid manifest'), { code: '42501' }, { code: '42P01' }]) {
       let calls = 0;
