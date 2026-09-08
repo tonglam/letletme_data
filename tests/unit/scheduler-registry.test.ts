@@ -1,6 +1,7 @@
+import * as priceChangeService from '../../src/services/price-change-predictions.service';
 import { readFileSync } from 'node:fs';
 
-import { describe, expect, mock, test } from 'bun:test';
+import { describe, expect, mock, spyOn, test } from 'bun:test';
 
 import {
   createSchedulerRegistry,
@@ -466,6 +467,46 @@ describe('standalone scheduler registry', () => {
         },
       },
     ]);
+  });
+
+  test('discovers price-watch plans through context only and skips failed discovery', async () => {
+    const now = new Date('2026-08-23T06:55:00.000Z');
+    const deadline = '2026-08-23T07:00:00.000Z';
+    const context = { season: TEST_SEASON, now, events: [] };
+    const enabled = process.env.PRICE_CHANGE_HOT_WATCH_ENABLED;
+    process.env.PRICE_CHANGE_HOT_WATCH_ENABLED = 'true';
+    const read = spyOn(priceChangeService, 'getPriceChangeWatchDeadlines').mockResolvedValue({
+      status: 'READY',
+      nextDeadlines: [deadline],
+    });
+    const fullBoard = spyOn(priceChangeService, 'getPriceChangePredictions').mockImplementation(
+      async () => {
+        throw new Error('Full board must not be used for scheduler discovery');
+      },
+    );
+    try {
+      const definition = createSchedulerRegistry().find(
+        (item) => item.name === 'price-change-watch',
+      )!;
+      expect(await definition.resolve(context)).toEqual(
+        resolvePriceChangeWatchPlans({
+          now,
+          seasonCode: TEST_SEASON.seasonCode,
+          deadlineCandidates: [deadline],
+        }),
+      );
+      expect(read).toHaveBeenCalledWith(TEST_SEASON, now);
+      expect(fullBoard).not.toHaveBeenCalled();
+      read.mockRejectedValueOnce(new Error('database deadline exceeded'));
+      expect(await definition.resolve(context)).toEqual([]);
+      read.mockResolvedValueOnce(null);
+      expect(await definition.resolve(context)).toEqual([]);
+    } finally {
+      read.mockRestore();
+      fullBoard.mockRestore();
+      if (enabled === undefined) delete process.env.PRICE_CHANGE_HOT_WATCH_ENABLED;
+      else process.env.PRICE_CHANGE_HOT_WATCH_ENABLED = enabled;
+    }
   });
 
   test('treats definitions without an enablement hook as always enabled', () => {

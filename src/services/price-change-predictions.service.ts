@@ -7,7 +7,10 @@ import {
 } from '../cache/data-publication';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import {
+  loadActivePriceChangeContext,
+  loadDataPublicationDelivery,
+} from '../repositories/data-publication-outbox';
 import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { seasonRepository } from '../repositories/seasons';
 import {
@@ -986,10 +989,10 @@ const CONTEXT_KEYS = [
   'latestEvent',
 ] as const;
 
-export function parsePublishedPriceChangeBoard(
+function parsePublishedPriceChangeContext(
   publication: DataPublicationReadResult,
   now = new Date(),
-): PriceChangeBoard | null {
+) {
   const { manifest, items } = publication;
   if (
     manifest.dataset !== PRICE_CHANGE_DATASET ||
@@ -1002,8 +1005,7 @@ export function parsePublishedPriceChangeBoard(
     return null;
   }
   const context = items.context;
-  const players = items.players;
-  if (!isRecord(context) || !Array.isArray(players)) {
+  if (!isRecord(context)) {
     return null;
   }
   if (context.schemaVersion !== 2 || !hasExactKeys(context, CONTEXT_KEYS)) {
@@ -1026,8 +1028,7 @@ export function parsePublishedPriceChangeBoard(
     !Number.isInteger(observedPlayerCountValue) ||
     Number(expectedPlayerCountValue) <= 0 ||
     Number(observedPlayerCountValue) <= 0 ||
-    Number(expectedPlayerCountValue) !== Number(observedPlayerCountValue) ||
-    players.length !== Number(observedPlayerCountValue)
+    Number(expectedPlayerCountValue) !== Number(observedPlayerCountValue)
   ) {
     return null;
   }
@@ -1058,6 +1059,63 @@ export function parsePublishedPriceChangeBoard(
       return null;
     }
   }
+  const ageMs = now.getTime() - fetchedAt;
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  return {
+    context,
+    nextDeadlines,
+    expectedPlayerCount,
+    observedPlayerCount,
+    fetchedAt,
+    sourceCheckedAt,
+    staleAt,
+    ageMs,
+  };
+}
+
+/** Scheduling metadata only: never a substitute for a validated consumer board. */
+export function parsePriceChangeWatchDeadlines(
+  publication: DataPublicationReadResult,
+  now = new Date(),
+) {
+  const parsed = parsePublishedPriceChangeContext(publication, now);
+  if (
+    !parsed ||
+    parsed.ageMs >= PRICE_CHANGE_MAX_AGE_MS ||
+    publication.manifest.items.find((item) => item.name === 'players')?.count !==
+      parsed.observedPlayerCount
+  )
+    return null;
+  return {
+    status: parsed.ageMs < PRICE_CHANGE_READY_MS ? ('READY' as const) : ('STALE' as const),
+    nextDeadlines: [...parsed.nextDeadlines],
+  };
+}
+
+export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Date) {
+  const publication = await loadActivePriceChangeContext(season);
+  return publication ? parsePriceChangeWatchDeadlines(publication, now) : null;
+}
+
+export function parsePublishedPriceChangeBoard(
+  publication: DataPublicationReadResult,
+  now = new Date(),
+): PriceChangeBoard | null {
+  const parsed = parsePublishedPriceChangeContext(publication, now);
+  if (!parsed) return null;
+  const {
+    context,
+    nextDeadlines,
+    expectedPlayerCount,
+    observedPlayerCount,
+    fetchedAt,
+    sourceCheckedAt,
+    staleAt,
+    ageMs,
+  } = parsed;
+  const { manifest, items } = publication;
+  const players = items.players;
+  if (!Array.isArray(players) || players.length !== observedPlayerCount) return null;
   const playerIds = new Set<number>();
   if (
     !players.every((player) => {
@@ -1077,12 +1135,10 @@ export function parsePublishedPriceChangeBoard(
   ) {
     return null;
   }
-  const ageMs = now.getTime() - fetchedAt;
-  if (ageMs < 0) return null;
   const board: PriceChangeBoard = {
     status: ageMs < PRICE_CHANGE_READY_MS ? 'READY' : 'STALE',
     source: 'FPL_BOOTSTRAP',
-    deadline: context.deadline,
+    deadline: nextDeadlines[0],
     nextDeadlines: [...nextDeadlines],
     fetchedAt: new Date(fetchedAt).toISOString(),
     sourceCheckedAt: new Date(sourceCheckedAt).toISOString(),

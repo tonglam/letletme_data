@@ -77,7 +77,7 @@ import { getConfig, parseStrictBooleanEnvValue } from '../utils/config';
 import { fplCriticalSyncQueueName } from '../queues/fpl-critical-sync.queue';
 import { assertDataContractRegistry, contractForSchedulerJob } from '../domain/data-contracts';
 import { fplPriceWatchQueueName } from '../queues/fpl-price-watch.queue';
-import { getPriceChangePredictions } from '../services/price-change-predictions.service';
+import { getPriceChangeWatchDeadlines } from '../services/price-change-predictions.service';
 import { resolvePlayerSyncEvent } from '../services/player-sync-event.service';
 import { logWarn } from '../utils/logger';
 import { findLivePublicationV2FinalizationTargets } from '../services/live-publication-v2-checkpoint.service';
@@ -1027,11 +1027,13 @@ function priceChangeWatchDefinition(): ScheduledJobDefinition {
     successPredicate: 'observe an official price-change fingerprint or record no change',
     resolve: async (context) => {
       if (!priceHotWatchEnabled()) return [];
-      // The durable board carries the latest authoritative deadline list. A
+      // Read only durable context, without loading the player board or Redis. A
       // missing/stale board is handled by the normal price publication lane;
       // the scheduler must not make a provider request to discover an
       // optional hot-watch target.
-      const board = await getPriceChangePredictions().catch(() => null);
+      const board = await getPriceChangeWatchDeadlines(context.season, context.now).catch(
+        () => null,
+      );
       const nowMs = context.now.getTime();
       const deadlineCandidates =
         board && ['READY', 'STALE'].includes(board.status) ? board.nextDeadlines : [];
