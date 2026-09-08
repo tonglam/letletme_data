@@ -6,6 +6,7 @@ import {
   dispatchAcquisitionJobOutbox,
   type AcquisitionQueueName,
 } from './content/acquisition/job-outbox';
+import { recoverContentDatabaseStartup } from './content/acquisition/startup-recovery';
 import { reconcileBriefingSourceRegistry } from './content/acquisition/manifest-reconciler';
 import { scheduleFormalAcquisition } from './content/acquisition/formal-scheduler';
 import { planTriggeredContentWork } from './content/acquisition/triggered-work-planner';
@@ -85,6 +86,7 @@ let formalXInitializationInFlight: Promise<void> | null = null;
 let acquisitionJobOutboxDispatchInFlight: Promise<void> | null = null;
 let publicationOutboxDispatchInFlight: Promise<void> | null = null;
 let shuttingDown = false;
+const acquisitionStartupAbort = new AbortController();
 
 function runtimeGitRevision(): string {
   return (
@@ -246,11 +248,19 @@ async function startFormalAcquisition(): Promise<void> {
   if (shuttingDown || !flags.pipelineEnabled) return;
   try {
     const bundle = await loadBriefingManifest();
-    const reconciliation = await reconcileBriefingSourceRegistry({
-      bundle,
-      gitRevision: runtimeGitRevision(),
-      includeXBackstop: flags.xBackstopEnabled,
-    });
+    const reconciliation = await recoverContentDatabaseStartup(
+      () =>
+        reconcileBriefingSourceRegistry({
+          bundle,
+          gitRevision: runtimeGitRevision(),
+          includeXBackstop: flags.xBackstopEnabled,
+        }),
+      {
+        signal: acquisitionStartupAbort.signal,
+        onRetry: (error) =>
+          logError('Content registry database unavailable; startup retries in 30 seconds', error),
+      },
+    );
     manifestBundle = bundle;
     if (flags.xScanEnabled && flags.realGrokEnabled) {
       xBudgetPolicy = compileXBudgetPolicy({
@@ -275,7 +285,8 @@ async function startFormalAcquisition(): Promise<void> {
     });
   } catch (error) {
     // Acquisition fails closed, but publication delivery remains independent.
-    logError('Briefing source manifest invalid; acquisition scheduler remains stopped', error);
+    if (!shuttingDown)
+      logError('Briefing acquisition initialization failed; scheduler remains stopped', error);
     return;
   }
 
@@ -321,13 +332,14 @@ publicationOutboxDispatcher = setInterval(() => {
   void dispatchPendingPublicationOutbox();
 }, PUBLICATION_OUTBOX_DISPATCH_INTERVAL_MS);
 
-void startFormalAcquisition().catch((error) => {
+const acquisitionStartup = startFormalAcquisition().catch((error) => {
   logError('Formal acquisition startup failed; publication delivery remains active', error);
 });
 
 const shutdownController = createShutdownController({
   stopIntake: () => {
     shuttingDown = true;
+    acquisitionStartupAbort.abort();
     queueMonitors.forEach((monitor) => monitor.stop());
     if (formalScheduler) clearInterval(formalScheduler);
     if (acquisitionJobOutboxDispatcher) clearInterval(acquisitionJobOutboxDispatcher);
@@ -337,6 +349,7 @@ const shutdownController = createShutdownController({
   },
   waitForInFlight: async () => {
     const inFlight = await Promise.allSettled([
+      acquisitionStartup,
       formalScheduleInFlight,
       formalXInitializationInFlight,
       acquisitionJobOutboxDispatchInFlight,
