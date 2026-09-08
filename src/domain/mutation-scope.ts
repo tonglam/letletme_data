@@ -109,15 +109,14 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   if (queue === 'entry-sync') {
     switch (jobName) {
       case 'entry-info':
-        // syncEntryInfo owns its per-entry write scope after fetching FPL data.
-        // The batch worker must not wrap concurrent entries in one transaction.
-        return [];
       case 'entry-picks':
-        return [withEvent('entry-event-picks', eventId)];
       case 'entry-transfers':
-        return [withEvent('entry-event-transfers', eventId)];
       case 'entry-results':
-        return [withEvent('entry-event-results', eventId)];
+        // Services fetch upstream before their per-entry write transactions.
+        // A batch transaction would retain entry locks across network waits,
+        // share savepoints between concurrent entries, and let Redis checkpoint
+        // markers escape before the enclosing transaction commits.
+        return [];
       default:
         return [];
     }

@@ -102,14 +102,17 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toEqual([]);
   });
 
-  it('does not reintroduce the global entry-info lock', () => {
-    expect(
-      resolveMutationScopes({
-        queueName: 'entry-sync',
-        jobName: 'entry-info',
-      }),
-    ).toEqual([]);
-  });
+  it.each(['entry-info', 'entry-picks', 'entry-transfers', 'entry-results'])(
+    'leaves %s batch transactions to individual entry writers',
+    (jobName) => {
+      expect(
+        resolveMutationScopes({
+          queueName: 'entry-sync',
+          jobName,
+        }),
+      ).toEqual([]);
+    },
+  );
 
   it('exposes rebuild, backfill, and lifecycle scopes for setup phases', () => {
     expect(tournamentSetupRebuildScopes(789)).toEqual([

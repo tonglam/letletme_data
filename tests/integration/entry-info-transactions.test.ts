@@ -4,14 +4,60 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import postgres from 'postgres';
+import { sql } from 'drizzle-orm';
 import { databaseSingleton, databaseTransactionStorage } from '../../src/db/singleton';
 import { syncEntryInfo, type EntryInfoClient } from '../../src/services/entry-info.service';
 import { withMutationScopes } from '../../src/utils/mutation-scopes';
 import { recordedEntrySummary } from '../fixtures/entry-info.fixtures';
+import { withEntrySeasonSyncTransaction } from '../../src/repositories/entry-event-transfers';
 
 const db = postgres(process.env.DATABASE_URL!, { max: 2 });
 const season = { seasonId: 2091, seasonCode: '9192' };
 const ids = [919201, 919202, 919203];
+
+test.each(['entry-picks', 'entry-transfers', 'entry-results'])(
+  '%s batch permits independent commits and rollback while another entry is pending',
+  async (jobName) => {
+    await syncEntryInfo(season, ids[0]!, client('original'), 0);
+    await syncEntryInfo(season, ids[1]!, client('original'), 0);
+    await withMutationScopes({ queueName: 'entry-sync', jobName, eventId: 1 }, async () => {
+      expect(databaseTransactionStorage.getStore()).toBeUndefined();
+      const release = gate();
+      const failing = (async () => {
+        // Model the provider wait before entering the repository transaction.
+        // This must work even with the production default of one pool slot.
+        await release.promise;
+        return withEntrySeasonSyncTransaction(season, ids[0]!, async (tx) => {
+          await tx.execute(sql`UPDATE competition.entries SET entry_name='must rollback'
+            WHERE season_id=${season.seasonId} AND entry_id=${ids[0]!}`);
+          throw new Error('entry write failed');
+        });
+      })();
+      const outcome = failing.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      try {
+        await withEntrySeasonSyncTransaction(season, ids[1]!, async (tx) => {
+          await tx.execute(sql`UPDATE competition.entries SET entry_name='committed'
+            WHERE season_id=${season.seasonId} AND entry_id=${ids[1]!}`);
+        });
+        // Read through a separate connection before the batch returns, exactly
+        // when a caller may advertise the durable checkpoint to Redis.
+        const rows = await db`SELECT entry_name FROM competition.entries
+          WHERE season_id=${season.seasonId} AND entry_id=${ids[1]!}`;
+        expect(rows[0]?.entry_name).toBe('committed');
+      } finally {
+        release.resolve();
+        expect(await outcome).toBeInstanceOf(Error);
+      }
+      const rows = await db`SELECT entry_name FROM competition.entries
+        WHERE season_id=${season.seasonId} ORDER BY entry_id`;
+      expect(rows.map((row) => row.entry_name)).toEqual(['original', 'committed']);
+    });
+  },
+  15000,
+);
 function gate() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
