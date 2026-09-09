@@ -26,6 +26,7 @@ import { seasonRepository } from '../repositories/seasons';
 import {
   tournamentInfoRepository,
   type TournamentSetupExecution,
+  type TournamentSetupFailureState,
 } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { logError, logInfo } from '../utils/logger';
@@ -111,6 +112,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
       let maxAttempts = Math.max(1, job.opts.attempts ?? 1);
       const startedAt = new Date();
       let execution: TournamentSetupExecution | undefined;
+      let expectedState: TournamentSetupFailureState | undefined;
       const lifecycle = <T>(operation: () => Promise<T>) =>
         withMutationScopes(
           {
@@ -124,6 +126,9 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
         );
       try {
         const claim = await lifecycle(async () => {
+          expectedState =
+            (await tournamentInfoRepository.findSetupStatus(season, job.data.tournamentId)) ??
+            undefined;
           if (job.data.resumeMarker) {
             const ownsResume = await tournamentRosterRepository.markResumeProcessingIfPending(
               season,
@@ -270,6 +275,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             job.data.tournamentId,
             {
               execution,
+              expectedState,
               attempt,
               terminal,
               errorCode: tournamentSetupErrorCode(error),

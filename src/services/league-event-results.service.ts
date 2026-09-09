@@ -28,8 +28,9 @@ import { playerRepository } from '../repositories/players';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryEventPickItem, RawFPLEntryEventPicksResponse } from '../types';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
-import { IncompleteDataSyncError } from '../utils/errors';
+import { ConflictError, IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { resolveMutationScopes, tournamentEntryCoreScopes } from '../domain/mutation-scope';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveTournamentEntryIds } from './tournament-entry-resolver.service';
 import { resolveRichResultFreshnessCutoff } from '../domain/entry-sync';
@@ -442,6 +443,11 @@ export async function syncLeagueEventResultsByTournament(
   const scopedEntryIds = requestedEntryIds
     ? resolvedEntryIds.filter((entryId) => requestedEntryIds.has(entryId))
     : resolvedEntryIds;
+  const inputRevisions = new Map(
+    (
+      await entryEventResultsRepository.findLeagueInputRevisions(season, eventId, scopedEntryIds)
+    ).map((row) => [row.entryId, row]),
+  );
   const entryInfos = await entryInfoRepository.findByIds(season, scopedEntryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
   const entryIds = findEventEligibleEntryIds(scopedEntryIds, entryInfos, eventId);
@@ -708,8 +714,44 @@ export async function syncLeagueEventResultsByTournament(
           `league-event-results:${season.seasonCode}:e${eventId}:t${tournamentId}`,
         eventId,
         tournamentId,
+        scopes: [
+          ...resolveMutationScopes({
+            queueName: 'league-sync',
+            jobName: 'league-event-results',
+            eventId,
+            tournamentId,
+          }),
+          ...tournamentEntryCoreScopes(
+            season.seasonId,
+            batch.map((row) => row.entryId),
+          ),
+        ],
       },
-      () => leagueEventResultsRepository.upsertBatch(season, batch),
+      async () => {
+        const current = new Map(
+          (
+            await entryEventResultsRepository.findLeagueInputRevisions(
+              season,
+              eventId,
+              batch.map((row) => row.entryId),
+            )
+          ).map((row) => [row.entryId, row]),
+        );
+        for (const row of batch) {
+          const before = inputRevisions.get(row.entryId);
+          const after = current.get(row.entryId);
+          if (
+            before?.profileRevision !== after?.profileRevision ||
+            before?.resultRevision !== after?.resultRevision
+          ) {
+            throw new ConflictError(
+              'League result source changed while enrichment was in progress',
+              'LEAGUE_ENTRY_SOURCE_STALE',
+            );
+          }
+        }
+        return leagueEventResultsRepository.upsertBatch(season, batch);
+      },
     );
   }
 

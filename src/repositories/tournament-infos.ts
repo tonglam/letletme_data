@@ -133,7 +133,13 @@ export type TournamentSetupExecution = Readonly<{
   attempt: number;
 }>;
 
+export type TournamentSetupFailureState = Pick<
+  TournamentSetupStatusRow,
+  'setupAttempt' | 'setupStartedAt' | 'setupStatus' | 'setupProgressUpdatedAt'
+>;
+
 export interface TournamentSetupAttemptFailure {
+  expectedState?: TournamentSetupFailureState;
   execution?: TournamentSetupExecution;
   attempt: number;
   terminal: boolean;
@@ -746,9 +752,20 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
                   sql`${tournamentsInCompetition.setupNextRetryAt} IS NULL`,
                   sql`${tournamentsInCompetition.setupStartedAt} = ${failure.execution.startedAt}::timestamptz`,
                 )
-              : failure.terminal
-                ? lte(tournamentsInCompetition.setupAttempt, attempt)
-                : lt(tournamentsInCompetition.setupAttempt, attempt),
+              : failure.expectedState
+                ? and(
+                    eq(
+                      tournamentsInCompetition.setupAttempt,
+                      failure.expectedState.setupAttempt ?? 0,
+                    ),
+                    eq(tournamentsInCompetition.setupStatus, failure.expectedState.setupStatus),
+                    sql`${tournamentsInCompetition.setupStartedAt} IS NOT DISTINCT FROM ${failure.expectedState.setupStartedAt}::timestamptz`,
+                    sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${failure.expectedState.setupProgressUpdatedAt}::timestamptz`,
+                    failure.terminal
+                      ? lte(tournamentsInCompetition.setupAttempt, attempt)
+                      : lt(tournamentsInCompetition.setupAttempt, attempt),
+                  )
+                : sql`false`,
           ),
         )
         .returning({ tournamentId: tournamentsInCompetition.tournamentId });

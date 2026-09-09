@@ -314,3 +314,112 @@ test('the worker settles obsolete delivery and releases its lock before slow Red
     await pending;
   }
 }, 5000);
+
+test('an unclaimed terminal failure cannot fail a successor with the same attempt number', async () => {
+  await claim();
+  const expectedState = (await tournamentInfoRepository.findSetupStatus(season, tournamentId))!;
+  await claim();
+  const failure = {
+    attempt: 1,
+    terminal: true,
+    errorCode: 'CLAIM_FAILED',
+    nextRetryAt: null,
+    startedAt: new Date(),
+  };
+  expect(
+    await tournamentInfoRepository.markSetupAttemptFailure(season, tournamentId, {
+      ...failure,
+      expectedState,
+    }),
+  ).toBe(false);
+  expect((await tournamentInfoRepository.findSetupStatus(season, tournamentId))!.setupStatus).toBe(
+    'processing',
+  );
+  expect(
+    await tournamentInfoRepository.markSetupAttemptFailure(season, tournamentId, failure),
+  ).toBe(false);
+});
+
+for (const sourceChanges of [false, true]) {
+  test(`league enrichment ${sourceChanges ? 'rejects changed' : 'accepts unchanged'} entry input after provider work`, async () => {
+    const { syncLeagueEventResultsByTournament } = await import(
+      '../../src/services/league-event-results.service'
+    );
+    const resolver = await import('../../src/services/tournament-entry-resolver.service');
+    const live = await import('../../src/services/event-live-v2-score.service');
+    const { eventRepository } = await import('../../src/repositories/events');
+    const { playerRepository } = await import('../../src/repositories/players');
+    const { entryEventResultsRepository } = await import(
+      '../../src/repositories/entry-event-results'
+    );
+    const { leagueEventResultsRepository } = await import(
+      '../../src/repositories/league-event-results'
+    );
+    const { fplClient } = await import('../../src/clients/fpl');
+    const { tournamentEntryCoreScopes } = await import('../../src/domain/mutation-scope');
+    const checkedAt = new Date(Date.now() + 60_000).toISOString();
+    const picks = Array.from({ length: 15 }, (_, i) => ({
+      element: i + 1,
+      position: i + 1,
+      multiplier: i === 0 ? 2 : i < 11 ? 1 : 0,
+      is_captain: i === 0,
+      is_vice_captain: i === 1,
+    }));
+    spyOn(resolver, 'resolveTournamentEntryIds').mockResolvedValue([tournamentId]);
+    spyOn(eventRepository, 'findById').mockResolvedValue(null);
+    spyOn(live, 'loadFreshEventLiveAuthoritySnapshot').mockResolvedValue({
+      publication: { sourceCheckedAt: checkedAt },
+      eventLives: picks.map((pick) => ({ elementId: pick.element, totalPoints: 2 })),
+    } as never);
+    spyOn(playerRepository, 'findByIds').mockResolvedValue([]);
+    spyOn(entryEventResultsRepository, 'findByEventAndEntryIds').mockResolvedValue([]);
+    spyOn(entryEventResultsRepository, 'findEntryIdsNeedingRichSync').mockResolvedValue([
+      tournamentId,
+    ]);
+    spyOn(fplClient, 'getEntryEventPicks').mockImplementation(async () => {
+      // A competing writer can commit while the provider call is in progress.
+      // The actual source-version read and mutation lock use the isolated PG.
+      await withMutationScopes(
+        {
+          queueName: 'entry-sync',
+          jobName: 'entry-info',
+          scopes: tournamentEntryCoreScopes(season.seasonId, [tournamentId]),
+        },
+        async () => {
+          if (sourceChanges) {
+            const tx = await getDbClient();
+            await tx`UPDATE competition.entries SET entry_name='new source' WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+          }
+        },
+      );
+      return {
+        picks,
+        automatic_subs: [],
+        active_chip: null,
+        entry_history: {
+          event: 1,
+          points: 24,
+          total_points: 24,
+          event_transfers_cost: 0,
+          event_transfers: 0,
+          overall_rank: 1,
+          rank: 1,
+          value: 1000,
+          bank: 0,
+        },
+      } as never;
+    });
+    const reachedPublication = new Error('publication reached');
+    const publish = spyOn(leagueEventResultsRepository, 'upsertBatch').mockRejectedValue(
+      reachedPublication,
+    );
+    const attempt = syncLeagueEventResultsByTournament(season, tournamentId, 1);
+    if (sourceChanges) {
+      await expect(attempt).rejects.toMatchObject({ code: 'LEAGUE_ENTRY_SOURCE_STALE' });
+      expect(publish).not.toHaveBeenCalled();
+    } else {
+      await expect(attempt).rejects.toBe(reachedPublication);
+      expect(publish).toHaveBeenCalledTimes(1);
+    }
+  });
+}

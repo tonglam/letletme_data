@@ -70,9 +70,12 @@ describe('tournament setup escaped failure fallback', () => {
   test('persists a retryable first attempt in a fresh fallback path', async () => {
     const { deps, failures } = dependencies();
 
-    expect(await persistEscapedTournamentSetupFailure(failedJob(1), { code: '42846' }, deps)).toBe(
-      true,
-    );
+    expect(
+      await persistEscapedTournamentSetupFailure(failedJob(1), { code: '42846' }, deps, {
+        attempt: 1,
+        startedAt: '2026-08-22T18:00:01.000Z',
+      }),
+    ).toBe(true);
     expect(failures).toHaveLength(1);
     expect(failures[0]).toMatchObject({
       attempt: 1,
@@ -83,10 +86,13 @@ describe('tournament setup escaped failure fallback', () => {
     expect(failures[0]?.nextRetryAt).toEqual(new Date('2026-08-22T18:01:02.000Z'));
   });
 
-  test('uses the durable attempt counter and marks the final attempt terminal', async () => {
+  test('uses the claimed attempt counter and marks the final attempt terminal', async () => {
     const { deps, failures } = dependencies({ setupStatus: 'processing', setupAttempt: 2 });
 
-    await persistEscapedTournamentSetupFailure(failedJob(1), new Error('commit failed'), deps);
+    await persistEscapedTournamentSetupFailure(failedJob(1), new Error('commit failed'), deps, {
+      attempt: 3,
+      startedAt: '2026-08-22T18:00:01.000Z',
+    });
 
     expect(failures[0]).toMatchObject({
       attempt: 3,
@@ -109,4 +115,12 @@ describe('tournament setup escaped failure fallback', () => {
     );
     expect(failures).toHaveLength(0);
   });
+});
+
+test('an unclaimed fallback cannot adopt a successor execution', async () => {
+  const { deps, failures } = dependencies({ setupStatus: 'processing', setupAttempt: 3 });
+  expect(
+    await persistEscapedTournamentSetupFailure(failedJob(3), new Error('unclaimed'), deps),
+  ).toBe(false);
+  expect(failures).toHaveLength(0);
 });

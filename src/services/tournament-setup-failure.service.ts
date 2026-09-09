@@ -79,6 +79,10 @@ export async function persistEscapedTournamentSetupFailure(
   dependencies: EscapedSetupFailureDependencies = defaultDependencies,
   execution?: TournamentSetupExecution,
 ): Promise<boolean> {
+  // A failed-event listener cannot reconstruct ownership by reading current
+  // state: it may already belong to a successor. Unclaimed failures are handled
+  // by the processor using its pre-claim snapshot, or by watchdog recovery.
+  if (!execution) return false;
   const season = await dependencies.requireSeason(job.data);
   const status = await dependencies.findStatus(season, job.data.tournamentId);
   if (
@@ -90,9 +94,7 @@ export async function persistEscapedTournamentSetupFailure(
   }
 
   const maxAttempts = Math.max(1, status.setupMaxAttempts ?? job.opts.attempts ?? 1);
-  const bullmqAttempt = Math.max(1, job.attemptsMade);
-  const nextAttempt =
-    execution?.attempt ?? Math.max(bullmqAttempt, Math.max(0, status.setupAttempt ?? 0) + 1);
+  const nextAttempt = execution.attempt;
   const attempt = Math.min(maxAttempts, nextAttempt);
   const terminal = isTerminalJobFailure(job, error) || nextAttempt >= maxAttempts;
   const now = dependencies.now();
@@ -101,7 +103,7 @@ export async function persistEscapedTournamentSetupFailure(
     typeof processedOn === 'number' && Number.isFinite(processedOn) ? new Date(processedOn) : now;
 
   return dependencies.persistFailure(season, job, {
-    ...(execution ? { execution } : {}),
+    execution,
     attempt,
     terminal,
     errorCode: tournamentSetupErrorCode(error),
