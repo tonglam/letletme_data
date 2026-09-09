@@ -676,7 +676,7 @@ describe('release workflow gates', () => {
     expect(runtimeHealthScript).toContain('deploySha');
   });
 
-  test('records the rollback digest and leaves image cleanup outside deployment', () => {
+  test('records the rollback digest and delegates image cleanup to Ops', () => {
     expect(deployScript).toContain('> "$HOME/.letletme-data-previous-image"');
     expect(deployScript).toContain('chmod 600 "$HOME/.letletme-data-previous-image"');
     expect(workflow).not.toContain('cleanup_obsolete_data_digests');

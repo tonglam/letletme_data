@@ -65,6 +65,20 @@ release_deploy_lock() {
   fi
 }
 
+# The deploy shell still owns the platform lock; pass its verified descriptor
+# so Ops can take the maintenance lock without trying to acquire it twice.
+cleanup_committed_deploy_images() {
+  if ! VPS_PLATFORM_DEPLOY_LOCK_FD="$deploy_lock_fd" \
+    /usr/local/libexec/vps-maintenance cleanup --dry-run --mode=deploy --service=data; then
+    echo 'post-deploy image cleanup dry-run failed; daily cleanup will retry' >&2
+    return 0
+  fi
+  if ! VPS_PLATFORM_DEPLOY_LOCK_FD="$deploy_lock_fd" \
+    /usr/local/libexec/vps-maintenance cleanup --mode=deploy --service=data; then
+    echo 'post-deploy image cleanup failed; daily cleanup will retry' >&2
+  fi
+}
+
 port_3000_owner() {
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp '( sport = :3000 )' 2>/dev/null || true
