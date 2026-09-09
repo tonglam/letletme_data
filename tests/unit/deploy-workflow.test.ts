@@ -296,6 +296,9 @@ describe('release workflow gates', () => {
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_NOT_REQUIRED');
     expect(sourceMediaDeployFence).toContain(String.raw`status = 'RUNNING'`);
     expect(sourceMediaDeployFence).toContain('lease_owner IS NOT NULL');
+    expect(sourceMediaDeployFence).toContain(
+      "storage_state = 'AVAILABLE'\n        AND upload_lease_owner IS NOT NULL",
+    );
     expect(sourceMediaDeployFence).toContain('repair_until_at <= clock_timestamp()');
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
     expect(sourceMediaDeployFence).toContain(
@@ -309,6 +312,12 @@ describe('release workflow gates', () => {
     expect(sourceMediaDeployFence).not.toContain('FOR UPDATE NOWAIT');
     expect(sourceMediaDeployFence).toContain('WHEN lock_not_available OR raise_exception THEN');
     expect(sourceMediaDeployFence).not.toMatch(/\b(INSERT|DELETE|TRUNCATE)\b|^\s*UPDATE\b/m);
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'if [[ ! "$previous_media_revision" =~ ^[0-9a-f]{40}$ ]]; then',
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('worker_created=false');
+    expect(sourceMediaRolloutWorkflow).toContain('created_media_container=');
+    expect(sourceMediaRolloutWorkflow).toContain('docker rm -f "$created_media_container"');
     expect(deployScript).toContain('release_source_media_deploy_fence()');
     expect(deployScript).toContain('docker rm --force "$container_id"');
     expect(deployScript).toContain('run --rm -T --interactive=false -d --no-deps');

@@ -115,7 +115,10 @@ jobs:
               previous_media_revision=$(docker image inspect \
                 --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
                 "$previous_media_image")
-              test "$previous_media_revision" =~ ^[0-9a-f]{40}$
+              if [[ ! "$previous_media_revision" =~ ^[0-9a-f]{40}$ ]]; then
+                echo 'source-media rollout refused: previous media image has no exact release revision' >&2
+                exit 1
+              fi
             else
               echo 'source-media rollout: no existing media-worker container; provisioning will create it'
             fi
@@ -322,6 +325,13 @@ jobs:
             backup_file=''
             rollout_committed=false
             worker_stopped=false
+            worker_created=false
+            created_media_container=''
+            remove_created_media_worker() {
+              if [ "$worker_created" = true ] && [ -n "$created_media_container" ]; then
+                docker rm -f "$created_media_container" || true
+              fi
+            }
             on_exit() {
               original_status=$?
               trap - EXIT
@@ -333,6 +343,8 @@ jobs:
                 if [ "$worker_stopped" = true ]; then
                   DEPLOY_SHA="$previous_media_revision" APP_IMAGE="$previous_media_image" \
                     docker compose up -d --no-build --force-recreate media-worker || true
+                elif [ "$worker_created" = true ]; then
+                  remove_created_media_worker
                 fi
               fi
               if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi
@@ -350,7 +362,18 @@ jobs:
             fi
             if [ "$ROLLOUT_MODE" = enable-retention ]; then retention_preflight; fi
             scripts/configure-briefing-source-media-env.sh "$ROLLOUT_MODE" "$media_env_file"
-            APP_IMAGE="$target_image" docker compose up -d --no-build --force-recreate media-worker
+            if ! APP_IMAGE="$target_image" docker compose up -d --no-build --force-recreate media-worker; then
+              if [ "$previous_media_present" = false ]; then
+                created_media_container=$(docker compose ps -aq media-worker | head -n 1 || true)
+                if [ -n "$created_media_container" ]; then worker_created=true; fi
+              fi
+              exit 1
+            fi
+            if [ "$previous_media_present" = false ]; then
+              created_media_container=$(docker compose ps -aq media-worker | head -n 1)
+              test -n "$created_media_container"
+              worker_created=true
+            fi
             wait_for_media_worker "$target_image"
             report_health
             rollout_committed=true

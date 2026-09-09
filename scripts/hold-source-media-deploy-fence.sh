@@ -43,6 +43,7 @@ DO \$deploy_fence\$
 DECLARE
   running_count integer;
   expiring_count integer;
+  retention_active boolean;
   advisory_acquired boolean;
   wait_deadline timestamptz := clock_timestamp() + make_interval(secs => ${wait_seconds});
 BEGIN
@@ -60,8 +61,15 @@ BEGIN
     )::integer
     INTO running_count, expiring_count
     FROM content.source_media_gates;
+    SELECT EXISTS (
+      SELECT 1
+      FROM content.source_media_assets
+      WHERE storage_state = 'AVAILABLE'
+        AND upload_lease_owner IS NOT NULL
+    )
+    INTO retention_active;
 
-    IF running_count = 0 AND expiring_count = 0 THEN
+    IF running_count = 0 AND expiring_count = 0 AND NOT retention_active THEN
       BEGIN
         advisory_acquired := false;
         SELECT pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))
@@ -88,7 +96,14 @@ BEGIN
         )::integer
         INTO running_count, expiring_count
         FROM content.source_media_gates;
-        IF running_count = 0 AND expiring_count = 0 THEN
+        SELECT EXISTS (
+          SELECT 1
+          FROM content.source_media_assets
+          WHERE storage_state = 'AVAILABLE'
+            AND upload_lease_owner IS NOT NULL
+        )
+        INTO retention_active;
+        IF running_count = 0 AND expiring_count = 0 AND NOT retention_active THEN
           RAISE NOTICE 'SOURCE_MEDIA_DEPLOY_FENCE_READY';
           PERFORM pg_sleep(${hold_seconds});
           RETURN;
