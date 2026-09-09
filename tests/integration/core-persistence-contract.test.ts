@@ -972,8 +972,20 @@ persistenceTest(
           againstEventPoints: 60,
         },
       ];
-      expect(await cupRepository.replaceBatch(season, cupResults)).toBe(2);
-      expect(await cupRepository.replaceBatch(season, cupResults)).toBe(2);
+      expect(
+        await cupRepository.replaceBatch(
+          season,
+          cupResults,
+          await cupRepository.findRevisions(season, 1, entryIds),
+        ),
+      ).toBe(2);
+      expect(
+        await cupRepository.replaceBatch(
+          season,
+          cupResults,
+          await cupRepository.findRevisions(season, 1, entryIds),
+        ),
+      ).toBe(2);
 
       const leagueResultRepository = createLeagueEventResultsRepository(db);
       const leagueResult = {
