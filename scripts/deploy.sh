@@ -234,26 +234,45 @@ release_source_media_deploy_fence() {
   DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
 }
 
+parse_source_media_schema_state() {
+  # Compose may write one-off container lifecycle lines alongside the command
+  # output. Accept only the single psql result and reject missing/ambiguous
+  # states so a deployment never fences the wrong schema.
+  local raw_output=$1
+  printf '%s\n' "$raw_output" |
+    tr -d '\r' |
+    awk '
+      $0 == "present" || $0 == "absent" {
+        if (state != "") duplicate = 1
+        else state = $0
+      }
+      END {
+        if (!duplicate && state != "") print state
+        else exit 1
+      }'
+}
+
 acquire_source_media_deploy_fence() {
-  local create_output container_id service_state fence_logs schema_state
+  local create_output container_id service_state fence_logs schema_probe_output schema_probe_sql schema_state
   # A fresh database has not created the source-media tables yet.  Probe the
   # catalog through the migration LOGIN and let that migration establish the
   # schema before a helper can attempt to lock it.
-  if ! schema_state=$(compose_direct --profile migration run --rm -T --interactive=false --no-deps \
+  # Keep this query on psql's command line: the deploy script can be streamed
+  # through bash -s, while --interactive=false deliberately closes Compose
+  # stdin.
+  schema_probe_sql="SELECT CASE WHEN to_regclass('content.source_media_gates') IS NOT NULL AND to_regclass('content.source_media_assets') IS NOT NULL THEN 'present' ELSE 'absent' END"
+  if ! schema_probe_output=$(compose_direct --profile migration run --rm -T --interactive=false --no-deps \
+    --env "SOURCE_MEDIA_SCHEMA_PROBE=${schema_probe_sql}" \
     --entrypoint sh backup -euc \
-    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
-SELECT CASE
-  WHEN to_regclass('content.source_media_gates') IS NOT NULL
-   AND to_regclass('content.source_media_assets') IS NOT NULL
-  THEN 'present'
-  ELSE 'absent'
-END;
-SQL
+    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "$SOURCE_MEDIA_SCHEMA_PROBE"'
   ); then
     log_error "Could not determine whether source-media tables exist"
     return 1
   fi
-  schema_state=$(printf '%s\n' "$schema_state" | tail -n 1 | tr -d '\r')
+  if ! schema_state=$(parse_source_media_schema_state "$schema_probe_output"); then
+    log_error "Source-media table catalog probe returned no unique state"
+    return 1
+  fi
   case "$schema_state" in
     absent)
       log_info "Source-media tables are not present yet; migration will create them"
@@ -315,9 +334,21 @@ SQL
   return 1
 }
 
+source_media_worker_container_id() {
+  local container_id
+  # Prefer the running service instance. A failed dedicated rollout can leave
+  # an older stopped container alongside the current worker; selecting from
+  # `ps -aq` first could otherwise stop or restore the wrong container.
+  container_id=$(compose_direct ps -q media-worker | head -n 1 || true)
+  if [[ -z "$container_id" ]]; then
+    container_id=$(compose_direct ps -aq media-worker | head -n 1 || true)
+  fi
+  printf '%s\n' "$container_id"
+}
+
 stop_source_media_worker_with_deadline() {
   local container_id state service
-  container_id=$(compose_direct ps -aq media-worker | head -n 1)
+  container_id=$(source_media_worker_container_id)
   if [[ -z "$container_id" ]]; then
     log_info "No source-media worker container exists; continuing without its lifecycle"
     return 0

@@ -276,6 +276,14 @@ describe('release workflow gates', () => {
     expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
+    expect(deployScript).toContain('source_media_worker_container_id()');
+    expect(deployScript).toContain('container_id=$(compose_direct ps -q media-worker');
+    expect(deployScript).toContain('container_id=$(compose_direct ps -aq media-worker');
+    expect(sourceMediaRolloutWorkflow).toContain('media_worker_container_id()');
+    expect(sourceMediaRolloutWorkflow).toContain('current_container=$(media_worker_container_id)');
+    expect(sourceMediaRolloutWorkflow).not.toContain(
+      'current_container=$(docker compose ps -aq media-worker',
+    );
     expect(deployScript).not.toContain('old_media_container=$(compose ps -q media-worker');
     expect(deployScript).toContain('acquire_source_media_deploy_fence');
     expect(deployScript).toContain('source_media_deploy_fence_is_active');
@@ -352,6 +360,38 @@ describe('release workflow gates', () => {
     );
     expect(queueQuiescence).toContain('connect_timeout: 5');
     expect(queueQuiescence).toContain('statement_timeout: 5_000');
+  });
+
+  test('keeps the source-media catalog probe independent of streamed stdin and Compose status output', () => {
+    expect(deployScript).toContain('parse_source_media_schema_state');
+    expect(deployScript).toContain('SOURCE_MEDIA_SCHEMA_PROBE=');
+    expect(deployScript).toContain('-c "$SOURCE_MEDIA_SCHEMA_PROBE"');
+    expect(deployScript).not.toContain(
+      'schema_state=$(printf \'%s\\n\' "$schema_state" | tail -n 1',
+    );
+
+    const parserStart = deployScript.indexOf('parse_source_media_schema_state() {');
+    const parserEnd = deployScript.indexOf(
+      '\n}\n\nacquire_source_media_deploy_fence()',
+      parserStart,
+    );
+    expect(parserStart).toBeGreaterThan(-1);
+    expect(parserEnd).toBeGreaterThan(parserStart);
+    const parser = deployScript.slice(parserStart, parserEnd + 2);
+    const result = Bun.spawnSync(
+      [
+        'bash',
+        '-c',
+        String.raw`set -euo pipefail
+${parser}
+test "$(parse_source_media_schema_state $'Container backup Created\r\npresent\r\n')" = present
+test "$(parse_source_media_schema_state $'Container backup Created\nabsent\n')" = absent
+if parse_source_media_schema_state $'Container backup Created\n' >/dev/null 2>&1; then exit 1; fi
+if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then exit 1; fi`,
+      ],
+      { stdout: 'pipe', stderr: 'pipe' },
+    );
+    expect(result.exitCode).toBe(0);
   });
 
   test('allows only session-mode pooler connections for the external backup', () => {
