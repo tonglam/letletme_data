@@ -354,6 +354,38 @@ describe('release workflow gates', () => {
     expect(queueQuiescence).toContain('statement_timeout: 5_000');
   });
 
+  test('keeps the source-media catalog probe independent of streamed stdin and Compose status output', () => {
+    expect(deployScript).toContain('parse_source_media_schema_state');
+    expect(deployScript).toContain('SOURCE_MEDIA_SCHEMA_PROBE=');
+    expect(deployScript).toContain('-c "$SOURCE_MEDIA_SCHEMA_PROBE"');
+    expect(deployScript).not.toContain(
+      'schema_state=$(printf \'%s\\n\' "$schema_state" | tail -n 1',
+    );
+
+    const parserStart = deployScript.indexOf('parse_source_media_schema_state() {');
+    const parserEnd = deployScript.indexOf(
+      '\n}\n\nacquire_source_media_deploy_fence()',
+      parserStart,
+    );
+    expect(parserStart).toBeGreaterThan(-1);
+    expect(parserEnd).toBeGreaterThan(parserStart);
+    const parser = deployScript.slice(parserStart, parserEnd + 2);
+    const result = Bun.spawnSync(
+      [
+        'bash',
+        '-c',
+        String.raw`set -euo pipefail
+${parser}
+test "$(parse_source_media_schema_state $'Container backup Created\r\npresent\r\n')" = present
+test "$(parse_source_media_schema_state $'Container backup Created\nabsent\n')" = absent
+if parse_source_media_schema_state $'Container backup Created\n' >/dev/null 2>&1; then exit 1; fi
+if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then exit 1; fi`,
+      ],
+      { stdout: 'pipe', stderr: 'pipe' },
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
   test('allows only session-mode pooler connections for the external backup', () => {
     expect(backupScript).toContain('*pgbouncer=true*|*:6543/*');
     expect(backupScript).not.toContain('*pooler.supabase.com*');
