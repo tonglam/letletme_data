@@ -14,8 +14,8 @@ export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
   /**
    * Prepare durable state before queue admission. A returned marker is copied
-   * into the job identity/data so a prepared handoff cannot be mistaken for
-   * an unmarked manual retry.
+   * into the job identity/data as a prepared retry marker so the handoff
+   * cannot be mistaken for an unmarked manual retry.
    */
   prepareEnqueue?: () => Promise<void | string>;
   /**
@@ -160,11 +160,11 @@ async function enqueueTournamentSetupUnlocked(
     if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
-    let resumeMarker = options.resumeMarker;
+    let preparedRetryMarker: string | undefined;
     const { baseJobId, successorJobId } = getTournamentSetupJobIds(
       season,
       tournamentId,
-      resumeMarker,
+      options.resumeMarker,
     );
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later
@@ -249,11 +249,15 @@ async function enqueueTournamentSetupUnlocked(
         options.prepareEnqueue,
       );
       if (typeof preparedMarker === 'string' && preparedMarker.length > 0) {
-        resumeMarker = preparedMarker;
+        preparedRetryMarker = preparedMarker;
         // A preparation callback may create a new durable marker. Its
         // deterministic job slot must carry that marker, otherwise the worker
         // would classify the prepared handoff as an unmarked manual retry.
-        jobId = getTournamentSetupJobIds(season, tournamentId, resumeMarker).baseJobId;
+        jobId = getTournamentSetupJobIds(
+          season,
+          tournamentId,
+          options.resumeMarker ?? preparedRetryMarker,
+        ).baseJobId;
       }
     }
     const jobData: TournamentSetupJobData = {
@@ -262,7 +266,8 @@ async function enqueueTournamentSetupUnlocked(
       tournamentId,
       source,
       triggeredAt: new Date().toISOString(),
-      ...(resumeMarker ? { resumeMarker } : {}),
+      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
+      ...(preparedRetryMarker ? { preparedRetryMarker } : {}),
     };
     let job;
     try {

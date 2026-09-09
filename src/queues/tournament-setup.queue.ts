@@ -23,6 +23,8 @@ export interface TournamentSetupJobData {
   triggeredAt: string;
   /** Activation marker owned by a resume-triggered setup job. */
   resumeMarker?: string;
+  /** Marker committed by an explicit setup retry before queue admission. */
+  preparedRetryMarker?: string;
 }
 
 export const tournamentSetupQueue = new Queue<TournamentSetupJobData>(tournamentSetupQueueName, {

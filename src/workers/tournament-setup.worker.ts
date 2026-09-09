@@ -139,6 +139,22 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
               });
               return null;
             }
+          } else if (job.data.preparedRetryMarker) {
+            const preparedStatus = await tournamentInfoRepository.findSetupStatus(
+              season,
+              job.data.tournamentId,
+            );
+            if (
+              preparedStatus?.setupStatus !== 'processing' ||
+              preparedStatus.setupPhase !== 'queued' ||
+              preparedStatus.setupProgressUpdatedAt !== job.data.preparedRetryMarker
+            ) {
+              logInfo('Ignoring stale prepared tournament setup retry', {
+                tournamentId: job.data.tournamentId,
+                jobId: job.id,
+              });
+              return null;
+            }
           } else {
             // Official-sync activation owns the setup lifecycle through
             // the roster reconciliation marker. A pre-existing manual or
@@ -217,7 +233,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           return tournamentInfoRepository.markSetupProcessing(
             season,
             job.data.tournamentId,
-            job.data.resumeMarker,
+            job.data.resumeMarker ?? job.data.preparedRetryMarker,
             attempt,
           );
         });
