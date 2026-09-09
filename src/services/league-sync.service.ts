@@ -3,7 +3,6 @@ import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import { withMutationScopes } from '../utils/mutation-scopes';
 import { syncLeagueEventPicksByTournament } from './league-event-picks.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 
@@ -12,12 +11,9 @@ import { syncLeagueEventResultsByTournament } from './league-event-results.servi
  * The root scheduler obligation therefore represents canonical convergence,
  * not merely successful child enqueue acknowledgements.
  */
-// Every tournament in one event acquires the same entry/league event mutation
-// scopes. Parallel fan-out therefore cannot perform canonical writes in
-// parallel; it only creates 120-second lock waiters while the largest league
-// is still fetching and persisting its entries. Keep one tournament in flight
-// per coordinator and leave the remaining database pool capacity available to
-// live/core publication work.
+// Tournaments share event-level checkpoint locks and may share entries.
+// Keep one tournament in flight per coordinator to bound provider fan-out
+// and leave database capacity available to live/core publication work.
 export const LEAGUE_FANOUT_CONCURRENCY = 1;
 
 type LeagueTournamentSyncResult = Readonly<{
@@ -125,22 +121,15 @@ export async function syncActiveLeagueTournaments(input: {
   };
 }
 
-async function syncPicksAcrossTournaments(season: FplSeasonRef, eventId: number, runId?: string) {
+async function syncPicksAcrossTournaments(season: FplSeasonRef, eventId: number) {
   return syncActiveLeagueTournaments({
     season,
     eventId,
     label: 'picks',
+    // Entry checkpoints own their short canonical transactions. Holding an
+    // outer tournament transaction would keep those locks across FPL reads.
     syncTournament: (tournamentId) =>
-      withMutationScopes(
-        {
-          queueName: 'league-sync',
-          jobName: 'league-event-picks',
-          jobId: `${runId ?? 'coordinator'}:t${tournamentId}`,
-          eventId,
-          tournamentId,
-        },
-        () => syncLeagueEventPicksByTournament(season, tournamentId, eventId),
-      ),
+      syncLeagueEventPicksByTournament(season, tournamentId, eventId),
   });
 }
 
@@ -170,12 +159,11 @@ export async function processLeagueEventPicksJob(
   season: FplSeasonRef,
   eventId: number,
   tournamentId?: number,
-  runId?: string,
 ) {
   if (tournamentId) {
     return syncLeagueEventPicksByTournament(season, tournamentId, eventId);
   }
-  return syncPicksAcrossTournaments(season, eventId, runId);
+  return syncPicksAcrossTournaments(season, eventId);
 }
 
 export async function processLeagueEventResultsJob(

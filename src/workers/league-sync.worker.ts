@@ -19,7 +19,6 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
-import { withMutationScopes } from '../utils/mutation-scopes';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import type { WorkerRuntime } from './worker-runtime';
 import { BULL_COMPLETED_RETENTION, BULL_FAILED_RETENTION } from '../queues/retention';
@@ -124,7 +123,7 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
           runTrackedJob(context, async () => {
             switch (job.name) {
               case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
-                return processLeagueEventPicksJob(season, eventId, tournamentId, runId);
+                return processLeagueEventPicksJob(season, eventId, tournamentId);
 
               case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS: {
                 // One coordinator attempt owns one database-clock boundary.
@@ -143,22 +142,9 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
             }
           });
 
-        // Coordinators acquire a short transaction per tournament in the
-        // service. An outer transaction would retain event locks across the
-        // complete network-heavy fan-out.
-        if (tournamentId === undefined || job.name === LEAGUE_JOBS.LEAGUE_EVENT_RESULTS) {
-          return operation();
-        }
-        return withMutationScopes(
-          {
-            queueName: job.queueName,
-            jobName: job.name,
-            jobId: String(job.id),
-            eventId,
-            tournamentId,
-          },
-          operation,
-        );
+        // Both lanes fetch provider data before their service-owned canonical
+        // transactions. This also applies to jobs targeting one tournament.
+        return operation();
       },
     );
   } finally {
