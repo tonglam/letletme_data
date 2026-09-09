@@ -335,13 +335,39 @@ acquire_source_media_deploy_fence() {
 }
 
 source_media_worker_container_id() {
-  local container_id
-  # Prefer the running service instance. A failed dedicated rollout can leave
-  # an older stopped container alongside the current worker; selecting from
-  # `ps -aq` first could otherwise stop or restore the wrong container.
-  container_id=$(compose_direct ps -q media-worker | head -n 1 || true)
+  local project running_oneoff container_id
+  if ! project=$(compose_project_name_for_cleanup); then
+    log_error "Could not resolve the Compose project for source-media worker lookup"
+    return 1
+  fi
+  # Keep Compose and Docker lookup failures distinct from an empty service. A
+  # failed daemon or project lookup must stop the deploy before migrations.
+  if ! running_oneoff=$(docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.service=media-worker' \
+    --filter 'label=com.docker.compose.oneoff=True'); then
+    log_error "Could not enumerate source-media one-off containers"
+    return 1
+  fi
+  if [[ -n "$running_oneoff" ]]; then
+    log_error "A source-media one-off probe is still running; refusing migrations"
+    return 1
+  fi
+  if ! container_id=$(docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.service=media-worker' \
+    --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+    log_error "Could not enumerate running source-media worker containers"
+    return 1
+  fi
   if [[ -z "$container_id" ]]; then
-    container_id=$(compose_direct ps -aq media-worker | head -n 1 || true)
+    if ! container_id=$(docker ps -aq \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter 'label=com.docker.compose.service=media-worker' \
+      --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+      log_error "Could not enumerate source-media worker containers"
+      return 1
+    fi
   fi
   printf '%s\n' "$container_id"
 }

@@ -95,12 +95,37 @@ jobs:
 
             export CONTENT_MEDIA_ENV_FILE="$media_env_file"
             media_worker_container_id() {
-              local container_id
-              # Prefer the running service instance. A failed rollout can leave
-              # an older stopped container alongside the current worker.
-              container_id=$(docker compose ps -q media-worker | head -n 1 || true)
+              local project running_oneoff container_id
+              if ! project=$(compose_project_name_for_cleanup); then
+                echo 'source-media rollout: could not resolve the Compose project' >&2
+                return 1
+              fi
+              if ! running_oneoff=$(docker ps -q \
+                --filter "label=com.docker.compose.project=$project" \
+                --filter 'label=com.docker.compose.service=media-worker' \
+                --filter 'label=com.docker.compose.oneoff=True'); then
+                echo 'source-media rollout: could not enumerate one-off containers' >&2
+                return 1
+              fi
+              if [ -n "$running_oneoff" ]; then
+                echo 'source-media rollout: a one-off probe is still running; refusing rollout' >&2
+                return 1
+              fi
+              if ! container_id=$(docker ps -q \
+                --filter "label=com.docker.compose.project=$project" \
+                --filter 'label=com.docker.compose.service=media-worker' \
+                --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+                echo 'source-media rollout: could not enumerate running worker containers' >&2
+                return 1
+              fi
               if [ -z "$container_id" ]; then
-                container_id=$(docker compose ps -aq media-worker | head -n 1 || true)
+                if ! container_id=$(docker ps -aq \
+                  --filter "label=com.docker.compose.project=$project" \
+                  --filter 'label=com.docker.compose.service=media-worker' \
+                  --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+                  echo 'source-media rollout: could not enumerate worker containers' >&2
+                  return 1
+                fi
               fi
               printf '%s\n' "$container_id"
             }
@@ -284,7 +309,7 @@ jobs:
 
             wait_for_media_worker() {
               expected_image=${1:-$target_image}
-              container=$(docker compose ps -q media-worker | head -n 1)
+              container=$(media_worker_container_id)
               test -n "$container"
               test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$expected_image"
               for attempt in $(seq 1 30); do
