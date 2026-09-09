@@ -476,7 +476,7 @@ describe('tournament setup transaction recovery', () => {
         ),
     );
 
-    expect(recoveryClaimed).toBe(false);
+    expect(recoveryClaimed).toBeNull();
     expect(
       await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID),
     ).toMatchObject({
@@ -489,10 +489,25 @@ describe('tournament setup transaction recovery', () => {
   test('watchdog restores the stale marker when queue admission fails', async () => {
     const season = explicitSeasonRef(SEASON_CODE);
     await tournamentInfoRepository.markSetupRetryQueued(season, RETRY_TOURNAMENT_ID);
+    const sqlClient = await getDbClient();
+    await sqlClient`
+      UPDATE competition.tournaments
+      SET setup_status = 'processing',
+          setup_phase = 'queued',
+          setup_progress_updated_at = '2020-01-01 00:00:00+00',
+          updated_at = '2020-01-01 00:00:00+00'
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${RETRY_TOURNAMENT_ID}
+    `;
     const beforeRecovery = await tournamentInfoRepository.findSetupStatus(
       season,
       RETRY_TOURNAMENT_ID,
     );
+    const [beforeActivity] = await sqlClient<Array<{ updatedAt: string }>>`
+      SELECT updated_at::text AS "updatedAt"
+      FROM competition.tournaments
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${RETRY_TOURNAMENT_ID}
+    `;
+    if (!beforeActivity) throw new Error('setup recovery fixture is missing');
     const recoveryMarker = await withMutationScopes(
       {
         queueName: 'integration-tournament-setup',
@@ -524,6 +539,7 @@ describe('tournament setup transaction recovery', () => {
             RETRY_TOURNAMENT_ID,
             recoveryMarker!,
             beforeRecovery?.setupProgressUpdatedAt ?? null,
+            beforeActivity.updatedAt,
           ),
       ),
     ).toBe(true);
@@ -533,6 +549,69 @@ describe('tournament setup transaction recovery', () => {
       setupPhase: 'queued',
       setupProgressUpdatedAt: beforeRecovery?.setupProgressUpdatedAt,
       setupLastErrorCode: 'STUCK_SETUP_QUEUE_ENQUEUE_FAILED',
+    });
+    expect(
+      (await tournamentInfoRepository.findStuckProcessing(season, 1)).some(
+        (row) => row.id === RETRY_TOURNAMENT_ID,
+      ),
+    ).toBe(true);
+  });
+
+  test('official resume watchdog restores its prior stale execution after enqueue failure', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const sqlClient = await getDbClient();
+    await sqlClient`
+      UPDATE competition.tournaments
+      SET state = 'inactive',
+          roster_mode = 'official_sync',
+          roster_sync_status = 'processing',
+          setup_status = 'processing',
+          setup_phase = 'syncing_entries',
+          setup_attempt = 2,
+          setup_progress_updated_at = '2020-01-02 00:00:00+00',
+          setup_started_at = '2020-01-02 00:00:00+00',
+          setup_next_retry_at = NULL,
+          setup_finished_at = NULL,
+          updated_at = '2020-01-02 00:00:00+00'
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${RETRY_TOURNAMENT_ID}
+    `;
+    const [before] = await tournamentInfoRepository.findStuckProcessing(season, 1);
+    if (!before) throw new Error('official resume recovery fixture is missing');
+
+    const recoveryUpdatedAt = await withMutationScopes(
+      {
+        queueName: 'integration-tournament-setup',
+        jobName: 'claim-official-resume-recovery',
+        tournamentId: RETRY_TOURNAMENT_ID,
+        scopes: [tournamentSetupLifecycleScope(RETRY_TOURNAMENT_ID)],
+      },
+      () =>
+        tournamentInfoRepository.markStuckOfficialResumeQueuedIfUnchanged(
+          season,
+          RETRY_TOURNAMENT_ID,
+          before.setupProgressUpdatedAt!,
+          before.setupStartedAt,
+          before.setupAttempt,
+        ),
+    );
+    expect(recoveryUpdatedAt).toBeString();
+    expect(
+      await tournamentInfoRepository.restoreStuckOfficialResumeAfterEnqueueFailure(
+        season,
+        RETRY_TOURNAMENT_ID,
+        recoveryUpdatedAt!,
+        before,
+      ),
+    ).toBe(true);
+
+    expect(
+      await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID),
+    ).toMatchObject({
+      setupStatus: 'processing',
+      setupPhase: 'syncing_entries',
+      setupAttempt: 2,
+      setupProgressUpdatedAt: before.setupProgressUpdatedAt,
+      setupStartedAt: before.setupStartedAt,
     });
   });
 });

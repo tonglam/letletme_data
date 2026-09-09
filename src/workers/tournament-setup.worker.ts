@@ -245,6 +245,32 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             });
             return null;
           }
+          const stableProgressMarker =
+            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
+          if (job.data.source === 'create' && stableProgressMarker === undefined) {
+            // Creates before marker-owned admission was introduced can still be
+            // sitting in BullMQ under the unsuffixed ID. If a newer durable
+            // marker is already present, settle that legacy delivery as stale
+            // instead of letting it supersede the handoff. New create jobs
+            // always carry setupMarker and remain eligible for BullMQ retries.
+            const triggeredAtMs = Date.parse(job.data.triggeredAt);
+            const currentMarkerMs = persistedStatus.setupProgressUpdatedAt
+              ? Date.parse(persistedStatus.setupProgressUpdatedAt)
+              : Number.NaN;
+            if (
+              Number.isFinite(triggeredAtMs) &&
+              Number.isFinite(currentMarkerMs) &&
+              currentMarkerMs > triggeredAtMs
+            ) {
+              logInfo('Ignoring superseded legacy tournament create setup job', {
+                tournamentId: job.data.tournamentId,
+                jobId: job.id,
+                triggeredAt: job.data.triggeredAt,
+                setupProgressUpdatedAt: persistedStatus.setupProgressUpdatedAt,
+              });
+              return null;
+            }
+          }
           if (
             persistedStatus.setupStatus === 'ready' ||
             (persistedStatus.setupStatus === 'failed' && !persistedStatus.setupNextRetryAt)
@@ -258,8 +284,6 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           }
 
           maxAttempts = Math.max(1, persistedStatus.setupMaxAttempts ?? maxAttempts);
-          const stableProgressMarker =
-            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
           // A marked delivery can be redelivered by BullMQ after losing its
           // lock while a phase is already in progress. That is a reclaim of
           // the same durable execution, so retain its attempt instead of

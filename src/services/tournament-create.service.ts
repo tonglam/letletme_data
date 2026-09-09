@@ -219,7 +219,10 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
           'pending';
         if (setupStatus !== 'ready') {
-          await enqueueTournamentSetup(season, persisted.id, 'create');
+          const setup = await tournamentInfoRepository.findSetupStatus(season, persisted.id);
+          await enqueueTournamentSetup(season, persisted.id, 'create', {
+            setupMarker: setup?.setupProgressUpdatedAt ?? undefined,
+          });
           setupStatus =
             (await tournamentInfoRepository.findSetupStatus(season, persisted.id))?.setupStatus ??
             setupStatus;
@@ -509,7 +512,9 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       phaseStartedAtMs = performance.now();
       let result: ReturnType<typeof resultFor>;
       try {
-        await enqueueTournamentSetup(season, tournament.id, 'create');
+        await enqueueTournamentSetup(season, tournament.id, 'create', {
+          setupMarker: tournament.setupProgressUpdatedAt ?? undefined,
+        });
         phaseDurationsMs.enqueue = Math.round(performance.now() - phaseStartedAtMs);
         failedPhase = null;
         report('queued', 'pending', null);

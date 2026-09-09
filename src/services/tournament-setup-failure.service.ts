@@ -111,5 +111,6 @@ export async function persistEscapedTournamentSetupFailure(
       ? null
       : new Date(now.getTime() + getTournamentSetupRetryDelayMs(attempt)),
     startedAt,
+    progressMarker: job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker,
   });
 }

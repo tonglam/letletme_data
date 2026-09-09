@@ -34,7 +34,7 @@ export interface EnqueueTournamentSetupOptions {
   activeSettleTimeoutMs?: number;
   /** Database marker for a resume-triggered setup operation. */
   resumeMarker?: string;
-  /** Database marker for a normal roster-publication setup operation. */
+  /** Database marker committed before a create or roster-publication setup operation. */
   setupMarker?: string;
   /** Existing marker-suffixed slot to inspect before preparing a new retry. */
   admissionMarker?: string;

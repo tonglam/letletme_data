@@ -680,6 +680,7 @@ export async function recoverStuckTournamentSetups(
   for (const row of stuck) {
     let watchdogRecoveryMarker: string | null = null;
     let watchdogRecoveryPrepared = false;
+    let officialResumeRecoveryUpdatedAt: string | null = null;
     try {
       // Queue probes are candidates only. Keep all Redis/BullMQ calls outside
       // the lifecycle transaction; the durable marker and compare-and-swap
@@ -733,6 +734,7 @@ export async function recoverStuckTournamentSetups(
           });
           continue;
         }
+        officialResumeRecoveryUpdatedAt = claimed;
         await recoverOfficialRoster(
           season,
           row.id,
@@ -788,7 +790,32 @@ export async function recoverStuckTournamentSetups(
         setupProgressUpdatedAt: row.setupProgressUpdatedAt,
       });
     } catch (error) {
-      if (watchdogRecoveryPrepared && watchdogRecoveryMarker) {
+      if (officialResumeRecoveryUpdatedAt) {
+        await withMutationScopes(
+          {
+            queueName: 'tournament-setup-watchdog',
+            jobName: 'restore-stuck-official-resume-after-enqueue-failure',
+            tournamentId: row.id,
+            scopes: [tournamentSetupLifecycleScope(row.id)],
+          },
+          () =>
+            tournamentInfoRepository.restoreStuckOfficialResumeAfterEnqueueFailure(
+              season,
+              row.id,
+              officialResumeRecoveryUpdatedAt!,
+              row,
+            ),
+        ).catch((restoreError) => {
+          logError(
+            'Watchdog failed to restore official resume after queue admission failure',
+            restoreError,
+            {
+              tournamentId: row.id,
+              recoveryUpdatedAt: officialResumeRecoveryUpdatedAt,
+            },
+          );
+        });
+      } else if (watchdogRecoveryPrepared && watchdogRecoveryMarker) {
         await withMutationScopes(
           {
             queueName: 'tournament-setup-watchdog',
@@ -802,6 +829,7 @@ export async function recoverStuckTournamentSetups(
               row.id,
               watchdogRecoveryMarker!,
               row.setupProgressUpdatedAt,
+              row.updatedAt,
             ),
         ).catch((restoreError) => {
           logError('Watchdog failed to restore setup after queue admission failure', restoreError, {

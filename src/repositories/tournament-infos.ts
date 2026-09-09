@@ -162,6 +162,8 @@ export interface TournamentCreatedRow {
   totalTeamNum: number;
   createdAt?: string;
   previewPayloadFingerprint?: string | null;
+  /** Marker persisted with a newly created setup row before queue admission. */
+  setupProgressUpdatedAt?: string | null;
 }
 
 export interface StuckTournamentRow {
@@ -169,6 +171,19 @@ export interface StuckTournamentRow {
   setupProgressUpdatedAt: string | null;
   setupStartedAt: string | null;
   setupAttempt: number | null;
+  setupCompletedUnits: number;
+  setupTotalUnits: number;
+  setupWarningCount: number;
+  setupError: string | null;
+  setupNextRetryAt: string | null;
+  setupFinishedAt: string | null;
+  setupLastErrorCode: string | null;
+  setupLastErrorAt: string | null;
+  setupProgressIndeterminate: boolean;
+  standingsReadyAt: string | null;
+  profilesReadyAt: string | null;
+  insightsReadyAt: string | null;
+  updatedAt: string;
   state: 'active' | 'inactive' | 'finished';
   rosterMode: 'snapshot' | 'official_sync';
   rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
@@ -846,6 +861,19 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           )::text`,
           setupStartedAt: sql<string | null>`${tournamentsInCompetition.setupStartedAt}::text`,
           setupAttempt: tournamentsInCompetition.setupAttempt,
+          setupCompletedUnits: tournamentsInCompetition.setupCompletedUnits,
+          setupTotalUnits: tournamentsInCompetition.setupTotalUnits,
+          setupWarningCount: tournamentsInCompetition.setupWarningCount,
+          setupError: tournamentsInCompetition.setupError,
+          setupNextRetryAt: sql<string | null>`${tournamentsInCompetition.setupNextRetryAt}::text`,
+          setupFinishedAt: sql<string | null>`${tournamentsInCompetition.setupFinishedAt}::text`,
+          setupLastErrorCode: tournamentsInCompetition.setupLastErrorCode,
+          setupLastErrorAt: sql<string | null>`${tournamentsInCompetition.setupLastErrorAt}::text`,
+          setupProgressIndeterminate: tournamentsInCompetition.setupProgressIndeterminate,
+          standingsReadyAt: sql<string | null>`${tournamentsInCompetition.standingsReadyAt}::text`,
+          profilesReadyAt: sql<string | null>`${tournamentsInCompetition.profilesReadyAt}::text`,
+          insightsReadyAt: sql<string | null>`${tournamentsInCompetition.insightsReadyAt}::text`,
+          updatedAt: sql<string>`${tournamentsInCompetition.updatedAt}::text`,
           state: tournamentsInCompetition.state,
           rosterMode: tournamentsInCompetition.rosterMode,
           rosterSyncStatus: tournamentsInCompetition.rosterSyncStatus,
@@ -950,7 +978,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
       expectedProgressUpdatedAt: string,
       expectedSetupStartedAt: string | null,
       expectedSetupAttempt: number | null,
-    ): Promise<boolean> => {
+    ): Promise<string | null> => {
       const db = await getDbInstance();
       const now = new Date();
       const rows = await db
@@ -989,8 +1017,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
             sql`${tournamentsInCompetition.setupAttempt} IS NOT DISTINCT FROM ${expectedSetupAttempt}`,
           ),
         )
-        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
-      return rows.length === 1;
+        .returning({
+          recoveryUpdatedAt: sql<string>`${tournamentsInCompetition.updatedAt}::text`,
+        });
+      return rows[0]?.recoveryUpdatedAt ?? null;
     },
 
     restoreStuckSetupAfterEnqueueFailure: async (
@@ -998,6 +1028,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
       tournamentId: number,
       recoveryProgressUpdatedAt: string,
       previousProgressUpdatedAt: string | null,
+      previousUpdatedAt: string,
     ): Promise<boolean> => {
       const db = await getDbInstance();
       const now = new Date();
@@ -1017,7 +1048,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           setupLastErrorCode: 'STUCK_SETUP_QUEUE_ENQUEUE_FAILED',
           setupLastErrorAt: now,
           setupError: null,
-          updatedAt: now,
+          // The row is still undelivered. Keep its pre-recovery activity time
+          // so the next watchdog pass can retry immediately instead of waiting
+          // for a fresh stuck cutoff after a definitive queue failure.
+          updatedAt: sql`${previousUpdatedAt}::timestamptz`,
         })
         .where(
           and(
@@ -1025,6 +1059,76 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
             eq(tournamentsInCompetition.setupStatus, 'pending'),
             eq(tournamentsInCompetition.setupPhase, 'queued'),
             sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${recoveryProgressUpdatedAt}::timestamptz`,
+          ),
+        )
+        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
+      return rows.length === 1;
+    },
+
+    restoreStuckOfficialResumeAfterEnqueueFailure: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      recoveryUpdatedAt: string,
+      previous: StuckTournamentRow,
+    ): Promise<boolean> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          // Restore the exact stale execution that the official-resume CAS
+          // displaced. The recovery timestamp is the CAS identity; a worker
+          // or newer handoff changing any execution field makes this a no-op.
+          setupStatus: previous.setupStatus,
+          setupPhase: previous.setupPhase,
+          setupCompletedUnits: previous.setupCompletedUnits,
+          setupTotalUnits: previous.setupTotalUnits,
+          setupWarningCount: previous.setupWarningCount,
+          setupError: previous.setupError,
+          setupNextRetryAt:
+            previous.setupNextRetryAt === null
+              ? null
+              : sql`${previous.setupNextRetryAt}::timestamptz`,
+          setupFinishedAt:
+            previous.setupFinishedAt === null
+              ? null
+              : sql`${previous.setupFinishedAt}::timestamptz`,
+          setupLastErrorCode: previous.setupLastErrorCode,
+          setupLastErrorAt:
+            previous.setupLastErrorAt === null
+              ? null
+              : sql`${previous.setupLastErrorAt}::timestamptz`,
+          setupProgressIndeterminate: previous.setupProgressIndeterminate,
+          setupProgressUpdatedAt:
+            previous.setupProgressUpdatedAt === null
+              ? null
+              : sql`${previous.setupProgressUpdatedAt}::timestamptz`,
+          setupStartedAt:
+            previous.setupStartedAt === null ? null : sql`${previous.setupStartedAt}::timestamptz`,
+          setupAttempt: previous.setupAttempt ?? 0,
+          standingsReadyAt:
+            previous.standingsReadyAt === null
+              ? null
+              : sql`${previous.standingsReadyAt}::timestamptz`,
+          profilesReadyAt:
+            previous.profilesReadyAt === null
+              ? null
+              : sql`${previous.profilesReadyAt}::timestamptz`,
+          insightsReadyAt:
+            previous.insightsReadyAt === null
+              ? null
+              : sql`${previous.insightsReadyAt}::timestamptz`,
+          // Preserve the pre-CAS age for immediate watchdog eligibility.
+          updatedAt: sql`${previous.updatedAt}::timestamptz`,
+        })
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            eq(tournamentsInCompetition.setupStatus, 'pending'),
+            eq(tournamentsInCompetition.setupPhase, 'queued'),
+            sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${previous.setupProgressUpdatedAt}::timestamptz`,
+            sql`${tournamentsInCompetition.setupStartedAt} IS NULL`,
+            sql`${tournamentsInCompetition.setupAttempt} IS NOT DISTINCT FROM ${previous.setupAttempt}`,
+            sql`${tournamentsInCompetition.updatedAt} = ${recoveryUpdatedAt}::timestamptz`,
           ),
         )
         .returning({ tournamentId: tournamentsInCompetition.tournamentId });
@@ -1104,6 +1208,9 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
               leagueId: tournamentsInCompetition.leagueId,
               totalTeamNum: tournamentsInCompetition.totalTeamNum,
               previewPayloadFingerprint: tournamentsInCompetition.previewPayloadFingerprint,
+              setupProgressUpdatedAt: sql<
+                string | null
+              >`${tournamentsInCompetition.setupProgressUpdatedAt}::text`,
             });
           const inserted = insertedTournament[0];
           if (!inserted) {

@@ -17,12 +17,15 @@ const data: TournamentSetupJobData = {
   triggeredAt: '2026-08-22T18:00:00.000Z',
 };
 
-function failedJob(attemptsMade: number): FailedTournamentSetupJob {
+function failedJob(
+  attemptsMade: number,
+  overrides: Partial<TournamentSetupJobData> = {},
+): FailedTournamentSetupJob {
   return {
     id: 'tournament-setup-2627-8',
     name: 'tournament-setup',
     queueName: 'tournament-setup',
-    data,
+    data: { ...data, ...overrides },
     attemptsMade,
     opts: { attempts: 3 },
     processedOn: Date.parse('2026-08-22T18:00:01.000Z'),
@@ -100,6 +103,23 @@ describe('tournament setup escaped failure fallback', () => {
       errorCode: 'Error',
       nextRetryAt: null,
     });
+  });
+
+  test('preserves a marker-owned delivery in the escaped failure fallback', async () => {
+    const { deps, failures } = dependencies({ setupStatus: 'processing', setupAttempt: 1 });
+    const setupMarker = '2026-08-22T18:00:00.500Z';
+
+    await persistEscapedTournamentSetupFailure(
+      failedJob(1, { setupMarker }),
+      new Error('queue worker crashed'),
+      deps,
+      {
+        attempt: 1,
+        startedAt: '2026-08-22T18:00:01.000Z',
+      },
+    );
+
+    expect(failures[0]?.progressMarker).toBe(setupMarker);
   });
 
   test('does not overwrite a setup that already became ready', async () => {
