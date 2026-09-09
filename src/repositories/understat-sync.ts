@@ -376,9 +376,9 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     return updated.length > 0 && ready;
   },
 
-  async markRunFailed(runId: string, error: string): Promise<void> {
+  async markRunFailed(runId: string, error: string): Promise<boolean> {
     const db = await getDatabase(dbInstance);
-    await db
+    const updated = await db
       .update(understatSyncRuns)
       .set({
         status: 'failed',
@@ -391,7 +391,9 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
           eq(understatSyncRuns.runId, runId),
           inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
         ),
-      );
+      )
+      .returning({ runId: understatSyncRuns.runId });
+    return updated.length === 1;
   },
 
   /**

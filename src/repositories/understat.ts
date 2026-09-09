@@ -1,3 +1,4 @@
+import { SupersededUnderstatDiscoveryError } from '../domain/understat';
 import { and, asc, eq, inArray, lt, sql } from 'drizzle-orm';
 
 import {
@@ -288,9 +289,7 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
         row.sourceHash !== incoming.sourceHash &&
         incoming.lastSeenSeason >= row.lastSeenSeason
       ) {
-        throw new Error(
-          'Understat team reference snapshot was superseded; retry with fresh provider data',
-        );
+        throw new SupersededUnderstatDiscoveryError('team reference');
       }
     }
   },

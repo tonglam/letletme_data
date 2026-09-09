@@ -10,7 +10,12 @@ import type {
   UnderstatTeamSeason,
   UnderstatTeamStatSplit,
 } from '../domain/understat';
-import { UNDERSTAT_SPLIT_DIMENSIONS, sourceYearFromSeason } from '../domain/understat';
+import {
+  UNDERSTAT_SPLIT_DIMENSIONS,
+  sourceYearFromSeason,
+  SupersededUnderstatDiscoveryError,
+} from '../domain/understat';
+export { SupersededUnderstatDiscoveryError } from '../domain/understat';
 import { getConfig } from '../utils/config';
 
 const LEAGUE_CARDINALITY: Readonly<Record<string, { teams: number; matches: number }>> = {
@@ -20,13 +25,6 @@ const LEAGUE_CARDINALITY: Readonly<Record<string, { teams: number; matches: numb
 export interface UnderstatCompletenessResult {
   complete: boolean;
   reason: string;
-}
-
-export class SupersededUnderstatDiscoveryError extends Error {
-  constructor() {
-    super('Understat reference snapshot was superseded; retry with fresh provider data');
-    this.name = 'SupersededUnderstatDiscoveryError';
-  }
 }
 
 export class IncompleteUnderstatResourceError extends Error {

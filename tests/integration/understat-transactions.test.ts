@@ -75,12 +75,12 @@ const processors = new Map<string, (job: unknown) => Promise<unknown>>();
 const providerContexts: boolean[] = [];
 const handoffObservations: Array<{ transaction: boolean; status: string | undefined }> = [];
 const projectionObservations: Array<{ transaction: boolean; rows: number }> = [];
-async function processJob(lane: 'team' | 'player', name: string, data: unknown) {
+async function processJob(lane: 'team' | 'player', name: string, data: unknown, attemptsMade = 0) {
   return processors.get(`understat-${lane}-sync`)!({
     id: 'fixture',
     name,
     queueName: `understat-${lane}-sync`,
-    attemptsMade: 0,
+    attemptsMade,
     opts: { attempts: 3 },
     data,
   });
@@ -661,5 +661,51 @@ for (const lane of ['team', 'player'] as const) {
     await expect(processJob(lane, name, detail)).rejects.toThrow('finalizer enqueue response lost');
     expect((await runs.findRun(data.runId))!.status).toBe('completed');
     expect(settle).not.toHaveBeenCalled();
+  });
+}
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} team metadata supersession requests fresh discovery at finalization`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    await processJob(lane, `understat-${lane}-discover`, data);
+    for (const item of await runs.findItems(data.runId)) {
+      if (item.status !== 'completed')
+        await runs.skipItem(data.runId, item.resourceType, item.resourceId, 'fixture sibling');
+    }
+    await sql`UPDATE understat.teams SET title='Corrected team',source_hash='corrected-team',updated_at=clock_timestamp() WHERE team_id=${offset + 83}`;
+    await expect(processJob(lane, `understat-${lane}-finalize`, data)).rejects.toThrow(
+      'team reference snapshot was superseded',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    await processJob(lane, `understat-${lane}-discover`, job());
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
+  });
+
+  test(`${lane} exhausted discovery fanout retires pending children and admits a fresh run`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    const fanout = spyOn(
+      enqueue,
+      lane === 'team' ? 'enqueueUnderstatTeamDetail' : 'enqueueUnderstatPlayerTeamDetail',
+    ).mockRejectedValue(new Error('queue unavailable'));
+    await expect(processJob(lane, `understat-${lane}-discover`, data, 2)).rejects.toThrow(
+      'queue unavailable',
+    );
+    expect((await runs.findItem(data.runId, 'league', 'EPL'))!.status).toBe('completed');
+    expect((await runs.findItems(data.runId)).some((item) => item.status === 'pending')).toBe(true);
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(settle.mock.calls[0]![0].nonRetryable).toBe(false);
+    fanout.mockResolvedValue(undefined as never);
+    await processJob(lane, `understat-${lane}-discover`, job());
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
   });
 }

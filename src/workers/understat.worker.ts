@@ -365,6 +365,11 @@ async function recordTeamFailure(
           // A settled replay has no new claim, but can still exhaust its queue handoff.
           // A superseded provider invocation must not fail its successor's run.
           if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return false;
+          // Exhausted discovery is the only producer of its pending children.
+          // Retire the run so those missing jobs cannot prevent scheduler retry.
+          if (item.resourceType === 'league' && persisted.status === 'completed') {
+            return understatSyncRepository.markRunFailed(job.data.runId, error.message);
+          }
           return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
         }
         // An event without this invocation's claim cannot fail an in-flight retry.
@@ -414,6 +419,11 @@ async function recordPlayerFailure(
           // A settled replay has no new claim, but can still exhaust its queue handoff.
           // A superseded provider invocation must not fail its successor's run.
           if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return false;
+          // Exhausted discovery is the only producer of its pending children.
+          // Retire the run so those missing jobs cannot prevent scheduler retry.
+          if (item.resourceType === 'league' && persisted.status === 'completed') {
+            return understatSyncRepository.markRunFailed(job.data.runId, error.message);
+          }
           return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
         }
         // An event without this invocation's claim cannot fail an in-flight retry.
@@ -468,8 +478,7 @@ async function retireSupersededDiscoveryRun(
       // The completed league payload cannot become fresh by retrying a detail.
       // Ending this run fences in-flight writes; the existing scheduler retry
       // creates a new run and distinct BullMQ IDs with a fresh league fetch.
-      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
-      return true;
+      return understatSyncRepository.markRunFailed(job.data.runId, error.message);
     },
   );
 }
