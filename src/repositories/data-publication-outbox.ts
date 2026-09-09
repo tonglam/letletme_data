@@ -38,49 +38,55 @@ export type ClaimedDataPublicationOutbox = Readonly<{
 /** Read scheduling context only after proving the complete active publication. */
 export async function loadActivePriceChangeContext(season: FplSeasonRef) {
   const db = await getDb();
-  const rows = await db
-    .select({
-      publicationId: datasetPublicationsInOps.publicationId,
-      revision: datasetPublicationsInOps.revision,
-      manifest: datasetPublicationsInOps.manifest,
-    })
-    .from(datasetPublicationsInOps)
-    .where(
-      and(
-        eq(datasetPublicationsInOps.dataset, 'fpl:price-changes'),
-        eq(datasetPublicationsInOps.seasonId, season.seasonId),
-        isNull(datasetPublicationsInOps.eventId),
-        eq(datasetPublicationsInOps.status, 'active'),
-      ),
+  // Keep the active identity and immutable item proofs in one transaction
+  // snapshot. A publication can be activated between two autocommit reads;
+  // without one snapshot those reads could combine the old row with a new
+  // publication's items (or vice versa) and schedule from a superseded board.
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select({
+        publicationId: datasetPublicationsInOps.publicationId,
+        revision: datasetPublicationsInOps.revision,
+        manifest: datasetPublicationsInOps.manifest,
+      })
+      .from(datasetPublicationsInOps)
+      .where(
+        and(
+          eq(datasetPublicationsInOps.dataset, 'fpl:price-changes'),
+          eq(datasetPublicationsInOps.seasonId, season.seasonId),
+          isNull(datasetPublicationsInOps.eventId),
+          eq(datasetPublicationsInOps.status, 'active'),
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    // The Redis fast path validates every sibling itself. This durable fallback
+    // must enforce the same boundary so a context row cannot create an
+    // obligation when the active publication is missing or has a bad players
+    // sibling.
+    const prepared = await loadPreparedPublication(tx, row.publicationId, row.manifest).catch(
+      () => null,
+    );
+    if (!prepared) return null;
+    const manifest = prepared.manifest;
+    if (
+      !manifest ||
+      manifest.publicationId !== row.publicationId ||
+      manifest.revision !== row.revision ||
+      manifest.dataset !== 'fpl:price-changes' ||
+      manifest.seasonCode !== season.seasonCode ||
+      manifest.eventId !== null
     )
-    .limit(1);
-  const row = rows[0];
-  if (!row) return null;
-  // The Redis fast path validates every sibling itself. This durable fallback
-  // must enforce the same boundary so a context row cannot create an
-  // obligation when the active publication is missing or has a bad players
-  // sibling.
-  const prepared = await loadPreparedPublication(db, row.publicationId, row.manifest).catch(
-    () => null,
-  );
-  if (!prepared) return null;
-  const manifest = prepared.manifest;
-  if (
-    !manifest ||
-    manifest.publicationId !== row.publicationId ||
-    manifest.revision !== row.revision ||
-    manifest.dataset !== 'fpl:price-changes' ||
-    manifest.seasonCode !== season.seasonCode ||
-    manifest.eventId !== null
-  )
-    return null;
-  const item = prepared.items.find((candidate) => candidate.manifest.name === 'context');
-  if (!item) return null;
-  try {
-    return { manifest, items: { context: JSON.parse(item.payload) as unknown } };
-  } catch {
-    return null;
-  }
+      return null;
+    const item = prepared.items.find((candidate) => candidate.manifest.name === 'context');
+    if (!item) return null;
+    try {
+      return { manifest, items: { context: JSON.parse(item.payload) as unknown } };
+    } catch {
+      return null;
+    }
+  });
 }
 
 function verifiedItemPayload(
