@@ -88,7 +88,6 @@ export const tournamentsInCompetition = competition.table(
     sourceLeagueName: text('source_league_name'),
     rosterMode: tournamentRosterModeInCompetition('roster_mode').default('snapshot').notNull(),
     rosterSyncStatus: tournamentSetupStatusInCompetition('roster_sync_status'),
-    rosterSyncExecutionId: uuid('roster_sync_execution_id'),
     rosterLastSyncedAt: timestamp('roster_last_synced_at', { withTimezone: true, mode: 'date' }),
     rosterSyncError: text('roster_sync_error'),
     setupPhase: tournamentSetupPhaseInCompetition('setup_phase').default('queued').notNull(),
@@ -122,6 +121,7 @@ export const tournamentsInCompetition = competition.table(
     setupProgressIndeterminate: boolean('setup_progress_indeterminate').default(false).notNull(),
     profilesReadyAt: timestamp('profiles_ready_at', { withTimezone: true, mode: 'date' }),
     insightsReadyAt: timestamp('insights_ready_at', { withTimezone: true, mode: 'date' }),
+    rosterSyncExecutionId: uuid('roster_sync_execution_id'),
   },
   (table) => [
     index('tournaments_admin_entry_idx').using(
