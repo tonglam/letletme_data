@@ -42,24 +42,20 @@ SET LOCAL statement_timeout = '0';
 DO \$deploy_fence\$
 DECLARE
   running_count integer;
-  expiring_count integer;
   retention_active boolean;
   advisory_acquired boolean;
   wait_deadline timestamptz := clock_timestamp() + make_interval(secs => ${wait_seconds});
 BEGIN
   LOOP
-    -- Do this first without the deploy advisory so a live media worker can
-    -- drain an overdue repair window. Taking the advisory before this check
-    -- would make the worker return an empty claim forever.
+    -- Durable PENDING/PARTIAL/UNAVAILABLE gates past repair_until_at do not
+    -- hold a database transaction. A disabled media worker cannot reconcile
+    -- them, so leave that backlog for its next run instead of blocking every
+    -- general deployment. The advisory/table fence below closes new claims;
+    -- only active leases must drain before the hand-off.
     SELECT count(*) FILTER (
       WHERE status = 'RUNNING' AND lease_owner IS NOT NULL
-    )::integer,
-    count(*) FILTER (
-      WHERE status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE')
-        AND repair_exhausted_at IS NULL
-        AND repair_until_at <= clock_timestamp()
     )::integer
-    INTO running_count, expiring_count
+    INTO running_count
     FROM content.source_media_gates;
     SELECT EXISTS (
       SELECT 1
@@ -69,7 +65,7 @@ BEGIN
     )
     INTO retention_active;
 
-    IF running_count = 0 AND expiring_count = 0 AND NOT retention_active THEN
+    IF running_count = 0 AND NOT retention_active THEN
       BEGIN
         advisory_acquired := false;
         SELECT pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))
@@ -88,13 +84,8 @@ BEGIN
 
         SELECT count(*) FILTER (
           WHERE status = 'RUNNING' AND lease_owner IS NOT NULL
-        )::integer,
-        count(*) FILTER (
-          WHERE status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE')
-            AND repair_exhausted_at IS NULL
-            AND repair_until_at <= clock_timestamp()
         )::integer
-        INTO running_count, expiring_count
+        INTO running_count
         FROM content.source_media_gates;
         SELECT EXISTS (
           SELECT 1
@@ -103,7 +94,7 @@ BEGIN
             AND upload_lease_owner IS NOT NULL
         )
         INTO retention_active;
-        IF running_count = 0 AND expiring_count = 0 AND NOT retention_active THEN
+        IF running_count = 0 AND NOT retention_active THEN
           RAISE NOTICE 'SOURCE_MEDIA_DEPLOY_FENCE_READY';
           PERFORM pg_sleep(${hold_seconds});
           RETURN;
@@ -111,10 +102,9 @@ BEGIN
         RAISE EXCEPTION 'SOURCE_MEDIA_DEPLOY_FENCE_RETRY';
       EXCEPTION
         WHEN lock_not_available OR raise_exception THEN
-          -- A legacy worker may still own a row/table lock, or a repair may
-          -- have become due between the two scans. Release any advisory lock
-          -- acquired in this attempt and let the media worker drain before
-          -- trying the fenced hand-off again.
+          -- A legacy worker may still own a row/table lock between the two
+          -- scans. Release any advisory lock acquired in this attempt and let
+          -- the active writer drain before trying the fenced hand-off again.
           IF advisory_acquired THEN
             PERFORM pg_advisory_unlock(
               hashtextextended('content-source-media-deploy-v1', 0)

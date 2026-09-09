@@ -300,7 +300,9 @@ describe('release workflow gates', () => {
       String.raw`storage_state = 'AVAILABLE'
         AND upload_lease_owner IS NOT NULL`,
     );
-    expect(sourceMediaDeployFence).toContain('repair_until_at <= clock_timestamp()');
+    expect(sourceMediaDeployFence).toContain(
+      'Durable PENDING/PARTIAL/UNAVAILABLE gates past repair_until_at do not',
+    );
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
     expect(sourceMediaDeployFence).toContain(
       'LOCK TABLE content.source_media_gates IN SHARE ROW EXCLUSIVE MODE NOWAIT',
@@ -568,7 +570,14 @@ describe('release workflow gates', () => {
     expect(sourceMediaRolloutWorkflow).toContain('DEPLOY_SHA="$previous_media_revision"');
     expect(sourceMediaRolloutWorkflow).toContain('wait_for_media_worker "$previous_media_image"');
     expect(sourceMediaRolloutWorkflow).toContain('if [ "$previous_media_present" = true ]; then');
-    expect(sourceMediaRolloutWorkflow).toContain('if [ "$worker_stopped" = true ]; then');
+    expect(sourceMediaRolloutWorkflow).toContain('if [ "$worker_restore_needed" = true ]; then');
+    expect(sourceMediaRolloutWorkflow).toContain('previous_media_was_running=false');
+    expect(sourceMediaRolloutWorkflow).toContain(
+      "previous_media_state=$(docker inspect --format '{{.State.Status}}' \"$current_container\")",
+    );
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'docker compose create --no-build --force-recreate media-worker',
+    );
     expect(
       sourceMediaRolloutWorkflow.indexOf(
         'source-media rollout refused: Storage secret is present in .env.deploy',

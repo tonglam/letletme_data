@@ -102,6 +102,7 @@ jobs:
             test "$target_revision" = "$ROLLOUT_SHA"
             current_container=$(docker compose ps -aq media-worker | head -n 1)
             previous_media_present=false
+            previous_media_was_running=false
             previous_media_image=''
             previous_media_image_id=''
             previous_media_revision=''
@@ -112,6 +113,12 @@ jobs:
               previous_media_image_id=$(docker inspect --format '{{.Image}}' "$current_container")
               test -n "$previous_media_image_id"
               test "$(docker image inspect --format '{{.Id}}' "$previous_media_image")" = "$previous_media_image_id"
+              previous_media_state=$(docker inspect --format '{{.State.Status}}' "$current_container")
+              case "$previous_media_state" in
+                running|restarting) previous_media_was_running=true ;;
+                created|exited|dead) ;;
+                *) echo "source-media rollout refused: unknown previous worker state=$previous_media_state" >&2; exit 1 ;;
+              esac
               previous_media_revision=$(docker image inspect \
                 --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
                 "$previous_media_image")
@@ -325,6 +332,7 @@ jobs:
             backup_file=''
             rollout_committed=false
             worker_stopped=false
+            worker_restore_needed=false
             worker_created=false
             created_media_container=''
             remove_created_media_worker() {
@@ -340,9 +348,14 @@ jobs:
                 if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
                   mv "$backup_file" "$media_env_file"
                 fi
-                if [ "$worker_stopped" = true ]; then
-                  DEPLOY_SHA="$previous_media_revision" APP_IMAGE="$previous_media_image" \
-                    docker compose up -d --no-build --force-recreate media-worker || true
+                if [ "$worker_restore_needed" = true ]; then
+                  if [ "$previous_media_was_running" = true ]; then
+                    DEPLOY_SHA="$previous_media_revision" APP_IMAGE="$previous_media_image" \
+                      docker compose up -d --no-build --force-recreate media-worker || true
+                  else
+                    DEPLOY_SHA="$previous_media_revision" APP_IMAGE="$previous_media_image" \
+                      docker compose create --no-build --force-recreate media-worker || true
+                  fi
                 elif [ "$worker_created" = true ]; then
                   remove_created_media_worker
                 fi
@@ -357,8 +370,11 @@ jobs:
             backup_file=$(mktemp "$expected_workdir/.env.media.rollout-backup.XXXXXX")
             cp -p "$media_env_file" "$backup_file"
             if [ "$previous_media_present" = true ]; then
-              docker compose stop -t 45 media-worker
-              worker_stopped=true
+              if [ "$previous_media_was_running" = true ]; then
+                worker_restore_needed=true
+                docker compose stop -t 45 media-worker
+                worker_stopped=true
+              fi
             fi
             if [ "$ROLLOUT_MODE" = enable-retention ]; then retention_preflight; fi
             scripts/configure-briefing-source-media-env.sh "$ROLLOUT_MODE" "$media_env_file"
@@ -366,9 +382,12 @@ jobs:
               if [ "$previous_media_present" = false ]; then
                 created_media_container=$(docker compose ps -aq media-worker | head -n 1 || true)
                 if [ -n "$created_media_container" ]; then worker_created=true; fi
+              else
+                worker_restore_needed=true
               fi
               exit 1
             fi
+            if [ "$previous_media_present" = true ]; then worker_restore_needed=true; fi
             if [ "$previous_media_present" = false ]; then
               created_media_container=$(docker compose ps -aq media-worker | head -n 1)
               test -n "$created_media_container"
