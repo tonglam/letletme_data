@@ -777,6 +777,45 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
         .where(tournamentScope(season, tournamentId));
     },
 
+    markSetupResultIfUnchanged: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      status: 'ready' | 'failed',
+      error: string | null | undefined,
+      expectedProgressMarker: string | null,
+      warningCount = status === 'ready' && error ? 1 : 0,
+      lastErrorCode?: string | null,
+    ): Promise<boolean> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupStatus: status,
+          setupPhase: status,
+          setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
+          setupError: status === 'ready' ? null : 'Tournament setup failed.',
+          setupNextRetryAt: null,
+          setupLastErrorCode: status === 'failed' ? (lastErrorCode ?? 'SETUP_FAILED') : null,
+          setupLastErrorAt: status === 'failed' ? new Date() : null,
+          setupProgressIndeterminate: false,
+          // Keep the owner marker unchanged while settling the enqueue error.
+          setupProgressUpdatedAt: sql`${expectedProgressMarker}::timestamptz`,
+          setupFinishedAt: sql`GREATEST(clock_timestamp(), ${tournamentsInCompetition.setupStartedAt})`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
+            eq(tournamentsInCompetition.setupPhase, 'queued'),
+            sql`${tournamentsInCompetition.setupFinishedAt} IS NULL`,
+            sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${expectedProgressMarker}::timestamptz`,
+          ),
+        )
+        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
+      return rows.length === 1;
+    },
+
     markSetupAttemptFailure: async (
       season: FplSeasonRef,
       tournamentId: number,
@@ -818,6 +857,9 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
         .where(
           and(
             tournamentScope(season, tournamentId),
+            failure.progressMarker === undefined
+              ? undefined
+              : sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${failure.progressMarker}::timestamptz`,
             inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
             sql`${tournamentsInCompetition.setupFinishedAt} IS NULL`,
             failure.execution

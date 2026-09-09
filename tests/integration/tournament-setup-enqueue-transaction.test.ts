@@ -111,3 +111,27 @@ test('prepared setup enqueue commits its marker before waiting for Redis', async
     blocker: null,
   });
 });
+
+test('snapshot resume carries its prepared marker into the resume job', async () => {
+  const tournamentId = 995992;
+  const marker = '2095-01-05T00:00:00.000Z';
+  let queuedData: Record<string, unknown> | undefined;
+  spyOn(governance, 'isQueueDrainOnly').mockResolvedValue(false);
+  spyOn(tournamentSetupQueue, 'getJob').mockResolvedValue(undefined);
+  spyOn(tournamentSetupQueue, 'add').mockImplementation(async (_name, data) => {
+    queuedData = data as unknown as Record<string, unknown>;
+    return { id: 'snapshot-resume-marker-fixture' } as never;
+  });
+
+  await enqueueTournamentSetup(TEST_SEASON, tournamentId, 'resume', {
+    forceNew: true,
+    prepareEnqueue: async () => marker,
+  });
+
+  expect(queuedData).toMatchObject({
+    source: 'resume',
+    resumeMarker: marker,
+  });
+  expect(queuedData).not.toHaveProperty('preparedRetryMarker');
+  mock.restore();
+});

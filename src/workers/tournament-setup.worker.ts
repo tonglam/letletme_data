@@ -23,7 +23,6 @@ import { seasonRepository } from '../repositories/seasons';
 import {
   tournamentInfoRepository,
   type TournamentSetupExecution,
-  type TournamentSetupFailureState,
 } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { logError, logInfo } from '../utils/logger';
@@ -121,7 +120,19 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
       let maxAttempts = Math.max(1, job.opts.attempts ?? 1);
       const startedAt = new Date();
       let execution: TournamentSetupExecution | undefined;
-      let expectedState: TournamentSetupFailureState | undefined;
+      const stableProgressMarker =
+        job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
+      // Before marker-owned admission was introduced, create jobs used the
+      // unsuffixed slot. Their trigger timestamp is now retained as the
+      // durable execution marker so a legacy retry can prove it still owns
+      // the row without being confused with a newer marker handoff.
+      const legacyProgressMarker =
+        stableProgressMarker === undefined &&
+        job.data.source === 'create' &&
+        Number.isFinite(triggeredAtMs)
+          ? job.data.triggeredAt
+          : undefined;
+      const progressMarker = stableProgressMarker ?? legacyProgressMarker;
       const lifecycle = <T>(operation: () => Promise<T>) =>
         withMutationScopes(
           {
@@ -135,9 +146,6 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
         );
       try {
         const claim = await lifecycle(async () => {
-          expectedState =
-            (await tournamentInfoRepository.findSetupStatus(season, job.data.tournamentId)) ??
-            undefined;
           if (job.data.resumeMarker) {
             const ownsResume = await tournamentRosterRepository.markResumeProcessingIfPending(
               season,
@@ -245,26 +253,18 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             });
             return null;
           }
-          const stableProgressMarker =
-            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
           if (job.data.source === 'create' && stableProgressMarker === undefined) {
-            // Creates before marker-owned admission was introduced can still be
-            // sitting in BullMQ under the unsuffixed ID. A newer marker plus a
-            // queued row with no setup execution proves that another handoff
-            // owns the row. A legacy job that already claimed an execution has
-            // setupStartedAt and remains eligible for its BullMQ retries.
-            const triggeredAtMs = Date.parse(job.data.triggeredAt);
+            // A legacy delivery remains eligible only while its trigger marker
+            // still owns the row. Any newer durable marker belongs to another
+            // handoff, regardless of whether that handoff has reached a phase
+            // transaction yet.
             const currentMarkerMs = persistedStatus.setupProgressUpdatedAt
               ? Date.parse(persistedStatus.setupProgressUpdatedAt)
               : Number.NaN;
             if (
               Number.isFinite(triggeredAtMs) &&
               Number.isFinite(currentMarkerMs) &&
-              currentMarkerMs > triggeredAtMs &&
-              persistedStatus.setupPhase === 'queued' &&
-              persistedStatus.setupStartedAt === null &&
-              (persistedStatus.setupStatus === 'pending' ||
-                persistedStatus.setupStatus === 'processing')
+              currentMarkerMs > triggeredAtMs
             ) {
               logInfo('Ignoring superseded legacy tournament create setup job', {
                 tournamentId: job.data.tournamentId,
@@ -315,7 +315,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           return tournamentInfoRepository.markSetupProcessing(
             season,
             job.data.tournamentId,
-            stableProgressMarker,
+            progressMarker,
             attempt,
           );
         });
@@ -326,8 +326,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
         logInfo('Tournament setup worker started job');
         await setupTournamentStructure(season, job.data.tournamentId, {
           resumeMarker: job.data.resumeMarker,
-          progressMarker:
-            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker,
+          progressMarker,
           execution,
         });
         return null;
@@ -339,6 +338,10 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           });
           return null;
         }
+        // A failure before markSetupProcessing commits no durable execution.
+        // Let BullMQ retry it; persisting from a pre-claim snapshot could
+        // overwrite a newer handoff that won the admission race.
+        if (!execution) return { error };
         const terminal = isTerminalJobAttemptFailure(job, error, attempt) || attempt >= maxAttempts;
         const changed = await lifecycle(async () => {
           const changed = await tournamentInfoRepository.markSetupAttemptFailure(
@@ -346,7 +349,6 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             job.data.tournamentId,
             {
               execution,
-              expectedState,
               attempt,
               terminal,
               errorCode: tournamentSetupErrorCode(error),
@@ -354,8 +356,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
                 ? null
                 : new Date(Date.now() + getTournamentSetupRetryDelayMs(attempt)),
               startedAt,
-              progressMarker:
-                job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker,
+              progressMarker,
             },
           );
           if (!changed)
@@ -366,7 +367,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             });
           return changed;
         });
-        if (!changed && (execution || expectedState)) return null;
+        if (!changed) return null;
         return { error };
       } finally {
         await updateSetupJobProgressBestEffort(job, 'settling');

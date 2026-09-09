@@ -68,6 +68,17 @@ export function tournamentSetupErrorCode(error: unknown): string {
   return fallback ?? (error instanceof Error ? error.name : 'SETUP_FAILED');
 }
 
+function tournamentSetupProgressMarker(job: FailedTournamentSetupJob): string | undefined {
+  const marker = job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
+  if (marker !== undefined) return marker;
+  // Legacy create jobs had no explicit marker. The processor uses their
+  // trigger timestamp as the durable owner token so BullMQ retries retain the
+  // same execution identity.
+  return job.data.source === 'create' && Number.isFinite(Date.parse(job.data.triggeredAt))
+    ? job.data.triggeredAt
+    : undefined;
+}
+
 /**
  * Persist a failed BullMQ attempt in a fresh lifecycle transaction. This is the
  * fallback for errors that escape the processor's short claim/failure phases.
@@ -111,6 +122,6 @@ export async function persistEscapedTournamentSetupFailure(
       ? null
       : new Date(now.getTime() + getTournamentSetupRetryDelayMs(attempt)),
     startedAt,
-    progressMarker: job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker,
+    progressMarker: tournamentSetupProgressMarker(job),
   });
 }

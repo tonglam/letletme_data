@@ -122,6 +122,22 @@ describe('tournament setup escaped failure fallback', () => {
     expect(failures[0]?.progressMarker).toBe(setupMarker);
   });
 
+  test('preserves the trigger marker for a legacy create delivery', async () => {
+    const { deps, failures } = dependencies({ setupStatus: 'processing', setupAttempt: 1 });
+
+    await persistEscapedTournamentSetupFailure(
+      failedJob(1),
+      new Error('legacy worker crashed'),
+      deps,
+      {
+        attempt: 1,
+        startedAt: '2026-08-22T18:00:01.000Z',
+      },
+    );
+
+    expect(failures[0]?.progressMarker).toBe('2026-08-22T18:00:00.000Z');
+  });
+
   test('does not overwrite a setup that already became ready', async () => {
     const { deps, failures } = dependencies({
       setupStatus: 'ready',

@@ -165,7 +165,8 @@ async function enqueueTournamentSetupUnlocked(
       throw new QueueDrainOnlyError(queue.name);
     }
     let preparedRetryMarker: string | undefined;
-    const admissionMarker = options.resumeMarker ?? options.setupMarker ?? options.admissionMarker;
+    let effectiveResumeMarker = options.resumeMarker;
+    const admissionMarker = effectiveResumeMarker ?? options.setupMarker ?? options.admissionMarker;
     const { baseJobId, successorJobId } = getTournamentSetupJobIds(
       season,
       tournamentId,
@@ -254,14 +255,21 @@ async function enqueueTournamentSetupUnlocked(
         options.prepareEnqueue,
       );
       if (typeof preparedMarker === 'string' && preparedMarker.length > 0) {
-        preparedRetryMarker = preparedMarker;
+        if (source === 'resume' && !effectiveResumeMarker) {
+          // Snapshot resume preparation writes the authoritative marker but
+          // cannot pass it through the callback options. Carry it as the
+          // resume marker so the worker claims the same durable handoff.
+          effectiveResumeMarker = preparedMarker;
+        } else {
+          preparedRetryMarker = preparedMarker;
+        }
         // A preparation callback may create a new durable marker. Its
         // deterministic job slot must carry that marker, otherwise the worker
         // would classify the prepared handoff as an unmarked manual retry.
         jobId = getTournamentSetupJobIds(
           season,
           tournamentId,
-          options.resumeMarker ?? options.setupMarker ?? preparedRetryMarker,
+          effectiveResumeMarker ?? options.setupMarker ?? preparedRetryMarker,
         ).baseJobId;
       }
     }
@@ -271,7 +279,7 @@ async function enqueueTournamentSetupUnlocked(
       tournamentId,
       source,
       triggeredAt: new Date().toISOString(),
-      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
+      ...(effectiveResumeMarker ? { resumeMarker: effectiveResumeMarker } : {}),
       ...(preparedRetryMarker ? { preparedRetryMarker } : {}),
       ...(options.setupMarker ? { setupMarker: options.setupMarker } : {}),
     };

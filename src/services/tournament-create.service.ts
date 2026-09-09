@@ -524,14 +524,34 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
         const message =
           error instanceof Error ? error.message : 'Failed to enqueue tournament setup.';
         const failureCode = safeCreationErrorCode(error);
+        let failed = false;
         try {
-          await tournamentInfoRepository.markSetupResult(season, tournament.id, 'failed', message);
+          failed = await tournamentInfoRepository.markSetupResultIfUnchanged(
+            season,
+            tournament.id,
+            'failed',
+            message,
+            tournament.setupProgressUpdatedAt ?? null,
+            0,
+            failureCode,
+          );
         } catch (statusError) {
           report('enqueue_failed', 'failed', failureCode);
           throw statusError;
         }
-        report('enqueue_failed', 'failed', failureCode);
-        result = resultFor('failed');
+        if (!failed) {
+          // A concurrent recovery may have committed a newer marker and
+          // accepted the setup job while this enqueue response was failing.
+          // Preserve that owner and report its durable status instead of
+          // replacing it with this admission error.
+          const current = await tournamentInfoRepository.findSetupStatus(season, tournament.id);
+          const currentStatus = current?.setupStatus ?? 'pending';
+          report(currentStatus === 'failed' ? 'enqueue_failed' : 'queued', currentStatus, null);
+          result = resultFor(currentStatus);
+        } else {
+          report('enqueue_failed', 'failed', failureCode);
+          result = resultFor('failed');
+        }
       }
       // Redis preview bookkeeping is recoverable metadata. It must never turn
       // a successfully enqueued authoritative creation into a failed response.

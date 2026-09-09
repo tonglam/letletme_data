@@ -312,6 +312,86 @@ describe('tournament setup transaction recovery', () => {
     expect(row?.setup_finished_at).not.toBeNull();
   });
 
+  test('enqueue failure CAS cannot overwrite a newer setup marker', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const oldMarker = '2095-01-06T00:00:00.000Z';
+    const newMarker = '2095-01-06T00:01:00.000Z';
+    const sqlClient = await getDbClient();
+    await sqlClient`
+      UPDATE competition.tournaments
+      SET setup_status='pending', setup_phase='queued',
+          setup_progress_updated_at=${newMarker}, setup_started_at=NULL,
+          setup_finished_at=NULL
+      WHERE season_id=${SEASON_ID} AND tournament_id=${SUCCESS_TOURNAMENT_ID}
+    `;
+
+    const changed = await tournamentInfoRepository.markSetupResultIfUnchanged(
+      season,
+      SUCCESS_TOURNAMENT_ID,
+      'failed',
+      'queue response lost',
+      oldMarker,
+      0,
+      'QUEUE_ADD_FAILED',
+    );
+
+    expect(changed).toBe(false);
+    const [row] = await sqlClient<
+      Array<{ setup_status: string; setup_progress_updated_at: string | null }>
+    >`
+      SELECT setup_status, setup_progress_updated_at::text
+      FROM competition.tournaments
+      WHERE season_id=${SEASON_ID} AND tournament_id=${SUCCESS_TOURNAMENT_ID}
+    `;
+    expect(row).toEqual({
+      setup_status: 'pending',
+      setup_progress_updated_at: '2095-01-06 00:01:00+00',
+    });
+  });
+
+  test('escaped setup failure CAS keeps a newer marker-owned execution', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const oldMarker = '2095-01-07T00:00:00.000Z';
+    const newMarker = '2095-01-07T00:01:00.000Z';
+    const startedAt = '2095-01-07T00:01:01.000Z';
+    const sqlClient = await getDbClient();
+    await sqlClient`
+      UPDATE competition.tournaments
+      SET setup_status='processing', setup_phase='building_structure', setup_attempt=1,
+          setup_started_at=${startedAt}, setup_next_retry_at=NULL,
+          setup_progress_updated_at=${newMarker}, setup_finished_at=NULL
+      WHERE season_id=${SEASON_ID} AND tournament_id=${SUCCESS_TOURNAMENT_ID}
+    `;
+
+    const changed = await tournamentInfoRepository.markSetupAttemptFailure(
+      season,
+      SUCCESS_TOURNAMENT_ID,
+      {
+        execution: { attempt: 1, startedAt },
+        attempt: 1,
+        terminal: false,
+        errorCode: 'QUEUE_WORKER_CRASH',
+        nextRetryAt: new Date('2095-01-07T00:02:00.000Z'),
+        startedAt: new Date(startedAt),
+        progressMarker: oldMarker,
+      },
+    );
+
+    expect(changed).toBe(false);
+    const [row] = await sqlClient<
+      Array<{ setup_status: string; setup_phase: string; setup_progress_updated_at: string | null }>
+    >`
+      SELECT setup_status, setup_phase, setup_progress_updated_at::text
+      FROM competition.tournaments
+      WHERE season_id=${SEASON_ID} AND tournament_id=${SUCCESS_TOURNAMENT_ID}
+    `;
+    expect(row).toEqual({
+      setup_status: 'processing',
+      setup_phase: 'building_structure',
+      setup_progress_updated_at: '2095-01-07 00:01:00+00',
+    });
+  });
+
   test('watchdog recovery preserves the attempt counter and real error code', async () => {
     const season = explicitSeasonRef(SEASON_CODE);
     await withMutationScopes(

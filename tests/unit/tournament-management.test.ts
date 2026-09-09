@@ -474,20 +474,22 @@ describe('tournament management service', () => {
 
   test('resumes snapshot and official-sync tournaments through injected queue ports', async () => {
     const calls: string[] = [];
+    let snapshotMarker: string | void | undefined;
     const snapshot = { ...tournament, state: 'inactive' as const };
     const snapshotService = createTestService(
       createRepository({ findById: async () => snapshot }),
       {
         enqueueSnapshotSetup: async (_season, id, _source, options) => {
-          await options.prepareEnqueue();
+          snapshotMarker = await options.prepareEnqueue();
           calls.push(`snapshot-enqueue:${id}`);
         },
         rosterRepository: {
           findById: async () => null,
-          markResumeProcessingWithMarker: async () => 'unused',
-          markResumeProcessing: async (_season, id) => {
+          markResumeProcessingWithMarker: async (_season, id) => {
             calls.push(`snapshot-marker:${id}`);
+            return 'unused';
           },
+          markResumeProcessing: async () => undefined,
           markSyncPending: async () => 'retry-marker',
           markSyncFailed: async () => undefined,
         },
@@ -523,6 +525,7 @@ describe('tournament management service', () => {
       'snapshot-enqueue:42',
       'official-enqueue:42:marker-42',
     ]);
+    expect(snapshotMarker).toBe('unused');
   });
 
   test('keeps an ambiguously accepted official resume and fails a definitely lost one', async () => {

@@ -211,10 +211,10 @@ type SnapshotResumeDependencies = {
     source: 'resume',
     options: {
       forceNew: true;
-      prepareEnqueue: () => Promise<void>;
+      prepareEnqueue: () => Promise<void | string>;
     },
   ) => Promise<unknown>;
-  markResumeProcessing: (tournamentId: number) => Promise<void>;
+  markResumeProcessing: (tournamentId: number) => Promise<void | string>;
   markRosterFailed: (tournamentId: number, error: string) => Promise<void>;
   markSetupFailed: (tournamentId: number, error: string) => Promise<void>;
 };
@@ -231,8 +231,11 @@ export async function requestSnapshotTournamentResume(
       forceNew: true,
       prepareEnqueue: async () => {
         enqueuePreparationStarted = true;
-        if (!options?.resumePrepared) await dependencies.markResumeProcessing(tournamentId);
+        const marker = options?.resumePrepared
+          ? undefined
+          : await dependencies.markResumeProcessing(tournamentId);
         resumePrepared = true;
+        return marker;
       },
     });
   } catch (error) {
@@ -587,7 +590,7 @@ export function createTournamentManagementService(
                       tournamentId: id,
                       scopes: [tournamentSetupLifecycleScope(id)],
                     },
-                    () => rosterRepository.markResumeProcessing(season, id),
+                    () => rosterRepository.markResumeProcessingWithMarker(season, id),
                   ),
                 markRosterFailed: (id, message) =>
                   rosterRepository.markSyncFailed(season, id, message),
