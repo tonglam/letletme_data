@@ -125,6 +125,45 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           operation,
         );
       try {
+        // Redis admission is observed before taking the PostgreSQL lifecycle
+        // lock. Recheck its owning database state below before using the result.
+        const observedResume =
+          job.data.source === 'manual' && !job.data.resumeMarker
+            ? await lifecycle(async () => {
+                expectedState =
+                  (await tournamentInfoRepository.findSetupStatus(season, job.data.tournamentId)) ??
+                  undefined;
+                return tournamentRosterRepository.findById(season, job.data.tournamentId);
+              })
+            : null;
+        let acceptedResume = false;
+        if (
+          observedResume?.rosterMode === 'official_sync' &&
+          observedResume.state === 'inactive' &&
+          (observedResume.rosterSyncStatus === 'processing' ||
+            observedResume.rosterSyncStatus === 'failed') &&
+          (observedResume.setupStatus === 'pending' ||
+            observedResume.setupStatus === 'processing' ||
+            observedResume.setupStatus === 'failed') &&
+          (observedResume.setupPhase === 'queued' ||
+            observedResume.setupPhase === 'failed' ||
+            observedResume.setupStatus === 'processing')
+        ) {
+          const [reconcileJob, setupJob] = await Promise.all([
+            findTournamentRosterReconcileJob(
+              season,
+              job.data.tournamentId,
+              true,
+              observedResume.setupProgressUpdatedAt ?? undefined,
+            ),
+            findTournamentSetupJob(
+              season,
+              job.data.tournamentId,
+              observedResume.setupProgressUpdatedAt,
+            ),
+          ]);
+          acceptedResume = Boolean(reconcileJob || setupJob);
+        }
         const claim = await lifecycle(async () => {
           expectedState =
             (await tournamentInfoRepository.findSetupStatus(season, job.data.tournamentId)) ??
@@ -184,20 +223,20 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
               // An explicit manual retry is allowed to recover a
               // terminal resume, but never while marker-owned work
               // is still live.
-              const [reconcileJob, setupJob] = await Promise.all([
-                findTournamentRosterReconcileJob(
-                  season,
-                  job.data.tournamentId,
-                  true,
-                  roster?.setupProgressUpdatedAt ?? undefined,
-                ),
-                findTournamentSetupJob(
-                  season,
-                  job.data.tournamentId,
-                  roster?.setupProgressUpdatedAt,
-                ),
-              ]);
-              if (reconcileJob || setupJob) {
+              const sameResume =
+                observedResume !== null &&
+                (
+                  [
+                    'executionId',
+                    'setupProgressUpdatedAt',
+                    'state',
+                    'rosterMode',
+                    'rosterSyncStatus',
+                    'setupStatus',
+                    'setupPhase',
+                  ] as const
+                ).every((key) => roster[key] === observedResume[key]);
+              if (!sameResume || acceptedResume) {
                 logInfo('Ignoring manual setup retry during official roster resume', {
                   tournamentId: job.data.tournamentId,
                   jobId: job.id,
