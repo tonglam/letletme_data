@@ -1,3 +1,6 @@
+import type postgres from 'postgres';
+import { withPostgresQueryTimeout } from '../db/postgres-query-timeout';
+import { TimeoutError, withTimeout } from '../utils/async';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
@@ -6,7 +9,7 @@ import {
   type DbEntryEventTransfer,
   type DbEntryEventTransferInsert,
 } from '../db/schemas/index.schema';
-import { getDb, type DbHandle, type TransactionHandle } from '../db/singleton';
+import { getDb, type DbOrTransaction, type TransactionHandle } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryTransfersResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
@@ -71,15 +74,73 @@ async function lockEntry(
   }
 }
 
+// Reuse the acquisition gate for a client/policy so repeated deadlines cannot
+// accumulate abandoned BEGIN requests behind an occupied single-connection pool.
+const persistenceClients = new WeakMap<
+  object,
+  Map<number, postgres.Sql | postgres.TransactionSql>
+>();
+
 export async function withEntrySeasonSyncTransaction<T>(
   season: FplSeasonRef,
   entryId: number,
   operation: (tx: TransactionHandle) => Promise<T>,
+  options?: { timeoutMs: number },
 ): Promise<T> {
-  const db = await getDb();
+  const deadlineAt = options ? Date.now() + options.timeoutMs : undefined;
+  const assertDeadline = () => {
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+      throw new TimeoutError('Entry persistence deadline exceeded');
+    }
+  };
+  // Initialization is shared and read-only. A timed-out caller must not proceed
+  // to transaction acquisition when that initialization eventually completes.
+  let db = options
+    ? await withTimeout(
+        getDb(),
+        options.timeoutMs,
+        'Entry database initialization exceeded its persistence deadline',
+      )
+    : await getDb();
+  assertDeadline();
+  if (options) {
+    const session = (
+      db as unknown as { session: { client: postgres.Sql | postgres.TransactionSql } }
+    ).session;
+    let policies = persistenceClients.get(session.client);
+    if (!policies) {
+      policies = new Map();
+      persistenceClients.set(session.client, policies);
+    }
+    let boundedClient = policies.get(options.timeoutMs);
+    if (!boundedClient) {
+      const rootClient = session.client as postgres.Sql;
+      const capacity = typeof rootClient.begin === 'function' ? rootClient.options.max : 1;
+      boundedClient = withPostgresQueryTimeout(
+        session.client,
+        options.timeoutMs,
+        undefined,
+        capacity,
+      );
+      policies.set(options.timeoutMs, boundedClient);
+    }
+    // Clone only the handle/session shell; never replace the shared database
+    // client's policy. Drizzle's root transaction and nested savepoint methods
+    // both acquire through this session client, before invoking our callback.
+    const boundedSession = Object.create(session) as typeof session;
+    boundedSession.client = withPostgresQueryTimeout(boundedClient, options.timeoutMs, deadlineAt);
+    const boundedDb = Object.create(db) as typeof db & { session: typeof session };
+    boundedDb.session = boundedSession;
+    db = boundedDb;
+  }
   return db.transaction(async (tx) => {
+    // The session belongs only to this transaction/savepoint. Its children
+    // inherit the bounded client; the enclosing transaction keeps its policy.
+    assertDeadline();
     await lockEntry(tx, season, entryId);
-    return operation(tx);
+    const result = await operation(tx);
+    assertDeadline();
+    return result;
   });
 }
 
@@ -151,7 +212,7 @@ export function buildTransferReplacementRows({
     });
 }
 
-export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
+export const createEntryEventTransfersRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {

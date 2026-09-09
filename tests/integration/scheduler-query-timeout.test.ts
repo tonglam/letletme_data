@@ -7,10 +7,10 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { sql as query } from 'drizzle-orm';
 
-import { withSchedulerQueryTimeout } from '../../src/db/scheduler-query-timeout';
+import { withPostgresQueryTimeout } from '../../src/db/postgres-query-timeout';
 
 const raw = postgres(process.env.DATABASE_URL!, { max: 1, prepare: false });
-const bounded = withSchedulerQueryTimeout(raw, 150);
+const bounded = withPostgresQueryTimeout(raw, 150);
 const db = drizzle(bounded);
 afterAll(async () => {
   await bounded.end({ timeout: 1 });

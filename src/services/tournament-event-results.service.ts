@@ -13,6 +13,7 @@ import {
 } from '../repositories/entry-event-results';
 import {
   entryEventTransfersRepository,
+  createEntryEventTransfersRepository,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
 import { eventRepository } from '../repositories/events';
@@ -265,8 +266,10 @@ export async function syncTournamentEventResultsForEntryIds(
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
       const persistEntry = async () => {
-        await withTimeout(
-          withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
+        await withEntrySeasonSyncTransaction(
+          season,
+          entryId,
+          async (tx) => {
             await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
               season,
               entryId,
@@ -284,23 +287,22 @@ export async function syncTournamentEventResultsForEntryIds(
               undefined,
               { preserveCheckpointedInput: true },
             );
-          }),
-          ENTRY_PERSIST_TIMEOUT_MS,
-          `Timed out persisting entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_PERSIST_TIMEOUT_MS}ms`,
+            if (transfers) {
+              await createEntryEventTransfersRepository(tx).replaceForEvent(
+                season,
+                entryId,
+                eventId,
+                transfers,
+                pointsByElement,
+                // The endpoint returned the entrant's complete transfer history.
+                // Persist and checkpoint that same scope so the following audit
+                // cannot reject a successful backfill repair.
+                { sourceCheckedAt: transferSourceCheckedAt! },
+              );
+            }
+          },
+          { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
         );
-        if (transfers) {
-          await entryEventTransfersRepository.replaceForEvent(
-            season,
-            entryId,
-            eventId,
-            transfers,
-            pointsByElement,
-            // The endpoint returned the entrant's complete transfer history.
-            // Persist and checkpoint that same scope so the following audit
-            // cannot reject a successful backfill repair.
-            { sourceCheckedAt: transferSourceCheckedAt! },
-          );
-        }
       };
       if (options?.perEntryMutationScopes) {
         await withMutationScopes(
@@ -394,19 +396,19 @@ export async function syncEntryTransferHistories(
         `Timed out fetching transfer history for entry ${entryId}`,
       );
       const persistTransfers = () =>
-        withTimeout(
-          entryEventTransfersRepository.replaceForEvent(
-            season,
-            entryId,
-            endEventId,
-            transfers,
-            undefined,
-            {
-              sourceCheckedAt,
-            },
-          ),
-          ENTRY_PERSIST_TIMEOUT_MS,
-          `Timed out persisting transfer history for entry ${entryId}`,
+        withEntrySeasonSyncTransaction(
+          season,
+          entryId,
+          (tx) =>
+            createEntryEventTransfersRepository(tx).replaceForEvent(
+              season,
+              entryId,
+              endEventId,
+              transfers,
+              undefined,
+              { sourceCheckedAt },
+            ),
+          { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
         );
       if (options?.perEntryMutationScopes) {
         await withMutationScopes(

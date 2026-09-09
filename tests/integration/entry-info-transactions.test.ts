@@ -5,7 +5,7 @@ assertIntegrationEnv();
 import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
-import { databaseSingleton, databaseTransactionStorage } from '../../src/db/singleton';
+import { databaseSingleton, databaseTransactionStorage, getDb } from '../../src/db/singleton';
 import { syncEntryInfo, type EntryInfoClient } from '../../src/services/entry-info.service';
 import { acquireMutationScopes, withMutationScopes } from '../../src/utils/mutation-scopes';
 import { recordedEntrySummary } from '../fixtures/entry-info.fixtures';
@@ -417,3 +417,306 @@ test('equal millisecond observations cannot overwrite the first committed profil
     await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=919203`;
   expect(rows[0]?.entry_name).toBe('first committed');
 }, 15000);
+
+test('entry deadline cancels a lock wait and never runs its write after the lock is released', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  const locked = gate();
+  const release = gate();
+  const owner = db.begin(async (tx) => {
+    await tx`SELECT entry_id FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!} FOR UPDATE`;
+    locked.resolve();
+    await release.promise;
+  });
+  await locked.promise;
+  let writes = 0;
+  try {
+    await expect(
+      withEntrySeasonSyncTransaction(
+        season,
+        ids[0]!,
+        async (tx) => {
+          writes += 1;
+          await tx.execute(
+            sql`UPDATE competition.entries SET entry_name='late write' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+          );
+        },
+        { timeoutMs: 150 },
+      ),
+    ).rejects.toThrow();
+    expect(writes).toBe(0);
+  } finally {
+    release.resolve();
+    await owner;
+  }
+  await Bun.sleep(200);
+  expect(writes).toBe(0);
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);
+
+test('deadline cancels SQL in a nested savepoint and rolls back earlier entry writes before rejection', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await expect(
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+        await tx.transaction(async (nested) => {
+          await nested.execute(sql`SELECT pg_sleep(3)`);
+        });
+      },
+      { timeoutMs: 150 },
+    ),
+  ).rejects.toThrow();
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+  // Cancellation has settled: the fence and row lock are immediately reusable.
+  await withEntrySeasonSyncTransaction(
+    season,
+    ids[0]!,
+    async (tx) => {
+      await tx.execute(
+        sql`UPDATE competition.entries SET entry_name='recovered' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+      );
+    },
+    { timeoutMs: 1000 },
+  );
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('recovered');
+}, 10000);
+
+test('one absolute deadline covers multiple individually short statements', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  let completed = 0;
+  await expect(
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+        for (let n = 0; n < 4; n += 1) {
+          await tx.execute(sql`SELECT pg_sleep(0.12)`);
+          completed += 1;
+        }
+      },
+      { timeoutMs: 300 },
+    ),
+  ).rejects.toThrow();
+  expect(completed).toBeLessThan(4);
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);
+
+test('an expired entry savepoint leaves its enclosing transaction usable without leaking the deadline', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await withMutationScopes(
+    { queueName: 'test', jobName: 'outer-deadline', scopes: [`entry-core:2091:${ids[0]!}`] },
+    async () => {
+      await expect(
+        withEntrySeasonSyncTransaction(
+          season,
+          ids[0]!,
+          async (tx) => {
+            await tx.execute(
+              sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+            );
+            await tx.execute(sql`SELECT pg_sleep(3)`);
+          },
+          { timeoutMs: 150 },
+        ),
+      ).rejects.toThrow();
+      await withEntrySeasonSyncTransaction(season, ids[0]!, async (tx) => {
+        await tx.execute(sql`SELECT pg_sleep(0.2)`);
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='outer recovered' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+      });
+    },
+  );
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('outer recovered');
+}, 10000);
+
+test('an expired callback cannot commit even when no SQL is in flight at its deadline', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await expect(
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+        await Bun.sleep(250);
+      },
+      { timeoutMs: 150 },
+    ),
+  ).rejects.toThrow('persistence deadline');
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);
+
+test('entry persistence bounds outer pool acquisition and fences abandoned callbacks', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  const handle = await getDb();
+  const occupied = gate();
+  const release = gate();
+  const owner = handle.transaction(async () => {
+    occupied.resolve();
+    await release.promise;
+  });
+  await occupied.promise;
+  let writes = 0;
+  const write = () =>
+    withEntrySeasonSyncTransaction(
+      season,
+      ids[0]!,
+      async (tx) => {
+        writes += 1;
+        await tx.execute(
+          sql`UPDATE competition.entries SET entry_name='late write' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+        );
+      },
+      { timeoutMs: 150 },
+    );
+  const started = Date.now();
+  try {
+    await expect(write()).rejects.toThrow('transaction acquisition');
+    expect(Date.now() - started).toBeLessThan(1000);
+    for (let n = 0; n < 3; n += 1) await expect(write()).rejects.toThrow('transaction acquisition');
+    expect(writes).toBe(0);
+  } finally {
+    release.resolve();
+    await owner;
+  }
+  await Bun.sleep(200);
+  expect(writes).toBe(0);
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+  await write();
+  expect(writes).toBe(1);
+}, 10000);
+
+test('database initialization consumes the entry deadline without starting a late transaction', async () => {
+  const handle = await getDb();
+  const release = gate();
+  const initialize = spyOn(databaseSingleton, 'getDb').mockImplementation(async () => {
+    await release.promise;
+    return handle;
+  });
+  let calls = 0;
+  try {
+    const start = Date.now();
+    await expect(
+      withEntrySeasonSyncTransaction(
+        season,
+        ids[0]!,
+        async () => {
+          calls += 1;
+        },
+        { timeoutMs: 100 },
+      ),
+    ).rejects.toThrow('initialization');
+    expect(Date.now() - start).toBeLessThan(1000);
+    release.resolve();
+    await Bun.sleep(30);
+    expect(calls).toBe(0);
+  } finally {
+    release.resolve();
+    initialize.mockRestore();
+  }
+});
+
+test('a second configured pool connection remains available beside a slow entry', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await syncEntryInfo(season, ids[1]!, client('original'), 0);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      '-e',
+      `
+    import assert from 'node:assert/strict';
+    import {sql} from 'drizzle-orm';
+    import {databaseSingleton} from './src/db/singleton';
+    import {withEntrySeasonSyncTransaction} from './src/repositories/entry-event-transfers';
+    let entered; const ready = new Promise(r=>entered=r); let slowSettled=false; let fastBeforeSlow=false;
+    const season={seasonId:2091,seasonCode:'9192'};
+    try {
+      const slow=withEntrySeasonSyncTransaction(season,919201,async(tx)=>{
+        await tx.execute(sql\`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=919201\`);
+        entered(); await tx.execute(sql\`SELECT pg_sleep(3)\`);
+      },{timeoutMs:500}).finally(()=>{slowSettled=true;}).catch(e=>e);
+      await ready;
+      await withEntrySeasonSyncTransaction(season,919202,async(tx)=>{
+        fastBeforeSlow=!slowSettled;
+        await tx.execute(sql\`UPDATE competition.entries SET entry_name='fast committed' WHERE season_id=2091 AND entry_id=919202\`);
+      },{timeoutMs:500});
+      assert.equal(fastBeforeSlow,true); assert.ok(await slow instanceof Error);
+    } finally {await databaseSingleton.disconnect();}
+  `,
+    ],
+    { stdout: 'pipe', stderr: 'pipe', env: { ...process.env, DATABASE_POOL_MAX: '2' } },
+  );
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+  const rows =
+    await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 ORDER BY entry_id`;
+  expect(rows.map((row) => row.entry_name)).toEqual(['original', 'fast committed']);
+}, 10000);
+
+test('initialization and SQL share one absolute persistence budget', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  const handle = await getDb();
+  const initialize = spyOn(databaseSingleton, 'getDb').mockImplementationOnce(async () => {
+    await Bun.sleep(300);
+    return handle;
+  });
+  try {
+    await expect(
+      withEntrySeasonSyncTransaction(
+        season,
+        ids[0]!,
+        async (tx) => {
+          await tx.execute(
+            sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+          );
+          await tx.execute(sql`SELECT pg_sleep(0.35)`);
+        },
+        { timeoutMs: 500 },
+      ),
+    ).rejects.toThrow();
+  } finally {
+    initialize.mockRestore();
+  }
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);

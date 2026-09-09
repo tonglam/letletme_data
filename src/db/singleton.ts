@@ -6,7 +6,7 @@ import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import { isTransactionPoolerConnection } from './postgres-connection';
 import { assertDataRuntimeRole } from './runtime-role-contract';
-import { withSchedulerQueryTimeout } from './scheduler-query-timeout';
+import { withPostgresQueryTimeout } from './postgres-query-timeout';
 import * as schema from './schemas/index.schema';
 
 /**
@@ -90,7 +90,7 @@ class DatabaseSingleton {
         prepare: !transactionPooler,
       });
       if (this.schedulerQueryTimeoutMs !== undefined) {
-        this.client = withSchedulerQueryTimeout(this.client, this.schedulerQueryTimeoutMs);
+        this.client = withPostgresQueryTimeout(this.client, this.schedulerQueryTimeoutMs);
       }
 
       // Test the connection before exposing it. Production must use the

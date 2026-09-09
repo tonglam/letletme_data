@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type postgres from 'postgres';
 
-import { withSchedulerQueryTimeout } from '../../src/db/scheduler-query-timeout';
+import { withPostgresQueryTimeout } from '../../src/db/postgres-query-timeout';
 
 function fixture() {
   let cancelCount = 0;
@@ -40,7 +40,7 @@ function fixture() {
       return callback(raw);
     },
   });
-  const client = withSchedulerQueryTimeout(raw as unknown as postgres.Sql, 20);
+  const client = withPostgresQueryTimeout(raw as unknown as postgres.Sql, 20);
   return { client, resolve, reject, counts: () => ({ cancelCount, executionCount, values }) };
 }
 
