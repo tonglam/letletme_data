@@ -17,6 +17,7 @@ export async function persistUnderstatTeamDiscovery(
   withdrawnMatchIds: readonly number[] = [],
 ): Promise<boolean> {
   const references = createUnderstatReferenceRepository(tx);
+  await references.assertTeamSnapshotCurrent(discovery.teams, discovery.season.lastSeenAt);
   const teams = createUnderstatTeamRepository(tx);
   const withdrawnStats = await teams.deleteMatchStats(withdrawnMatchIds);
   if (discovery.season.state === 'active') {
@@ -40,6 +41,7 @@ export async function persistUnderstatPlayerDiscovery(
   options: { preserveExistingPlayerSeasons?: boolean } = {},
 ): Promise<boolean> {
   const references = createUnderstatReferenceRepository(tx);
+  await references.assertTeamSnapshotCurrent(discovery.teams, discovery.season.lastSeenAt);
   const players = createUnderstatPlayerRepository(tx);
   const withdrawnStats = await players.deleteMatchStats(withdrawnMatchIds);
   if (discovery.season.state === 'active') {
@@ -48,7 +50,7 @@ export async function persistUnderstatPlayerDiscovery(
   await references.upsertSeason(discovery.season);
   const teamChanges = await references.upsertTeams(discovery.teams);
   const matchChanges = await references.upsertMatches(discovery.matches);
-  const playerChanges = await players.upsertPlayers(discovery.players);
+  const playerChanges = await players.upsertPlayers(discovery.players, discovery.season.lastSeenAt);
   const seasonsChanged = await players.replacePlayerSeasons(
     discovery.season.season,
     discovery.playerSeasons,
