@@ -942,7 +942,7 @@ describe('Understat persistence', () => {
       ...playerSource,
       sourceHash: contentHash(playerSource),
     };
-    await playersRepository.upsertPlayers([player]);
+    await playersRepository.upsertPlayers([player], new Date());
     const seasonSource = {
       season,
       playerId,

@@ -267,3 +267,10 @@ export function sourceYearFromSeason(season: string): number {
   }
   return 2000 + start;
 }
+
+export class SupersededUnderstatDiscoveryError extends Error {
+  constructor(resource = 'reference') {
+    super(`Understat ${resource} snapshot was superseded; retry with fresh provider data`);
+    this.name = 'SupersededUnderstatDiscoveryError';
+  }
+}

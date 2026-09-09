@@ -1,3 +1,4 @@
+import { SupersededUnderstatDiscoveryError } from '../domain/understat';
 import { and, asc, eq, inArray, lt, sql } from 'drizzle-orm';
 
 import {
@@ -266,6 +267,31 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
       })
       .returning({ id: understatTeams.teamId });
     return result.length;
+  },
+
+  async assertTeamSnapshotCurrent(rows: readonly UnderstatTeam[], observedAt: Date): Promise<void> {
+    if (rows.length === 0) return;
+    const db = await getDatabase(dbInstance);
+    const current = await db
+      .select()
+      .from(understatTeams)
+      .where(
+        inArray(
+          understatTeams.teamId,
+          rows.map((row) => row.id),
+        ),
+      );
+    const incomingById = new Map(rows.map((row) => [row.id, row]));
+    for (const row of current) {
+      const incoming = incomingById.get(row.teamId)!;
+      if (
+        row.updatedAt >= observedAt &&
+        row.sourceHash !== incoming.sourceHash &&
+        incoming.lastSeenSeason >= row.lastSeenSeason
+      ) {
+        throw new SupersededUnderstatDiscoveryError('team reference');
+      }
+    }
   },
 
   async findTeamsByIds(teamIds: readonly number[]): Promise<UnderstatTeam[]> {
@@ -606,9 +632,46 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     return new Set(rows.map((row) => row.teamId));
   },
 
-  async upsertPlayers(rows: UnderstatPlayer[]): Promise<number> {
+  async upsertPlayers(
+    rows: UnderstatPlayer[],
+    observedAt: Date,
+    rejectSuperseded = false,
+  ): Promise<number> {
     if (rows.length === 0) return 0;
     const db = await getDatabase(dbInstance);
+    if (rejectSuperseded) {
+      const current = await db
+        .select({
+          playerId: understatPlayers.playerId,
+          sourceHash: understatPlayers.sourceHash,
+          lastSeenSeason: understatPlayers.lastSeenSeason,
+          favoritePosition: understatPlayers.favoritePosition,
+          superseded: sql<boolean>`${understatPlayers.updatedAt} > ${observedAt.toISOString()}::timestamptz`,
+        })
+        .from(understatPlayers)
+        .where(
+          inArray(
+            understatPlayers.playerId,
+            rows.map((row) => row.id),
+          ),
+        );
+      const byId = new Map(current.map((row) => [row.playerId, row]));
+      if (
+        rows.some((row) => {
+          const stored = byId.get(row.id);
+          return (
+            stored &&
+            stored.superseded &&
+            row.lastSeenSeason >= stored.lastSeenSeason &&
+            (row.sourceHash !== stored.sourceHash ||
+              (row.favoritePosition !== null && row.favoritePosition !== stored.favoritePosition))
+          );
+        })
+      )
+        throw new Error(
+          'Understat player identity snapshot was superseded; retry with fresh provider data',
+        );
+    }
     const result = await db
       .insert(understatPlayers)
       .values(rows.map((row) => ({ ...toPlayerRow(row), updatedAt: sql`clock_timestamp()` })))
@@ -616,15 +679,15 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
         target: understatPlayers.playerId,
         set: {
           name: sql`CASE
-            WHEN excluded.last_seen_season >= ${understatPlayers.lastSeenSeason}
+            WHEN excluded.last_seen_season >= ${understatPlayers.lastSeenSeason} AND ${understatPlayers.updatedAt} <= ${observedAt.toISOString()}::timestamptz
               THEN excluded.name
             ELSE ${understatPlayers.name}
           END`,
-          favoritePosition: sql`COALESCE(excluded.favorite_position, ${understatPlayers.favoritePosition})`,
+          favoritePosition: sql`CASE WHEN ${understatPlayers.updatedAt} <= ${observedAt.toISOString()}::timestamptz THEN COALESCE(excluded.favorite_position, ${understatPlayers.favoritePosition}) ELSE ${understatPlayers.favoritePosition} END`,
           firstSeenSeason: sql`LEAST(${understatPlayers.firstSeenSeason}, excluded.first_seen_season)`,
           lastSeenSeason: sql`GREATEST(${understatPlayers.lastSeenSeason}, excluded.last_seen_season)`,
           sourceHash: sql`CASE
-            WHEN excluded.last_seen_season >= ${understatPlayers.lastSeenSeason}
+            WHEN excluded.last_seen_season >= ${understatPlayers.lastSeenSeason} AND ${understatPlayers.updatedAt} <= ${observedAt.toISOString()}::timestamptz
               THEN excluded.source_hash
             ELSE ${understatPlayers.sourceHash}
           END`,
@@ -635,10 +698,12 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
           OR ${understatPlayers.lastSeenSeason} < excluded.last_seen_season
           OR (
             excluded.last_seen_season >= ${understatPlayers.lastSeenSeason}
+            AND ${understatPlayers.updatedAt} <= ${observedAt.toISOString()}::timestamptz
             AND ${understatPlayers.sourceHash} IS DISTINCT FROM excluded.source_hash
           )
           OR (
-            ${understatPlayers.favoritePosition} IS NULL
+            ${understatPlayers.updatedAt} <= ${observedAt.toISOString()}::timestamptz
+            AND ${understatPlayers.favoritePosition} IS NULL
             AND excluded.favorite_position IS NOT NULL
           )
         `,

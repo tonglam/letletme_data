@@ -24,6 +24,8 @@ export function selectUnsettledUnderstatFanoutIds(
   ].sort((left, right) => left - right);
 }
 
+export class UnderstatFanoutError extends Error {}
+
 export async function enqueueUnderstatFanout(
   label: string,
   tasks: readonly UnderstatFanoutTask[],
@@ -37,7 +39,7 @@ export async function enqueueUnderstatFanout(
   });
 
   if (failures.length > 0) {
-    throw new Error(
+    throw new UnderstatFanoutError(
       `Failed to enqueue ${failures.length} ${label} job(s): ${failures
         .map(({ resourceType, resourceId, message }) => `${resourceType}:${resourceId}: ${message}`)
         .join('; ')}`,
