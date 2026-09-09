@@ -252,6 +252,14 @@ export function createTournamentManagementService(
         tournament.setupPhase === 'queued' ||
         tournament.setupPhase === 'failed')
     ) {
+      // The committed marker owns the handoff even before BullMQ accepts it.
+      // Only a terminal failed resume may use queue absence to permit retry.
+      if (tournament.setupStatus !== 'failed' || tournament.rosterSyncStatus !== 'failed') {
+        throw new ConflictError(
+          'Tournament activation is already reconciling its authoritative roster.',
+          'TOURNAMENT_RESUME_PENDING',
+        );
+      }
       const [reconcileJob, setupJob] = await Promise.all([
         findRosterReconcileJob(
           season,
@@ -588,10 +596,8 @@ export function createTournamentManagementService(
                 const owner = await rosterRepository.findById(season, tournamentId, {
                   forUpdate: true,
                 });
-                const latest = await repository.findById(season, tournamentId);
                 if (
                   !owner ||
-                  latest?.updatedAt !== prepared.tournament.updatedAt ||
                   owner.state !== 'active' ||
                   owner.rosterMode !== 'official_sync' ||
                   owner.rosterSyncStatus !== 'pending' ||

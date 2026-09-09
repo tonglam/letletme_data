@@ -803,9 +803,9 @@ for (const changedDuringLookup of [false, true]) {
   });
 }
 
-for (const outcome of ['failed', 'paused', 'accepted'] as const) {
+for (const outcome of ['failed', 'paused', 'accepted', 'renamed'] as const) {
   test(`roster mode handoff runs after commit and preserves ${outcome} outcome`, async () => {
-    const pending = {
+    let pending = {
       ...tournament,
       rosterMode: 'official_sync' as const,
       rosterSyncStatus: 'pending' as const,
@@ -849,13 +849,15 @@ for (const outcome of ['failed', 'paused', 'accepted'] as const) {
         expect(inScope).toBe(false);
         expect(committed).toBe(true);
         if (outcome === 'paused') owner = { ...owner, state: 'inactive' };
+        if (outcome === 'renamed')
+          pending = { ...pending, name: 'Renamed', updatedAt: 'new-name-version' };
         throw queueError;
       },
     });
     const operation = service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' });
     if (outcome === 'accepted') await expect(operation).resolves.toEqual(pending);
     else await expect(operation).rejects.toBe(queueError);
-    expect(failures).toBe(outcome === 'failed' ? 1 : 0);
+    expect(failures).toBe(outcome === 'failed' || outcome === 'renamed' ? 1 : 0);
   });
 }
 
@@ -884,3 +886,32 @@ test('roster retry performs queue admission after the lifecycle check commits', 
     operationId: 'retry-job',
   });
 });
+
+for (const action of ['retrySetup', 'retryRoster'] as const) {
+  test(`${action} respects committed official resume intent before queue handoff`, async () => {
+    const pending = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'processing' as const,
+      setupStatus: 'pending' as const,
+      setupPhase: 'queued' as const,
+      setupProgressUpdatedAt: 'resume-intent',
+    };
+    let queueReads = 0;
+    const service = createTestService(createRepository({ findById: async () => pending }), {
+      findSetupJob: async () => {
+        queueReads += 1;
+        return null;
+      },
+      findRosterReconcileJob: async () => {
+        queueReads += 1;
+        return null;
+      },
+    });
+    await expect(service[action](42, { adminEntryId: 123 })).rejects.toMatchObject({
+      code: 'TOURNAMENT_RESUME_PENDING',
+    });
+    expect(queueReads).toBe(0);
+  });
+}
