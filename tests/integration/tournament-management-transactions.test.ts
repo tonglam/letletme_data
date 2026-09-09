@@ -41,6 +41,7 @@ test('official resume queue observes committed intent outside the lifecycle tran
           await db`INSERT INTO ops.mutation_scopes(scope_key,last_used_at) VALUES(${marker},clock_timestamp())`;
           return marker;
         },
+        markSyncPending: async () => 'retry-marker',
         markSyncFailed: async () => undefined,
       },
       enqueueRosterReconcile: async () => {
@@ -112,3 +113,59 @@ for (const cleanupFails of [false, true]) {
     }
   });
 }
+
+test('roster retry intent creates a committed marker that fences old queue claims', async () => {
+  const { explicitSeasonRef } = await import('../../src/domain/fpl-season');
+  const { tournamentRosterRepository } = await import('../../src/repositories/tournament-roster');
+  const { withMutationScopes } = await import('../../src/utils/mutation-scopes');
+  const { tournamentSetupLifecycleScope } = await import('../../src/domain/mutation-scope');
+  const season = explicitSeasonRef('9899');
+  const id = 995908;
+  const scope = tournamentSetupLifecycleScope(id);
+  try {
+    await observer`INSERT INTO fpl.seasons(season_id,season_code,display_name,start_year,end_year,lifecycle_state)
+      VALUES(${season.seasonId},${season.seasonCode},'Roster retry intent fixture',2098,2099,'reference_only')`;
+    await observer`INSERT INTO competition.entries(season_id,entry_id,entry_name,player_name) VALUES(${season.seasonId},${id},'Fixture','Fixture')`;
+    await observer`INSERT INTO competition.tournaments(season_id,tournament_id,name,creator,admin_entry_id,league_id,league_type,total_team_num,tournament_mode,group_mode,group_auto_averages,state,roster_mode,roster_sync_status,setup_status)
+      VALUES(${season.seasonId},${id},'Retry intent fixture','integration-test',${id},${id},'classic',2,'normal','no_group',false,'active','official_sync','failed','ready')`;
+    const old = await tournamentRosterRepository.findById(season, id);
+    const marker = await withMutationScopes(
+      { queueName: 'tournament-management', jobName: 'retry-intent-fixture', scopes: [scope] },
+      async () => {
+        const marker = await tournamentRosterRepository.markSyncPending(season, id);
+        const [beforeCommit] =
+          await observer`SELECT roster_sync_status FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
+        expect(beforeCommit!.roster_sync_status).toBe('failed');
+        return marker;
+      },
+    );
+    const pending = await tournamentRosterRepository.findById(season, id);
+    expect(pending!.rosterSyncStatus).toBe('pending');
+    expect(pending!.setupProgressUpdatedAt).toBe(marker);
+    expect(pending!.executionId).not.toBeNull();
+    expect(pending!.setupStatus).toBe('ready');
+    expect(
+      await tournamentRosterRepository.markSyncProcessingIfMarker(
+        season,
+        id,
+        old!.setupProgressUpdatedAt,
+      ),
+    ).toBe(false);
+    expect(await tournamentRosterRepository.markSyncProcessingIfMarker(season, id, marker)).toBe(
+      true,
+    );
+    expect(
+      await tournamentRosterRepository.markSyncFailedIfOwned(
+        season,
+        id,
+        pending!,
+        'late queue error',
+      ),
+    ).toBe(false);
+  } finally {
+    await observer`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
+    await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${id}`;
+    await observer`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
+    await observer`DELETE FROM ops.mutation_scopes WHERE scope_key=${scope}`;
+  }
+});

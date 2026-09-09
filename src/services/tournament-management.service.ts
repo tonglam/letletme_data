@@ -128,7 +128,11 @@ export type TournamentManagementLifecycle = {
   assertRosterBoundary?: typeof assertTournamentRosterPreGameweekBoundary;
   rosterRepository?: Pick<
     typeof tournamentRosterRepository,
-    'findById' | 'markResumeProcessingWithMarker' | 'markResumeProcessing' | 'markSyncFailed'
+    | 'findById'
+    | 'markResumeProcessingWithMarker'
+    | 'markResumeProcessing'
+    | 'markSyncFailed'
+    | 'markSyncPending'
   >;
   infoRepository?: Pick<typeof tournamentInfoRepository, 'markSetupResult'>;
   enqueueRosterReconcile?: typeof enqueueTournamentRosterReconcile;
@@ -241,6 +245,12 @@ export function createTournamentManagementService(
     season: FplSeasonRef,
     tournament: TournamentManagementRecord,
   ) => {
+    if (tournament.rosterMode === 'official_sync' && tournament.rosterSyncStatus === 'pending') {
+      throw new ConflictError(
+        'Tournament roster reconciliation is already pending.',
+        'TOURNAMENT_RESUME_PENDING',
+      );
+    }
     if (
       tournament.rosterMode === 'official_sync' &&
       tournament.state === 'inactive' &&
@@ -254,7 +264,7 @@ export function createTournamentManagementService(
     ) {
       // The committed marker owns the handoff even before BullMQ accepts it.
       // Only a terminal failed resume may use queue absence to permit retry.
-      if (tournament.setupStatus !== 'failed' || tournament.rosterSyncStatus !== 'failed') {
+      if (tournament.setupStatus !== 'failed') {
         throw new ConflictError(
           'Tournament activation is already reconciling its authoritative roster.',
           'TOURNAMENT_RESUME_PENDING',
@@ -463,7 +473,7 @@ export function createTournamentManagementService(
                 if (accepted) return;
                 const message =
                   error instanceof Error ? error.message : 'Unable to enqueue resume.';
-                await scopeRunner(
+                const completed = await scopeRunner(
                   {
                     queueName: 'tournament-management',
                     jobName: 'tournament-resume-failure',
@@ -475,15 +485,25 @@ export function createTournamentManagementService(
                       forUpdate: true,
                     });
                     if (
+                      currentOwner?.setupProgressUpdatedAt === resumeMarker &&
+                      currentOwner.rosterMode === 'official_sync' &&
+                      currentOwner.rosterSyncStatus === 'ready' &&
+                      currentOwner.setupStatus === 'ready' &&
+                      (currentOwner.state === 'active' || currentOwner.state === 'finished')
+                    )
+                      return true;
+                    if (
                       !owner ||
                       !currentOwner ||
                       !ownsTournamentRosterExecution(currentOwner, owner)
                     )
-                      return;
+                      return false;
                     await rosterRepository.markSyncFailed(season, tournamentId, message);
                     await infoRepository.markSetupResult(season, tournamentId, 'failed', message);
+                    return false;
                   },
                 );
+                if (completed) return;
                 throw error;
               }
             };
@@ -643,8 +663,9 @@ export function createTournamentManagementService(
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
       const observed = await assertCanManage(season, tournamentId, payload);
-      await assertNoPendingOfficialResume(season, observed);
-      const expectedProgressMarker = await scopeRunner(
+      if (observed.rosterSyncStatus !== 'pending')
+        await assertNoPendingOfficialResume(season, observed);
+      const prepared = await scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-roster-retry',
@@ -674,20 +695,77 @@ export function createTournamentManagementService(
             );
           }
           await assertRosterBoundary(season);
-          const rosterState = await rosterRepository.findById(season, tournamentId);
-          return rosterState?.setupProgressUpdatedAt ?? null;
+          const existingIntent = await rosterRepository.findById(season, tournamentId);
+          if (
+            existingIntent?.rosterSyncStatus === 'pending' &&
+            existingIntent.executionId &&
+            existingIntent.setupProgressUpdatedAt
+          ) {
+            return { marker: existingIntent.setupProgressUpdatedAt, owner: existingIntent };
+          }
+          const marker = await rosterRepository.markSyncPending(season, tournamentId);
+          return { marker, owner: await rosterRepository.findById(season, tournamentId) };
         },
       );
-      const job = await enqueueRosterReconcile(season, tournamentId, 'manual', {
-        allowInactive: true,
-        settleBoundaryFailure: true,
-        expectedProgressMarker,
-      });
+      let operationId: string | null = null;
+      try {
+        const job = await enqueueRosterReconcile(season, tournamentId, 'manual', {
+          allowInactive: true,
+          settleBoundaryFailure: true,
+          expectedProgressMarker: prepared.marker,
+        });
+        operationId = job.id ?? null;
+      } catch (error) {
+        const accepted = await findRosterReconcileJob(
+          season,
+          tournamentId,
+          false,
+          undefined,
+          prepared.marker,
+          true,
+        ).catch(() => null);
+        if (accepted) operationId = accepted.id ?? null;
+        else {
+          const advanced = await scopeRunner(
+            {
+              queueName: 'tournament-management',
+              jobName: 'tournament-roster-retry-failure',
+              tournamentId,
+              scopes: [tournamentSetupLifecycleScope(tournamentId)],
+            },
+            async () => {
+              const currentOwner = await rosterRepository.findById(season, tournamentId, {
+                forUpdate: true,
+              });
+              if (
+                prepared.owner &&
+                currentOwner &&
+                ownsTournamentRosterExecution(currentOwner, prepared.owner)
+              ) {
+                await rosterRepository.markSyncFailed(
+                  season,
+                  tournamentId,
+                  error instanceof Error ? error.message : 'Unable to enqueue roster retry.',
+                );
+                return false;
+              }
+              return Boolean(
+                currentOwner &&
+                  currentOwner.setupProgressUpdatedAt === prepared.marker &&
+                  currentOwner.rosterMode === 'official_sync' &&
+                  currentOwner.executionId !== prepared.owner?.executionId,
+              );
+            },
+          );
+          if (!advanced) throw error;
+        }
+      }
+
       return {
         tournamentId,
         changed: false,
         queued: true,
-        operationId: job.id ?? null,
+        operationId,
         status: 'pending' as const,
       };
     },

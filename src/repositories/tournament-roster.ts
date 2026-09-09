@@ -306,6 +306,24 @@ export const tournamentRosterRepository = {
     return rows.length === 1;
   },
 
+  markSyncPending: async (season: FplSeasonRef, tournamentId: number): Promise<string> => {
+    const client = await getDbClient();
+    const rows = await client<{ marker: string }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'pending', roster_sync_execution_id = gen_random_uuid(),
+          roster_sync_error = NULL, setup_progress_updated_at = clock_timestamp(), updated_at = clock_timestamp()
+      WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        AND roster_mode = 'official_sync' AND state <> 'finished'
+      RETURNING setup_progress_updated_at::text AS marker
+    `;
+    if (!rows[0])
+      throw new DatabaseError(
+        'Tournament roster retry intent was not written.',
+        'TOURNAMENT_NOT_FOUND',
+      );
+    return rows[0].marker;
+  },
+
   markSyncProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     const client = await getDbClient();
     await client`

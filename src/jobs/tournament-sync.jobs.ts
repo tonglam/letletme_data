@@ -589,12 +589,13 @@ export async function findTournamentRosterReconcileJob(
   resumeAfterSetup: boolean,
   resumeMarker?: string,
   expectedProgressMarker?: string | null,
+  allowInactive = false,
 ) {
   const logicalJobId = getTournamentRosterReconcileLogicalJobId(
     tournamentId,
     resumeAfterSetup,
     resumeMarker,
-    undefined,
+    allowInactive,
     undefined,
     expectedProgressMarker,
   );
