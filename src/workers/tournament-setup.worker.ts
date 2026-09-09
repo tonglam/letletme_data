@@ -140,14 +140,9 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
         if (
           observedResume?.rosterMode === 'official_sync' &&
           observedResume.state === 'inactive' &&
-          (observedResume.rosterSyncStatus === 'processing' ||
-            observedResume.rosterSyncStatus === 'failed') &&
-          (observedResume.setupStatus === 'pending' ||
-            observedResume.setupStatus === 'processing' ||
-            observedResume.setupStatus === 'failed') &&
-          (observedResume.setupPhase === 'queued' ||
-            observedResume.setupPhase === 'failed' ||
-            observedResume.setupStatus === 'processing')
+          observedResume.rosterSyncStatus === 'failed' &&
+          observedResume.setupStatus === 'failed' &&
+          (observedResume.setupPhase === 'queued' || observedResume.setupPhase === 'failed')
         ) {
           const [reconcileJob, setupJob] = await Promise.all([
             findTournamentRosterReconcileJob(
@@ -200,6 +195,15 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
                 roster.setupStatus === 'processing');
 
             if (resumePending) {
+              // A committed in-progress resume owns the handoff before a
+              // queue job is visible. Unmarked work cannot bypass its roster.
+              if (roster.rosterSyncStatus !== 'failed' || roster.setupStatus !== 'failed') {
+                logInfo('Ignoring unmarked setup during committed official resume', {
+                  tournamentId: job.data.tournamentId,
+                  jobId: job.id,
+                });
+                return null;
+              }
               if (job.data.source === 'watchdog') {
                 // Watchdog recovery replays the marker-pinned roster
                 // operation first; it must never rebuild from an old
