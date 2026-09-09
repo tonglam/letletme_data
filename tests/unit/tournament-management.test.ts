@@ -815,6 +815,7 @@ for (const outcome of [
   'accepted',
   'renamed',
   'completed',
+  'completed-same-execution',
   'newer-marker',
 ] as const) {
   test(`roster mode handoff runs after commit and preserves ${outcome} outcome`, async () => {
@@ -865,10 +866,14 @@ for (const outcome of [
         if (outcome === 'paused') owner = { ...owner, state: 'inactive' };
         if (outcome === 'renamed')
           pending = { ...pending, name: 'Renamed', updatedAt: 'new-name-version' };
-        if (outcome === 'completed' || outcome === 'newer-marker') {
+        if (
+          outcome === 'completed' ||
+          outcome === 'completed-same-execution' ||
+          outcome === 'newer-marker'
+        ) {
           owner = {
             ...owner,
-            executionId: 'worker-execution',
+            executionId: outcome === 'completed-same-execution' ? null : 'worker-execution',
             rosterSyncStatus: 'ready',
             setupProgressUpdatedAt: outcome === 'newer-marker' ? 'other-operation' : null,
           };
@@ -878,9 +883,10 @@ for (const outcome of [
       },
     });
     const operation = service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' });
-    if (outcome === 'accepted' || outcome === 'completed')
+    if (outcome === 'accepted' || outcome === 'completed' || outcome === 'completed-same-execution')
       await expect(operation).resolves.toMatchObject({
-        rosterSyncStatus: outcome === 'completed' ? 'ready' : 'pending',
+        rosterSyncStatus:
+          outcome === 'completed' || outcome === 'completed-same-execution' ? 'ready' : 'pending',
       });
     else await expect(operation).rejects.toBe(queueError);
     expect(failures).toBe(outcome === 'failed' || outcome === 'renamed' ? 1 : 0);
@@ -1004,7 +1010,7 @@ test('official resume accepts durable completion after a lost queue response', a
 });
 
 for (const state of ['active', 'inactive'] as const) {
-  for (const outcome of ['accepted', 'failed', 'advanced'] as const) {
+  for (const outcome of ['accepted', 'failed', 'advanced', 'terminal-failed'] as const) {
     test(`roster retry commits pending intent before handoff (${state}, ${outcome})`, async () => {
       let current = {
         ...tournament,
@@ -1072,15 +1078,20 @@ for (const state of ['active', 'inactive'] as const) {
             await expect(service.retrySetup(42, { adminEntryId: 123 })).rejects.toMatchObject({
               code: 'TOURNAMENT_RESUME_PENDING',
             });
-            if (outcome === 'advanced')
-              owner = { ...owner, executionId: 'worker-owner', rosterSyncStatus: 'ready' };
+            if (outcome === 'advanced' || outcome === 'terminal-failed')
+              owner = {
+                ...owner,
+                executionId: 'worker-owner',
+                rosterSyncStatus: outcome === 'advanced' ? 'ready' : 'failed',
+              };
             if (outcome !== 'accepted') throw new Error('queue response lost');
             return { id: 'accepted-retry' } as never;
           },
         },
       );
       const result = service.retryRoster(42, { adminEntryId: 123 });
-      if (outcome === 'failed') await expect(result).rejects.toThrow('queue response lost');
+      if (outcome === 'failed' || outcome === 'terminal-failed')
+        await expect(result).rejects.toThrow('queue response lost');
       else await expect(result).resolves.toMatchObject({ queued: true });
       expect(failures).toBe(outcome === 'failed' ? 1 : 0);
     });

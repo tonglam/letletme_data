@@ -169,3 +169,28 @@ test('roster retry intent creates a committed marker that fences old queue claim
     await observer`DELETE FROM ops.mutation_scopes WHERE scope_key=${scope}`;
   }
 });
+
+test('scheduled roster recovery includes an inactive pending retry marker', async () => {
+  const { explicitSeasonRef } = await import('../../src/domain/fpl-season');
+  const { tournamentRosterRepository } = await import('../../src/repositories/tournament-roster');
+  const season = explicitSeasonRef('9798');
+  const id = 995909;
+  try {
+    await observer`INSERT INTO fpl.seasons(season_id,season_code,display_name,start_year,end_year,lifecycle_state)
+      VALUES(${season.seasonId},${season.seasonCode},'Inactive roster recovery fixture',2097,2098,'reference_only')`;
+    await observer`INSERT INTO competition.entries(season_id,entry_id,entry_name,player_name) VALUES(${season.seasonId},${id},'Fixture','Fixture')`;
+    await observer`INSERT INTO competition.tournaments(season_id,tournament_id,name,creator,admin_entry_id,league_id,league_type,total_team_num,tournament_mode,group_mode,group_auto_averages,state,roster_mode,roster_sync_status,setup_status)
+      VALUES(${season.seasonId},${id},'Inactive roster recovery fixture','integration-test',${id},${id},'classic',2,'normal','no_group',false,'inactive','official_sync','pending','ready')`;
+    const candidates =
+      await tournamentRosterRepository.findOfficialSyncReconciliationCandidates(season);
+    expect(candidates.map((candidate) => candidate.id)).toContain(id);
+    expect(candidates.find((candidate) => candidate.id === id)).toMatchObject({
+      state: 'inactive',
+      rosterSyncStatus: 'pending',
+    });
+  } finally {
+    await observer`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
+    await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${id}`;
+    await observer`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
+  }
+});

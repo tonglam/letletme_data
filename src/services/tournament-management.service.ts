@@ -153,6 +153,41 @@ type MutationScopeRunner = <T>(
   operation: () => Promise<T>,
 ) => Promise<T>;
 
+type RosterHandoffState = Pick<
+  NonNullable<Awaited<ReturnType<typeof tournamentRosterRepository.findById>>>,
+  'executionId' | 'setupProgressUpdatedAt' | 'rosterMode' | 'rosterSyncStatus' | 'state'
+>;
+
+function hasAdvancedRosterHandoff(
+  current: RosterHandoffState | null,
+  captured: RosterHandoffState | null | undefined,
+  marker: string | null,
+  statuses: ReadonlyArray<NonNullable<RosterHandoffState['rosterSyncStatus']>>,
+): boolean {
+  if (!current || !captured) return false;
+  if (
+    current.setupProgressUpdatedAt !== marker ||
+    current.rosterMode !== 'official_sync' ||
+    !statuses.includes(
+      current.rosterSyncStatus as NonNullable<RosterHandoffState['rosterSyncStatus']>,
+    )
+  ) {
+    return false;
+  }
+  if (current.state !== 'active' && current.state !== 'inactive' && current.state !== 'finished') {
+    return false;
+  }
+
+  // A worker normally claims a fresh execution ID. A completed worker can
+  // leave the captured ID in place, however, when the handoff started from an
+  // already pending marker and only the durable status was advanced. Both are
+  // completion evidence; a same-marker terminal failure is deliberately not.
+  return (
+    current.executionId !== captured.executionId ||
+    (captured.rosterSyncStatus === 'pending' && current.rosterSyncStatus === 'ready')
+  );
+}
+
 type SnapshotResumeDependencies = {
   enqueue: (
     tournamentId: number,
@@ -617,13 +652,10 @@ export function createTournamentManagementService(
                   forUpdate: true,
                 });
                 if (
-                  owner &&
-                  owner.executionId !== null &&
-                  owner.executionId !== prepared.owner?.executionId &&
-                  owner.setupProgressUpdatedAt === expectedProgressMarker &&
-                  owner.rosterMode === 'official_sync' &&
-                  (owner.state === 'active' || owner.state === 'finished') &&
-                  (owner.rosterSyncStatus === 'ready' || owner.rosterSyncStatus === 'processing')
+                  hasAdvancedRosterHandoff(owner, prepared.owner, expectedProgressMarker, [
+                    'ready',
+                    'processing',
+                  ])
                 )
                   return true;
                 if (
@@ -760,12 +792,10 @@ export function createTournamentManagementService(
                 );
                 return false;
               }
-              return Boolean(
-                currentOwner &&
-                  currentOwner.setupProgressUpdatedAt === prepared.marker &&
-                  currentOwner.rosterMode === 'official_sync' &&
-                  currentOwner.executionId !== prepared.owner?.executionId,
-              );
+              return hasAdvancedRosterHandoff(currentOwner, prepared.owner, prepared.marker, [
+                'ready',
+                'processing',
+              ]);
             },
           );
           if (!advanced) throw error;
