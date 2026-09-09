@@ -334,9 +334,47 @@ acquire_source_media_deploy_fence() {
   return 1
 }
 
+source_media_worker_container_id() {
+  local project running_oneoff container_id
+  if ! project=$(compose_project_name_for_cleanup); then
+    log_error "Could not resolve the Compose project for source-media worker lookup"
+    return 1
+  fi
+  # Keep Compose and Docker lookup failures distinct from an empty service. A
+  # failed daemon or project lookup must stop the deploy before migrations.
+  if ! running_oneoff=$(docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.service=media-worker' \
+    --filter 'label=com.docker.compose.oneoff=True'); then
+    log_error "Could not enumerate source-media one-off containers"
+    return 1
+  fi
+  if [[ -n "$running_oneoff" ]]; then
+    log_error "A source-media one-off probe is still running; refusing migrations"
+    return 1
+  fi
+  if ! container_id=$(docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.service=media-worker' \
+    --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+    log_error "Could not enumerate running source-media worker containers"
+    return 1
+  fi
+  if [[ -z "$container_id" ]]; then
+    if ! container_id=$(docker ps -aq \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter 'label=com.docker.compose.service=media-worker' \
+      --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+      log_error "Could not enumerate source-media worker containers"
+      return 1
+    fi
+  fi
+  printf '%s\n' "$container_id"
+}
+
 stop_source_media_worker_with_deadline() {
   local container_id state service
-  container_id=$(compose_direct ps -aq media-worker | head -n 1)
+  container_id=$(source_media_worker_container_id)
   if [[ -z "$container_id" ]]; then
     log_info "No source-media worker container exists; continuing without its lifecycle"
     return 0

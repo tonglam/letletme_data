@@ -276,6 +276,17 @@ describe('release workflow gates', () => {
     expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
+    expect(deployScript).toContain('source_media_worker_container_id()');
+    expect(deployScript).toContain('Could not enumerate running source-media worker containers');
+    expect(deployScript).toContain('label=com.docker.compose.oneoff=True');
+    expect(deployScript).toContain('label=com.docker.compose.oneoff=False');
+    expect(sourceMediaRolloutWorkflow).toContain('media_worker_container_id()');
+    expect(sourceMediaRolloutWorkflow).toContain('label=com.docker.compose.oneoff=True');
+    expect(sourceMediaRolloutWorkflow).toContain('label=com.docker.compose.oneoff=False');
+    expect(sourceMediaRolloutWorkflow).toContain('current_container=$(media_worker_container_id)');
+    expect(sourceMediaRolloutWorkflow).not.toContain(
+      'current_container=$(docker compose ps -aq media-worker',
+    );
     expect(deployScript).not.toContain('old_media_container=$(compose ps -q media-worker');
     expect(deployScript).toContain('acquire_source_media_deploy_fence');
     expect(deployScript).toContain('source_media_deploy_fence_is_active');
@@ -352,6 +363,45 @@ describe('release workflow gates', () => {
     );
     expect(queueQuiescence).toContain('connect_timeout: 5');
     expect(queueQuiescence).toContain('statement_timeout: 5_000');
+
+    const helperStart = deployScript.indexOf('source_media_worker_container_id() {');
+    const helperEnd = deployScript.indexOf(
+      '\n}\n\nstop_source_media_worker_with_deadline()',
+      helperStart,
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helper = deployScript.slice(helperStart, helperEnd + 2);
+    const lookupResult = Bun.spawnSync(
+      [
+        'bash',
+        '-c',
+        String.raw`set -euo pipefail
+${helper}
+compose_project_name_for_cleanup() { printf project; }
+log_error() { printf '%s\n' "$1" >&2; }
+docker() {
+  [[ "$1" = ps ]] || return 1
+  if [[ "$*" = *'label=com.docker.compose.oneoff=True'* ]]; then
+    [[ "$MOCK_MODE" = oneoff ]] && printf 'probe\n'
+    [[ "$MOCK_MODE" = error ]] && return 1
+    return 0
+  fi
+  [[ "$MOCK_MODE" = error ]] && return 1
+  if [[ "$*" = *'ps -aq'* ]]; then
+    [[ "$MOCK_MODE" = stopped ]] && printf 'stopped\n'
+  elif [[ "$MOCK_MODE" = running ]]; then
+    printf 'durable\n'
+  fi
+}
+test "$(MOCK_MODE=running source_media_worker_container_id)" = durable
+test "$(MOCK_MODE=stopped source_media_worker_container_id)" = stopped
+if MOCK_MODE=oneoff source_media_worker_container_id >/dev/null 2>&1; then exit 1; fi
+if MOCK_MODE=error source_media_worker_container_id >/dev/null 2>&1; then exit 1; fi`,
+      ],
+      { stdout: 'pipe', stderr: 'pipe' },
+    );
+    expect(lookupResult.exitCode).toBe(0);
   });
 
   test('keeps the source-media catalog probe independent of streamed stdin and Compose status output', () => {

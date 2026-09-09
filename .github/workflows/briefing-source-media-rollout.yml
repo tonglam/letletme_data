@@ -94,13 +94,48 @@ jobs:
             fi
 
             export CONTENT_MEDIA_ENV_FILE="$media_env_file"
+            media_worker_container_id() {
+              local project running_oneoff container_id
+              if ! project=$(compose_project_name_for_cleanup); then
+                echo 'source-media rollout: could not resolve the Compose project' >&2
+                return 1
+              fi
+              if ! running_oneoff=$(docker ps -q \
+                --filter "label=com.docker.compose.project=$project" \
+                --filter 'label=com.docker.compose.service=media-worker' \
+                --filter 'label=com.docker.compose.oneoff=True'); then
+                echo 'source-media rollout: could not enumerate one-off containers' >&2
+                return 1
+              fi
+              if [ -n "$running_oneoff" ]; then
+                echo 'source-media rollout: a one-off probe is still running; refusing rollout' >&2
+                return 1
+              fi
+              if ! container_id=$(docker ps -q \
+                --filter "label=com.docker.compose.project=$project" \
+                --filter 'label=com.docker.compose.service=media-worker' \
+                --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+                echo 'source-media rollout: could not enumerate running worker containers' >&2
+                return 1
+              fi
+              if [ -z "$container_id" ]; then
+                if ! container_id=$(docker ps -aq \
+                  --filter "label=com.docker.compose.project=$project" \
+                  --filter 'label=com.docker.compose.service=media-worker' \
+                  --filter 'label=com.docker.compose.oneoff=False' | head -n 1); then
+                  echo 'source-media rollout: could not enumerate worker containers' >&2
+                  return 1
+                fi
+              fi
+              printf '%s\n' "$container_id"
+            }
             target_container=$(docker compose ps -q api | head -n 1)
             test -n "$target_container"
             target_image=$(docker inspect --format '{{.Config.Image}}' "$target_container")
             test -n "$target_image"
             target_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$target_image")
             test "$target_revision" = "$ROLLOUT_SHA"
-            current_container=$(docker compose ps -aq media-worker | head -n 1)
+            current_container=$(media_worker_container_id)
             previous_media_present=false
             previous_media_was_running=false
             previous_media_image=''
@@ -274,7 +309,7 @@ jobs:
 
             wait_for_media_worker() {
               expected_image=${1:-$target_image}
-              container=$(docker compose ps -q media-worker | head -n 1)
+              container=$(media_worker_container_id)
               test -n "$container"
               test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$expected_image"
               for attempt in $(seq 1 30); do
@@ -380,7 +415,7 @@ jobs:
             scripts/configure-briefing-source-media-env.sh "$ROLLOUT_MODE" "$media_env_file"
             if ! APP_IMAGE="$target_image" docker compose up -d --no-build --force-recreate media-worker; then
               if [ "$previous_media_present" = false ]; then
-                created_media_container=$(docker compose ps -aq media-worker | head -n 1 || true)
+                created_media_container=$(media_worker_container_id)
                 if [ -n "$created_media_container" ]; then worker_created=true; fi
               else
                 worker_restore_needed=true
@@ -389,7 +424,7 @@ jobs:
             fi
             if [ "$previous_media_present" = true ]; then worker_restore_needed=true; fi
             if [ "$previous_media_present" = false ]; then
-              created_media_container=$(docker compose ps -aq media-worker | head -n 1)
+              created_media_container=$(media_worker_container_id)
               test -n "$created_media_container"
               worker_created=true
             fi
