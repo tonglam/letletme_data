@@ -221,13 +221,14 @@ type SnapshotResumeDependencies = {
 export async function requestSnapshotTournamentResume(
   tournamentId: number,
   dependencies: SnapshotResumeDependencies,
+  options?: { resumePrepared?: boolean },
 ): Promise<void> {
-  let resumePrepared = false;
+  let resumePrepared = options?.resumePrepared === true;
   try {
     await dependencies.enqueue(tournamentId, 'resume', {
       forceNew: true,
       prepareEnqueue: async () => {
-        await dependencies.markResumeProcessing(tournamentId);
+        if (!options?.resumePrepared) await dependencies.markResumeProcessing(tournamentId);
         resumePrepared = true;
       },
     });
@@ -561,14 +562,23 @@ export function createTournamentManagementService(
               }
             };
           } else {
-            await requestSnapshotTournamentResume(tournamentId, {
-              enqueue: (id, source, options) => enqueueSnapshotSetup(season, id, source, options),
-              markResumeProcessing: (id) => rosterRepository.markResumeProcessing(season, id),
-              markRosterFailed: (id, message) =>
-                rosterRepository.markSyncFailed(season, id, message),
-              markSetupFailed: (id, message) =>
-                infoRepository.markSetupResult(season, id, 'failed', message),
-            });
+            // Commit the durable resume marker with the lifecycle transition;
+            // queue inspection/admission runs after this transaction returns.
+            await rosterRepository.markResumeProcessing(season, tournamentId);
+            return async () =>
+              requestSnapshotTournamentResume(
+                tournamentId,
+                {
+                  enqueue: (id, source, options) =>
+                    enqueueSnapshotSetup(season, id, source, options),
+                  markResumeProcessing: (id) => rosterRepository.markResumeProcessing(season, id),
+                  markRosterFailed: (id, message) =>
+                    rosterRepository.markSyncFailed(season, id, message),
+                  markSetupFailed: (id, message) =>
+                    infoRepository.markSetupResult(season, id, 'failed', message),
+                },
+                { resumePrepared: true },
+              );
           }
           return undefined;
         },
