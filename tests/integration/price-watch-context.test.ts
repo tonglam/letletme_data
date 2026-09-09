@@ -85,6 +85,18 @@ test('returns context only and discovers deadlines without Redis or season disco
   });
   expect(await loadActivePriceChangeContext({ ...season, seasonCode: '9495' })).toBeNull();
 });
+
+test('falls back to durable context when the active Redis publication is unavailable', async () => {
+  await redis.del(
+    activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
+    ...prepared.items.map((item) => item.manifest.key),
+  );
+
+  await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
+    status: 'READY',
+    nextDeadlines: context.nextDeadlines,
+  });
+});
 test('does not accept a missing or retired active context', async () => {
   await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();

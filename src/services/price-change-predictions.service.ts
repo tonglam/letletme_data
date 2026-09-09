@@ -8,7 +8,10 @@ import {
 } from '../cache/data-publication';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import {
+  loadActivePriceChangeContext,
+  loadDataPublicationDelivery,
+} from '../repositories/data-publication-outbox';
 import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { seasonRepository } from '../repositories/seasons';
 import {
@@ -1095,10 +1098,16 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
   // consumer publication in Redis and fetch only its small context item so a
   // publication transaction updating PostgreSQL item rows cannot occupy the
   // scheduler's database pool or consume its ten-second resolution budget.
-  const publication = await readActiveDataPublicationItems(
+  const redisPublication = await readActiveDataPublicationItems(
     { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode },
     ['context'],
   );
+  // Redis is the normal path, but the durable row is the source of truth while
+  // an active publication is waiting for outbox delivery or Redis has been
+  // rebuilt. Keep the existing loader as a bounded fallback so a missing cache
+  // cannot silently drop a time-sensitive watch plan.
+  const publication =
+    redisPublication ?? (await loadActivePriceChangeContext(season).catch(() => null));
   return publication ? parsePriceChangeWatchDeadlines(publication, now) : null;
 }
 
