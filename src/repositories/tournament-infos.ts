@@ -656,7 +656,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
               AND ${tournamentsInCompetition.setupStartedAt} IS NULL
               AND ${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT NULL
               THEN ${tournamentsInCompetition.setupProgressUpdatedAt}
-            ELSE ${new Date()}
+            ELSE clock_timestamp()
           END`,
           setupWarningCount: 0,
           setupAttempt: 0,
