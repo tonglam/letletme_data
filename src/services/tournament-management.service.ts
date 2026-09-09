@@ -605,7 +605,7 @@ export function createTournamentManagementService(
             expectedProgressMarker,
           ).catch(() => null);
           if (!accepted) {
-            await scopeRunner(
+            const advanced = await scopeRunner(
               {
                 queueName: 'tournament-management',
                 jobName: 'tournament-roster-mode-failure',
@@ -617,6 +617,16 @@ export function createTournamentManagementService(
                   forUpdate: true,
                 });
                 if (
+                  owner &&
+                  owner.executionId !== null &&
+                  owner.executionId !== prepared.owner?.executionId &&
+                  owner.setupProgressUpdatedAt === expectedProgressMarker &&
+                  owner.rosterMode === 'official_sync' &&
+                  (owner.state === 'active' || owner.state === 'finished') &&
+                  (owner.rosterSyncStatus === 'ready' || owner.rosterSyncStatus === 'processing')
+                )
+                  return true;
+                if (
                   !owner ||
                   owner.state !== 'active' ||
                   owner.rosterMode !== 'official_sync' ||
@@ -624,7 +634,7 @@ export function createTournamentManagementService(
                   owner.setupProgressUpdatedAt !== expectedProgressMarker ||
                   owner.executionId !== prepared.owner?.executionId
                 )
-                  return;
+                  return false;
                 await rosterRepository.markSyncFailed(
                   season,
                   tournamentId,
@@ -632,9 +642,10 @@ export function createTournamentManagementService(
                     ? error.message
                     : 'Unable to enqueue roster reconciliation.',
                 );
+                return false;
               },
             );
-            throw error;
+            if (!advanced) throw error;
           }
         }
       }

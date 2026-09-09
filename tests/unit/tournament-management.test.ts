@@ -809,16 +809,23 @@ for (const changedDuringLookup of [false, true]) {
   });
 }
 
-for (const outcome of ['failed', 'paused', 'accepted', 'renamed'] as const) {
+for (const outcome of [
+  'failed',
+  'paused',
+  'accepted',
+  'renamed',
+  'completed',
+  'newer-marker',
+] as const) {
   test(`roster mode handoff runs after commit and preserves ${outcome} outcome`, async () => {
     let pending = {
       ...tournament,
       rosterMode: 'official_sync' as const,
-      rosterSyncStatus: 'pending' as const,
+      rosterSyncStatus: 'pending' as 'pending' | 'ready',
     };
     let owner = {
-      executionId: null,
-      setupProgressUpdatedAt: null,
+      executionId: null as string | null,
+      setupProgressUpdatedAt: null as string | null,
       state: 'active',
       rosterMode: 'official_sync',
       rosterSyncStatus: 'pending',
@@ -858,11 +865,23 @@ for (const outcome of ['failed', 'paused', 'accepted', 'renamed'] as const) {
         if (outcome === 'paused') owner = { ...owner, state: 'inactive' };
         if (outcome === 'renamed')
           pending = { ...pending, name: 'Renamed', updatedAt: 'new-name-version' };
+        if (outcome === 'completed' || outcome === 'newer-marker') {
+          owner = {
+            ...owner,
+            executionId: 'worker-execution',
+            rosterSyncStatus: 'ready',
+            setupProgressUpdatedAt: outcome === 'newer-marker' ? 'other-operation' : null,
+          };
+          pending = { ...pending, rosterSyncStatus: 'ready' };
+        }
         throw queueError;
       },
     });
     const operation = service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' });
-    if (outcome === 'accepted') await expect(operation).resolves.toEqual(pending);
+    if (outcome === 'accepted' || outcome === 'completed')
+      await expect(operation).resolves.toMatchObject({
+        rosterSyncStatus: outcome === 'completed' ? 'ready' : 'pending',
+      });
     else await expect(operation).rejects.toBe(queueError);
     expect(failures).toBe(outcome === 'failed' || outcome === 'renamed' ? 1 : 0);
   });
