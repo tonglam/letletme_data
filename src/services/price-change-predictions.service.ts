@@ -1126,7 +1126,12 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
       redisPublication.manifest.revision === canonicalManifest.revision
     ) {
       const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
-      if (deadlines) return deadlines;
+      // This Redis publication is already fenced to the canonical durable
+      // identity. If its context is semantically unusable (for example, it
+      // has reached the hard expiry), reloading the same immutable players
+      // rows from PostgreSQL cannot produce a different answer and would
+      // recreate the control-plane pressure this fast path avoids.
+      return deadlines;
     }
   }
 

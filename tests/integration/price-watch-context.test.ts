@@ -165,6 +165,42 @@ test('falls back when a Redis publication sibling is missing', async () => {
   });
 });
 
+test('does not reload durable players after a canonical Redis context is unusable', async () => {
+  const invalidContext = { ...context, unexpected: true };
+  const invalid = prepareDataPublication({
+    ...season,
+    dataset: 'fpl:price-changes',
+    revision: prepared.manifest.revision,
+    publicationId,
+    sourceCheckedAt: now,
+    state: 'active',
+    items: [
+      { name: 'context', value: invalidContext },
+      { name: 'players', value: [{ unused: 'x'.repeat(400000) }] },
+    ],
+  });
+  await redis.set(
+    activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
+    JSON.stringify(invalid.manifest),
+  );
+  await Promise.all(invalid.items.map((item) => redis.set(item.manifest.key, item.payload)));
+
+  expect(await getPriceChangeWatchDeadlines(season, now)).toBeNull();
+});
+
+test('rejects a Redis pointer whose manifest identity disagrees with database columns', async () => {
+  const foreignPublicationId = '00000000-0000-4000-8000-000000009395';
+  const invalidManifest = { ...prepared.manifest, publicationId: foreignPublicationId };
+  await db`UPDATE ops.dataset_publications SET manifest=${db.json(invalidManifest as never)}
+    WHERE publication_id=${publicationId}`;
+  await redis.set(
+    activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
+    JSON.stringify(invalidManifest),
+  );
+
+  expect(await getPriceChangeWatchDeadlines(season, now)).toBeNull();
+});
+
 test('does not accept a missing or retired active context', async () => {
   await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();

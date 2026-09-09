@@ -1019,7 +1019,11 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     ): Promise<DataPublicationManifest | null> => {
       const db = await getDbInstance();
       const rows = await db
-        .select({ manifest: datasetPublicationsInOps.manifest })
+        .select({
+          publicationId: datasetPublicationsInOps.publicationId,
+          revision: datasetPublicationsInOps.revision,
+          manifest: datasetPublicationsInOps.manifest,
+        })
         .from(datasetPublicationsInOps)
         .where(
           and(
@@ -1028,13 +1032,16 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           ),
         )
         .limit(1);
-      const raw = rows[0]?.manifest;
+      const row = rows[0];
+      const raw = row?.manifest;
       if (!raw) return null;
       const manifest = parseDataPublicationManifest(
         typeof raw === 'string' ? raw : JSON.stringify(raw),
       );
       if (
         !manifest ||
+        manifest.publicationId !== row.publicationId ||
+        manifest.revision !== row.revision ||
         manifest.dataset !== dataset ||
         manifest.seasonCode !== season.seasonCode ||
         manifest.eventId !== (eventId ?? null)
