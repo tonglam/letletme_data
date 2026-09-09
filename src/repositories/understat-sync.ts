@@ -199,9 +199,13 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     return expectedItems;
   },
 
-  async markItemRunning(runId: string, resourceType: string, resourceId: string): Promise<void> {
+  async markItemRunning(
+    runId: string,
+    resourceType: string,
+    resourceId: string,
+  ): Promise<number | null> {
     const db = await getDatabase(dbInstance);
-    await db
+    const rows = await db
       .update(understatSyncItems)
       .set({
         status: 'running',
@@ -216,7 +220,33 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
           notInArray(understatSyncItems.status, ['completed', 'skipped']),
           runIsActive(runId),
         ),
-      );
+      )
+      .returning({ attempts: understatSyncItems.attempts });
+    return rows[0]?.attempts ?? null;
+  },
+
+  async isItemAttemptCurrent(
+    runId: string,
+    resourceType: string,
+    resourceId: string,
+    attempt: number,
+  ): Promise<boolean> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ attempts: understatSyncItems.attempts })
+      .from(understatSyncItems)
+      .where(
+        and(
+          eq(understatSyncItems.runId, runId),
+          eq(understatSyncItems.resourceType, resourceType),
+          eq(understatSyncItems.resourceId, resourceId),
+          eq(understatSyncItems.status, 'running'),
+          eq(understatSyncItems.attempts, attempt),
+          runIsActive(runId),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   },
 
   async skipItem(

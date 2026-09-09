@@ -637,3 +637,33 @@ export function selectPlayerMatchIds(input: {
 export function teamById(teams: readonly UnderstatTeam[]): Map<number, UnderstatTeam> {
   return new Map(teams.map((team) => [team.id, team]));
 }
+
+export function understatMutationScopes(
+  lane: 'team' | 'player',
+  name: string,
+  season: string,
+  resourceId?: number,
+): string[] {
+  const scopes = ['understat:reference:all', `understat:reference:${season}`];
+  if (name.endsWith('-discover') || name.endsWith('-finalize')) return scopes;
+  return [...scopes, `understat:${lane}:${season}:${name}:${resourceId ?? 'unknown'}`];
+}
+
+export function assertUnderstatReferenceSnapshotCurrent(
+  incoming: readonly UnderstatMatch[],
+  persisted: readonly UnderstatMatch[],
+): void {
+  const currentById = new Map(persisted.map((match) => [match.id, match]));
+  for (const match of incoming) {
+    const current = currentById.get(match.id);
+    if (
+      current &&
+      current.sourceCheckedAt >= match.sourceCheckedAt &&
+      current.sourceHash !== match.sourceHash
+    ) {
+      throw new Error(
+        'Understat reference snapshot was superseded; retry with fresh provider data',
+      );
+    }
+  }
+}

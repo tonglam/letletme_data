@@ -27,7 +27,10 @@ import {
   syncUnderstatTeamDetail,
   understatTeamItemForJob,
 } from '../services/understat-team.service';
-import { IncompleteUnderstatResourceError } from '../services/understat-sync.service';
+import {
+  IncompleteUnderstatResourceError,
+  understatMutationScopes,
+} from '../services/understat-sync.service';
 import { understatSyncRepository } from '../repositories/understat-sync';
 import { getConfig } from '../utils/config';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -53,13 +56,11 @@ function lockScopes(
   name: string,
   data: UnderstatTeamJobData | UnderstatPlayerJobData,
 ): string[] {
-  const scopes = ['understat:reference:all', `understat:reference:${data.season}`];
-  if (name.endsWith('-discover') || name.endsWith('-finalize')) return scopes;
   const resourceId =
     lane === 'team'
       ? (data as UnderstatTeamJobData).teamId
       : (data as UnderstatPlayerJobData).resourceId;
-  return [...scopes, `understat:${lane}:${data.season}:${name}:${resourceId ?? 'unknown'}`];
+  return understatMutationScopes(lane, name, data.season, resourceId);
 }
 
 async function runUnderstatOperation(operation: () => Promise<void>): Promise<void> {
@@ -126,28 +127,19 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
   logJobTriggered(context);
   const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job);
   try {
-    await withMutationScopes(
-      {
-        queueName: job.queueName,
-        jobName: job.name,
-        jobId: String(job.id),
-        scopes: lockScopes('team', job.name, job.data),
-      },
-      () =>
-        runTrackedJob(context, () =>
-          runUnderstatOperation(async () => {
-            switch (job.name) {
-              case 'understat-team-discover':
-                return discoverUnderstatTeams(job.data);
-              case 'understat-team-detail':
-                return syncUnderstatTeamDetail(job.data);
-              case 'understat-team-finalize':
-                return finalizeUnderstatTeamRun(job.data);
-              default:
-                throw new Error(`Unknown Understat team job: ${job.name}`);
-            }
-          }),
-        ),
+    await runTrackedJob(context, () =>
+      runUnderstatOperation(async () => {
+        switch (job.name) {
+          case 'understat-team-discover':
+            return discoverUnderstatTeams(job.data);
+          case 'understat-team-detail':
+            return syncUnderstatTeamDetail(job.data);
+          case 'understat-team-finalize':
+            return finalizeUnderstatTeamRun(job.data);
+          default:
+            throw new Error(`Unknown Understat team job: ${job.name}`);
+        }
+      }),
     );
     await settleFinalizerOutcome(job);
     await settleDeferredUnderstatRunFailure(job);
@@ -183,30 +175,21 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
   logJobTriggered(context);
   const stopLeaseHeartbeat = startSchedulerLeaseHeartbeat(job);
   try {
-    await withMutationScopes(
-      {
-        queueName: job.queueName,
-        jobName: job.name,
-        jobId: String(job.id),
-        scopes: lockScopes('player', job.name, job.data),
-      },
-      () =>
-        runTrackedJob(context, () =>
-          runUnderstatOperation(async () => {
-            switch (job.name) {
-              case 'understat-player-discover':
-                return discoverUnderstatPlayers(job.data);
-              case 'understat-player-team-detail':
-                return syncUnderstatPlayerTeamDetail(job.data);
-              case 'understat-player-match':
-                return syncUnderstatPlayerMatch(job.data);
-              case 'understat-player-finalize':
-                return finalizeUnderstatPlayerRun(job.data);
-              default:
-                throw new Error(`Unknown Understat player job: ${job.name}`);
-            }
-          }),
-        ),
+    await runTrackedJob(context, () =>
+      runUnderstatOperation(async () => {
+        switch (job.name) {
+          case 'understat-player-discover':
+            return discoverUnderstatPlayers(job.data);
+          case 'understat-player-team-detail':
+            return syncUnderstatPlayerTeamDetail(job.data);
+          case 'understat-player-match':
+            return syncUnderstatPlayerMatch(job.data);
+          case 'understat-player-finalize':
+            return finalizeUnderstatPlayerRun(job.data);
+          default:
+            throw new Error(`Unknown Understat player job: ${job.name}`);
+        }
+      }),
     );
     await settleFinalizerOutcome(job);
     await settleDeferredUnderstatRunFailure(job);
@@ -351,26 +334,36 @@ async function recordTeamFailure(
   terminal = isTerminalJobFailure(job, error),
 ): Promise<void> {
   if (!terminal) return;
-  const item = understatTeamItemForJob(job.data, job.name);
-  if (item) {
-    const persisted = await understatSyncRepository.findItem(
-      job.data.runId,
-      item.resourceType,
-      item.resourceId,
-    );
-    if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+  await withMutationScopes(
+    {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: String(job.id),
+      scopes: lockScopes('team', job.name, job.data),
+    },
+    async () => {
+      const item = understatTeamItemForJob(job.data, job.name);
+      if (item) {
+        const persisted = await understatSyncRepository.findItem(
+          job.data.runId,
+          item.resourceType,
+          item.resourceId,
+        );
+        if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+          return;
+        }
+        await understatSyncRepository.failItem(
+          job.data.runId,
+          item.resourceType,
+          item.resourceId,
+          error.message,
+        );
+        return;
+      }
       await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-      return;
-    }
-    await understatSyncRepository.failItem(
-      job.data.runId,
-      item.resourceType,
-      item.resourceId,
-      error.message,
-    );
-    return;
-  }
-  await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+    },
+  );
 }
 
 async function recordPlayerFailure(
@@ -379,26 +372,36 @@ async function recordPlayerFailure(
   terminal = isTerminalJobFailure(job, error),
 ): Promise<void> {
   if (!terminal) return;
-  const item = understatPlayerItemForJob(job.data, job.name);
-  if (item) {
-    const persisted = await understatSyncRepository.findItem(
-      job.data.runId,
-      item.resourceType,
-      item.resourceId,
-    );
-    if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+  await withMutationScopes(
+    {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: String(job.id),
+      scopes: lockScopes('player', job.name, job.data),
+    },
+    async () => {
+      const item = understatPlayerItemForJob(job.data, job.name);
+      if (item) {
+        const persisted = await understatSyncRepository.findItem(
+          job.data.runId,
+          item.resourceType,
+          item.resourceId,
+        );
+        if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+          return;
+        }
+        await understatSyncRepository.failItem(
+          job.data.runId,
+          item.resourceType,
+          item.resourceId,
+          error.message,
+        );
+        return;
+      }
       await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-      return;
-    }
-    await understatSyncRepository.failItem(
-      job.data.runId,
-      item.resourceType,
-      item.resourceId,
-      error.message,
-    );
-    return;
-  }
-  await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+    },
+  );
 }
 
 async function recordTerminalFailure(
