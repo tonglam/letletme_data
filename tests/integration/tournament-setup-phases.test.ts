@@ -320,6 +320,44 @@ test('the worker settles obsolete delivery and releases its lock before slow Red
   }
 }, 5000);
 
+test('manual resume queue probes run outside the lifecycle transaction', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  const setupQueue = await import('../../src/queues/tournament-setup.queue');
+  const syncQueue = await import('../../src/queues/tournament-sync.queue');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  await sql`UPDATE competition.tournaments
+    SET state='inactive', roster_sync_status='processing', roster_sync_execution_id=gen_random_uuid(),
+        setup_status='failed', setup_phase='failed', setup_error='resume failed',
+        setup_progress_updated_at='2095-01-01 00:00:00+00', setup_next_retry_at=null
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  let queueProbeInTransaction = false;
+  let probeCalls = 0;
+  spyOn(syncQueue.tournamentSyncQueue, 'getJob').mockImplementation(async () => {
+    probeCalls += 1;
+    queueProbeInTransaction ||= Boolean(databaseTransactionStorage.getStore());
+    return undefined;
+  });
+  spyOn(setupQueue.tournamentSetupQueue, 'getJob').mockImplementation(async () => {
+    probeCalls += 1;
+    queueProbeInTransaction ||= Boolean(databaseTransactionStorage.getStore());
+    return undefined;
+  });
+
+  await processTournamentSetupJob({
+    id: 'integration-setup-resume-probe',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: { ...season, tournamentId, source: 'manual', triggeredAt: new Date().toISOString() },
+    attemptsMade: 0,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(probeCalls).toBe(3);
+  expect(queueProbeInTransaction).toBe(false);
+}, 5000);
+
 test('an unclaimed terminal failure cannot fail a successor with the same attempt number', async () => {
   await claim();
   const expectedState = (await tournamentInfoRepository.findSetupStatus(season, tournamentId))!;
