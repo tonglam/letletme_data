@@ -144,10 +144,16 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
               season,
               job.data.tournamentId,
             );
+            const preparedRoster = await tournamentRosterRepository.findById(
+              season,
+              job.data.tournamentId,
+            );
             if (
               preparedStatus?.setupStatus !== 'processing' ||
               preparedStatus.setupPhase !== 'queued' ||
-              preparedStatus.setupProgressUpdatedAt !== job.data.preparedRetryMarker
+              preparedStatus.setupProgressUpdatedAt !== job.data.preparedRetryMarker ||
+              (preparedRoster?.rosterMode === 'official_sync' &&
+                preparedRoster.rosterSyncStatus === 'pending')
             ) {
               logInfo('Ignoring stale prepared tournament setup retry', {
                 tournamentId: job.data.tournamentId,
