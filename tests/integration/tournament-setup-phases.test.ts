@@ -705,12 +705,15 @@ for (const rosterStatus of ['failed', 'processing'] as const) {
     const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
     spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
     const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+    let preparedMarkerForAssertion: string | undefined;
     await sql`UPDATE competition.tournaments SET state='inactive',roster_sync_status=${rosterStatus},
     setup_status='failed',setup_phase='failed',setup_error='terminal resume failure',
     setup_progress_updated_at='2095-01-01' WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
     spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
       async (_season, id, source, options) => {
         const preparedRetryMarker = await options?.prepareEnqueue?.();
+        preparedMarkerForAssertion =
+          typeof preparedRetryMarker === 'string' ? preparedRetryMarker : undefined;
         const prepared = await tournamentInfoRepository.findSetupStatus(season, id);
         expect(prepared!.setupStatus).toBe('processing');
         expect(prepared!.setupPhase).toBe('queued');
@@ -734,11 +737,43 @@ for (const rosterStatus of ['failed', 'processing'] as const) {
     );
     await setup.requeueTournamentSetup(season, tournamentId);
     expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith(
+      season,
+      tournamentId,
+      expect.objectContaining({ progressMarker: preparedMarkerForAssertion }),
+    );
     expect(
       (await tournamentInfoRepository.findSetupStatus(season, tournamentId))!.setupAttempt,
     ).toBe(1);
   });
 }
+
+test('requeue admission follows a prepared marker after setup progress advances', async () => {
+  const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const marker = '2095-01-03 00:00:00+00';
+  await sql`UPDATE competition.tournaments
+    SET setup_status='processing', setup_phase='building_structure',
+        setup_progress_updated_at=${marker}
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  const findJob = spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue({
+    id: 'active-prepared-retry',
+  } as never);
+  const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+    async (_season, id, _source, options) => {
+      expect(id).toBe(tournamentId);
+      expect(options?.admissionMarker).toBe(marker);
+      return { id: 'active-prepared-retry' } as never;
+    },
+  );
+
+  await expect(setup.requeueTournamentSetup(season, tournamentId, marker)).resolves.toMatchObject({
+    id: 'active-prepared-retry',
+  });
+  expect(findJob).toHaveBeenCalledWith(season, tournamentId, marker);
+  expect(enqueue).toHaveBeenCalledTimes(1);
+});
 
 test('prepared setup retry marker runs without an official roster resume', async () => {
   const seasonJobs = await import('../../src/services/season-scoped-job.service');

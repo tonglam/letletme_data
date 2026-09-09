@@ -753,10 +753,14 @@ for (const resume of [false, true])
       );
       const leagueMembers = await import('../../src/services/tournament-league-members.service');
       const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
-      const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(async () => {
-        expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
-        return undefined as never;
-      });
+      let enqueuedOptions: Parameters<typeof setupJobs.enqueueTournamentSetup>[3] | undefined;
+      const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+        async (_season, _id, _source, options) => {
+          expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
+          enqueuedOptions = options;
+          return undefined as never;
+        },
+      );
       let enter!: () => void;
       let release!: () => void;
       const entered = new Promise<void>((resolve) => {
@@ -838,6 +842,15 @@ for (const resume of [false, true])
         else expect(result).toMatchObject({ changed: false, participantCount: 2 });
         expect(enqueue).toHaveBeenCalledTimes(fails ? 0 : 1);
         const saved = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+        if (!fails) {
+          if (resume) {
+            expect(enqueuedOptions).toMatchObject({ resumeMarker: marker });
+            expect(enqueuedOptions?.setupMarker).toBeUndefined();
+          } else {
+            expect(enqueuedOptions?.setupMarker).toBe(saved.setupProgressUpdatedAt ?? undefined);
+            expect(enqueuedOptions?.resumeMarker).toBeUndefined();
+          }
+        }
         expect(saved.rosterSyncStatus).toBe(fails ? 'failed' : resume ? 'processing' : 'ready');
         const [name] =
           await sql`SELECT name FROM competition.tournaments WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;

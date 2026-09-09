@@ -25,6 +25,8 @@ export interface TournamentSetupJobData {
   resumeMarker?: string;
   /** Marker committed by an explicit setup retry before queue admission. */
   preparedRetryMarker?: string;
+  /** Marker committed by a normal roster publication before queue admission. */
+  setupMarker?: string;
 }
 
 export const tournamentSetupQueue = new Queue<TournamentSetupJobData>(tournamentSetupQueueName, {

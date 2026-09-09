@@ -161,6 +161,28 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
               });
               return null;
             }
+          } else if (job.data.setupMarker) {
+            const markedStatus = await tournamentInfoRepository.findSetupStatus(
+              season,
+              job.data.tournamentId,
+            );
+            const markedRoster = await tournamentRosterRepository.findById(
+              season,
+              job.data.tournamentId,
+            );
+            if (
+              !['pending', 'processing'].includes(markedStatus?.setupStatus ?? '') ||
+              markedStatus?.setupPhase !== 'queued' ||
+              markedStatus.setupProgressUpdatedAt !== job.data.setupMarker ||
+              (markedRoster?.rosterMode === 'official_sync' &&
+                markedRoster.rosterSyncStatus === 'pending')
+            ) {
+              logInfo('Ignoring stale roster publication setup job', {
+                tournamentId: job.data.tournamentId,
+                jobId: job.id,
+              });
+              return null;
+            }
           } else {
             // Official-sync activation owns the setup lifecycle through
             // the roster reconciliation marker. A pre-existing manual or
@@ -236,10 +258,12 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             });
           }
 
+          const stableProgressMarker =
+            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
           return tournamentInfoRepository.markSetupProcessing(
             season,
             job.data.tournamentId,
-            job.data.resumeMarker ?? job.data.preparedRetryMarker,
+            stableProgressMarker,
             attempt,
           );
         });
@@ -250,6 +274,8 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
         logInfo('Tournament setup worker started job');
         await setupTournamentStructure(season, job.data.tournamentId, {
           resumeMarker: job.data.resumeMarker,
+          progressMarker:
+            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker,
           execution,
         });
         return null;
@@ -276,7 +302,8 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
                 ? null
                 : new Date(Date.now() + getTournamentSetupRetryDelayMs(attempt)),
               startedAt,
-              progressMarker: job.data.preparedRetryMarker,
+              progressMarker:
+                job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker,
             },
           );
           if (!changed)

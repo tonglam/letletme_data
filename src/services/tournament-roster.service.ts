@@ -435,6 +435,9 @@ async function reconcileTournamentRosterUnlocked(
             ensureSuccessorOnActive: true,
             activeSettleTimeoutMs: 2_000,
             resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
+            setupMarker: options?.resumeAfterSetup
+              ? undefined
+              : (owner.setupProgressUpdatedAt ?? undefined),
           },
         );
       }

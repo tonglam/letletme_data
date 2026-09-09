@@ -146,7 +146,12 @@ export async function finalizePublishedTournamentSetup(
 export async function setupTournamentStructure(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: { resumeMarker?: string; execution?: TournamentSetupExecution },
+  options?: {
+    resumeMarker?: string;
+    /** Stable marker owned by a non-resume setup handoff. */
+    progressMarker?: string;
+    execution?: TournamentSetupExecution;
+  },
 ): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
@@ -240,7 +245,7 @@ export async function setupTournamentStructure(
   // resume attempt into a warning. Only publication completed below makes
   // failures non-critical for this attempt.
   let standingsPublished = false;
-  const progressMarker = options?.resumeMarker;
+  const progressMarker = options?.progressMarker ?? options?.resumeMarker;
   let execution: TournamentSetupExecution;
   const runPhase = <T>(phase: string, scopes: readonly string[], operation: () => Promise<T>) =>
     withTournamentSetupPhase(season, tournamentId, execution, phase, scopes, operation);

@@ -34,6 +34,8 @@ export interface EnqueueTournamentSetupOptions {
   activeSettleTimeoutMs?: number;
   /** Database marker for a resume-triggered setup operation. */
   resumeMarker?: string;
+  /** Database marker for a normal roster-publication setup operation. */
+  setupMarker?: string;
   /** Existing marker-suffixed slot to inspect before preparing a new retry. */
   admissionMarker?: string;
 }
@@ -163,7 +165,7 @@ async function enqueueTournamentSetupUnlocked(
       throw new QueueDrainOnlyError(queue.name);
     }
     let preparedRetryMarker: string | undefined;
-    const admissionMarker = options.resumeMarker ?? options.admissionMarker;
+    const admissionMarker = options.resumeMarker ?? options.setupMarker ?? options.admissionMarker;
     const { baseJobId, successorJobId } = getTournamentSetupJobIds(
       season,
       tournamentId,
@@ -259,7 +261,7 @@ async function enqueueTournamentSetupUnlocked(
         jobId = getTournamentSetupJobIds(
           season,
           tournamentId,
-          options.resumeMarker ?? preparedRetryMarker,
+          options.resumeMarker ?? options.setupMarker ?? preparedRetryMarker,
         ).baseJobId;
       }
     }
@@ -271,6 +273,7 @@ async function enqueueTournamentSetupUnlocked(
       triggeredAt: new Date().toISOString(),
       ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
       ...(preparedRetryMarker ? { preparedRetryMarker } : {}),
+      ...(options.setupMarker ? { setupMarker: options.setupMarker } : {}),
     };
     let job;
     try {
