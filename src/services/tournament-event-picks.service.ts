@@ -79,6 +79,13 @@ export async function syncTournamentEventPicks(
     };
   }
 
+  const eligibleEntryIds = new Set(entryIds);
+  const publicationTournamentIds = tournaments
+    .filter((_tournament, index) =>
+      entryLists[index].some((entryId) => eligibleEntryIds.has(entryId)),
+    )
+    .map((tournament) => tournament.id);
+
   const existing = await entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds);
   const existingSet = new Set(existing);
   const toSync = entryIds.filter((entryId) => !existingSet.has(entryId));
@@ -125,11 +132,19 @@ export async function syncTournamentEventPicks(
 
   // Publish ownership/captaincy as soon as durable picks converge. Transfer
   // counts remain explicitly unavailable until the transfer checkpoint lands.
-  await publishTournamentTrendScopes(
-    season,
-    eventId,
-    tournaments.map((tournament) => tournament.id),
-  );
+  const publication = await publishTournamentTrendScopes(season, eventId, publicationTournamentIds);
+
+  const incompletePublications =
+    publication.failed + publication.results.filter((result) => !result.isActive).length;
+  if (incompletePublications > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament picks converged but required Trends publications are incomplete',
+      publication.failed + publication.results.length,
+      0,
+      publication.results.filter((result) => result.isActive).length,
+      incompletePublications,
+    );
+  }
 
   return {
     eventId,

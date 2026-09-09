@@ -12,6 +12,7 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { TournamentSyncContext } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import {
@@ -24,6 +25,8 @@ import { createTournamentGroupRepository } from './tournament-groups';
 import { createTournamentKnockoutsRepository } from './tournament-knockouts';
 
 export type OfficialH2HPublication = {
+  /** Setup uses its execution fence; regular refreshes compare the pre-fetch revision. */
+  expectedRevision?: string;
   scheduleHash: string;
   checkedAt: Date;
   lockSchedule: boolean;
@@ -128,6 +131,59 @@ export const tournamentOfficialH2HRepository = {
     return [...regular, ...knockout].sort((a, b) => a.sourceOrder - b.sourceOrder);
   },
 
+  async captureRevision(season: FplSeasonRef, expected: TournamentSyncContext): Promise<string> {
+    const db = await getDb();
+    const rows = await db
+      .select({
+        row: tournamentsInCompetition,
+        revision: sql<string>`${tournamentsInCompetition}.xmin::text`,
+      })
+      .from(tournamentsInCompetition)
+      .where(
+        and(
+          eq(tournamentsInCompetition.seasonId, season.seasonId),
+          eq(tournamentsInCompetition.tournamentId, expected.id),
+        ),
+      )
+      .limit(1);
+    const current = rows[0];
+    const keys = [
+      'leagueId',
+      'leagueType',
+      'rosterMode',
+      'totalTeamNum',
+      'groupMode',
+      'groupStartedEventId',
+      'groupEndedEventId',
+      'groupQualifyNum',
+      'knockoutMode',
+      'knockoutTeamNum',
+      'knockoutEventNum',
+      'knockoutStartedEventId',
+      'knockoutEndedEventId',
+      'knockoutPlayAgainstNum',
+    ] as const;
+    if (
+      !current ||
+      current.row.state !== 'active' ||
+      keys.some((key) => {
+        const value =
+          key === 'groupMode'
+            ? (current.row.groupMode ?? 'no_group')
+            : key === 'knockoutMode'
+              ? (current.row.knockoutMode ?? 'no_knockout')
+              : current.row[key];
+        return expected[key] !== undefined && expected[key] !== value;
+      })
+    ) {
+      throw new ConflictError(
+        'Official H2H tournament configuration changed before fetch.',
+        'TOURNAMENT_OFFICIAL_H2H_SOURCE_STALE',
+      );
+    }
+    return current.revision;
+  },
+
   async publish(
     season: FplSeasonRef,
     tournamentId: number,
@@ -138,6 +194,7 @@ export const tournamentOfficialH2HRepository = {
       return await db.transaction(async (tx) => {
         const currentRows = await tx
           .select({
+            revision: sql<string>`${tournamentsInCompetition}.xmin::text`,
             scheduleHash: tournamentsInCompetition.officialScheduleHash,
             scheduleLockedAt: tournamentsInCompetition.officialScheduleLockedAt,
           })
@@ -155,6 +212,15 @@ export const tournamentOfficialH2HRepository = {
           throw new DatabaseError(
             'Tournament no longer exists.',
             'TOURNAMENT_OFFICIAL_H2H_NOT_FOUND',
+          );
+        }
+        if (
+          publication.expectedRevision !== undefined &&
+          current.revision !== publication.expectedRevision
+        ) {
+          throw new ConflictError(
+            'Official H2H source changed during provider fetch.',
+            'TOURNAMENT_OFFICIAL_H2H_SOURCE_STALE',
           );
         }
         if (

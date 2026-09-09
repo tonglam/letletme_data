@@ -786,12 +786,14 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
           // second outer transaction that would hold the scope through the queue
           // handoff. Cup likewise fetches first, then owns its version-fenced
           // database-only event publication transaction. Tournament info likewise
-          // fetches first and fences its short name update in the repository.
+          // fetches first and fences its short name update in the repository. Picks
+          // checkpoints and Trends publications likewise own their transactions.
           if (
             job.name === TOURNAMENT_JOBS.ROSTER_SYNC ||
             job.name === TOURNAMENT_JOBS.ROSTER_RECONCILE ||
             job.name === TOURNAMENT_JOBS.CUP_RESULTS ||
-            job.name === TOURNAMENT_JOBS.INFO
+            job.name === TOURNAMENT_JOBS.INFO ||
+            job.name === TOURNAMENT_JOBS.EVENT_PICKS
           ) {
             const unscoped = await runMutation();
             if (unscoped.afterCommit) await unscoped.afterCommit();
@@ -799,7 +801,12 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
           }
 
           try {
-            const scoped = await withMutationScopes(mutationInput, runMutation);
+            // H2H owns a fenced per-tournament publication after provider I/O.
+            // Keep it inside this catch so roster/full-reconcile recovery remains intact.
+            const scoped =
+              job.name === TOURNAMENT_JOBS.OFFICIAL_H2H || job.name === TOURNAMENT_JOBS.BATTLE_RACE
+                ? await runMutation()
+                : await withMutationScopes(mutationInput, runMutation);
             if (scoped.afterCommit) await scoped.afterCommit();
             return scoped.value;
           } catch (error) {
