@@ -9,9 +9,12 @@ import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryCupMatch } from '../types';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { logDebug, logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
+// Bound SQL batch size; the entire accepted event publishes in one transaction.
+const PERSISTENCE_BATCH_SIZE = 25;
 
 type GetEntryCup = typeof fplClient.getEntryCup;
 
@@ -184,14 +187,40 @@ export async function syncTournamentEventCupResults(
     };
   }
 
+  const revisions = await entryEventCupResultsRepository.findRevisions(season, eventId, entryIds);
   const { records, skipped, errors } = await collectEntryCupResults(entryIds, eventId, options);
 
-  const upserted = await entryEventCupResultsRepository.replaceBatch(season, records);
-  if (upserted !== records.length) {
-    throw new Error(
-      `Tournament event cup results lost season ownership for ${records.length - upserted} entries`,
+  if (errors > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament cup provider reads did not converge; preserving the last snapshot',
+      entryIds.length,
+      0,
+      entryIds.length - errors,
+      errors,
     );
   }
+  // All provider reads have completed. Serialize and accept the complete event
+  // together so a conflict in a later SQL batch rolls back every earlier batch.
+  const orderedRecords = [...records].sort((left, right) => left.entryId - right.entryId);
+  const upserted = await withMutationScopes(
+    { queueName: 'tournament-sync', jobName: 'tournament-cup-results', eventId },
+    async () => {
+      let written = 0;
+      for (let offset = 0; offset < orderedRecords.length; offset += PERSISTENCE_BATCH_SIZE) {
+        written += await entryEventCupResultsRepository.replaceBatch(
+          season,
+          orderedRecords.slice(offset, offset + PERSISTENCE_BATCH_SIZE),
+          revisions,
+        );
+      }
+      if (written !== records.length) {
+        throw new Error(
+          `Tournament event cup results lost season ownership for ${records.length - written} entries`,
+        );
+      }
+      return written;
+    },
+  );
 
   logInfo('Tournament event cup results sync completed', {
     eventId,
