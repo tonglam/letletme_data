@@ -408,7 +408,7 @@ async function reconcileTournamentRosterUnlocked(
       publication.changed || options?.resumeAfterSetup || tournament.standingsReadyAt === null;
     setupEnqueueRequired = needsSetup && !publication.automaticallyPaused;
     if (setupEnqueueRequired) {
-      await withMutationScopes(
+      const shouldEnqueueSetup = await withMutationScopes(
         {
           queueName: 'tournament-roster',
           jobName: 'enqueue-claimed-setup',
@@ -419,23 +419,25 @@ async function reconcileTournamentRosterUnlocked(
           const current = await tournamentRosterRepository.findById(season, tournamentId, {
             forUpdate: true,
           });
-          if (!current || !ownsTournamentRosterExecution(current, owner)) return;
-          await enqueueTournamentSetup(
-            season,
-            tournamentId,
-            options?.resumeAfterSetup ? 'resume' : 'roster',
-            {
-              forceNew: true,
-              // The lifecycle lock is held here. If BullMQ still reports an active
-              // predecessor after the settle window, leave a distinct successor;
-              // reusing it would not prove that the newly published marker is read.
-              ensureSuccessorOnActive: true,
-              activeSettleTimeoutMs: 2_000,
-              resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
-            },
-          );
+          return Boolean(current && ownsTournamentRosterExecution(current, owner));
         },
       );
+      if (shouldEnqueueSetup) {
+        // Queue inspection/admission runs after the lifecycle transaction has
+        // committed. The durable roster/setup marker fences a stale job if a
+        // concurrent owner advances the tournament during this handoff.
+        await enqueueTournamentSetup(
+          season,
+          tournamentId,
+          options?.resumeAfterSetup ? 'resume' : 'roster',
+          {
+            forceNew: true,
+            ensureSuccessorOnActive: true,
+            activeSettleTimeoutMs: 2_000,
+            resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
+          },
+        );
+      }
     }
 
     logInfo('Tournament roster reconciliation completed', {
