@@ -1,5 +1,3 @@
-import type { TournamentRepairState } from '../repositories/tournament-setup-issues';
-import { withTournamentRepairPhase } from '../utils/tournament-repair-phase';
 import {
   tournamentEntryCoreScopes,
   tournamentSetupBackfillEventScopes,
@@ -31,6 +29,8 @@ import { entryInfoRepository } from '../repositories/entry-infos';
 import { uniqueNumbers } from '../utils/async';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import type { TournamentRepairState } from '../repositories/tournament-setup-issues';
+import { withTournamentRepairPhase } from '../utils/tournament-repair-phase';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { ValidationError } from '../utils/errors';
 
