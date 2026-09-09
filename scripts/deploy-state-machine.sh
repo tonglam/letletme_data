@@ -1510,7 +1510,7 @@ start_runtime_services() {
   done < <(runtime_worker_services)
   compose up -d --remove-orphans --no-build "${services[@]}"
   compose up -d --remove-orphans --no-build api || {
-    echo 'API start failed; preserving scheduler/worker/content-worker/live-picks-worker/official-h2h-worker/media-worker for recovery' >&2
+    echo 'API start failed; preserving the Data runtime consumers for recovery' >&2
     port_3000_owner >&2
     # A failed Docker bind can leave the exact Compose API container in
     # `created` state while its network namespace/port proxy is being torn

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   checkReadiness,
+  isMediaWorkerRequired,
   mismatchSinceForPublication,
   publicationMismatchGraceMs,
 } from '../../src/api/health';
@@ -84,5 +85,34 @@ describe('data API readiness', () => {
     expect(result.ready).toBe(false);
     expect(result.dependencies.postgres).toBe(false);
     expect(Date.now() - started).toBeLessThan(250);
+  });
+
+  test('allows strict readiness while the separately rolled out media worker is absent', async () => {
+    const previous = process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
+    process.env.RUNTIME_INCLUDE_MEDIA_WORKER = 'false';
+    try {
+      expect(isMediaWorkerRequired()).toBe(false);
+      const result = await checkReadiness({
+        postgres: async () => true,
+        cacheRedis: async () => true,
+        queueRedis: async () => true,
+        activeSeason: async () => true,
+        screenshotRetentionConfigured: async () => true,
+        scheduler: async () => true,
+        queueWorker: async () => true,
+        contentWorker: async () => true,
+        mediaWorker: async () => false,
+        livePicksWorker: async () => true,
+        officialH2HWorker: async () => true,
+        publicationConsistency: async () => true,
+        includeRuntimeDependencies: true,
+        strict: true,
+      });
+      expect(result.ready).toBe(true);
+      expect(result.dependencies.mediaWorker).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
+      else process.env.RUNTIME_INCLUDE_MEDIA_WORKER = previous;
+    }
   });
 });

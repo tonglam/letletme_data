@@ -109,6 +109,15 @@ const mediaWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('mediaWork
 const livePicksWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('livePicksWorker');
 const officialH2HWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('officialH2HWorker');
 
+/**
+ * Source-media is deployed independently because its worker performs external
+ * Storage I/O during startup. The general Data release sets this flag to
+ * false; the default keeps local and dedicated rollouts strict.
+ */
+export function isMediaWorkerRequired(): boolean {
+  return process.env.RUNTIME_INCLUDE_MEDIA_WORKER?.trim().toLowerCase() !== 'false';
+}
+
 const PUBLICATION_MISMATCH_GRACE_MS = 120_000;
 const publicationMismatchSince = new Map<string, number>();
 
@@ -342,6 +351,7 @@ export async function checkReadiness(
     safeProbe(configured.officialH2HWorker, probeTimeoutMs),
     safeProbe(configured.publicationConsistency, probeTimeoutMs),
   ]);
+  const mediaWorkerRequired = isMediaWorkerRequired();
   return {
     ready: strict
       ? postgres &&
@@ -352,7 +362,7 @@ export async function checkReadiness(
         scheduler &&
         queueWorker &&
         contentWorker &&
-        mediaWorker &&
+        (!mediaWorkerRequired || mediaWorker) &&
         livePicksWorker &&
         officialH2HWorker &&
         publicationConsistency
