@@ -111,6 +111,7 @@ DEPLOY_RUNNER_PREVIOUS_RELEASE=''
 DEPLOY_SERVICES_STOPPED=false
 DEPLOY_CONTENT_WORKER_FENCED=false
 DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
+DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -172,6 +173,104 @@ compose() {
 # startup state machine as the GitHub workflow.
 source "${PROJECT_DIR}/scripts/deploy-state-machine.sh"
 
+source_media_deploy_fence_is_exact() {
+  local container_id=$1
+  local service oneoff
+  service=$(docker inspect \
+    --format '{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$container_id" 2>/dev/null || true)
+  oneoff=$(docker inspect \
+    --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' \
+    "$container_id" 2>/dev/null || true)
+  [[ "$service" = backup && "$oneoff" = True ]]
+}
+
+source_media_deploy_fence_is_active() {
+  local container_id=${DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER:-}
+  [[ -n "$container_id" ]] || return 1
+  source_media_deploy_fence_is_exact "$container_id" || return 1
+  [[ "$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)" = running ]]
+}
+
+release_source_media_deploy_fence() {
+  local container_id=${DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER:-}
+  if [[ -z "$container_id" ]]; then return 0; fi
+  if ! docker inspect "$container_id" >/dev/null 2>&1; then
+    DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+    return 0
+  fi
+  if ! source_media_deploy_fence_is_exact "$container_id"; then
+    if ! docker inspect "$container_id" >/dev/null 2>&1; then
+      DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+      return 0
+    fi
+    log_error "Refusing to remove an unverified source-media deployment fence container"
+    return 1
+  fi
+  if ! docker rm --force "$container_id" >/dev/null; then
+    if ! docker inspect "$container_id" >/dev/null 2>&1; then
+      DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+      return 0
+    fi
+    log_error "Could not remove the exact source-media deployment fence container"
+    return 1
+  fi
+  if docker inspect "$container_id" >/dev/null 2>&1; then
+    log_error "Source-media deployment fence container still exists after removal"
+    return 1
+  fi
+  DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+}
+
+acquire_source_media_deploy_fence() {
+  local create_output container_id service_state fence_logs
+  local ready_deadline=$(( $(date +%s) + 310 ))
+  if ! create_output=$(run_deploy_command_with_pause_renewal \
+    compose_direct --profile migration run --rm -T --interactive=false -d --no-deps \
+    --entrypoint bash backup \
+    /app/scripts/hold-source-media-deploy-fence.sh 300 0); then
+    log_error "Could not start the source-media deployment fence container"
+    return 1
+  fi
+  container_id=$(printf '%s\n' "$create_output" | tail -n 1 | tr -d '\r')
+  if ! [[ "$container_id" =~ ^[0-9a-f]{12,64}$ ]] || \
+    ! source_media_deploy_fence_is_exact "$container_id"; then
+    log_error "Source-media deployment fence returned an invalid container identity"
+    if [[ "$container_id" =~ ^[0-9a-f]{12,64}$ ]]; then
+      DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=$container_id
+      release_source_media_deploy_fence || true
+    fi
+    return 1
+  fi
+  DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=$container_id
+
+  while (( $(date +%s) < ready_deadline )); do
+    fence_logs=$(docker logs "$container_id" 2>&1 || true)
+    if grep -Fq 'SOURCE_MEDIA_DEPLOY_FENCE_READY' <<<"$fence_logs"; then
+      service_state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+      if [[ "$service_state" = running ]]; then
+        log_info "Source-media deployment claim fence is active"
+        return 0
+      fi
+      break
+    fi
+    service_state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+    case "$service_state" in
+      created|running) ;;
+      *) break ;;
+    esac
+    if [[ -n "${DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE:-}" &&
+      -s "$DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_FAILURE_FILE" ]]; then
+      break
+    fi
+    sleep 1
+  done
+
+  log_error "Source-media deployment claim fence did not become ready"
+  release_source_media_deploy_fence || true
+  return 1
+}
+
 restore_stopped_services() {
   local restored=false
   if [[ "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
@@ -221,6 +320,7 @@ deploy() {
     trap - EXIT
     set +e
     local controls_restored=true
+    if ! release_source_media_deploy_fence; then status=1; fi
     if [[ "$DEPLOY_CONTENT_WORKER_CONSUMER_PAUSE_ATTEMPTED" = true ||
       -n "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES" ]]; then
       controls_restored=false
@@ -414,6 +514,17 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
+  # The media worker has its own dedicated lifecycle and stays running during
+  # a general Data release. Hold its claim advisory lock before the scoped
+  # probe; the helper waits for any in-flight lease to finish, and every new
+  # claim returns immediately while the fence is held. This closes the race
+  # between the first quiescence observation and the migration boundary
+  # without making a Storage request or recreating the worker.
+  if ! acquire_source_media_deploy_fence || ! source_media_deploy_fence_is_active; then
+    log_error "Could not establish the source-media claim fence; services were not stopped."
+    restore_stopped_services
+    exit 1
+  fi
   # The bounded scoped probe covers both PostgreSQL work and Redis queues.
   if ! wait_for_scoped_queue_quiescence 150 2; then
     log_error "Database or queue work is not quiescent; services were not stopped."
@@ -453,6 +564,11 @@ deploy() {
   remove_exact_stopped_container api
   remove_stale_api_run_containers
   wait_for_port_3000_free 30 2
+  if ! source_media_deploy_fence_is_active; then
+    log_error "Source-media claim fence was lost before the database quiescence check."
+    restore_stopped_services
+    exit 1
+  fi
   if ! compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
     log_error "Database work is not quiescent; migration was not started."
     restore_stopped_services
@@ -518,6 +634,10 @@ deploy() {
     log_info 'Host Grok runner is not required while X scanning or the real Grok provider is disabled'
   fi
   start_stage migration
+  if ! source_media_deploy_fence_is_active; then
+    log_error "Source-media claim fence was lost before migrations; leaving services stopped."
+    exit 1
+  fi
   DEPLOY_MIGRATION_STARTED=true
   log_info "Running migrations"
   if [[ "$DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED" = true ]]; then
@@ -619,6 +739,10 @@ deploy() {
   fi
   start_stage serviceReady
   log_info "Starting services"
+  if ! source_media_deploy_fence_is_active || ! release_source_media_deploy_fence; then
+    log_error "Could not release the source-media claim fence before service start."
+    exit 1
+  fi
   # Source-media is maintained by its dedicated rollout. The general Data
   # release starts only database/scheduler consumers and leaves that worker
   # container and its Storage credentials untouched.

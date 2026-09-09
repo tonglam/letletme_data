@@ -247,7 +247,7 @@ describe('production environment preflight', () => {
     expect(deployScript).not.toContain('restore_before_migration');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=false');
     expect(deployScript).not.toContain('stop_media_worker_with_deadline');
-    expect(deployScript).not.toContain('acquire_source_media_deploy_fence');
+    expect(deployScript).toContain('acquire_source_media_deploy_fence');
     expect(deployScript).not.toContain('media-worker; then');
     expect(deployScript).not.toContain('/usr/local/libexec/vps-maintenance');
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
@@ -356,7 +356,7 @@ describe('production environment preflight', () => {
     expect(deployScript).not.toContain('DEPLOY_OLD_MEDIA_ENABLED');
     expect(deployScript).not.toContain('container_boolean_env');
     expect(deployScript).not.toContain('old_media_container=$(compose ps -q media-worker');
-    expect(deployScript).not.toContain('release_source_media_deploy_fence');
+    expect(deployScript).toContain('release_source_media_deploy_fence');
     expect(deployScript).not.toContain('stop_media_worker_with_deadline');
     expect(deployScript).toContain('"$DEPLOY_COMMITTED" = false &&');
     expect(deployScript).not.toContain('git -C "$PROJECT_DIR" reset --hard');

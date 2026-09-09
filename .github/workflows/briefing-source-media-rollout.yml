@@ -94,12 +94,19 @@ jobs:
             fi
 
             export CONTENT_MEDIA_ENV_FILE="$media_env_file"
-            current_container=$(docker compose ps -q media-worker | head -n 1)
+            target_container=$(docker compose ps -q api | head -n 1)
+            test -n "$target_container"
+            target_image=$(docker inspect --format '{{.Config.Image}}' "$target_container")
+            test -n "$target_image"
+            target_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$target_image")
+            test "$target_revision" = "$ROLLOUT_SHA"
+            current_container=$(docker compose ps -aq media-worker | head -n 1)
             test -n "$current_container"
-            current_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
-            test -n "$current_image"
-            image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$current_image")
-            test "$image_revision" = "$ROLLOUT_SHA"
+            previous_media_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
+            test -n "$previous_media_image"
+            previous_media_image_id=$(docker inspect --format '{{.Image}}' "$current_container")
+            test -n "$previous_media_image_id"
+            test "$(docker image inspect --format '{{.Id}}' "$previous_media_image")" = "$previous_media_image_id"
 
             read_container_boolean() {
               key=$1
@@ -197,7 +204,7 @@ jobs:
                 release_deploy_lock
                 exit 0
               fi
-              if ! APP_IMAGE="$current_image" docker compose run --rm -T --interactive=false --no-deps api \
+              if ! APP_IMAGE="$target_image" docker compose run --rm -T --interactive=false --no-deps api \
                 bun validate-env.ts --probe-bug-report-storage; then
                 release_deploy_lock || true
                 exit 1
@@ -239,9 +246,10 @@ jobs:
             }
 
             wait_for_media_worker() {
+              expected_image=${1:-$target_image}
               container=$(docker compose ps -q media-worker | head -n 1)
               test -n "$container"
-              test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$current_image"
+              test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$expected_image"
               for attempt in $(seq 1 30); do
                 health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
                 if [ "$health" = healthy ]; then return 0; fi
@@ -255,7 +263,7 @@ jobs:
 
             scripts/configure-briefing-source-media-env.sh status "$media_env_file"
             if [ "$ROLLOUT_MODE" = status ]; then
-              wait_for_media_worker
+              wait_for_media_worker "$previous_media_image"
               report_health
               release_deploy_lock
               exit 0
@@ -275,7 +283,7 @@ jobs:
                 echo 'enable modes require the production standard probe; use probe_mode=standard' >&2
                 exit 1
               fi
-              APP_IMAGE="$current_image" docker compose run --rm -T --interactive=false --no-deps media-worker \
+              APP_IMAGE="$target_image" docker compose run --rm -T --interactive=false --no-deps media-worker \
                 bun dist/media-worker.js --provision-and-probe "$probe_flag"
             fi
             if [ "$ROLLOUT_MODE" = provision ]; then
@@ -301,7 +309,7 @@ jobs:
                   mv "$backup_file" "$media_env_file"
                 fi
                 if [ "$worker_stopped" = true ]; then
-                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate media-worker || true
+                  APP_IMAGE="$previous_media_image" docker compose up -d --no-build --force-recreate media-worker || true
                 fi
               fi
               if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi
@@ -317,8 +325,8 @@ jobs:
             worker_stopped=true
             if [ "$ROLLOUT_MODE" = enable-retention ]; then retention_preflight; fi
             scripts/configure-briefing-source-media-env.sh "$ROLLOUT_MODE" "$media_env_file"
-            APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate media-worker
-            wait_for_media_worker
+            APP_IMAGE="$target_image" docker compose up -d --no-build --force-recreate media-worker
+            wait_for_media_worker "$target_image"
             report_health
             rollout_committed=true
             rm -f -- "$backup_file"
