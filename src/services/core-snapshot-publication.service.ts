@@ -5,6 +5,7 @@ import {
   type CoreSnapshotCachePublication,
 } from '../cache/core-snapshot-cache';
 import { stageDataPublication } from '../cache/data-publication';
+import { databaseTransactionStorage, registerDatabasePostCommit } from '../db/singleton';
 import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { randomUUID } from 'node:crypto';
 import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
@@ -45,7 +46,7 @@ export type CoreSnapshotPersistedResult = Readonly<{
 export { readCoreSnapshotOrderingTimestamp };
 
 /**
- * Persist only canonical PostgreSQL facts and reporting projections. Cache and
+ * Persist canonical PostgreSQL facts and schedule reporting after commit. Cache and
  * ops-publication handoffs intentionally happen in a separate phase after the
  * caller's mutation transaction has committed.
  */
@@ -55,16 +56,25 @@ export async function persistCoreSnapshotPublication(
 ): Promise<CoreSnapshotPersistedResult> {
   const season = explicitSeasonRef(snapshot.season);
   const persisted = await persistCoreSnapshot(snapshot, context.sourceCheckedAt);
-  try {
-    // Core publications can change the roster or player positions before any
-    // live gameweek write occurs, so refresh the reporting read model here as
-    // well as on the live-write path.
-    await refreshPlayerSeasonSummaries(season);
-  } catch (error) {
-    logError('Player season summary refresh failed after core publication', error, {
-      season: season.seasonCode,
-      revision: context.revision,
-    });
+  const refreshReporting = async (): Promise<void> => {
+    try {
+      // Core publications can change the roster or player positions before any
+      // live gameweek write occurs, so refresh the reporting read model here as
+      // well as on the live-write path.
+      await refreshPlayerSeasonSummaries(season);
+    } catch (error) {
+      logError('Player season summary refresh failed after core publication', error, {
+        season: season.seasonCode,
+        revision: context.revision,
+      });
+    }
+  };
+  // A nested persistence savepoint does not release the caller's core locks.
+  // Run projections only after the outermost canonical transaction commits.
+  if (databaseTransactionStorage.getStore()) {
+    registerDatabasePostCommit(refreshReporting);
+  } else {
+    await refreshReporting();
   }
   return persisted;
 }
