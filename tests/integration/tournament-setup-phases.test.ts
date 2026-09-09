@@ -218,7 +218,7 @@ test('setup provider wait releases lifecycle ownership and a superseded service 
   }
 }, 5000);
 
-test('setup enrichment publishes only its scoped Trends data without a global MV refresh', async () => {
+test('setup accepts a reused READY Trends publication without a global MV refresh', async () => {
   const selection = await import('../../src/services/tournament-selection-stats.service');
   const trends = await import('../../src/services/tournament-trends-publication.service');
   const league = await import('../../src/services/league-event-results.service');
@@ -232,6 +232,9 @@ test('setup enrichment publishes only its scoped Trends data without a global MV
     tournamentId,
     eventId: 1,
     rows: 0,
+    state: 'REUSED',
+    publicationState: 'READY',
+    ownershipState: 'READY',
     isActive: true,
     transfersState: 'READY',
   } as never);
@@ -239,11 +242,13 @@ test('setup enrichment publishes only its scoped Trends data without a global MV
     failedUnits: 0,
     skipped: 0,
   } as never);
+  const events = await import('../../src/services/tournament-event-results.service');
+  spyOn(events, 'syncTournamentEventResultsForEntryIds').mockResolvedValue({} as never);
   const execution = await claim();
   const issues = await enrichTournamentHistory(
     season,
     tournamentId,
-    [],
+    [tournamentId],
     { startEventId: 1, endEventId: 1 },
     {
       setupExecution: execution,
@@ -264,3 +269,48 @@ test('terminal timestamps respect the database execution clock even ahead of the
     FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   expect(result!.ordered).toBe(true);
 });
+
+test('the worker settles obsolete delivery and releases its lock before slow Redis progress', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  spyOn(setup, 'setupTournamentStructure').mockRejectedValue(
+    Object.assign(new Error('superseded'), { code: 'TOURNAMENT_SETUP_EXECUTION_STALE' }),
+  );
+  const failure = spyOn(tournamentInfoRepository, 'markSetupAttemptFailure');
+  let settling!: () => void;
+  const reachedSettling = new Promise<void>((resolve) => {
+    settling = resolve;
+  });
+  let release!: () => void;
+  const redisWait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const job = {
+    id: 'integration-setup-superseded',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: { ...season, tournamentId, source: 'manual', triggeredAt: new Date().toISOString() },
+    attemptsMade: 0,
+    opts: { attempts: 3 },
+    updateProgress: async (value: string) => {
+      if (value === 'settling') {
+        settling();
+        await redisWait;
+      }
+    },
+  };
+  const pending = processTournamentSetupJob(job as never);
+  try {
+    await reachedSettling;
+    const successor = await claim();
+    expect(successor).toBeDefined();
+    expect(failure).not.toHaveBeenCalled();
+    release();
+    await pending;
+  } finally {
+    release();
+    await pending;
+  }
+}, 5000);

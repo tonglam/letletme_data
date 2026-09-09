@@ -661,9 +661,11 @@ export async function enrichTournamentHistory(
           );
       if (
         entryIds.length > 0 &&
-        (selectionResult.rows === 0 ||
-          ('isActive' in selectionResult && !selectionResult.isActive) ||
-          ('transfersState' in selectionResult && selectionResult.transfersState !== 'READY'))
+        ('isActive' in selectionResult
+          ? !selectionResult.isActive ||
+            selectionResult.ownershipState !== 'READY' ||
+            selectionResult.transfersState !== 'READY'
+          : selectionResult.rows === 0)
       ) {
         issues.push({
           scope: 'selection-insights',

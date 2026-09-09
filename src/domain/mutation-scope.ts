@@ -191,9 +191,14 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
         return [withEvent('tournament-cup-results', eventId)];
       // Cascade enqueues refresh only after points/battle/knockout complete
       // (barrier). The event scope also fences terminal publication against
-      // a core finalization arriving after the base job.
+      // a core finalization arriving after the base job. Setup-owned refreshes
+      // also rebuild selection reporting, so share its picks/transfers fence.
       case 'tournament-materialized-views-refresh':
-        return [TOURNAMENT_STRUCTURE_GLOBAL_SCOPE, 'data-core:events'];
+        return [
+          TOURNAMENT_STRUCTURE_GLOBAL_SCOPE,
+          'data-core:events',
+          withEvent('tournament-event-mutations', eventId),
+        ];
       case 'tournament-info':
         return ['tournament-info:all'];
       default:
