@@ -81,6 +81,7 @@ async function processJob(lane: 'team' | 'player', name: string, data: unknown) 
     name,
     queueName: `understat-${lane}-sync`,
     attemptsMade: 0,
+    opts: { attempts: 3 },
     data,
   });
 }
@@ -121,6 +122,7 @@ beforeEach(async () => {
     ...originalConfig,
     UNDERSTAT_ENABLED: true,
     UNDERSTAT_SEASON: season,
+    UNDERSTAT_MIN_SEASON: season,
     UNDERSTAT_LEAGUE: 'EPL',
   });
   await sql`INSERT INTO ops.mutation_scopes(scope_key,last_used_at) VALUES(${scope},now()) ON CONFLICT DO NOTHING`;
