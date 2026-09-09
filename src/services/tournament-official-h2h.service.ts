@@ -1,6 +1,6 @@
 import type { TournamentSetupExecution } from '../repositories/tournament-infos';
 import { withTournamentSetupPhase } from '../utils/tournament-setup-execution';
-import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
+import { tournamentEntryCoreScopes, tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import type { RawFPLLeagueH2HMatch, RawFPLLeagueStandingsResult } from '../clients/fpl';
 import { fplClient } from '../clients/fpl';
 import type {
@@ -24,6 +24,7 @@ import {
   validateOfficialH2HPageManifest,
   type OfficialH2HPageManifest,
 } from '../domain/official-h2h-manifest';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { ValidationError } from '../utils/errors';
 import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
@@ -1143,20 +1144,6 @@ export async function syncOfficialH2HTournament(
     }
   }
 
-  const currentGroups = await tournamentGroupRepository.findByTournamentAndEntries(
-    season,
-    tournament.id,
-    entryIds,
-  );
-  if (
-    currentGroups.length !== entryIdSet.size ||
-    currentGroups.some((group) => !entryIdSet.has(group.entryId))
-  ) {
-    throw new ValidationError(
-      'Official H2H tournament group does not match its roster.',
-      'TOURNAMENT_OFFICIAL_H2H_GROUP_MISMATCH',
-    );
-  }
   const requestedProvisionalEventId = options.provisionalEventId ?? null;
   const eventLiveBatch =
     requestedProvisionalEventId === null
@@ -1263,52 +1250,6 @@ export async function syncOfficialH2HTournament(
   const groupEndEventId = tournament.groupEndedEventId ?? reconcileEventId ?? 38;
   const provisionalEventBelongsToGroup =
     provisionalEventId !== null && isOfficialH2HGroupEvent(tournament, provisionalEventId);
-  const aggregateTotals =
-    eventLiveSnapshot && eventLiveBatch && provisionalEventBelongsToGroup
-      ? await (async () => {
-          const previousTotals =
-            provisionalEventId <= groupStartEventId
-              ? []
-              : await entryEventResultsRepository.aggregateTotalsByEntry(
-                  season,
-                  entryIds,
-                  groupStartEventId,
-                  provisionalEventId - 1,
-                );
-          const previousByEntry = new Map(previousTotals.map((row) => [row.entryId, row] as const));
-          const previousEndEventId = provisionalEventId - 1;
-          const incompleteEntryIds = entryIds.filter(
-            (entryId) =>
-              !hasCompleteEntryEventTotalsCoverage(
-                previousByEntry.get(entryId),
-                groupStartEventId,
-                previousEndEventId,
-              ),
-          );
-          if (incompleteEntryIds.length > 0) {
-            throw new ValidationError(
-              `Official H2H cumulative totals are incomplete for ${incompleteEntryIds.length} entries through GW${previousEndEventId}.`,
-              'TOURNAMENT_OFFICIAL_H2H_TOTALS_INCOMPLETE',
-            );
-          }
-          return entryIds.map((entryId) => {
-            const previous = previousByEntry.get(entryId);
-            const score = eventLiveBatch.scores.get(entryId)!;
-            return {
-              entryId,
-              totalPoints: (previous?.totalPoints ?? 0) + score.eventPoints,
-              totalTransfersCost: (previous?.totalTransfersCost ?? 0) + score.transferCost,
-              totalNetPoints: (previous?.totalNetPoints ?? 0) + score.netEventPoints,
-            };
-          });
-        })()
-      : await entryEventResultsRepository.aggregateTotalsByEntry(
-          season,
-          entryIds,
-          groupStartEventId,
-          groupEndEventId,
-        );
-  const totalsByEntry = new Map(aggregateTotals.map((row) => [row.entryId, row] as const));
   const matchDerivedStandings = projectOfficialH2HStandingsFromMatches(
     entryIdSet,
     scoringSnapshot.matches,
@@ -1335,14 +1276,78 @@ export async function syncOfficialH2HTournament(
       derivedPlayed: standingsSelection.derivedPlayed,
     });
   }
-  const groupRows = projectOfficialH2HStandings(
-    currentGroups,
-    standingsSelection.standings,
-    totalsByEntry,
-    snapshot.sourceCheckedAt ?? checkedAt,
-  );
-  const publish = () =>
-    tournamentOfficialH2HRepository.publish(season, tournament.id, {
+  const publish = async () => {
+    // Provider/Redis observations are already captured. Read canonical group
+    // state and cumulative entry totals only after acquiring their write fences.
+    const currentGroups = await tournamentGroupRepository.findByTournamentAndEntries(
+      season,
+      tournament.id,
+      entryIds,
+    );
+    if (
+      currentGroups.length !== entryIdSet.size ||
+      currentGroups.some((group) => !entryIdSet.has(group.entryId))
+    ) {
+      throw new ValidationError(
+        'Official H2H tournament group does not match its roster.',
+        'TOURNAMENT_OFFICIAL_H2H_GROUP_MISMATCH',
+      );
+    }
+    const aggregateTotals =
+      eventLiveSnapshot && eventLiveBatch && provisionalEventBelongsToGroup
+        ? await (async () => {
+            const previousTotals =
+              provisionalEventId <= groupStartEventId
+                ? []
+                : await entryEventResultsRepository.aggregateTotalsByEntry(
+                    season,
+                    entryIds,
+                    groupStartEventId,
+                    provisionalEventId - 1,
+                  );
+            const previousByEntry = new Map(
+              previousTotals.map((row) => [row.entryId, row] as const),
+            );
+            const previousEndEventId = provisionalEventId - 1;
+            const incompleteEntryIds = entryIds.filter(
+              (entryId) =>
+                !hasCompleteEntryEventTotalsCoverage(
+                  previousByEntry.get(entryId),
+                  groupStartEventId,
+                  previousEndEventId,
+                ),
+            );
+            if (incompleteEntryIds.length > 0) {
+              throw new ValidationError(
+                `Official H2H cumulative totals are incomplete for ${incompleteEntryIds.length} entries through GW${previousEndEventId}.`,
+                'TOURNAMENT_OFFICIAL_H2H_TOTALS_INCOMPLETE',
+              );
+            }
+            return entryIds.map((entryId) => {
+              const previous = previousByEntry.get(entryId);
+              const score = eventLiveBatch.scores.get(entryId)!;
+              return {
+                entryId,
+                totalPoints: (previous?.totalPoints ?? 0) + score.eventPoints,
+                totalTransfersCost: (previous?.totalTransfersCost ?? 0) + score.transferCost,
+                totalNetPoints: (previous?.totalNetPoints ?? 0) + score.netEventPoints,
+              };
+            });
+          })()
+        : await entryEventResultsRepository.aggregateTotalsByEntry(
+            season,
+            entryIds,
+            groupStartEventId,
+            groupEndEventId,
+          );
+    const totalsByEntry = new Map(aggregateTotals.map((row) => [row.entryId, row] as const));
+    const groupRows = projectOfficialH2HStandings(
+      currentGroups,
+      standingsSelection.standings,
+      totalsByEntry,
+      snapshot.sourceCheckedAt ?? checkedAt,
+    );
+    return tournamentOfficialH2HRepository.publish(season, tournament.id, {
       ...officialRows,
       checkedAt,
       lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
@@ -1351,16 +1356,29 @@ export async function syncOfficialH2HTournament(
       pageManifests: snapshot.pageManifests,
       fullReconcile: options.forceFull === true,
     });
+  };
+  const publicationScopes = [
+    ...tournamentSetupRebuildScopes(tournament.id),
+    ...tournamentEntryCoreScopes(season.seasonId, entryIds),
+  ];
   const published = options.setupExecution
     ? await withTournamentSetupPhase(
         season,
         tournament.id,
         options.setupExecution,
         'official_h2h_publish',
-        tournamentSetupRebuildScopes(tournament.id),
+        publicationScopes,
         publish,
       )
-    : await publish();
+    : await withMutationScopes(
+        {
+          queueName: 'tournament-sync',
+          jobName: 'tournament-official-h2h',
+          tournamentId: tournament.id,
+          scopes: publicationScopes,
+        },
+        publish,
+      );
 
   logInfo('Official H2H strategy completed', {
     tournamentId: tournament.id,

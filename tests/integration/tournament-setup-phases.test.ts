@@ -16,6 +16,8 @@ const tournamentId = 995_501;
 const jobName = 'integration-setup-phase-refresh';
 const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
 async function cleanup() {
+  await sql`DELETE FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  await sql`DELETE FROM competition.entry_event_results WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
   await sql`DELETE FROM ops.scheduler_obligations WHERE job_name='tournament-materialized-views-refresh' AND scope_key=${`${season.seasonCode}:tournament:${tournamentId}`}`;
   await sql`DELETE FROM competition.tournament_setup_issues WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM ops.scheduler_obligations WHERE job_name=${jobName}`;
@@ -510,4 +512,93 @@ test('a second setup for the same event reserves a new refresh after the first s
   expect(rows).toHaveLength(2);
   expect(new Set(rows.map((row) => row.period_key)).size).toBe(2);
   expect(rows.map((row) => row.status).sort()).toEqual(['pending', 'succeeded']);
+});
+
+test('official H2H rereads groups and entry totals after acquiring publication fences', async () => {
+  const phases = await import('../../src/utils/tournament-setup-execution');
+  const { tournamentSetupRebuildScopes, tournamentEntryCoreScopes } = await import(
+    '../../src/domain/mutation-scope'
+  );
+  const { tournamentEntryRepository } = await import('../../src/repositories/tournament-entries');
+  const { tournamentOfficialH2HRepository } = await import(
+    '../../src/repositories/tournament-official-h2h'
+  );
+  const { tournamentOfficialH2HManifestRepository } = await import(
+    '../../src/repositories/tournament-official-h2h-manifest'
+  );
+  const { fplClient } = await import('../../src/clients/fpl');
+  const { syncOfficialH2HTournament } = await import(
+    '../../src/services/tournament-official-h2h.service'
+  );
+  await sql`INSERT INTO fpl.events (season_id,event_id,name) VALUES (${season.seasonId},1,'H2H fixture')`;
+  await sql`INSERT INTO competition.entry_event_results (season_id,entry_id,event_id,event_points,event_net_points) VALUES (${season.seasonId},${tournamentId},1,1,1)`;
+  await sql`INSERT INTO competition.tournament_groups (season_id,tournament_id,entry_id,group_id,group_name,group_index) VALUES (${season.seasonId},${tournamentId},${tournamentId},1,'Old group',1)`;
+  const owner = await claim();
+  const tournament = {
+    ...(await tournamentInfoRepository.findSetupConfig(season, tournamentId))!,
+    leagueType: 'h2h',
+    groupMode: 'battle_races',
+    groupStartedEventId: 1,
+    groupEndedEventId: 1,
+  } as const;
+  spyOn(tournamentEntryRepository, 'findEntryIdsByTournamentId').mockResolvedValue([tournamentId]);
+  spyOn(tournamentOfficialH2HManifestRepository, 'findByTournament').mockResolvedValue([]);
+  spyOn(fplClient, 'getLeagueH2HStandings').mockImplementation(async () => {
+    expect(typeof (await getDbClient()).begin).toBe('function');
+    return {
+      standings: {
+        results: [
+          {
+            entry: tournamentId,
+            total: 3,
+            rank: 1,
+            matches_played: 1,
+            matches_won: 1,
+            matches_drawn: 0,
+            matches_lost: 0,
+            points_for: 20,
+          },
+        ],
+        has_next: false,
+      },
+    } as never;
+  });
+  spyOn(fplClient, 'getLeagueH2HMatches').mockResolvedValue({
+    results: [],
+    has_next: false,
+  } as never);
+  const scopes = [
+    ...tournamentSetupRebuildScopes(tournamentId),
+    ...tournamentEntryCoreScopes(season.seasonId, [tournamentId]),
+  ];
+  const originalPhase = phases.withTournamentSetupPhase;
+  spyOn(phases, 'withTournamentSetupPhase').mockImplementation(async (...args) => {
+    // Simulate an earlier cascade committing immediately before the H2H
+    // publisher acquires its scopes. Old precomputed groupRows would be stale.
+    await withMutationScopes(
+      { queueName: 'test', jobName: 'competing-source-writer', scopes },
+      async () => {
+        const tx = await getDbClient();
+        await tx`UPDATE competition.tournament_groups SET group_name='New group' WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+        await tx`UPDATE competition.entry_event_results SET event_points=20,event_net_points=20 WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+      },
+    );
+    return originalPhase(...args);
+  });
+  const publish = spyOn(tournamentOfficialH2HRepository, 'publish').mockImplementation(
+    async (_season, _id, publication) => {
+      expect(publication.groupRows[0]!.groupName).toBe('New group');
+      expect(publication.groupRows[0]!.totalPoints).toBe(20);
+      for (const scope of scopes) {
+        await expect(
+          sql.begin(async (tx) => {
+            await tx`SELECT scope_key FROM ops.mutation_scopes WHERE scope_key=${scope} FOR UPDATE NOWAIT`;
+          }),
+        ).rejects.toMatchObject({ code: '55P03' });
+      }
+      return { groupRows: 1, battleRows: 0, knockoutRows: 0 } as never;
+    },
+  );
+  await syncOfficialH2HTournament(season, tournament, undefined, { setupExecution: owner });
+  expect(publish).toHaveBeenCalledTimes(1);
 });
