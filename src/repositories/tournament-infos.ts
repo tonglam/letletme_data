@@ -626,9 +626,13 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
       return rows.length === 1;
     },
 
-    markSetupRetryQueued: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+    markSetupRetryQueued: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      expectedSetupProgressUpdatedAt?: string | null,
+    ): Promise<boolean> => {
       const db = await getDbInstance();
-      await db
+      const rows = await db
         .update(tournamentsInCompetition)
         .set({
           setupStatus: 'processing',
@@ -650,7 +654,16 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           insightsReadyAt: null,
           updatedAt: new Date(),
         })
-        .where(tournamentScope(season, tournamentId));
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            expectedSetupProgressUpdatedAt === undefined
+              ? undefined
+              : sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${expectedSetupProgressUpdatedAt}::timestamptz`,
+          ),
+        )
+        .returning({ id: tournamentsInCompetition.tournamentId });
+      return rows.length === 1;
     },
 
     markSetupProgress: async (

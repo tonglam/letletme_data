@@ -236,7 +236,20 @@ async function enqueueTournamentSetupUnlocked(
       }
     }
 
-    await options.prepareEnqueue?.();
+    if (options.prepareEnqueue) {
+      // Durable preparation is serialized briefly. Queue inspection and Redis
+      // admission intentionally happen after this transaction commits so a
+      // slow/unavailable queue cannot retain a PostgreSQL mutation lock.
+      await withMutationScopes(
+        {
+          queueName: 'tournament-setup-enqueue',
+          jobName: 'prepare-tournament-setup-enqueue',
+          tournamentId,
+          scopes: [tournamentSetupEnqueueScope(tournamentId)],
+        },
+        options.prepareEnqueue,
+      );
+    }
     let job;
     try {
       job = await queue.add(
@@ -281,13 +294,8 @@ export function enqueueTournamentSetup(
   source: TournamentSetupJobSource = 'create',
   options: EnqueueTournamentSetupOptions = {},
 ) {
-  return withMutationScopes(
-    {
-      queueName: 'tournament-setup-enqueue',
-      jobName: 'tournament-setup-enqueue',
-      tournamentId,
-      scopes: [tournamentSetupEnqueueScope(tournamentId)],
-    },
-    () => enqueueTournamentSetupUnlocked(season, tournamentId, source, options),
-  );
+  // Queue inspection and admission must not run inside a database mutation
+  // scope. Callers that need a durable marker use prepareEnqueue above, which
+  // holds the scope only for that short database write.
+  return enqueueTournamentSetupUnlocked(season, tournamentId, source, options);
 }

@@ -145,6 +145,7 @@ export type TournamentManagementLifecycle = {
   requeueSetup?: (
     season: FplSeasonRef,
     tournamentId: number,
+    expectedSetupProgressUpdatedAt?: string | null,
   ) => Promise<{ readonly id?: string | number | null }>;
 };
 
@@ -224,10 +225,12 @@ export async function requestSnapshotTournamentResume(
   options?: { resumePrepared?: boolean },
 ): Promise<void> {
   let resumePrepared = options?.resumePrepared === true;
+  let enqueuePreparationStarted = false;
   try {
     await dependencies.enqueue(tournamentId, 'resume', {
       forceNew: true,
       prepareEnqueue: async () => {
+        enqueuePreparationStarted = true;
         if (!options?.resumePrepared) await dependencies.markResumeProcessing(tournamentId);
         resumePrepared = true;
       },
@@ -236,7 +239,7 @@ export async function requestSnapshotTournamentResume(
     // An active job is rejected before prepareEnqueue runs. Preserve its
     // canonical state instead of replacing ready/processing with a false
     // pending or failed resume marker. Fail only a transition we wrote.
-    if (resumePrepared) {
+    if (enqueuePreparationStarted && resumePrepared) {
       const message = error instanceof Error ? error.message : 'Unable to enqueue resume setup.';
       await Promise.allSettled([
         dependencies.markRosterFailed(tournamentId, message),
@@ -569,23 +572,28 @@ export function createTournamentManagementService(
               }
             };
           } else {
-            // Commit the durable resume marker with the lifecycle transition;
-            // queue inspection/admission runs after this transaction returns.
-            await rosterRepository.markResumeProcessing(season, tournamentId);
+            // Queue inspection/admission runs after this transaction returns.
+            // The preparation callback reacquires the lifecycle scope only for
+            // the durable marker, then the queue add happens after that short
+            // transaction commits.
             return async () =>
-              requestSnapshotTournamentResume(
-                tournamentId,
-                {
-                  enqueue: (id, source, options) =>
-                    enqueueSnapshotSetup(season, id, source, options),
-                  markResumeProcessing: (id) => rosterRepository.markResumeProcessing(season, id),
-                  markRosterFailed: (id, message) =>
-                    rosterRepository.markSyncFailed(season, id, message),
-                  markSetupFailed: (id, message) =>
-                    infoRepository.markSetupResult(season, id, 'failed', message),
-                },
-                { resumePrepared: true },
-              );
+              requestSnapshotTournamentResume(tournamentId, {
+                enqueue: (id, source, options) => enqueueSnapshotSetup(season, id, source, options),
+                markResumeProcessing: (id) =>
+                  scopeRunner(
+                    {
+                      queueName: 'tournament-management',
+                      jobName: 'tournament-resume-prepare',
+                      tournamentId: id,
+                      scopes: [tournamentSetupLifecycleScope(id)],
+                    },
+                    () => rosterRepository.markResumeProcessing(season, id),
+                  ),
+                markRosterFailed: (id, message) =>
+                  rosterRepository.markSyncFailed(season, id, message),
+                markSetupFailed: (id, message) =>
+                  infoRepository.markSetupResult(season, id, 'failed', message),
+              });
           }
           return undefined;
         },
@@ -757,7 +765,7 @@ export function createTournamentManagementService(
       );
       // The lifecycle transaction has committed. Requeue performs its queue
       // inspection and admission after the lock is released.
-      return requeueSetup(season, tournamentId);
+      return requeueSetup(season, tournamentId, observed.setupProgressUpdatedAt ?? null);
     },
 
     retryRoster: async (tournamentId: number, input: unknown) => {

@@ -102,6 +102,38 @@ describe('tournament management service', () => {
     expect(calls).toEqual(['enqueue-rejected']);
   });
 
+  test('does not fail a preprepared resume when admission rejects an active replacement', async () => {
+    const calls: string[] = [];
+    const activeError = new ConflictError(
+      'Tournament setup is already running.',
+      'TOURNAMENT_SETUP_IN_PROGRESS',
+    );
+
+    await expect(
+      requestSnapshotTournamentResume(
+        42,
+        {
+          enqueue: async () => {
+            calls.push('enqueue-rejected');
+            throw activeError;
+          },
+          markResumeProcessing: async () => {
+            calls.push('mark-pending');
+          },
+          markRosterFailed: async () => {
+            calls.push('mark-roster-failed');
+          },
+          markSetupFailed: async () => {
+            calls.push('mark-setup-failed');
+          },
+        },
+        { resumePrepared: true },
+      ),
+    ).rejects.toBe(activeError);
+
+    expect(calls).toEqual(['enqueue-rejected']);
+  });
+
   test('marks only a prepared resume failed when queue publication fails', async () => {
     const calls: string[] = [];
     const enqueueError = new Error('queue unavailable');
@@ -634,10 +666,23 @@ describe('tournament management service', () => {
       code: 'TOURNAMENT_RESUME_PENDING',
     });
 
-    const retry = createTestService(createRepository());
+    let expectedRetryMarker: string | null | undefined;
+    const retryMarker = '2026-08-28T00:01:00.000Z';
+    const retry = createTestService(
+      createRepository({
+        findById: async () => ({ ...tournament, setupProgressUpdatedAt: retryMarker }),
+      }),
+      {
+        requeueSetup: async (_season, tournamentId, expectedMarker) => {
+          expectedRetryMarker = expectedMarker;
+          return { id: `setup-${tournamentId}` };
+        },
+      },
+    );
     await expect(retry.retrySetup(42, { adminEntryId: 123 })).resolves.toEqual({
       id: 'setup-42',
     });
+    expect(expectedRetryMarker).toBe(retryMarker);
   });
 
   test('releases the management scope before the setup queue handoff', async () => {
