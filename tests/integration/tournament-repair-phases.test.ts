@@ -229,10 +229,13 @@ test('correction writes and issue resolution roll back together when settlement 
   issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
   await mockAudit([]);
   spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue(undefined);
+  const requestCorrection = review.requestTournamentReviewTournamentCorrection;
   const correction = spyOn(
     review,
     'requestTournamentReviewTournamentCorrection',
-  ).mockImplementation(async () => {
+  ).mockImplementation(async (...args) => {
+    // Exercise the real correction SQL within the enclosing repair transaction.
+    await requestCorrection(...args);
     const tx = await getDbClient();
     await tx`UPDATE competition.tournament_setup_issues SET diagnostic_code='correction-marker' WHERE issue_id=${issueId}`;
     return [];
