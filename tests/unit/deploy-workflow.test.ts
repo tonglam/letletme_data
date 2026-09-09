@@ -297,7 +297,8 @@ describe('release workflow gates', () => {
     expect(sourceMediaDeployFence).toContain(String.raw`status = 'RUNNING'`);
     expect(sourceMediaDeployFence).toContain('lease_owner IS NOT NULL');
     expect(sourceMediaDeployFence).toContain(
-      "storage_state = 'AVAILABLE'\n        AND upload_lease_owner IS NOT NULL",
+      String.raw`storage_state = 'AVAILABLE'
+        AND upload_lease_owner IS NOT NULL`,
     );
     expect(sourceMediaDeployFence).toContain('repair_until_at <= clock_timestamp()');
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
