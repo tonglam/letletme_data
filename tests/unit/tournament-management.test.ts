@@ -57,6 +57,7 @@ function createTestService(
         findById: async () => null,
         markResumeProcessingWithMarker: async () => 'resume-marker',
         markResumeProcessing: async () => undefined,
+        markSyncPending: async () => 'retry-marker',
         markSyncFailed: async () => undefined,
       },
       infoRepository: { markSetupResult: async () => undefined },
@@ -96,6 +97,38 @@ describe('tournament management service', () => {
           calls.push('mark-setup-failed');
         },
       }),
+    ).rejects.toBe(activeError);
+
+    expect(calls).toEqual(['enqueue-rejected']);
+  });
+
+  test('does not fail a preprepared resume when admission rejects an active replacement', async () => {
+    const calls: string[] = [];
+    const activeError = new ConflictError(
+      'Tournament setup is already running.',
+      'TOURNAMENT_SETUP_IN_PROGRESS',
+    );
+
+    await expect(
+      requestSnapshotTournamentResume(
+        42,
+        {
+          enqueue: async () => {
+            calls.push('enqueue-rejected');
+            throw activeError;
+          },
+          markResumeProcessing: async () => {
+            calls.push('mark-pending');
+          },
+          markRosterFailed: async () => {
+            calls.push('mark-roster-failed');
+          },
+          markSetupFailed: async () => {
+            calls.push('mark-setup-failed');
+          },
+        },
+        { resumePrepared: true },
+      ),
     ).rejects.toBe(activeError);
 
     expect(calls).toEqual(['enqueue-rejected']);
@@ -455,6 +488,7 @@ describe('tournament management service', () => {
           markResumeProcessing: async (_season, id) => {
             calls.push(`snapshot-marker:${id}`);
           },
+          markSyncPending: async () => 'retry-marker',
           markSyncFailed: async () => undefined,
         },
       },
@@ -473,6 +507,7 @@ describe('tournament management service', () => {
           findById: async () => null,
           markResumeProcessingWithMarker: async () => 'marker-42',
           markResumeProcessing: async () => undefined,
+          markSyncPending: async () => 'retry-marker',
           markSyncFailed: async () => undefined,
         },
         enqueueRosterReconcile: async (_season, id, _source, options) => {
@@ -519,9 +554,21 @@ describe('tournament management service', () => {
           throw queueError;
         },
         rosterRepository: {
-          findById: async () => null,
+          findById: async () =>
+            ({
+              executionId: 'execution-42',
+              setupProgressUpdatedAt: 'marker-42',
+              state: 'inactive',
+              rosterMode: 'official_sync',
+              rosterSyncStatus: 'processing',
+              setupStatus: 'pending',
+              setupPhase: 'queued',
+              leagueId: 100,
+              leagueType: 'classic',
+            }) as never,
           markResumeProcessingWithMarker: async () => 'marker-42',
           markResumeProcessing: async () => undefined,
+          markSyncPending: async () => 'retry-marker',
           markSyncFailed: async () => {
             failures.push('roster');
           },
@@ -579,9 +626,17 @@ describe('tournament management service', () => {
         throw queueError;
       },
       rosterRepository: {
-        findById: async () => null,
+        findById: async () =>
+          ({
+            executionId: null,
+            setupProgressUpdatedAt: null,
+            state: 'active',
+            rosterMode: 'official_sync',
+            rosterSyncStatus: 'pending',
+          }) as never,
         markResumeProcessingWithMarker: async () => 'unused',
         markResumeProcessing: async () => undefined,
+        markSyncPending: async () => 'retry-marker',
         markSyncFailed: async (_season, id, message) => {
           failures.push(`${id}:${message}`);
         },
@@ -611,8 +666,46 @@ describe('tournament management service', () => {
       code: 'TOURNAMENT_RESUME_PENDING',
     });
 
-    const retry = createTestService(createRepository());
+    let expectedRetryMarker: string | null | undefined;
+    const retryMarker = '2026-08-28T00:01:00.000Z';
+    const retry = createTestService(
+      createRepository({
+        findById: async () => ({ ...tournament, setupProgressUpdatedAt: retryMarker }),
+      }),
+      {
+        requeueSetup: async (_season, tournamentId, expectedMarker) => {
+          expectedRetryMarker = expectedMarker;
+          return { id: `setup-${tournamentId}` };
+        },
+      },
+    );
     await expect(retry.retrySetup(42, { adminEntryId: 123 })).resolves.toEqual({
+      id: 'setup-42',
+    });
+    expect(expectedRetryMarker).toBe(retryMarker);
+  });
+
+  test('releases the management scope before the setup queue handoff', async () => {
+    let inScope = false;
+    let committed = false;
+    const service = createTestService(createRepository(), {
+      withMutationScopes: async (_input, operation) => {
+        inScope = true;
+        try {
+          return await operation();
+        } finally {
+          inScope = false;
+          committed = true;
+        }
+      },
+      requeueSetup: async (_season, tournamentId) => {
+        expect(inScope).toBe(false);
+        expect(committed).toBe(true);
+        return { id: `setup-${tournamentId}` };
+      },
+    });
+
+    await expect(service.retrySetup(42, { adminEntryId: 123 })).resolves.toEqual({
       id: 'setup-42',
     });
   });
@@ -674,5 +767,474 @@ describe('tournament management service', () => {
     await expect(committed.deleteTournament(42, { adminEntryId: 123 })).resolves.toEqual(
       tournament,
     );
+  });
+});
+
+for (const pausedDuringEnqueue of [false, true]) {
+  test(`official resume commits before queue handoff and protects newer pause=${pausedDuringEnqueue}`, async () => {
+    const official = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+    };
+    let inScope = false;
+    let committed = false;
+    let owner = {
+      executionId: 'execution-1',
+      setupProgressUpdatedAt: 'marker-1',
+      state: 'inactive',
+      rosterMode: 'official_sync',
+      rosterSyncStatus: 'processing',
+      setupStatus: 'pending',
+      setupPhase: 'queued',
+      leagueId: 100,
+      leagueType: 'classic',
+    };
+    const failures: string[] = [];
+    const queueError = new Error('queue unavailable');
+    const service = createTestService(createRepository({ findById: async () => official }), {
+      withMutationScopes: async (_input, operation) => {
+        inScope = true;
+        try {
+          return await operation();
+        } finally {
+          inScope = false;
+          committed = true;
+        }
+      },
+      rosterRepository: {
+        findById: async () => ({ ...owner }) as never,
+        markResumeProcessingWithMarker: async () => 'marker-1',
+        markResumeProcessing: async () => undefined,
+        markSyncPending: async () => 'retry-marker',
+        markSyncFailed: async () => {
+          failures.push('roster');
+        },
+      },
+      infoRepository: {
+        markSetupResult: async () => {
+          failures.push('setup');
+        },
+      },
+      enqueueRosterReconcile: async () => {
+        expect(inScope).toBe(false);
+        expect(committed).toBe(true);
+        if (pausedDuringEnqueue)
+          owner = { ...owner, executionId: 'execution-2', setupStatus: 'ready' };
+        throw queueError;
+      },
+    });
+    await expect(
+      service.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+    ).rejects.toBe(queueError);
+    expect(failures.sort()).toEqual(pausedDuringEnqueue ? [] : ['roster', 'setup']);
+  });
+}
+
+for (const changedDuringLookup of [false, true]) {
+  test(`pause reads queue outside its transaction and fences changed intent=${changedDuringLookup}`, async () => {
+    let current = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'failed' as const,
+      setupStatus: 'failed' as const,
+      setupError: 'lost response',
+      setupProgressUpdatedAt: 'marker-1',
+    };
+    let inScope = false;
+    let writes = 0;
+    const service = createTestService(
+      createRepository({
+        findById: async () => ({ ...current }),
+        updateStateOwned: async () => {
+          writes += 1;
+          return current;
+        },
+      }),
+      {
+        withMutationScopes: async (_input, operation) => {
+          inScope = true;
+          try {
+            return await operation();
+          } finally {
+            inScope = false;
+          }
+        },
+        findRosterReconcileJob: async () => {
+          expect(inScope).toBe(false);
+          if (changedDuringLookup) current = { ...current, setupProgressUpdatedAt: 'marker-2' };
+          return { id: 'old-accepted' } as never;
+        },
+      },
+    );
+    const operation = service.setTournamentState(42, { adminEntryId: 123, state: 'inactive' });
+    if (changedDuringLookup) {
+      await expect(operation).rejects.toBeInstanceOf(ConflictError);
+      expect(writes).toBe(0);
+    } else {
+      await expect(operation).resolves.toEqual(current);
+      expect(writes).toBe(1);
+    }
+  });
+}
+
+for (const outcome of [
+  'failed',
+  'paused',
+  'accepted',
+  'renamed',
+  'completed',
+  'completed-same-execution',
+  'newer-marker',
+] as const) {
+  test(`roster mode handoff runs after commit and preserves ${outcome} outcome`, async () => {
+    let pending = {
+      ...tournament,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'pending' as 'pending' | 'ready',
+    };
+    let owner = {
+      executionId: null as string | null,
+      setupProgressUpdatedAt: null as string | null,
+      state: 'active',
+      rosterMode: 'official_sync',
+      rosterSyncStatus: 'pending',
+    };
+    let inScope = false;
+    let committed = false;
+    let lookups = 0;
+    let failures = 0;
+    const queueError = new Error('queue response lost');
+    const service = createTestService(createRepository({ findById: async () => pending }), {
+      withMutationScopes: async (_input, operation) => {
+        inScope = true;
+        try {
+          return await operation();
+        } finally {
+          inScope = false;
+          committed = true;
+        }
+      },
+      rosterRepository: {
+        findById: async () => ({ ...owner }) as never,
+        markResumeProcessingWithMarker: async () => 'unused',
+        markResumeProcessing: async () => undefined,
+        markSyncPending: async () => 'retry-marker',
+        markSyncFailed: async () => {
+          failures += 1;
+        },
+      },
+      findRosterReconcileJob: async () => {
+        expect(inScope).toBe(false);
+        lookups += 1;
+        return outcome === 'accepted' && lookups > 1 ? ({ id: 'accepted' } as never) : null;
+      },
+      enqueueRosterReconcile: async () => {
+        expect(inScope).toBe(false);
+        expect(committed).toBe(true);
+        if (outcome === 'paused') owner = { ...owner, state: 'inactive' };
+        if (outcome === 'renamed')
+          pending = { ...pending, name: 'Renamed', updatedAt: 'new-name-version' };
+        if (
+          outcome === 'completed' ||
+          outcome === 'completed-same-execution' ||
+          outcome === 'newer-marker'
+        ) {
+          owner = {
+            ...owner,
+            executionId: outcome === 'completed-same-execution' ? null : 'worker-execution',
+            rosterSyncStatus: 'ready',
+            setupProgressUpdatedAt: outcome === 'newer-marker' ? 'other-operation' : null,
+          };
+          pending = { ...pending, rosterSyncStatus: 'ready' };
+        }
+        throw queueError;
+      },
+    });
+    const operation = service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' });
+    if (outcome === 'accepted' || outcome === 'completed' || outcome === 'completed-same-execution')
+      await expect(operation).resolves.toMatchObject({
+        rosterSyncStatus:
+          outcome === 'completed' || outcome === 'completed-same-execution' ? 'ready' : 'pending',
+      });
+    else await expect(operation).rejects.toBe(queueError);
+    expect(failures).toBe(outcome === 'failed' || outcome === 'renamed' ? 1 : 0);
+  });
+}
+
+test('roster retry performs queue admission after the lifecycle check commits', async () => {
+  const current = { ...tournament, rosterMode: 'official_sync' as const };
+  let inScope = false;
+  let committed = false;
+  const service = createTestService(createRepository({ findById: async () => current }), {
+    withMutationScopes: async (_input, operation) => {
+      inScope = true;
+      try {
+        return await operation();
+      } finally {
+        inScope = false;
+        committed = true;
+      }
+    },
+    enqueueRosterReconcile: async () => {
+      expect(inScope).toBe(false);
+      expect(committed).toBe(true);
+      return { id: 'retry-job' } as never;
+    },
+  });
+  expect(await service.retryRoster(42, { adminEntryId: 123 })).toMatchObject({
+    queued: true,
+    operationId: 'retry-job',
+  });
+});
+
+for (const action of ['retrySetup', 'retryRoster'] as const) {
+  test(`${action} respects committed official resume intent before queue handoff`, async () => {
+    const pending = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'processing' as const,
+      setupStatus: 'pending' as const,
+      setupPhase: 'queued' as const,
+      setupProgressUpdatedAt: 'resume-intent',
+    };
+    let queueReads = 0;
+    const service = createTestService(createRepository({ findById: async () => pending }), {
+      findSetupJob: async () => {
+        queueReads += 1;
+        return null;
+      },
+      findRosterReconcileJob: async () => {
+        queueReads += 1;
+        return null;
+      },
+    });
+    await expect(service[action](42, { adminEntryId: 123 })).rejects.toMatchObject({
+      code: 'TOURNAMENT_RESUME_PENDING',
+    });
+    expect(queueReads).toBe(0);
+  });
+}
+
+for (const action of ['retrySetup', 'retryRoster'] as const) {
+  test(`${action} permits terminal setup failure with a processing official roster`, async () => {
+    const terminal = {
+      ...tournament,
+      state: 'inactive' as const,
+      rosterMode: 'official_sync' as const,
+      rosterSyncStatus: 'processing' as const,
+      setupStatus: 'failed' as const,
+      setupPhase: 'failed' as const,
+      setupError: 'setup exhausted',
+      setupProgressUpdatedAt: 'resume-marker',
+    };
+    const service = createTestService(createRepository({ findById: async () => terminal }));
+    await expect(service[action](42, { adminEntryId: 123 })).resolves.toBeDefined();
+  });
+}
+
+test('official resume accepts durable completion after a lost queue response', async () => {
+  let current = { ...tournament, state: 'inactive' as const, rosterMode: 'official_sync' as const };
+  let owner = {
+    executionId: 'intent-owner',
+    setupProgressUpdatedAt: 'resume-marker',
+    state: 'inactive',
+    rosterMode: 'official_sync',
+    rosterSyncStatus: 'processing',
+    setupStatus: 'pending',
+    setupPhase: 'queued',
+    leagueId: 100,
+    leagueType: 'classic',
+  };
+  let failureWrites = 0;
+  const service = createTestService(createRepository({ findById: async () => current }), {
+    rosterRepository: {
+      findById: async () => ({ ...owner }) as never,
+      markResumeProcessingWithMarker: async () => 'resume-marker',
+      markResumeProcessing: async () => undefined,
+      markSyncPending: async () => 'retry-marker',
+      markSyncFailed: async () => {
+        failureWrites += 1;
+      },
+    },
+    enqueueRosterReconcile: async () => {
+      owner = {
+        ...owner,
+        executionId: 'worker-owner',
+        state: 'active',
+        rosterSyncStatus: 'ready',
+        setupStatus: 'ready',
+        setupPhase: 'ready',
+      };
+      current = { ...current, state: 'active' as never };
+      throw new Error('accepted queue response lost');
+    },
+    findRosterReconcileJob: async () => null,
+  });
+  await expect(
+    service.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+  ).resolves.toMatchObject({ state: 'active' });
+  expect(failureWrites).toBe(0);
+});
+
+test('official resume accepts a roster-to-setup handoff after a lost queue response', async () => {
+  const current = {
+    ...tournament,
+    state: 'inactive' as const,
+    rosterMode: 'official_sync' as const,
+  };
+  let owner = {
+    executionId: 'intent-owner',
+    setupProgressUpdatedAt: 'resume-marker',
+    state: 'inactive',
+    rosterMode: 'official_sync',
+    rosterSyncStatus: 'processing',
+    setupStatus: 'pending',
+    setupPhase: 'queued',
+    leagueId: 100,
+    leagueType: 'classic',
+  };
+  let failureWrites = 0;
+  const service = createTestService(createRepository({ findById: async () => current }), {
+    rosterRepository: {
+      findById: async () => ({ ...owner }) as never,
+      markResumeProcessingWithMarker: async () => 'resume-marker',
+      markResumeProcessing: async () => undefined,
+      markSyncPending: async () => 'retry-marker',
+      markSyncFailed: async () => {
+        failureWrites += 1;
+      },
+    },
+    enqueueRosterReconcile: async () => {
+      owner = { ...owner, executionId: 'worker-owner' };
+      throw new Error('accepted queue response lost');
+    },
+    findRosterReconcileJob: async () => null,
+  });
+  await expect(
+    service.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+  ).resolves.toMatchObject({ state: 'inactive' });
+  expect(failureWrites).toBe(0);
+});
+
+for (const state of ['active', 'inactive'] as const) {
+  for (const outcome of ['accepted', 'failed', 'advanced', 'terminal-failed'] as const) {
+    test(`roster retry commits pending intent before handoff (${state}, ${outcome})`, async () => {
+      let current = {
+        ...tournament,
+        state,
+        rosterMode: 'official_sync' as const,
+        rosterSyncStatus: 'failed' as 'failed' | 'pending',
+      };
+      let owner = {
+        executionId: 'retry-owner',
+        setupProgressUpdatedAt: 'retry-marker',
+        state,
+        rosterMode: 'official_sync',
+        rosterSyncStatus: 'failed',
+        setupStatus: 'ready',
+        setupPhase: 'ready',
+        leagueId: 100,
+        leagueType: 'classic',
+      };
+      let failures = 0;
+      let inScope = false;
+      const service = createTestService(
+        createRepository({ findById: async () => ({ ...current }) }),
+        {
+          withMutationScopes: async (_input, operation) => {
+            inScope = true;
+            try {
+              return await operation();
+            } finally {
+              inScope = false;
+            }
+          },
+          rosterRepository: {
+            findById: async () => ({ ...owner }) as never,
+            markResumeProcessingWithMarker: async () => 'unused',
+            markResumeProcessing: async () => undefined,
+            markSyncPending: async () => {
+              expect(inScope).toBe(true);
+              current = { ...current, rosterSyncStatus: 'pending' };
+              owner = { ...owner, rosterSyncStatus: 'pending' };
+              return 'retry-marker';
+            },
+            markSyncFailed: async () => {
+              failures += 1;
+              current = { ...current, rosterSyncStatus: 'failed' };
+            },
+          },
+          findRosterReconcileJob: async (
+            _season,
+            _id,
+            resume,
+            _marker,
+            expectedMarker,
+            allowInactive,
+          ) => {
+            if (expectedMarker) {
+              expect(resume).toBe(false);
+              expect(expectedMarker).toBe('retry-marker');
+              expect(allowInactive).toBe(true);
+            }
+            return null;
+          },
+          enqueueRosterReconcile: async (_season, _id, _source, options) => {
+            expect(inScope).toBe(false);
+            expect(options?.expectedProgressMarker).toBe('retry-marker');
+            await expect(service.retrySetup(42, { adminEntryId: 123 })).rejects.toMatchObject({
+              code: 'TOURNAMENT_RESUME_PENDING',
+            });
+            if (outcome === 'advanced' || outcome === 'terminal-failed')
+              owner = {
+                ...owner,
+                executionId: 'worker-owner',
+                rosterSyncStatus: outcome === 'advanced' ? 'ready' : 'failed',
+              };
+            if (outcome !== 'accepted') throw new Error('queue response lost');
+            return { id: 'accepted-retry' } as never;
+          },
+        },
+      );
+      const result = service.retryRoster(42, { adminEntryId: 123 });
+      if (outcome === 'failed' || outcome === 'terminal-failed')
+        await expect(result).rejects.toThrow('queue response lost');
+      else await expect(result).resolves.toMatchObject({ queued: true });
+      expect(failures).toBe(outcome === 'failed' ? 1 : 0);
+    });
+  }
+}
+
+test('roster retry replays a pending durable intent without replacing its marker', async () => {
+  const current = {
+    ...tournament,
+    rosterMode: 'official_sync' as const,
+    rosterSyncStatus: 'pending' as const,
+  };
+  const service = createTestService(createRepository({ findById: async () => current }), {
+    rosterRepository: {
+      findById: async () =>
+        ({
+          executionId: 'pending-owner',
+          setupProgressUpdatedAt: 'existing-marker',
+          rosterSyncStatus: 'pending',
+        }) as never,
+      markResumeProcessingWithMarker: async () => 'unused',
+      markResumeProcessing: async () => undefined,
+      markSyncPending: async () => {
+        throw new Error('must reuse pending intent');
+      },
+      markSyncFailed: async () => undefined,
+    },
+    enqueueRosterReconcile: async (_season, _id, _source, options) => {
+      expect(options!.expectedProgressMarker).toBe('existing-marker');
+      return { id: 'replayed-intent' } as never;
+    },
+  });
+  await expect(service.retryRoster(42, { adminEntryId: 123 })).resolves.toMatchObject({
+    operationId: 'replayed-intent',
   });
 });

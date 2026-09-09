@@ -8,7 +8,10 @@ import { normalizeTournamentName } from '../domain/tournament';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../utils/errors';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { tournamentRosterRepository } from '../repositories/tournament-roster';
+import {
+  tournamentRosterRepository,
+  ownsTournamentRosterExecution,
+} from '../repositories/tournament-roster';
 import { seasonRepository } from '../repositories/seasons';
 import {
   refreshTournamentEntryEventSummariesMaterializedView,
@@ -125,7 +128,11 @@ export type TournamentManagementLifecycle = {
   assertRosterBoundary?: typeof assertTournamentRosterPreGameweekBoundary;
   rosterRepository?: Pick<
     typeof tournamentRosterRepository,
-    'findById' | 'markResumeProcessingWithMarker' | 'markResumeProcessing' | 'markSyncFailed'
+    | 'findById'
+    | 'markResumeProcessingWithMarker'
+    | 'markResumeProcessing'
+    | 'markSyncFailed'
+    | 'markSyncPending'
   >;
   infoRepository?: Pick<typeof tournamentInfoRepository, 'markSetupResult'>;
   enqueueRosterReconcile?: typeof enqueueTournamentRosterReconcile;
@@ -138,6 +145,7 @@ export type TournamentManagementLifecycle = {
   requeueSetup?: (
     season: FplSeasonRef,
     tournamentId: number,
+    expectedSetupProgressUpdatedAt?: string | null,
   ) => Promise<{ readonly id?: string | number | null }>;
 };
 
@@ -145,6 +153,57 @@ type MutationScopeRunner = <T>(
   input: Parameters<typeof withMutationScopes>[0],
   operation: () => Promise<T>,
 ) => Promise<T>;
+
+type RosterHandoffState = Pick<
+  NonNullable<Awaited<ReturnType<typeof tournamentRosterRepository.findById>>>,
+  | 'executionId'
+  | 'setupProgressUpdatedAt'
+  | 'rosterMode'
+  | 'rosterSyncStatus'
+  | 'setupStatus'
+  | 'state'
+>;
+
+function hasAdvancedRosterHandoff(
+  current: RosterHandoffState | null,
+  captured: RosterHandoffState | null | undefined,
+  marker: string | null,
+  statuses: ReadonlyArray<NonNullable<RosterHandoffState['rosterSyncStatus']>>,
+): boolean {
+  if (!current || !captured) return false;
+  if (
+    current.setupProgressUpdatedAt !== marker ||
+    current.rosterMode !== 'official_sync' ||
+    !statuses.includes(
+      current.rosterSyncStatus as NonNullable<RosterHandoffState['rosterSyncStatus']>,
+    )
+  ) {
+    return false;
+  }
+  if (current.state !== 'active' && current.state !== 'inactive' && current.state !== 'finished') {
+    return false;
+  }
+
+  // A worker normally claims a fresh execution ID. A completed worker can
+  // leave the captured ID in place, however, when the handoff started from an
+  // already pending marker and only the durable status was advanced. Both are
+  // completion evidence; a same-marker terminal failure is deliberately not.
+  return (
+    current.executionId !== captured.executionId ||
+    (captured.rosterSyncStatus === 'pending' && current.rosterSyncStatus === 'ready')
+  );
+}
+
+function hasReachedRosterToSetupHandoff(
+  current: RosterHandoffState | null,
+  captured: RosterHandoffState | null | undefined,
+  marker: string,
+): boolean {
+  return (
+    hasAdvancedRosterHandoff(current, captured, marker, ['processing']) &&
+    (current?.setupStatus === 'pending' || current?.setupStatus === 'processing')
+  );
+}
 
 type SnapshotResumeDependencies = {
   enqueue: (
@@ -163,13 +222,16 @@ type SnapshotResumeDependencies = {
 export async function requestSnapshotTournamentResume(
   tournamentId: number,
   dependencies: SnapshotResumeDependencies,
+  options?: { resumePrepared?: boolean },
 ): Promise<void> {
-  let resumePrepared = false;
+  let resumePrepared = options?.resumePrepared === true;
+  let enqueuePreparationStarted = false;
   try {
     await dependencies.enqueue(tournamentId, 'resume', {
       forceNew: true,
       prepareEnqueue: async () => {
-        await dependencies.markResumeProcessing(tournamentId);
+        enqueuePreparationStarted = true;
+        if (!options?.resumePrepared) await dependencies.markResumeProcessing(tournamentId);
         resumePrepared = true;
       },
     });
@@ -177,7 +239,7 @@ export async function requestSnapshotTournamentResume(
     // An active job is rejected before prepareEnqueue runs. Preserve its
     // canonical state instead of replacing ready/processing with a false
     // pending or failed resume marker. Fail only a transition we wrote.
-    if (resumePrepared) {
+    if (enqueuePreparationStarted && resumePrepared) {
       const message = error instanceof Error ? error.message : 'Unable to enqueue resume setup.';
       await Promise.allSettled([
         dependencies.markRosterFailed(tournamentId, message),
@@ -234,10 +296,13 @@ export function createTournamentManagementService(
     return tournament;
   };
 
-  const assertNoPendingOfficialResume = async (
-    season: FplSeasonRef,
-    tournament: TournamentManagementRecord,
-  ) => {
+  const assertNoPendingOfficialResumeState = (tournament: TournamentManagementRecord): boolean => {
+    if (tournament.rosterMode === 'official_sync' && tournament.rosterSyncStatus === 'pending') {
+      throw new ConflictError(
+        'Tournament roster reconciliation is already pending.',
+        'TOURNAMENT_RESUME_PENDING',
+      );
+    }
     if (
       tournament.rosterMode === 'official_sync' &&
       tournament.state === 'inactive' &&
@@ -249,16 +314,34 @@ export function createTournamentManagementService(
         tournament.setupPhase === 'queued' ||
         tournament.setupPhase === 'failed')
     ) {
-      const [reconcileJob, setupJob] = await Promise.all([
-        findRosterReconcileJob(
-          season,
-          tournament.id,
-          true,
-          tournament.setupProgressUpdatedAt ?? undefined,
-        ),
-        findSetupJob(season, tournament.id, tournament.setupProgressUpdatedAt),
-      ]);
-      if (!reconcileJob && !setupJob) return;
+      // The committed marker owns the handoff even before BullMQ accepts it.
+      // Only a terminal failed resume may use queue absence to permit retry.
+      if (tournament.setupStatus !== 'failed') {
+        throw new ConflictError(
+          'Tournament activation is already reconciling its authoritative roster.',
+          'TOURNAMENT_RESUME_PENDING',
+        );
+      }
+      return true;
+    }
+    return false;
+  };
+
+  const assertNoPendingOfficialResume = async (
+    season: FplSeasonRef,
+    tournament: TournamentManagementRecord,
+  ) => {
+    if (!assertNoPendingOfficialResumeState(tournament)) return;
+    const [reconcileJob, setupJob] = await Promise.all([
+      findRosterReconcileJob(
+        season,
+        tournament.id,
+        true,
+        tournament.setupProgressUpdatedAt ?? undefined,
+      ),
+      findSetupJob(season, tournament.id, tournament.setupProgressUpdatedAt),
+    ]);
+    if (reconcileJob || setupJob) {
       throw new ConflictError(
         'Tournament activation is already reconciling its authoritative roster.',
         'TOURNAMENT_RESUME_PENDING',
@@ -326,6 +409,25 @@ export function createTournamentManagementService(
       if (current.state === payload.state && payload.state !== 'inactive') return current;
 
       if (payload.state === 'inactive') {
+        let acceptedResume = false;
+        if (
+          current.rosterMode === 'official_sync' &&
+          current.state === 'inactive' &&
+          current.rosterSyncStatus === 'failed' &&
+          current.setupStatus === 'failed' &&
+          current.setupError != null
+        ) {
+          const [reconcileJob, setupJob] = await Promise.all([
+            findRosterReconcileJob(
+              season,
+              tournamentId,
+              true,
+              current.setupProgressUpdatedAt ?? undefined,
+            ),
+            findSetupJob(season, tournamentId, current.setupProgressUpdatedAt),
+          ]);
+          acceptedResume = Boolean(reconcileJob || setupJob);
+        }
         const paused = await scopeRunner(
           {
             queueName: 'tournament-management',
@@ -353,16 +455,19 @@ export function createTournamentManagementService(
               lockedCurrent.setupStatus === 'failed' &&
               lockedCurrent.setupError != null
             ) {
-              const [reconcileJob, setupJob] = await Promise.all([
-                findRosterReconcileJob(
-                  season,
-                  tournamentId,
-                  true,
-                  lockedCurrent.setupProgressUpdatedAt ?? undefined,
-                ),
-                findSetupJob(season, tournamentId, lockedCurrent.setupProgressUpdatedAt),
-              ]);
-              settleResume = Boolean(reconcileJob || setupJob);
+              if (
+                lockedCurrent.updatedAt !== current.updatedAt ||
+                lockedCurrent.setupProgressUpdatedAt !== current.setupProgressUpdatedAt ||
+                lockedCurrent.rosterSyncStatus !== current.rosterSyncStatus ||
+                lockedCurrent.setupStatus !== current.setupStatus ||
+                lockedCurrent.setupError !== current.setupError
+              ) {
+                throw new ConflictError(
+                  'Tournament state changed while pause was checking queued work.',
+                  'TOURNAMENT_STATE_CHANGED',
+                );
+              }
+              settleResume = acceptedResume;
             }
 
             return repository.updateStateOwned(
@@ -378,7 +483,7 @@ export function createTournamentManagementService(
         return paused;
       }
 
-      await scopeRunner(
+      const handoff = await scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-resume',
@@ -412,48 +517,95 @@ export function createTournamentManagementService(
               season,
               tournamentId,
             );
-            try {
-              await enqueueRosterReconcile(season, tournamentId, 'manual', {
-                resumeAfterSetup: true,
-                resumeMarker,
-                allowInactive: true,
-              });
-            } catch (error) {
-              // A lost Redis response is ambiguous. If the deterministic
-              // resume job exists, keep the accepted transition intact.
-              const accepted = await findRosterReconcileJob(
-                season,
-                tournamentId,
-                true,
-                resumeMarker,
-              ).catch(() => null);
-              if (accepted) return;
-              const message = error instanceof Error ? error.message : 'Unable to enqueue resume.';
-              await Promise.allSettled([
-                rosterRepository.markSyncFailed(season, tournamentId, message),
-                infoRepository.markSetupResult(season, tournamentId, 'failed', message),
-              ]);
-              throw error;
-            }
+            const owner = await rosterRepository.findById(season, tournamentId);
+            return async () => {
+              try {
+                await enqueueRosterReconcile(season, tournamentId, 'manual', {
+                  resumeAfterSetup: true,
+                  resumeMarker,
+                  allowInactive: true,
+                });
+              } catch (error) {
+                const accepted = await findRosterReconcileJob(
+                  season,
+                  tournamentId,
+                  true,
+                  resumeMarker,
+                ).catch(() => null);
+                if (accepted) return;
+                const message =
+                  error instanceof Error ? error.message : 'Unable to enqueue resume.';
+                const completed = await scopeRunner(
+                  {
+                    queueName: 'tournament-management',
+                    jobName: 'tournament-resume-failure',
+                    tournamentId,
+                    scopes: [tournamentSetupLifecycleScope(tournamentId)],
+                  },
+                  async () => {
+                    const currentOwner = await rosterRepository.findById(season, tournamentId, {
+                      forUpdate: true,
+                    });
+                    if (
+                      currentOwner?.setupProgressUpdatedAt === resumeMarker &&
+                      currentOwner.rosterMode === 'official_sync' &&
+                      currentOwner.rosterSyncStatus === 'ready' &&
+                      currentOwner.setupStatus === 'ready' &&
+                      (currentOwner.state === 'active' || currentOwner.state === 'finished')
+                    )
+                      return true;
+                    if (hasReachedRosterToSetupHandoff(currentOwner, owner, resumeMarker))
+                      return true;
+                    if (
+                      !owner ||
+                      !currentOwner ||
+                      !ownsTournamentRosterExecution(currentOwner, owner)
+                    )
+                      return false;
+                    await rosterRepository.markSyncFailed(season, tournamentId, message);
+                    await infoRepository.markSetupResult(season, tournamentId, 'failed', message);
+                    return false;
+                  },
+                );
+                if (completed) return;
+                throw error;
+              }
+            };
           } else {
-            await requestSnapshotTournamentResume(tournamentId, {
-              enqueue: (id, source, options) => enqueueSnapshotSetup(season, id, source, options),
-              markResumeProcessing: (id) => rosterRepository.markResumeProcessing(season, id),
-              markRosterFailed: (id, message) =>
-                rosterRepository.markSyncFailed(season, id, message),
-              markSetupFailed: (id, message) =>
-                infoRepository.markSetupResult(season, id, 'failed', message),
-            });
+            // Queue inspection/admission runs after this transaction returns.
+            // The preparation callback reacquires the lifecycle scope only for
+            // the durable marker, then the queue add happens after that short
+            // transaction commits.
+            return async () =>
+              requestSnapshotTournamentResume(tournamentId, {
+                enqueue: (id, source, options) => enqueueSnapshotSetup(season, id, source, options),
+                markResumeProcessing: (id) =>
+                  scopeRunner(
+                    {
+                      queueName: 'tournament-management',
+                      jobName: 'tournament-resume-prepare',
+                      tournamentId: id,
+                      scopes: [tournamentSetupLifecycleScope(id)],
+                    },
+                    () => rosterRepository.markResumeProcessing(season, id),
+                  ),
+                markRosterFailed: (id, message) =>
+                  rosterRepository.markSyncFailed(season, id, message),
+                markSetupFailed: (id, message) =>
+                  infoRepository.markSetupResult(season, id, 'failed', message),
+              });
           }
+          return undefined;
         },
       );
+      await handoff?.();
       return (await repository.findById(season, tournamentId)) ?? current;
     },
 
     setRosterMode: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = rosterModeSchema.parse(input);
-      return scopeRunner(
+      const prepared = await scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-roster-mode',
@@ -475,43 +627,16 @@ export function createTournamentManagementService(
               'TOURNAMENT_ROSTER_MODE_INELIGIBLE',
             );
           }
-          const ensureActiveRosterReconcile = async () => {
-            const rosterState = await rosterRepository.findById(season, tournamentId);
-            const expectedProgressMarker = rosterState?.setupProgressUpdatedAt ?? null;
-            const existing = await findRosterReconcileJob(
-              season,
-              tournamentId,
-              false,
-              undefined,
-              expectedProgressMarker,
-            );
-            if (existing) return;
-            await enqueueRosterReconcile(season, tournamentId, 'manual', {
-              settleBoundaryFailure: true,
-              expectedProgressMarker,
-            });
-          };
-
           if (current.rosterMode === payload.rosterMode && current.rosterSyncStatus !== 'failed') {
-            if (
+            const needsReconcile =
               current.state === 'active' &&
               current.rosterMode === 'official_sync' &&
-              current.rosterSyncStatus === 'pending'
-            ) {
-              try {
-                await ensureActiveRosterReconcile();
-              } catch (error) {
-                await rosterRepository.markSyncFailed(
-                  season,
-                  tournamentId,
-                  error instanceof Error
-                    ? error.message
-                    : 'Unable to enqueue roster reconciliation.',
-                );
-                throw error;
-              }
-            }
-            return current;
+              current.rosterSyncStatus === 'pending';
+            return {
+              tournament: current,
+              needsReconcile,
+              owner: needsReconcile ? await rosterRepository.findById(season, tournamentId) : null,
+            };
           }
           if (current.state === 'active') {
             // Do not persist an opt-in that cannot be reconciled at the current
@@ -525,27 +650,91 @@ export function createTournamentManagementService(
             payload.rosterMode,
           );
           if (!updated) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
-          if (updated.state === 'active' && updated.rosterMode === 'official_sync') {
-            try {
-              await ensureActiveRosterReconcile();
-            } catch (error) {
-              await rosterRepository.markSyncFailed(
-                season,
-                tournamentId,
-                error instanceof Error ? error.message : 'Unable to enqueue roster reconciliation.',
-              );
-              throw error;
-            }
-          }
-          return (await repository.findById(season, tournamentId)) ?? updated;
+          const needsReconcile =
+            updated.state === 'active' && updated.rosterMode === 'official_sync';
+          return {
+            tournament: updated,
+            needsReconcile,
+            owner: needsReconcile ? await rosterRepository.findById(season, tournamentId) : null,
+          };
         },
       );
+      if (prepared.needsReconcile) {
+        const expectedProgressMarker = prepared.owner?.setupProgressUpdatedAt ?? null;
+        try {
+          const existing = await findRosterReconcileJob(
+            season,
+            tournamentId,
+            false,
+            undefined,
+            expectedProgressMarker,
+          );
+          if (!existing)
+            await enqueueRosterReconcile(season, tournamentId, 'manual', {
+              settleBoundaryFailure: true,
+              expectedProgressMarker,
+            });
+        } catch (error) {
+          const accepted = await findRosterReconcileJob(
+            season,
+            tournamentId,
+            false,
+            undefined,
+            expectedProgressMarker,
+          ).catch(() => null);
+          if (!accepted) {
+            const advanced = await scopeRunner(
+              {
+                queueName: 'tournament-management',
+                jobName: 'tournament-roster-mode-failure',
+                tournamentId,
+                scopes: [tournamentSetupLifecycleScope(tournamentId)],
+              },
+              async () => {
+                const owner = await rosterRepository.findById(season, tournamentId, {
+                  forUpdate: true,
+                });
+                if (
+                  hasAdvancedRosterHandoff(owner, prepared.owner, expectedProgressMarker, [
+                    'ready',
+                    'processing',
+                  ])
+                )
+                  return true;
+                if (
+                  !owner ||
+                  owner.state !== 'active' ||
+                  owner.rosterMode !== 'official_sync' ||
+                  owner.rosterSyncStatus !== 'pending' ||
+                  owner.setupProgressUpdatedAt !== expectedProgressMarker ||
+                  owner.executionId !== prepared.owner?.executionId
+                )
+                  return false;
+                await rosterRepository.markSyncFailed(
+                  season,
+                  tournamentId,
+                  error instanceof Error
+                    ? error.message
+                    : 'Unable to enqueue roster reconciliation.',
+                );
+                return false;
+              },
+            );
+            if (!advanced) throw error;
+          }
+        }
+      }
+      return (await repository.findById(season, tournamentId)) ?? prepared.tournament;
     },
 
     retrySetup: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      return scopeRunner(
+      const observed = await assertCanManage(season, tournamentId, payload);
+      // Queue probes are read-only and may wait on Redis. Perform them before
+      // taking the lifecycle lock; the durable state is rechecked below.
+      await assertNoPendingOfficialResume(season, observed);
+      await scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-setup-retry',
@@ -554,16 +743,38 @@ export function createTournamentManagementService(
         },
         async () => {
           const current = await assertCanManage(season, tournamentId, payload);
-          await assertNoPendingOfficialResume(season, current);
-          return requeueSetup(season, tournamentId);
+          if (
+            current.updatedAt !== observed.updatedAt ||
+            current.setupProgressUpdatedAt !== observed.setupProgressUpdatedAt ||
+            current.rosterSyncStatus !== observed.rosterSyncStatus ||
+            current.setupStatus !== observed.setupStatus ||
+            current.setupPhase !== observed.setupPhase ||
+            current.setupError !== observed.setupError ||
+            current.state !== observed.state ||
+            current.rosterMode !== observed.rosterMode
+          ) {
+            throw new ConflictError(
+              'Tournament state changed while retry was checking queued work.',
+              'TOURNAMENT_STATE_CHANGED',
+            );
+          }
+          // Recheck only durable state while holding the lock. Redis/BullMQ
+          // inspection remains outside the transaction.
+          assertNoPendingOfficialResumeState(current);
         },
       );
+      // The lifecycle transaction has committed. Requeue performs its queue
+      // inspection and admission after the lock is released.
+      return requeueSetup(season, tournamentId, observed.setupProgressUpdatedAt ?? null);
     },
 
     retryRoster: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      return scopeRunner(
+      const observed = await assertCanManage(season, tournamentId, payload);
+      if (observed.rosterSyncStatus !== 'pending')
+        await assertNoPendingOfficialResume(season, observed);
+      const prepared = await scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-roster-retry',
@@ -581,23 +792,89 @@ export function createTournamentManagementService(
           if (current.state === 'finished') {
             throw new ConflictError('Tournament is already finished.', 'TOURNAMENT_FINISHED');
           }
-          await assertNoPendingOfficialResume(season, current);
+          if (
+            current.updatedAt !== observed.updatedAt ||
+            current.setupProgressUpdatedAt !== observed.setupProgressUpdatedAt ||
+            current.rosterSyncStatus !== observed.rosterSyncStatus ||
+            current.setupStatus !== observed.setupStatus
+          ) {
+            throw new ConflictError(
+              'Tournament state changed while retry was checking queued work.',
+              'TOURNAMENT_STATE_CHANGED',
+            );
+          }
           await assertRosterBoundary(season);
-          const rosterState = await rosterRepository.findById(season, tournamentId);
-          const job = await enqueueRosterReconcile(season, tournamentId, 'manual', {
-            allowInactive: true,
-            settleBoundaryFailure: true,
-            expectedProgressMarker: rosterState?.setupProgressUpdatedAt ?? null,
-          });
-          return {
-            tournamentId,
-            changed: false,
-            queued: true,
-            operationId: job.id ?? null,
-            status: 'pending' as const,
-          };
+          const existingIntent = await rosterRepository.findById(season, tournamentId);
+          if (
+            existingIntent?.rosterSyncStatus === 'pending' &&
+            existingIntent.executionId &&
+            existingIntent.setupProgressUpdatedAt
+          ) {
+            return { marker: existingIntent.setupProgressUpdatedAt, owner: existingIntent };
+          }
+          const marker = await rosterRepository.markSyncPending(season, tournamentId);
+          return { marker, owner: await rosterRepository.findById(season, tournamentId) };
         },
       );
+      let operationId: string | null = null;
+      try {
+        const job = await enqueueRosterReconcile(season, tournamentId, 'manual', {
+          allowInactive: true,
+          settleBoundaryFailure: true,
+          expectedProgressMarker: prepared.marker,
+        });
+        operationId = job.id ?? null;
+      } catch (error) {
+        const accepted = await findRosterReconcileJob(
+          season,
+          tournamentId,
+          false,
+          undefined,
+          prepared.marker,
+          true,
+        ).catch(() => null);
+        if (accepted) operationId = accepted.id ?? null;
+        else {
+          const advanced = await scopeRunner(
+            {
+              queueName: 'tournament-management',
+              jobName: 'tournament-roster-retry-failure',
+              tournamentId,
+              scopes: [tournamentSetupLifecycleScope(tournamentId)],
+            },
+            async () => {
+              const currentOwner = await rosterRepository.findById(season, tournamentId, {
+                forUpdate: true,
+              });
+              if (
+                prepared.owner &&
+                currentOwner &&
+                ownsTournamentRosterExecution(currentOwner, prepared.owner)
+              ) {
+                await rosterRepository.markSyncFailed(
+                  season,
+                  tournamentId,
+                  error instanceof Error ? error.message : 'Unable to enqueue roster retry.',
+                );
+                return false;
+              }
+              return hasAdvancedRosterHandoff(currentOwner, prepared.owner, prepared.marker, [
+                'ready',
+                'processing',
+              ]);
+            },
+          );
+          if (!advanced) throw error;
+        }
+      }
+
+      return {
+        tournamentId,
+        changed: false,
+        queued: true,
+        operationId,
+        status: 'pending' as const,
+      };
     },
 
     deleteTournament: async (tournamentId: number, input: unknown) => {
@@ -700,24 +977,30 @@ export const tournamentManagementService = createTournamentManagementService(
       );
       const { tournamentSetupLifecycleScope } = await import('../domain/mutation-scope');
       const { withMutationScopes } = await import('../utils/mutation-scopes');
-      return withMutationScopes(
+      const result = await withMutationScopes(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-delete',
           tournamentId,
           scopes: [tournamentSetupLifecycleScope(tournamentId)],
         },
-        async () => {
-          // Cancel after acquiring the same lifecycle lock as enqueueing and
-          // deletion. A worker that already crossed this boundary is harmless
-          // because the worker treats an authoritative delete as a no-op.
-          await cancelWaitingTournamentSetupJobs(tournamentId);
-          const { cancelTournamentRepairJobs } = await import('../jobs/tournament-repair.jobs');
-          await cancelTournamentRepairJobs(tournamentId);
-          await cancelWaitingTournamentRosterReconcileJobs(tournamentId);
-          return tournamentManagementRepository.deleteOwned(season, tournamentId, adminEntryId);
-        },
+        () => tournamentManagementRepository.deleteOwned(season, tournamentId, adminEntryId),
       );
+      if (result.status === 'deleted') {
+        // Canonical deletion is committed. Workers that already started, or
+        // are queued concurrently, recheck existence and settle as no-ops.
+        const { cancelTournamentRepairJobs } = await import('../jobs/tournament-repair.jobs');
+        const cleanup = await Promise.allSettled([
+          cancelWaitingTournamentSetupJobs(tournamentId),
+          cancelTournamentRepairJobs(tournamentId),
+          cancelWaitingTournamentRosterReconcileJobs(tournamentId),
+        ]);
+        const failures = cleanup.filter((item) => item.status === 'rejected').length;
+        if (failures > 0) {
+          logWarn('Tournament deleted with pending queue cleanup', { tournamentId, failures });
+        }
+      }
+      return result;
     },
   },
 );

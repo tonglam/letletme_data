@@ -22,7 +22,7 @@ import {
 } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { tournamentSetupIssueRepository } from '../repositories/tournament-setup-issues';
-import { NotFoundError } from '../utils/errors';
+import { ConflictError, NotFoundError } from '../utils/errors';
 import { getFplRequestMetricsSnapshot } from '../utils/fpl-request-metrics';
 import { getJobLogContext } from '../utils/job-log-context';
 import { logError, logInfo } from '../utils/logger';
@@ -586,7 +586,11 @@ export async function setupTournamentStructure(
   }
 }
 
-export async function requeueTournamentSetup(season: FplSeasonRef, tournamentId: number) {
+export async function requeueTournamentSetup(
+  season: FplSeasonRef,
+  tournamentId: number,
+  expectedSetupProgressUpdatedAt?: string | null,
+) {
   const tournament = await tournamentInfoRepository.findSetupConfig(season, tournamentId);
   if (!tournament) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
@@ -597,7 +601,27 @@ export async function requeueTournamentSetup(season: FplSeasonRef, tournamentId:
     return await enqueueTournamentSetup(season, tournamentId, 'manual', {
       forceNew: true,
       prepareEnqueue: async () => {
-        await tournamentInfoRepository.markSetupRetryQueued(season, tournamentId);
+        await withMutationScopes(
+          {
+            queueName: 'tournament-management',
+            jobName: 'tournament-setup-retry-prepare',
+            tournamentId,
+            scopes: [tournamentSetupLifecycleScope(tournamentId)],
+          },
+          async () => {
+            const marked = await tournamentInfoRepository.markSetupRetryQueued(
+              season,
+              tournamentId,
+              expectedSetupProgressUpdatedAt,
+            );
+            if (!marked) {
+              throw new ConflictError(
+                'Tournament state changed while setup retry was waiting to queue.',
+                'TOURNAMENT_STATE_CHANGED',
+              );
+            }
+          },
+        );
         retryStatePrepared = true;
       },
     });

@@ -109,6 +109,7 @@ async function prepareTournamentRosterReconciliation(
         season,
         tournamentId,
         options.expectedProgressMarker,
+        'pending',
       );
       if (!ownsInactiveState) {
         return {
@@ -188,6 +189,7 @@ async function prepareTournamentRosterReconciliation(
       season,
       tournamentId,
       options.expectedProgressMarker,
+      tournament.state === 'inactive' ? 'pending' : undefined,
     );
     if (!claimed) {
       return {
@@ -518,12 +520,15 @@ export async function reconcileOfficialTournamentRosters(season: FplSeasonRef): 
     throw error;
   }
 
-  const tournaments = await tournamentRosterRepository.findActiveOfficialSync(season);
+  const tournaments =
+    await tournamentRosterRepository.findOfficialSyncReconciliationCandidates(season);
   let changed = 0;
   let errors = 0;
   await mapWithConcurrency(tournaments, 2, async (tournament) => {
     try {
       const result = await reconcileTournamentRosterUnlocked(season, tournament.id, {
+        allowInactive: tournament.state === 'inactive',
+        settleBoundaryFailure: tournament.state === 'inactive',
         expectedProgressMarker: tournament.setupProgressUpdatedAt,
       });
       if (result.changed) changed += 1;

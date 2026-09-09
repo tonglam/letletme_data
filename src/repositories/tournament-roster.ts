@@ -151,7 +151,13 @@ export const tournamentRosterRepository = {
     }
   },
 
-  findActiveOfficialSync: async (season: FplSeasonRef): Promise<TournamentRosterRecord[]> => {
+  // The scheduled reconciliation also owns recovery of an inactive retry whose
+  // pending marker was committed before the process could publish BullMQ work.
+  // Keep the candidate read durable so that recovery does not depend on the
+  // administrator repeating the request.
+  findOfficialSyncReconciliationCandidates: async (
+    season: FplSeasonRef,
+  ): Promise<TournamentRosterRecord[]> => {
     try {
       const client = await getDbClient();
       const rows = await client<RosterRow[]>`
@@ -163,6 +169,9 @@ export const tournamentRosterRepository = {
           league_type AS "leagueType",
           roster_mode AS "rosterMode",
           state,
+          roster_sync_status AS "rosterSyncStatus",
+          setup_status AS "setupStatus",
+          setup_phase AS "setupPhase",
           standings_ready_at::text AS "standingsReadyAt",
           setup_progress_updated_at::text AS "setupProgressUpdatedAt",
           official_schedule_locked_at::text AS "officialScheduleLockedAt",
@@ -180,18 +189,26 @@ export const tournamentRosterRepository = {
           knockout_play_against_num AS "knockoutPlayAgainstNum"
         FROM competition.tournaments
         WHERE season_id = ${season.seasonId}
-          AND state = 'active'
           AND roster_mode = 'official_sync'
+          AND (
+            state = 'active'
+            OR (
+              state = 'inactive'
+              AND roster_sync_status = 'pending'
+              AND roster_sync_execution_id IS NOT NULL
+              AND setup_progress_updated_at IS NOT NULL
+            )
+          )
         ORDER BY tournament_id
       `;
       return rows.map((row) => normalizeRoster(row)!);
     } catch (error) {
-      logError('Failed to load official-sync tournaments', error, {
+      logError('Failed to load official-sync reconciliation candidates', error, {
         season: season.seasonCode,
       });
       throw new DatabaseError(
         'Failed to load official-sync tournaments.',
-        'TOURNAMENT_ROSTER_FIND_ACTIVE_ERROR',
+        'TOURNAMENT_ROSTER_FIND_RECOVERY_ERROR',
         error instanceof Error ? error : undefined,
       );
     }
@@ -306,6 +323,24 @@ export const tournamentRosterRepository = {
     return rows.length === 1;
   },
 
+  markSyncPending: async (season: FplSeasonRef, tournamentId: number): Promise<string> => {
+    const client = await getDbClient();
+    const rows = await client<{ marker: string }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'pending', roster_sync_execution_id = gen_random_uuid(),
+          roster_sync_error = NULL, setup_progress_updated_at = clock_timestamp(), updated_at = clock_timestamp()
+      WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        AND roster_mode = 'official_sync' AND state <> 'finished'
+      RETURNING setup_progress_updated_at::text AS marker
+    `;
+    if (!rows[0])
+      throw new DatabaseError(
+        'Tournament roster retry intent was not written.',
+        'TOURNAMENT_NOT_FOUND',
+      );
+    return rows[0].marker;
+  },
+
   markSyncProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     const client = await getDbClient();
     await client`
@@ -324,6 +359,7 @@ export const tournamentRosterRepository = {
     season: FplSeasonRef,
     tournamentId: number,
     expectedMarker: string | null,
+    expectedRosterSyncStatus?: TournamentSetupStatus | null,
   ): Promise<boolean> => {
     const client = await getDbClient();
     const rows = await client<{ tournamentId: number }[]>`
@@ -338,6 +374,10 @@ export const tournamentRosterRepository = {
         AND (
           (${expectedMarker}::timestamptz IS NULL AND setup_progress_updated_at IS NULL)
           OR setup_progress_updated_at::text = ${expectedMarker}
+        )
+        AND (
+          ${expectedRosterSyncStatus ?? null}::competition.tournament_setup_status IS NULL
+          OR roster_sync_status = ${expectedRosterSyncStatus ?? null}::competition.tournament_setup_status
         )
       RETURNING tournament_id AS "tournamentId"
     `;
