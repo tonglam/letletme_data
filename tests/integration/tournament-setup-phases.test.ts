@@ -747,3 +747,41 @@ test('unmarked manual setup cannot bypass committed resume intent before queue h
   expect(status!.setupStatus).toBe('pending');
   expect(status!.setupProgressUpdatedAt).toBe('2095-01-01 00:00:00+00');
 });
+
+test('prepared manual retry of a failed official resume reaches setup execution', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const rosterJobs = await import('../../src/jobs/tournament-sync.jobs');
+  const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  spyOn(rosterJobs, 'findTournamentRosterReconcileJob').mockResolvedValue(null);
+  spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue(null);
+  await sql`UPDATE competition.tournaments SET state='inactive',roster_sync_status='failed',
+    setup_status='failed',setup_phase='failed',setup_error='terminal resume failure',
+    setup_progress_updated_at='2095-01-01' WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+    async (_season, id, source, options) => {
+      await options?.prepareEnqueue?.();
+      const prepared = await tournamentInfoRepository.findSetupStatus(season, id);
+      expect(prepared!.setupStatus).toBe('processing');
+      expect(prepared!.setupPhase).toBe('queued');
+      await processTournamentSetupJob({
+        id: 'integration-prepared-manual-retry',
+        name: 'tournament-setup',
+        queueName: 'tournament-setup',
+        data: { ...season, tournamentId: id, source, triggeredAt: new Date().toISOString() },
+        attemptsMade: 0,
+        opts: { attempts: 3 },
+        updateProgress: async () => {},
+      } as never);
+      return { id: 'integration-prepared-manual-retry' } as never;
+    },
+  );
+  await setup.requeueTournamentSetup(season, tournamentId);
+  expect(run).toHaveBeenCalledTimes(1);
+  expect((await tournamentInfoRepository.findSetupStatus(season, tournamentId))!.setupAttempt).toBe(
+    1,
+  );
+});

@@ -141,7 +141,9 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           observedResume?.rosterMode === 'official_sync' &&
           observedResume.state === 'inactive' &&
           observedResume.rosterSyncStatus === 'failed' &&
-          observedResume.setupStatus === 'failed' &&
+          (observedResume.setupStatus === 'failed' ||
+            (observedResume.setupStatus === 'processing' &&
+              observedResume.setupPhase === 'queued')) &&
           (observedResume.setupPhase === 'queued' || observedResume.setupPhase === 'failed')
         ) {
           const [reconcileJob, setupJob] = await Promise.all([
@@ -197,7 +199,15 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             if (resumePending) {
               // A committed in-progress resume owns the handoff before a
               // queue job is visible. Unmarked work cannot bypass its roster.
-              if (roster.rosterSyncStatus !== 'failed' || roster.setupStatus !== 'failed') {
+              const preparedManualRetry =
+                job.data.source === 'manual' &&
+                roster.rosterSyncStatus === 'failed' &&
+                roster.setupStatus === 'processing' &&
+                roster.setupPhase === 'queued';
+              if (
+                !preparedManualRetry &&
+                (roster.rosterSyncStatus !== 'failed' || roster.setupStatus !== 'failed')
+              ) {
                 logInfo('Ignoring unmarked setup during committed official resume', {
                   tournamentId: job.data.tournamentId,
                   jobId: job.id,
