@@ -622,3 +622,101 @@ test('entry persistence bounds outer pool acquisition and fences abandoned callb
   await write();
   expect(writes).toBe(1);
 }, 10000);
+
+test('database initialization consumes the entry deadline without starting a late transaction', async () => {
+  const handle = await getDb();
+  const release = gate();
+  const initialize = spyOn(databaseSingleton, 'getDb').mockImplementation(async () => {
+    await release.promise;
+    return handle;
+  });
+  let calls = 0;
+  try {
+    const start = Date.now();
+    await expect(
+      withEntrySeasonSyncTransaction(
+        season,
+        ids[0]!,
+        async () => {
+          calls += 1;
+        },
+        { timeoutMs: 100 },
+      ),
+    ).rejects.toThrow('initialization');
+    expect(Date.now() - start).toBeLessThan(1000);
+    release.resolve();
+    await Bun.sleep(30);
+    expect(calls).toBe(0);
+  } finally {
+    release.resolve();
+    initialize.mockRestore();
+  }
+});
+
+test('a second configured pool connection remains available beside a slow entry', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  await syncEntryInfo(season, ids[1]!, client('original'), 0);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      '-e',
+      `
+    import assert from 'node:assert/strict';
+    import {sql} from 'drizzle-orm';
+    import {databaseSingleton} from './src/db/singleton';
+    import {withEntrySeasonSyncTransaction} from './src/repositories/entry-event-transfers';
+    let entered; const ready = new Promise(r=>entered=r); let slowSettled=false; let fastBeforeSlow=false;
+    const season={seasonId:2091,seasonCode:'9192'};
+    try {
+      const slow=withEntrySeasonSyncTransaction(season,919201,async(tx)=>{
+        await tx.execute(sql\`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=919201\`);
+        entered(); await tx.execute(sql\`SELECT pg_sleep(3)\`);
+      },{timeoutMs:500}).finally(()=>{slowSettled=true;}).catch(e=>e);
+      await ready;
+      await withEntrySeasonSyncTransaction(season,919202,async(tx)=>{
+        fastBeforeSlow=!slowSettled;
+        await tx.execute(sql\`UPDATE competition.entries SET entry_name='fast committed' WHERE season_id=2091 AND entry_id=919202\`);
+      },{timeoutMs:500});
+      assert.equal(fastBeforeSlow,true); assert.ok(await slow instanceof Error);
+    } finally {await databaseSingleton.disconnect();}
+  `,
+    ],
+    { stdout: 'pipe', stderr: 'pipe', env: { ...process.env, DATABASE_POOL_MAX: '2' } },
+  );
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+  const rows =
+    await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 ORDER BY entry_id`;
+  expect(rows.map((row) => row.entry_name)).toEqual(['original', 'fast committed']);
+}, 10000);
+
+test('initialization and SQL share one absolute persistence budget', async () => {
+  await syncEntryInfo(season, ids[0]!, client('original'), 0);
+  const handle = await getDb();
+  const initialize = spyOn(databaseSingleton, 'getDb').mockImplementationOnce(async () => {
+    await Bun.sleep(300);
+    return handle;
+  });
+  try {
+    await expect(
+      withEntrySeasonSyncTransaction(
+        season,
+        ids[0]!,
+        async (tx) => {
+          await tx.execute(
+            sql`UPDATE competition.entries SET entry_name='must rollback' WHERE season_id=2091 AND entry_id=${ids[0]!}`,
+          );
+          await tx.execute(sql`SELECT pg_sleep(0.35)`);
+        },
+        { timeoutMs: 500 },
+      ),
+    ).rejects.toThrow();
+  } finally {
+    initialize.mockRestore();
+  }
+  expect(
+    (
+      await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=${ids[0]!}`
+    )[0]?.entry_name,
+  ).toBe('original');
+}, 10000);

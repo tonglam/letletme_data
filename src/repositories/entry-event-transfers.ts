@@ -1,6 +1,6 @@
 import type postgres from 'postgres';
 import { withPostgresQueryTimeout } from '../db/postgres-query-timeout';
-import { TimeoutError } from '../utils/async';
+import { TimeoutError, withTimeout } from '../utils/async';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
@@ -87,13 +87,22 @@ export async function withEntrySeasonSyncTransaction<T>(
   operation: (tx: TransactionHandle) => Promise<T>,
   options?: { timeoutMs: number },
 ): Promise<T> {
-  let db = await getDb();
   const deadlineAt = options ? Date.now() + options.timeoutMs : undefined;
   const assertDeadline = () => {
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
       throw new TimeoutError('Entry persistence deadline exceeded');
     }
   };
+  // Initialization is shared and read-only. A timed-out caller must not proceed
+  // to transaction acquisition when that initialization eventually completes.
+  let db = options
+    ? await withTimeout(
+        getDb(),
+        options.timeoutMs,
+        'Entry database initialization exceeded its persistence deadline',
+      )
+    : await getDb();
+  assertDeadline();
   if (options) {
     const session = (
       db as unknown as { session: { client: postgres.Sql | postgres.TransactionSql } }
@@ -105,14 +114,21 @@ export async function withEntrySeasonSyncTransaction<T>(
     }
     let boundedClient = policies.get(options.timeoutMs);
     if (!boundedClient) {
-      boundedClient = withPostgresQueryTimeout(session.client, options.timeoutMs);
+      const rootClient = session.client as postgres.Sql;
+      const capacity = typeof rootClient.begin === 'function' ? rootClient.options.max : 1;
+      boundedClient = withPostgresQueryTimeout(
+        session.client,
+        options.timeoutMs,
+        undefined,
+        capacity,
+      );
       policies.set(options.timeoutMs, boundedClient);
     }
     // Clone only the handle/session shell; never replace the shared database
     // client's policy. Drizzle's root transaction and nested savepoint methods
     // both acquire through this session client, before invoking our callback.
     const boundedSession = Object.create(session) as typeof session;
-    boundedSession.client = boundedClient;
+    boundedSession.client = withPostgresQueryTimeout(boundedClient, options.timeoutMs, deadlineAt);
     const boundedDb = Object.create(db) as typeof db & { session: typeof session };
     boundedDb.session = boundedSession;
     db = boundedDb;
@@ -121,10 +137,6 @@ export async function withEntrySeasonSyncTransaction<T>(
     // The session belongs only to this transaction/savepoint. Its children
     // inherit the bounded client; the enclosing transaction keeps its policy.
     assertDeadline();
-    if (options) {
-      const session = (tx as unknown as { session: { client: postgres.TransactionSql } }).session;
-      session.client = withPostgresQueryTimeout(session.client, options.timeoutMs, deadlineAt);
-    }
     await lockEntry(tx, season, entryId);
     const result = await operation(tx);
     assertDeadline();

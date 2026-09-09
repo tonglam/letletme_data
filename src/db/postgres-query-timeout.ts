@@ -13,6 +13,7 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
   client: T,
   timeoutMs: number,
   deadlineAt?: number,
+  concurrency = 1,
 ): T {
   const remainingMs = () =>
     deadlineAt === undefined
@@ -24,19 +25,19 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
   };
   // postgres.js does not expose its queued BEGIN as a cancellable query.
   // Fence an expired acquisition before its callback can execute, and retain
-  // at most one abandoned acquisition until the driver rolls it back. This
+  // at most one abandoned acquisition per admitted pool slot until rollback. This
   // prevents both a hung pass and accumulating new BEGIN waiters each pass.
   // Keep work out of the driver's wire pipeline until the previous
   // operation settles. Queued deadlines can then discard work before it is
   // sent, rather than racing a cancellation against a later statement.
   const waiting: Array<() => void> = [];
-  let running = false;
+  let running = 0;
   function enqueueWork(operation: () => unknown) {
     let reject!: (error: unknown) => void;
     const promise = new Promise<unknown>((resolve, fail) => {
       reject = fail;
       waiting.push(() => {
-        running = true;
+        running += 1;
         void Promise.resolve()
           .then(operation)
           .then(
@@ -53,10 +54,10 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
     });
     const queued = waiting.at(-1)!;
     function finish() {
-      running = false;
-      waiting.shift()?.();
+      running -= 1;
+      if (running < concurrency) waiting.shift()?.();
     }
-    if (!running) waiting.shift()?.();
+    if (running < concurrency) waiting.shift()?.();
     return {
       promise,
       cancelQueued(error: Error): boolean {
@@ -68,14 +69,14 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
       },
     };
   }
-  let abandonedAcquisition: Promise<unknown> | undefined;
+  const abandonedAcquisitions = new Set<Promise<unknown>>();
 
   function transactionCall(
     method: (...args: unknown[]) => unknown,
     args: unknown[],
   ): Promise<unknown> {
     const error = new TimeoutError('PostgreSQL transaction acquisition exceeded its deadline');
-    if (abandonedAcquisition) return Promise.reject(error);
+    if (abandonedAcquisitions.size >= concurrency) return Promise.reject(error);
     let expired = false;
     let rejectDeadline!: (reason: Error) => void;
     const deadline = new Promise<never>((_, reject) => {
@@ -83,7 +84,7 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
     });
     const timer = setTimeout(() => {
       expired = true;
-      if (!scheduled.cancelQueued(error)) abandonedAcquisition = operation;
+      if (!scheduled.cancelQueued(error)) abandonedAcquisitions.add(operation);
       rejectDeadline(error);
     }, remainingMs());
     const scheduled = enqueueWork(() => {
@@ -112,7 +113,7 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
     void operation
       .finally(() => {
         clearTimeout(timer);
-        if (abandonedAcquisition === operation) abandonedAcquisition = undefined;
+        abandonedAcquisitions.delete(operation);
       })
       .catch(() => undefined);
     return Promise.race([operation, deadline]);
