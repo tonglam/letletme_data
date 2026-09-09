@@ -276,6 +276,13 @@ describe('release workflow gates', () => {
     expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
+    expect(queueQuiescence).toContain('DEPLOY_QUIESCENCE_SOURCE_MEDIA_FENCED');
+    expect(queueQuiescence).toContain('catalog.has_source_media_gates && !sourceMediaIsFenced');
+    expect(deployStateMachine).toContain('DEPLOY_PROBE_SOURCE_MEDIA_FENCED');
+    expect(deployStateMachine).toContain(
+      'DEPLOY_QUIESCENCE_SOURCE_MEDIA_FENCED=${source_media_fenced}',
+    );
+    expect(deployScript).toContain('-e DEPLOY_QUIESCENCE_SOURCE_MEDIA_FENCED=true');
     expect(deployScript).toContain('source_media_worker_container_id()');
     expect(deployScript).toContain('Could not enumerate running source-media worker containers');
     expect(deployScript).toContain('label=com.docker.compose.oneoff=True');

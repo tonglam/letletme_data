@@ -738,7 +738,9 @@ cleanup_content_worker_control_image() {
 run_deploy_probe_command() {
   case "${DEPLOY_PROBE_KIND:-}" in
     queue)
+      local source_media_fenced=${DEPLOY_PROBE_SOURCE_MEDIA_FENCED:-false}
       APP_IMAGE="${DEPLOY_PROBE_APP_IMAGE:-}" compose run --rm -T --interactive=false \
+        -e "DEPLOY_QUIESCENCE_SOURCE_MEDIA_FENCED=${source_media_fenced}" \
         -e "DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES=${DEPLOY_PROBE_ALLOW_PAUSED_QUEUES:-}" api \
         bun scripts/assert-queue-quiescence.ts --scoped
       ;;
@@ -779,6 +781,7 @@ run_bounded_deploy_probe() {
   local probe_allow_paused_queues=${DEPLOY_CONTENT_WORKER_PAUSED_QUEUES// /,}
   local probe_app_image=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE:-${APP_IMAGE:-}}
   local probe_consumer_owner_token=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN:-}
+  local probe_source_media_fenced=${DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED:-false}
 
   if [[ "$probe_kind" != queue && "$probe_kind" != consumer && "$probe_kind" != admission ]]; then
     echo "deploy preflight: invalid deploy probe kind=$probe_kind" >&2
@@ -825,6 +828,7 @@ run_bounded_deploy_probe() {
       export DEPLOY_PROBE_MODE="$probe_mode"
       export DEPLOY_PROBE_ALLOW_PAUSED_QUEUES="$probe_allow_paused_queues"
       export DEPLOY_PROBE_CONSUMER_OWNER_TOKEN="$probe_consumer_owner_token"
+      export DEPLOY_PROBE_SOURCE_MEDIA_FENCED="$probe_source_media_fenced"
       exec setsid bash -c '
         # Bash functions and arrays are not enough to carry the local deploy
         # context across `bash -c`: PROJECT_DIR/COMPOSE_FILE/COMPOSE_BIN are
@@ -853,6 +857,7 @@ run_bounded_deploy_probe() {
       export DEPLOY_PROBE_APP_IMAGE="$probe_app_image"
       export DEPLOY_PROBE_ALLOW_PAUSED_QUEUES="$probe_allow_paused_queues"
       export DEPLOY_PROBE_CONSUMER_OWNER_TOKEN="$probe_consumer_owner_token"
+      export DEPLOY_PROBE_SOURCE_MEDIA_FENCED="$probe_source_media_fenced"
       run_deploy_probe_command >"$output_file" 2>&1
     ) &
     probe_pid=$!
