@@ -32,6 +32,7 @@ import {
   SupersededUnderstatDiscoveryError,
   understatMutationScopes,
 } from '../services/understat-sync.service';
+import { UnderstatFanoutError } from '../services/understat-fanout';
 import { understatSyncRepository } from '../repositories/understat-sync';
 import { getConfig } from '../utils/config';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -368,6 +369,13 @@ async function recordTeamFailure(
           // Exhausted discovery is the only producer of its pending children.
           // Retire the run so those missing jobs cannot prevent scheduler retry.
           if (item.resourceType === 'league' && persisted.status === 'completed') {
+            // A lost fanout response may follow accepted children that have
+            // already settled. Their ready run belongs to its finalizer.
+            if (
+              error instanceof UnderstatFanoutError &&
+              (await understatSyncRepository.findRun(job.data.runId))?.status === 'ready_to_publish'
+            )
+              return false;
             return understatSyncRepository.markRunFailed(job.data.runId, error.message);
           }
           return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
@@ -422,6 +430,13 @@ async function recordPlayerFailure(
           // Exhausted discovery is the only producer of its pending children.
           // Retire the run so those missing jobs cannot prevent scheduler retry.
           if (item.resourceType === 'league' && persisted.status === 'completed') {
+            // A lost fanout response may follow accepted children that have
+            // already settled. Their ready run belongs to its finalizer.
+            if (
+              error instanceof UnderstatFanoutError &&
+              (await understatSyncRepository.findRun(job.data.runId))?.status === 'ready_to_publish'
+            )
+              return false;
             return understatSyncRepository.markRunFailed(job.data.runId, error.message);
           }
           return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);

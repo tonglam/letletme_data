@@ -709,3 +709,31 @@ for (const lane of ['team', 'player'] as const) {
     expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
   });
 }
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} ambiguous fanout preserves a ready run and its accepted finalizer`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    const finalize =
+      lane === 'team' ? 'enqueueUnderstatTeamFinalize' : 'enqueueUnderstatPlayerFinalize';
+    spyOn(
+      enqueue,
+      lane === 'team' ? 'enqueueUnderstatTeamDetail' : 'enqueueUnderstatPlayerTeamDetail',
+    ).mockImplementation(async () => {
+      await sql`UPDATE ops.sync_items SET status='skipped' WHERE run_id=${data.runId} AND resource_type<>'league'`;
+      await runs.refreshRun(data.runId);
+      await enqueue[finalize](data as never);
+      throw new Error('accepted child response lost');
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data, 2)).rejects.toThrow(
+      'accepted child response lost',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('ready_to_publish');
+    expect(settle).not.toHaveBeenCalled();
+    await processJob(lane, `understat-${lane}-finalize`, data);
+    expect((await runs.findRun(data.runId))!.status).toBe('completed');
+  });
+}
