@@ -342,9 +342,9 @@ async function recordTeamFailure(
   job: Job<UnderstatTeamJobData>,
   error: Error,
   terminal = isTerminalJobFailure(job, error),
-): Promise<void> {
-  if (!terminal) return;
-  await withMutationScopes(
+): Promise<boolean> {
+  if (!terminal) return false;
+  return withMutationScopes(
     {
       queueName: job.queueName,
       jobName: job.name,
@@ -363,9 +363,9 @@ async function recordTeamFailure(
         if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
           // A settled replay has no new claim, but can still exhaust its queue handoff.
           // A superseded provider invocation must not fail its successor's run.
-          if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return;
+          if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return false;
           await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-          return;
+          return true;
         }
         // An event without this invocation's claim cannot fail an in-flight retry.
         if (
@@ -374,16 +374,17 @@ async function recordTeamFailure(
             ? persisted.attempts > 0
             : persisted.attempts !== expectedAttempt)
         )
-          return;
+          return false;
         await understatSyncRepository.failItem(
           job.data.runId,
           item.resourceType,
           item.resourceId,
           error.message,
         );
-        return;
+        return true;
       }
       await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+      return true;
     },
   );
 }
@@ -392,9 +393,9 @@ async function recordPlayerFailure(
   job: Job<UnderstatPlayerJobData>,
   error: Error,
   terminal = isTerminalJobFailure(job, error),
-): Promise<void> {
-  if (!terminal) return;
-  await withMutationScopes(
+): Promise<boolean> {
+  if (!terminal) return false;
+  return withMutationScopes(
     {
       queueName: job.queueName,
       jobName: job.name,
@@ -413,9 +414,9 @@ async function recordPlayerFailure(
         if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
           // A settled replay has no new claim, but can still exhaust its queue handoff.
           // A superseded provider invocation must not fail its successor's run.
-          if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return;
+          if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return false;
           await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-          return;
+          return true;
         }
         // An event without this invocation's claim cannot fail an in-flight retry.
         if (
@@ -424,16 +425,17 @@ async function recordPlayerFailure(
             ? persisted.attempts > 0
             : persisted.attempts !== expectedAttempt)
         )
-          return;
+          return false;
         await understatSyncRepository.failItem(
           job.data.runId,
           item.resourceType,
           item.resourceId,
           error.message,
         );
-        return;
+        return true;
       }
       await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+      return true;
     },
   );
 }
@@ -446,12 +448,12 @@ async function recordTerminalFailure(
   if (!terminal) return;
   const typedError = error instanceof Error ? error : new Error(String(error));
   try {
-    if (job.name.startsWith('understat-player-')) {
-      await recordPlayerFailure(job as Job<UnderstatPlayerJobData>, typedError, true);
-    } else {
-      await recordTeamFailure(job as Job<UnderstatTeamJobData>, typedError, true);
+    const currentAttempt = job.name.startsWith('understat-player-')
+      ? await recordPlayerFailure(job as Job<UnderstatPlayerJobData>, typedError, true)
+      : await recordTeamFailure(job as Job<UnderstatTeamJobData>, typedError, true);
+    if (currentAttempt && understatFailureBookkeepingPlan(job.data).settleScheduler) {
+      await settleUnderstatFailureAfterRunDrained(job, typedError, true);
     }
-    await settleUnderstatFailureAfterRunDrained(job, typedError, true);
   } catch (bookkeepingError) {
     logError('Understat terminal failure bookkeeping failed in worker path', bookkeepingError, {
       runId: job.data.runId,
@@ -503,20 +505,8 @@ export function createUnderstatWorker(): WorkerRuntime {
       attemptsMade: job?.attemptsMade,
     });
     if (job) {
-      const bookkeeping = understatFailureBookkeepingPlan(job.data);
-      if (bookkeeping.recordDomainFailure) {
-        void recordTeamFailure(job, error).catch((bookkeepingError) =>
-          logError('Understat team failure bookkeeping failed', bookkeepingError, {
-            runId: job.data.runId,
-          }),
-        );
-      }
-      if (bookkeeping.settleScheduler && isTerminalJobFailure(job, error)) {
-        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
-          logError('Understat team obligation failure bookkeeping failed', bookkeepingError, {
-            runId: job.data.runId,
-          }),
-        );
+      if (isTerminalJobFailure(job, error)) {
+        void recordTerminalFailure(job, error);
       }
       void alertOnFinalFailure(job, error);
     }
@@ -528,20 +518,8 @@ export function createUnderstatWorker(): WorkerRuntime {
       attemptsMade: job?.attemptsMade,
     });
     if (job) {
-      const bookkeeping = understatFailureBookkeepingPlan(job.data);
-      if (bookkeeping.recordDomainFailure) {
-        void recordPlayerFailure(job, error).catch((bookkeepingError) =>
-          logError('Understat player failure bookkeeping failed', bookkeepingError, {
-            runId: job.data.runId,
-          }),
-        );
-      }
-      if (bookkeeping.settleScheduler && isTerminalJobFailure(job, error)) {
-        void settleUnderstatFailureAfterRunDrained(job, error, true).catch((bookkeepingError) =>
-          logError('Understat player obligation failure bookkeeping failed', bookkeepingError, {
-            runId: job.data.runId,
-          }),
-        );
+      if (isTerminalJobFailure(job, error)) {
+        void recordTerminalFailure(job, error);
       }
       void alertOnFinalFailure(job, error);
     }

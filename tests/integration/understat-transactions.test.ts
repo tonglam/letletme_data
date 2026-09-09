@@ -372,6 +372,29 @@ for (const lane of ['team', 'player'] as const) {
     expect(await runs.isItemAttemptCurrent(data.runId, 'league', 'EPL', 2)).toBe(true);
   });
 
+  test(`${lane} superseded failure cannot settle a completed successor obligation`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue('none');
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: `understat-${lane}-sync`, jobName: 'newer-attempt', scopes: [scope] },
+        async () => {
+          expect(await runs.markItemRunning(data.runId, 'league', 'EPL')).toBe(2);
+        },
+      );
+      await sql`UPDATE ops.sync_items SET status='completed' WHERE run_id=${data.runId}`;
+      await sql`UPDATE ops.sync_runs SET status='completed' WHERE run_id=${data.runId}`;
+      throw new UnrecoverableError('superseded provider failed after finalizer commit');
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'superseded provider failed after finalizer commit',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('completed');
+    expect(settle).not.toHaveBeenCalled();
+  });
+
   test(`${lane} discovery rejects a late team-only metadata overwrite`, async () => {
     const first = job();
     await processJob('player', 'understat-player-discover', first);
