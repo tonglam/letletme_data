@@ -750,6 +750,7 @@ export async function recoverStuckTournamentSetups(
       await enqueueTournamentSetup(season, row.id, 'watchdog', {
         forceNew: true,
         activeSettleTimeoutMs: 2_000,
+        setupMarker: watchdogRecoveryMarker,
       });
       recovered.push(row.id);
       logInfo('Watchdog recovered stuck tournament setup', {
