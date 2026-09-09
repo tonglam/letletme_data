@@ -408,7 +408,7 @@ async function enqueueOfficialRosterSyncAfterFinalization(
  * Architecture:
  * event-results (base) → [points-race, battle-race, knockout, transfers-post, cup-results] (parallel)
  */
-async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
+export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
   if (
     !(await startCurrentSchedulerJob(job.data, {
       queueName: job.queueName,
@@ -776,12 +776,16 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           // Roster reconciliation owns its own short publication scope and
           // performs setup enqueueing after that commit. Do not wrap it in a
           // second outer transaction that would hold the scope through the queue
-          // handoff.
+          // handoff. Cup likewise fetches first, then owns short version-fenced
+          // entry-season replacement transactions.
           if (
             job.name === TOURNAMENT_JOBS.ROSTER_SYNC ||
-            job.name === TOURNAMENT_JOBS.ROSTER_RECONCILE
+            job.name === TOURNAMENT_JOBS.ROSTER_RECONCILE ||
+            job.name === TOURNAMENT_JOBS.CUP_RESULTS
           ) {
-            return (await runMutation()).value;
+            const unscoped = await runMutation();
+            if (unscoped.afterCommit) await unscoped.afterCommit();
+            return unscoped.value;
           }
 
           try {

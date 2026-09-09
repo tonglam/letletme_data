@@ -12,6 +12,8 @@ import { IncompleteDataSyncError } from '../utils/errors';
 import { logDebug, logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
+// Each entry acquires a database write fence; keep each lock-holding batch small.
+const PERSISTENCE_BATCH_SIZE = 25;
 
 type GetEntryCup = typeof fplClient.getEntryCup;
 
@@ -184,9 +186,17 @@ export async function syncTournamentEventCupResults(
     };
   }
 
+  const revisions = await entryEventCupResultsRepository.findRevisions(season, eventId, entryIds);
   const { records, skipped, errors } = await collectEntryCupResults(entryIds, eventId, options);
 
-  const upserted = await entryEventCupResultsRepository.replaceBatch(season, records);
+  let upserted = 0;
+  for (let offset = 0; offset < records.length; offset += PERSISTENCE_BATCH_SIZE) {
+    upserted += await entryEventCupResultsRepository.replaceBatch(
+      season,
+      records.slice(offset, offset + PERSISTENCE_BATCH_SIZE),
+      revisions,
+    );
+  }
   if (upserted !== records.length) {
     throw new Error(
       `Tournament event cup results lost season ownership for ${records.length - upserted} entries`,
