@@ -24,7 +24,7 @@ async function cleanup() {
   await sql`DELETE FROM competition.tournament_entries WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM competition.tournament_setup_issues WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
-  await sql`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+  await sql`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id IN (${tournamentId}, ${tournamentId + 1})`;
   await sql`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM ops.mutation_scopes WHERE scope_key=${tournamentSetupLifecycleScope(tournamentId)}`;
 }
@@ -256,8 +256,8 @@ test('correction writes and issue resolution roll back together when settlement 
   expect(issue!.diagnosticCode).toBeNull();
 });
 
-for (const sourceChanges of [false, true]) {
-  test(`league enrichment ${sourceChanges ? 'rejects changed' : 'accepts unchanged'} entry input after provider work`, async () => {
+for (const sourceChanges of [false, true, 'omitted'] as const) {
+  test(`league enrichment ${sourceChanges === 'omitted' ? 'rejects newly eligible omitted' : sourceChanges ? 'rejects changed' : 'accepts unchanged'} entry input after provider work`, async () => {
     const { syncLeagueEventResultsByTournament } = await import(
       '../../src/services/league-event-results.service'
     );
@@ -281,7 +281,14 @@ for (const sourceChanges of [false, true]) {
       is_captain: i === 0,
       is_vice_captain: i === 1,
     }));
-    spyOn(resolver, 'resolveTournamentEntryIds').mockResolvedValue([tournamentId]);
+    const omittedEntryId = tournamentId + 1;
+    if (sourceChanges === 'omitted') {
+      await sql`INSERT INTO competition.entries (season_id,entry_id,entry_name,player_name,started_event)
+        VALUES (${season.seasonId},${omittedEntryId},'Omitted','Fixture',2)`;
+    }
+    spyOn(resolver, 'resolveTournamentEntryIds').mockResolvedValue(
+      sourceChanges === 'omitted' ? [tournamentId, omittedEntryId] : [tournamentId],
+    );
     spyOn(eventRepository, 'findById').mockResolvedValue(null);
     spyOn(live, 'loadFreshEventLiveAuthoritySnapshot').mockResolvedValue({
       publication: { sourceCheckedAt: checkedAt },
@@ -299,12 +306,18 @@ for (const sourceChanges of [false, true]) {
         {
           queueName: 'entry-sync',
           jobName: 'entry-info',
-          scopes: tournamentEntryCoreScopes(season.seasonId, [tournamentId]),
+          scopes: tournamentEntryCoreScopes(season.seasonId, [
+            sourceChanges === 'omitted' ? omittedEntryId : tournamentId,
+          ]),
         },
         async () => {
           if (sourceChanges) {
             const tx = await getDbClient();
-            await tx`UPDATE competition.entries SET entry_name='new source' WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+            if (sourceChanges === 'omitted') {
+              await tx`UPDATE competition.entries SET started_event=1 WHERE season_id=${season.seasonId} AND entry_id=${omittedEntryId}`;
+            } else {
+              await tx`UPDATE competition.entries SET entry_name='new source' WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+            }
           }
         },
       );
@@ -359,7 +372,10 @@ test('selection repair holds all entrant scopes, including entrants outside the 
   ]);
   issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
   const entrants = [tournamentId, tournamentId + 1];
-  const scopes = tournamentEntryCoreScopes(season.seasonId, entrants);
+  const scopes = [
+    tournamentSetupLifecycleScope(tournamentId),
+    ...tournamentEntryCoreScopes(season.seasonId, entrants),
+  ];
   await withMutationScopes(
     { queueName: 'test', jobName: 'seed-entry-scopes', scopes },
     async () => {},
@@ -379,4 +395,70 @@ test('selection repair holds all entrant scopes, including entrants outside the 
   await repairTournamentSetupIssue(season, issueId);
   expect(publish).toHaveBeenCalledTimes(1);
   expect(await tournamentSetupIssueRepository.findUnresolvedById(season, issueId)).toBeNull();
+});
+
+test('pre-capture failure accounts only for its still-due occurrence', async () => {
+  const triggeredAt = new Date(Date.now() + 1000);
+  const attemptedAt = new Date(triggeredAt.getTime() + 1000);
+  const revision = await tournamentSetupIssueRepository.findDueDeliveryRevision(
+    season,
+    issueId,
+    triggeredAt,
+    attemptedAt,
+  );
+  expect(revision).not.toBeNull();
+  await tournamentSetupIssueRepository.recordRepairAttempt(
+    issueId,
+    new Date(attemptedAt.getTime() + 86400000),
+    true,
+    revision!,
+  );
+  const issue = await tournamentSetupIssueRepository.findUnresolvedById(season, issueId);
+  expect(issue?.repairAttempts).toBe(1);
+  expect(issue?.repairExhaustedAt).not.toBeNull();
+  expect(
+    await tournamentSetupIssueRepository.findDueDeliveryRevision(
+      season,
+      issueId,
+      triggeredAt,
+      attemptedAt,
+    ),
+  ).toBeNull();
+});
+
+test('pre-capture fallback cannot adopt an occurrence observed after enqueue', async () => {
+  const triggeredAt = new Date(Date.now() - 1000);
+  await tournamentSetupIssueRepository.sync(season, tournamentId, [input]);
+  expect(
+    await tournamentSetupIssueRepository.findDueDeliveryRevision(
+      season,
+      issueId,
+      triggeredAt,
+      new Date(),
+    ),
+  ).toBeNull();
+});
+
+test('league eligibility changes cannot turn an empty write batch into success', async () => {
+  const service = await import('../../src/services/league-event-results.service');
+  const resolver = await import('../../src/services/tournament-entry-resolver.service');
+  const { eventRepository } = await import('../../src/repositories/events');
+  const { entryInfoRepository } = await import('../../src/repositories/entry-infos');
+  const { leagueEventResultsRepository } = await import(
+    '../../src/repositories/league-event-results'
+  );
+  spyOn(resolver, 'resolveTournamentEntryIds').mockResolvedValue([tournamentId]);
+  spyOn(eventRepository, 'findById').mockResolvedValue(null);
+  const original = entryInfoRepository.findByIds.bind(entryInfoRepository);
+  spyOn(entryInfoRepository, 'findByIds').mockImplementation(async (...args) => {
+    const rows = await original(...args);
+    await sql`UPDATE competition.entries SET started_event=1 WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+    return rows;
+  });
+  await sql`UPDATE competition.entries SET started_event=2 WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+  const publish = spyOn(leagueEventResultsRepository, 'upsertBatch');
+  await expect(
+    service.syncLeagueEventResultsByTournament(season, tournamentId, 1),
+  ).rejects.toMatchObject({ code: 'LEAGUE_ENTRY_SOURCE_STALE' });
+  expect(publish).not.toHaveBeenCalled();
 });

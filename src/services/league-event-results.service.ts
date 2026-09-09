@@ -448,10 +448,47 @@ export async function syncLeagueEventResultsByTournament(
       await entryEventResultsRepository.findLeagueInputRevisions(season, eventId, scopedEntryIds)
     ).map((row) => [row.entryId, row]),
   );
+  // Eligibility and reuse decisions also depend on entries that produce no
+  // write batch. Validate the complete input snapshot before accepting them.
+  const validateInputSnapshot = () =>
+    withMutationScopes(
+      {
+        queueName: 'league-sync',
+        jobName: 'league-event-results',
+        tournamentId,
+        eventId,
+        scopes: tournamentEntryCoreScopes(season.seasonId, scopedEntryIds),
+      },
+      async () => {
+        const current = new Map(
+          (
+            await entryEventResultsRepository.findLeagueInputRevisions(
+              season,
+              eventId,
+              scopedEntryIds,
+            )
+          ).map((row) => [row.entryId, row]),
+        );
+        for (const entryId of scopedEntryIds) {
+          const before = inputRevisions.get(entryId);
+          const after = current.get(entryId);
+          if (
+            before?.profileRevision !== after?.profileRevision ||
+            before?.resultRevision !== after?.resultRevision
+          ) {
+            throw new ConflictError(
+              'League result source changed while enrichment was in progress',
+              'LEAGUE_ENTRY_SOURCE_STALE',
+            );
+          }
+        }
+      },
+    );
   const entryInfos = await entryInfoRepository.findByIds(season, scopedEntryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
   const entryIds = findEventEligibleEntryIds(scopedEntryIds, entryInfos, eventId);
   if (entryIds.length === 0) {
+    await validateInputSnapshot();
     return {
       tournamentId,
       eventId,
@@ -496,6 +533,7 @@ export async function syncLeagueEventResultsByTournament(
   const reusedSet = new Set(reusedEntryIds);
   const entriesToBuild = entryIds.filter((entryId) => !reusedSet.has(entryId));
   if (entriesToBuild.length === 0) {
+    await validateInputSnapshot();
     return {
       tournamentId,
       eventId,
@@ -700,6 +738,7 @@ export async function syncLeagueEventResultsByTournament(
     );
   }
 
+  await validateInputSnapshot();
   const batchSize = 500;
   let updated = 0;
 
@@ -793,6 +832,7 @@ export async function syncLeagueEventResultsByTournament(
   const succeeded = entriesToBuild.length - missingPersistedEntryIds.length;
   const errors = missingPersistedEntryIds.length;
 
+  await validateInputSnapshot();
   logInfo('League event results sync completed for tournament', {
     eventId,
     tournamentId,

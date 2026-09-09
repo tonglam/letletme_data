@@ -52,6 +52,29 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
       return rows[0] ?? null;
     },
 
+    // A failure can occur before lifecycle capture. Only adopt the revision
+    // of an occurrence already visible to this delivery, still due when its
+    // attempt started. New observations and already-accounted retries fail
+    // this fence; recordRepairAttempt additionally compares xmin atomically.
+    findDueDeliveryRevision: async (
+      season: FplSeasonRef,
+      issueId: number,
+      triggeredAt: Date,
+      attemptedAt: Date,
+    ): Promise<string | null> => {
+      const db = await getDbInstance();
+      const rows = await db.execute<{ revision: string }>(sql`
+        SELECT xmin::text AS revision
+        FROM competition.tournament_setup_issues
+        WHERE season_id = ${season.seasonId} AND issue_id = ${issueId}
+          AND resolved_at IS NULL
+          AND last_seen_at <= ${triggeredAt.toISOString()}::timestamptz
+          AND (next_repair_at IS NULL OR next_repair_at <= ${attemptedAt.toISOString()}::timestamptz)
+          AND (repair_exhausted_at IS NULL OR repair_exhausted_at < ${triggeredAt.toISOString()}::timestamptz)
+      `);
+      return rows[0]?.revision ?? null;
+    },
+
     findUnresolvedById: async (
       season: FplSeasonRef,
       issueId: number,

@@ -39,9 +39,9 @@ export function createTournamentRepairWorker(): WorkerRuntime {
   const worker = new Worker<TournamentRepairJobData>(
     tournamentRepairQueueName,
     async (job: Job<TournamentRepairJobData>) => {
+      observedRevisions.delete(String(job.id));
       const season = await seasonRepository.findByCode(job.data.seasonCode);
       if (!season) return;
-      observedRevisions.delete(String(job.id));
       await repairTournamentSetupIssue(season, job.data.issueId, (state) => {
         observedRevisions.set(String(job.id), state.issueRevision);
       });
@@ -62,10 +62,20 @@ export function createTournamentRepairWorker(): WorkerRuntime {
   });
   worker.on('failed', (job, error) => {
     if (!job) return;
-    const revision = observedRevisions.get(String(job.id));
+    const capturedRevision = observedRevisions.get(String(job.id));
     observedRevisions.delete(String(job.id));
-    if (!revision) return;
     void (async () => {
+      const revision =
+        capturedRevision ??
+        (job.processedOn
+          ? await tournamentSetupIssueRepository.findDueDeliveryRevision(
+              { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
+              job.data.issueId,
+              new Date(job.data.triggeredAt),
+              new Date(job.processedOn),
+            )
+          : null);
+      if (!revision) return;
       const issue = await tournamentSetupIssueRepository.findUnresolvedById(
         { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
         job.data.issueId,

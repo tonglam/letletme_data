@@ -175,21 +175,15 @@ async function repairTournamentSetupIssuePrepared(
     case 'SELECTION_INSIGHTS_INCOMPLETE': {
       if (eventId === null) break;
       try {
-        const result = await withMutationScopes(
-          {
-            queueName: 'tournament-repair',
-            jobName: 'selection-insights',
-            tournamentId: issue.tournamentId,
-            eventId,
-            scopes: [
-              ...resolveMutationScopes({
-                queueName: 'tournament-sync',
-                jobName: 'tournament-selection-stats',
-                eventId,
-              }),
-              ...tournamentEntryCoreScopes(season.seasonId, allEntryIds),
-            ],
-          },
+        const result = await runPhase(
+          [
+            ...resolveMutationScopes({
+              queueName: 'tournament-sync',
+              jobName: 'tournament-selection-stats',
+              eventId,
+            }),
+            ...tournamentEntryCoreScopes(season.seasonId, allEntryIds),
+          ],
           () =>
             syncTournamentSelectionStats(season, eventId, {
               tournamentIds: [issue.tournamentId],
