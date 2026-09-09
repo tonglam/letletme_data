@@ -268,6 +268,33 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
     return result.length;
   },
 
+  async assertTeamSnapshotCurrent(rows: readonly UnderstatTeam[], observedAt: Date): Promise<void> {
+    if (rows.length === 0) return;
+    const db = await getDatabase(dbInstance);
+    const current = await db
+      .select()
+      .from(understatTeams)
+      .where(
+        inArray(
+          understatTeams.teamId,
+          rows.map((row) => row.id),
+        ),
+      );
+    const incomingById = new Map(rows.map((row) => [row.id, row]));
+    for (const row of current) {
+      const incoming = incomingById.get(row.teamId)!;
+      if (
+        row.updatedAt >= observedAt &&
+        row.sourceHash !== incoming.sourceHash &&
+        incoming.lastSeenSeason >= row.lastSeenSeason
+      ) {
+        throw new Error(
+          'Understat team reference snapshot was superseded; retry with fresh provider data',
+        );
+      }
+    }
+  },
+
   async findTeamsByIds(teamIds: readonly number[]): Promise<UnderstatTeam[]> {
     if (teamIds.length === 0) return [];
     const db = await getDatabase(dbInstance);

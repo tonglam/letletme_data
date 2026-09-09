@@ -337,3 +337,63 @@ test('a later shared match observation cannot be mixed with an older discovery g
   expect(stats!.count).toBe(0);
   expect(enqueue.enqueueUnderstatTeamDetail).not.toHaveBeenCalled();
 });
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} terminal failure still settles its own claimed attempt`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    spyOn(understatClient, 'getLeagueData').mockRejectedValue(
+      new UnrecoverableError('current provider failed'),
+    );
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'current provider failed',
+    );
+    expect((await runs.findItem(data.runId, 'league', 'EPL'))!.status).toBe('failed');
+  });
+
+  test(`${lane} late terminal failure cannot fail a newer claimed attempt`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: `understat-${lane}-sync`, jobName: 'newer-attempt', scopes: [scope] },
+        async () => {
+          expect(await runs.markItemRunning(data.runId, 'league', 'EPL')).toBe(2);
+        },
+      );
+      throw new UnrecoverableError('old provider request failed');
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'old provider request failed',
+    );
+    const current = await runs.findItem(data.runId, 'league', 'EPL');
+    expect(current!.status).toBe('running');
+    expect(current!.attempts).toBe(2);
+    expect(await runs.isItemAttemptCurrent(data.runId, 'league', 'EPL', 2)).toBe(true);
+  });
+
+  test(`${lane} discovery rejects a late team-only metadata overwrite`, async () => {
+    const first = job();
+    await processJob('player', 'understat-player-discover', first);
+    const delayed = job();
+    // Close the fixture generation so the player lane can start its next run.
+    await sql`UPDATE ops.sync_runs SET status='completed' WHERE run_id=${first.runId}`;
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: 'understat-player-sync', jobName: 'newer-team-name', scopes: [scope] },
+        async () => {
+          await sql`UPDATE understat.teams SET title='Corrected team title',source_hash='corrected-team-only',updated_at=clock_timestamp() WHERE team_id=${offset + 83}`;
+        },
+      );
+      return leagueData as never;
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, delayed)).rejects.toThrow(
+      'team reference snapshot was superseded',
+    );
+    const [team] =
+      await sql`SELECT title,source_hash FROM understat.teams WHERE team_id=${offset + 83}`;
+    expect(team!.title).toBe('Corrected team title');
+    expect(team!.source_hash).toBe('corrected-team-only');
+    expect((await runs.findItem(delayed.runId, 'league', 'EPL'))!.status).toBe('running');
+  });
+}

@@ -267,7 +267,10 @@ async function enqueueTeamDetailJobs(
   };
 }
 
-export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise<void> {
+export async function discoverUnderstatTeams(
+  job: UnderstatTeamJobData,
+  onClaim?: (attempt: number) => void,
+): Promise<void> {
   const handoffs: Array<() => Promise<void>> = [];
   const { league, sourceYear } = assertUnderstatSyncAllowed(job.season);
   const config = getConfig();
@@ -345,6 +348,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   });
   for (const handoff of handoffs) await handoff();
   if (!claim) return;
+  onClaim?.(claim.attempt);
   const { date: sourceCheckedAt } = await readDatabaseOrderingTimestamp();
   const response = await understatClient.getLeagueData(league, sourceYear);
 
@@ -465,7 +469,10 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   for (const handoff of handoffs) await handoff();
 }
 
-export async function syncUnderstatTeamDetail(job: UnderstatTeamJobData): Promise<void> {
+export async function syncUnderstatTeamDetail(
+  job: UnderstatTeamJobData,
+  onClaim?: (attempt: number) => void,
+): Promise<void> {
   const handoffs: Array<() => Promise<void>> = [];
   const { sourceYear } = assertUnderstatSyncAllowed(job.season);
   const config = getConfig();
@@ -489,6 +496,7 @@ export async function syncUnderstatTeamDetail(job: UnderstatTeamJobData): Promis
   });
   for (const handoff of handoffs) await handoff();
   if (attempt === null) return;
+  onClaim?.(attempt);
   const response = await understatClient.getTeamData(teamTitle, sourceYear);
   await withMutationScopes(mutation, async () => {
     if (

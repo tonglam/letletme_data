@@ -106,6 +106,8 @@ function startSchedulerLeaseHeartbeat(
   return () => clearInterval(timer);
 }
 
+const claimedAttempts = new WeakMap<object, number>();
+
 async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
   if (
     !(await startCurrentSchedulerJob(job.data, {
@@ -131,9 +133,11 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
       runUnderstatOperation(async () => {
         switch (job.name) {
           case 'understat-team-discover':
-            return discoverUnderstatTeams(job.data);
+            return discoverUnderstatTeams(job.data, (attempt) => claimedAttempts.set(job, attempt));
           case 'understat-team-detail':
-            return syncUnderstatTeamDetail(job.data);
+            return syncUnderstatTeamDetail(job.data, (attempt) =>
+              claimedAttempts.set(job, attempt),
+            );
           case 'understat-team-finalize':
             return finalizeUnderstatTeamRun(job.data);
           default:
@@ -179,11 +183,17 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
       runUnderstatOperation(async () => {
         switch (job.name) {
           case 'understat-player-discover':
-            return discoverUnderstatPlayers(job.data);
+            return discoverUnderstatPlayers(job.data, (attempt) =>
+              claimedAttempts.set(job, attempt),
+            );
           case 'understat-player-team-detail':
-            return syncUnderstatPlayerTeamDetail(job.data);
+            return syncUnderstatPlayerTeamDetail(job.data, (attempt) =>
+              claimedAttempts.set(job, attempt),
+            );
           case 'understat-player-match':
-            return syncUnderstatPlayerMatch(job.data);
+            return syncUnderstatPlayerMatch(job.data, (attempt) =>
+              claimedAttempts.set(job, attempt),
+            );
           case 'understat-player-finalize':
             return finalizeUnderstatPlayerRun(job.data);
           default:
@@ -349,6 +359,15 @@ async function recordTeamFailure(
           item.resourceType,
           item.resourceId,
         );
+        const expectedAttempt = claimedAttempts.get(job);
+        // An event without this invocation's claim cannot fail an in-flight retry.
+        if (
+          persisted &&
+          (expectedAttempt === undefined
+            ? persisted.attempts > 0
+            : persisted.attempts !== expectedAttempt)
+        )
+          return;
         if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
           await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
           return;
@@ -387,6 +406,15 @@ async function recordPlayerFailure(
           item.resourceType,
           item.resourceId,
         );
+        const expectedAttempt = claimedAttempts.get(job);
+        // An event without this invocation's claim cannot fail an in-flight retry.
+        if (
+          persisted &&
+          (expectedAttempt === undefined
+            ? persisted.attempts > 0
+            : persisted.attempts !== expectedAttempt)
+        )
+          return;
         if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
           await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
           return;

@@ -17,6 +17,7 @@ export async function persistUnderstatTeamDiscovery(
   withdrawnMatchIds: readonly number[] = [],
 ): Promise<boolean> {
   const references = createUnderstatReferenceRepository(tx);
+  await references.assertTeamSnapshotCurrent(discovery.teams, discovery.season.lastSeenAt);
   const teams = createUnderstatTeamRepository(tx);
   const withdrawnStats = await teams.deleteMatchStats(withdrawnMatchIds);
   if (discovery.season.state === 'active') {
@@ -40,6 +41,7 @@ export async function persistUnderstatPlayerDiscovery(
   options: { preserveExistingPlayerSeasons?: boolean } = {},
 ): Promise<boolean> {
   const references = createUnderstatReferenceRepository(tx);
+  await references.assertTeamSnapshotCurrent(discovery.teams, discovery.season.lastSeenAt);
   const players = createUnderstatPlayerRepository(tx);
   const withdrawnStats = await players.deleteMatchStats(withdrawnMatchIds);
   if (discovery.season.state === 'active') {
