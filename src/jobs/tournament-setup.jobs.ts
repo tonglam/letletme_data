@@ -12,11 +12,18 @@ import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governa
 export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
 export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
-  prepareEnqueue?: () => Promise<void>;
+  /**
+   * Prepare durable state before queue admission. A returned marker is copied
+   * into the job identity/data as a prepared retry marker so the handoff
+   * cannot be mistaken for an unmarked manual retry.
+   */
+  prepareEnqueue?: () => Promise<void | string>;
   /**
    * Queue a distinct successor when an active job remains ambiguous after the
-   * settle window. Only lifecycle-locked callers may use this: the successor
-   * waits behind the caller and guarantees that newly published state is read.
+   * settle window. Callers must fence the durable publication marker with the
+   * tournament lifecycle scope before invoking this after-commit handoff; the
+   * successor then waits behind the active job and reads the newly published
+   * state.
    */
   ensureSuccessorOnActive?: boolean;
   /**
@@ -27,6 +34,10 @@ export interface EnqueueTournamentSetupOptions {
   activeSettleTimeoutMs?: number;
   /** Database marker for a resume-triggered setup operation. */
   resumeMarker?: string;
+  /** Database marker committed before a create or roster-publication setup operation. */
+  setupMarker?: string;
+  /** Existing marker-suffixed slot to inspect before preparing a new retry. */
+  admissionMarker?: string;
 }
 
 export type ExistingSetupJobAction =
@@ -153,19 +164,13 @@ async function enqueueTournamentSetupUnlocked(
     if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
-    const jobData: TournamentSetupJobData = {
-      seasonId: season.seasonId,
-      seasonCode: season.seasonCode,
-      tournamentId,
-      source,
-      triggeredAt: new Date().toISOString(),
-      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
-    };
-
+    let preparedRetryMarker: string | undefined;
+    let effectiveResumeMarker = options.resumeMarker;
+    const admissionMarker = effectiveResumeMarker ?? options.setupMarker ?? options.admissionMarker;
     const { baseJobId, successorJobId } = getTournamentSetupJobIds(
       season,
       tournamentId,
-      options.resumeMarker,
+      admissionMarker,
     );
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later
@@ -240,7 +245,7 @@ async function enqueueTournamentSetupUnlocked(
       // Durable preparation is serialized briefly. Queue inspection and Redis
       // admission intentionally happen after this transaction commits so a
       // slow/unavailable queue cannot retain a PostgreSQL mutation lock.
-      await withMutationScopes(
+      const preparedMarker = await withMutationScopes(
         {
           queueName: 'tournament-setup-enqueue',
           jobName: 'prepare-tournament-setup-enqueue',
@@ -249,7 +254,35 @@ async function enqueueTournamentSetupUnlocked(
         },
         options.prepareEnqueue,
       );
+      if (typeof preparedMarker === 'string' && preparedMarker.length > 0) {
+        if (source === 'resume' && !effectiveResumeMarker) {
+          // Snapshot resume preparation writes the authoritative marker but
+          // cannot pass it through the callback options. Carry it as the
+          // resume marker so the worker claims the same durable handoff.
+          effectiveResumeMarker = preparedMarker;
+        } else {
+          preparedRetryMarker = preparedMarker;
+        }
+        // A preparation callback may create a new durable marker. Its
+        // deterministic job slot must carry that marker, otherwise the worker
+        // would classify the prepared handoff as an unmarked manual retry.
+        jobId = getTournamentSetupJobIds(
+          season,
+          tournamentId,
+          effectiveResumeMarker ?? options.setupMarker ?? preparedRetryMarker,
+        ).baseJobId;
+      }
     }
+    const jobData: TournamentSetupJobData = {
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
+      tournamentId,
+      source,
+      triggeredAt: new Date().toISOString(),
+      ...(effectiveResumeMarker ? { resumeMarker: effectiveResumeMarker } : {}),
+      ...(preparedRetryMarker ? { preparedRetryMarker } : {}),
+      ...(options.setupMarker ? { setupMarker: options.setupMarker } : {}),
+    };
     let job;
     try {
       job = await queue.add(

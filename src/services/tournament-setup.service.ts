@@ -11,7 +11,7 @@ import {
   type TournamentSetupPhase,
   type TournamentSetupStatus,
 } from '../domain/tournament';
-import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
+import { enqueueTournamentSetup, findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
 import { eventRepository } from '../repositories/events';
@@ -146,7 +146,12 @@ export async function finalizePublishedTournamentSetup(
 export async function setupTournamentStructure(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: { resumeMarker?: string; execution?: TournamentSetupExecution },
+  options?: {
+    resumeMarker?: string;
+    /** Stable marker owned by a non-resume setup handoff. */
+    progressMarker?: string;
+    execution?: TournamentSetupExecution;
+  },
 ): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
@@ -240,7 +245,7 @@ export async function setupTournamentStructure(
   // resume attempt into a warning. Only publication completed below makes
   // failures non-critical for this attempt.
   let standingsPublished = false;
-  const progressMarker = options?.resumeMarker;
+  const progressMarker = options?.progressMarker ?? options?.resumeMarker;
   let execution: TournamentSetupExecution;
   const runPhase = <T>(phase: string, scopes: readonly string[], operation: () => Promise<T>) =>
     withTournamentSetupPhase(season, tournamentId, execution, phase, scopes, operation);
@@ -596,12 +601,24 @@ export async function requeueTournamentSetup(
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
   }
 
+  // A prepared retry uses a marker-suffixed job ID. Reuse the current durable
+  // marker for the admission check so a repeated request cannot miss that
+  // waiting/active slot and prepare a second retry.
+  const currentStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+  const markerJob = currentStatus?.setupProgressUpdatedAt
+    ? await findTournamentSetupJob(season, tournamentId, currentStatus.setupProgressUpdatedAt)
+    : null;
+  const admissionMarker = markerJob
+    ? (currentStatus?.setupProgressUpdatedAt ?? undefined)
+    : undefined;
+
   let retryStatePrepared = false;
   try {
     return await enqueueTournamentSetup(season, tournamentId, 'manual', {
       forceNew: true,
+      ...(admissionMarker ? { admissionMarker } : {}),
       prepareEnqueue: async () => {
-        await withMutationScopes(
+        const marker = await withMutationScopes(
           {
             queueName: 'tournament-management',
             jobName: 'tournament-setup-retry-prepare',
@@ -620,15 +637,22 @@ export async function requeueTournamentSetup(
                 'TOURNAMENT_STATE_CHANGED',
               );
             }
+            return marked;
           },
         );
         retryStatePrepared = true;
+        return marker;
       },
     });
   } catch (error) {
     if (!retryStatePrepared) throw error;
-    const message = error instanceof Error ? error.message : 'Unable to enqueue setup retry.';
-    await tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message, 0);
+    // The prepared processing/queued row is a durable admission reservation.
+    // Leave it intact when Redis/BullMQ rejects the handoff: an overlapping
+    // retry may already be targeting the same marker, and the watchdog can
+    // safely replay this exact slot if no delivery was accepted.
+    logError('Setup retry queue admission failed; retaining durable reservation', error, {
+      tournamentId,
+    });
     throw error;
   }
 }
@@ -654,88 +678,166 @@ export async function recoverStuckTournamentSetups(
   const recovered: number[] = [];
   const skippedActive: number[] = [];
   for (const row of stuck) {
+    let watchdogRecoveryMarker: string | null = null;
+    let watchdogRecoveryPrepared = false;
+    let officialResumeRecoveryUpdatedAt: string | null = null;
     try {
-      await withMutationScopes(
+      // Queue probes are candidates only. Keep all Redis/BullMQ calls outside
+      // the lifecycle transaction; the durable marker and compare-and-swap
+      // below fence a concurrent worker or owner change.
+      if (isActive && (await isActive(row.id))) {
+        skippedActive.push(row.id);
+        logInfo('Skipping watchdog recovery after a live job appeared', {
+          tournamentId: row.id,
+          setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+        });
+        continue;
+      }
+
+      // An inactive official-sync row with a pending/processing setup is
+      // resume-owned. Replaying setup directly would rebuild from the old
+      // roster and could activate the tournament without authoritative roster
+      // publication. Replay the marker-pinned roster operation first; the
+      // marked setup job will be enqueued by that operation.
+      if (
+        row.state === 'inactive' &&
+        row.rosterMode === 'official_sync' &&
+        (row.rosterSyncStatus === 'processing' || row.rosterSyncStatus === 'failed')
+      ) {
+        if (!recoverOfficialRoster || !row.setupProgressUpdatedAt) {
+          logInfo('Skipping watchdog recovery without an official resume marker', {
+            tournamentId: row.id,
+            setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+          });
+          continue;
+        }
+        const claimed = await withMutationScopes(
+          {
+            queueName: 'tournament-setup-watchdog',
+            jobName: 'claim-stuck-official-resume',
+            tournamentId: row.id,
+            scopes: [tournamentSetupLifecycleScope(row.id)],
+          },
+          () =>
+            tournamentInfoRepository.markStuckOfficialResumeQueuedIfUnchanged(
+              season,
+              row.id,
+              row.setupProgressUpdatedAt!,
+              row.setupStartedAt,
+              row.setupAttempt,
+            ),
+        );
+        if (!claimed) {
+          logInfo('Skipping watchdog official resume after setup state advanced', {
+            tournamentId: row.id,
+            observedSetupProgressUpdatedAt: row.setupProgressUpdatedAt,
+          });
+          continue;
+        }
+        officialResumeRecoveryUpdatedAt = claimed;
+        await recoverOfficialRoster(
+          season,
+          row.id,
+          row.setupProgressUpdatedAt,
+          row.setupStatus,
+          row.setupPhase,
+          row.rosterLastSyncedAt,
+        );
+        recovered.push(row.id);
+        logInfo('Watchdog replayed stalled official roster resume', {
+          tournamentId: row.id,
+          setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+        });
+        continue;
+      }
+
+      // The stale query and BullMQ probe are only candidates. A worker may
+      // advance its heartbeat before this short transaction is acquired, so
+      // compare-and-swap the exact observed heartbeat before changing state.
+      const marked = await withMutationScopes(
         {
           queueName: 'tournament-setup-watchdog',
           jobName: 'recover-stuck-setup',
           tournamentId: row.id,
           scopes: [tournamentSetupLifecycleScope(row.id)],
         },
-        async () => {
-          // The queue probe above is only a candidate. Recheck while holding
-          // the same lifecycle lock as roster/setup workers so a retry queued
-          // after the first probe cannot be invalidated by this watchdog.
-          if (isActive && (await isActive(row.id))) {
-            skippedActive.push(row.id);
-            logInfo('Skipping watchdog recovery after a live job appeared', {
-              tournamentId: row.id,
-              setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-            });
-            return;
-          }
-
-          // An inactive official-sync row with a pending/processing setup is
-          // resume-owned. Replaying setup directly would rebuild from the old
-          // roster and could activate the tournament without authoritative
-          // roster publication. Replay the marker-pinned roster operation
-          // first; the marked setup job will be enqueued by that operation.
-          if (
-            row.state === 'inactive' &&
-            row.rosterMode === 'official_sync' &&
-            (row.rosterSyncStatus === 'processing' || row.rosterSyncStatus === 'failed')
-          ) {
-            if (!recoverOfficialRoster || !row.setupProgressUpdatedAt) {
-              logInfo('Skipping watchdog recovery without an official resume marker', {
-                tournamentId: row.id,
-                setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-              });
-              return;
-            }
-            await recoverOfficialRoster(
-              season,
-              row.id,
-              row.setupProgressUpdatedAt,
-              row.setupStatus,
-              row.setupPhase,
-              row.rosterLastSyncedAt,
-            );
-            recovered.push(row.id);
-            logInfo('Watchdog replayed stalled official roster resume', {
-              tournamentId: row.id,
-              setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-            });
-            return;
-          }
-
-          // The initial stale query and BullMQ probe are only candidates. A
-          // worker may publish readiness or advance its heartbeat before this
-          // lock is acquired, so compare-and-swap the exact observed heartbeat
-          // before changing canonical state.
-          const marked = await tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
+        () =>
+          tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
             season,
             row.id,
             row.setupProgressUpdatedAt,
-          );
-          if (!marked) {
-            logInfo('Skipping watchdog recovery after setup state advanced', {
-              tournamentId: row.id,
-              observedSetupProgressUpdatedAt: row.setupProgressUpdatedAt,
-            });
-            return;
-          }
-          await enqueueTournamentSetup(season, row.id, 'watchdog', {
-            forceNew: true,
-            activeSettleTimeoutMs: 2_000,
-          });
-          recovered.push(row.id);
-          logInfo('Watchdog recovered stuck tournament setup', {
-            tournamentId: row.id,
-            setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-          });
-        },
+            row.setupStartedAt,
+            row.setupAttempt,
+          ),
       );
+      if (!marked) {
+        logInfo('Skipping watchdog recovery after setup state advanced', {
+          tournamentId: row.id,
+          observedSetupProgressUpdatedAt: row.setupProgressUpdatedAt,
+        });
+        continue;
+      }
+      watchdogRecoveryMarker = marked;
+      watchdogRecoveryPrepared = true;
+      await enqueueTournamentSetup(season, row.id, 'watchdog', {
+        forceNew: true,
+        activeSettleTimeoutMs: 2_000,
+        setupMarker: watchdogRecoveryMarker,
+      });
+      recovered.push(row.id);
+      logInfo('Watchdog recovered stuck tournament setup', {
+        tournamentId: row.id,
+        setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+      });
     } catch (error) {
+      if (officialResumeRecoveryUpdatedAt) {
+        await withMutationScopes(
+          {
+            queueName: 'tournament-setup-watchdog',
+            jobName: 'restore-stuck-official-resume-after-enqueue-failure',
+            tournamentId: row.id,
+            scopes: [tournamentSetupLifecycleScope(row.id)],
+          },
+          () =>
+            tournamentInfoRepository.restoreStuckOfficialResumeAfterEnqueueFailure(
+              season,
+              row.id,
+              officialResumeRecoveryUpdatedAt!,
+              row,
+            ),
+        ).catch((restoreError) => {
+          logError(
+            'Watchdog failed to restore official resume after queue admission failure',
+            restoreError,
+            {
+              tournamentId: row.id,
+              recoveryUpdatedAt: officialResumeRecoveryUpdatedAt,
+            },
+          );
+        });
+      } else if (watchdogRecoveryPrepared && watchdogRecoveryMarker) {
+        await withMutationScopes(
+          {
+            queueName: 'tournament-setup-watchdog',
+            jobName: 'restore-stuck-setup-after-enqueue-failure',
+            tournamentId: row.id,
+            scopes: [tournamentSetupLifecycleScope(row.id)],
+          },
+          () =>
+            tournamentInfoRepository.restoreStuckSetupAfterEnqueueFailure(
+              season,
+              row.id,
+              watchdogRecoveryMarker!,
+              row.setupProgressUpdatedAt,
+              row.updatedAt,
+            ),
+        ).catch((restoreError) => {
+          logError('Watchdog failed to restore setup after queue admission failure', restoreError, {
+            tournamentId: row.id,
+            recoveryProgressUpdatedAt: watchdogRecoveryMarker,
+          });
+        });
+      }
       logError('Watchdog failed to recover stuck tournament setup', error, {
         tournamentId: row.id,
       });

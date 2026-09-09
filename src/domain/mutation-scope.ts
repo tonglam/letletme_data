@@ -64,7 +64,7 @@ export function tournamentEntryCoreScopes(seasonId: number, entryIds: number[]):
   ].sort();
 }
 
-/** Serializes the queue check, canonical preparation, and deterministic add. */
+/** Serializes short-lived durable setup-enqueue preparation before queue I/O. */
 export function tournamentSetupEnqueueScope(tournamentId: number): string {
   return Number.isFinite(tournamentId)
     ? `tournament-setup-enqueue:tournament:${tournamentId}`

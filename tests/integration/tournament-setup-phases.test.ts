@@ -7,7 +7,7 @@ import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import { tournamentSetupLifecycleScope } from '../../src/domain/mutation-scope';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { reserveSchedulerObligation } from '../../src/repositories/scheduler-obligations';
-import { databaseTransactionStorage, getDbClient } from '../../src/db/singleton';
+import { getDbClient } from '../../src/db/singleton';
 import { withMutationScopes } from '../../src/utils/mutation-scopes';
 import { withTournamentSetupPhase } from '../../src/utils/tournament-setup-execution';
 
@@ -664,60 +664,6 @@ test('league eligibility changes cannot turn an empty write batch into success',
   expect(publish).not.toHaveBeenCalled();
 });
 
-for (const outcome of ['accepted', 'clear', 'superseded', 'failed-after-supersession'] as const) {
-  test(`manual setup checks resume queues without a database transaction: ${outcome}`, async () => {
-    const seasonJobs = await import('../../src/services/season-scoped-job.service');
-    const setup = await import('../../src/services/tournament-setup.service');
-    const rosterJobs = await import('../../src/jobs/tournament-sync.jobs');
-    const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
-    const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
-    spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
-    const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
-    await sql`UPDATE competition.tournaments SET state='inactive', roster_sync_status='failed',
-      setup_status='failed',setup_phase='failed',setup_progress_updated_at='2095-01-01',
-      setup_next_retry_at='2095-01-03',
-      roster_sync_execution_id=gen_random_uuid() WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
-    let queueChecks = 0;
-    spyOn(setupJobs, 'findTournamentSetupJob').mockImplementation(async () => {
-      expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
-      queueChecks += 1;
-      return null;
-    });
-    spyOn(rosterJobs, 'findTournamentRosterReconcileJob').mockImplementation(async () => {
-      expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
-      queueChecks += 1;
-      if (outcome === 'accepted') return { id: 'accepted-resume' } as never;
-      if (outcome === 'clear') return null;
-      await sql`UPDATE competition.tournaments SET setup_progress_updated_at='2095-01-02'
-        WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
-      if (outcome === 'failed-after-supersession') throw new Error('queue response lost');
-      return null;
-    });
-    await processTournamentSetupJob({
-      id: `integration-resume-admission-${outcome}`,
-      name: 'tournament-setup',
-      queueName: 'tournament-setup',
-      data: { ...season, tournamentId, source: 'manual', triggeredAt: new Date().toISOString() },
-      attemptsMade: 0,
-      opts: { attempts: 3 },
-      updateProgress: async () => {},
-    } as never);
-    expect(queueChecks).toBe(2);
-    expect(run).toHaveBeenCalledTimes(outcome === 'clear' ? 1 : 0);
-    const status = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
-    expect(status!.setupStatus).toBe(outcome === 'clear' ? 'processing' : 'failed');
-    if (outcome !== 'clear') {
-      expect(status!.setupProgressUpdatedAt).toBe(
-        outcome === 'accepted' ? '2095-01-01 00:00:00+00' : '2095-01-02 00:00:00+00',
-      );
-    } else {
-      expect(status!.setupAttempt).toBe(1);
-    }
-    if (outcome === 'clear') expect(status!.setupNextRetryAt).toBeNull();
-    else expect(Date.parse(status!.setupNextRetryAt!)).toBe(Date.parse('2095-01-03T00:00:00Z'));
-  });
-}
-
 for (const intent of ['resume', 'roster-retry'] as const) {
   test(`unmarked manual setup cannot bypass committed ${intent} intent before queue handoff`, async () => {
     const seasonJobs = await import('../../src/services/season-scoped-job.service');
@@ -751,23 +697,166 @@ for (const intent of ['resume', 'roster-retry'] as const) {
     expect(status!.setupProgressUpdatedAt).toBe('2095-01-01 00:00:00+00');
   });
 }
+
+test('a legacy unmarked create delivery cannot supersede a newer setup marker', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_mode='snapshot', roster_sync_status=NULL,
+        setup_status='pending', setup_phase='queued',
+        setup_progress_updated_at='2095-01-02 00:00:00+00'
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await processTournamentSetupJob({
+    id: 'integration-legacy-create-delivery',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: {
+      ...season,
+      tournamentId,
+      source: 'create',
+      triggeredAt: '2095-01-01T00:00:00.000Z',
+    },
+    attemptsMade: 0,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(run).not.toHaveBeenCalled();
+  expect(await tournamentInfoRepository.findSetupStatus(season, tournamentId)).toMatchObject({
+    setupStatus: 'pending',
+    setupProgressUpdatedAt: '2095-01-02 00:00:00+00',
+  });
+});
+
+test('a legacy create retry keeps its claimed execution after its marker is preserved', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_mode='snapshot', roster_sync_status=NULL,
+        setup_status='processing', setup_phase='queued', setup_attempt=1,
+        setup_started_at='2095-01-01 00:00:01+00',
+        setup_next_retry_at='2095-01-01 00:01:00+00',
+        setup_last_error_code='SETUP_RETRYABLE',
+        setup_progress_updated_at='2095-01-01 00:00:00+00'
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await processTournamentSetupJob({
+    id: 'integration-legacy-create-retry',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: {
+      ...season,
+      tournamentId,
+      source: 'create',
+      triggeredAt: '2095-01-01T00:00:00.000Z',
+    },
+    attemptsMade: 1,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(await tournamentInfoRepository.findSetupStatus(season, tournamentId)).toMatchObject({
+    setupStatus: 'processing',
+    setupPhase: 'syncing_entries',
+    setupAttempt: 2,
+  });
+});
+
+test('a legacy create retry cannot supersede a newer marked execution in progress', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_mode='snapshot', roster_sync_status=NULL,
+        setup_status='processing', setup_phase='building_structure', setup_attempt=1,
+        setup_started_at='2095-01-02 00:00:01+00',
+        setup_progress_updated_at='2095-01-02 00:00:00+00'
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await processTournamentSetupJob({
+    id: 'integration-legacy-create-active-new-owner',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: {
+      ...season,
+      tournamentId,
+      source: 'create',
+      triggeredAt: '2095-01-01T00:00:00.000Z',
+    },
+    attemptsMade: 1,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(run).not.toHaveBeenCalled();
+  expect(await tournamentInfoRepository.findSetupStatus(season, tournamentId)).toMatchObject({
+    setupStatus: 'processing',
+    setupPhase: 'building_structure',
+    setupProgressUpdatedAt: '2095-01-02 00:00:00+00',
+  });
+});
+
+test('a marked admission error does not persist a stale pre-claim failure', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const roster = await import('../../src/repositories/tournament-roster');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const admissionError = new Error('roster read failed');
+  const failure = spyOn(tournamentInfoRepository, 'markSetupAttemptFailure');
+  spyOn(roster.tournamentRosterRepository, 'findById').mockRejectedValue(admissionError);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_mode='snapshot', roster_sync_status=NULL,
+        setup_status='pending', setup_phase='queued',
+        setup_progress_updated_at='2095-01-03 00:00:00+00'
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await expect(
+    processTournamentSetupJob({
+      id: 'integration-marked-admission-error',
+      name: 'tournament-setup',
+      queueName: 'tournament-setup',
+      data: {
+        ...season,
+        tournamentId,
+        source: 'roster',
+        setupMarker: '2095-01-03 00:00:00+00',
+        triggeredAt: '2095-01-03T00:00:01.000Z',
+      },
+      attemptsMade: 0,
+      opts: { attempts: 3 },
+      updateProgress: async () => {},
+    } as never),
+  ).rejects.toBe(admissionError);
+  expect(failure).not.toHaveBeenCalled();
+});
+
 for (const rosterStatus of ['failed', 'processing'] as const) {
   test(`prepared manual retry of a failed official resume reaches setup execution with roster=${rosterStatus}`, async () => {
     const seasonJobs = await import('../../src/services/season-scoped-job.service');
     const setup = await import('../../src/services/tournament-setup.service');
-    const rosterJobs = await import('../../src/jobs/tournament-sync.jobs');
     const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
     const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
     spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
     const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
-    spyOn(rosterJobs, 'findTournamentRosterReconcileJob').mockResolvedValue(null);
-    spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue(null);
+    let preparedMarkerForAssertion: string | undefined;
     await sql`UPDATE competition.tournaments SET state='inactive',roster_sync_status=${rosterStatus},
     setup_status='failed',setup_phase='failed',setup_error='terminal resume failure',
     setup_progress_updated_at='2095-01-01' WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
     spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
       async (_season, id, source, options) => {
-        await options?.prepareEnqueue?.();
+        const preparedRetryMarker = await options?.prepareEnqueue?.();
+        preparedMarkerForAssertion =
+          typeof preparedRetryMarker === 'string' ? preparedRetryMarker : undefined;
         const prepared = await tournamentInfoRepository.findSetupStatus(season, id);
         expect(prepared!.setupStatus).toBe('processing');
         expect(prepared!.setupPhase).toBe('queued');
@@ -775,7 +864,13 @@ for (const rosterStatus of ['failed', 'processing'] as const) {
           id: 'integration-prepared-manual-retry',
           name: 'tournament-setup',
           queueName: 'tournament-setup',
-          data: { ...season, tournamentId: id, source, triggeredAt: new Date().toISOString() },
+          data: {
+            ...season,
+            tournamentId: id,
+            source,
+            triggeredAt: new Date().toISOString(),
+            ...(typeof preparedRetryMarker === 'string' ? { preparedRetryMarker } : {}),
+          },
           attemptsMade: 0,
           opts: { attempts: 3 },
           updateProgress: async () => {},
@@ -785,8 +880,140 @@ for (const rosterStatus of ['failed', 'processing'] as const) {
     );
     await setup.requeueTournamentSetup(season, tournamentId);
     expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith(
+      season,
+      tournamentId,
+      expect.objectContaining({ progressMarker: preparedMarkerForAssertion }),
+    );
     expect(
       (await tournamentInfoRepository.findSetupStatus(season, tournamentId))!.setupAttempt,
     ).toBe(1);
   });
 }
+
+test('requeue admission follows a prepared marker after setup progress advances', async () => {
+  const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const marker = '2095-01-03 00:00:00+00';
+  await sql`UPDATE competition.tournaments
+    SET setup_status='processing', setup_phase='building_structure',
+        setup_progress_updated_at=${marker}
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  const findJob = spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue({
+    id: 'active-prepared-retry',
+  } as never);
+  const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+    async (_season, id, _source, options) => {
+      expect(id).toBe(tournamentId);
+      expect(options?.admissionMarker).toBe(marker);
+      return { id: 'active-prepared-retry' } as never;
+    },
+  );
+
+  await expect(setup.requeueTournamentSetup(season, tournamentId, marker)).resolves.toMatchObject({
+    id: 'active-prepared-retry',
+  });
+  expect(findJob).toHaveBeenCalledWith(season, tournamentId, marker);
+  expect(enqueue).toHaveBeenCalledTimes(1);
+});
+
+test('prepared retry keeps its durable reservation when queue admission fails', async () => {
+  const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const failure = new Error('queue unavailable');
+  spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue(null);
+  spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+    async (_season, id, _source, options) => {
+      const marker = await options?.prepareEnqueue?.();
+      expect(id).toBe(tournamentId);
+      expect(marker).toBeString();
+      throw failure;
+    },
+  );
+
+  await expect(setup.requeueTournamentSetup(season, tournamentId)).rejects.toBe(failure);
+  expect(await tournamentInfoRepository.findSetupStatus(season, tournamentId)).toMatchObject({
+    setupStatus: 'processing',
+    setupPhase: 'queued',
+    setupAttempt: 0,
+  });
+});
+
+test('prepared setup retry marker runs without an official roster resume', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  const preparedRetryMarker = '2095-01-02 00:00:00+00';
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_sync_status='ready', setup_status='processing', setup_phase='building_structure',
+        setup_progress_updated_at=${preparedRetryMarker}
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await processTournamentSetupJob({
+    id: 'integration-prepared-ordinary-retry',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: {
+      ...season,
+      tournamentId,
+      source: 'manual',
+      triggeredAt: new Date().toISOString(),
+      preparedRetryMarker,
+    },
+    attemptsMade: 0,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(run).toHaveBeenCalledWith(
+    season,
+    tournamentId,
+    expect.objectContaining({ progressMarker: preparedRetryMarker }),
+  );
+  expect((await tournamentInfoRepository.findSetupStatus(season, tournamentId))!.setupAttempt).toBe(
+    1,
+  );
+});
+
+test('prepared setup retry reclaims the current durable attempt after a stalled phase', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  const preparedRetryMarker = '2095-01-04 00:00:00+00';
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_sync_status='ready', setup_status='processing',
+        setup_phase='building_structure', setup_progress_updated_at=${preparedRetryMarker},
+        setup_started_at=clock_timestamp(), setup_attempt=3, setup_max_attempts=3
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await processTournamentSetupJob({
+    id: 'integration-prepared-stalled-retry',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: {
+      ...season,
+      tournamentId,
+      source: 'manual',
+      triggeredAt: new Date().toISOString(),
+      preparedRetryMarker,
+    },
+    // BullMQ stalled redelivery has consumed a delivery slot, while the
+    // durable execution remains on its final configured attempt.
+    attemptsMade: 1,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(run).toHaveBeenCalledTimes(1);
+  expect((await tournamentInfoRepository.findSetupStatus(season, tournamentId))!).toMatchObject({
+    setupStatus: 'processing',
+    setupPhase: 'syncing_entries',
+    setupAttempt: 3,
+  });
+});
