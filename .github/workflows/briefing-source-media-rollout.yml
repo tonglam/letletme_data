@@ -107,6 +107,10 @@ jobs:
             previous_media_image_id=$(docker inspect --format '{{.Image}}' "$current_container")
             test -n "$previous_media_image_id"
             test "$(docker image inspect --format '{{.Id}}' "$previous_media_image")" = "$previous_media_image_id"
+            previous_media_revision=$(docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "$previous_media_image")
+            test "$previous_media_revision" =~ ^[0-9a-f]{40}$
 
             read_container_boolean() {
               key=$1
@@ -309,7 +313,8 @@ jobs:
                   mv "$backup_file" "$media_env_file"
                 fi
                 if [ "$worker_stopped" = true ]; then
-                  APP_IMAGE="$previous_media_image" docker compose up -d --no-build --force-recreate media-worker || true
+                  DEPLOY_SHA="$previous_media_revision" APP_IMAGE="$previous_media_image" \
+                    docker compose up -d --no-build --force-recreate media-worker || true
                 fi
               fi
               if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi

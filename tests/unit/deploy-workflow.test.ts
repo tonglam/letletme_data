@@ -42,6 +42,7 @@ const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'ut
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
 const sourceMediaDeployFence = readFileSync('scripts/hold-source-media-deploy-fence.sh', 'utf8');
 const sourceMediaRepository = readFileSync('src/content/media/source-media-repository.ts', 'utf8');
+const sourceMediaRetention = readFileSync('src/content/media/source-media-retention.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
 function expectNonInteractiveComposeRuns(source: string, label: string) {
@@ -214,7 +215,22 @@ describe('release workflow gates', () => {
     expect(localSchedulerStop).toBeLessThan(localProbe);
     expect(localMediaFence).toBeGreaterThan(localSchedulerStop);
     expect(localMediaFence).toBeLessThan(localProbe);
-    expect(deployScript).not.toContain('stop_media_worker_with_deadline');
+    const localMediaStop = deployScript.indexOf(
+      'if ! stop_source_media_worker_with_deadline; then',
+    );
+    const localMigrationFenceRelease = deployScript.indexOf(
+      'if ! release_source_media_deploy_fence; then',
+      deployScript.indexOf('start_stage migration'),
+    );
+    expect(localMediaStop).toBeGreaterThan(localStop);
+    expect(localMediaStop).toBeLessThan(localPrepare);
+    expect(localMigrationFenceRelease).toBeGreaterThan(-1);
+    expect(localMigrationFenceRelease).toBeLessThan(
+      deployScript.indexOf('DEPLOY_MIGRATION_STARTED=true'),
+    );
+    expect(deployScript).toContain('docker stop --time 45 "$container_id"');
+    expect(deployScript).toContain('docker start "$container_id"');
+    expect(deployScript).toContain('DEPLOY_SOURCE_MEDIA_WORKER_STOPPED');
     expect(localProbe).toBeLessThan(localStop);
     expect(localStop).toBeLessThan(localPrepare);
     expect(localPrepare).toBeLessThan(localRenew);
@@ -267,16 +283,30 @@ describe('release workflow gates', () => {
       String.raw`pg_try_advisory_xact_lock(hashtextextended('content-source-media-deploy-v1', 0))`,
     );
     expect(sourceMediaRepository).toContain('if (fenceRows[0]?.acquired !== true) return []');
+    expect(sourceMediaRetention).toContain(
+      String.raw`pg_try_advisory_lock(
+        hashtextextended('content-source-media-deploy-v1', 0)
+      )`,
+    );
+    expect(sourceMediaRetention).toContain('if (!deployFenceAcquired) return []');
     expect(sourceMediaDeployFence).toContain(
       String.raw`pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))`,
     );
+    expect(sourceMediaDeployFence).toContain(String.raw`to_regclass('content.source_media_gates')`);
+    expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_NOT_REQUIRED');
     expect(sourceMediaDeployFence).toContain(String.raw`status = 'RUNNING'`);
     expect(sourceMediaDeployFence).toContain('lease_owner IS NOT NULL');
     expect(sourceMediaDeployFence).toContain('repair_until_at <= clock_timestamp()');
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
-    expect(sourceMediaDeployFence).toContain('IF ${hold_seconds} = 0 THEN');
-    expect(sourceMediaDeployFence).toContain('PERFORM pg_sleep(5);');
-    expect(sourceMediaDeployFence).toContain('FOR UPDATE NOWAIT');
+    expect(sourceMediaDeployFence).toContain(
+      'LOCK TABLE content.source_media_gates IN SHARE ROW EXCLUSIVE MODE NOWAIT',
+    );
+    expect(sourceMediaDeployFence).toContain(
+      'LOCK TABLE content.source_media_assets IN SHARE ROW EXCLUSIVE MODE NOWAIT',
+    );
+    expect(sourceMediaDeployFence).toContain('hold_seconds=${2:-1500}');
+    expect(sourceMediaDeployFence).not.toContain('IF ${hold_seconds} = 0 THEN');
+    expect(sourceMediaDeployFence).not.toContain('FOR UPDATE NOWAIT');
     expect(sourceMediaDeployFence).toContain('WHEN lock_not_available OR raise_exception THEN');
     expect(sourceMediaDeployFence).not.toMatch(/\b(INSERT|DELETE|TRUNCATE)\b|^\s*UPDATE\b/m);
     expect(deployScript).toContain('release_source_media_deploy_fence()');
@@ -518,8 +548,10 @@ describe('release workflow gates', () => {
     expect(sourceMediaRolloutWorkflow).toContain('target_container=$(docker compose ps -q api');
     expect(sourceMediaRolloutWorkflow).toContain('target_revision');
     expect(sourceMediaRolloutWorkflow).toContain('previous_media_image=$(docker inspect');
+    expect(sourceMediaRolloutWorkflow).toContain('previous_media_revision=$(docker image inspect');
     expect(sourceMediaRolloutWorkflow).toContain('APP_IMAGE="$target_image"');
     expect(sourceMediaRolloutWorkflow).toContain('APP_IMAGE="$previous_media_image"');
+    expect(sourceMediaRolloutWorkflow).toContain('DEPLOY_SHA="$previous_media_revision"');
     expect(sourceMediaRolloutWorkflow).toContain('wait_for_media_worker "$previous_media_image"');
     expect(
       sourceMediaRolloutWorkflow.indexOf(
@@ -569,6 +601,7 @@ describe('release workflow gates', () => {
     );
     expect(briefingRolloutWorkflow).toContain('mv "$backup_file" "$env_file"');
     expect(briefingRolloutWorkflow).toContain('--force-recreate content-worker');
+    expect(briefingRolloutWorkflow).toContain('RUNTIME_INCLUDE_MEDIA_WORKER=false');
     expect(briefingRolloutWorkflow).toContain('content-worker || true');
     expect(briefingRolloutWorkflow).toContain(
       'runner_socket=/run/letletme-grok-runner/runner.sock',

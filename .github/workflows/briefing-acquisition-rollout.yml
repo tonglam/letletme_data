@@ -295,7 +295,8 @@ jobs:
             if [ "$services_quiesced" = true ]; then
               APP_IMAGE="$current_image" docker compose up -d --no-build scheduler
             fi
-            PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
+            RUNTIME_INCLUDE_MEDIA_WORKER=false \
+              PROJECT_DIR="$expected_workdir" COMPOSE_FILE=docker-compose.yml \
               COMPOSE_BIN='docker compose' scripts/verify-runtime-health.sh
             report_acquisition_health
             pipeline_enabled_after=$(read_pipeline_enabled)

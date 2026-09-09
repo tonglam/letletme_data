@@ -112,6 +112,10 @@ DEPLOY_SERVICES_STOPPED=false
 DEPLOY_CONTENT_WORKER_FENCED=false
 DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
 DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+DEPLOY_SOURCE_MEDIA_WORKER_CONTAINER=''
+DEPLOY_SOURCE_MEDIA_WORKER_WAS_RUNNING=false
+DEPLOY_SOURCE_MEDIA_WORKER_STOPPED=false
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -186,6 +190,7 @@ source_media_deploy_fence_is_exact() {
 }
 
 source_media_deploy_fence_is_active() {
+  if [[ "$DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED" != true ]]; then return 0; fi
   local container_id=${DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER:-}
   [[ -n "$container_id" ]] || return 1
   source_media_deploy_fence_is_exact "$container_id" || return 1
@@ -194,14 +199,19 @@ source_media_deploy_fence_is_active() {
 
 release_source_media_deploy_fence() {
   local container_id=${DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER:-}
-  if [[ -z "$container_id" ]]; then return 0; fi
+  if [[ -z "$container_id" ]]; then
+    DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+    return 0
+  fi
   if ! docker inspect "$container_id" >/dev/null 2>&1; then
     DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+    DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
     return 0
   fi
   if ! source_media_deploy_fence_is_exact "$container_id"; then
     if ! docker inspect "$container_id" >/dev/null 2>&1; then
       DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+      DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
       return 0
     fi
     log_error "Refusing to remove an unverified source-media deployment fence container"
@@ -210,6 +220,7 @@ release_source_media_deploy_fence() {
   if ! docker rm --force "$container_id" >/dev/null; then
     if ! docker inspect "$container_id" >/dev/null 2>&1; then
       DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+      DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
       return 0
     fi
     log_error "Could not remove the exact source-media deployment fence container"
@@ -220,15 +231,48 @@ release_source_media_deploy_fence() {
     return 1
   fi
   DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
+  DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
 }
 
 acquire_source_media_deploy_fence() {
-  local create_output container_id service_state fence_logs
+  local create_output container_id service_state fence_logs schema_state
+  # A fresh database has not created the source-media tables yet.  Probe the
+  # catalog through the migration LOGIN and let that migration establish the
+  # schema before a helper can attempt to lock it.
+  if ! schema_state=$(compose_direct --profile migration run --rm -T --interactive=false --no-deps \
+    --entrypoint sh backup -euc \
+    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1' <<'SQL'
+SELECT CASE
+  WHEN to_regclass('content.source_media_gates') IS NOT NULL
+   AND to_regclass('content.source_media_assets') IS NOT NULL
+  THEN 'present'
+  ELSE 'absent'
+END;
+SQL
+  ); then
+    log_error "Could not determine whether source-media tables exist"
+    return 1
+  fi
+  schema_state=$(printf '%s\n' "$schema_state" | tail -n 1 | tr -d '\r')
+  case "$schema_state" in
+    absent)
+      log_info "Source-media tables are not present yet; migration will create them"
+      DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+      return 0
+      ;;
+    present)
+      DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=true
+      ;;
+    *)
+      log_error "Source-media table catalog probe returned an invalid state"
+      return 1
+      ;;
+  esac
   local ready_deadline=$(( $(date +%s) + 310 ))
   if ! create_output=$(run_deploy_command_with_pause_renewal \
     compose_direct --profile migration run --rm -T --interactive=false -d --no-deps \
     --entrypoint bash backup \
-    /app/scripts/hold-source-media-deploy-fence.sh 300 0); then
+    /app/scripts/hold-source-media-deploy-fence.sh 300 1500); then
     log_error "Could not start the source-media deployment fence container"
     return 1
   fi
@@ -271,10 +315,90 @@ acquire_source_media_deploy_fence() {
   return 1
 }
 
+stop_source_media_worker_with_deadline() {
+  local container_id state service
+  container_id=$(compose_direct ps -aq media-worker | head -n 1)
+  if [[ -z "$container_id" ]]; then
+    log_info "No source-media worker container exists; continuing without its lifecycle"
+    return 0
+  fi
+  service=$(docker inspect \
+    --format '{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$container_id" 2>/dev/null || true)
+  if [[ "$service" != media-worker ]]; then
+    log_error "Refusing to stop an unverified source-media worker container"
+    return 1
+  fi
+  DEPLOY_SOURCE_MEDIA_WORKER_CONTAINER=$container_id
+  state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+  case "$state" in
+    running|restarting)
+      DEPLOY_SOURCE_MEDIA_WORKER_WAS_RUNNING=true
+      log_info "Stopping the existing source-media worker before database migrations"
+      if ! docker stop --time 45 "$container_id" >/dev/null; then
+        log_error "Source-media worker did not stop within its bounded shutdown"
+        return 1
+      fi
+      state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+      if [[ "$state" != exited && "$state" != dead ]]; then
+        log_error "Source-media worker remains active after bounded shutdown"
+        return 1
+      fi
+      DEPLOY_SOURCE_MEDIA_WORKER_STOPPED=true
+      ;;
+    created|exited|dead)
+      log_info "Source-media worker was already stopped; preserving its state"
+      ;;
+    *)
+      log_error "Unknown source-media worker state=$state; refusing migration"
+      return 1
+      ;;
+  esac
+}
+
+start_source_media_worker_best_effort() {
+  local container_id=${DEPLOY_SOURCE_MEDIA_WORKER_CONTAINER:-}
+  local state
+  if [[ "$DEPLOY_SOURCE_MEDIA_WORKER_WAS_RUNNING" != true ||
+    "$DEPLOY_SOURCE_MEDIA_WORKER_STOPPED" != true ]]; then
+    return 0
+  fi
+  [[ -n "$container_id" ]] || return 1
+  if [[ "$DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED" = true ]]; then
+    log_error "Source-media deployment fence is still held; refusing worker restart"
+    return 1
+  fi
+  state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+  if [[ "$state" = running ]]; then
+    DEPLOY_SOURCE_MEDIA_WORKER_STOPPED=false
+    return 0
+  fi
+  if [[ "$state" != exited && "$state" != dead ]]; then
+    log_warn "Source-media worker cannot be restarted from state=$state"
+    return 1
+  fi
+  log_info "Starting the existing source-media worker after the core release"
+  if ! docker start "$container_id" >/dev/null; then
+    log_warn "Source-media worker restart failed; dedicated Storage rollout remains available"
+    return 1
+  fi
+  state=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)
+  if [[ "$state" != running ]]; then
+    log_warn "Source-media worker did not remain running after restart"
+    return 1
+  fi
+  DEPLOY_SOURCE_MEDIA_WORKER_STOPPED=false
+  return 0
+}
+
 restore_stopped_services() {
   local restored=false
   if [[ "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
     log_error "Previous runtime was not proven rollback-eligible; leaving services stopped for forward recovery."
+    return 1
+  fi
+  if ! release_source_media_deploy_fence; then
+    log_error "Could not release the source-media fence before runtime recovery"
     return 1
   fi
   log_warn "Restoring existing services because migration has not started"
@@ -296,6 +420,9 @@ restore_stopped_services() {
     log_error "Existing services could not be restored; manual recovery is required."
   fi
   if [[ "$restored" = true ]]; then
+    if ! start_source_media_worker_best_effort; then
+      log_warn "Recovered core runtime is healthy but the existing source-media worker remains stopped"
+    fi
     if ! run_deploy_command_with_pause_renewal env \
       EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
       PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
@@ -337,12 +464,19 @@ deploy() {
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
           "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
           false "$DEPLOY_ROLLBACK_ELIGIBLE" \
-          "$DEPLOY_OLD_IMAGE_ID" && \
-          run_deploy_command_with_pause_renewal env \
-          EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
-          PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
-          scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
-          controls_restored=true
+          "$DEPLOY_OLD_IMAGE_ID"; then
+          if ! start_source_media_worker_best_effort; then
+            log_warn "Rolled-back core runtime is healthy but the existing source-media worker remains stopped"
+          fi
+          if run_deploy_command_with_pause_renewal env \
+            EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
+            PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
+            scripts/verify-runtime-health.sh && restore_content_deploy_controls; then
+            controls_restored=true
+          else
+            log_error "Rolled-back runtime did not become healthy; leaving deployment in forward recovery."
+            stop_content_worker_for_forward_recovery || true
+          fi
         else
           log_error "Rollback eligibility or migration ledger proof failed; leaving the deployment in forward recovery."
           stop_content_worker_for_forward_recovery || true
@@ -514,12 +648,11 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  # The media worker has its own dedicated lifecycle and stays running during
-  # a general Data release. Hold its claim advisory lock before the scoped
-  # probe; the helper waits for any in-flight lease to finish, and every new
-  # claim returns immediately while the fence is held. This closes the race
-  # between the first quiescence observation and the migration boundary
-  # without making a Storage request or recreating the worker.
+  # The media worker has its own dedicated lifecycle, but it must be bounded
+  # out of the database-critical section. The helper takes the deploy
+  # advisory plus source-media table locks; this blocks legacy claims,
+  # retention writes, and producer inserts after the READY scan without making
+  # a Storage request or recreating the worker.
   if ! acquire_source_media_deploy_fence || ! source_media_deploy_fence_is_active; then
     log_error "Could not establish the source-media claim fence; services were not stopped."
     restore_stopped_services
@@ -534,6 +667,11 @@ deploy() {
   log_info "Stopping content-worker after active content work drained"
   if ! compose stop -t 45 content-worker; then
     log_error "Content worker did not stop cleanly after queue drain; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  if ! stop_source_media_worker_with_deadline; then
+    log_error "Source-media worker did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi
@@ -636,6 +774,13 @@ deploy() {
   start_stage migration
   if ! source_media_deploy_fence_is_active; then
     log_error "Source-media claim fence was lost before migrations; leaving services stopped."
+    exit 1
+  fi
+  # Both source-media producers are stopped and the table-level fence has
+  # covered all source-media writes. Release it before DDL so migrations never
+  # contend with a retained table/row lock on their target tables.
+  if ! release_source_media_deploy_fence; then
+    log_error "Could not release the source-media claim fence before migrations."
     exit 1
   fi
   DEPLOY_MIGRATION_STARTED=true
@@ -743,10 +888,13 @@ deploy() {
     log_error "Could not release the source-media claim fence before service start."
     exit 1
   fi
-  # Source-media is maintained by its dedicated rollout. The general Data
-  # release starts only database/scheduler consumers and leaves that worker
-  # container and its Storage credentials untouched.
+  # Source-media is maintained by its dedicated rollout. Start the core
+  # consumers first, then best-effort restart the exact existing media
+  # container; its Storage request is never part of generic health gating.
   start_runtime_services
+  if ! start_source_media_worker_best_effort; then
+    log_warn "Core release is healthy but the source-media worker needs its dedicated rollout"
+  fi
   log_info "Current service status"
   compose ps
   if ! run_deploy_command_with_pause_renewal env \

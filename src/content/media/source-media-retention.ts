@@ -39,8 +39,21 @@ async function renewSourceMediaRetentionLease(input: {
 async function claimSourceMediaRetentionAssets(workerId: string): Promise<RetentionAsset[]> {
   const client = await getDbClient();
   const lockClient = await client.reserve();
+  let deployFenceAcquired = false;
   let lockAcquired = false;
   try {
+    // The general Data deployment holds this session advisory fence while it
+    // closes the source-media tables for migrations. Retention must not lease
+    // new assets after that boundary; the deployment helper also takes table
+    // locks so legacy workers cannot write while the fence is held.
+    const deployFenceRows = await lockClient<{ acquired: boolean }[]>`
+      SELECT pg_try_advisory_lock(
+        hashtextextended('content-source-media-deploy-v1', 0)
+      ) AS acquired
+    `;
+    deployFenceAcquired = deployFenceRows[0]?.acquired === true;
+    if (!deployFenceAcquired) return [];
+
     const rows = await lockClient<{ acquired: boolean }[]>`
       SELECT pg_try_advisory_lock(hashtext('content-source-media-retention-v1')) AS acquired
     `;
@@ -143,6 +156,11 @@ async function claimSourceMediaRetentionAssets(workerId: string): Promise<Retent
     if (lockAcquired) {
       await lockClient`
         SELECT pg_advisory_unlock(hashtext('content-source-media-retention-v1'))
+      `.catch(() => undefined);
+    }
+    if (deployFenceAcquired) {
+      await lockClient`
+        SELECT pg_advisory_unlock(hashtextextended('content-source-media-deploy-v1', 0))
       `.catch(() => undefined);
     }
     lockClient.release();
