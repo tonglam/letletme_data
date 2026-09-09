@@ -18,6 +18,7 @@ import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 export type TournamentRosterRecord = TournamentConfig & {
+  executionId: string | null;
   adminEntryId: number;
   leagueId: number;
   leagueType: LeagueType;
@@ -30,6 +31,41 @@ export type TournamentRosterRecord = TournamentConfig & {
   setupProgressUpdatedAt: string | null;
   officialScheduleLockedAt: string | null;
 };
+
+type RosterExecutionOwner = Pick<
+  TournamentRosterRecord,
+  | 'executionId'
+  | 'setupProgressUpdatedAt'
+  | 'state'
+  | 'rosterMode'
+  | 'rosterSyncStatus'
+  | 'setupStatus'
+  | 'setupPhase'
+  | 'leagueId'
+  | 'leagueType'
+>;
+
+export function ownsTournamentRosterExecution(
+  current: RosterExecutionOwner,
+  owner: RosterExecutionOwner,
+): boolean {
+  return (
+    owner.executionId !== null &&
+    (
+      [
+        'executionId',
+        'setupProgressUpdatedAt',
+        'state',
+        'rosterMode',
+        'rosterSyncStatus',
+        'setupStatus',
+        'setupPhase',
+        'leagueId',
+        'leagueType',
+      ] as const
+    ).every((key) => current[key] === owner[key])
+  );
+}
 
 type RosterRow = TournamentRosterRecord;
 
@@ -64,11 +100,13 @@ export const tournamentRosterRepository = {
   findById: async (
     season: FplSeasonRef,
     tournamentId: number,
+    options?: { forUpdate?: boolean },
   ): Promise<TournamentRosterRecord | null> => {
     try {
       const client = await getDbClient();
       const rows = await client<RosterRow[]>`
         SELECT
+          roster_sync_execution_id::text AS "executionId",
           tournament_id AS id,
           admin_entry_id AS "adminEntryId",
           league_id AS "leagueId",
@@ -97,6 +135,7 @@ export const tournamentRosterRepository = {
         WHERE season_id = ${season.seasonId}
           AND tournament_id = ${tournamentId}
         LIMIT 1
+        ${options?.forUpdate ? client`FOR UPDATE` : client``}
       `;
       return normalizeRoster(rows[0]);
     } catch (error) {
@@ -117,6 +156,7 @@ export const tournamentRosterRepository = {
       const client = await getDbClient();
       const rows = await client<RosterRow[]>`
         SELECT
+          roster_sync_execution_id::text AS "executionId",
           tournament_id AS id,
           admin_entry_id AS "adminEntryId",
           league_id AS "leagueId",
@@ -233,6 +273,7 @@ export const tournamentRosterRepository = {
     const rows = await client<Array<{ tournamentId: number }>>`
       UPDATE competition.tournaments AS tournament
       SET roster_sync_status = 'processing',
+          roster_sync_execution_id = gen_random_uuid(),
           roster_sync_error = NULL,
           updated_at = now()
       WHERE season_id = ${season.seasonId}
@@ -270,6 +311,7 @@ export const tournamentRosterRepository = {
     await client`
       UPDATE competition.tournaments
       SET roster_sync_status = 'processing',
+          roster_sync_execution_id = gen_random_uuid(),
           roster_sync_error = NULL,
           -- Invalidate a queued resume marker from an older reconciliation.
           setup_progress_updated_at = now(),
@@ -287,6 +329,7 @@ export const tournamentRosterRepository = {
     const rows = await client<{ tournamentId: number }[]>`
       UPDATE competition.tournaments
       SET roster_sync_status = 'processing',
+          roster_sync_execution_id = gen_random_uuid(),
           roster_sync_error = NULL,
           updated_at = now()
       WHERE season_id = ${season.seasonId}
@@ -314,6 +357,28 @@ export const tournamentRosterRepository = {
           updated_at = now()
       WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
     `;
+  },
+
+  markSyncFailedIfOwned: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    owner: RosterExecutionOwner,
+    internalError: string,
+  ): Promise<boolean> => {
+    const client = await getDbClient();
+    const rows = await client<{ id: number }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'failed', roster_sync_error = ${internalError}, updated_at = now()
+      WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        AND roster_sync_execution_id = ${owner.executionId}::uuid
+        AND setup_progress_updated_at IS NOT DISTINCT FROM ${owner.setupProgressUpdatedAt}::timestamptz
+        AND state = ${owner.state} AND roster_mode = ${owner.rosterMode}
+        AND roster_sync_status IS NOT DISTINCT FROM ${owner.rosterSyncStatus}
+        AND setup_status = ${owner.setupStatus} AND setup_phase = ${owner.setupPhase}
+        AND league_id = ${owner.leagueId} AND league_type = ${owner.leagueType}
+      RETURNING tournament_id AS id
+    `;
+    return rows.length === 1;
   },
 
   markSyncReady: async (
@@ -369,6 +434,7 @@ export const tournamentRosterRepository = {
     const rows = await client<{ marker: string }[]>`
       UPDATE competition.tournaments
       SET roster_sync_status = 'processing',
+          roster_sync_execution_id = gen_random_uuid(),
           roster_sync_error = NULL,
           setup_status = 'pending',
           setup_phase = 'queued',
@@ -406,6 +472,7 @@ export const tournamentRosterRepository = {
     const rows = await client<{ tournamentId: number }[]>`
       UPDATE competition.tournaments
       SET roster_sync_status = 'processing',
+          roster_sync_execution_id = gen_random_uuid(),
           roster_sync_error = NULL,
           setup_status = 'pending',
           setup_phase = 'queued',
@@ -478,8 +545,12 @@ export const tournamentRosterRepository = {
 
         const locked = await tx<
           Array<{
+            executionId: string | null;
             id: number;
             state: 'active' | 'inactive' | 'finished';
+            leagueId: number;
+            setupStatus: TournamentSetupStatus;
+            setupPhase: TournamentSetupPhase;
             leagueType: LeagueType;
             rosterMode: TournamentRosterMode;
             rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
@@ -490,8 +561,12 @@ export const tournamentRosterRepository = {
           }>
         >`
           SELECT
+            roster_sync_execution_id::text AS "executionId",
             tournament_id AS id,
             state,
+            league_id AS "leagueId",
+            setup_status AS "setupStatus",
+            setup_phase AS "setupPhase",
             league_type AS "leagueType",
             roster_mode AS "rosterMode",
             roster_sync_status AS "rosterSyncStatus",
@@ -507,6 +582,16 @@ export const tournamentRosterRepository = {
         const current = locked[0];
         if (!current) {
           return { changed: false, participantCount: 0, automaticallyPaused: false, skipped: true };
+        }
+        // Name-only edits preserve this execution; a new claim or lifecycle
+        // transition invalidates it without changing durable resume intent.
+        if (!ownsTournamentRosterExecution(current, tournament)) {
+          return {
+            changed: false,
+            participantCount: current.totalTeamNum,
+            automaticallyPaused: false,
+            skipped: true,
+          };
         }
         if (options?.resumeAfterSetup && current.rosterSyncStatus !== 'processing') {
           return {

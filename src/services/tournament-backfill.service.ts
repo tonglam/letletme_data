@@ -30,6 +30,7 @@ import { uniqueNumbers } from '../utils/async';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
+import { ValidationError } from '../utils/errors';
 
 import { syncEntryInfo } from './entry-info.service';
 import { syncTournamentBattleRaceResultsForTournament } from './tournament-battle-race-results.service';
@@ -206,6 +207,7 @@ export async function syncTournamentEntryDetails(
   logInfo('Tournament entry snapshot sync planned', { targetEventId, ...plan });
 
   const failures: number[] = [];
+  const superseded: number[] = [];
   let completed = 0;
   const progressBatchSize = Math.max(ENTRY_SYNC_DEFAULT_CONCURRENCY * 2, 10);
   for (let index = 0; index < requestedEntryIds.length; index += progressBatchSize) {
@@ -214,12 +216,24 @@ export async function syncTournamentEntryDetails(
       try {
         await syncEntryInfo(season, entryId, undefined, targetEventId);
       } catch (error) {
+        if (error instanceof ValidationError && error.code === 'ENTRY_PROFILE_SOURCE_STALE') {
+          superseded.push(entryId);
+          return;
+        }
         failures.push(entryId);
         logError('Failed to sync detailed tournament entry info', error, { entryId });
       }
     });
     completed += batch.length;
     await options?.onProgress?.(completed, requestedEntryIds.length);
+  }
+
+  // A newer writer may have completed this same target while our provider
+  // request was in flight. Only the durable target checkpoint proves convergence.
+  if (superseded.length > 0) {
+    failures.push(
+      ...(await entryInfoRepository.findIdsNeedingSnapshotSync(season, superseded, targetEventId)),
+    );
   }
 
   if (failures.length > 0) {
@@ -395,18 +409,11 @@ export async function ensureTournamentCoreResults(
   });
 
   for (const [eventId, missingEntryIds] of missing) {
-    await withMutationScopes(
-      {
-        queueName: 'tournament-setup',
-        jobName: 'entry-event-results',
-        scopes: tournamentEntryCoreScopes(season.seasonId, missingEntryIds),
-      },
-      () =>
-        syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
-          concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-          skipTransfers: true,
-        }),
-    );
+    await syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
+      concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      skipTransfers: true,
+      perEntryMutationScopes: true,
+    });
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);
   }

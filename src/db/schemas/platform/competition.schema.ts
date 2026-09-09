@@ -121,6 +121,7 @@ export const tournamentsInCompetition = competition.table(
     setupProgressIndeterminate: boolean('setup_progress_indeterminate').default(false).notNull(),
     profilesReadyAt: timestamp('profiles_ready_at', { withTimezone: true, mode: 'date' }),
     insightsReadyAt: timestamp('insights_ready_at', { withTimezone: true, mode: 'date' }),
+    rosterSyncExecutionId: uuid('roster_sync_execution_id'),
   },
   (table) => [
     index('tournaments_admin_entry_idx').using(

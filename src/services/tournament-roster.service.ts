@@ -2,9 +2,16 @@ import { eventRepository } from '../repositories/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { tournamentRosterRepository } from '../repositories/tournament-roster';
+import {
+  tournamentRosterRepository,
+  ownsTournamentRosterExecution,
+  type TournamentRosterRecord,
+} from '../repositories/tournament-roster';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
-import { tournamentEntryCoreScopes, tournamentSetupRebuildScopes } from '../domain/mutation-scope';
+import {
+  tournamentSetupRebuildScopes,
+  tournamentSetupLifecycleScope,
+} from '../domain/mutation-scope';
 import {
   diffTournamentRoster,
   getTournamentBackfillWindow,
@@ -67,12 +74,20 @@ export type TournamentRosterReconcileOptions = {
   allowUnlockedOfficialH2HRecovery?: boolean;
 };
 
-async function reconcileTournamentRosterUnlocked(
+async function prepareTournamentRosterReconciliation(
   season: FplSeasonRef,
   tournamentId: number,
   options?: TournamentRosterReconcileOptions,
-): Promise<TournamentRosterReconcileResult> {
-  const tournament = await tournamentRosterRepository.findById(season, tournamentId);
+): Promise<
+  | TournamentRosterReconcileResult
+  | {
+      tournament: TournamentRosterRecord;
+      unlockedOfficialH2HRecovery: boolean;
+    }
+> {
+  const tournament = await tournamentRosterRepository.findById(season, tournamentId, {
+    forUpdate: true,
+  });
   if (!tournament) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
   }
@@ -242,6 +257,28 @@ async function reconcileTournamentRosterUnlocked(
   ) {
     await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
   }
+  const claimed = await tournamentRosterRepository.findById(season, tournamentId);
+  if (!claimed) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
+  return { tournament: claimed, unlockedOfficialH2HRecovery };
+}
+
+async function reconcileTournamentRosterUnlocked(
+  season: FplSeasonRef,
+  tournamentId: number,
+  options?: TournamentRosterReconcileOptions,
+): Promise<TournamentRosterReconcileResult> {
+  const prepared = await withMutationScopes(
+    {
+      queueName: 'tournament-roster',
+      jobName: 'claim-reconciliation',
+      tournamentId,
+      scopes: [tournamentSetupLifecycleScope(tournamentId)],
+    },
+    () => prepareTournamentRosterReconciliation(season, tournamentId, options),
+  );
+  if ('changed' in prepared) return prepared;
+  const { tournament, unlockedOfficialH2HRecovery } = prepared;
+  let owner = tournament;
   let setupEnqueueRequired = false;
   try {
     const source = await fetchLeagueParticipants(
@@ -274,15 +311,10 @@ async function reconcileTournamentRosterUnlocked(
 
     if (addedEntryIds.length > 0) {
       const targetEventId = window?.endEventId ?? 0;
-      const entryIssues = await withMutationScopes(
-        {
-          queueName: 'tournament-roster',
-          jobName: 'entry-profile',
-          tournamentId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, addedEntryIds),
-        },
-        () => syncTournamentEntryDetails(season, addedEntryIds, { targetEventId }),
-      );
+      // Provider reads run before syncEntryInfo acquires its per-entry write scope.
+      const entryIssues = await syncTournamentEntryDetails(season, addedEntryIds, {
+        targetEventId,
+      });
       if (entryIssues.length > 0) {
         const failedCount = entryIssues.reduce(
           (count, issue) => count + (issue.failedEntries?.length ?? 0),
@@ -299,18 +331,10 @@ async function reconcileTournamentRosterUnlocked(
         addedEntryIds,
         targetEventId,
       );
-      const transfers = await withMutationScopes(
-        {
-          queueName: 'tournament-roster',
-          jobName: 'entry-transfer-history',
-          tournamentId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, transferEntryIds),
-        },
-        () =>
-          syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
-            concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-          }),
-      );
+      const transfers = await syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        perEntryMutationScopes: true,
+      });
       if (transfers.errors > 0) {
         throw new Error(
           `Unable to prepare transfer history for ${transfers.errors} new entrant(s)`,
@@ -328,13 +352,17 @@ async function reconcileTournamentRosterUnlocked(
         tournamentId,
         // Serialize the final boundary check with the canonical events writer,
         // then keep membership frozen through the short structure transaction.
-        scopes: [...tournamentSetupRebuildScopes(tournamentId), 'data-core:events'],
+        scopes: [
+          ...tournamentSetupRebuildScopes(tournamentId),
+          tournamentSetupLifecycleScope(tournamentId),
+          'data-core:events',
+        ],
       },
       async () => {
         if (!unlockedOfficialH2HRecovery) {
           await assertPreGameweekBoundary(season);
         }
-        return tournamentRosterRepository.publishAuthoritativeRoster(
+        const published = await tournamentRosterRepository.publishAuthoritativeRoster(
           season,
           tournament,
           source.participants,
@@ -349,6 +377,10 @@ async function reconcileTournamentRosterUnlocked(
             guardUnlockedOfficialH2HRecovery: unlockedOfficialH2HRecovery,
           },
         );
+        if (!published.skipped) {
+          owner = (await tournamentRosterRepository.findById(season, tournamentId))!;
+        }
+        return published;
       },
     );
     if (publication.skipped) {
@@ -374,18 +406,32 @@ async function reconcileTournamentRosterUnlocked(
       publication.changed || options?.resumeAfterSetup || tournament.standingsReadyAt === null;
     setupEnqueueRequired = needsSetup && !publication.automaticallyPaused;
     if (setupEnqueueRequired) {
-      await enqueueTournamentSetup(
-        season,
-        tournamentId,
-        options?.resumeAfterSetup ? 'resume' : 'roster',
+      await withMutationScopes(
         {
-          forceNew: true,
-          // The lifecycle lock is held here. If BullMQ still reports an active
-          // predecessor after the settle window, leave a distinct successor;
-          // reusing it would not prove that the newly published marker is read.
-          ensureSuccessorOnActive: true,
-          activeSettleTimeoutMs: 2_000,
-          resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
+          queueName: 'tournament-roster',
+          jobName: 'enqueue-claimed-setup',
+          tournamentId,
+          scopes: [tournamentSetupLifecycleScope(tournamentId)],
+        },
+        async () => {
+          const current = await tournamentRosterRepository.findById(season, tournamentId, {
+            forUpdate: true,
+          });
+          if (!current || !ownsTournamentRosterExecution(current, owner)) return;
+          await enqueueTournamentSetup(
+            season,
+            tournamentId,
+            options?.resumeAfterSetup ? 'resume' : 'roster',
+            {
+              forceNew: true,
+              // The lifecycle lock is held here. If BullMQ still reports an active
+              // predecessor after the settle window, leave a distinct successor;
+              // reusing it would not prove that the newly published marker is read.
+              ensureSuccessorOnActive: true,
+              activeSettleTimeoutMs: 2_000,
+              resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
+            },
+          );
         },
       );
     }
@@ -411,21 +457,36 @@ async function reconcileTournamentRosterUnlocked(
     const failureMarker = options?.resumeAfterSetup
       ? options.resumeMarker
       : options?.expectedProgressMarker;
-    await Promise.allSettled([
-      tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
-      ...(options?.resumeAfterSetup || setupEnqueueRequired
-        ? [
-            tournamentInfoRepository.markSetupResult(
-              season,
-              tournamentId,
-              'failed',
-              message,
-              0,
-              failureMarker,
-            ),
-          ]
-        : []),
-    ]);
+    await withMutationScopes(
+      {
+        queueName: 'tournament-roster',
+        jobName: 'settle-claimed-failure',
+        tournamentId,
+        scopes: [tournamentSetupLifecycleScope(tournamentId)],
+      },
+      async () => {
+        const owned = await tournamentRosterRepository.markSyncFailedIfOwned(
+          season,
+          tournamentId,
+          owner,
+          message,
+        );
+        if (owned && (options?.resumeAfterSetup || setupEnqueueRequired)) {
+          await tournamentInfoRepository.markSetupResult(
+            season,
+            tournamentId,
+            'failed',
+            message,
+            0,
+            failureMarker,
+          );
+        }
+      },
+    ).catch((settlementError: unknown) => {
+      logError('Failed to settle owned roster reconciliation failure', settlementError, {
+        tournamentId,
+      });
+    });
     throw error;
   }
 }
