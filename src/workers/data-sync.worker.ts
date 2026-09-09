@@ -712,10 +712,10 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
         }
       });
 
-    // Core aliases perform upstream reads before acquiring their own short
-    // multi-table persistence/publication lock.
-    if (job.name === 'core-snapshot') return execute();
-    return withMutationScopes(mutationInput, execute);
+    // These services fetch provider data before their repository-owned write
+    // transactions. A worker transaction would retain core locks across those
+    // requests and expose the price cascade before its parent write commits.
+    return execute();
   });
 };
 
