@@ -6,7 +6,7 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbHandle } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { DatabaseError } from '../utils/errors';
+import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { acquireEntrySeasonWriteFence } from './entry-event-transfers';
 
@@ -31,9 +31,36 @@ export const createEntryEventCupResultsRepository = (dbInstance?: DbHandle) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
+    findRevisions: async (season: FplSeasonRef, eventId: number, entryIds: readonly number[]) => {
+      const db = await getDbInstance();
+      const revisions = new Map<string, number>();
+      for (let offset = 0; offset < entryIds.length; offset += 500) {
+        const rows = await db
+          .select({
+            entryId: entryEventCupResultsInCompetition.entryId,
+            eventId: entryEventCupResultsInCompetition.eventId,
+            revision: entryEventCupResultsInCompetition.sourceResultId,
+          })
+          .from(entryEventCupResultsInCompetition)
+          .where(
+            and(
+              eq(entryEventCupResultsInCompetition.seasonId, season.seasonId),
+              eq(entryEventCupResultsInCompetition.eventId, eventId),
+              inArray(
+                entryEventCupResultsInCompetition.entryId,
+                entryIds.slice(offset, offset + 500),
+              ),
+            ),
+          );
+        for (const row of rows) revisions.set(`${row.entryId}:${row.eventId}`, row.revision);
+      }
+      return revisions;
+    },
+
     replaceBatch: async (
       season: FplSeasonRef,
       results: readonly EntryEventCupResultInput[],
+      expectedRevisions: ReadonlyMap<string, number>,
     ): Promise<number> => {
       if (results.length === 0) return 0;
 
@@ -63,6 +90,41 @@ export const createEntryEventCupResultsRepository = (dbInstance?: DbHandle) => {
           ];
           if (uniqueScopes.length !== results.length) {
             throw new Error('Cup results contain duplicate entry/event scopes');
+          }
+          // Entry-season fences serialize every replacement, including the
+          // initially absent row. Reject a provider response if a competing
+          // attempt published since this attempt captured its baseline.
+          const currentRows = await tx
+            .select({
+              entryId: entryEventCupResultsInCompetition.entryId,
+              eventId: entryEventCupResultsInCompetition.eventId,
+              revision: entryEventCupResultsInCompetition.sourceResultId,
+            })
+            .from(entryEventCupResultsInCompetition)
+            .where(
+              and(
+                eq(entryEventCupResultsInCompetition.seasonId, season.seasonId),
+                or(
+                  ...uniqueScopes.map((row) =>
+                    and(
+                      eq(entryEventCupResultsInCompetition.entryId, row.entryId),
+                      eq(entryEventCupResultsInCompetition.eventId, row.eventId),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          const current = new Map(
+            currentRows.map((row) => [`${row.entryId}:${row.eventId}`, row.revision]),
+          );
+          for (const row of uniqueScopes) {
+            const key = `${row.entryId}:${row.eventId}`;
+            if (current.get(key) !== expectedRevisions.get(key)) {
+              throw new ConflictError(
+                'Cup result changed while provider work was in progress',
+                'CUP_RESULT_SOURCE_STALE',
+              );
+            }
           }
           await tx
             .delete(entryEventCupResultsInCompetition)
@@ -113,6 +175,7 @@ export const createEntryEventCupResultsRepository = (dbInstance?: DbHandle) => {
         });
         return persisted;
       } catch (error) {
+        if (error instanceof ConflictError) throw error;
         logError('Failed to replace entry event cup results', error, {
           season: season.seasonCode,
           count: results.length,
