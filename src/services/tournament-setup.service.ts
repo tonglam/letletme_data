@@ -601,7 +601,7 @@ export async function requeueTournamentSetup(
     return await enqueueTournamentSetup(season, tournamentId, 'manual', {
       forceNew: true,
       prepareEnqueue: async () => {
-        await withMutationScopes(
+        const marker = await withMutationScopes(
           {
             queueName: 'tournament-management',
             jobName: 'tournament-setup-retry-prepare',
@@ -620,9 +620,11 @@ export async function requeueTournamentSetup(
                 'TOURNAMENT_STATE_CHANGED',
               );
             }
+            return marked;
           },
         );
         retryStatePrepared = true;
+        return marker;
       },
     });
   } catch (error) {
@@ -654,6 +656,8 @@ export async function recoverStuckTournamentSetups(
   const recovered: number[] = [];
   const skippedActive: number[] = [];
   for (const row of stuck) {
+    let watchdogRecoveryMarker: string | null = null;
+    let watchdogRecoveryPrepared = false;
     try {
       // Queue probes are candidates only. Keep all Redis/BullMQ calls outside
       // the lifecycle transaction; the durable marker and compare-and-swap
@@ -724,6 +728,8 @@ export async function recoverStuckTournamentSetups(
         });
         continue;
       }
+      watchdogRecoveryMarker = marked;
+      watchdogRecoveryPrepared = true;
       await enqueueTournamentSetup(season, row.id, 'watchdog', {
         forceNew: true,
         activeSettleTimeoutMs: 2_000,
@@ -734,6 +740,28 @@ export async function recoverStuckTournamentSetups(
         setupProgressUpdatedAt: row.setupProgressUpdatedAt,
       });
     } catch (error) {
+      if (watchdogRecoveryPrepared && watchdogRecoveryMarker) {
+        await withMutationScopes(
+          {
+            queueName: 'tournament-setup-watchdog',
+            jobName: 'restore-stuck-setup-after-enqueue-failure',
+            tournamentId: row.id,
+            scopes: [tournamentSetupLifecycleScope(row.id)],
+          },
+          () =>
+            tournamentInfoRepository.restoreStuckSetupAfterEnqueueFailure(
+              season,
+              row.id,
+              watchdogRecoveryMarker!,
+              row.setupProgressUpdatedAt,
+            ),
+        ).catch((restoreError) => {
+          logError('Watchdog failed to restore setup after queue admission failure', restoreError, {
+            tournamentId: row.id,
+            recoveryProgressUpdatedAt: watchdogRecoveryMarker,
+          });
+        });
+      }
       logError('Watchdog failed to recover stuck tournament setup', error, {
         tournamentId: row.id,
       });

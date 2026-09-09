@@ -359,7 +359,7 @@ describe('tournament setup transaction recovery', () => {
             beforeRecovery?.setupProgressUpdatedAt ?? null,
           ),
       ),
-    ).toBe(true);
+    ).not.toBeNull();
 
     const afterRecovery = await tournamentInfoRepository.findSetupStatus(
       season,
@@ -369,6 +369,54 @@ describe('tournament setup transaction recovery', () => {
       setupStatus: 'pending',
       setupAttempt: 1,
       setupLastErrorCode: '42846',
+    });
+  });
+
+  test('watchdog restores the stale marker when queue admission fails', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    await tournamentInfoRepository.markSetupRetryQueued(season, RETRY_TOURNAMENT_ID);
+    const beforeRecovery = await tournamentInfoRepository.findSetupStatus(
+      season,
+      RETRY_TOURNAMENT_ID,
+    );
+    const recoveryMarker = await withMutationScopes(
+      {
+        queueName: 'integration-tournament-setup',
+        jobName: 'watchdog-recovery',
+        tournamentId: RETRY_TOURNAMENT_ID,
+        scopes: [tournamentSetupLifecycleScope(RETRY_TOURNAMENT_ID)],
+      },
+      () =>
+        tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
+          season,
+          RETRY_TOURNAMENT_ID,
+          beforeRecovery?.setupProgressUpdatedAt ?? null,
+        ),
+    );
+    expect(recoveryMarker).toBeString();
+    expect(
+      await withMutationScopes(
+        {
+          queueName: 'integration-tournament-setup',
+          jobName: 'restore-watchdog-recovery',
+          tournamentId: RETRY_TOURNAMENT_ID,
+          scopes: [tournamentSetupLifecycleScope(RETRY_TOURNAMENT_ID)],
+        },
+        () =>
+          tournamentInfoRepository.restoreStuckSetupAfterEnqueueFailure(
+            season,
+            RETRY_TOURNAMENT_ID,
+            recoveryMarker!,
+            beforeRecovery?.setupProgressUpdatedAt ?? null,
+          ),
+      ),
+    ).toBe(true);
+    const restored = await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID);
+    expect(restored).toMatchObject({
+      setupStatus: 'pending',
+      setupPhase: 'queued',
+      setupProgressUpdatedAt: beforeRecovery?.setupProgressUpdatedAt,
+      setupLastErrorCode: 'STUCK_SETUP_QUEUE_ENQUEUE_FAILED',
     });
   });
 });

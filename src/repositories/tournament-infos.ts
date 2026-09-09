@@ -630,7 +630,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
       season: FplSeasonRef,
       tournamentId: number,
       expectedSetupProgressUpdatedAt?: string | null,
-    ): Promise<boolean> => {
+    ): Promise<string | null> => {
       const db = await getDbInstance();
       const rows = await db
         .update(tournamentsInCompetition)
@@ -662,8 +662,11 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
               : sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${expectedSetupProgressUpdatedAt}::timestamptz`,
           ),
         )
-        .returning({ id: tournamentsInCompetition.tournamentId });
-      return rows.length === 1;
+        .returning({
+          id: tournamentsInCompetition.tournamentId,
+          marker: sql<string>`${tournamentsInCompetition.setupProgressUpdatedAt}::text`,
+        });
+      return rows[0]?.marker ?? null;
     },
 
     markSetupProgress: async (
@@ -866,7 +869,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
       season: FplSeasonRef,
       tournamentId: number,
       expectedProgressUpdatedAt: string | null,
-    ): Promise<boolean> => {
+    ): Promise<string | null> => {
       const db = await getDbInstance();
       const now = new Date();
       const rows = await db
@@ -902,6 +905,47 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
               ${tournamentsInCompetition.setupProgressUpdatedAt},
               ${tournamentsInCompetition.setupStartedAt}
             ) IS NOT DISTINCT FROM ${expectedProgressUpdatedAt}::timestamptz`,
+          ),
+        )
+        .returning({
+          tournamentId: tournamentsInCompetition.tournamentId,
+          marker: sql<string>`${tournamentsInCompetition.setupProgressUpdatedAt}::text`,
+        });
+      return rows[0]?.marker ?? null;
+    },
+
+    restoreStuckSetupAfterEnqueueFailure: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      recoveryProgressUpdatedAt: string,
+      previousProgressUpdatedAt: string | null,
+    ): Promise<boolean> => {
+      const db = await getDbInstance();
+      const now = new Date();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          // Keep the row discoverable by the next watchdog pass. Restoring the
+          // pre-recovery marker makes the original age visible again while the
+          // queue admission is retried.
+          setupStatus: 'pending',
+          setupPhase: 'queued',
+          setupNextRetryAt: now,
+          setupProgressUpdatedAt:
+            previousProgressUpdatedAt === null
+              ? null
+              : sql`${previousProgressUpdatedAt}::timestamptz`,
+          setupLastErrorCode: 'STUCK_SETUP_QUEUE_ENQUEUE_FAILED',
+          setupLastErrorAt: now,
+          setupError: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            eq(tournamentsInCompetition.setupStatus, 'pending'),
+            eq(tournamentsInCompetition.setupPhase, 'queued'),
+            sql`${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT DISTINCT FROM ${recoveryProgressUpdatedAt}::timestamptz`,
           ),
         )
         .returning({ tournamentId: tournamentsInCompetition.tournamentId });

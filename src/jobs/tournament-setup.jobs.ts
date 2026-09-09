@@ -12,7 +12,12 @@ import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governa
 export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
 export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
-  prepareEnqueue?: () => Promise<void>;
+  /**
+   * Prepare durable state before queue admission. A returned marker is copied
+   * into the job identity/data so a prepared handoff cannot be mistaken for
+   * an unmarked manual retry.
+   */
+  prepareEnqueue?: () => Promise<void | string>;
   /**
    * Queue a distinct successor when an active job remains ambiguous after the
    * settle window. Callers must fence the durable publication marker with the
@@ -155,19 +160,11 @@ async function enqueueTournamentSetupUnlocked(
     if (await isQueueDrainOnly(queue.name)) {
       throw new QueueDrainOnlyError(queue.name);
     }
-    const jobData: TournamentSetupJobData = {
-      seasonId: season.seasonId,
-      seasonCode: season.seasonCode,
-      tournamentId,
-      source,
-      triggeredAt: new Date().toISOString(),
-      ...(options.resumeMarker ? { resumeMarker: options.resumeMarker } : {}),
-    };
-
+    let resumeMarker = options.resumeMarker;
     const { baseJobId, successorJobId } = getTournamentSetupJobIds(
       season,
       tournamentId,
-      options.resumeMarker,
+      resumeMarker,
     );
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later
@@ -242,7 +239,7 @@ async function enqueueTournamentSetupUnlocked(
       // Durable preparation is serialized briefly. Queue inspection and Redis
       // admission intentionally happen after this transaction commits so a
       // slow/unavailable queue cannot retain a PostgreSQL mutation lock.
-      await withMutationScopes(
+      const preparedMarker = await withMutationScopes(
         {
           queueName: 'tournament-setup-enqueue',
           jobName: 'prepare-tournament-setup-enqueue',
@@ -251,7 +248,22 @@ async function enqueueTournamentSetupUnlocked(
         },
         options.prepareEnqueue,
       );
+      if (typeof preparedMarker === 'string' && preparedMarker.length > 0) {
+        resumeMarker = preparedMarker;
+        // A preparation callback may create a new durable marker. Its
+        // deterministic job slot must carry that marker, otherwise the worker
+        // would classify the prepared handoff as an unmarked manual retry.
+        jobId = getTournamentSetupJobIds(season, tournamentId, resumeMarker).baseJobId;
+      }
     }
+    const jobData: TournamentSetupJobData = {
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
+      tournamentId,
+      source,
+      triggeredAt: new Date().toISOString(),
+      ...(resumeMarker ? { resumeMarker } : {}),
+    };
     let job;
     try {
       job = await queue.add(
