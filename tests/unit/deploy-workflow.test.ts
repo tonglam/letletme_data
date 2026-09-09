@@ -573,7 +573,7 @@ describe('release workflow gates', () => {
     expect(sourceMediaRolloutWorkflow).toContain('if [ "$worker_restore_needed" = true ]; then');
     expect(sourceMediaRolloutWorkflow).toContain('previous_media_was_running=false');
     expect(sourceMediaRolloutWorkflow).toContain(
-      "previous_media_state=$(docker inspect --format '{{.State.Status}}' \"$current_container\")",
+      'previous_media_state=$(docker inspect --format \'{{.State.Status}}\' "$current_container")',
     );
     expect(sourceMediaRolloutWorkflow).toContain(
       'docker compose create --no-build --force-recreate media-worker',
