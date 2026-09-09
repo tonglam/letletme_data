@@ -1,3 +1,5 @@
+import { databaseTransactionStorage, type TransactionHandle } from '../db/singleton';
+import { acquireEntrySeasonWriteFence } from '../repositories/entry-event-transfers';
 import type { TournamentSetupExecution } from '../repositories/tournament-infos';
 import { withTournamentSetupPhase } from '../utils/tournament-setup-execution';
 import { tournamentEntryCoreScopes, tournamentSetupRebuildScopes } from '../domain/mutation-scope';
@@ -1277,6 +1279,10 @@ export async function syncOfficialH2HTournament(
     });
   }
   const publish = async () => {
+    // Entry-result writers also use the entry-season advisory fence without
+    // entry-core scopes. Hold their shared fence across reread and publication.
+    const tx = databaseTransactionStorage.getStore()!.db as TransactionHandle;
+    await acquireEntrySeasonWriteFence(tx, season, entryIds);
     // Provider/Redis observations are already captured. Read canonical group
     // state and cumulative entry totals only after acquiring their write fences.
     const currentGroups = await tournamentGroupRepository.findByTournamentAndEntries(

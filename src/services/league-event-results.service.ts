@@ -1,3 +1,5 @@
+import { databaseTransactionStorage, type TransactionHandle } from '../db/singleton';
+import { acquireEntrySeasonWriteFence } from '../repositories/entry-event-transfers';
 import { fplClient } from '../clients/fpl';
 import {
   type DbEntryEventResult,
@@ -767,6 +769,14 @@ export async function syncLeagueEventResultsByTournament(
         ],
       },
       async () => {
+        // Result writers can bypass entry-core scopes. Take their shared fence
+        // before comparing revisions, not only later inside upsertBatch.
+        const tx = databaseTransactionStorage.getStore()!.db as TransactionHandle;
+        await acquireEntrySeasonWriteFence(
+          tx,
+          season,
+          batch.map((row) => row.entryId),
+        );
         const current = new Map(
           (
             await entryEventResultsRepository.findLeagueInputRevisions(

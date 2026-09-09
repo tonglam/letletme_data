@@ -360,6 +360,9 @@ for (const sourceChanges of [false, true, 'omitted'] as const) {
     const { leagueEventResultsRepository } = await import(
       '../../src/repositories/league-event-results'
     );
+    const { ENTRY_SEASON_SYNC_LOCK_NAMESPACE } = await import(
+      '../../src/repositories/entry-event-transfers'
+    );
     const { fplClient } = await import('../../src/clients/fpl');
     const { tournamentEntryCoreScopes } = await import('../../src/domain/mutation-scope');
     const checkedAt = new Date(Date.now() + 60_000).toISOString();
@@ -428,8 +431,18 @@ for (const sourceChanges of [false, true, 'omitted'] as const) {
       } as never;
     });
     const reachedPublication = new Error('publication reached');
-    const publish = spyOn(leagueEventResultsRepository, 'upsertBatch').mockRejectedValue(
-      reachedPublication,
+    const publish = spyOn(leagueEventResultsRepository, 'upsertBatch').mockImplementation(
+      async () => {
+        const writerCanLock = await sql.begin(async (tx) => {
+          const [row] = await tx`SELECT pg_try_advisory_xact_lock(
+            ${ENTRY_SEASON_SYNC_LOCK_NAMESPACE},
+            hashint8((${season.seasonId}::bigint << 32) + ${tournamentId}::bigint)
+          ) AS acquired`;
+          return row!.acquired;
+        });
+        expect(writerCanLock).toBe(false);
+        throw reachedPublication;
+      },
     );
     const attempt = syncLeagueEventResultsByTournament(season, tournamentId, 1);
     if (sourceChanges) {
@@ -528,6 +541,9 @@ test('a second setup for the same event reserves a new refresh after the first s
 });
 
 test('official H2H rereads groups and entry totals after acquiring publication fences', async () => {
+  const { ENTRY_SEASON_SYNC_LOCK_NAMESPACE } = await import(
+    '../../src/repositories/entry-event-transfers'
+  );
   const phases = await import('../../src/utils/tournament-setup-execution');
   const { tournamentSetupRebuildScopes, tournamentEntryCoreScopes } = await import(
     '../../src/domain/mutation-scope'
@@ -609,6 +625,14 @@ test('official H2H rereads groups and entry totals after acquiring publication f
           }),
         ).rejects.toMatchObject({ code: '55P03' });
       }
+      const writerCanLock = await sql.begin(async (tx) => {
+        const [row] = await tx`SELECT pg_try_advisory_xact_lock(
+          ${ENTRY_SEASON_SYNC_LOCK_NAMESPACE},
+          hashint8((${season.seasonId}::bigint << 32) + ${tournamentId}::bigint)
+        ) AS acquired`;
+        return row!.acquired;
+      });
+      expect(writerCanLock).toBe(false);
       return { groupRows: 1, battleRows: 0, knockoutRows: 0 } as never;
     },
   );
