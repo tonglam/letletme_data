@@ -1103,7 +1103,6 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
   let canonicalManifest: Awaited<
     ReturnType<typeof syncOperationsRepository.findActivePublicationManifest>
   > = null;
-  let databaseAvailable = true;
   try {
     // The identity query is intentionally metadata-only. It fences a valid but
     // stale Redis pointer while avoiding the large publication-item join that
@@ -1113,15 +1112,16 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
       season,
     );
   } catch {
-    databaseAvailable = false;
+    // Keep the Redis result untrusted when the durable identity cannot be
+    // established. The fallback below will fail closed if PostgreSQL is also
+    // unavailable instead of scheduling from an unknown revision.
   }
 
   if (
     redisPublication &&
-    ((!databaseAvailable && !canonicalManifest) ||
-      (canonicalManifest &&
-        redisPublication.manifest.publicationId === canonicalManifest.publicationId &&
-        redisPublication.manifest.revision === canonicalManifest.revision))
+    canonicalManifest &&
+    redisPublication.manifest.publicationId === canonicalManifest.publicationId &&
+    redisPublication.manifest.revision === canonicalManifest.revision
   ) {
     const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
     if (deadlines) return deadlines;

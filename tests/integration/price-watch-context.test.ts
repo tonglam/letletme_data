@@ -146,7 +146,7 @@ test('does not accept a missing or retired active context', async () => {
   await db`DELETE FROM ops.dataset_publication_items WHERE publication_id=${publicationId} AND item_name='context'`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();
 });
-test.each(['payload', 'checksum', 'count', 'bytes', 'identity', 'revision'])(
+test.each(['payload', 'checksum', 'count', 'payload-count', 'bytes', 'identity', 'revision'])(
   'rejects corrupted %s',
   async (field) => {
     if (field === 'payload')
@@ -155,6 +155,32 @@ test.each(['payload', 'checksum', 'count', 'bytes', 'identity', 'revision'])(
       await db`UPDATE ops.dataset_publication_items SET checksum=repeat('0',64) WHERE publication_id=${publicationId} AND item_name='context'`;
     if (field === 'count')
       await db`UPDATE ops.dataset_publication_items SET item_count=11 WHERE publication_id=${publicationId} AND item_name='context'`;
+    if (field === 'payload-count') {
+      const changed = prepareDataPublication({
+        ...season,
+        dataset: 'fpl:price-changes',
+        revision: 9394,
+        publicationId,
+        sourceCheckedAt: now,
+        state: 'active',
+        items: [
+          { name: 'context', value: { ...context, unexpected: true } },
+          { name: 'players', value: [{ unused: 'x'.repeat(400000) }] },
+        ],
+      });
+      const contextCount = prepared.manifest.items.find((item) => item.name === 'context')!.count;
+      const manifest = {
+        ...changed.manifest,
+        items: changed.manifest.items.map((item) =>
+          item.name === 'context' ? { ...item, count: contextCount } : item,
+        ),
+      };
+      const contextItem = changed.items.find((item) => item.manifest.name === 'context')!;
+      await db`UPDATE ops.dataset_publications SET manifest=${db.json(manifest as never)} WHERE publication_id=${publicationId}`;
+      await db`UPDATE ops.dataset_publication_items
+        SET payload=${db.json(JSON.parse(contextItem.payload))}, item_count=${contextCount}, checksum=${contextItem.manifest.sha256}
+        WHERE publication_id=${publicationId} AND item_name='context'`;
+    }
     if (field === 'bytes') {
       const manifest = structuredClone(prepared.manifest);
       const changed = {

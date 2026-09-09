@@ -87,13 +87,28 @@ function verifiedItemPayload(
   row: { payload: unknown; itemCount: number; checksum: string },
   item: DataPublicationManifest['items'][number],
 ): string | undefined {
-  return [canonicalJson(row.payload), JSON.stringify(row.payload)].find(
-    (candidate) =>
-      row.itemCount === item.count &&
-      Buffer.byteLength(candidate, 'utf8') === item.bytes &&
-      createSha256(candidate) === item.sha256 &&
-      row.checksum === item.sha256,
-  );
+  return [canonicalJson(row.payload), JSON.stringify(row.payload)].find((candidate) => {
+    if (
+      row.itemCount !== item.count ||
+      Buffer.byteLength(candidate, 'utf8') !== item.bytes ||
+      createSha256(candidate) !== item.sha256 ||
+      row.checksum !== item.sha256
+    )
+      return false;
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      const actualCount = Array.isArray(parsed)
+        ? parsed.length
+        : parsed !== null && typeof parsed === 'object'
+          ? Object.keys(parsed).length
+          : parsed === null || parsed === undefined
+            ? 0
+            : 1;
+      return actualCount === item.count;
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function loadPreparedPublication(
