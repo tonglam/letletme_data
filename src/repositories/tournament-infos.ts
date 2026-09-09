@@ -148,6 +148,8 @@ export interface TournamentSetupAttemptFailure {
   errorCode: string;
   nextRetryAt: Date | null;
   startedAt: Date;
+  /** Stable ownership marker for a prepared retry across BullMQ attempts. */
+  progressMarker?: string;
 }
 
 export interface TournamentCreatedRow {
@@ -767,7 +769,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           setupLastErrorCode: failure.errorCode,
           setupLastErrorAt: now,
           setupProgressIndeterminate: false,
-          setupProgressUpdatedAt: now,
+          setupProgressUpdatedAt:
+            failure.progressMarker !== undefined
+              ? sql`${failure.progressMarker}::timestamptz`
+              : now,
           setupStartedAt: sql`COALESCE(
             ${tournamentsInCompetition.setupStartedAt},
             ${failure.startedAt.toISOString()}::timestamptz

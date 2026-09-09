@@ -11,7 +11,7 @@ import {
   type TournamentSetupPhase,
   type TournamentSetupStatus,
 } from '../domain/tournament';
-import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
+import { enqueueTournamentSetup, findTournamentSetupJob } from '../jobs/tournament-setup.jobs';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
 import { eventRepository } from '../repositories/events';
@@ -596,10 +596,22 @@ export async function requeueTournamentSetup(
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
   }
 
+  // A prepared retry uses a marker-suffixed job ID. Reuse the current durable
+  // marker for the admission check so a repeated request cannot miss that
+  // waiting/active slot and prepare a second retry.
+  const currentStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+  const markerJob = currentStatus?.setupProgressUpdatedAt
+    ? await findTournamentSetupJob(season, tournamentId, currentStatus.setupProgressUpdatedAt)
+    : null;
+  const admissionMarker = markerJob
+    ? (currentStatus?.setupProgressUpdatedAt ?? undefined)
+    : undefined;
+
   let retryStatePrepared = false;
   try {
     return await enqueueTournamentSetup(season, tournamentId, 'manual', {
       forceNew: true,
+      ...(admissionMarker ? { admissionMarker } : {}),
       prepareEnqueue: async () => {
         const marker = await withMutationScopes(
           {

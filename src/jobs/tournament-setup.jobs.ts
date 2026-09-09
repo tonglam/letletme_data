@@ -34,6 +34,8 @@ export interface EnqueueTournamentSetupOptions {
   activeSettleTimeoutMs?: number;
   /** Database marker for a resume-triggered setup operation. */
   resumeMarker?: string;
+  /** Existing marker-suffixed slot to inspect before preparing a new retry. */
+  admissionMarker?: string;
 }
 
 export type ExistingSetupJobAction =
@@ -161,10 +163,11 @@ async function enqueueTournamentSetupUnlocked(
       throw new QueueDrainOnlyError(queue.name);
     }
     let preparedRetryMarker: string | undefined;
+    const admissionMarker = options.resumeMarker ?? options.admissionMarker;
     const { baseJobId, successorJobId } = getTournamentSetupJobIds(
       season,
       tournamentId,
-      options.resumeMarker,
+      admissionMarker,
     );
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later

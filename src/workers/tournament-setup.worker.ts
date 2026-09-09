@@ -276,6 +276,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
                 ? null
                 : new Date(Date.now() + getTournamentSetupRetryDelayMs(attempt)),
               startedAt,
+              progressMarker: job.data.preparedRetryMarker,
             },
           );
           if (!changed)
