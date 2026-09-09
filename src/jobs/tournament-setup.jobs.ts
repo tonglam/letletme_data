@@ -15,8 +15,10 @@ export interface EnqueueTournamentSetupOptions {
   prepareEnqueue?: () => Promise<void>;
   /**
    * Queue a distinct successor when an active job remains ambiguous after the
-   * settle window. Only lifecycle-locked callers may use this: the successor
-   * waits behind the caller and guarantees that newly published state is read.
+   * settle window. Callers must fence the durable publication marker with the
+   * tournament lifecycle scope before invoking this after-commit handoff; the
+   * successor then waits behind the active job and reads the newly published
+   * state.
    */
   ensureSuccessorOnActive?: boolean;
   /**
