@@ -44,6 +44,18 @@ const WATCHDOG_INTERVAL_MS = runtimeConfig.TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS
 type SetupFailure = { error: unknown };
 const setupFailuresPersistedInProcessor = new Set<string>();
 const setupExecutions = new Map<string, TournamentSetupExecution>();
+const RECLAIMABLE_SETUP_PHASES = new Set([
+  'queued',
+  'syncing_entries',
+  'building_structure',
+  'calculating_standings',
+  'enriching_history',
+  'finalizing',
+]);
+
+function isReclaimableSetupPhase(phase: string | null | undefined): boolean {
+  return phase !== undefined && phase !== null && RECLAIMABLE_SETUP_PHASES.has(phase);
+}
 
 function setupJobKey(job: Pick<Job<TournamentSetupJobData>, 'id'>): string {
   return String(job.id);
@@ -150,7 +162,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             );
             if (
               preparedStatus?.setupStatus !== 'processing' ||
-              preparedStatus.setupPhase !== 'queued' ||
+              !isReclaimableSetupPhase(preparedStatus.setupPhase) ||
               preparedStatus.setupProgressUpdatedAt !== job.data.preparedRetryMarker ||
               (preparedRoster?.rosterMode === 'official_sync' &&
                 preparedRoster.rosterSyncStatus === 'pending')
@@ -172,8 +184,8 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             );
             if (
               !['pending', 'processing'].includes(markedStatus?.setupStatus ?? '') ||
-              markedStatus?.setupPhase !== 'queued' ||
-              markedStatus.setupProgressUpdatedAt !== job.data.setupMarker ||
+              !isReclaimableSetupPhase(markedStatus?.setupPhase) ||
+              markedStatus?.setupProgressUpdatedAt !== job.data.setupMarker ||
               (markedRoster?.rosterMode === 'official_sync' &&
                 markedRoster.rosterSyncStatus === 'pending')
             ) {

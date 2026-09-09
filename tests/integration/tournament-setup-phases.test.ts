@@ -783,7 +783,7 @@ test('prepared setup retry marker runs without an official roster resume', async
   spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
   const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
   await sql`UPDATE competition.tournaments
-    SET state='active', roster_sync_status='ready', setup_status='processing', setup_phase='queued',
+    SET state='active', roster_sync_status='ready', setup_status='processing', setup_phase='building_structure',
         setup_progress_updated_at=${preparedRetryMarker}
     WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
 
@@ -804,6 +804,11 @@ test('prepared setup retry marker runs without an official roster resume', async
   } as never);
 
   expect(run).toHaveBeenCalledTimes(1);
+  expect(run).toHaveBeenCalledWith(
+    season,
+    tournamentId,
+    expect.objectContaining({ progressMarker: preparedRetryMarker }),
+  );
   expect((await tournamentInfoRepository.findSetupStatus(season, tournamentId))!.setupAttempt).toBe(
     1,
   );
