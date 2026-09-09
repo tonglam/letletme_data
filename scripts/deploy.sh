@@ -435,6 +435,9 @@ deploy() {
     DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
     stop_content_worker_pause_renewal || true
     cleanup_content_worker_control_image || true
+    if [[ "$status" -eq 0 && "$DEPLOY_COMMITTED" = true ]]; then
+      cleanup_committed_deploy_images
+    fi
     release_deploy_lock || true
     exit "$status"
   }
