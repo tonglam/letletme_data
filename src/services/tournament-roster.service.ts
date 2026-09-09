@@ -4,6 +4,7 @@ import { entryEventTransfersRepository } from '../repositories/entry-event-trans
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import {
   tournamentRosterRepository,
+  ownsTournamentRosterExecution,
   type TournamentRosterRecord,
 } from '../repositories/tournament-roster';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
@@ -277,7 +278,7 @@ async function reconcileTournamentRosterUnlocked(
   );
   if ('changed' in prepared) return prepared;
   const { tournament, unlockedOfficialH2HRecovery } = prepared;
-  let ownerVersion = tournament.rowVersion;
+  let owner = tournament;
   let setupEnqueueRequired = false;
   try {
     const source = await fetchLeagueParticipants(
@@ -377,8 +378,7 @@ async function reconcileTournamentRosterUnlocked(
           },
         );
         if (!published.skipped) {
-          ownerVersion = (await tournamentRosterRepository.findById(season, tournamentId))!
-            .rowVersion;
+          owner = (await tournamentRosterRepository.findById(season, tournamentId))!;
         }
         return published;
       },
@@ -417,7 +417,7 @@ async function reconcileTournamentRosterUnlocked(
           const current = await tournamentRosterRepository.findById(season, tournamentId, {
             forUpdate: true,
           });
-          if (current?.rowVersion !== ownerVersion) return;
+          if (!current || !ownsTournamentRosterExecution(current, owner)) return;
           await enqueueTournamentSetup(
             season,
             tournamentId,
@@ -465,10 +465,10 @@ async function reconcileTournamentRosterUnlocked(
         scopes: [tournamentSetupLifecycleScope(tournamentId)],
       },
       async () => {
-        const owned = await tournamentRosterRepository.markSyncFailedIfVersion(
+        const owned = await tournamentRosterRepository.markSyncFailedIfOwned(
           season,
           tournamentId,
-          ownerVersion,
+          owner,
           message,
         );
         if (owned && (options?.resumeAfterSetup || setupEnqueueRequired)) {

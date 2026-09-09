@@ -71,6 +71,8 @@ async function seed(): Promise<void> {
     SELECT ${TOURNAMENT_ID}, ${SEASON_ID}, ${LEAGUE_ID}, entry_id
     FROM unnest(${[...ENTRY_IDS.slice(0, 2)]}::integer[]) AS entries(entry_id)
   `;
+  await sql`UPDATE competition.tournaments SET roster_sync_execution_id=gen_random_uuid()
+    WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;
 }
 
 beforeEach(seed);
@@ -454,7 +456,7 @@ for (const resume of [false, true]) {
       : await tournamentRosterRepository.markSyncProcessingIfMarker(season, TOURNAMENT_ID, marker);
     expect(claimed).toBe(true);
     const current = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
-    expect(current.rowVersion).not.toBe(old.rowVersion);
+    expect(current.executionId).not.toBe(old.executionId);
     expect(current.setupProgressUpdatedAt).toBe(old.setupProgressUpdatedAt);
     const participants = ENTRY_IDS.slice(0, 2).map((id) => ({
       id: String(id),
@@ -478,15 +480,15 @@ for (const resume of [false, true]) {
       ).skipped,
     ).toBe(true);
     expect(
-      await tournamentRosterRepository.markSyncFailedIfVersion(
+      await tournamentRosterRepository.markSyncFailedIfOwned(
         season,
         TOURNAMENT_ID,
-        old.rowVersion,
+        old,
         'stale failure',
       ),
     ).toBe(false);
-    expect((await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!.rowVersion).toBe(
-      current.rowVersion,
+    expect((await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!.executionId).toBe(
+      current.executionId,
     );
     expect(
       (
@@ -500,13 +502,13 @@ for (const resume of [false, true]) {
       ).skipped,
     ).toBe(false);
     expect(
-      await tournamentRosterRepository.markSyncFailedIfVersion(
+      await tournamentRosterRepository.markSyncFailedIfOwned(
         season,
         TOURNAMENT_ID,
-        current.rowVersion,
-        'failure after superseding publication',
+        current,
+        'current execution failure after publication',
       ),
-    ).toBe(false);
+    ).toBe(resume);
   });
 }
 
@@ -573,7 +575,7 @@ for (const failure of [false, true]) {
       if (failure) expect(result).toBe(providerFailure);
       else expect(result).toMatchObject({ changed: false, participantCount: 2 });
       const saved = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
-      expect(saved.rowVersion).toBe(current.rowVersion);
+      expect(saved.executionId).toBe(current.executionId);
       expect(saved.rosterSyncStatus).toBe('ready');
       expect(saved.setupStatus).toBe('ready');
     } finally {
@@ -739,3 +741,115 @@ test('a current execution can settle an enqueue failure after its roster publica
     ]}::text[])`;
   }
 });
+
+for (const resume of [false, true])
+  for (const fails of [false, true]) {
+    test(`rename during ${resume ? 'resume' : 'normal'} provider work preserves ${fails ? 'failure settlement' : 'publication and setup enqueue'}`, async () => {
+      const { reconcileTournamentRoster } = await import(
+        '../../src/services/tournament-roster.service'
+      );
+      const { tournamentManagementRepository } = await import(
+        '../../src/repositories/tournament-management'
+      );
+      const leagueMembers = await import('../../src/services/tournament-league-members.service');
+      const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+      const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+        async () => undefined as never,
+      );
+      let enter!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const failure = new Error('owned provider failure after rename');
+      const provider = spyOn(leagueMembers, 'fetchLeagueParticipants').mockImplementation(
+        async () => {
+          enter();
+          await released;
+          if (fails) throw failure;
+          return {
+            leagueId: LEAGUE_ID,
+            leagueType: 'h2h',
+            leagueName: 'Fixture',
+            startEventId: 1,
+            knockoutRounds: 0,
+            participants: ENTRY_IDS.slice(0, 2).map((id) => ({
+              id: String(id),
+              team: 'Fixture',
+              manager: 'Fixture',
+              overallRank: 1,
+              totalPoints: 0,
+            })),
+          };
+        },
+      );
+      const season = explicitSeasonRef(SEASON_CODE);
+      const sql = await getDbClient();
+      let marker: string | undefined;
+      if (resume) {
+        await sql`UPDATE competition.tournaments SET state='inactive'
+        WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;
+        marker = await tournamentRosterRepository.markResumeProcessingWithMarker(
+          season,
+          TOURNAMENT_ID,
+        );
+      }
+      const work = reconcileTournamentRoster(
+        season,
+        TOURNAMENT_ID,
+        resume
+          ? {
+              allowInactive: true,
+              resumeAfterSetup: true,
+              requireResumeMarker: true,
+              resumeMarker: marker,
+            }
+          : undefined,
+      ).then(
+        (value) => value,
+        (error: unknown) => error,
+      );
+      try {
+        await Promise.race([
+          entered,
+          work.then(() => {
+            throw new Error('Provider not reached');
+          }),
+        ]);
+        const before = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+        expect(
+          await tournamentManagementRepository.updateNameOwned(
+            season,
+            TOURNAMENT_ID,
+            ENTRY_IDS[0],
+            'Renamed during provider',
+          ),
+        ).not.toBeNull();
+        expect(
+          (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!.executionId,
+        ).toBe(before.executionId);
+        release();
+        const result = await work;
+        if (fails) expect(result).toBe(failure);
+        else expect(result).toMatchObject({ changed: false, participantCount: 2 });
+        expect(enqueue).toHaveBeenCalledTimes(fails ? 0 : 1);
+        const saved = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+        expect(saved.rosterSyncStatus).toBe(fails ? 'failed' : resume ? 'processing' : 'ready');
+        const [name] =
+          await sql`SELECT name FROM competition.tournaments WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;
+        expect(name!.name).toBe('Renamed during provider');
+      } finally {
+        release();
+        await work;
+        provider.mockRestore();
+        enqueue.mockRestore();
+        await sql`DELETE FROM ops.mutation_scopes WHERE scope_key = ANY(${[
+          `tournament-setup:tournament:${TOURNAMENT_ID}`,
+          `tournament-structure:tournament:${TOURNAMENT_ID}`,
+        ]}::text[])`;
+      }
+    }, 15000);
+  }
