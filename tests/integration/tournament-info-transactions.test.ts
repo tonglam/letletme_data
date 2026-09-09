@@ -94,8 +94,14 @@ test('a tournament rebound to a different league while fetching rejects the old 
     await observer`UPDATE competition.tournaments SET league_id=102,source_league_name='Rebound',updated_at=clock_timestamp() WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
     return { league: { name: 'Old League Response' } } as never;
   });
-  expect(await syncTournamentInfo(season)).toMatchObject({ updated: 0 });
+  await expect(syncTournamentInfo(season)).rejects.toThrow('retry with current identities');
   expect(await savedName()).toBe('Rebound');
+  spyOn(fplClient, 'getLeagueClassicStandings').mockImplementation(async (leagueId) => {
+    expect(leagueId).toBe(102);
+    return { league: { name: 'Current League Response' } } as never;
+  });
+  expect(await syncTournamentInfo(season)).toMatchObject({ updated: 1, failedUnits: 0 });
+  expect(await savedName()).toBe('Current League Response');
 });
 
 test('a response captured before a newer name write cannot replace that write', async () => {

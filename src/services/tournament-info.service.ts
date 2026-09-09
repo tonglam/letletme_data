@@ -105,6 +105,15 @@ export async function syncTournamentInfo(
     .filter((update) => update !== null);
 
   const updated = await tournamentInfoRepository.updateSourceLeagueNames(season, updates);
+  if (updated < updates.length) {
+    throw new IncompleteDataSyncError(
+      'Tournament source-league name writes were superseded; retry with current identities',
+      updates.length,
+      tournaments.length - updates.length,
+      updated,
+      updates.length - updated,
+    );
+  }
   const skipped = tournaments.length - updated;
 
   logInfo('Tournament info sync completed', {
