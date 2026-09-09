@@ -16,9 +16,12 @@ const tournamentId = 995_501;
 const jobName = 'integration-setup-phase-refresh';
 const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
 async function cleanup() {
+  await sql`DELETE FROM ops.scheduler_obligations WHERE job_name='tournament-materialized-views-refresh' AND scope_key=${`${season.seasonCode}:tournament:${tournamentId}`}`;
+  await sql`DELETE FROM competition.tournament_setup_issues WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM ops.scheduler_obligations WHERE job_name=${jobName}`;
   await sql`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+  await sql`DELETE FROM fpl.events WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM ops.mutation_scopes WHERE scope_key=${tournamentSetupLifecycleScope(tournamentId)}`;
 }
@@ -423,3 +426,88 @@ for (const sourceChanges of [false, true]) {
     }
   });
 }
+
+test('the worker settles an ordinary provider error once a successor owns the setup', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  let successor: Awaited<ReturnType<typeof claim>>;
+  spyOn(setup, 'setupTournamentStructure').mockImplementation(async () => {
+    successor = await claim();
+    throw new Error('provider failed after successor claim');
+  });
+  await processTournamentSetupJob({
+    id: 'integration-setup-stale-provider',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: { ...season, tournamentId, source: 'manual', triggeredAt: new Date().toISOString() },
+    attemptsMade: 0,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+  const status = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+  expect(status!.setupStatus).toBe('processing');
+  expect(status!.setupStartedAt).toBe(successor!.startedAt);
+  expect(status!.setupNextRetryAt).toBeNull();
+});
+
+async function prepareSetupPublicationTest() {
+  const backfill = await import('../../src/services/tournament-backfill.service');
+  const structure = await import('../../src/services/tournament-structure.service');
+  const audit = await import('../../src/services/tournament-audit.service');
+  const scheduler = await import('../../src/scheduler/scheduler.service');
+  const reviewJobs = await import('../../src/jobs/maintenance.jobs');
+  const repairJobs = await import('../../src/jobs/tournament-repair.jobs');
+  const { tournamentEntryRepository } = await import('../../src/repositories/tournament-entries');
+  const { eventRepository } = await import('../../src/repositories/events');
+  spyOn(backfill, 'syncTournamentEntryDetails').mockResolvedValue([]);
+  spyOn(backfill, 'ensureTournamentCoreResults').mockResolvedValue(undefined);
+  spyOn(backfill, 'calculateTournamentHistoryFromStoredResults').mockResolvedValue(undefined);
+  spyOn(backfill, 'enrichTournamentHistory').mockResolvedValue([]);
+  spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue(undefined);
+  spyOn(audit, 'auditTournamentSetup').mockResolvedValue({ issues: [] } as never);
+  spyOn(tournamentEntryRepository, 'findEntryIdsByTournamentId').mockResolvedValue([tournamentId]);
+  spyOn(tournamentEntryRepository, 'findEntrySeedsByTournamentId').mockResolvedValue([]);
+  spyOn(eventRepository, 'findLatestFinalized').mockResolvedValue({ id: 1 } as never);
+  spyOn(scheduler, 'runCompatibilitySchedulerPass').mockResolvedValue({} as never);
+  spyOn(reviewJobs, 'enqueueTournamentReview').mockResolvedValue(undefined as never);
+  spyOn(repairJobs, 'enqueueTournamentRepair').mockResolvedValue(undefined as never);
+  await sql`INSERT INTO fpl.events (season_id,event_id,name) VALUES (${season.seasonId},1,'Setup fixture event')`;
+  await sql`UPDATE competition.tournaments SET group_started_event_id=1,group_ended_event_id=1 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+}
+
+test('a rolled-back SQL failure after standings can publish warnings in a fresh phase', async () => {
+  await prepareSetupPublicationTest();
+  const { setupTournamentStructure } = await import('../../src/services/tournament-setup.service');
+  const progress = tournamentInfoRepository.markSetupProgress;
+  spyOn(tournamentInfoRepository, 'markSetupProgress').mockImplementation(async (...args) => {
+    if (args[2] === 'enriching_history') {
+      const tx = await getDbClient();
+      await tx`SELECT 1 / 0`;
+    }
+    return progress(...args);
+  });
+  await setupTournamentStructure(season, tournamentId, { execution: await claim() });
+  const status = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+  expect(status!.setupStatus).toBe('ready');
+  expect(status!.standingsReadyAt).not.toBeNull();
+  expect(status!.setupWarningCount).toBeGreaterThan(0);
+  const rows =
+    await sql`SELECT diagnostic_code FROM competition.tournament_setup_issues WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND resolved_at IS NULL`;
+  expect(rows.map((row) => row.diagnostic_code)).toContain('22012');
+});
+
+test('a second setup for the same event reserves a new refresh after the first succeeded', async () => {
+  await prepareSetupPublicationTest();
+  const { setupTournamentStructure } = await import('../../src/services/tournament-setup.service');
+  await setupTournamentStructure(season, tournamentId, { execution: await claim() });
+  const scopeKey = `${season.seasonCode}:tournament:${tournamentId}`;
+  await sql`UPDATE ops.scheduler_obligations SET status='succeeded' WHERE job_name='tournament-materialized-views-refresh' AND scope_key=${scopeKey}`;
+  await setupTournamentStructure(season, tournamentId, { execution: await claim() });
+  const rows =
+    await sql`SELECT status,period_key FROM ops.scheduler_obligations WHERE job_name='tournament-materialized-views-refresh' AND scope_key=${scopeKey}`;
+  expect(rows).toHaveLength(2);
+  expect(new Set(rows.map((row) => row.period_key)).size).toBe(2);
+  expect(rows.map((row) => row.status).sort()).toEqual(['pending', 'succeeded']);
+});

@@ -269,7 +269,7 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           return null;
         }
         const terminal = isTerminalJobAttemptFailure(job, error, attempt) || attempt >= maxAttempts;
-        await lifecycle(async () => {
+        const changed = await lifecycle(async () => {
           const changed = await tournamentInfoRepository.markSetupAttemptFailure(
             season,
             job.data.tournamentId,
@@ -291,7 +291,9 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
               jobId: job.id,
               attempt,
             });
+          return changed;
         });
+        if (!changed && (execution || expectedState)) return null;
         return { error };
       } finally {
         await updateSetupJobProgressBestEffort(job, 'settling');

@@ -104,11 +104,6 @@ function safeErrorCode(error: unknown): string {
   return findErrorCode(error) ?? (error instanceof Error ? error.name : 'UNKNOWN_ERROR');
 }
 
-function isPostgresStatementError(error: unknown): boolean {
-  const code = findErrorCode(error);
-  return code !== null && /^[0-9A-Z]{5}$/.test(code);
-}
-
 function elapsedBetween(start: string | null | undefined, end: string | null | undefined) {
   if (!start || !end) return null;
   const startMs = Date.parse(start);
@@ -245,7 +240,6 @@ export async function setupTournamentStructure(
   // resume attempt into a warning. Only publication completed below makes
   // failures non-critical for this attempt.
   let standingsPublished = false;
-  let transactionAborted = false;
   const progressMarker = options?.resumeMarker;
   let execution: TournamentSetupExecution;
   const runPhase = <T>(phase: string, scopes: readonly string[], operation: () => Promise<T>) =>
@@ -280,7 +274,7 @@ export async function setupTournamentStructure(
         },
         plan: {
           scopeKey: `${season.seasonCode}:tournament:${tournamentId}`,
-          periodKey: `setup-${tournamentId}-${targetEventId}`,
+          periodKey: `setup-${tournamentId}-${targetEventId}-${execution.attempt}-${execution.startedAt}`,
           dueAt: new Date(),
           source: 'reconcile',
           eventId: targetEventId,
@@ -527,17 +521,14 @@ export async function setupTournamentStructure(
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Tournament setup failed.';
     failureCode = safeErrorCode(error);
-    transactionAborted = isPostgresStatementError(error);
     logError('Tournament setup failed', error, {
       tournamentId,
       durationMs: Math.round(performance.now() - setupStartedAtMs),
       standingsPublished,
     });
-    if (
-      standingsPublished &&
-      !transactionAborted &&
-      failureCode !== 'TOURNAMENT_SETUP_EXECUTION_STALE'
-    ) {
+    // Each phase has already rolled back before control reaches this catch.
+    // A statement error does not poison this new guarded publication phase.
+    if (standingsPublished && failureCode !== 'TOURNAMENT_SETUP_EXECUTION_STALE') {
       await runPhase('publish_ready_with_warnings', [], async () => {
         const issueState = await tournamentSetupIssueRepository.sync(season, tournamentId, [
           normalizeTournamentSetupIssue({
@@ -560,14 +551,12 @@ export async function setupTournamentStructure(
     throw error;
   } finally {
     let terminalStatus = null;
-    if (!transactionAborted) {
-      try {
-        terminalStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
-      } catch (error) {
-        logError('Unable to read terminal tournament setup status for reporting', error, {
-          tournamentId,
-        });
-      }
+    try {
+      terminalStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+    } catch (error) {
+      logError('Unable to read terminal tournament setup status for reporting', error, {
+        tournamentId,
+      });
     }
     const context = getJobLogContext();
     const createdAt = terminalStatus?.createdAt ?? initialStatus.createdAt;
