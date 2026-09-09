@@ -25,6 +25,7 @@ import { syncCoreSnapshot } from '../services/core-snapshot.service';
 import {
   preparePriceChangePublication,
   persistPriceChangePublication,
+  reconcilePriceChangeAfterCommit,
   PriceChangeCorePublicationRequiredError,
   PriceChangeHotEventSupersededError,
   type PriceChangeHotEventEvidence,
@@ -636,7 +637,6 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             persistPriceChangePublication(prepared, {
               deferDelivery: true,
               readLatestHotEvent,
-              onHotEventSuperseded: (evidence) => enqueueNewerHotPriceEvent(season, evidence),
             }),
           );
         } catch (error) {
@@ -660,6 +660,9 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           }
           throw error;
         }
+        await reconcilePriceChangeAfterCommit(prepared, readLatestHotEvent, (evidence) =>
+          enqueueNewerHotPriceEvent(season, evidence),
+        );
         const delivered = await dispatchDataPublicationOutbox({
           limit: 1,
           publicationId: persisted.publicationId,
