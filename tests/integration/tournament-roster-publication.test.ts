@@ -753,12 +753,10 @@ for (const resume of [false, true])
       );
       const leagueMembers = await import('../../src/services/tournament-league-members.service');
       const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
-      const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
-        async () => {
-          expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
-          return undefined as never;
-        },
-      );
+      const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(async () => {
+        expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
+        return undefined as never;
+      });
       let enter!: () => void;
       let release!: () => void;
       const entered = new Promise<void>((resolve) => {
