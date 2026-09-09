@@ -270,15 +270,9 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('release_source_media_deploy_fence()');
     expect(deployScript).toContain('docker rm --force "$container_id"');
     expect(deployScript).toContain('run --rm -T --interactive=false -d --no-deps');
-    expect(deployScript).toContain('--provision-and-probe');
-    expect(deployScript).toContain('--probe-fpl-raw-snapshot-storage');
-    expect(deployScript).toContain('bootstrap-briefing-source-media-env.sh');
-    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
-      deployScript.indexOf('bun validate-env.ts --probe-fpl-raw-snapshot-storage'),
-    );
-    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeLessThan(
-      deployScript.indexOf('status()'),
-    );
+    expect(deployScript).not.toContain('--provision-and-probe');
+    expect(deployScript).not.toContain('--probe-fpl-raw-snapshot-storage');
+    expect(deployScript).not.toContain('bootstrap-briefing-source-media-env.sh');
     expect(sourceMediaBootstrapScript).toContain('BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY');
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_WORKER_ENABLED=false');
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_RETENTION_ENABLED=false');

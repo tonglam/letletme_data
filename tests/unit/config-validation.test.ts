@@ -195,6 +195,8 @@ describe('production environment preflight', () => {
     const deployScript = readFileSync('scripts/deploy.sh', 'utf8');
     const preflight = deployScript.indexOf('bun run env:check');
     const fplSourceProbe = deployScript.indexOf('--probe-fpl-raw-snapshot-storage');
+    const sourceMediaBootstrap = deployScript.indexOf('bootstrap-briefing-source-media-env.sh');
+    const sourceMediaProbe = deployScript.indexOf('--provision-and-probe');
     const identityContract = deployScript.indexOf('bun scripts/wait-for-migration-login.ts');
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     const stopServices = deployScript.indexOf('if ! compose stop -t 45 api worker; then');
@@ -214,8 +216,9 @@ describe('production environment preflight', () => {
     const replaceServices = deployScript.indexOf('start_runtime_services', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
-    expect(fplSourceProbe).toBeGreaterThan(preflight);
-    expect(fplSourceProbe).toBeLessThan(identityContract);
+    expect(fplSourceProbe).toBe(-1);
+    expect(sourceMediaBootstrap).toBe(-1);
+    expect(sourceMediaProbe).toBe(-1);
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(configuredRuntimeUrl).toBeLessThan(preflight);
     expect(identityContract).toBeGreaterThan(preflight);
@@ -317,7 +320,9 @@ describe('production environment preflight', () => {
     expect(configuredRuntimeUrl).toBeGreaterThan(0);
     expect(deployScript).toContain('bun scripts/wait-for-migration-login.ts');
     expect(deployScript).not.toContain('--probe-bug-report-storage');
-    expect(deployScript).toContain('bun validate-env.ts --probe-fpl-raw-snapshot-storage');
+    expect(deployScript).not.toContain('bun validate-env.ts --probe-fpl-raw-snapshot-storage');
+    expect(deployScript).not.toContain('bootstrap-briefing-source-media-env.sh');
+    expect(deployScript).not.toContain('--provision-and-probe');
     expect(deployScript).toContain('bun run db:verify-runtime-logins');
     expect(deployScript).not.toContain('GRAPHQL_RUNTIME_DB_PASSWORD');
     expect(deployScript).not.toContain('db:provision-runtime-logins');

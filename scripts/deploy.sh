@@ -533,29 +533,11 @@ deploy() {
     log_error "Application environment contract failed; services were not stopped."
     exit 1
   fi
-  log_info "Provisioning and probing the immutable FPL raw snapshot bucket"
-  if ! compose run --rm -T --interactive=false api bun validate-env.ts --probe-fpl-raw-snapshot-storage; then
-    log_error "FPL raw snapshot storage contract failed; services were not stopped."
-    exit 1
-  fi
-  if ! "${PROJECT_DIR}/scripts/bootstrap-briefing-source-media-env.sh" \
-    "${ENV_FILE}" "${CONTENT_MEDIA_ENV_FILE}"; then
-    log_error "Could not establish the private source-media environment file."
-    exit 1
-  fi
-  media_worker_setting=false
-  if [[ -f "${CONTENT_MEDIA_ENV_FILE}" ]]; then
-    media_worker_setting=$(read_env_setting CONTENT_MEDIA_WORKER_ENABLED "$CONTENT_MEDIA_ENV_FILE" | tr '[:upper:]' '[:lower:]' || true)
-  fi
-  if [[ "$media_worker_setting" =~ ^(1|true|yes|on)$ ]]; then
-    log_info "Provisioning and probing the private Briefing source-media bucket"
-    if ! compose run --rm -T --interactive=false media-worker bun dist/media-worker.js --provision-and-probe; then
-      log_error "Briefing source-media Storage contract failed; services were not stopped."
-      exit 1
-    fi
-  else
-    log_info "Briefing source-media worker is disabled; Storage provisioning is not required"
-  fi
+  # Storage is a separate runtime capability. The general Data release must
+  # not make an external object-store request or create the media-worker env
+  # file: a Storage quota or network issue cannot block an unrelated database
+  # and scheduler release. The dedicated source-media rollout owns bucket
+  # provisioning and its explicit Storage gate.
   log_info "Probing the migration LOGIN for at most 120 seconds"
   if ! compose run --rm -T --interactive=false migration bun scripts/wait-for-migration-login.ts; then
     log_error "Migration LOGIN identity contract failed; services were not stopped."
