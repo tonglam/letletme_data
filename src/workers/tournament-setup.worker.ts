@@ -140,7 +140,8 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
         if (
           observedResume?.rosterMode === 'official_sync' &&
           observedResume.state === 'inactive' &&
-          observedResume.rosterSyncStatus === 'failed' &&
+          (observedResume.rosterSyncStatus === 'failed' ||
+            observedResume.rosterSyncStatus === 'processing') &&
           (observedResume.setupStatus === 'failed' ||
             (observedResume.setupStatus === 'processing' &&
               observedResume.setupPhase === 'queued')) &&
@@ -185,6 +186,13 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             // the old roster while that authoritative reconciliation is
             // pending, even if it was already active before activation.
             const roster = await tournamentRosterRepository.findById(season, job.data.tournamentId);
+            if (roster?.rosterMode === 'official_sync' && roster.rosterSyncStatus === 'pending') {
+              logInfo('Ignoring unmarked setup before roster retry handoff', {
+                tournamentId: job.data.tournamentId,
+                jobId: job.id,
+              });
+              return null;
+            }
             const resumePending =
               roster?.rosterMode === 'official_sync' &&
               roster.state === 'inactive' &&
@@ -201,13 +209,11 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
               // queue job is visible. Unmarked work cannot bypass its roster.
               const preparedManualRetry =
                 job.data.source === 'manual' &&
-                roster.rosterSyncStatus === 'failed' &&
+                (roster.rosterSyncStatus === 'failed' ||
+                  roster.rosterSyncStatus === 'processing') &&
                 roster.setupStatus === 'processing' &&
                 roster.setupPhase === 'queued';
-              if (
-                !preparedManualRetry &&
-                (roster.rosterSyncStatus !== 'failed' || roster.setupStatus !== 'failed')
-              ) {
+              if (!preparedManualRetry && roster.setupStatus !== 'failed') {
                 logInfo('Ignoring unmarked setup during committed official resume', {
                   tournamentId: job.data.tournamentId,
                   jobId: job.id,
