@@ -109,6 +109,7 @@ async function prepareTournamentRosterReconciliation(
         season,
         tournamentId,
         options.expectedProgressMarker,
+        'pending',
       );
       if (!ownsInactiveState) {
         return {
@@ -188,6 +189,7 @@ async function prepareTournamentRosterReconciliation(
       season,
       tournamentId,
       options.expectedProgressMarker,
+      tournament.state === 'inactive' ? 'pending' : undefined,
     );
     if (!claimed) {
       return {

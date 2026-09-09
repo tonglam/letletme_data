@@ -1009,6 +1009,46 @@ test('official resume accepts durable completion after a lost queue response', a
   expect(failureWrites).toBe(0);
 });
 
+test('official resume accepts a roster-to-setup handoff after a lost queue response', async () => {
+  const current = {
+    ...tournament,
+    state: 'inactive' as const,
+    rosterMode: 'official_sync' as const,
+  };
+  let owner = {
+    executionId: 'intent-owner',
+    setupProgressUpdatedAt: 'resume-marker',
+    state: 'inactive',
+    rosterMode: 'official_sync',
+    rosterSyncStatus: 'processing',
+    setupStatus: 'pending',
+    setupPhase: 'queued',
+    leagueId: 100,
+    leagueType: 'classic',
+  };
+  let failureWrites = 0;
+  const service = createTestService(createRepository({ findById: async () => current }), {
+    rosterRepository: {
+      findById: async () => ({ ...owner }) as never,
+      markResumeProcessingWithMarker: async () => 'resume-marker',
+      markResumeProcessing: async () => undefined,
+      markSyncPending: async () => 'retry-marker',
+      markSyncFailed: async () => {
+        failureWrites += 1;
+      },
+    },
+    enqueueRosterReconcile: async () => {
+      owner = { ...owner, executionId: 'worker-owner' };
+      throw new Error('accepted queue response lost');
+    },
+    findRosterReconcileJob: async () => null,
+  });
+  await expect(
+    service.setTournamentState(42, { adminEntryId: 123, state: 'active' }),
+  ).resolves.toMatchObject({ state: 'inactive' });
+  expect(failureWrites).toBe(0);
+});
+
 for (const state of ['active', 'inactive'] as const) {
   for (const outcome of ['accepted', 'failed', 'advanced', 'terminal-failed'] as const) {
     test(`roster retry commits pending intent before handoff (${state}, ${outcome})`, async () => {

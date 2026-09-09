@@ -192,7 +192,12 @@ export const tournamentRosterRepository = {
           AND roster_mode = 'official_sync'
           AND (
             state = 'active'
-            OR (state = 'inactive' AND roster_sync_status = 'pending')
+            OR (
+              state = 'inactive'
+              AND roster_sync_status = 'pending'
+              AND roster_sync_execution_id IS NOT NULL
+              AND setup_progress_updated_at IS NOT NULL
+            )
           )
         ORDER BY tournament_id
       `;
@@ -354,6 +359,7 @@ export const tournamentRosterRepository = {
     season: FplSeasonRef,
     tournamentId: number,
     expectedMarker: string | null,
+    expectedRosterSyncStatus?: TournamentSetupStatus | null,
   ): Promise<boolean> => {
     const client = await getDbClient();
     const rows = await client<{ tournamentId: number }[]>`
@@ -368,6 +374,10 @@ export const tournamentRosterRepository = {
         AND (
           (${expectedMarker}::timestamptz IS NULL AND setup_progress_updated_at IS NULL)
           OR setup_progress_updated_at::text = ${expectedMarker}
+        )
+        AND (
+          ${expectedRosterSyncStatus ?? null}::competition.tournament_setup_status IS NULL
+          OR roster_sync_status = ${expectedRosterSyncStatus ?? null}::competition.tournament_setup_status
         )
       RETURNING tournament_id AS "tournamentId"
     `;

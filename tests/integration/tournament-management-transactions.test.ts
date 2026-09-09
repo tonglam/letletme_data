@@ -179,8 +179,8 @@ test('scheduled roster recovery includes an inactive pending retry marker', asyn
     await observer`INSERT INTO fpl.seasons(season_id,season_code,display_name,start_year,end_year,lifecycle_state)
       VALUES(${season.seasonId},${season.seasonCode},'Inactive roster recovery fixture',2097,2098,'reference_only')`;
     await observer`INSERT INTO competition.entries(season_id,entry_id,entry_name,player_name) VALUES(${season.seasonId},${id},'Fixture','Fixture')`;
-    await observer`INSERT INTO competition.tournaments(season_id,tournament_id,name,creator,admin_entry_id,league_id,league_type,total_team_num,tournament_mode,group_mode,group_auto_averages,state,roster_mode,roster_sync_status,setup_status)
-      VALUES(${season.seasonId},${id},'Inactive roster recovery fixture','integration-test',${id},${id},'classic',2,'normal','no_group',false,'inactive','official_sync','pending','ready')`;
+    await observer`INSERT INTO competition.tournaments(season_id,tournament_id,name,creator,admin_entry_id,league_id,league_type,total_team_num,tournament_mode,group_mode,group_auto_averages,state,roster_mode,roster_sync_status,roster_sync_execution_id,setup_progress_updated_at,setup_status)
+      VALUES(${season.seasonId},${id},'Inactive roster recovery fixture','integration-test',${id},${id},'classic',2,'normal','no_group',false,'inactive','official_sync','pending',${randomUUID()},clock_timestamp(),'ready')`;
     const candidates =
       await tournamentRosterRepository.findOfficialSyncReconciliationCandidates(season);
     expect(candidates.map((candidate) => candidate.id)).toContain(id);
@@ -188,6 +188,39 @@ test('scheduled roster recovery includes an inactive pending retry marker', asyn
       state: 'inactive',
       rosterSyncStatus: 'pending',
     });
+  } finally {
+    await observer`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
+    await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${id}`;
+    await observer`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
+  }
+});
+
+test('scheduled roster recovery excludes an inactive mode opt-in without a retry marker', async () => {
+  const { explicitSeasonRef } = await import('../../src/domain/fpl-season');
+  const { tournamentRosterRepository } = await import('../../src/repositories/tournament-roster');
+  const { tournamentManagementRepository } = await import(
+    '../../src/repositories/tournament-management'
+  );
+  const season = explicitSeasonRef('9697');
+  const id = 995910;
+  try {
+    await observer`INSERT INTO fpl.seasons(season_id,season_code,display_name,start_year,end_year,lifecycle_state)
+      VALUES(${season.seasonId},${season.seasonCode},'Inactive roster opt-in fixture',2096,2097,'reference_only')`;
+    await observer`INSERT INTO competition.entries(season_id,entry_id,entry_name,player_name) VALUES(${season.seasonId},${id},'Fixture','Fixture')`;
+    await observer`INSERT INTO competition.tournaments(season_id,tournament_id,name,creator,admin_entry_id,league_id,league_type,total_team_num,tournament_mode,group_mode,group_auto_averages,state,roster_mode,roster_sync_status,roster_sync_execution_id,setup_progress_updated_at,setup_status)
+      VALUES(${season.seasonId},${id},'Inactive roster opt-in fixture','integration-test',${id},${id},'classic',2,'normal','no_group',false,'inactive','snapshot',NULL,${randomUUID()},clock_timestamp(),'ready')`;
+    await tournamentManagementRepository.updateRosterModeOwned(season, id, id, 'official_sync');
+    const markerState = await observer<
+      Array<{ executionId: string | null; marker: string | null }>
+    >`
+      SELECT roster_sync_execution_id::text AS "executionId", setup_progress_updated_at::text AS marker
+      FROM competition.tournaments
+      WHERE season_id=${season.seasonId} AND tournament_id=${id}
+    `;
+    expect(markerState[0]).toEqual({ executionId: null, marker: null });
+    const candidates =
+      await tournamentRosterRepository.findOfficialSyncReconciliationCandidates(season);
+    expect(candidates.map((candidate) => candidate.id)).not.toContain(id);
   } finally {
     await observer`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
     await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${id}`;

@@ -155,7 +155,12 @@ type MutationScopeRunner = <T>(
 
 type RosterHandoffState = Pick<
   NonNullable<Awaited<ReturnType<typeof tournamentRosterRepository.findById>>>,
-  'executionId' | 'setupProgressUpdatedAt' | 'rosterMode' | 'rosterSyncStatus' | 'state'
+  | 'executionId'
+  | 'setupProgressUpdatedAt'
+  | 'rosterMode'
+  | 'rosterSyncStatus'
+  | 'setupStatus'
+  | 'state'
 >;
 
 function hasAdvancedRosterHandoff(
@@ -185,6 +190,17 @@ function hasAdvancedRosterHandoff(
   return (
     current.executionId !== captured.executionId ||
     (captured.rosterSyncStatus === 'pending' && current.rosterSyncStatus === 'ready')
+  );
+}
+
+function hasReachedRosterToSetupHandoff(
+  current: RosterHandoffState | null,
+  captured: RosterHandoffState | null | undefined,
+  marker: string,
+): boolean {
+  return (
+    hasAdvancedRosterHandoff(current, captured, marker, ['processing']) &&
+    (current?.setupStatus === 'pending' || current?.setupStatus === 'processing')
   );
 }
 
@@ -526,6 +542,8 @@ export function createTournamentManagementService(
                       currentOwner.setupStatus === 'ready' &&
                       (currentOwner.state === 'active' || currentOwner.state === 'finished')
                     )
+                      return true;
+                    if (hasReachedRosterToSetupHandoff(currentOwner, owner, resumeMarker))
                       return true;
                     if (
                       !owner ||

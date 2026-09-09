@@ -320,6 +320,16 @@ export const createTournamentManagementRepository = () => ({
                 THEN 'pending'::competition.tournament_setup_status
               ELSE NULL
             END,
+            -- A mode change starts a new reconciliation lifecycle. Do not let
+            -- an old retry marker turn an inactive opt-in into scheduled work.
+            roster_sync_execution_id = CASE
+              WHEN roster_mode IS DISTINCT FROM ${rosterMode} THEN NULL
+              ELSE roster_sync_execution_id
+            END,
+            setup_progress_updated_at = CASE
+              WHEN roster_mode IS DISTINCT FROM ${rosterMode} THEN NULL
+              ELSE setup_progress_updated_at
+            END,
             roster_sync_error = NULL,
             updated_at = now()
         WHERE season_id = ${season.seasonId}
