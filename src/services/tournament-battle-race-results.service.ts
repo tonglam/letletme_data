@@ -1,3 +1,5 @@
+import { withMutationScopes } from '../utils/mutation-scopes';
+import { resolveMutationScopes } from '../domain/mutation-scope';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { tournamentBattleGroupResultsRepository } from '../repositories/tournament-battle-group-results';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
@@ -536,7 +538,19 @@ export async function syncTournamentBattleRaceResults(
     try {
       return isOfficialH2HTournament(tournament)
         ? await OfficialH2HStrategy.sync(season, tournament, eventId, officialH2HOptions)
-        : await LocalBattleStrategy.sync(season, tournament, eventId);
+        : await withMutationScopes(
+            {
+              queueName: 'tournament-sync',
+              jobName: 'tournament-battle-race',
+              tournamentId: tournament.id,
+              scopes: resolveMutationScopes({
+                queueName: 'tournament-sync',
+                jobName: 'tournament-battle-race',
+                eventId,
+              }),
+            },
+            () => LocalBattleStrategy.sync(season, tournament, eventId),
+          );
     } catch (error) {
       logError('Failed to sync battle race results', error, {
         tournamentId: tournament.id,
