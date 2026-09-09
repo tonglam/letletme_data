@@ -644,7 +644,20 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           setupPhase: 'queued',
           setupCompletedUnits: 0,
           setupTotalUnits: 0,
-          setupProgressUpdatedAt: new Date(),
+          // A prepared manual retry is itself the durable queue-admission
+          // reservation. If another caller arrives before BullMQ accepts the
+          // first delivery, keep that marker so both callers target one
+          // deterministic job slot instead of superseding one another.
+          setupProgressUpdatedAt: sql`CASE
+            WHEN ${tournamentsInCompetition.setupStatus} = 'processing'
+              AND ${tournamentsInCompetition.setupPhase} = 'queued'
+              AND ${tournamentsInCompetition.setupAttempt} = 0
+              AND ${tournamentsInCompetition.setupNextRetryAt} IS NULL
+              AND ${tournamentsInCompetition.setupStartedAt} IS NULL
+              AND ${tournamentsInCompetition.setupProgressUpdatedAt} IS NOT NULL
+              THEN ${tournamentsInCompetition.setupProgressUpdatedAt}
+            ELSE ${new Date()}
+          END`,
           setupWarningCount: 0,
           setupAttempt: 0,
           setupNextRetryAt: null,
@@ -848,9 +861,13 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
             eq(tournamentsInCompetition.seasonId, season.seasonId),
             inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
             lt(
-              sql`COALESCE(
-                ${tournamentsInCompetition.setupProgressUpdatedAt},
-                ${tournamentsInCompetition.setupStartedAt}
+              sql`GREATEST(
+                COALESCE(
+                  ${tournamentsInCompetition.setupProgressUpdatedAt},
+                  ${tournamentsInCompetition.setupStartedAt},
+                  '-infinity'::timestamptz
+                ),
+                ${tournamentsInCompetition.updatedAt}
               )`,
               cutoff,
             ),
@@ -925,6 +942,55 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           marker: sql<string>`${tournamentsInCompetition.setupProgressUpdatedAt}::text`,
         });
       return rows[0]?.marker ?? null;
+    },
+
+    markStuckOfficialResumeQueuedIfUnchanged: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      expectedProgressUpdatedAt: string,
+      expectedSetupStartedAt: string | null,
+      expectedSetupAttempt: number | null,
+    ): Promise<boolean> => {
+      const db = await getDbInstance();
+      const now = new Date();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          // Preserve the authoritative resume marker. The follow-up roster
+          // or setup enqueue carries this same marker into its admission
+          // fence after the short CAS transaction commits.
+          setupStatus: 'pending',
+          setupPhase: 'queued',
+          setupCompletedUnits: 0,
+          setupTotalUnits: 0,
+          setupWarningCount: 0,
+          setupError: null,
+          setupNextRetryAt: now,
+          setupStartedAt: null,
+          setupFinishedAt: null,
+          standingsReadyAt: null,
+          profilesReadyAt: null,
+          insightsReadyAt: null,
+          setupProgressIndeterminate: false,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            eq(tournamentsInCompetition.state, 'inactive'),
+            eq(tournamentsInCompetition.rosterMode, 'official_sync'),
+            inArray(tournamentsInCompetition.rosterSyncStatus, ['processing', 'failed']),
+            inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
+            sql`COALESCE(
+              ${tournamentsInCompetition.setupProgressUpdatedAt},
+              ${tournamentsInCompetition.setupStartedAt}
+            ) IS NOT DISTINCT FROM ${expectedProgressUpdatedAt}::timestamptz`,
+            sql`${tournamentsInCompetition.setupStartedAt} IS NOT DISTINCT FROM ${expectedSetupStartedAt}::timestamptz`,
+            sql`${tournamentsInCompetition.setupAttempt} IS NOT DISTINCT FROM ${expectedSetupAttempt}`,
+          ),
+        )
+        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
+      return rows.length === 1;
     },
 
     restoreStuckSetupAfterEnqueueFailure: async (

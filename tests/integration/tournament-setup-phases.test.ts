@@ -775,6 +775,28 @@ test('requeue admission follows a prepared marker after setup progress advances'
   expect(enqueue).toHaveBeenCalledTimes(1);
 });
 
+test('prepared retry keeps its durable reservation when queue admission fails', async () => {
+  const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const failure = new Error('queue unavailable');
+  spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue(null);
+  spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+    async (_season, id, _source, options) => {
+      const marker = await options?.prepareEnqueue?.();
+      expect(id).toBe(tournamentId);
+      expect(marker).toBeString();
+      throw failure;
+    },
+  );
+
+  await expect(setup.requeueTournamentSetup(season, tournamentId)).rejects.toBe(failure);
+  expect(await tournamentInfoRepository.findSetupStatus(season, tournamentId)).toMatchObject({
+    setupStatus: 'processing',
+    setupPhase: 'queued',
+    setupAttempt: 0,
+  });
+});
+
 test('prepared setup retry marker runs without an official roster resume', async () => {
   const seasonJobs = await import('../../src/services/season-scoped-job.service');
   const setup = await import('../../src/services/tournament-setup.service');

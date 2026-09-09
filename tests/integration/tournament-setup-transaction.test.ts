@@ -421,6 +421,71 @@ describe('tournament setup transaction recovery', () => {
     });
   });
 
+  test('prepared setup retry keeps one durable marker before queue admission', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const firstMarker = await tournamentInfoRepository.markSetupRetryQueued(
+      season,
+      RETRY_TOURNAMENT_ID,
+    );
+    const secondMarker = await tournamentInfoRepository.markSetupRetryQueued(
+      season,
+      RETRY_TOURNAMENT_ID,
+    );
+
+    expect(firstMarker).toBeString();
+    expect(secondMarker).toBe(firstMarker);
+    expect(
+      await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID),
+    ).toMatchObject({
+      setupStatus: 'processing',
+      setupPhase: 'queued',
+      setupAttempt: 0,
+      setupProgressUpdatedAt: firstMarker,
+    });
+  });
+
+  test('official resume watchdog CAS rejects a worker claim after the queue probe', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const marker = await tournamentInfoRepository.markSetupRetryQueued(season, RETRY_TOURNAMENT_ID);
+    const sqlClient = await getDbClient();
+    await sqlClient`
+      UPDATE competition.tournaments
+      SET state = 'inactive', roster_mode = 'official_sync', roster_sync_status = 'processing'
+      WHERE season_id = ${SEASON_ID} AND tournament_id = ${RETRY_TOURNAMENT_ID}
+    `;
+    const observed = await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID);
+    expect(observed?.setupProgressUpdatedAt).toBe(marker);
+
+    await tournamentInfoRepository.markSetupProcessing(season, RETRY_TOURNAMENT_ID, marker, 1);
+    const observedMarker = observed?.setupProgressUpdatedAt;
+    if (!observedMarker) throw new Error('setup retry marker was not persisted');
+    const recoveryClaimed = await withMutationScopes(
+      {
+        queueName: 'integration-tournament-setup',
+        jobName: 'watchdog-official-resume-race',
+        tournamentId: RETRY_TOURNAMENT_ID,
+        scopes: [tournamentSetupLifecycleScope(RETRY_TOURNAMENT_ID)],
+      },
+      () =>
+        tournamentInfoRepository.markStuckOfficialResumeQueuedIfUnchanged(
+          season,
+          RETRY_TOURNAMENT_ID,
+          observedMarker,
+          observed?.setupStartedAt,
+          observed?.setupAttempt ?? null,
+        ),
+    );
+
+    expect(recoveryClaimed).toBe(false);
+    expect(
+      await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID),
+    ).toMatchObject({
+      setupStatus: 'processing',
+      setupPhase: 'syncing_entries',
+      setupAttempt: 1,
+    });
+  });
+
   test('watchdog restores the stale marker when queue admission fails', async () => {
     const season = explicitSeasonRef(SEASON_CODE);
     await tournamentInfoRepository.markSetupRetryQueued(season, RETRY_TOURNAMENT_ID);

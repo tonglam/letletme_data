@@ -646,8 +646,13 @@ export async function requeueTournamentSetup(
     });
   } catch (error) {
     if (!retryStatePrepared) throw error;
-    const message = error instanceof Error ? error.message : 'Unable to enqueue setup retry.';
-    await tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message, 0);
+    // The prepared processing/queued row is a durable admission reservation.
+    // Leave it intact when Redis/BullMQ rejects the handoff: an overlapping
+    // retry may already be targeting the same marker, and the watchdog can
+    // safely replay this exact slot if no delivery was accepted.
+    logError('Setup retry queue admission failed; retaining durable reservation', error, {
+      tournamentId,
+    });
     throw error;
   }
 }
@@ -702,6 +707,29 @@ export async function recoverStuckTournamentSetups(
           logInfo('Skipping watchdog recovery without an official resume marker', {
             tournamentId: row.id,
             setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+          });
+          continue;
+        }
+        const claimed = await withMutationScopes(
+          {
+            queueName: 'tournament-setup-watchdog',
+            jobName: 'claim-stuck-official-resume',
+            tournamentId: row.id,
+            scopes: [tournamentSetupLifecycleScope(row.id)],
+          },
+          () =>
+            tournamentInfoRepository.markStuckOfficialResumeQueuedIfUnchanged(
+              season,
+              row.id,
+              row.setupProgressUpdatedAt!,
+              row.setupStartedAt,
+              row.setupAttempt,
+            ),
+        );
+        if (!claimed) {
+          logInfo('Skipping watchdog official resume after setup state advanced', {
+            tournamentId: row.id,
+            observedSetupProgressUpdatedAt: row.setupProgressUpdatedAt,
           });
           continue;
         }
