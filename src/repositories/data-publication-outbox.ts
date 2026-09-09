@@ -35,71 +35,89 @@ export type ClaimedDataPublicationOutbox = Readonly<{
   items: readonly DataPublicationDeliveryItem[];
 }>;
 
-/** Read only scheduling context, bound to the active row in one SQL snapshot. */
+/** Read scheduling context only after proving the complete active publication. */
 export async function loadActivePriceChangeContext(season: FplSeasonRef) {
   const db = await getDb();
-  const rows = await db
-    .select({
-      publicationId: datasetPublicationsInOps.publicationId,
-      revision: datasetPublicationsInOps.revision,
-      manifest: datasetPublicationsInOps.manifest,
-      payload: datasetPublicationItemsInOps.payload,
-      itemCount: datasetPublicationItemsInOps.itemCount,
-      checksum: datasetPublicationItemsInOps.checksum,
-    })
-    .from(datasetPublicationsInOps)
-    .innerJoin(
-      datasetPublicationItemsInOps,
-      and(
-        eq(datasetPublicationItemsInOps.publicationId, datasetPublicationsInOps.publicationId),
-        eq(datasetPublicationItemsInOps.itemName, 'context'),
-      ),
-    )
-    .where(
-      and(
-        eq(datasetPublicationsInOps.dataset, 'fpl:price-changes'),
-        eq(datasetPublicationsInOps.seasonId, season.seasonId),
-        isNull(datasetPublicationsInOps.eventId),
-        eq(datasetPublicationsInOps.status, 'active'),
-      ),
-    )
-    .limit(1);
-  const row = rows[0];
-  if (!row) return null;
-  const manifest = parseDataPublicationManifest(JSON.stringify(row.manifest));
-  if (
-    !manifest ||
-    manifest.publicationId !== row.publicationId ||
-    manifest.revision !== row.revision ||
-    manifest.dataset !== 'fpl:price-changes' ||
-    manifest.seasonCode !== season.seasonCode ||
-    manifest.eventId !== null
-  )
-    return null;
-  const item = manifest.items.find((candidate) => candidate.name === 'context');
-  if (
-    !item ||
-    row.itemCount !== item.count ||
-    !row.payload ||
-    typeof row.payload !== 'object' ||
-    Array.isArray(row.payload) ||
-    Object.keys(row.payload).length !== item.count ||
-    !verifiedItemPayload(row, item)
-  )
-    return null;
-  return { manifest, items: { context: row.payload } };
+  // Keep the active identity and immutable item proofs in one transaction
+  // snapshot. A publication can be activated between two autocommit reads;
+  // without one snapshot those reads could combine the old row with a new
+  // publication's items (or vice versa) and schedule from a superseded board.
+  return db.transaction(
+    async (tx) => {
+      const rows = await tx
+        .select({
+          publicationId: datasetPublicationsInOps.publicationId,
+          revision: datasetPublicationsInOps.revision,
+          manifest: datasetPublicationsInOps.manifest,
+        })
+        .from(datasetPublicationsInOps)
+        .where(
+          and(
+            eq(datasetPublicationsInOps.dataset, 'fpl:price-changes'),
+            eq(datasetPublicationsInOps.seasonId, season.seasonId),
+            isNull(datasetPublicationsInOps.eventId),
+            eq(datasetPublicationsInOps.status, 'active'),
+          ),
+        )
+        .limit(1);
+      const row = rows[0];
+      if (!row) return null;
+      // The Redis fast path validates every sibling itself. This durable fallback
+      // must enforce the same boundary so a context row cannot create an
+      // obligation when the active publication is missing or has a bad players
+      // sibling.
+      const prepared = await loadPreparedPublication(tx, row.publicationId, row.manifest).catch(
+        () => null,
+      );
+      if (!prepared) return null;
+      const manifest = prepared.manifest;
+      if (
+        !manifest ||
+        manifest.publicationId !== row.publicationId ||
+        manifest.revision !== row.revision ||
+        manifest.dataset !== 'fpl:price-changes' ||
+        manifest.seasonCode !== season.seasonCode ||
+        manifest.eventId !== null
+      )
+        return null;
+      const item = prepared.items.find((candidate) => candidate.manifest.name === 'context');
+      if (!item) return null;
+      try {
+        return { manifest, items: { context: JSON.parse(item.payload) as unknown } };
+      } catch {
+        return null;
+      }
+    },
+    { isolationLevel: 'repeatable read' },
+  );
 }
 
 function verifiedItemPayload(
-  row: { payload: unknown; checksum: string },
+  row: { payload: unknown; itemCount: number; checksum: string },
   item: DataPublicationManifest['items'][number],
 ): string | undefined {
-  return [canonicalJson(row.payload), JSON.stringify(row.payload)].find(
-    (candidate) =>
-      Buffer.byteLength(candidate, 'utf8') === item.bytes &&
-      createSha256(candidate) === item.sha256 &&
-      row.checksum === item.sha256,
-  );
+  return [canonicalJson(row.payload), JSON.stringify(row.payload)].find((candidate) => {
+    if (
+      row.itemCount !== item.count ||
+      Buffer.byteLength(candidate, 'utf8') !== item.bytes ||
+      createSha256(candidate) !== item.sha256 ||
+      row.checksum !== item.sha256
+    )
+      return false;
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      const actualCount = Array.isArray(parsed)
+        ? parsed.length
+        : parsed !== null && typeof parsed === 'object'
+          ? Object.keys(parsed).length
+          : parsed === null || parsed === undefined
+            ? 0
+            : 1;
+      return actualCount === item.count;
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function loadPreparedPublication(
@@ -118,6 +136,13 @@ async function loadPreparedPublication(
     })
     .from(datasetPublicationItemsInOps)
     .where(eq(datasetPublicationItemsInOps.publicationId, publicationId));
+  const manifestNames = new Set(manifest.items.map((item) => item.name));
+  if (
+    rows.length !== manifest.items.length ||
+    rows.some((row) => !manifestNames.has(row.itemName))
+  ) {
+    throw new Error(`Publication ${publicationId} item set does not match its manifest`);
+  }
   const items: DataPublicationDeliveryItem[] = [];
   for (const itemManifest of manifest.items) {
     const row = rows.find((candidate) => candidate.itemName === itemManifest.name);

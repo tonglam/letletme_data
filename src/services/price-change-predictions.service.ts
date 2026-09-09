@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   prepareDataPublication,
   readActiveDataPublication,
+  readActiveDataPublicationItems,
   type DataPublicationReadResult,
 } from '../cache/data-publication';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
@@ -18,6 +19,7 @@ import {
   syncOperationsRepository,
 } from '../repositories/sync-operations';
 import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
+import { canonicalJson } from '../utils/content-hash';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { formatCronCalendarDate } from '../utils/timezone';
@@ -1093,7 +1095,51 @@ export function parsePriceChangeWatchDeadlines(
 }
 
 export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Date) {
-  const publication = await loadActivePriceChangeContext(season);
+  const scope = { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode } as const;
+  // Deadline discovery is a scheduler control-plane read. Use the active
+  // consumer publication in Redis and retain only its small context item. The
+  // cache helper validates every sibling before returning, so a partial board
+  // cannot create a scheduler obligation.
+  const redisPublication = await readActiveDataPublicationItems(scope, ['context']);
+  if (redisPublication) {
+    let canonicalManifest: Awaited<
+      ReturnType<typeof syncOperationsRepository.findActivePublicationManifest>
+    > = null;
+    try {
+      // The identity query is intentionally metadata-only. It fences a valid but
+      // stale Redis pointer while avoiding the large publication-item join that
+      // caused the scheduler timeout incident. Do not spend another database
+      // query when the Redis read already failed; the durable fallback below is
+      // the only useful path in that case.
+      canonicalManifest = await syncOperationsRepository.findActivePublicationManifest(
+        PRICE_CHANGE_DATASET,
+        season,
+      );
+    } catch {
+      // Keep the Redis result untrusted when the durable identity cannot be
+      // established. The fallback below will fail closed if PostgreSQL is also
+      // unavailable instead of scheduling from an unknown revision.
+    }
+
+    if (
+      canonicalManifest &&
+      canonicalJson(redisPublication.manifest) === canonicalJson(canonicalManifest)
+    ) {
+      const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
+      // This Redis publication is already fenced to the canonical durable
+      // identity. If its context is semantically unusable (for example, it
+      // has reached the hard expiry), reloading the same immutable players
+      // rows from PostgreSQL cannot produce a different answer and would
+      // recreate the control-plane pressure this fast path avoids.
+      return deadlines;
+    }
+  }
+
+  // Redis is the normal path, but the durable row is the source of truth while
+  // an active publication is waiting for outbox delivery or Redis has been
+  // rebuilt. Keep the existing loader as a bounded fallback so a missing cache
+  // cannot silently drop a time-sensitive watch plan.
+  const publication = await loadActivePriceChangeContext(season).catch(() => null);
   return publication ? parsePriceChangeWatchDeadlines(publication, now) : null;
 }
 
