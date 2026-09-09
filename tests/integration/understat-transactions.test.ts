@@ -633,3 +633,33 @@ for (const lane of ['team', 'player'] as const) {
     expect(settle).not.toHaveBeenCalled();
   });
 }
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} accepted finalizer completion wins over a lost enqueue response`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue('none');
+    await processJob(lane, `understat-${lane}-discover`, data);
+    const detail =
+      lane === 'team'
+        ? { ...data, teamId: offset + 83, teamTitle: 'Arsenal' }
+        : { ...data, resourceId: offset + 83, teamTitle: 'Arsenal' };
+    const name = lane === 'team' ? 'understat-team-detail' : 'understat-player-team-detail';
+    await processJob(lane, name, detail);
+    for (const item of await runs.findItems(data.runId)) {
+      if (item.status !== 'completed')
+        await runs.skipItem(data.runId, item.resourceType, item.resourceId, 'fixture sibling');
+    }
+    spyOn(
+      enqueue,
+      lane === 'team' ? 'enqueueUnderstatTeamFinalize' : 'enqueueUnderstatPlayerFinalize',
+    ).mockImplementation(async () => {
+      await sql`UPDATE ops.sync_runs SET status='completed' WHERE run_id=${data.runId}`;
+      throw new UnrecoverableError('finalizer enqueue response lost');
+    });
+    await expect(processJob(lane, name, detail)).rejects.toThrow('finalizer enqueue response lost');
+    expect((await runs.findRun(data.runId))!.status).toBe('completed');
+    expect(settle).not.toHaveBeenCalled();
+  });
+}

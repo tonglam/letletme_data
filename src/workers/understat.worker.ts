@@ -365,8 +365,7 @@ async function recordTeamFailure(
           // A settled replay has no new claim, but can still exhaust its queue handoff.
           // A superseded provider invocation must not fail its successor's run.
           if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return false;
-          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-          return true;
+          return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
         }
         // An event without this invocation's claim cannot fail an in-flight retry.
         if (
@@ -384,8 +383,7 @@ async function recordTeamFailure(
         );
         return true;
       }
-      await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-      return true;
+      return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
     },
   );
 }
@@ -416,8 +414,7 @@ async function recordPlayerFailure(
           // A settled replay has no new claim, but can still exhaust its queue handoff.
           // A superseded provider invocation must not fail its successor's run.
           if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return false;
-          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-          return true;
+          return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
         }
         // An event without this invocation's claim cannot fail an in-flight retry.
         if (
@@ -435,8 +432,7 @@ async function recordPlayerFailure(
         );
         return true;
       }
-      await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-      return true;
+      return understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
     },
   );
 }
