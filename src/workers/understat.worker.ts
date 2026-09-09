@@ -29,6 +29,7 @@ import {
 } from '../services/understat-team.service';
 import {
   IncompleteUnderstatResourceError,
+  SupersededUnderstatDiscoveryError,
   understatMutationScopes,
 } from '../services/understat-sync.service';
 import { understatSyncRepository } from '../repositories/understat-sync';
@@ -440,17 +441,57 @@ async function recordPlayerFailure(
   );
 }
 
+async function retireSupersededDiscoveryRun(
+  job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
+  error: SupersededUnderstatDiscoveryError,
+): Promise<boolean> {
+  const lane = job.name.startsWith('understat-player-') ? 'player' : 'team';
+  return withMutationScopes(
+    {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: String(job.id),
+      scopes: lockScopes(lane, job.name, job.data),
+    },
+    async () => {
+      const run = await understatSyncRepository.findRun(job.data.runId);
+      if (!run || !ACTIVE_UNDERSTAT_RUN_STATUSES.has(run.status)) return false;
+      const item =
+        lane === 'player'
+          ? understatPlayerItemForJob(job.data as UnderstatPlayerJobData, job.name)
+          : understatTeamItemForJob(job.data as UnderstatTeamJobData, job.name);
+      const expectedAttempt = claimedAttempts.get(job);
+      if (item && expectedAttempt !== undefined) {
+        const persisted = await understatSyncRepository.findItem(
+          job.data.runId,
+          item.resourceType,
+          item.resourceId,
+        );
+        if (persisted?.attempts !== expectedAttempt) return false;
+      }
+      // The completed league payload cannot become fresh by retrying a detail.
+      // Ending this run fences in-flight writes; the existing scheduler retry
+      // creates a new run and distinct BullMQ IDs with a fresh league fetch.
+      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      return true;
+    },
+  );
+}
+
 async function recordTerminalFailure(
   job: Job<UnderstatTeamJobData | UnderstatPlayerJobData>,
   error: unknown,
 ): Promise<void> {
   const terminal = isTerminalJobAttemptFailure(job, error, job.attemptsMade + 1);
-  if (!terminal) return;
+  if (!terminal && !(error instanceof SupersededUnderstatDiscoveryError)) return;
   const typedError = error instanceof Error ? error : new Error(String(error));
   try {
-    const currentAttempt = job.name.startsWith('understat-player-')
-      ? await recordPlayerFailure(job as Job<UnderstatPlayerJobData>, typedError, true)
-      : await recordTeamFailure(job as Job<UnderstatTeamJobData>, typedError, true);
+    const currentAttempt =
+      error instanceof SupersededUnderstatDiscoveryError
+        ? await retireSupersededDiscoveryRun(job, error)
+        : job.name.startsWith('understat-player-')
+          ? await recordPlayerFailure(job as Job<UnderstatPlayerJobData>, typedError, true)
+          : await recordTeamFailure(job as Job<UnderstatTeamJobData>, typedError, true);
     if (currentAttempt && understatFailureBookkeepingPlan(job.data).settleScheduler) {
       await settleUnderstatFailureAfterRunDrained(job, typedError, true);
     }

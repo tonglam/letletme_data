@@ -536,3 +536,100 @@ test('player finalization replays durable facts without reverting a later player
   expect(row!.source_hash).toBe('latest-player-name');
   expect((await runs.findRun(data.runId))!.status).toBe('completed');
 });
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} stale discovery releases the run for a fresh scheduler generation`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    await processJob(lane, `understat-${lane}-discover`, data);
+    await sql`UPDATE understat.matches SET source_hash='corrected-reference',source_checked_at=stamp.checked_at,last_seen_at=stamp.checked_at FROM (SELECT clock_timestamp() AS checked_at) stamp WHERE match_id=${offset + 28786}`;
+    const detail =
+      lane === 'team'
+        ? { ...data, teamId: offset + 83, teamTitle: 'Arsenal' }
+        : { ...data, resourceId: offset + 83, teamTitle: 'Arsenal' };
+    const name = lane === 'team' ? 'understat-team-detail' : 'understat-player-team-detail';
+    await expect(processJob(lane, name, detail)).rejects.toThrow(
+      'reference snapshot was superseded',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(settle.mock.calls[0]![0].nonRetryable).toBe(false);
+    // New generation admission must not be blocked by this stale run's pending siblings.
+    const next = job();
+    await processJob(lane, `understat-${lane}-discover`, next);
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
+    await processJob(lane, name, { ...detail, runId: next.runId });
+    expect(
+      (await runs.findItem(
+        next.runId,
+        lane === 'team' ? 'team-detail' : 'team-participants',
+        String(offset + 83),
+      ))!.status,
+    ).toBe('completed');
+    const requests = (understatClient.getTeamData as ReturnType<typeof spyOn>).mock.calls.length;
+    await processJob(lane, name, detail);
+    expect((understatClient.getTeamData as ReturnType<typeof spyOn>).mock.calls.length).toBe(
+      requests,
+    );
+  });
+}
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} superseded finalizer requests fresh discovery without replaying old facts`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    await processJob(lane, `understat-${lane}-discover`, data);
+    for (const item of await runs.findItems(data.runId)) {
+      if (item.status !== 'completed')
+        await runs.skipItem(
+          data.runId,
+          item.resourceType,
+          item.resourceId,
+          'fixture incomplete sibling',
+        );
+    }
+    expect((await runs.findRun(data.runId))!.status).toBe('ready_to_publish');
+    await sql`UPDATE understat.matches SET source_hash='corrected-reference',source_checked_at=stamp.checked_at,last_seen_at=stamp.checked_at FROM (SELECT clock_timestamp() AS checked_at) stamp WHERE match_id=${offset + 28786}`;
+    await expect(processJob(lane, `understat-${lane}-finalize`, data)).rejects.toThrow(
+      'reference snapshot was superseded',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    const [match] =
+      await sql`SELECT source_hash FROM understat.matches WHERE match_id=${offset + 28786}`;
+    expect(match!.source_hash).toBe('corrected-reference');
+    await processJob(lane, `understat-${lane}-discover`, job());
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
+  });
+
+  test(`${lane} superseded old invocation cannot retire its replacement attempt`, async () => {
+    const data = job();
+    const { SupersededUnderstatDiscoveryError } = await import(
+      '../../src/services/understat-sync.service'
+    );
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: `understat-${lane}-sync`, jobName: 'newer-attempt', scopes: [scope] },
+        async () => {
+          expect(await runs.markItemRunning(data.runId, 'league', 'EPL')).toBe(2);
+        },
+      );
+      throw new SupersededUnderstatDiscoveryError();
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'reference snapshot was superseded',
+    );
+    expect(await runs.isItemAttemptCurrent(data.runId, 'league', 'EPL', 2)).toBe(true);
+    expect(settle).not.toHaveBeenCalled();
+  });
+}

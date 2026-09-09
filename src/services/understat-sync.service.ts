@@ -22,6 +22,13 @@ export interface UnderstatCompletenessResult {
   reason: string;
 }
 
+export class SupersededUnderstatDiscoveryError extends Error {
+  constructor() {
+    super('Understat reference snapshot was superseded; retry with fresh provider data');
+    this.name = 'SupersededUnderstatDiscoveryError';
+  }
+}
+
 export class IncompleteUnderstatResourceError extends Error {
   constructor(resource: string, reason: string) {
     super(`Understat ${resource} incomplete: ${reason}`);
@@ -661,9 +668,7 @@ export function assertUnderstatReferenceSnapshotCurrent(
       current.sourceCheckedAt >= match.sourceCheckedAt &&
       current.sourceHash !== match.sourceHash
     ) {
-      throw new Error(
-        'Understat reference snapshot was superseded; retry with fresh provider data',
-      );
+      throw new SupersededUnderstatDiscoveryError();
     }
   }
 }
