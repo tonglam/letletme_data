@@ -397,3 +397,119 @@ for (const lane of ['team', 'player'] as const) {
     expect((await runs.findItem(delayed.runId, 'league', 'EPL'))!.status).toBe('running');
   });
 }
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} settled replay records terminal finalizer handoff failure without a new claim`, async () => {
+    const data = job();
+    await processJob(lane, `understat-${lane}-discover`, data);
+    await sql`UPDATE ops.sync_items SET status='skipped',attempts=1 WHERE run_id=${data.runId} AND resource_type<>'league'`;
+    await runs.refreshRun(data.runId);
+    const { UnrecoverableError } = await import('bullmq');
+    const finalizer =
+      lane === 'team' ? 'enqueueUnderstatTeamFinalize' : 'enqueueUnderstatPlayerFinalize';
+    spyOn(enqueue, finalizer).mockRejectedValue(
+      new UnrecoverableError('finalizer handoff exhausted'),
+    );
+    const detail =
+      lane === 'team'
+        ? { ...data, teamId: offset + 83, teamTitle: 'Arsenal' }
+        : { ...data, resourceId: offset + 83, teamTitle: 'Arsenal' };
+    const name = lane === 'team' ? 'understat-team-detail' : 'understat-player-team-detail';
+    await expect(processJob(lane, name, detail)).rejects.toThrow('finalizer handoff exhausted');
+    const [run] = await sql`SELECT status FROM ops.sync_runs WHERE run_id=${data.runId}`;
+    expect(run!.status).toBe('failed');
+    expect(understatClient.getTeamData).not.toHaveBeenCalled();
+  });
+}
+
+for (const resource of ['team', 'match'] as const) {
+  test(`player ${resource} rejects an older identity and retains an unfinished retryable resource`, async () => {
+    const data = job();
+    await processJob('player', 'understat-player-discover', data);
+    const update = async () => {
+      await freeScope();
+      await withMutationScopes(
+        { queueName: 'understat-player-sync', jobName: 'newer-player-name', scopes: [scope] },
+        async () => {
+          await sql`UPDATE understat.players SET name='Corrected player',source_hash='newer-player-name',updated_at=clock_timestamp() WHERE player_id=${offset + 1001}`;
+        },
+      );
+    };
+    if (resource === 'team')
+      spyOn(understatClient, 'getTeamData').mockImplementation(async () => {
+        await update();
+        return teamData as never;
+      });
+    else
+      spyOn(understatClient, 'getMatchData').mockImplementation(async () => {
+        await update();
+        return matchData as never;
+      });
+    const resourceId = offset + (resource === 'team' ? 83 : 28786);
+    await expect(
+      processJob(
+        'player',
+        resource === 'team' ? 'understat-player-team-detail' : 'understat-player-match',
+        { ...data, resourceId, teamTitle: 'Arsenal' },
+      ),
+    ).rejects.toThrow('player identity snapshot was superseded');
+    const [row] =
+      await sql`SELECT name,source_hash FROM understat.players WHERE player_id=${offset + 1001}`;
+    expect(row!.name).toBe('Corrected player');
+    expect(row!.source_hash).toBe('newer-player-name');
+    expect(
+      (await runs.findItem(
+        data.runId,
+        resource === 'team' ? 'team-participants' : 'match-roster',
+        String(resourceId),
+      ))!.status,
+    ).toBe('running');
+    if (resource === 'team') {
+      spyOn(understatClient, 'getTeamData').mockResolvedValue(
+        JSON.parse(JSON.stringify(teamData).replaceAll('Example Player', 'Corrected player')),
+      );
+    } else {
+      spyOn(understatClient, 'getMatchData').mockResolvedValue(
+        JSON.parse(JSON.stringify(matchData).replaceAll('Example Player', 'Corrected player')),
+      );
+    }
+    await processJob(
+      'player',
+      resource === 'team' ? 'understat-player-team-detail' : 'understat-player-match',
+      { ...data, resourceId, teamTitle: 'Arsenal' },
+    );
+    expect(
+      (await runs.findItem(
+        data.runId,
+        resource === 'team' ? 'team-participants' : 'match-roster',
+        String(resourceId),
+      ))!.status,
+    ).toBe('completed');
+    const [accepted] =
+      await sql`SELECT name FROM understat.players WHERE player_id=${offset + 1001}`;
+    expect(accepted!.name).toBe('Corrected player');
+  });
+}
+
+test('player finalization replays durable facts without reverting a later player identity', async () => {
+  const data = job();
+  await processJob('player', 'understat-player-discover', data);
+  await processJob('player', 'understat-player-team-detail', {
+    ...data,
+    resourceId: offset + 83,
+    teamTitle: 'Arsenal',
+  });
+  await processJob('player', 'understat-player-match', { ...data, resourceId: offset + 28786 });
+  await sql`UPDATE ops.sync_items SET status='skipped' WHERE run_id=${data.runId} AND status NOT IN ('completed','skipped')`;
+  await runs.refreshRun(data.runId);
+  await sql`UPDATE understat.players SET name='Newest player',source_hash='latest-player-name',updated_at=clock_timestamp() WHERE player_id=${offset + 1001}`;
+  const { finalizeUnderstatPlayerRun } = await import(
+    '../../src/services/understat-player.service'
+  );
+  await finalizeUnderstatPlayerRun(data);
+  const [row] =
+    await sql`SELECT name,source_hash FROM understat.players WHERE player_id=${offset + 1001}`;
+  expect(row!.name).toBe('Newest player');
+  expect(row!.source_hash).toBe('latest-player-name');
+  expect((await runs.findRun(data.runId))!.status).toBe('completed');
+});

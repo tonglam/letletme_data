@@ -50,7 +50,7 @@ export async function persistUnderstatPlayerDiscovery(
   await references.upsertSeason(discovery.season);
   const teamChanges = await references.upsertTeams(discovery.teams);
   const matchChanges = await references.upsertMatches(discovery.matches);
-  const playerChanges = await players.upsertPlayers(discovery.players);
+  const playerChanges = await players.upsertPlayers(discovery.players, discovery.season.lastSeenAt);
   const seasonsChanged = await players.replacePlayerSeasons(
     discovery.season.season,
     discovery.playerSeasons,

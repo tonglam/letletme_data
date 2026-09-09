@@ -360,6 +360,13 @@ async function recordTeamFailure(
           item.resourceId,
         );
         const expectedAttempt = claimedAttempts.get(job);
+        if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+          // A settled replay has no new claim, but can still exhaust its queue handoff.
+          // A superseded provider invocation must not fail its successor's run.
+          if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return;
+          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+          return;
+        }
         // An event without this invocation's claim cannot fail an in-flight retry.
         if (
           persisted &&
@@ -368,10 +375,6 @@ async function recordTeamFailure(
             : persisted.attempts !== expectedAttempt)
         )
           return;
-        if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
-          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-          return;
-        }
         await understatSyncRepository.failItem(
           job.data.runId,
           item.resourceType,
@@ -407,6 +410,13 @@ async function recordPlayerFailure(
           item.resourceId,
         );
         const expectedAttempt = claimedAttempts.get(job);
+        if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+          // A settled replay has no new claim, but can still exhaust its queue handoff.
+          // A superseded provider invocation must not fail its successor's run.
+          if (expectedAttempt !== undefined && persisted.attempts !== expectedAttempt) return;
+          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
+          return;
+        }
         // An event without this invocation's claim cannot fail an in-flight retry.
         if (
           persisted &&
@@ -415,10 +425,6 @@ async function recordPlayerFailure(
             : persisted.attempts !== expectedAttempt)
         )
           return;
-        if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
-          await understatSyncRepository.markRunFailedIfSettled(job.data.runId, error.message);
-          return;
-        }
         await understatSyncRepository.failItem(
           job.data.runId,
           item.resourceType,
