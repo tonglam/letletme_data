@@ -732,6 +732,44 @@ test('a legacy unmarked create delivery cannot supersede a newer setup marker', 
   });
 });
 
+test('a legacy create retry keeps its claimed execution after progress advances', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_mode='snapshot', roster_sync_status=NULL,
+        setup_status='processing', setup_phase='queued', setup_attempt=1,
+        setup_started_at='2095-01-01 00:00:01+00',
+        setup_next_retry_at='2095-01-01 00:01:00+00',
+        setup_last_error_code='SETUP_RETRYABLE',
+        setup_progress_updated_at='2095-01-01 00:00:02+00'
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await processTournamentSetupJob({
+    id: 'integration-legacy-create-retry',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: {
+      ...season,
+      tournamentId,
+      source: 'create',
+      triggeredAt: '2095-01-01T00:00:00.000Z',
+    },
+    attemptsMade: 1,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(await tournamentInfoRepository.findSetupStatus(season, tournamentId)).toMatchObject({
+    setupStatus: 'processing',
+    setupPhase: 'syncing_entries',
+    setupAttempt: 2,
+  });
+});
+
 for (const rosterStatus of ['failed', 'processing'] as const) {
   test(`prepared manual retry of a failed official resume reaches setup execution with roster=${rosterStatus}`, async () => {
     const seasonJobs = await import('../../src/services/season-scoped-job.service');

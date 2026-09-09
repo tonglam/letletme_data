@@ -249,10 +249,10 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
           if (job.data.source === 'create' && stableProgressMarker === undefined) {
             // Creates before marker-owned admission was introduced can still be
-            // sitting in BullMQ under the unsuffixed ID. If a newer durable
-            // marker is already present, settle that legacy delivery as stale
-            // instead of letting it supersede the handoff. New create jobs
-            // always carry setupMarker and remain eligible for BullMQ retries.
+            // sitting in BullMQ under the unsuffixed ID. A newer marker plus a
+            // queued row with no setup execution proves that another handoff
+            // owns the row. A legacy job that already claimed an execution has
+            // setupStartedAt and remains eligible for its BullMQ retries.
             const triggeredAtMs = Date.parse(job.data.triggeredAt);
             const currentMarkerMs = persistedStatus.setupProgressUpdatedAt
               ? Date.parse(persistedStatus.setupProgressUpdatedAt)
@@ -260,7 +260,11 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             if (
               Number.isFinite(triggeredAtMs) &&
               Number.isFinite(currentMarkerMs) &&
-              currentMarkerMs > triggeredAtMs
+              currentMarkerMs > triggeredAtMs &&
+              persistedStatus.setupPhase === 'queued' &&
+              persistedStatus.setupStartedAt === null &&
+              (persistedStatus.setupStatus === 'pending' ||
+                persistedStatus.setupStatus === 'processing')
             ) {
               logInfo('Ignoring superseded legacy tournament create setup job', {
                 tournamentId: job.data.tournamentId,
