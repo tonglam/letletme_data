@@ -27,7 +27,7 @@ import {
   type OfficialH2HPageManifest,
 } from '../domain/official-h2h-manifest';
 import { withMutationScopes } from '../utils/mutation-scopes';
-import { ValidationError } from '../utils/errors';
+import { ConflictError, ValidationError } from '../utils/errors';
 import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
 import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
@@ -1052,6 +1052,9 @@ export async function syncOfficialH2HTournament(
   // fences. Sample it before any FPL request so a response started before
   // data_checked_at cannot be blessed merely because the provider returned
   // after the boundary.
+  const expectedRevision = options.setupExecution
+    ? undefined
+    : await tournamentOfficialH2HRepository.captureRevision(season, tournament);
   const sourceOrdering = await readDatabaseOrderingTimestamp();
   if (options.freshAfter !== undefined) {
     const freshAfter =
@@ -1279,6 +1282,20 @@ export async function syncOfficialH2HTournament(
     });
   }
   const publish = async () => {
+    const currentEntryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
+      season,
+      tournament.id,
+    );
+    if (
+      currentEntryIds.length !== entryIdSet.size ||
+      currentEntryIds.some((entryId) => !entryIdSet.has(entryId))
+    ) {
+      throw new ConflictError(
+        'Official H2H roster changed during provider fetch.',
+        'TOURNAMENT_OFFICIAL_H2H_SOURCE_STALE',
+      );
+    }
+
     // Entry-result writers also use the entry-season advisory fence without
     // entry-core scopes. Hold their shared fence across reread and publication.
     const tx = databaseTransactionStorage.getStore()!.db as TransactionHandle;
@@ -1355,6 +1372,7 @@ export async function syncOfficialH2HTournament(
     );
     return tournamentOfficialH2HRepository.publish(season, tournament.id, {
       ...officialRows,
+      expectedRevision,
       checkedAt,
       lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
       groupRows,

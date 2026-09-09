@@ -1,4 +1,11 @@
-import { afterAll, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import * as mutationScopes from '../../src/utils/mutation-scopes';
+beforeEach(() => {
+  spyOn(mutationScopes, 'withMutationScopes').mockImplementation(async (_input, operation) =>
+    operation(),
+  );
+});
+afterEach(() => mock.restore());
 
 import { entryEventResultsRepository } from '../../src/repositories/entry-event-results';
 import { tournamentBattleGroupResultsRepository } from '../../src/repositories/tournament-battle-group-results';
