@@ -35,12 +35,16 @@ export function createTournamentRepairWorker(): WorkerRuntime {
   const connection = getQueueConnection();
   const queueEvents = new QueueEvents(tournamentRepairQueueName, { connection });
   let watchdog: ReturnType<typeof setInterval> | null = null;
+  const observedRevisions = new Map<string, string>();
   const worker = new Worker<TournamentRepairJobData>(
     tournamentRepairQueueName,
     async (job: Job<TournamentRepairJobData>) => {
+      observedRevisions.delete(String(job.id));
       const season = await seasonRepository.findByCode(job.data.seasonCode);
       if (!season) return;
-      await repairTournamentSetupIssue(season, job.data.issueId);
+      await repairTournamentSetupIssue(season, job.data.issueId, (state) => {
+        observedRevisions.set(String(job.id), state.issueRevision);
+      });
     },
     {
       connection,
@@ -53,9 +57,25 @@ export function createTournamentRepairWorker(): WorkerRuntime {
     },
   );
 
+  worker.on('completed', (job) => {
+    observedRevisions.delete(String(job.id));
+  });
   worker.on('failed', (job, error) => {
     if (!job) return;
+    const capturedRevision = observedRevisions.get(String(job.id));
+    observedRevisions.delete(String(job.id));
     void (async () => {
+      const revision =
+        capturedRevision ??
+        (job.processedOn
+          ? await tournamentSetupIssueRepository.findDueDeliveryRevision(
+              { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
+              job.data.issueId,
+              new Date(job.data.triggeredAt),
+              new Date(job.processedOn),
+            )
+          : null);
+      if (!revision) return;
       const issue = await tournamentSetupIssueRepository.findUnresolvedById(
         { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
         job.data.issueId,
@@ -69,6 +89,7 @@ export function createTournamentRepairWorker(): WorkerRuntime {
         issue.issueId,
         nextRepairAt,
         exhausted,
+        revision,
       );
     })().catch((stateError) => {
       logError('Failed to persist tournament repair retry state', stateError, {

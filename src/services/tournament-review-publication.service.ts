@@ -2957,8 +2957,7 @@ async function resetTournamentReviewScopesForCorrection(
   changeId: string,
   allowEmpty = false,
 ): Promise<number[]> {
-  const db = await getDbClient();
-  const rows: Array<{ event_id: number }> = await db.begin(
+  const rows: Array<{ event_id: number }> = await withDatabaseTransaction(
     async (tx): Promise<Array<{ event_id: number }>> => {
       // Correction Change IDs are globally idempotent within a tournament.
       // A retry after a later correction has advanced the head must not reset

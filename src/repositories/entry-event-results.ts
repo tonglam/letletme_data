@@ -132,6 +132,44 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
+    // Capture both input row versions before deriving league results. Missing
+    // profiles are represented by absence; their later insertion also invalidates
+    // the snapshot. xmin is used only for this short-lived read/write comparison.
+    findLeagueInputRevisions: async (season: FplSeasonRef, eventId: number, entryIds: number[]) => {
+      const db = await getDbInstance();
+      const revisions: {
+        entryId: number;
+        profileRevision: string;
+        resultRevision: string | null;
+      }[] = [];
+      for (let offset = 0; offset < entryIds.length; offset += 1000) {
+        revisions.push(
+          ...(await db
+            .select({
+              entryId: entriesInCompetition.entryId,
+              profileRevision: sql<string>`${entriesInCompetition}.xmin::text`,
+              resultRevision: sql<string | null>`${entryEventResultsInCompetition}.xmin::text`,
+            })
+            .from(entriesInCompetition)
+            .leftJoin(
+              entryEventResultsInCompetition,
+              and(
+                eq(entryEventResultsInCompetition.seasonId, entriesInCompetition.seasonId),
+                eq(entryEventResultsInCompetition.entryId, entriesInCompetition.entryId),
+                eq(entryEventResultsInCompetition.eventId, eventId),
+              ),
+            )
+            .where(
+              and(
+                eq(entriesInCompetition.seasonId, season.seasonId),
+                inArray(entriesInCompetition.entryId, entryIds.slice(offset, offset + 1000)),
+              ),
+            )),
+        );
+      }
+      return revisions;
+    },
+
     upsertCoreFromHistory: async (
       season: FplSeasonRef,
       entryId: number,

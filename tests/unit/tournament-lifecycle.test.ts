@@ -177,7 +177,18 @@ describe('tournament lifecycle invariants', () => {
       calls.push('ready-with-warning');
     });
 
-    await finalizePublishedTournamentSetup(TEST_SEASON, 900_122, 'enrichment failed', 1);
+    const { runInDatabaseTransaction, runDatabasePostCommitActions } = await import(
+      '../../src/db/singleton'
+    );
+    const actions: Array<() => Promise<void>> = [];
+    await runInDatabaseTransaction(
+      {} as never,
+      () => finalizePublishedTournamentSetup(TEST_SEASON, 900_122, 'enrichment failed', 1),
+      {} as never,
+      actions,
+    );
+    expect(enqueueReviewSpy).not.toHaveBeenCalled();
+    await runDatabasePostCommitActions(actions);
 
     expect(calls).toEqual(['resume', 'ready-with-warning']);
     expect(tournamentInfoRepository.markSetupResult).toHaveBeenCalledWith(
@@ -276,7 +287,8 @@ describe('tournament lifecycle invariants', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
     } as never);
     spyOn(tournamentInfoRepository, 'findSetupConfig').mockResolvedValue({ id: 900_124 } as never);
-    spyOn(tournamentInfoRepository, 'markSetupProcessing').mockRejectedValue(
+    const { tournamentEntryRepository } = await import('../../src/repositories/tournament-entries');
+    spyOn(tournamentEntryRepository, 'findEntryIdsByTournamentId').mockRejectedValue(
       new Error('resume preparation failed'),
     );
     const resultSpy = spyOn(tournamentInfoRepository, 'markSetupResult').mockResolvedValue(
@@ -285,9 +297,11 @@ describe('tournament lifecycle invariants', () => {
     process.env.DATABASE_URL = '';
 
     try {
-      await expect(setupTournamentStructure(TEST_SEASON, 900_124)).rejects.toThrow(
-        'resume preparation failed',
-      );
+      await expect(
+        setupTournamentStructure(TEST_SEASON, 900_124, {
+          execution: { startedAt: '2026-01-01T00:00:00Z', attempt: 1 },
+        }),
+      ).rejects.toThrow('resume preparation failed');
       expect(resultSpy).not.toHaveBeenCalled();
     } finally {
       process.env.DATABASE_URL = originalDatabaseUrl;

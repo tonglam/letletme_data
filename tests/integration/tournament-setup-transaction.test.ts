@@ -151,6 +151,7 @@ async function runDatabaseFailure(
         expect(rolledBack?.setupStatus).toBe(expectedSetupStatus);
         expect(rolledBack?.setupAttempt).toBe(expectedSetupAttempt);
         changed = await tournamentInfoRepository.markSetupAttemptFailure(season, tournamentId, {
+          expectedState: rolledBack!,
           attempt,
           terminal,
           errorCode: '42846',
@@ -324,6 +325,10 @@ describe('tournament setup transaction recovery', () => {
         await tournamentInfoRepository.markSetupRetryQueued(season, RETRY_TOURNAMENT_ID);
         expect(
           await tournamentInfoRepository.markSetupAttemptFailure(season, RETRY_TOURNAMENT_ID, {
+            expectedState: (await tournamentInfoRepository.findSetupStatus(
+              season,
+              RETRY_TOURNAMENT_ID,
+            ))!,
             attempt: 1,
             terminal: false,
             errorCode: '42846',
