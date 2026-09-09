@@ -1,0 +1,739 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+assertIntegrationEnv();
+import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
+import postgres from 'postgres';
+import * as config from '../../src/utils/config';
+import * as singleton from '../../src/db/singleton';
+import {
+  understatClient,
+  UnderstatLeagueResponseSchema,
+  UnderstatTeamResponseSchema,
+  UnderstatMatchResponseSchema,
+} from '../../src/clients/understat';
+import { understatSyncRepository as runs } from '../../src/repositories/understat-sync';
+import * as enqueue from '../../src/jobs/understat-enqueue';
+import * as projections from '../../src/services/player-season-summaries.service';
+import {
+  discoverUnderstatTeams,
+  syncUnderstatTeamDetail,
+} from '../../src/services/understat-team.service';
+import {
+  UNDERSTAT_LEAGUE_FIXTURE,
+  UNDERSTAT_TEAM_FIXTURE,
+  UNDERSTAT_MATCH_FIXTURE,
+} from '../fixtures/understat.fixtures';
+import { withMutationScopes } from '../../src/utils/mutation-scopes';
+const sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+const season = '9697';
+const offset = 990_000_000;
+const scope = 'understat:reference:all';
+const runIds: string[] = [];
+const originalConfig = config.getConfig();
+function fixture<T>(value: T): T {
+  return JSON.parse(
+    JSON.stringify(value)
+      .replaceAll('2025-', '2096-')
+      .replace(/"(\d+)"/g, (whole, number) => {
+        const n = Number(number);
+        return n === 83 || n === 89 || n >= 1000 ? `"${offset + n}"` : whole;
+      }),
+  );
+}
+const leagueData = UnderstatLeagueResponseSchema.parse(fixture(UNDERSTAT_LEAGUE_FIXTURE));
+const teamData = UnderstatTeamResponseSchema.parse(fixture(UNDERSTAT_TEAM_FIXTURE));
+const matchData = UnderstatMatchResponseSchema.parse(fixture(UNDERSTAT_MATCH_FIXTURE));
+async function cleanup() {
+  for (const runId of runIds) {
+    await sql`DELETE FROM ops.sync_items WHERE run_id=${runId}`;
+    await sql`DELETE FROM ops.sync_runs WHERE run_id=${runId}`;
+  }
+  runIds.length = 0;
+  await sql`DELETE FROM understat.player_match_stats WHERE match_id=${offset + 28786}`;
+  await sql`DELETE FROM understat.player_team_seasons WHERE season_code=${season}`;
+  await sql`DELETE FROM understat.player_seasons WHERE season_code=${season}`;
+  await sql`DELETE FROM understat.team_stat_splits WHERE season_code=${season}`;
+  await sql`DELETE FROM understat.team_seasons WHERE season_code=${season}`;
+  await sql`DELETE FROM understat.team_match_stats WHERE match_id=${offset + 28786}`;
+  await sql`DELETE FROM understat.matches WHERE season_code=${season}`;
+  await sql`DELETE FROM understat.players WHERE player_id BETWEEN ${offset + 1000} AND ${offset + 2011}`;
+  await sql`DELETE FROM understat.teams WHERE team_id IN (${offset + 83},${offset + 89})`;
+  await sql`DELETE FROM understat.seasons WHERE season_code=${season}`;
+}
+async function freeScope() {
+  expect(singleton.databaseTransactionStorage.getStore()).toBeUndefined();
+  await sql.begin(async (tx) => {
+    await tx`SELECT scope_key FROM ops.mutation_scopes WHERE scope_key=${scope} FOR UPDATE NOWAIT`;
+  });
+}
+function job() {
+  const runId = randomUUID();
+  runIds.push(runId);
+  return { runId, season, mode: 'incremental' as const, trigger: 'manual' as const };
+}
+const processors = new Map<string, (job: unknown) => Promise<unknown>>();
+const providerContexts: boolean[] = [];
+const handoffObservations: Array<{ transaction: boolean; status: string | undefined }> = [];
+const projectionObservations: Array<{ transaction: boolean; rows: number }> = [];
+async function processJob(lane: 'team' | 'player', name: string, data: unknown, attemptsMade = 0) {
+  return processors.get(`understat-${lane}-sync`)!({
+    id: 'fixture',
+    name,
+    queueName: `understat-${lane}-sync`,
+    attemptsMade,
+    opts: { attempts: 3 },
+    data,
+  });
+}
+async function wireWorkers() {
+  const bullmq = await import('bullmq');
+  const teamQueue = await import('../../src/queues/understat-team.queue');
+  const playerQueue = await import('../../src/queues/understat-player.queue');
+  const queue = await import('../../src/utils/queue');
+  const fence = await import('../../src/utils/scheduler-obligation-fence');
+  const tracking = await import('../../src/utils/job-run-logger');
+  const emitter = {
+    on() {
+      return this;
+    },
+  };
+  spyOn(bullmq, 'Worker').mockImplementation(function (name: string, callback: unknown) {
+    processors.set(name, callback as (job: unknown) => Promise<unknown>);
+    return emitter;
+  } as never);
+  spyOn(bullmq, 'QueueEvents').mockImplementation(function () {
+    return emitter;
+  } as never);
+  spyOn(teamQueue, 'getUnderstatTeamQueue').mockReturnValue({} as never);
+  spyOn(playerQueue, 'getUnderstatPlayerQueue').mockReturnValue({} as never);
+  spyOn(queue, 'getQueueConnection').mockReturnValue({} as never);
+  spyOn(fence, 'startCurrentSchedulerJob').mockResolvedValue(true);
+  spyOn(tracking, 'runTrackedJob').mockImplementation(async (_input, operation) => operation());
+  spyOn(tracking, 'logJobTriggered').mockImplementation(() => undefined);
+  const { createUnderstatWorker } = await import('../../src/workers/understat.worker');
+  createUnderstatWorker();
+}
+beforeEach(async () => {
+  await cleanup();
+  projectionObservations.length = 0;
+  providerContexts.length = 0;
+  handoffObservations.length = 0;
+  spyOn(config, 'getConfig').mockReturnValue({
+    ...originalConfig,
+    UNDERSTAT_ENABLED: true,
+    UNDERSTAT_SEASON: season,
+    UNDERSTAT_MIN_SEASON: season,
+    UNDERSTAT_LEAGUE: 'EPL',
+  });
+  await sql`INSERT INTO ops.mutation_scopes(scope_key,last_used_at) VALUES(${scope},now()) ON CONFLICT DO NOTHING`;
+  spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+    const transaction = Boolean(singleton.databaseTransactionStorage.getStore());
+    providerContexts.push(transaction);
+    if (!transaction) await freeScope();
+    return leagueData as never;
+  });
+  spyOn(understatClient, 'getTeamData').mockImplementation(async () => {
+    const transaction = Boolean(singleton.databaseTransactionStorage.getStore());
+    providerContexts.push(transaction);
+    if (!transaction) await freeScope();
+    return teamData as never;
+  });
+  spyOn(understatClient, 'getMatchData').mockImplementation(async () => {
+    const transaction = Boolean(singleton.databaseTransactionStorage.getStore());
+    providerContexts.push(transaction);
+    if (!transaction) await freeScope();
+    return matchData as never;
+  });
+  for (const name of [
+    'enqueueUnderstatTeamDetail',
+    'enqueueUnderstatTeamFinalize',
+    'enqueueUnderstatPlayerTeamDetail',
+    'enqueueUnderstatPlayerMatch',
+    'enqueueUnderstatPlayerFinalize',
+  ] as const) {
+    spyOn(enqueue, name).mockImplementation(async (data: { runId: string }) => {
+      const transaction = Boolean(singleton.databaseTransactionStorage.getStore());
+      if (!transaction) await freeScope();
+      const [item] =
+        await sql`SELECT status FROM ops.sync_items WHERE run_id=${data.runId} AND resource_type='league'`;
+      handoffObservations.push({ transaction, status: item?.status });
+      return undefined as never;
+    });
+  }
+  spyOn(projections, 'refreshPlayerStateSeasonSafely').mockImplementation(async () => {
+    const transaction = Boolean(singleton.databaseTransactionStorage.getStore());
+    const [row] =
+      await sql`SELECT count(*)::int AS count FROM understat.player_team_seasons WHERE season_code=${season}`;
+    projectionObservations.push({ transaction, rows: row!.count });
+    if (!transaction) await freeScope();
+    return undefined as never;
+  });
+  spyOn(projections, 'publishUnderstatPlayerState').mockImplementation(async () => {
+    const transaction = Boolean(singleton.databaseTransactionStorage.getStore());
+    const [row] =
+      await sql`SELECT count(*)::int AS count FROM understat.player_match_stats WHERE match_id=${offset + 28786}`;
+    projectionObservations.push({ transaction, rows: row!.count });
+    if (!transaction) await freeScope();
+    return undefined as never;
+  });
+  await wireWorkers();
+});
+afterEach(async () => {
+  mock.restore();
+  await cleanup();
+});
+afterAll(() => sql.end());
+
+test('team discovery commits before fanout and resource completion is atomic with its splits', async () => {
+  const data = job();
+  await processJob('team', 'understat-team-discover', data);
+  expect(enqueue.enqueueUnderstatTeamDetail).toHaveBeenCalled();
+  expect(
+    handoffObservations.every((value) => !value.transaction && value.status === 'completed'),
+  ).toBe(true);
+  await processJob('team', 'understat-team-detail', {
+    ...data,
+    teamId: offset + 83,
+    teamTitle: 'Arsenal',
+  });
+  expect((await runs.findItem(data.runId, 'team-detail', String(offset + 83)))!.status).toBe(
+    'completed',
+  );
+  const [row] =
+    await sql`SELECT count(*)::int AS count FROM understat.team_stat_splits WHERE season_code=${season} AND team_id=${offset + 83}`;
+  expect(row!.count).toBe(7);
+  expect(providerContexts).toEqual([false, false]);
+  await freeScope();
+});
+
+test('player discovery, team and match requests release the scope and projections follow commits', async () => {
+  const data = job();
+  await processJob('player', 'understat-player-discover', data);
+  await processJob('player', 'understat-player-team-detail', {
+    ...data,
+    resourceId: offset + 83,
+    teamTitle: 'Arsenal',
+  });
+  expect((await runs.findItem(data.runId, 'team-participants', String(offset + 83)))!.status).toBe(
+    'completed',
+  );
+  await processJob('player', 'understat-player-match', { ...data, resourceId: offset + 28786 });
+  expect((await runs.findItem(data.runId, 'match-roster', String(offset + 28786)))!.status).toBe(
+    'completed',
+  );
+  expect(projections.refreshPlayerStateSeasonSafely).toHaveBeenCalled();
+  expect(projections.publishUnderstatPlayerState).toHaveBeenCalled();
+  expect(providerContexts).toEqual([false, false, false]);
+  expect(projectionObservations).toHaveLength(2);
+  expect(projectionObservations.every((value) => !value.transaction && value.rows > 0)).toBe(true);
+});
+
+test('a failed run during provider wait discards the response before canonical writes', async () => {
+  const data = job();
+  spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+    await freeScope();
+    await runs.markRunFailed(data.runId, 'fixture recovery');
+    return leagueData as never;
+  });
+  await discoverUnderstatTeams(data);
+  const [row] =
+    await sql`SELECT count(*)::int AS count FROM understat.matches WHERE season_code=${season}`;
+  expect(row!.count).toBe(0);
+  expect(enqueue.enqueueUnderstatTeamDetail).not.toHaveBeenCalled();
+});
+
+test('a newer item attempt fences a delayed provider response', async () => {
+  const data = job();
+  spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+    await freeScope();
+    await withMutationScopes(
+      { queueName: 'understat-team-sync', jobName: 'fixture-claim', scopes: [scope] },
+      () => runs.markItemRunning(data.runId, 'league', 'EPL'),
+    );
+    return leagueData as never;
+  });
+  await discoverUnderstatTeams(data);
+  expect((await runs.findItem(data.runId, 'league', 'EPL'))!.attempts).toBe(2);
+  expect(enqueue.enqueueUnderstatTeamDetail).not.toHaveBeenCalled();
+  const [row] =
+    await sql`SELECT count(*)::int AS count FROM understat.matches WHERE season_code=${season}`;
+  expect(row!.count).toBe(0);
+});
+
+test('failed resource checkpoint rolls back canonical rows and never hands off', async () => {
+  const data = job();
+  await discoverUnderstatTeams(data);
+  const original = runs.completeItem;
+  spyOn(runs, 'completeItem').mockImplementation(async (...args) => {
+    if (args[1] === 'team-detail') throw new Error('checkpoint failure');
+    return original.apply(runs, args);
+  });
+  await expect(
+    syncUnderstatTeamDetail({ ...data, teamId: offset + 83, teamTitle: 'Arsenal' }),
+  ).rejects.toThrow('checkpoint failure');
+  const [row] =
+    await sql`SELECT count(*)::int AS count FROM understat.team_stat_splits WHERE season_code=${season} AND team_id=${offset + 83}`;
+  expect(row!.count).toBe(0);
+  expect((await runs.findItem(data.runId, 'team-detail', String(offset + 83)))!.status).toBe(
+    'running',
+  );
+  expect(enqueue.enqueueUnderstatTeamFinalize).not.toHaveBeenCalled();
+});
+
+test('fanout failure preserves the committed discovery and retry hands off without refetching', async () => {
+  const data = job();
+  spyOn(enqueue, 'enqueueUnderstatTeamDetail').mockRejectedValue(new Error('queue unavailable'));
+  await expect(discoverUnderstatTeams(data)).rejects.toThrow();
+  expect((await runs.findItem(data.runId, 'league', 'EPL'))!.status).toBe('completed');
+  expect(understatClient.getLeagueData).toHaveBeenCalledTimes(1);
+  spyOn(enqueue, 'enqueueUnderstatTeamDetail').mockImplementation(async () => {
+    await freeScope();
+    return undefined as never;
+  });
+  await discoverUnderstatTeams(data);
+  expect(understatClient.getLeagueData).toHaveBeenCalledTimes(1);
+  expect(enqueue.enqueueUnderstatTeamDetail).toHaveBeenCalledTimes(4);
+});
+
+test('settled resources retry only their post-commit handoff without fetching again', async () => {
+  const data = job();
+  await discoverUnderstatTeams(data);
+  const detail = { ...data, teamId: offset + 83, teamTitle: 'Arsenal' };
+  await syncUnderstatTeamDetail(detail);
+  await withMutationScopes(
+    { queueName: 'understat-team-sync', jobName: 'fixture-skip-sibling', scopes: [scope] },
+    () =>
+      runs.skipItem(data.runId, 'team-detail', String(offset + 89), 'fixture incomplete sibling'),
+  );
+  await syncUnderstatTeamDetail(detail);
+  expect(understatClient.getTeamData).toHaveBeenCalledTimes(1);
+  expect((await runs.findItem(data.runId, 'team-detail', String(offset + 83)))!.attempts).toBe(1);
+  expect(enqueue.enqueueUnderstatTeamFinalize).toHaveBeenCalledTimes(1);
+  expect(
+    handoffObservations.every((value) => !value.transaction && value.status === 'completed'),
+  ).toBe(true);
+});
+
+test('a later shared match observation cannot be mixed with an older discovery graph', async () => {
+  const player = job();
+  await processJob('player', 'understat-player-discover', player);
+  const team = job();
+  spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+    await freeScope();
+    await withMutationScopes(
+      { queueName: 'understat-player-sync', jobName: 'fixture-newer-reference', scopes: [scope] },
+      async () => {
+        await sql`UPDATE understat.matches SET source_hash='newer-reference-fixture',home_xg=2,source_checked_at=stamp.checked_at,last_seen_at=stamp.checked_at FROM (SELECT clock_timestamp() AS checked_at) stamp WHERE match_id=${offset + 28786}`;
+      },
+    );
+    return leagueData as never;
+  });
+  await expect(discoverUnderstatTeams(team)).rejects.toThrow('reference snapshot was superseded');
+  const [match] =
+    await sql`SELECT source_hash FROM understat.matches WHERE match_id=${offset + 28786}`;
+  expect(match!.source_hash).toBe('newer-reference-fixture');
+  const [stats] =
+    await sql`SELECT count(*)::int AS count FROM understat.team_match_stats WHERE match_id=${offset + 28786}`;
+  expect(stats!.count).toBe(0);
+  expect(enqueue.enqueueUnderstatTeamDetail).not.toHaveBeenCalled();
+});
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} terminal failure still settles its own claimed attempt`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    spyOn(understatClient, 'getLeagueData').mockRejectedValue(
+      new UnrecoverableError('current provider failed'),
+    );
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'current provider failed',
+    );
+    expect((await runs.findItem(data.runId, 'league', 'EPL'))!.status).toBe('failed');
+  });
+
+  test(`${lane} late terminal failure cannot fail a newer claimed attempt`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: `understat-${lane}-sync`, jobName: 'newer-attempt', scopes: [scope] },
+        async () => {
+          expect(await runs.markItemRunning(data.runId, 'league', 'EPL')).toBe(2);
+        },
+      );
+      throw new UnrecoverableError('old provider request failed');
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'old provider request failed',
+    );
+    const current = await runs.findItem(data.runId, 'league', 'EPL');
+    expect(current!.status).toBe('running');
+    expect(current!.attempts).toBe(2);
+    expect(await runs.isItemAttemptCurrent(data.runId, 'league', 'EPL', 2)).toBe(true);
+  });
+
+  test(`${lane} superseded failure cannot settle a completed successor obligation`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue('none');
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: `understat-${lane}-sync`, jobName: 'newer-attempt', scopes: [scope] },
+        async () => {
+          expect(await runs.markItemRunning(data.runId, 'league', 'EPL')).toBe(2);
+        },
+      );
+      await sql`UPDATE ops.sync_items SET status='completed' WHERE run_id=${data.runId}`;
+      await sql`UPDATE ops.sync_runs SET status='completed' WHERE run_id=${data.runId}`;
+      throw new UnrecoverableError('superseded provider failed after finalizer commit');
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'superseded provider failed after finalizer commit',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('completed');
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test(`${lane} discovery rejects a late team-only metadata overwrite`, async () => {
+    const first = job();
+    await processJob('player', 'understat-player-discover', first);
+    const delayed = job();
+    // Close the fixture generation so the player lane can start its next run.
+    await sql`UPDATE ops.sync_runs SET status='completed' WHERE run_id=${first.runId}`;
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: 'understat-player-sync', jobName: 'newer-team-name', scopes: [scope] },
+        async () => {
+          await sql`UPDATE understat.teams SET title='Corrected team title',source_hash='corrected-team-only',updated_at=clock_timestamp() WHERE team_id=${offset + 83}`;
+        },
+      );
+      return leagueData as never;
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, delayed)).rejects.toThrow(
+      'team reference snapshot was superseded',
+    );
+    const [team] =
+      await sql`SELECT title,source_hash FROM understat.teams WHERE team_id=${offset + 83}`;
+    expect(team!.title).toBe('Corrected team title');
+    expect(team!.source_hash).toBe('corrected-team-only');
+    expect((await runs.findItem(delayed.runId, 'league', 'EPL'))!.status).toBe('running');
+  });
+}
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} settled replay records terminal finalizer handoff failure without a new claim`, async () => {
+    const data = job();
+    await processJob(lane, `understat-${lane}-discover`, data);
+    await sql`UPDATE ops.sync_items SET status='skipped',attempts=1 WHERE run_id=${data.runId} AND resource_type<>'league'`;
+    await runs.refreshRun(data.runId);
+    const { UnrecoverableError } = await import('bullmq');
+    const finalizer =
+      lane === 'team' ? 'enqueueUnderstatTeamFinalize' : 'enqueueUnderstatPlayerFinalize';
+    spyOn(enqueue, finalizer).mockRejectedValue(
+      new UnrecoverableError('finalizer handoff exhausted'),
+    );
+    const detail =
+      lane === 'team'
+        ? { ...data, teamId: offset + 83, teamTitle: 'Arsenal' }
+        : { ...data, resourceId: offset + 83, teamTitle: 'Arsenal' };
+    const name = lane === 'team' ? 'understat-team-detail' : 'understat-player-team-detail';
+    await expect(processJob(lane, name, detail)).rejects.toThrow('finalizer handoff exhausted');
+    const [run] = await sql`SELECT status FROM ops.sync_runs WHERE run_id=${data.runId}`;
+    expect(run!.status).toBe('failed');
+    expect(understatClient.getTeamData).not.toHaveBeenCalled();
+  });
+}
+
+for (const resource of ['team', 'match'] as const) {
+  test(`player ${resource} rejects an older identity and retains an unfinished retryable resource`, async () => {
+    const data = job();
+    await processJob('player', 'understat-player-discover', data);
+    const update = async () => {
+      await freeScope();
+      await withMutationScopes(
+        { queueName: 'understat-player-sync', jobName: 'newer-player-name', scopes: [scope] },
+        async () => {
+          await sql`UPDATE understat.players SET name='Corrected player',source_hash='newer-player-name',updated_at=clock_timestamp() WHERE player_id=${offset + 1001}`;
+        },
+      );
+    };
+    if (resource === 'team')
+      spyOn(understatClient, 'getTeamData').mockImplementation(async () => {
+        await update();
+        return teamData as never;
+      });
+    else
+      spyOn(understatClient, 'getMatchData').mockImplementation(async () => {
+        await update();
+        return matchData as never;
+      });
+    const resourceId = offset + (resource === 'team' ? 83 : 28786);
+    await expect(
+      processJob(
+        'player',
+        resource === 'team' ? 'understat-player-team-detail' : 'understat-player-match',
+        { ...data, resourceId, teamTitle: 'Arsenal' },
+      ),
+    ).rejects.toThrow('player identity snapshot was superseded');
+    const [row] =
+      await sql`SELECT name,source_hash FROM understat.players WHERE player_id=${offset + 1001}`;
+    expect(row!.name).toBe('Corrected player');
+    expect(row!.source_hash).toBe('newer-player-name');
+    expect(
+      (await runs.findItem(
+        data.runId,
+        resource === 'team' ? 'team-participants' : 'match-roster',
+        String(resourceId),
+      ))!.status,
+    ).toBe('running');
+    if (resource === 'team') {
+      spyOn(understatClient, 'getTeamData').mockResolvedValue(
+        JSON.parse(JSON.stringify(teamData).replaceAll('Example Player', 'Corrected player')),
+      );
+    } else {
+      spyOn(understatClient, 'getMatchData').mockResolvedValue(
+        JSON.parse(JSON.stringify(matchData).replaceAll('Example Player', 'Corrected player')),
+      );
+    }
+    await processJob(
+      'player',
+      resource === 'team' ? 'understat-player-team-detail' : 'understat-player-match',
+      { ...data, resourceId, teamTitle: 'Arsenal' },
+    );
+    expect(
+      (await runs.findItem(
+        data.runId,
+        resource === 'team' ? 'team-participants' : 'match-roster',
+        String(resourceId),
+      ))!.status,
+    ).toBe('completed');
+    const [accepted] =
+      await sql`SELECT name FROM understat.players WHERE player_id=${offset + 1001}`;
+    expect(accepted!.name).toBe('Corrected player');
+  });
+}
+
+test('player finalization replays durable facts without reverting a later player identity', async () => {
+  const data = job();
+  await processJob('player', 'understat-player-discover', data);
+  await processJob('player', 'understat-player-team-detail', {
+    ...data,
+    resourceId: offset + 83,
+    teamTitle: 'Arsenal',
+  });
+  await processJob('player', 'understat-player-match', { ...data, resourceId: offset + 28786 });
+  await sql`UPDATE ops.sync_items SET status='skipped' WHERE run_id=${data.runId} AND status NOT IN ('completed','skipped')`;
+  await runs.refreshRun(data.runId);
+  await sql`UPDATE understat.players SET name='Newest player',source_hash='latest-player-name',updated_at=clock_timestamp() WHERE player_id=${offset + 1001}`;
+  const { finalizeUnderstatPlayerRun } = await import(
+    '../../src/services/understat-player.service'
+  );
+  await finalizeUnderstatPlayerRun(data);
+  const [row] =
+    await sql`SELECT name,source_hash FROM understat.players WHERE player_id=${offset + 1001}`;
+  expect(row!.name).toBe('Newest player');
+  expect(row!.source_hash).toBe('latest-player-name');
+  expect((await runs.findRun(data.runId))!.status).toBe('completed');
+});
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} stale discovery releases the run for a fresh scheduler generation`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    await processJob(lane, `understat-${lane}-discover`, data);
+    await sql`UPDATE understat.matches SET source_hash='corrected-reference',source_checked_at=stamp.checked_at,last_seen_at=stamp.checked_at FROM (SELECT clock_timestamp() AS checked_at) stamp WHERE match_id=${offset + 28786}`;
+    const detail =
+      lane === 'team'
+        ? { ...data, teamId: offset + 83, teamTitle: 'Arsenal' }
+        : { ...data, resourceId: offset + 83, teamTitle: 'Arsenal' };
+    const name = lane === 'team' ? 'understat-team-detail' : 'understat-player-team-detail';
+    await expect(processJob(lane, name, detail)).rejects.toThrow(
+      'reference snapshot was superseded',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(settle.mock.calls[0]![0].nonRetryable).toBe(false);
+    // New generation admission must not be blocked by this stale run's pending siblings.
+    const next = job();
+    await processJob(lane, `understat-${lane}-discover`, next);
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
+    await processJob(lane, name, { ...detail, runId: next.runId });
+    expect(
+      (await runs.findItem(
+        next.runId,
+        lane === 'team' ? 'team-detail' : 'team-participants',
+        String(offset + 83),
+      ))!.status,
+    ).toBe('completed');
+    const requests = (understatClient.getTeamData as ReturnType<typeof spyOn>).mock.calls.length;
+    await processJob(lane, name, detail);
+    expect((understatClient.getTeamData as ReturnType<typeof spyOn>).mock.calls.length).toBe(
+      requests,
+    );
+  });
+}
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} superseded finalizer requests fresh discovery without replaying old facts`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    await processJob(lane, `understat-${lane}-discover`, data);
+    for (const item of await runs.findItems(data.runId)) {
+      if (item.status !== 'completed')
+        await runs.skipItem(
+          data.runId,
+          item.resourceType,
+          item.resourceId,
+          'fixture incomplete sibling',
+        );
+    }
+    expect((await runs.findRun(data.runId))!.status).toBe('ready_to_publish');
+    await sql`UPDATE understat.matches SET source_hash='corrected-reference',source_checked_at=stamp.checked_at,last_seen_at=stamp.checked_at FROM (SELECT clock_timestamp() AS checked_at) stamp WHERE match_id=${offset + 28786}`;
+    await expect(processJob(lane, `understat-${lane}-finalize`, data)).rejects.toThrow(
+      'reference snapshot was superseded',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    const [match] =
+      await sql`SELECT source_hash FROM understat.matches WHERE match_id=${offset + 28786}`;
+    expect(match!.source_hash).toBe('corrected-reference');
+    await processJob(lane, `understat-${lane}-discover`, job());
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
+  });
+
+  test(`${lane} superseded old invocation cannot retire its replacement attempt`, async () => {
+    const data = job();
+    const { SupersededUnderstatDiscoveryError } = await import(
+      '../../src/services/understat-sync.service'
+    );
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    spyOn(understatClient, 'getLeagueData').mockImplementation(async () => {
+      await withMutationScopes(
+        { queueName: `understat-${lane}-sync`, jobName: 'newer-attempt', scopes: [scope] },
+        async () => {
+          expect(await runs.markItemRunning(data.runId, 'league', 'EPL')).toBe(2);
+        },
+      );
+      throw new SupersededUnderstatDiscoveryError();
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data)).rejects.toThrow(
+      'reference snapshot was superseded',
+    );
+    expect(await runs.isItemAttemptCurrent(data.runId, 'league', 'EPL', 2)).toBe(true);
+    expect(settle).not.toHaveBeenCalled();
+  });
+}
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} accepted finalizer completion wins over a lost enqueue response`, async () => {
+    const data = job();
+    const { UnrecoverableError } = await import('bullmq');
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue('none');
+    await processJob(lane, `understat-${lane}-discover`, data);
+    const detail =
+      lane === 'team'
+        ? { ...data, teamId: offset + 83, teamTitle: 'Arsenal' }
+        : { ...data, resourceId: offset + 83, teamTitle: 'Arsenal' };
+    const name = lane === 'team' ? 'understat-team-detail' : 'understat-player-team-detail';
+    await processJob(lane, name, detail);
+    for (const item of await runs.findItems(data.runId)) {
+      if (item.status !== 'completed')
+        await runs.skipItem(data.runId, item.resourceType, item.resourceId, 'fixture sibling');
+    }
+    spyOn(
+      enqueue,
+      lane === 'team' ? 'enqueueUnderstatTeamFinalize' : 'enqueueUnderstatPlayerFinalize',
+    ).mockImplementation(async () => {
+      await sql`UPDATE ops.sync_runs SET status='completed' WHERE run_id=${data.runId}`;
+      throw new UnrecoverableError('finalizer enqueue response lost');
+    });
+    await expect(processJob(lane, name, detail)).rejects.toThrow('finalizer enqueue response lost');
+    expect((await runs.findRun(data.runId))!.status).toBe('completed');
+    expect(settle).not.toHaveBeenCalled();
+  });
+}
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} team metadata supersession requests fresh discovery at finalization`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    await processJob(lane, `understat-${lane}-discover`, data);
+    for (const item of await runs.findItems(data.runId)) {
+      if (item.status !== 'completed')
+        await runs.skipItem(data.runId, item.resourceType, item.resourceId, 'fixture sibling');
+    }
+    await sql`UPDATE understat.teams SET title='Corrected team',source_hash='corrected-team',updated_at=clock_timestamp() WHERE team_id=${offset + 83}`;
+    await expect(processJob(lane, `understat-${lane}-finalize`, data)).rejects.toThrow(
+      'team reference snapshot was superseded',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    await processJob(lane, `understat-${lane}-discover`, job());
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
+  });
+
+  test(`${lane} exhausted discovery fanout retires pending children and admits a fresh run`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    const fanout = spyOn(
+      enqueue,
+      lane === 'team' ? 'enqueueUnderstatTeamDetail' : 'enqueueUnderstatPlayerTeamDetail',
+    ).mockRejectedValue(new Error('queue unavailable'));
+    await expect(processJob(lane, `understat-${lane}-discover`, data, 2)).rejects.toThrow(
+      'queue unavailable',
+    );
+    expect((await runs.findItem(data.runId, 'league', 'EPL'))!.status).toBe('completed');
+    expect((await runs.findItems(data.runId)).some((item) => item.status === 'pending')).toBe(true);
+    expect((await runs.findRun(data.runId))!.status).toBe('failed');
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(settle.mock.calls[0]![0].nonRetryable).toBe(false);
+    fanout.mockResolvedValue(undefined as never);
+    await processJob(lane, `understat-${lane}-discover`, job());
+    expect(understatClient.getLeagueData).toHaveBeenCalledTimes(2);
+  });
+}
+
+for (const lane of ['team', 'player'] as const) {
+  test(`${lane} ambiguous fanout preserves a ready run and its accepted finalizer`, async () => {
+    const data = job();
+    const recovery = await import('../../src/services/understat-recovery.service');
+    const settle = spyOn(recovery, 'settleUnderstatObligationFailure').mockResolvedValue(
+      'retrying',
+    );
+    const finalize =
+      lane === 'team' ? 'enqueueUnderstatTeamFinalize' : 'enqueueUnderstatPlayerFinalize';
+    spyOn(
+      enqueue,
+      lane === 'team' ? 'enqueueUnderstatTeamDetail' : 'enqueueUnderstatPlayerTeamDetail',
+    ).mockImplementation(async () => {
+      await sql`UPDATE ops.sync_items SET status='skipped' WHERE run_id=${data.runId} AND resource_type<>'league'`;
+      await runs.refreshRun(data.runId);
+      await enqueue[finalize](data as never);
+      throw new Error('accepted child response lost');
+    });
+    await expect(processJob(lane, `understat-${lane}-discover`, data, 2)).rejects.toThrow(
+      'accepted child response lost',
+    );
+    expect((await runs.findRun(data.runId))!.status).toBe('ready_to_publish');
+    expect(settle).not.toHaveBeenCalled();
+    await processJob(lane, `understat-${lane}-finalize`, data);
+    expect((await runs.findRun(data.runId))!.status).toBe('completed');
+  });
+}

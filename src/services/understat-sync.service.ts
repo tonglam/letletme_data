@@ -10,7 +10,12 @@ import type {
   UnderstatTeamSeason,
   UnderstatTeamStatSplit,
 } from '../domain/understat';
-import { UNDERSTAT_SPLIT_DIMENSIONS, sourceYearFromSeason } from '../domain/understat';
+import {
+  UNDERSTAT_SPLIT_DIMENSIONS,
+  sourceYearFromSeason,
+  SupersededUnderstatDiscoveryError,
+} from '../domain/understat';
+export { SupersededUnderstatDiscoveryError } from '../domain/understat';
 import { getConfig } from '../utils/config';
 
 const LEAGUE_CARDINALITY: Readonly<Record<string, { teams: number; matches: number }>> = {
@@ -636,4 +641,32 @@ export function selectPlayerMatchIds(input: {
 
 export function teamById(teams: readonly UnderstatTeam[]): Map<number, UnderstatTeam> {
   return new Map(teams.map((team) => [team.id, team]));
+}
+
+export function understatMutationScopes(
+  lane: 'team' | 'player',
+  name: string,
+  season: string,
+  resourceId?: number,
+): string[] {
+  const scopes = ['understat:reference:all', `understat:reference:${season}`];
+  if (name.endsWith('-discover') || name.endsWith('-finalize')) return scopes;
+  return [...scopes, `understat:${lane}:${season}:${name}:${resourceId ?? 'unknown'}`];
+}
+
+export function assertUnderstatReferenceSnapshotCurrent(
+  incoming: readonly UnderstatMatch[],
+  persisted: readonly UnderstatMatch[],
+): void {
+  const currentById = new Map(persisted.map((match) => [match.id, match]));
+  for (const match of incoming) {
+    const current = currentById.get(match.id);
+    if (
+      current &&
+      current.sourceCheckedAt >= match.sourceCheckedAt &&
+      current.sourceHash !== match.sourceHash
+    ) {
+      throw new SupersededUnderstatDiscoveryError();
+    }
+  }
 }

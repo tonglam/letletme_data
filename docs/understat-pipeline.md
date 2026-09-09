@@ -65,8 +65,15 @@ jobs for seven days (maximum 500).
 | Team | `understat-team-sync` | `understat-team-discover`, `understat-team-detail`, `understat-team-finalize` |
 | Player | `understat-player-sync` | `understat-player-discover`, `understat-player-team-detail`, `understat-player-match`, `understat-player-finalize` |
 
-All Understat jobs take the provider-reference mutation scope. This serializes shared season/team/
-match mutations across both lanes and replicas. Detail jobs also take a resource-specific scope.
+Understat database phases take the provider-reference mutation scope. This serializes shared
+season/team/match mutations across both lanes and replicas. Detail phases also take a
+resource-specific scope. Discovery claims the active run and each item in a short transaction,
+then releases the scope before provider requests. Persistence reacquires the scope and checks the
+run status and item attempt before atomically committing facts and the item checkpoint. A stale
+response from a failed run or replaced attempt writes nothing. Provider observation time comes
+from the database clock; a changed, newer shared match reference rejects an older graph before
+derived rows can be mixed with it. Failure bookkeeping uses the same scopes. Queue fanout, finalizer enqueueing and Player State projections run only after commit;
+retries of completed items repeat the handoff without refetching the provider.
 
 When `UNDERSTAT_ENABLED=true`, the scheduler runs only incremental lanes on the UTC+8 staggered
 schedule: Team at 11:15 and Player at 12:15. Full and reconcile modes remain API/manual-only. A
