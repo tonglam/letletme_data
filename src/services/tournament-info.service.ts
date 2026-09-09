@@ -74,6 +74,16 @@ export async function syncTournamentInfo(
   });
   const errors = outcomes.filter((success) => !success).length;
 
+  if (errors > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament source-league names did not converge',
+      leagueRequests.length,
+      0,
+      leagueRequests.length - errors,
+      errors,
+    );
+  }
+
   const updates = tournaments
     .map((tournament) => {
       const key = `${tournament.leagueType}:${tournament.leagueId}`;
@@ -84,9 +94,15 @@ export async function syncTournamentInfo(
       if (fetchedName.trim() === tournament.sourceLeagueName?.trim()) {
         return null;
       }
-      return { id: tournament.id, sourceLeagueName: fetchedName };
+      return {
+        id: tournament.id,
+        sourceLeagueName: fetchedName,
+        leagueId: tournament.leagueId,
+        leagueType: tournament.leagueType,
+        expectedUpdatedAt: tournament.updatedAt,
+      };
     })
-    .filter((update): update is { id: number; sourceLeagueName: string } => Boolean(update));
+    .filter((update) => update !== null);
 
   const updated = await tournamentInfoRepository.updateSourceLeagueNames(season, updates);
   const skipped = tournaments.length - updated;
@@ -97,16 +113,6 @@ export async function syncTournamentInfo(
     skipped,
     errors,
   });
-
-  if (errors > 0) {
-    throw new IncompleteDataSyncError(
-      'Tournament source-league names did not converge',
-      leagueRequests.length,
-      0,
-      leagueRequests.length - errors,
-      errors,
-    );
-  }
 
   return {
     total: tournaments.length,

@@ -31,6 +31,7 @@ import type {
 } from '../domain/tournament';
 import { ConflictError, DatabaseError, ValidationError } from '../utils/errors';
 import { logError } from '../utils/logger';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 type TournamentStorage = typeof tournamentsInCompetition.$inferSelect;
 
@@ -99,6 +100,7 @@ export interface TournamentInfoSummary {
 }
 
 export interface TournamentInfoNameSummary {
+  updatedAt: string;
   id: number;
   name: string;
   sourceLeagueName: string | null;
@@ -228,6 +230,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
             sourceLeagueName: tournamentsInCompetition.sourceLeagueName,
             leagueId: tournamentsInCompetition.leagueId,
             leagueType: tournamentsInCompetition.leagueType,
+            updatedAt: sql<string>`${tournamentsInCompetition.updatedAt}::text`,
           })
           .from(tournamentsInCompetition)
           .where(eq(tournamentsInCompetition.seasonId, season.seasonId));
@@ -246,26 +249,46 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
 
     updateSourceLeagueNames: async (
       season: FplSeasonRef,
-      updates: Array<{ id: number; sourceLeagueName: string }>,
+      updates: Array<{
+        id: number;
+        sourceLeagueName: string;
+        leagueId: number;
+        leagueType: LeagueType;
+        expectedUpdatedAt: string;
+      }>,
     ): Promise<number> => {
       if (updates.length === 0) return 0;
 
       try {
-        const db = await getDbInstance();
-        const payload = JSON.stringify(updates);
-        const rows = (await db.execute(sql`
-          UPDATE ${tournamentsInCompetition} AS tournament
-          SET source_league_name = data.source_league_name,
-              updated_at = clock_timestamp()
-          FROM jsonb_to_recordset(${payload}::jsonb) AS data(
-            id int,
-            source_league_name text
-          )
-          WHERE tournament.season_id = ${season.seasonId}
-            AND tournament.tournament_id = data.id
-          RETURNING tournament.tournament_id
-        `)) as unknown as Array<{ tournamentId: number }>;
-        return rows.length;
+        const persist = async () => {
+          const db = await getDbInstance();
+          const payload = JSON.stringify(updates);
+          const rows = (await db.execute(sql`
+            UPDATE ${tournamentsInCompetition} AS tournament
+            SET source_league_name = data."sourceLeagueName",
+                updated_at = clock_timestamp()
+            FROM jsonb_to_recordset(${payload}::jsonb) AS data(
+              id int, "sourceLeagueName" text, "leagueId" int,
+              "leagueType" text, "expectedUpdatedAt" timestamptz
+            )
+            WHERE tournament.season_id = ${season.seasonId}
+              AND tournament.tournament_id = data.id
+              AND tournament.league_id = data."leagueId"
+              AND tournament.league_type::text = data."leagueType"
+              AND tournament.updated_at = data."expectedUpdatedAt"
+            RETURNING tournament.tournament_id
+          `)) as unknown as Array<{ tournamentId: number }>;
+          return rows.length;
+        };
+        if (dbInstance) return await persist();
+        return await withMutationScopes(
+          {
+            queueName: 'tournament-sync',
+            jobName: 'tournament-info',
+            scopes: ['tournament-info:all'],
+          },
+          persist,
+        );
       } catch (error) {
         logError('Failed to update tournament source league names', error, {
           season: season.seasonCode,

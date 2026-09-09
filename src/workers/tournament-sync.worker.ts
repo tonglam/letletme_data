@@ -785,11 +785,13 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
           // performs setup enqueueing after that commit. Do not wrap it in a
           // second outer transaction that would hold the scope through the queue
           // handoff. Cup likewise fetches first, then owns its version-fenced
-          // database-only event publication transaction.
+          // database-only event publication transaction. Tournament info likewise
+          // fetches first and fences its short name update in the repository.
           if (
             job.name === TOURNAMENT_JOBS.ROSTER_SYNC ||
             job.name === TOURNAMENT_JOBS.ROSTER_RECONCILE ||
-            job.name === TOURNAMENT_JOBS.CUP_RESULTS
+            job.name === TOURNAMENT_JOBS.CUP_RESULTS ||
+            job.name === TOURNAMENT_JOBS.INFO
           ) {
             const unscoped = await runMutation();
             if (unscoped.afterCommit) await unscoped.afterCommit();
