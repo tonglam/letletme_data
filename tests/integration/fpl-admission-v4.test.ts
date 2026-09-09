@@ -62,7 +62,7 @@ function spawnContender(priority: 'deadline-critical' | 'live' | 'bulk') {
     while (!(await redis.get(prefix + ':gate'))) await Bun.sleep(5);
     const lease = await acquireFplRequest(priority, { deadlineAt: Date.now() + 5000 });
     const grantedAt = Date.now();
-    console.log(JSON.stringify({ priority, grantedAt }));
+    console.log('FPL_ADMISSION_RESULT ' + JSON.stringify({ priority, grantedAt }));
     await Bun.sleep(50);
     await lease.release();
     await queueRedisSingleton.disconnect();
@@ -91,10 +91,12 @@ async function childResult(child: ReturnType<typeof spawnContender>) {
     .trim()
     .split('\n')
     .map((value) => value.trim())
-    .filter(Boolean)
-    .at(-1);
+    .find((value) => value.startsWith('FPL_ADMISSION_RESULT '));
   if (!line) throw new Error(`Admission contender returned no result: ${stderr}`);
-  return JSON.parse(line) as { priority: string; grantedAt: number };
+  return JSON.parse(line.slice('FPL_ADMISSION_RESULT '.length)) as {
+    priority: string;
+    grantedAt: number;
+  };
 }
 
 describe('distributed FPL admission v4', () => {
