@@ -95,6 +95,7 @@ type ManualResumeQueueProbe = {
   setupPhase: string | null;
   state: string | null;
   rosterMode: string | null;
+  queueProbeFailed: boolean;
   reconcileJob: Awaited<ReturnType<typeof findTournamentRosterReconcileJob>>;
   setupJob: Awaited<ReturnType<typeof findTournamentSetupJob>>;
 };
@@ -105,6 +106,22 @@ async function probeManualResumeQueue(
 ): Promise<ManualResumeQueueProbe | null> {
   const roster = await tournamentRosterRepository.findById(season, tournamentId);
   if (!roster) return null;
+  const snapshot = (
+    queueProbeFailed: boolean,
+    reconcileJob: Awaited<ReturnType<typeof findTournamentRosterReconcileJob>> = null,
+    setupJob: Awaited<ReturnType<typeof findTournamentSetupJob>> = null,
+  ): ManualResumeQueueProbe => ({
+    executionId: roster.executionId,
+    setupProgressUpdatedAt: roster.setupProgressUpdatedAt,
+    rosterSyncStatus: roster.rosterSyncStatus,
+    setupStatus: roster.setupStatus,
+    setupPhase: roster.setupPhase,
+    state: roster.state,
+    rosterMode: roster.rosterMode,
+    queueProbeFailed,
+    reconcileJob,
+    setupJob,
+  });
   const resumePending =
     roster.rosterMode === 'official_sync' &&
     roster.state === 'inactive' &&
@@ -116,38 +133,27 @@ async function probeManualResumeQueue(
       roster.setupPhase === 'failed' ||
       roster.setupStatus === 'processing');
   if (!resumePending) {
-    return {
-      executionId: roster.executionId,
-      setupProgressUpdatedAt: roster.setupProgressUpdatedAt,
-      rosterSyncStatus: roster.rosterSyncStatus,
-      setupStatus: roster.setupStatus,
-      setupPhase: roster.setupPhase,
-      state: roster.state,
-      rosterMode: roster.rosterMode,
-      reconcileJob: null,
-      setupJob: null,
-    };
+    return snapshot(false);
   }
-  const [reconcileJob, setupJob] = await Promise.all([
-    findTournamentRosterReconcileJob(
-      season,
-      tournamentId,
-      true,
-      roster.setupProgressUpdatedAt ?? undefined,
-    ),
-    findTournamentSetupJob(season, tournamentId, roster.setupProgressUpdatedAt),
-  ]);
-  return {
-    executionId: roster.executionId,
-    setupProgressUpdatedAt: roster.setupProgressUpdatedAt,
-    rosterSyncStatus: roster.rosterSyncStatus,
-    setupStatus: roster.setupStatus,
-    setupPhase: roster.setupPhase,
-    state: roster.state,
-    rosterMode: roster.rosterMode,
-    reconcileJob,
-    setupJob,
-  };
+  const mayNeedQueueProbe =
+    roster.setupStatus === 'failed' ||
+    (roster.setupStatus === 'processing' && roster.setupPhase === 'queued');
+  if (!mayNeedQueueProbe) return snapshot(false);
+  try {
+    const [reconcileJob, setupJob] = await Promise.all([
+      findTournamentRosterReconcileJob(
+        season,
+        tournamentId,
+        true,
+        roster.setupProgressUpdatedAt ?? undefined,
+      ),
+      findTournamentSetupJob(season, tournamentId, roster.setupProgressUpdatedAt),
+    ]);
+    return snapshot(false, reconcileJob, setupJob);
+  } catch (error) {
+    logError('Failed to probe tournament resume queues', error, { tournamentId });
+    return snapshot(true);
+  }
 }
 
 export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>): Promise<void> {
@@ -242,6 +248,13 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
               // queue job is visible. Unmarked work can recover only a
               // terminal setup failure or a deliberately prepared manual
               // retry whose marker was committed before enqueue.
+              if (manualResumeQueueProbe?.queueProbeFailed) {
+                logInfo('Ignoring manual setup retry because resume queue probe failed', {
+                  tournamentId: job.data.tournamentId,
+                  jobId: job.id,
+                });
+                return null;
+              }
               const preparedManualRetry =
                 job.data.source === 'manual' &&
                 (roster.rosterSyncStatus === 'failed' ||
