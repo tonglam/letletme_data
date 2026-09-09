@@ -1,6 +1,7 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   resolveMutationScopes,
+  tournamentEntryCoreScopes,
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
@@ -180,11 +181,14 @@ async function repairTournamentSetupIssuePrepared(
             jobName: 'selection-insights',
             tournamentId: issue.tournamentId,
             eventId,
-            scopes: resolveMutationScopes({
-              queueName: 'tournament-sync',
-              jobName: 'tournament-selection-stats',
-              eventId,
-            }),
+            scopes: [
+              ...resolveMutationScopes({
+                queueName: 'tournament-sync',
+                jobName: 'tournament-selection-stats',
+                eventId,
+              }),
+              ...tournamentEntryCoreScopes(season.seasonId, allEntryIds),
+            ],
           },
           () =>
             syncTournamentSelectionStats(season, eventId, {
