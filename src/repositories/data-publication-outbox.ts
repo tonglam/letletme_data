@@ -136,6 +136,13 @@ async function loadPreparedPublication(
     })
     .from(datasetPublicationItemsInOps)
     .where(eq(datasetPublicationItemsInOps.publicationId, publicationId));
+  const manifestNames = new Set(manifest.items.map((item) => item.name));
+  if (
+    rows.length !== manifest.items.length ||
+    rows.some((row) => !manifestNames.has(row.itemName))
+  ) {
+    throw new Error(`Publication ${publicationId} item set does not match its manifest`);
+  }
   const items: DataPublicationDeliveryItem[] = [];
   for (const itemManifest of manifest.items) {
     const row = rows.find((candidate) => candidate.itemName === itemManifest.name);

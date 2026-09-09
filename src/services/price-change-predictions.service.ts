@@ -1100,31 +1100,34 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
   // cache helper validates every sibling before returning, so a partial board
   // cannot create a scheduler obligation.
   const redisPublication = await readActiveDataPublicationItems(scope, ['context']);
-  let canonicalManifest: Awaited<
-    ReturnType<typeof syncOperationsRepository.findActivePublicationManifest>
-  > = null;
-  try {
-    // The identity query is intentionally metadata-only. It fences a valid but
-    // stale Redis pointer while avoiding the large publication-item join that
-    // caused the scheduler timeout incident.
-    canonicalManifest = await syncOperationsRepository.findActivePublicationManifest(
-      PRICE_CHANGE_DATASET,
-      season,
-    );
-  } catch {
-    // Keep the Redis result untrusted when the durable identity cannot be
-    // established. The fallback below will fail closed if PostgreSQL is also
-    // unavailable instead of scheduling from an unknown revision.
-  }
+  if (redisPublication) {
+    let canonicalManifest: Awaited<
+      ReturnType<typeof syncOperationsRepository.findActivePublicationManifest>
+    > = null;
+    try {
+      // The identity query is intentionally metadata-only. It fences a valid but
+      // stale Redis pointer while avoiding the large publication-item join that
+      // caused the scheduler timeout incident. Do not spend another database
+      // query when the Redis read already failed; the durable fallback below is
+      // the only useful path in that case.
+      canonicalManifest = await syncOperationsRepository.findActivePublicationManifest(
+        PRICE_CHANGE_DATASET,
+        season,
+      );
+    } catch {
+      // Keep the Redis result untrusted when the durable identity cannot be
+      // established. The fallback below will fail closed if PostgreSQL is also
+      // unavailable instead of scheduling from an unknown revision.
+    }
 
-  if (
-    redisPublication &&
-    canonicalManifest &&
-    redisPublication.manifest.publicationId === canonicalManifest.publicationId &&
-    redisPublication.manifest.revision === canonicalManifest.revision
-  ) {
-    const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
-    if (deadlines) return deadlines;
+    if (
+      canonicalManifest &&
+      redisPublication.manifest.publicationId === canonicalManifest.publicationId &&
+      redisPublication.manifest.revision === canonicalManifest.revision
+    ) {
+      const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
+      if (deadlines) return deadlines;
+    }
   }
 
   // Redis is the normal path, but the durable row is the source of truth while

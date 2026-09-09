@@ -1,12 +1,14 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
 assertIntegrationEnv();
 
-import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import postgres from 'postgres';
 import Redis from 'ioredis';
 import { activeDataPublicationKey, prepareDataPublication } from '../../src/cache/data-publication';
 import { databaseSingleton } from '../../src/db/singleton';
 import { loadActivePriceChangeContext } from '../../src/repositories/data-publication-outbox';
+import { syncOperationsRepository } from '../../src/repositories/sync-operations';
 import { getPriceChangeWatchDeadlines } from '../../src/services/price-change-predictions.service';
 
 const db = postgres(process.env.DATABASE_URL!, { max: 1 });
@@ -92,10 +94,34 @@ test('falls back to durable context when the active Redis publication is unavail
     ...prepared.items.map((item) => item.manifest.key),
   );
 
-  await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
-    status: 'READY',
-    nextDeadlines: context.nextDeadlines,
-  });
+  const identity = spyOn(
+    syncOperationsRepository,
+    'findActivePublicationManifest',
+  ).mockRejectedValue(new Error('identity query must not run after a Redis failure'));
+  try {
+    await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
+      status: 'READY',
+      nextDeadlines: context.nextDeadlines,
+    });
+    expect(identity).not.toHaveBeenCalled();
+  } finally {
+    identity.mockRestore();
+  }
+});
+
+test('rejects extra durable publication items outside the manifest', async () => {
+  const payload = '{}';
+  await db`INSERT INTO ops.dataset_publication_items
+    (publication_id, item_name, payload, item_count, checksum)
+    VALUES (
+      ${publicationId},
+      'eventLive',
+      ${db.json({})},
+      0,
+      ${createHash('sha256').update(payload, 'utf8').digest('hex')}
+    )`;
+
+  expect(await loadActivePriceChangeContext(season)).toBeNull();
 });
 
 test('falls back to the canonical revision when Redis still points at the previous one', async () => {
