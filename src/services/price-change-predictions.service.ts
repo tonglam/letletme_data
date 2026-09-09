@@ -19,6 +19,7 @@ import {
   syncOperationsRepository,
 } from '../repositories/sync-operations';
 import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
+import { canonicalJson } from '../utils/content-hash';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import { formatCronCalendarDate } from '../utils/timezone';
@@ -1122,8 +1123,7 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
 
     if (
       canonicalManifest &&
-      redisPublication.manifest.publicationId === canonicalManifest.publicationId &&
-      redisPublication.manifest.revision === canonicalManifest.revision
+      canonicalJson(redisPublication.manifest) === canonicalJson(canonicalManifest)
     ) {
       const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
       // This Redis publication is already fenced to the canonical durable

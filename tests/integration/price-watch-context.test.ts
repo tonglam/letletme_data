@@ -165,7 +165,37 @@ test('falls back when a Redis publication sibling is missing', async () => {
   });
 });
 
-test('does not reload durable players after a canonical Redis context is unusable', async () => {
+test('falls back when a same-identity Redis publication has different item proofs', async () => {
+  const alteredContext = {
+    ...context,
+    deadline: '2093-08-22T02:30:00.000Z',
+    nextDeadlines: ['2093-08-22T02:30:00.000Z'],
+  };
+  const altered = prepareDataPublication({
+    ...season,
+    dataset: 'fpl:price-changes',
+    revision: prepared.manifest.revision,
+    publicationId,
+    sourceCheckedAt: now,
+    state: 'active',
+    items: [
+      { name: 'context', value: alteredContext },
+      { name: 'players', value: [{ unused: 'x'.repeat(400000) }] },
+    ],
+  });
+  await redis.set(
+    activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
+    JSON.stringify({ ...altered.manifest, publishedAt: prepared.manifest.publishedAt }),
+  );
+  await Promise.all(altered.items.map((item) => redis.set(item.manifest.key, item.payload)));
+
+  await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
+    status: 'READY',
+    nextDeadlines: context.nextDeadlines,
+  });
+});
+
+test('falls back when a canonical Redis context is semantically unusable', async () => {
   const invalidContext = { ...context, unexpected: true };
   const invalid = prepareDataPublication({
     ...season,
@@ -185,7 +215,10 @@ test('does not reload durable players after a canonical Redis context is unusabl
   );
   await Promise.all(invalid.items.map((item) => redis.set(item.manifest.key, item.payload)));
 
-  expect(await getPriceChangeWatchDeadlines(season, now)).toBeNull();
+  await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
+    status: 'READY',
+    nextDeadlines: context.nextDeadlines,
+  });
 });
 
 test('rejects a Redis pointer whose manifest identity disagrees with database columns', async () => {
