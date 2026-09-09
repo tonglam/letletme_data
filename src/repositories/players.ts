@@ -3,6 +3,7 @@ import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { playersInFpl, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -111,26 +112,34 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
           sql.raw(' '),
         )} ELSE ${playersInFpl.price} END`;
 
-        const db = await getDbInstance();
-        const sourceCheckedAtIso = sourceCheckedAt.toISOString();
-        const updated = await db
-          .update(playersInFpl)
-          .set({
-            price: priceExpression,
-            priceSourceCheckedAt: sourceCheckedAt,
-            updatedAt: sql`NOW()`,
-          })
-          .where(
-            and(
-              inArray(playersInFpl.elementId, elementIds),
-              eq(playersInFpl.seasonId, season.seasonId),
-              sql`(
+        const persist = async () => {
+          const db = await getDbInstance();
+          const sourceCheckedAtIso = sourceCheckedAt.toISOString();
+          return db
+            .update(playersInFpl)
+            .set({
+              price: priceExpression,
+              priceSourceCheckedAt: sourceCheckedAt,
+              updatedAt: sql`NOW()`,
+            })
+            .where(
+              and(
+                inArray(playersInFpl.elementId, elementIds),
+                eq(playersInFpl.seasonId, season.seasonId),
+                sql`(
                 ${playersInFpl.priceSourceCheckedAt} IS NULL OR
                 ${playersInFpl.priceSourceCheckedAt} <= ${sourceCheckedAtIso}::timestamptz
               )`,
-            ),
-          )
-          .returning();
+              ),
+            )
+            .returning();
+        };
+        const updated = dbInstance
+          ? await persist()
+          : await withMutationScopes(
+              { queueName: 'data-sync', jobName: 'player-prices', scopes: ['data-core:players'] },
+              persist,
+            );
 
         const mappedPlayers = updated.map(mapDbPlayerToDomain);
         logInfo('Batch updated player prices', { count: mappedPlayers.length });

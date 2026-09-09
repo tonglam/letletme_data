@@ -9,8 +9,9 @@ import {
   seasonsInFpl,
   type DbPlayerStatInsert,
 } from '../db/schemas/index.schema';
-import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { withMutationScopes } from '../utils/mutation-scopes';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -508,10 +509,12 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
       };
 
       try {
-        const db = await getDbInstance();
         const result = dbInstance
-          ? await persist(db)
-          : await (db as DbHandle).transaction((transaction) => persist(transaction));
+          ? await persist(dbInstance)
+          : await withMutationScopes(
+              { queueName: 'data-sync', jobName: 'player-stats', scopes: ['data-core:players'] },
+              async () => persist(await getDb()),
+            );
         logInfo('Player stats snapshot replaced and published', {
           season: season.seasonCode,
           eventId,
