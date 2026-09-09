@@ -1,5 +1,4 @@
 import {
-  tournamentEntryCoreScopes,
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
@@ -17,7 +16,10 @@ import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
-import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import {
+  tournamentInfoRepository,
+  type TournamentSetupExecution,
+} from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { tournamentSetupIssueRepository } from '../repositories/tournament-setup-issues';
 import { NotFoundError } from '../utils/errors';
@@ -25,6 +27,7 @@ import { getFplRequestMetricsSnapshot } from '../utils/fpl-request-metrics';
 import { getJobLogContext } from '../utils/job-log-context';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
+import { withTournamentSetupPhase } from '../utils/tournament-setup-execution';
 import { runCompatibilitySchedulerPass } from '../scheduler/scheduler.service';
 import {
   reserveSchedulerObligation,
@@ -128,25 +131,27 @@ export async function finalizePublishedTournamentSetup(
   // after setup becomes READY. The targeted worker reconciles all eligible
   // historical events for this tournament in one bounded batch; the global
   // five-minute scan remains the durable safety net.
-  try {
-    await enqueueTournamentReview(season, 'api', {
-      tournamentId,
-      attempts: 3,
-      backoffDelayMs: 60_000,
-      deduplicationId: `tournament-review-bootstrap-${season.seasonCode}-${tournamentId}`,
-    });
-  } catch (error) {
-    logError('Failed to enqueue targeted tournament review bootstrap', error, {
-      tournamentId,
-      season: season.seasonCode,
-    });
-  }
+  registerDatabasePostCommit(async () => {
+    try {
+      await enqueueTournamentReview(season, 'api', {
+        tournamentId,
+        attempts: 3,
+        backoffDelayMs: 60_000,
+        deduplicationId: `tournament-review-bootstrap-${season.seasonCode}-${tournamentId}`,
+      });
+    } catch (error) {
+      logError('Failed to enqueue targeted tournament review bootstrap', error, {
+        tournamentId,
+        season: season.seasonCode,
+      });
+    }
+  });
 }
 
 export async function setupTournamentStructure(
   season: FplSeasonRef,
   tournamentId: number,
-  options?: { resumeMarker?: string; attempt?: number },
+  options?: { resumeMarker?: string; execution?: TournamentSetupExecution },
 ): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
@@ -242,29 +247,63 @@ export async function setupTournamentStructure(
   let standingsPublished = false;
   let transactionAborted = false;
   const progressMarker = options?.resumeMarker;
+  let execution: TournamentSetupExecution;
+  const runPhase = <T>(phase: string, scopes: readonly string[], operation: () => Promise<T>) =>
+    withTournamentSetupPhase(season, tournamentId, execution, phase, scopes, operation);
   const markSetupProgress = (
     phase: TournamentSetupPhase,
     completedUnits: number,
     totalUnits: number,
     progressIndeterminate = false,
   ) =>
-    tournamentInfoRepository.markSetupProgress(
-      season,
-      tournamentId,
-      phase,
-      completedUnits,
-      totalUnits,
-      progressMarker,
-      progressIndeterminate,
+    runPhase(phase, [], () =>
+      tournamentInfoRepository.markSetupProgress(
+        season,
+        tournamentId,
+        phase,
+        completedUnits,
+        totalUnits,
+        progressMarker,
+        progressIndeterminate,
+      ),
     );
 
+  let targetEventId = 0;
+  const reserveRefresh = async () => {
+    const materializedViewsRefreshObligation: SchedulerObligation =
+      await reserveSchedulerObligation({
+        definition: {
+          name: 'tournament-materialized-views-refresh',
+          cadence: 'after tournament setup commit or cascade barrier',
+          timezone: 'UTC',
+          queueName: 'tournament-sync',
+        },
+        plan: {
+          scopeKey: `${season.seasonCode}:tournament:${tournamentId}`,
+          periodKey: `setup-${tournamentId}-${targetEventId}`,
+          dueAt: new Date(),
+          source: 'reconcile',
+          eventId: targetEventId,
+          evidence: { tournamentId, setupRefresh: true },
+        },
+      });
+    registerDatabasePostCommit(async () => {
+      // The durable row is the source of truth. This pass only attempts
+      // delivery after commit; a failed pass leaves the row pending for the
+      // next scheduler tick and therefore remains retryable.
+      const delivery = await runCompatibilitySchedulerPass();
+      logInfo('Requested scheduler delivery for tournament materialized-view refresh', {
+        tournamentId,
+        eventId: targetEventId,
+        obligationId: materializedViewsRefreshObligation.obligationId,
+        delivery,
+      });
+    });
+  };
+
   try {
-    await tournamentInfoRepository.markSetupProcessing(
-      season,
-      tournamentId,
-      progressMarker,
-      options?.attempt,
-    );
+    if (!options?.execution) throw new Error('Tournament setup requires a claimed execution');
+    execution = options.execution;
     const setupIssues: TournamentSetupIssue[] = [];
     const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
       season,
@@ -275,28 +314,18 @@ export async function setupTournamentStructure(
     const finalizedEvent = await eventRepository.findLatestFinalized(season);
     const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
     eventCount = window ? window.endEventId - window.startEventId + 1 : 0;
-    const targetEventId = window?.endEventId ?? 0;
+    targetEventId = window?.endEventId ?? 0;
     let phaseStartedAtMs = performance.now();
 
-    // Entry FPL sync: entry-core only — do NOT hold tournament-structure:global
-    // across potentially long external HTTP (FP-07 Codex P1).
-    const entrySyncIssues = await withMutationScopes(
-      {
-        queueName: 'tournament-setup',
-        jobName: 'tournament-setup',
-        tournamentId,
-        scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
+    // Entry provider reads run outside the per-entry canonical persistence scope.
+    const entrySyncIssues = await syncTournamentEntryDetails(season, entryIds, {
+      targetEventId,
+      onPlan: async (plan) => {
+        entryPlan = plan;
+        await markSetupProgress('syncing_entries', 0, plan.requestedEntries);
       },
-      () =>
-        syncTournamentEntryDetails(season, entryIds, {
-          targetEventId,
-          onPlan: async (plan) => {
-            entryPlan = plan;
-            await markSetupProgress('syncing_entries', 0, plan.requestedEntries);
-          },
-          onProgress: (completed, total) => markSetupProgress('syncing_entries', completed, total),
-        }),
-    );
+      onProgress: (completed, total) => markSetupProgress('syncing_entries', completed, total),
+    });
     setupIssues.push(...entrySyncIssues);
     phaseDurationsMs.syncing_entries = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
@@ -325,14 +354,8 @@ export async function setupTournamentStructure(
     );
 
     // Structure rebuild: per-tournament + global (C4 mutual exclusion with results).
-    await withMutationScopes(
-      {
-        queueName: 'tournament-setup',
-        jobName: 'tournament-setup',
-        tournamentId,
-        scopes: tournamentSetupRebuildScopes(tournamentId),
-      },
-      () => rebuildTournamentStructure(season, tournament, entrySeeds),
+    await runPhase('building_structure', tournamentSetupRebuildScopes(tournamentId), () =>
+      rebuildTournamentStructure(season, tournament, entrySeeds),
     );
     await markSetupProgress('building_structure', 1, 1);
     phaseDurationsMs.building_structure = Math.round(performance.now() - phaseStartedAtMs);
@@ -350,6 +373,7 @@ export async function setupTournamentStructure(
       // score fallback without allowing live points to become results.
       await syncOfficialH2HTournament(season, tournament, undefined, {
         finalizedThroughEventId: finalizedEvent?.id ?? null,
+        setupExecution: execution,
       });
     }
 
@@ -405,13 +429,16 @@ export async function setupTournamentStructure(
           corePlan.missingPairs + completed,
           corePlan.missingPairs + eventCount,
         ),
+      execution,
     );
     const coreAudit = await auditTournamentSetup(season, tournament, window);
     const blockingCoreIssues = coreAudit.issues.filter(isBlockingCoreAuditIssue);
     if (blockingCoreIssues.length > 0) {
       throw new Error(`Core tournament audit failed: ${blockingCoreIssues.join('; ')}`);
     }
-    await tournamentInfoRepository.markStandingsReady(season, tournamentId, progressMarker);
+    await runPhase('publish_standings', [], () =>
+      tournamentInfoRepository.markStandingsReady(season, tournamentId, progressMarker),
+    );
     standingsPublished = true;
     phaseDurationsMs.calculating_standings = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
@@ -426,6 +453,7 @@ export async function setupTournamentStructure(
     await markSetupProgress('enriching_history', 0, 0, true);
     setupIssues.push(
       ...(await enrichTournamentHistory(season, tournamentId, entryIds, window, {
+        setupExecution: execution,
         onPlan: (plan) => {
           enrichmentPlan = plan;
         },
@@ -470,49 +498,22 @@ export async function setupTournamentStructure(
     );
     setupIssues.push(...auditIssues);
     const persistedIssues = setupIssues.map(normalizeTournamentSetupIssue);
-    const issueState = await tournamentSetupIssueRepository.sync(
-      season,
-      tournamentId,
-      persistedIssues,
-    );
-    const unresolvedIssues = await tournamentSetupIssueRepository.listUnresolved(
-      season,
-      tournamentId,
-    );
-    await Promise.all(unresolvedIssues.map((issue) => enqueueTournamentRepair(season, issue)));
-    await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
-    // Persist the refresh obligation inside the same lifecycle transaction as
-    // the setup publication. If queue delivery fails after commit, the
-    // standalone scheduler can still claim this durable pending row; no
-    // post-commit callback is allowed to be the only copy of the work.
-    const materializedViewsRefreshObligation: SchedulerObligation =
-      await reserveSchedulerObligation({
-        definition: {
-          name: 'tournament-materialized-views-refresh',
-          cadence: 'after tournament setup commit or cascade barrier',
-          timezone: 'UTC',
-          queueName: 'tournament-sync',
-        },
-        plan: {
-          scopeKey: `${season.seasonCode}:tournament:${tournamentId}`,
-          periodKey: `setup-${tournamentId}-${targetEventId}`,
-          dueAt: new Date(),
-          source: 'reconcile',
-          eventId: targetEventId,
-          evidence: { tournamentId, setupRefresh: true },
-        },
-      });
-    registerDatabasePostCommit(async () => {
-      // The durable row is the source of truth. This pass only attempts
-      // delivery after commit; a failed pass leaves the row pending for the
-      // next scheduler tick and therefore remains retryable.
-      const delivery = await runCompatibilitySchedulerPass();
-      logInfo('Requested scheduler delivery for tournament materialized-view refresh', {
+    const warningCount = await runPhase('publish_ready', [], async () => {
+      const issueState = await tournamentSetupIssueRepository.sync(
+        season,
         tournamentId,
-        eventId: targetEventId,
-        obligationId: materializedViewsRefreshObligation.obligationId,
-        delivery,
+        persistedIssues,
+      );
+      await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
+      await reserveRefresh();
+      registerDatabasePostCommit(async () => {
+        const unresolvedIssues = await tournamentSetupIssueRepository.listUnresolved(
+          season,
+          tournamentId,
+        );
+        await Promise.all(unresolvedIssues.map((issue) => enqueueTournamentRepair(season, issue)));
       });
+      return issueState.warningCount;
     });
     outcome = setupIssues.length > 0 ? 'ready_with_warnings' : 'ready';
     logInfo('Tournament setup completed', {
@@ -520,7 +521,7 @@ export async function setupTournamentStructure(
       backfillStartEventId: window?.startEventId ?? null,
       backfillEndEventId: window?.endEventId ?? null,
       warnings: setupIssues.length,
-      warningCount: issueState.warningCount,
+      warningCount,
       durationMs: Math.round(performance.now() - setupStartedAtMs),
     });
   } catch (error) {
@@ -532,16 +533,23 @@ export async function setupTournamentStructure(
       durationMs: Math.round(performance.now() - setupStartedAtMs),
       standingsPublished,
     });
-    if (standingsPublished && !transactionAborted) {
-      const issueState = await tournamentSetupIssueRepository.sync(season, tournamentId, [
-        normalizeTournamentSetupIssue({
-          scope: 'event-results',
-          message,
-          failedEntries: setupEntryIds,
-          diagnosticCode: failureCode,
-        }),
-      ]);
-      await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
+    if (
+      standingsPublished &&
+      !transactionAborted &&
+      failureCode !== 'TOURNAMENT_SETUP_EXECUTION_STALE'
+    ) {
+      await runPhase('publish_ready_with_warnings', [], async () => {
+        const issueState = await tournamentSetupIssueRepository.sync(season, tournamentId, [
+          normalizeTournamentSetupIssue({
+            scope: 'event-results',
+            message,
+            failedEntries: setupEntryIds,
+            diagnosticCode: failureCode,
+          }),
+        ]);
+        await finalizePublishedTournamentSetup(season, tournamentId, issueState.warningCount);
+        await reserveRefresh();
+      });
       outcome = 'ready_with_warnings';
       return;
     }

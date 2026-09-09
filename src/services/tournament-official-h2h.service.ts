@@ -1,3 +1,6 @@
+import type { TournamentSetupExecution } from '../repositories/tournament-infos';
+import { withTournamentSetupPhase } from '../utils/tournament-setup-execution';
+import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import type { RawFPLLeagueH2HMatch, RawFPLLeagueStandingsResult } from '../clients/fpl';
 import { fplClient } from '../clients/fpl';
 import type {
@@ -80,6 +83,7 @@ export type OfficialH2HSourceSnapshot = {
 };
 
 export type OfficialH2HSyncOptions = {
+  setupExecution?: TournamentSetupExecution;
   /** Allow score fallback for matches at or before a finalized event. */
   finalizedThroughEventId?: number | null;
   /**
@@ -1337,15 +1341,26 @@ export async function syncOfficialH2HTournament(
     totalsByEntry,
     snapshot.sourceCheckedAt ?? checkedAt,
   );
-  const published = await tournamentOfficialH2HRepository.publish(season, tournament.id, {
-    ...officialRows,
-    checkedAt,
-    lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
-    groupRows,
-    fetchedOfficialMatchIds: fetched.matches.map((match) => match.id),
-    pageManifests: snapshot.pageManifests,
-    fullReconcile: options.forceFull === true,
-  });
+  const publish = () =>
+    tournamentOfficialH2HRepository.publish(season, tournament.id, {
+      ...officialRows,
+      checkedAt,
+      lockSchedule: scoringSnapshot.matches.some((match) => !isOfficialKnockoutMatch(match)),
+      groupRows,
+      fetchedOfficialMatchIds: fetched.matches.map((match) => match.id),
+      pageManifests: snapshot.pageManifests,
+      fullReconcile: options.forceFull === true,
+    });
+  const published = options.setupExecution
+    ? await withTournamentSetupPhase(
+        season,
+        tournament.id,
+        options.setupExecution,
+        'official_h2h_publish',
+        tournamentSetupRebuildScopes(tournament.id),
+        publish,
+      )
+    : await publish();
 
   logInfo('Official H2H strategy completed', {
     tournamentId: tournament.id,

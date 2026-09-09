@@ -31,7 +31,10 @@ import { syncTournamentEventCupResults } from '../services/tournament-event-cup-
 import { syncTournamentEventPicks } from '../services/tournament-event-picks.service';
 import { syncTournamentInfo } from '../services/tournament-info.service';
 import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
-import { syncTournamentSelectionStats } from '../services/tournament-selection-stats.service';
+import {
+  syncTournamentSelectionStats,
+  refreshTournamentSelectionStatsMaterializedView,
+} from '../services/tournament-selection-stats.service';
 import { eventRepository } from '../repositories/events';
 import {
   finishTournamentsThroughEvent,
@@ -675,6 +678,11 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 return { value: await syncTournamentEventPicks(season, eventId) };
 
               case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
+                // Setup publishes scoped Trends rows before READY. Its durable
+                // obligation owns both global reporting refreshes afterwards.
+                if (job.data.tournamentId) {
+                  await refreshTournamentSelectionStatsMaterializedView();
+                }
                 return {
                   value: await finalizeTournamentEventLifecycle(eventId, {
                     ...tournamentEventFinalizationDependencies(season, finalizationTargets),

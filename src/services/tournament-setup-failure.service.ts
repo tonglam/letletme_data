@@ -8,6 +8,7 @@ import type { TournamentSetupJobData } from '../queues/tournament-setup.queue';
 import {
   tournamentInfoRepository,
   type TournamentSetupAttemptFailure,
+  type TournamentSetupExecution,
   type TournamentSetupStatusRow,
 } from '../repositories/tournament-infos';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -69,13 +70,14 @@ export function tournamentSetupErrorCode(error: unknown): string {
 
 /**
  * Persist a failed BullMQ attempt in a fresh lifecycle transaction. This is the
- * fallback for errors that escape before the worker's savepoint handler runs or
- * while its outer mutation transaction is committing.
+ * fallback for errors that escape the processor's short claim/failure phases.
+ * A claimed execution keeps its identity so this cannot consume a successor's retry.
  */
 export async function persistEscapedTournamentSetupFailure(
   job: FailedTournamentSetupJob,
   error: unknown,
   dependencies: EscapedSetupFailureDependencies = defaultDependencies,
+  execution?: TournamentSetupExecution,
 ): Promise<boolean> {
   const season = await dependencies.requireSeason(job.data);
   const status = await dependencies.findStatus(season, job.data.tournamentId);
@@ -89,7 +91,8 @@ export async function persistEscapedTournamentSetupFailure(
 
   const maxAttempts = Math.max(1, status.setupMaxAttempts ?? job.opts.attempts ?? 1);
   const bullmqAttempt = Math.max(1, job.attemptsMade);
-  const nextAttempt = Math.max(bullmqAttempt, Math.max(0, status.setupAttempt ?? 0) + 1);
+  const nextAttempt =
+    execution?.attempt ?? Math.max(bullmqAttempt, Math.max(0, status.setupAttempt ?? 0) + 1);
   const attempt = Math.min(maxAttempts, nextAttempt);
   const terminal = isTerminalJobFailure(job, error) || nextAttempt >= maxAttempts;
   const now = dependencies.now();
@@ -98,6 +101,7 @@ export async function persistEscapedTournamentSetupFailure(
     typeof processedOn === 'number' && Number.isFinite(processedOn) ? new Date(processedOn) : now;
 
   return dependencies.persistFailure(season, job, {
+    ...(execution ? { execution } : {}),
     attempt,
     terminal,
     errorCode: tournamentSetupErrorCode(error),

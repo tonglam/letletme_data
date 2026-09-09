@@ -23,9 +23,11 @@ import {
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import { seasonRepository } from '../repositories/seasons';
-import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import {
+  tournamentInfoRepository,
+  type TournamentSetupExecution,
+} from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
-import { withDatabaseSavepoint } from '../db/singleton';
 import { logError, logInfo } from '../utils/logger';
 import { runWithFplRequestMetrics } from '../utils/fpl-request-metrics';
 import { runTrackedJob } from '../utils/job-run-logger';
@@ -43,6 +45,7 @@ const WATCHDOG_INTERVAL_MS = runtimeConfig.TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS
 
 type SetupFailure = { error: unknown };
 const setupFailuresPersistedInProcessor = new Set<string>();
+const setupExecutions = new Map<string, TournamentSetupExecution>();
 
 function setupJobKey(job: Pick<Job<TournamentSetupJobData>, 'id'>): string {
   return String(job.id);
@@ -93,6 +96,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
     async (job: Job<TournamentSetupJobData>) => {
       const setupFailureKey = setupJobKey(job);
       setupFailuresPersistedInProcessor.delete(setupFailureKey);
+      setupExecutions.delete(setupFailureKey);
       const season = await requireCurrentSeasonForJob(job.data);
       await updateSetupJobProgressBestEffort(job, 'waiting_for_lifecycle');
       const triggeredAtMs = Date.parse(job.data.triggeredAt);
@@ -109,192 +113,194 @@ export function createTournamentSetupWorker(): WorkerRuntime {
         attempt: job.attemptsMade + 1,
         queueWaitMs,
       };
-      // Per-tournament lifecycle lock only (not tournament-structure:global):
-      // serializes force-requeue / concurrency>1 for the same tournament so
-      // markSetupProcessing/Result cannot interleave, without starving cascade
-      // structure writers. Structure global is acquired only around rebuild /
-      // points/knockout writes inside setup phases (FP-07 Codex P2).
       const failure = await runWithFplRequestMetrics(() =>
-        runTrackedJob(context, () =>
-          withMutationScopes(
-            {
-              queueName: job.queueName,
-              jobName: job.name,
-              jobId: String(job.id),
-              tournamentId: job.data.tournamentId,
-              scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
-            },
-            async (): Promise<SetupFailure | null> => {
-              const bullmqAttempt = Math.max(1, job.attemptsMade + 1);
-              let attempt = bullmqAttempt;
-              let maxAttempts = Math.max(1, job.opts.attempts ?? 1);
-              const startedAt = new Date();
-              let attemptFailure: SetupFailure | null = null;
+        runTrackedJob(context, async (): Promise<SetupFailure | null> => {
+          const bullmqAttempt = Math.max(1, job.attemptsMade + 1);
+          let attempt = bullmqAttempt;
+          let maxAttempts = Math.max(1, job.opts.attempts ?? 1);
+          const startedAt = new Date();
+          let execution: TournamentSetupExecution | undefined;
+          const lifecycle = <T>(operation: () => Promise<T>) =>
+            withMutationScopes(
+              {
+                queueName: job.queueName,
+                jobName: job.name,
+                jobId: String(job.id),
+                tournamentId: job.data.tournamentId,
+                scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
+              },
+              operation,
+            );
+          try {
+            const claim = await lifecycle(async () => {
+              if (job.data.resumeMarker) {
+                const ownsResume = await tournamentRosterRepository.markResumeProcessingIfPending(
+                  season,
+                  job.data.tournamentId,
+                  job.data.resumeMarker,
+                );
+                if (!ownsResume) {
+                  logInfo('Ignoring stale tournament resume setup job', {
+                    tournamentId: job.data.tournamentId,
+                    jobId: job.id,
+                  });
+                  return null;
+                }
+              } else {
+                // Official-sync activation owns the setup lifecycle through
+                // the roster reconciliation marker. A pre-existing manual or
+                // watchdog setup job has no marker and must not rebuild from
+                // the old roster while that authoritative reconciliation is
+                // pending, even if it was already active before activation.
+                const roster = await tournamentRosterRepository.findById(
+                  season,
+                  job.data.tournamentId,
+                );
+                const resumePending =
+                  roster?.rosterMode === 'official_sync' &&
+                  roster.state === 'inactive' &&
+                  (roster.rosterSyncStatus === 'processing' ||
+                    roster.rosterSyncStatus === 'failed') &&
+                  (roster.setupStatus === 'pending' ||
+                    roster.setupStatus === 'processing' ||
+                    roster.setupStatus === 'failed') &&
+                  (roster.setupPhase === 'queued' ||
+                    roster.setupPhase === 'failed' ||
+                    roster.setupStatus === 'processing');
 
-              try {
-                if (job.data.resumeMarker) {
-                  const ownsResume = await tournamentRosterRepository.markResumeProcessingIfPending(
-                    season,
-                    job.data.tournamentId,
-                    job.data.resumeMarker,
-                  );
-                  if (!ownsResume) {
-                    logInfo('Ignoring stale tournament resume setup job', {
+                if (resumePending) {
+                  if (job.data.source === 'watchdog') {
+                    // Watchdog recovery replays the marker-pinned roster
+                    // operation first; it must never rebuild from an old
+                    // roster while the authoritative publication is pending.
+                    logInfo('Ignoring watchdog setup job before roster resume', {
                       tournamentId: job.data.tournamentId,
                       jobId: job.id,
                     });
                     return null;
                   }
-                } else {
-                  // Official-sync activation owns the setup lifecycle through
-                  // the roster reconciliation marker. A pre-existing manual or
-                  // watchdog setup job has no marker and must not rebuild from
-                  // the old roster while that authoritative reconciliation is
-                  // pending, even if it was already active before activation.
-                  const roster = await tournamentRosterRepository.findById(
-                    season,
-                    job.data.tournamentId,
-                  );
-                  const resumePending =
-                    roster?.rosterMode === 'official_sync' &&
-                    roster.state === 'inactive' &&
-                    (roster.rosterSyncStatus === 'processing' ||
-                      roster.rosterSyncStatus === 'failed') &&
-                    (roster.setupStatus === 'pending' ||
-                      roster.setupStatus === 'processing' ||
-                      roster.setupStatus === 'failed') &&
-                    (roster.setupPhase === 'queued' ||
-                      roster.setupPhase === 'failed' ||
-                      roster.setupStatus === 'processing');
 
-                  if (resumePending) {
-                    if (job.data.source === 'watchdog') {
-                      // Watchdog recovery replays the marker-pinned roster
-                      // operation first; it must never rebuild from an old
-                      // roster while the authoritative publication is pending.
-                      logInfo('Ignoring watchdog setup job before roster resume', {
-                        tournamentId: job.data.tournamentId,
-                        jobId: job.id,
-                      });
-                      return null;
-                    }
+                  if (job.data.source !== 'manual') {
+                    logInfo('Ignoring unmarked setup job during official roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
+                      source: job.data.source,
+                    });
+                    return null;
+                  }
 
-                    if (job.data.source !== 'manual') {
-                      logInfo('Ignoring unmarked setup job during official roster resume', {
-                        tournamentId: job.data.tournamentId,
-                        jobId: job.id,
-                        source: job.data.source,
-                      });
-                      return null;
-                    }
-
-                    // An explicit manual retry is allowed to recover a
-                    // terminal resume, but never while marker-owned work
-                    // is still live.
-                    const [reconcileJob, setupJob] = await Promise.all([
-                      findTournamentRosterReconcileJob(
-                        season,
-                        job.data.tournamentId,
-                        true,
-                        roster?.setupProgressUpdatedAt ?? undefined,
-                      ),
-                      findTournamentSetupJob(
-                        season,
-                        job.data.tournamentId,
-                        roster?.setupProgressUpdatedAt,
-                      ),
-                    ]);
-                    if (reconcileJob || setupJob) {
-                      logInfo('Ignoring manual setup retry during official roster resume', {
-                        tournamentId: job.data.tournamentId,
-                        jobId: job.id,
-                      });
-                      return null;
-                    }
+                  // An explicit manual retry is allowed to recover a
+                  // terminal resume, but never while marker-owned work
+                  // is still live.
+                  const [reconcileJob, setupJob] = await Promise.all([
+                    findTournamentRosterReconcileJob(
+                      season,
+                      job.data.tournamentId,
+                      true,
+                      roster?.setupProgressUpdatedAt ?? undefined,
+                    ),
+                    findTournamentSetupJob(
+                      season,
+                      job.data.tournamentId,
+                      roster?.setupProgressUpdatedAt,
+                    ),
+                  ]);
+                  if (reconcileJob || setupJob) {
+                    logInfo('Ignoring manual setup retry during official roster resume', {
+                      tournamentId: job.data.tournamentId,
+                      jobId: job.id,
+                    });
+                    return null;
                   }
                 }
-
-                const persistedStatus = await tournamentInfoRepository.findSetupStatus(
-                  season,
-                  job.data.tournamentId,
-                );
-                if (!persistedStatus) {
-                  logInfo('Ignoring tournament setup job for a deleted tournament', {
-                    tournamentId: job.data.tournamentId,
-                    jobId: job.id,
-                  });
-                  return null;
-                }
-                if (
-                  persistedStatus.setupStatus === 'ready' ||
-                  (persistedStatus.setupStatus === 'failed' && !persistedStatus.setupNextRetryAt)
-                ) {
-                  logInfo('Ignoring stale tournament setup job after terminal state', {
-                    tournamentId: job.data.tournamentId,
-                    jobId: job.id,
-                    setupStatus: persistedStatus.setupStatus,
-                  });
-                  return null;
-                }
-
-                maxAttempts = Math.max(1, persistedStatus.setupMaxAttempts ?? maxAttempts);
-                const nextAttempt = Math.max(
-                  bullmqAttempt,
-                  Math.max(0, persistedStatus.setupAttempt ?? 0) + 1,
-                );
-                attempt = Math.min(maxAttempts, nextAttempt);
-                context.attempt = attempt;
-                if (nextAttempt > maxAttempts) {
-                  throw Object.assign(new Error('Tournament setup automatic retries exhausted.'), {
-                    code: persistedStatus.setupLastErrorCode ?? 'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
-                  });
-                }
-
-                await updateSetupJobProgressBestEffort(job, 'running');
-                logInfo('Tournament setup worker started job');
-                await withDatabaseSavepoint(() =>
-                  setupTournamentStructure(season, job.data.tournamentId, {
-                    resumeMarker: job.data.resumeMarker,
-                    attempt,
-                  }),
-                );
-              } catch (error) {
-                const terminal =
-                  isTerminalJobAttemptFailure(job, error, attempt) || attempt >= maxAttempts;
-                const changed = await tournamentInfoRepository.markSetupAttemptFailure(
-                  season,
-                  job.data.tournamentId,
-                  {
-                    attempt,
-                    terminal,
-                    errorCode: tournamentSetupErrorCode(error),
-                    nextRetryAt: terminal
-                      ? null
-                      : new Date(Date.now() + getTournamentSetupRetryDelayMs(attempt)),
-                    startedAt,
-                  },
-                );
-                if (!changed) {
-                  logInfo('Ignoring stale tournament setup failure state', {
-                    tournamentId: job.data.tournamentId,
-                    jobId: job.id,
-                    attempt,
-                  });
-                }
-                attemptFailure = { error };
-              } finally {
-                // Written before the mandatory lifecycle lock is released, so
-                // an enqueuer that later acquires it can safely alternate slots.
-                await updateSetupJobProgressBestEffort(job, 'settling');
               }
 
-              return attemptFailure;
-            },
-          ),
-        ),
+              const persistedStatus = await tournamentInfoRepository.findSetupStatus(
+                season,
+                job.data.tournamentId,
+              );
+              if (!persistedStatus) {
+                logInfo('Ignoring tournament setup job for a deleted tournament', {
+                  tournamentId: job.data.tournamentId,
+                  jobId: job.id,
+                });
+                return null;
+              }
+              if (
+                persistedStatus.setupStatus === 'ready' ||
+                (persistedStatus.setupStatus === 'failed' && !persistedStatus.setupNextRetryAt)
+              ) {
+                logInfo('Ignoring stale tournament setup job after terminal state', {
+                  tournamentId: job.data.tournamentId,
+                  jobId: job.id,
+                  setupStatus: persistedStatus.setupStatus,
+                });
+                return null;
+              }
+
+              maxAttempts = Math.max(1, persistedStatus.setupMaxAttempts ?? maxAttempts);
+              const nextAttempt = Math.max(
+                bullmqAttempt,
+                Math.max(0, persistedStatus.setupAttempt ?? 0) + 1,
+              );
+              attempt = Math.min(maxAttempts, nextAttempt);
+              context.attempt = attempt;
+              if (nextAttempt > maxAttempts) {
+                throw Object.assign(new Error('Tournament setup automatic retries exhausted.'), {
+                  code: persistedStatus.setupLastErrorCode ?? 'SETUP_AUTOMATIC_RETRIES_EXHAUSTED',
+                });
+              }
+
+              return tournamentInfoRepository.markSetupProcessing(
+                season,
+                job.data.tournamentId,
+                job.data.resumeMarker,
+                attempt,
+              );
+            });
+            if (!claim) return null;
+            execution = claim;
+            setupExecutions.set(setupFailureKey, claim);
+            await updateSetupJobProgressBestEffort(job, 'running');
+            logInfo('Tournament setup worker started job');
+            await setupTournamentStructure(season, job.data.tournamentId, {
+              resumeMarker: job.data.resumeMarker,
+              execution,
+            });
+            return null;
+          } catch (error) {
+            const terminal =
+              isTerminalJobAttemptFailure(job, error, attempt) || attempt >= maxAttempts;
+            await lifecycle(async () => {
+              const changed = await tournamentInfoRepository.markSetupAttemptFailure(
+                season,
+                job.data.tournamentId,
+                {
+                  execution,
+                  attempt,
+                  terminal,
+                  errorCode: tournamentSetupErrorCode(error),
+                  nextRetryAt: terminal
+                    ? null
+                    : new Date(Date.now() + getTournamentSetupRetryDelayMs(attempt)),
+                  startedAt,
+                },
+              );
+              if (!changed)
+                logInfo('Ignoring stale tournament setup failure state', {
+                  tournamentId: job.data.tournamentId,
+                  jobId: job.id,
+                  attempt,
+                });
+            });
+            return { error };
+          } finally {
+            await lifecycle(() => updateSetupJobProgressBestEffort(job, 'settling'));
+          }
+        }),
       );
       if (failure) {
-        // Reaching this point proves the outer lifecycle transaction committed
+        // Reaching this point proves the failure lifecycle transaction committed
         // the retry state. The failed listener must not persist it a second time.
         setupFailuresPersistedInProcessor.add(setupFailureKey);
         throw failure.error;
@@ -312,6 +318,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
   );
 
   worker.on('completed', (job) => {
+    setupExecutions.delete(setupJobKey(job));
     logInfo('Tournament setup worker completed job', {
       jobId: job.id,
       tournamentId: job.data.tournamentId,
@@ -324,9 +331,11 @@ export function createTournamentSetupWorker(): WorkerRuntime {
       tournamentId: job?.data.tournamentId,
     });
     if (job) {
+      const execution = setupExecutions.get(setupJobKey(job));
+      setupExecutions.delete(setupJobKey(job));
       const alreadyPersisted = setupFailuresPersistedInProcessor.delete(setupJobKey(job));
       if (!alreadyPersisted) {
-        void persistEscapedTournamentSetupFailure(job, err)
+        void persistEscapedTournamentSetupFailure(job, err, undefined, execution)
           .then((changed) => {
             logInfo('Tournament setup escaped failure fallback completed', {
               jobId: job.id,

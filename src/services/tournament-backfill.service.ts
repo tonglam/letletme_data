@@ -1,3 +1,6 @@
+import { publishTournamentTrendScope } from './tournament-trends-publication.service';
+import type { TournamentSetupExecution } from '../repositories/tournament-infos';
+import { withTournamentSetupPhase } from '../utils/tournament-setup-execution';
 import {
   tournamentEntryCoreScopes,
   tournamentSetupBackfillEventScopes,
@@ -440,6 +443,7 @@ export async function calculateTournamentHistoryFromStoredResults(
   tournament: TournamentConfig,
   window: TournamentBackfillWindow | null,
   onProgress?: (completed: number, total: number) => Promise<void>,
+  setupExecution?: TournamentSetupExecution,
 ): Promise<void> {
   if (!window) return;
 
@@ -447,6 +451,26 @@ export async function calculateTournamentHistoryFromStoredResults(
   let completed = 0;
   for (let eventId = window.startEventId; eventId <= window.endEventId; eventId += 1) {
     const structureScopes = tournamentSetupBackfillEventScopes(eventId);
+    const writeResults = <T>(operation: () => Promise<T>) =>
+      setupExecution
+        ? withTournamentSetupPhase(
+            season,
+            tournamentId,
+            setupExecution,
+            'calculate_standings',
+            structureScopes,
+            operation,
+          )
+        : withMutationScopes(
+            {
+              queueName: 'tournament-setup',
+              jobName: 'tournament-setup',
+              tournamentId,
+              eventId,
+              scopes: structureScopes,
+            },
+            operation,
+          );
     if (
       tournament.groupMode === 'points_races' &&
       tournament.groupStartedEventId &&
@@ -454,15 +478,8 @@ export async function calculateTournamentHistoryFromStoredResults(
       eventId >= tournament.groupStartedEventId &&
       eventId <= tournament.groupEndedEventId
     ) {
-      const result = await withMutationScopes(
-        {
-          queueName: 'tournament-setup',
-          jobName: 'tournament-setup',
-          tournamentId,
-          eventId,
-          scopes: structureScopes,
-        },
-        () => syncTournamentPointsRaceResultsForTournament(season, tournament, eventId),
+      const result = await writeResults(() =>
+        syncTournamentPointsRaceResultsForTournament(season, tournament, eventId),
       );
       if (result.skipped > 0) {
         throw new Error(
@@ -479,15 +496,8 @@ export async function calculateTournamentHistoryFromStoredResults(
       eventId >= tournament.groupStartedEventId &&
       eventId <= tournament.groupEndedEventId
     ) {
-      const result = await withMutationScopes(
-        {
-          queueName: 'tournament-setup',
-          jobName: 'tournament-setup',
-          tournamentId,
-          eventId,
-          scopes: structureScopes,
-        },
-        () => syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
+      const result = await writeResults(() =>
+        syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
       );
       if (result.skipped > 0) {
         throw new Error(
@@ -505,15 +515,8 @@ export async function calculateTournamentHistoryFromStoredResults(
       eventId <= tournament.knockoutEndedEventId
     ) {
       const { syncKnockoutForTournament } = await import('./tournament-knockout-results.service');
-      const result = await withMutationScopes(
-        {
-          queueName: 'tournament-setup',
-          jobName: 'tournament-setup',
-          tournamentId,
-          eventId,
-          scopes: structureScopes,
-        },
-        () => syncKnockoutForTournament(season, tournament, eventId),
+      const result = await writeResults(() =>
+        syncKnockoutForTournament(season, tournament, eventId),
       );
       if (result.skipped > 0) {
         throw new Error(
@@ -534,6 +537,7 @@ export async function enrichTournamentHistory(
   window: TournamentBackfillWindow | null,
   options?: {
     includeTransferHistory?: boolean;
+    setupExecution?: TournamentSetupExecution;
     onPlan?: (plan: TournamentEnrichmentPlan) => void | Promise<void>;
     onProgress?: (completed: number, total: number) => Promise<void>;
   },
@@ -585,17 +589,14 @@ export async function enrichTournamentHistory(
   });
 
   if (transferEntryIds.length > 0) {
-    const transferResult = await withMutationScopes(
+    const transferResult = await syncEntryTransferHistories(
+      season,
+      transferEntryIds,
+      targetEventId,
       {
-        queueName: 'tournament-setup',
-        jobName: 'entry-transfer-history',
-        tournamentId,
-        scopes: tournamentEntryCoreScopes(season.seasonId, transferEntryIds),
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        perEntryMutationScopes: true,
       },
-      () =>
-        syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
-          concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-        }),
     );
     completed += transferEntryIds.length;
     await options?.onProgress?.(completed, total);
@@ -614,33 +615,16 @@ export async function enrichTournamentHistory(
     const missingEntryIds = missing.get(eventId) ?? [];
     try {
       if (missingEntryIds.length > 0) {
-        await withMutationScopes(
-          {
-            queueName: 'tournament-setup',
-            jobName: 'entry-event-results',
-            scopes: tournamentEntryCoreScopes(season.seasonId, missingEntryIds),
-          },
-          () =>
-            syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
-              concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-              skipTransfers: true,
-            }),
-        );
+        await syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
+          concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+          skipTransfers: true,
+          perEntryMutationScopes: true,
+        });
       }
-      const leagueResult = await withMutationScopes(
-        {
-          queueName: 'tournament-setup',
-          jobName: 'league-event-results',
-          tournamentId,
-          eventId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
-        },
-        () =>
-          syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
-            concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-            entryIds,
-          }),
-      );
+      const leagueResult = await syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        entryIds,
+      });
       if (leagueResult.failedUnits > 0 || leagueResult.skipped > 0) {
         const convergedEntries = leagueResult.reusedUnits + leagueResult.succeededUnits;
         issues.push({
@@ -651,20 +635,36 @@ export async function enrichTournamentHistory(
         });
       }
 
-      const selectionResult = await withMutationScopes(
-        {
-          queueName: 'tournament-setup',
-          jobName: 'tournament-selection-stats',
-          tournamentId,
-          eventId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
-        },
-        () =>
-          syncTournamentSelectionStats(season, eventId, {
-            tournamentIds: [tournamentId],
-          }),
-      );
-      if (entryIds.length > 0 && selectionResult.rows === 0) {
+      const publishSelection = () =>
+        syncTournamentSelectionStats(season, eventId, {
+          tournamentIds: [tournamentId],
+        });
+      const scopes = tournamentEntryCoreScopes(season.seasonId, entryIds);
+      const selectionResult = options?.setupExecution
+        ? await withTournamentSetupPhase(
+            season,
+            tournamentId,
+            options.setupExecution,
+            'selection_insights',
+            scopes,
+            () => publishTournamentTrendScope(season, tournamentId, eventId),
+          )
+        : await withMutationScopes(
+            {
+              queueName: 'tournament-setup',
+              jobName: 'tournament-selection-stats',
+              tournamentId,
+              eventId,
+              scopes,
+            },
+            publishSelection,
+          );
+      if (
+        entryIds.length > 0 &&
+        (selectionResult.rows === 0 ||
+          ('isActive' in selectionResult && !selectionResult.isActive) ||
+          ('transfersState' in selectionResult && selectionResult.transfersState !== 'READY'))
+      ) {
         issues.push({
           scope: 'selection-insights',
           eventId,
@@ -673,6 +673,12 @@ export async function enrichTournamentHistory(
         });
       }
     } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'TOURNAMENT_SETUP_EXECUTION_STALE'
+      )
+        throw error;
       const message = error instanceof Error ? error.message : 'Unknown enrichment failure';
       issues.push({
         scope: 'event-results',

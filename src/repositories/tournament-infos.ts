@@ -128,7 +128,13 @@ export interface TournamentSetupStatusRow {
   insightsReadyAt?: string | null;
 }
 
+export type TournamentSetupExecution = Readonly<{
+  startedAt: string;
+  attempt: number;
+}>;
+
 export interface TournamentSetupAttemptFailure {
+  execution?: TournamentSetupExecution;
   attempt: number;
   terminal: boolean;
   errorCode: string;
@@ -528,10 +534,10 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
       tournamentId: number,
       progressMarker?: string | null,
       attempt?: number,
-    ): Promise<void> => {
+    ): Promise<TournamentSetupExecution> => {
       const db = await getDbInstance();
       const safeAttempt = attempt === undefined ? null : Math.max(1, Math.trunc(attempt));
-      await db
+      const rows = await db
         .update(tournamentsInCompetition)
         .set({
           setupStatus: 'processing',
@@ -552,12 +558,43 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           setupProgressIndeterminate: false,
           profilesReadyAt: null,
           insightsReadyAt: null,
-          setupStartedAt: new Date(),
+          setupStartedAt: sql`GREATEST(clock_timestamp(), COALESCE(
+            ${tournamentsInCompetition.setupStartedAt} + interval '1 microsecond', clock_timestamp()
+          ))`,
           setupFinishedAt: null,
           standingsReadyAt: null,
           updatedAt: new Date(),
         })
-        .where(tournamentScope(season, tournamentId));
+        .where(tournamentScope(season, tournamentId))
+        .returning({
+          startedAt: sql<string>`${tournamentsInCompetition.setupStartedAt}::text`,
+          attempt: tournamentsInCompetition.setupAttempt,
+        });
+      const execution = rows[0];
+      if (!execution) throw new Error(`Tournament ${tournamentId} no longer exists`);
+      return execution;
+    },
+
+    lockSetupExecution: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+      execution: TournamentSetupExecution,
+    ): Promise<boolean> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({ id: tournamentsInCompetition.tournamentId })
+        .from(tournamentsInCompetition)
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            eq(tournamentsInCompetition.setupStatus, 'processing'),
+            sql`${tournamentsInCompetition.setupNextRetryAt} IS NULL`,
+            eq(tournamentsInCompetition.setupAttempt, execution.attempt),
+            sql`${tournamentsInCompetition.setupStartedAt} = ${execution.startedAt}::timestamptz`,
+          ),
+        )
+        .for('update');
+      return rows.length === 1;
     },
 
     markSetupRetryQueued: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
@@ -657,7 +694,7 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
           setupProgressIndeterminate: false,
           setupProgressUpdatedAt:
             progressMarker !== undefined ? sql`${progressMarker}::timestamptz` : new Date(),
-          setupFinishedAt: new Date(),
+          setupFinishedAt: sql`GREATEST(clock_timestamp(), ${tournamentsInCompetition.setupStartedAt})`,
           updatedAt: new Date(),
         })
         .where(tournamentScope(season, tournamentId));
@@ -690,7 +727,9 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
             ${tournamentsInCompetition.setupStartedAt},
             ${failure.startedAt.toISOString()}::timestamptz
           )`,
-          setupFinishedAt: failure.terminal ? now : null,
+          setupFinishedAt: failure.terminal
+            ? sql`GREATEST(clock_timestamp(), ${tournamentsInCompetition.setupStartedAt}, ${failure.startedAt.toISOString()}::timestamptz)`
+            : null,
           standingsReadyAt: null,
           profilesReadyAt: null,
           insightsReadyAt: null,
@@ -701,9 +740,15 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
             tournamentScope(season, tournamentId),
             inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
             sql`${tournamentsInCompetition.setupFinishedAt} IS NULL`,
-            failure.terminal
-              ? lte(tournamentsInCompetition.setupAttempt, attempt)
-              : lt(tournamentsInCompetition.setupAttempt, attempt),
+            failure.execution
+              ? and(
+                  eq(tournamentsInCompetition.setupAttempt, failure.execution.attempt),
+                  sql`${tournamentsInCompetition.setupNextRetryAt} IS NULL`,
+                  sql`${tournamentsInCompetition.setupStartedAt} = ${failure.execution.startedAt}::timestamptz`,
+                )
+              : failure.terminal
+                ? lte(tournamentsInCompetition.setupAttempt, attempt)
+                : lt(tournamentsInCompetition.setupAttempt, attempt),
           ),
         )
         .returning({ tournamentId: tournamentsInCompetition.tournamentId });
