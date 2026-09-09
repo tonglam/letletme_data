@@ -148,3 +148,51 @@ test('Cup completion advances the cascade only after its result transaction comm
   ).rejects.toBe(handoffFailure);
   expect(handoff).toHaveBeenCalledTimes(1);
 });
+
+for (const failureMode of ['provider', 'later-batch-conflict'] as const) {
+  test(`Cup preserves earlier results on ${failureMode}`, async () => {
+    const { syncTournamentEventCupResults } = await import(
+      '../../src/services/tournament-event-cup-results.service'
+    );
+    const { tournamentInfoRepository } = await import('../../src/repositories/tournament-infos');
+    const { tournamentEntryRepository } = await import('../../src/repositories/tournament-entries');
+    const { fplClient } = await import('../../src/clients/fpl');
+    const entrants = Array.from({ length: 27 }, (_, index) => entryId + index);
+    await sql`INSERT INTO competition.entries (season_id,entry_id,entry_name,player_name) SELECT ${season.seasonId}, id, 'Fixture', 'Fixture' FROM unnest(${entrants.slice(1)}::int[]) AS id`;
+    await repository.replaceBatch(
+      season,
+      entrants.map((id) => ({ ...record(1), entryId: id })),
+      new Map(),
+    );
+    const revisions = await repository.findRevisions(season, eventId, entrants);
+    spyOn(tournamentInfoRepository, 'findActive').mockResolvedValue([{ id: entryId }] as never);
+    spyOn(tournamentEntryRepository, 'findEntryIdsByTournamentId').mockResolvedValue(entrants);
+    const lastEntryId = entrants.at(-1)!;
+    spyOn(fplClient, 'getEntryCup').mockImplementation(async (id) => {
+      if (id === lastEntryId) {
+        if (failureMode === 'provider') throw new Error('last provider failed');
+        await repository.replaceBatch(season, [{ ...record(20), entryId: id }], revisions);
+      }
+      return {
+        cup_matches: [
+          {
+            event: eventId,
+            entry_1_entry: id,
+            entry_2_entry: null,
+            entry_1_points: 10,
+            entry_2_points: 0,
+            winner: id,
+          },
+        ],
+      } as never;
+    });
+    await expect(syncTournamentEventCupResults(season, eventId)).rejects.toMatchObject({
+      code: failureMode === 'provider' ? 'DATA_SYNC_INCOMPLETE' : 'CUP_RESULT_SOURCE_STALE',
+    });
+    const rows =
+      await sql`SELECT entry_id,entry_points FROM competition.entry_event_cup_results WHERE season_id=${season.seasonId} ORDER BY entry_id`;
+    expect(rows).toHaveLength(27);
+    expect(rows.slice(0, 26).every((row) => row.entry_points === 1)).toBe(true);
+    expect(rows.at(-1)!.entry_points).toBe(failureMode === 'provider' ? 1 : 20);
+  });
+}

@@ -776,8 +776,8 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
           // Roster reconciliation owns its own short publication scope and
           // performs setup enqueueing after that commit. Do not wrap it in a
           // second outer transaction that would hold the scope through the queue
-          // handoff. Cup likewise fetches first, then owns short version-fenced
-          // entry-season replacement transactions.
+          // handoff. Cup likewise fetches first, then owns its version-fenced
+          // database-only event publication transaction.
           if (
             job.name === TOURNAMENT_JOBS.ROSTER_SYNC ||
             job.name === TOURNAMENT_JOBS.ROSTER_RECONCILE ||
