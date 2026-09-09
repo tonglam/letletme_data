@@ -1094,20 +1094,44 @@ export function parsePriceChangeWatchDeadlines(
 }
 
 export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Date) {
+  const scope = { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode } as const;
   // Deadline discovery is a scheduler control-plane read. Use the active
-  // consumer publication in Redis and fetch only its small context item so a
-  // publication transaction updating PostgreSQL item rows cannot occupy the
-  // scheduler's database pool or consume its ten-second resolution budget.
-  const redisPublication = await readActiveDataPublicationItems(
-    { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode },
-    ['context'],
-  );
+  // consumer publication in Redis and retain only its small context item. The
+  // cache helper validates every sibling before returning, so a partial board
+  // cannot create a scheduler obligation.
+  const redisPublication = await readActiveDataPublicationItems(scope, ['context']);
+  let canonicalPublication: Awaited<
+    ReturnType<typeof syncOperationsRepository.findActivePublication>
+  > = null;
+  let databaseAvailable = true;
+  try {
+    // The identity query is intentionally metadata-only. It fences a valid but
+    // stale Redis pointer while avoiding the large publication-item join that
+    // caused the scheduler timeout incident.
+    canonicalPublication = await syncOperationsRepository.findActivePublication(
+      PRICE_CHANGE_DATASET,
+      season,
+    );
+  } catch {
+    databaseAvailable = false;
+  }
+
+  if (
+    redisPublication &&
+    ((!databaseAvailable && !canonicalPublication) ||
+      (canonicalPublication &&
+        redisPublication.manifest.publicationId === canonicalPublication.publicationId &&
+        redisPublication.manifest.revision === canonicalPublication.revision))
+  ) {
+    const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
+    if (deadlines) return deadlines;
+  }
+
   // Redis is the normal path, but the durable row is the source of truth while
   // an active publication is waiting for outbox delivery or Redis has been
   // rebuilt. Keep the existing loader as a bounded fallback so a missing cache
   // cannot silently drop a time-sensitive watch plan.
-  const publication =
-    redisPublication ?? (await loadActivePriceChangeContext(season).catch(() => null));
+  const publication = await loadActivePriceChangeContext(season).catch(() => null);
   return publication ? parsePriceChangeWatchDeadlines(publication, now) : null;
 }
 

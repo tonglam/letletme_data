@@ -165,7 +165,7 @@ describe('data publication contract', () => {
     expect(parseDataPublicationManifest(JSON.stringify({ ...manifest, eventId: 1 }))).toBeNull();
   });
 
-  test('reads only selected active publication items', async () => {
+  test('returns selected active publication items after validating every sibling', async () => {
     const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
     const prepared = prepareDataPublication({
       ...priceScope,
@@ -195,6 +195,14 @@ describe('data publication contract', () => {
       manifest: prepared.manifest,
       items: { context: { deadline: '2026-08-09T02:00:00.000Z' } },
     });
-    expect(requested).toEqual([dataPublicationItemKey(priceScope, 11, 'context')]);
+    expect(requested).toEqual([
+      dataPublicationItemKey(priceScope, 11, 'context'),
+      dataPublicationItemKey(priceScope, 11, 'players'),
+    ]);
+
+    values.delete(dataPublicationItemKey(priceScope, 11, 'players'));
+    await expect(
+      readActiveDataPublicationItems(priceScope, ['context'], redis),
+    ).resolves.toBeNull();
   });
 });

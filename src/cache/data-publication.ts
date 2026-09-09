@@ -789,11 +789,11 @@ export async function readActiveDataPublicationManifest(
 }
 
 /**
- * Read a selected set of items from the active publication without loading
- * unrelated payloads. Control-plane callers use this when they need a small
- * scheduling context while the full publication remains the consumer/audit
- * path. The manifest is still validated in full, and every selected item is
- * checked against its declared size, checksum, and count.
+ * Read a selected set of items from the active publication. The returned value
+ * contains only the requested items, while every manifest sibling is checked
+ * against its declared size, checksum, and count before any selected item is
+ * consumed. This keeps control-plane callers from retaining large payloads
+ * while preserving the publication integrity boundary.
  */
 export async function readActiveDataPublicationItems(
   scope: DataPublicationScope,
@@ -808,18 +808,21 @@ export async function readActiveDataPublicationItems(
   ) {
     return null;
   }
-  const redis = redisClient ?? (await redisSingleton.getClient());
   try {
+    // Client acquisition belongs inside the failure boundary too: startup and
+    // reconnect failures must return null so callers can use their durable
+    // fallback instead of skipping it on a rejected promise.
+    const redis = redisClient ?? (await redisSingleton.getClient());
     const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
     if (!manifest || !assertManifestMatchesScope(manifest, scope) || manifest.items.length === 0) {
       return null;
     }
     const selected = itemNames.map((name) => manifest.items.find((item) => item.name === name));
     if (selected.some((item): item is undefined => item === undefined)) return null;
-    const payloads = await redis.mget(...selected.map((item) => item!.key));
-    const items: Record<string, unknown> = {};
-    for (let index = 0; index < selected.length; index += 1) {
-      const item = selected[index]!;
+    const payloads = await redis.mget(...manifest.items.map((item) => item.key));
+    const payloadByName = new Map<string, string>();
+    for (let index = 0; index < manifest.items.length; index += 1) {
+      const item = manifest.items[index];
       const payload = payloads[index];
       if (
         payload === null ||
@@ -830,6 +833,14 @@ export async function readActiveDataPublicationItems(
       }
       const parsed = JSON.parse(payload) as unknown;
       if (itemCount(parsed) !== item.count) return null;
+      payloadByName.set(item.name, payload);
+    }
+    const items: Record<string, unknown> = {};
+    for (let index = 0; index < selected.length; index += 1) {
+      const item = selected[index]!;
+      const payload = payloadByName.get(item.name);
+      if (payload === undefined) return null;
+      const parsed = JSON.parse(payload) as unknown;
       items[item.name] = parsed;
     }
     return { manifest, items };

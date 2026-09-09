@@ -97,6 +97,48 @@ test('falls back to durable context when the active Redis publication is unavail
     nextDeadlines: context.nextDeadlines,
   });
 });
+
+test('falls back to the canonical revision when Redis still points at the previous one', async () => {
+  const newerContext = {
+    ...context,
+    deadline: '2093-08-22T02:30:00.000Z',
+    nextDeadlines: ['2093-08-22T02:30:00.000Z'],
+  };
+  const newer = prepareDataPublication({
+    ...season,
+    dataset: 'fpl:price-changes',
+    revision: 9395,
+    publicationId,
+    sourceCheckedAt: now,
+    state: 'active',
+    items: [
+      { name: 'context', value: newerContext },
+      { name: 'players', value: [{ unused: 'x'.repeat(400000) }] },
+    ],
+  });
+  await db`UPDATE ops.dataset_publications SET revision=9395, manifest=${db.json(newer.manifest as never)} WHERE publication_id=${publicationId}`;
+  await db`DELETE FROM ops.dataset_publication_items WHERE publication_id=${publicationId}`;
+  for (const item of newer.items) {
+    await db`INSERT INTO ops.dataset_publication_items (publication_id,item_name,payload,item_count,checksum)
+      VALUES (${publicationId},${item.manifest.name},${db.json(JSON.parse(item.payload))},${item.manifest.count},${item.manifest.sha256})`;
+  }
+
+  await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
+    status: 'READY',
+    nextDeadlines: newerContext.nextDeadlines,
+  });
+});
+
+test('falls back when a Redis publication sibling is missing', async () => {
+  const playersKey = prepared.items.find((item) => item.manifest.name === 'players')!.manifest.key;
+  await redis.del(playersKey);
+
+  await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
+    status: 'READY',
+    nextDeadlines: context.nextDeadlines,
+  });
+});
+
 test('does not accept a missing or retired active context', async () => {
   await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();
