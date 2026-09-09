@@ -736,6 +736,8 @@ export async function recoverStuckTournamentSetups(
             season,
             row.id,
             row.setupProgressUpdatedAt,
+            row.setupStartedAt,
+            row.setupAttempt,
           ),
       );
       if (!marked) {

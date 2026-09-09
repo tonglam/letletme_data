@@ -167,6 +167,8 @@ export interface TournamentCreatedRow {
 export interface StuckTournamentRow {
   id: number;
   setupProgressUpdatedAt: string | null;
+  setupStartedAt: string | null;
+  setupAttempt: number | null;
   state: 'active' | 'inactive' | 'finished';
   rosterMode: 'snapshot' | 'official_sync';
   rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
@@ -829,6 +831,8 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
             ${tournamentsInCompetition.setupProgressUpdatedAt},
             ${tournamentsInCompetition.setupStartedAt}
           )::text`,
+          setupStartedAt: sql<string | null>`${tournamentsInCompetition.setupStartedAt}::text`,
+          setupAttempt: tournamentsInCompetition.setupAttempt,
           state: tournamentsInCompetition.state,
           rosterMode: tournamentsInCompetition.rosterMode,
           rosterSyncStatus: tournamentsInCompetition.rosterSyncStatus,
@@ -874,6 +878,8 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
       season: FplSeasonRef,
       tournamentId: number,
       expectedProgressUpdatedAt: string | null,
+      expectedSetupStartedAt: string | null,
+      expectedSetupAttempt: number | null,
     ): Promise<string | null> => {
       const db = await getDbInstance();
       const now = new Date();
@@ -910,6 +916,8 @@ export const createTournamentInfoRepository = (dbInstance?: DbOrTransaction) => 
               ${tournamentsInCompetition.setupProgressUpdatedAt},
               ${tournamentsInCompetition.setupStartedAt}
             ) IS NOT DISTINCT FROM ${expectedProgressUpdatedAt}::timestamptz`,
+            sql`${tournamentsInCompetition.setupStartedAt} IS NOT DISTINCT FROM ${expectedSetupStartedAt}::timestamptz`,
+            sql`${tournamentsInCompetition.setupAttempt} IS NOT DISTINCT FROM ${expectedSetupAttempt}`,
           ),
         )
         .returning({

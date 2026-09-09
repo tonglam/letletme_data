@@ -357,6 +357,8 @@ describe('tournament setup transaction recovery', () => {
             season,
             RETRY_TOURNAMENT_ID,
             beforeRecovery?.setupProgressUpdatedAt ?? null,
+            beforeRecovery?.setupStartedAt ?? null,
+            beforeRecovery?.setupAttempt ?? null,
           ),
       ),
     ).not.toBeNull();
@@ -369,6 +371,53 @@ describe('tournament setup transaction recovery', () => {
       setupStatus: 'pending',
       setupAttempt: 1,
       setupLastErrorCode: '42846',
+    });
+  });
+
+  test('watchdog CAS rejects a row after a worker claims the observed execution', async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    await tournamentInfoRepository.markSetupRetryQueued(season, RETRY_TOURNAMENT_ID);
+    const firstExecution = await tournamentInfoRepository.markSetupProcessing(
+      season,
+      RETRY_TOURNAMENT_ID,
+      '2095-01-01 00:00:00+00',
+      1,
+    );
+    const observed = await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID);
+    expect(observed?.setupStartedAt).toBe(firstExecution.startedAt);
+
+    // A second claim represents the worker winning the queue-probe/CAS race.
+    const secondExecution = await tournamentInfoRepository.markSetupProcessing(
+      season,
+      RETRY_TOURNAMENT_ID,
+      '2095-01-01 00:00:00+00',
+      1,
+    );
+    const recoveryMarker = await withMutationScopes(
+      {
+        queueName: 'integration-tournament-setup',
+        jobName: 'watchdog-race',
+        tournamentId: RETRY_TOURNAMENT_ID,
+        scopes: [tournamentSetupLifecycleScope(RETRY_TOURNAMENT_ID)],
+      },
+      () =>
+        tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
+          season,
+          RETRY_TOURNAMENT_ID,
+          observed?.setupProgressUpdatedAt ?? null,
+          observed?.setupStartedAt ?? null,
+          observed?.setupAttempt ?? null,
+        ),
+    );
+
+    expect(recoveryMarker).toBeNull();
+    expect(secondExecution.startedAt).not.toBe(firstExecution.startedAt);
+    expect(
+      await tournamentInfoRepository.findSetupStatus(season, RETRY_TOURNAMENT_ID),
+    ).toMatchObject({
+      setupStatus: 'processing',
+      setupPhase: 'syncing_entries',
+      setupAttempt: 1,
     });
   });
 
@@ -391,6 +440,8 @@ describe('tournament setup transaction recovery', () => {
           season,
           RETRY_TOURNAMENT_ID,
           beforeRecovery?.setupProgressUpdatedAt ?? null,
+          beforeRecovery?.setupStartedAt ?? null,
+          beforeRecovery?.setupAttempt ?? null,
         ),
     );
     expect(recoveryMarker).toBeString();

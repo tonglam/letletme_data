@@ -258,9 +258,23 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
           }
 
           maxAttempts = Math.max(1, persistedStatus.setupMaxAttempts ?? maxAttempts);
+          const stableProgressMarker =
+            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
+          // A marked delivery can be redelivered by BullMQ after losing its
+          // lock while a phase is already in progress. That is a reclaim of
+          // the same durable execution, so retain its attempt instead of
+          // consuming a fresh retry slot. New marked work always starts in
+          // queued and still advances the durable attempt counter normally.
+          const reclaimingMarkedExecution =
+            stableProgressMarker !== undefined &&
+            persistedStatus.setupStatus === 'processing' &&
+            persistedStatus.setupPhase !== 'queued' &&
+            persistedStatus.setupStartedAt !== null;
           const nextAttempt = Math.max(
             bullmqAttempt,
-            Math.max(0, persistedStatus.setupAttempt ?? 0) + 1,
+            reclaimingMarkedExecution
+              ? Math.max(1, persistedStatus.setupAttempt ?? bullmqAttempt)
+              : Math.max(0, persistedStatus.setupAttempt ?? 0) + 1,
           );
           attempt = Math.min(maxAttempts, nextAttempt);
           context.attempt = attempt;
@@ -270,8 +284,6 @@ export async function processTournamentSetupJob(job: Job<TournamentSetupJobData>
             });
           }
 
-          const stableProgressMarker =
-            job.data.resumeMarker ?? job.data.preparedRetryMarker ?? job.data.setupMarker;
           return tournamentInfoRepository.markSetupProcessing(
             season,
             job.data.tournamentId,

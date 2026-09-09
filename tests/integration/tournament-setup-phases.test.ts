@@ -813,3 +813,42 @@ test('prepared setup retry marker runs without an official roster resume', async
     1,
   );
 });
+
+test('prepared setup retry reclaims the current durable attempt after a stalled phase', async () => {
+  const seasonJobs = await import('../../src/services/season-scoped-job.service');
+  const setup = await import('../../src/services/tournament-setup.service');
+  const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+  const preparedRetryMarker = '2095-01-04 00:00:00+00';
+  spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+  const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+  await sql`UPDATE competition.tournaments
+    SET state='active', roster_sync_status='ready', setup_status='processing',
+        setup_phase='building_structure', setup_progress_updated_at=${preparedRetryMarker},
+        setup_started_at=clock_timestamp(), setup_attempt=3, setup_max_attempts=3
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+
+  await processTournamentSetupJob({
+    id: 'integration-prepared-stalled-retry',
+    name: 'tournament-setup',
+    queueName: 'tournament-setup',
+    data: {
+      ...season,
+      tournamentId,
+      source: 'manual',
+      triggeredAt: new Date().toISOString(),
+      preparedRetryMarker,
+    },
+    // BullMQ stalled redelivery has consumed a delivery slot, while the
+    // durable execution remains on its final configured attempt.
+    attemptsMade: 1,
+    opts: { attempts: 3 },
+    updateProgress: async () => {},
+  } as never);
+
+  expect(run).toHaveBeenCalledTimes(1);
+  expect((await tournamentInfoRepository.findSetupStatus(season, tournamentId))!).toMatchObject({
+    setupStatus: 'processing',
+    setupPhase: 'syncing_entries',
+    setupAttempt: 3,
+  });
+});
