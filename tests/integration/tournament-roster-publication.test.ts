@@ -430,3 +430,312 @@ test('core result backfill enters provider work without holding the batch scope'
     await sql.end();
   }
 });
+
+for (const resume of [false, true]) {
+  test(`an older ${resume ? 'resume' : 'normal'} execution cannot publish or fail a newer claim`, async () => {
+    const season = explicitSeasonRef(SEASON_CODE);
+    const sql = await getDbClient();
+    let marker: string | null = null;
+    if (resume) {
+      await sql`UPDATE competition.tournaments SET state='inactive'
+        WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;
+      marker = await tournamentRosterRepository.markResumeProcessingWithMarker(
+        season,
+        TOURNAMENT_ID,
+      );
+    }
+    const old = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+    const claimed = resume
+      ? await tournamentRosterRepository.markResumeProcessingIfPending(
+          season,
+          TOURNAMENT_ID,
+          marker!,
+        )
+      : await tournamentRosterRepository.markSyncProcessingIfMarker(season, TOURNAMENT_ID, marker);
+    expect(claimed).toBe(true);
+    const current = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+    expect(current.rowVersion).not.toBe(old.rowVersion);
+    expect(current.setupProgressUpdatedAt).toBe(old.setupProgressUpdatedAt);
+    const participants = ENTRY_IDS.slice(0, 2).map((id) => ({
+      id: String(id),
+      team: 'Fixture',
+      manager: 'Fixture',
+      overallRank: 1,
+      totalPoints: 0,
+    }));
+    const options = resume
+      ? { allowInactive: true, resumeAfterSetup: true, resumeMarker: marker! }
+      : undefined;
+    expect(
+      (
+        await tournamentRosterRepository.publishAuthoritativeRoster(
+          season,
+          old,
+          participants,
+          'Stale',
+          options,
+        )
+      ).skipped,
+    ).toBe(true);
+    expect(
+      await tournamentRosterRepository.markSyncFailedIfVersion(
+        season,
+        TOURNAMENT_ID,
+        old.rowVersion,
+        'stale failure',
+      ),
+    ).toBe(false);
+    expect((await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!.rowVersion).toBe(
+      current.rowVersion,
+    );
+    expect(
+      (
+        await tournamentRosterRepository.publishAuthoritativeRoster(
+          season,
+          current,
+          participants,
+          'Current',
+          options,
+        )
+      ).skipped,
+    ).toBe(false);
+    expect(
+      await tournamentRosterRepository.markSyncFailedIfVersion(
+        season,
+        TOURNAMENT_ID,
+        current.rowVersion,
+        'failure after superseding publication',
+      ),
+    ).toBe(false);
+  });
+}
+
+for (const failure of [false, true]) {
+  test(`reconciliation ${failure ? 'failure' : 'publication'} preserves state written during its provider wait`, async () => {
+    const { reconcileTournamentRoster } = await import(
+      '../../src/services/tournament-roster.service'
+    );
+    const leagueMembers = await import('../../src/services/tournament-league-members.service');
+    const { spyOn } = await import('bun:test');
+    const { databaseTransactionStorage } = await import('../../src/db/singleton');
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const providerFailure = new Error('owned provider failure');
+    let providerHeldTransaction = false;
+    const provider = spyOn(leagueMembers, 'fetchLeagueParticipants').mockImplementation(
+      async () => {
+        providerHeldTransaction = databaseTransactionStorage.getStore() !== undefined;
+        enter();
+        await released;
+        if (failure) throw providerFailure;
+        return {
+          leagueId: LEAGUE_ID,
+          leagueType: 'h2h',
+          leagueName: 'Fixture',
+          startEventId: 1,
+          knockoutRounds: 0,
+          participants: ENTRY_IDS.slice(0, 2).map((id) => ({
+            id: String(id),
+            team: 'Fixture',
+            manager: 'Fixture',
+            overallRank: 1,
+            totalPoints: 0,
+          })),
+        };
+      },
+    );
+    const season = explicitSeasonRef(SEASON_CODE);
+    const work = reconcileTournamentRoster(season, TOURNAMENT_ID).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    try {
+      await Promise.race([
+        entered,
+        work.then(() => {
+          throw new Error('Provider not reached');
+        }),
+      ]);
+      expect(providerHeldTransaction).toBe(false);
+      const sql = await getDbClient();
+      await sql`UPDATE competition.tournaments SET roster_sync_status='ready', setup_status='ready',
+        source_league_name='Newer accepted state', updated_at=now()
+        WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;
+      const current = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+      release();
+      const result = await work;
+      if (failure) expect(result).toBe(providerFailure);
+      else expect(result).toMatchObject({ changed: false, participantCount: 2 });
+      const saved = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+      expect(saved.rowVersion).toBe(current.rowVersion);
+      expect(saved.rosterSyncStatus).toBe('ready');
+      expect(saved.setupStatus).toBe('ready');
+    } finally {
+      release();
+      await work;
+      provider.mockRestore();
+      const sql = await getDbClient();
+      await sql`DELETE FROM ops.mutation_scopes WHERE scope_key = ANY(${[
+        `tournament-setup:tournament:${TOURNAMENT_ID}`,
+        `tournament-structure:tournament:${TOURNAMENT_ID}`,
+      ]}::text[])`;
+    }
+  }, 15000);
+}
+
+for (const missingCheckpoint of [false, true]) {
+  test(`a superseded profile ${missingCheckpoint ? 'still reports a missing target checkpoint' : 'converges on the committed target checkpoint'}`, async () => {
+    const { syncTournamentEntryDetails } = await import(
+      '../../src/services/tournament-backfill.service'
+    );
+    const { syncEntryInfo } = await import('../../src/services/entry-info.service');
+    const { recordedEntrySummary } = await import('../fixtures/entry-info.fixtures');
+    const { fplClient } = await import('../../src/clients/fpl');
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const summary = (id: number, name: string) => ({
+      ...structuredClone(recordedEntrySummary),
+      id,
+      name,
+      leagues: { classic: [], h2h: [] },
+    });
+    const oldProvider = spyOn(fplClient, 'getEntrySummary').mockImplementation(async (id) => {
+      enter();
+      await released;
+      return summary(id, 'Older profile');
+    });
+    const history = spyOn(fplClient, 'getEntryHistory').mockResolvedValue({
+      current: [],
+      past: [],
+      chips: [],
+    });
+    const season = explicitSeasonRef(SEASON_CODE);
+    const work = syncTournamentEntryDetails(season, [ENTRY_IDS[2]], { targetEventId: 0 });
+    try {
+      await entered;
+      await syncEntryInfo(
+        season,
+        ENTRY_IDS[2],
+        {
+          getEntrySummary: async (id) => summary(id, 'Newer profile'),
+          getEntryHistory: async () => ({ current: [], past: [], chips: [] }),
+        },
+        0,
+      );
+      const sql = await getDbClient();
+      if (missingCheckpoint)
+        await sql`UPDATE competition.entries SET snapshot_synced_through_event_id=NULL
+        WHERE season_id=${SEASON_ID} AND entry_id=${ENTRY_IDS[2]}`;
+      release();
+      const issues = await work;
+      expect(issues.length).toBe(missingCheckpoint ? 1 : 0);
+      const [saved] = await sql`SELECT entry_name FROM competition.entries
+        WHERE season_id=${SEASON_ID} AND entry_id=${ENTRY_IDS[2]}`;
+      expect(saved!.entry_name).toBe('Newer profile');
+    } finally {
+      release();
+      await work;
+      oldProvider.mockRestore();
+      history.mockRestore();
+      const sql = await getDbClient();
+      await sql`DELETE FROM ops.mutation_scopes WHERE scope_key=${`entry-core:${SEASON_ID}:${ENTRY_IDS[2]}`}`;
+    }
+  }, 15000);
+}
+
+for (const resume of [false, true]) {
+  test(`the current ${resume ? 'resume' : 'normal'} execution still records its provider failure`, async () => {
+    const { reconcileTournamentRoster } = await import(
+      '../../src/services/tournament-roster.service'
+    );
+    const leagueMembers = await import('../../src/services/tournament-league-members.service');
+    const failure = new Error('current execution provider failure');
+    const provider = spyOn(leagueMembers, 'fetchLeagueParticipants').mockRejectedValue(failure);
+    const season = explicitSeasonRef(SEASON_CODE);
+    const sql = await getDbClient();
+    let marker: string | undefined;
+    if (resume) {
+      await sql`UPDATE competition.tournaments SET state='inactive'
+        WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;
+      marker = await tournamentRosterRepository.markResumeProcessingWithMarker(
+        season,
+        TOURNAMENT_ID,
+      );
+    }
+    try {
+      await expect(
+        reconcileTournamentRoster(
+          season,
+          TOURNAMENT_ID,
+          resume
+            ? {
+                allowInactive: true,
+                resumeAfterSetup: true,
+                requireResumeMarker: true,
+                resumeMarker: marker,
+              }
+            : undefined,
+        ),
+      ).rejects.toBe(failure);
+      const saved = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+      expect(saved.rosterSyncStatus).toBe('failed');
+      expect(saved.setupStatus).toBe(resume ? 'failed' : 'ready');
+      if (resume) expect(saved.setupProgressUpdatedAt).toBe(marker!);
+    } finally {
+      provider.mockRestore();
+      await sql`DELETE FROM ops.mutation_scopes WHERE scope_key=${`tournament-setup:tournament:${TOURNAMENT_ID}`}`;
+    }
+  });
+}
+
+test('a current execution can settle an enqueue failure after its roster publication commits', async () => {
+  const { reconcileTournamentRoster } = await import(
+    '../../src/services/tournament-roster.service'
+  );
+  const leagueMembers = await import('../../src/services/tournament-league-members.service');
+  const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+  const failure = new Error('owned enqueue failure');
+  const enqueue = spyOn(setupJobs, 'enqueueTournamentSetup').mockRejectedValue(failure);
+  const provider = spyOn(leagueMembers, 'fetchLeagueParticipants').mockResolvedValue({
+    leagueId: LEAGUE_ID,
+    leagueType: 'h2h',
+    leagueName: 'Fixture',
+    startEventId: 1,
+    knockoutRounds: 0,
+    participants: ENTRY_IDS.slice(0, 2).map((id) => ({
+      id: String(id),
+      team: 'Fixture',
+      manager: 'Fixture',
+      overallRank: 1,
+      totalPoints: 0,
+    })),
+  });
+  const season = explicitSeasonRef(SEASON_CODE);
+  try {
+    await expect(reconcileTournamentRoster(season, TOURNAMENT_ID)).rejects.toBe(failure);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    const saved = (await tournamentRosterRepository.findById(season, TOURNAMENT_ID))!;
+    expect(saved.rosterSyncStatus).toBe('failed');
+    expect(saved.setupStatus).toBe('failed');
+  } finally {
+    enqueue.mockRestore();
+    provider.mockRestore();
+    const sql = await getDbClient();
+    await sql`DELETE FROM ops.mutation_scopes WHERE scope_key = ANY(${[
+      `tournament-setup:tournament:${TOURNAMENT_ID}`,
+      `tournament-structure:tournament:${TOURNAMENT_ID}`,
+    ]}::text[])`;
+  }
+});

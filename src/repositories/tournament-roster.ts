@@ -18,6 +18,7 @@ import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 export type TournamentRosterRecord = TournamentConfig & {
+  rowVersion: string;
   adminEntryId: number;
   leagueId: number;
   leagueType: LeagueType;
@@ -64,11 +65,13 @@ export const tournamentRosterRepository = {
   findById: async (
     season: FplSeasonRef,
     tournamentId: number,
+    options?: { forUpdate?: boolean },
   ): Promise<TournamentRosterRecord | null> => {
     try {
       const client = await getDbClient();
       const rows = await client<RosterRow[]>`
         SELECT
+          xmin::text AS "rowVersion",
           tournament_id AS id,
           admin_entry_id AS "adminEntryId",
           league_id AS "leagueId",
@@ -97,6 +100,7 @@ export const tournamentRosterRepository = {
         WHERE season_id = ${season.seasonId}
           AND tournament_id = ${tournamentId}
         LIMIT 1
+        ${options?.forUpdate ? client`FOR UPDATE` : client``}
       `;
       return normalizeRoster(rows[0]);
     } catch (error) {
@@ -117,6 +121,7 @@ export const tournamentRosterRepository = {
       const client = await getDbClient();
       const rows = await client<RosterRow[]>`
         SELECT
+          xmin::text AS "rowVersion",
           tournament_id AS id,
           admin_entry_id AS "adminEntryId",
           league_id AS "leagueId",
@@ -316,6 +321,23 @@ export const tournamentRosterRepository = {
     `;
   },
 
+  markSyncFailedIfVersion: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    rowVersion: string,
+    internalError: string,
+  ): Promise<boolean> => {
+    const client = await getDbClient();
+    const rows = await client<{ id: number }[]>`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'failed', roster_sync_error = ${internalError}, updated_at = now()
+      WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        AND xmin::text = ${rowVersion}
+      RETURNING tournament_id AS id
+    `;
+    return rows.length === 1;
+  },
+
   markSyncReady: async (
     season: FplSeasonRef,
     tournamentId: number,
@@ -478,6 +500,7 @@ export const tournamentRosterRepository = {
 
         const locked = await tx<
           Array<{
+            rowVersion: string;
             id: number;
             state: 'active' | 'inactive' | 'finished';
             leagueType: LeagueType;
@@ -490,6 +513,7 @@ export const tournamentRosterRepository = {
           }>
         >`
           SELECT
+            xmin::text AS "rowVersion",
             tournament_id AS id,
             state,
             league_type AS "leagueType",
@@ -507,6 +531,16 @@ export const tournamentRosterRepository = {
         const current = locked[0];
         if (!current) {
           return { changed: false, participantCount: 0, automaticallyPaused: false, skipped: true };
+        }
+        // The claim's MVCC row version changes on every committed tournament
+        // write, including another execution of the same durable resume intent.
+        if (current.rowVersion !== tournament.rowVersion) {
+          return {
+            changed: false,
+            participantCount: current.totalTeamNum,
+            automaticallyPaused: false,
+            skipped: true,
+          };
         }
         if (options?.resumeAfterSetup && current.rosterSyncStatus !== 'processing') {
           return {

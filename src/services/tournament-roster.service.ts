@@ -2,9 +2,15 @@ import { eventRepository } from '../repositories/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { tournamentRosterRepository } from '../repositories/tournament-roster';
+import {
+  tournamentRosterRepository,
+  type TournamentRosterRecord,
+} from '../repositories/tournament-roster';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
-import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
+import {
+  tournamentSetupRebuildScopes,
+  tournamentSetupLifecycleScope,
+} from '../domain/mutation-scope';
 import {
   diffTournamentRoster,
   getTournamentBackfillWindow,
@@ -67,12 +73,20 @@ export type TournamentRosterReconcileOptions = {
   allowUnlockedOfficialH2HRecovery?: boolean;
 };
 
-async function reconcileTournamentRosterUnlocked(
+async function prepareTournamentRosterReconciliation(
   season: FplSeasonRef,
   tournamentId: number,
   options?: TournamentRosterReconcileOptions,
-): Promise<TournamentRosterReconcileResult> {
-  const tournament = await tournamentRosterRepository.findById(season, tournamentId);
+): Promise<
+  | TournamentRosterReconcileResult
+  | {
+      tournament: TournamentRosterRecord;
+      unlockedOfficialH2HRecovery: boolean;
+    }
+> {
+  const tournament = await tournamentRosterRepository.findById(season, tournamentId, {
+    forUpdate: true,
+  });
   if (!tournament) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
   }
@@ -242,6 +256,28 @@ async function reconcileTournamentRosterUnlocked(
   ) {
     await tournamentRosterRepository.markSyncProcessing(season, tournamentId);
   }
+  const claimed = await tournamentRosterRepository.findById(season, tournamentId);
+  if (!claimed) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
+  return { tournament: claimed, unlockedOfficialH2HRecovery };
+}
+
+async function reconcileTournamentRosterUnlocked(
+  season: FplSeasonRef,
+  tournamentId: number,
+  options?: TournamentRosterReconcileOptions,
+): Promise<TournamentRosterReconcileResult> {
+  const prepared = await withMutationScopes(
+    {
+      queueName: 'tournament-roster',
+      jobName: 'claim-reconciliation',
+      tournamentId,
+      scopes: [tournamentSetupLifecycleScope(tournamentId)],
+    },
+    () => prepareTournamentRosterReconciliation(season, tournamentId, options),
+  );
+  if ('changed' in prepared) return prepared;
+  const { tournament, unlockedOfficialH2HRecovery } = prepared;
+  let ownerVersion = tournament.rowVersion;
   let setupEnqueueRequired = false;
   try {
     const source = await fetchLeagueParticipants(
@@ -315,13 +351,17 @@ async function reconcileTournamentRosterUnlocked(
         tournamentId,
         // Serialize the final boundary check with the canonical events writer,
         // then keep membership frozen through the short structure transaction.
-        scopes: [...tournamentSetupRebuildScopes(tournamentId), 'data-core:events'],
+        scopes: [
+          ...tournamentSetupRebuildScopes(tournamentId),
+          tournamentSetupLifecycleScope(tournamentId),
+          'data-core:events',
+        ],
       },
       async () => {
         if (!unlockedOfficialH2HRecovery) {
           await assertPreGameweekBoundary(season);
         }
-        return tournamentRosterRepository.publishAuthoritativeRoster(
+        const published = await tournamentRosterRepository.publishAuthoritativeRoster(
           season,
           tournament,
           source.participants,
@@ -336,6 +376,11 @@ async function reconcileTournamentRosterUnlocked(
             guardUnlockedOfficialH2HRecovery: unlockedOfficialH2HRecovery,
           },
         );
+        if (!published.skipped) {
+          ownerVersion = (await tournamentRosterRepository.findById(season, tournamentId))!
+            .rowVersion;
+        }
+        return published;
       },
     );
     if (publication.skipped) {
@@ -361,18 +406,32 @@ async function reconcileTournamentRosterUnlocked(
       publication.changed || options?.resumeAfterSetup || tournament.standingsReadyAt === null;
     setupEnqueueRequired = needsSetup && !publication.automaticallyPaused;
     if (setupEnqueueRequired) {
-      await enqueueTournamentSetup(
-        season,
-        tournamentId,
-        options?.resumeAfterSetup ? 'resume' : 'roster',
+      await withMutationScopes(
         {
-          forceNew: true,
-          // The lifecycle lock is held here. If BullMQ still reports an active
-          // predecessor after the settle window, leave a distinct successor;
-          // reusing it would not prove that the newly published marker is read.
-          ensureSuccessorOnActive: true,
-          activeSettleTimeoutMs: 2_000,
-          resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
+          queueName: 'tournament-roster',
+          jobName: 'enqueue-claimed-setup',
+          tournamentId,
+          scopes: [tournamentSetupLifecycleScope(tournamentId)],
+        },
+        async () => {
+          const current = await tournamentRosterRepository.findById(season, tournamentId, {
+            forUpdate: true,
+          });
+          if (current?.rowVersion !== ownerVersion) return;
+          await enqueueTournamentSetup(
+            season,
+            tournamentId,
+            options?.resumeAfterSetup ? 'resume' : 'roster',
+            {
+              forceNew: true,
+              // The lifecycle lock is held here. If BullMQ still reports an active
+              // predecessor after the settle window, leave a distinct successor;
+              // reusing it would not prove that the newly published marker is read.
+              ensureSuccessorOnActive: true,
+              activeSettleTimeoutMs: 2_000,
+              resumeMarker: options?.resumeAfterSetup ? options.resumeMarker : undefined,
+            },
+          );
         },
       );
     }
@@ -398,21 +457,36 @@ async function reconcileTournamentRosterUnlocked(
     const failureMarker = options?.resumeAfterSetup
       ? options.resumeMarker
       : options?.expectedProgressMarker;
-    await Promise.allSettled([
-      tournamentRosterRepository.markSyncFailed(season, tournamentId, message),
-      ...(options?.resumeAfterSetup || setupEnqueueRequired
-        ? [
-            tournamentInfoRepository.markSetupResult(
-              season,
-              tournamentId,
-              'failed',
-              message,
-              0,
-              failureMarker,
-            ),
-          ]
-        : []),
-    ]);
+    await withMutationScopes(
+      {
+        queueName: 'tournament-roster',
+        jobName: 'settle-claimed-failure',
+        tournamentId,
+        scopes: [tournamentSetupLifecycleScope(tournamentId)],
+      },
+      async () => {
+        const owned = await tournamentRosterRepository.markSyncFailedIfVersion(
+          season,
+          tournamentId,
+          ownerVersion,
+          message,
+        );
+        if (owned && (options?.resumeAfterSetup || setupEnqueueRequired)) {
+          await tournamentInfoRepository.markSetupResult(
+            season,
+            tournamentId,
+            'failed',
+            message,
+            0,
+            failureMarker,
+          );
+        }
+      },
+    ).catch((settlementError: unknown) => {
+      logError('Failed to settle owned roster reconciliation failure', settlementError, {
+        tournamentId,
+      });
+    });
     throw error;
   }
 }
