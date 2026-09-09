@@ -35,7 +35,7 @@ export type ClaimedDataPublicationOutbox = Readonly<{
   items: readonly DataPublicationDeliveryItem[];
 }>;
 
-/** Read only scheduling context, bound to the active row in one SQL snapshot. */
+/** Read scheduling context only after proving the complete active publication. */
 export async function loadActivePriceChangeContext(season: FplSeasonRef) {
   const db = await getDb();
   const rows = await db
@@ -43,18 +43,8 @@ export async function loadActivePriceChangeContext(season: FplSeasonRef) {
       publicationId: datasetPublicationsInOps.publicationId,
       revision: datasetPublicationsInOps.revision,
       manifest: datasetPublicationsInOps.manifest,
-      payload: datasetPublicationItemsInOps.payload,
-      itemCount: datasetPublicationItemsInOps.itemCount,
-      checksum: datasetPublicationItemsInOps.checksum,
     })
     .from(datasetPublicationsInOps)
-    .innerJoin(
-      datasetPublicationItemsInOps,
-      and(
-        eq(datasetPublicationItemsInOps.publicationId, datasetPublicationsInOps.publicationId),
-        eq(datasetPublicationItemsInOps.itemName, 'context'),
-      ),
-    )
     .where(
       and(
         eq(datasetPublicationsInOps.dataset, 'fpl:price-changes'),
@@ -66,7 +56,15 @@ export async function loadActivePriceChangeContext(season: FplSeasonRef) {
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  const manifest = parseDataPublicationManifest(JSON.stringify(row.manifest));
+  // The Redis fast path validates every sibling itself. This durable fallback
+  // must enforce the same boundary so a context row cannot create an
+  // obligation when the active publication is missing or has a bad players
+  // sibling.
+  const prepared = await loadPreparedPublication(db, row.publicationId, row.manifest).catch(
+    () => null,
+  );
+  if (!prepared) return null;
+  const manifest = prepared.manifest;
   if (
     !manifest ||
     manifest.publicationId !== row.publicationId ||
@@ -76,18 +74,13 @@ export async function loadActivePriceChangeContext(season: FplSeasonRef) {
     manifest.eventId !== null
   )
     return null;
-  const item = manifest.items.find((candidate) => candidate.name === 'context');
-  if (
-    !item ||
-    row.itemCount !== item.count ||
-    !row.payload ||
-    typeof row.payload !== 'object' ||
-    Array.isArray(row.payload) ||
-    Object.keys(row.payload).length !== item.count ||
-    !verifiedItemPayload(row, item)
-  )
+  const item = prepared.items.find((candidate) => candidate.manifest.name === 'context');
+  if (!item) return null;
+  try {
+    return { manifest, items: { context: JSON.parse(item.payload) as unknown } };
+  } catch {
     return null;
-  return { manifest, items: { context: row.payload } };
+  }
 }
 
 function verifiedItemPayload(

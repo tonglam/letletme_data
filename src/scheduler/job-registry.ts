@@ -1027,10 +1027,10 @@ function priceChangeWatchDefinition(): ScheduledJobDefinition {
     successPredicate: 'observe an official price-change fingerprint or record no change',
     resolve: async (context) => {
       if (!priceHotWatchEnabled()) return [];
-      // Read only durable context, without loading the player board or Redis. A
-      // missing/stale board is handled by the normal price publication lane;
-      // the scheduler must not make a provider request to discover an
-      // optional hot-watch target.
+      // Read scheduler-safe publication context. The cache path validates the
+      // complete active revision but returns only deadline metadata; a missing
+      // or stale board is handled by the normal price publication lane without
+      // making a provider request from the scheduler.
       const board = await getPriceChangeWatchDeadlines(context.season, context.now).catch(
         () => null,
       );

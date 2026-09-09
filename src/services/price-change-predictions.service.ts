@@ -1100,15 +1100,15 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
   // cache helper validates every sibling before returning, so a partial board
   // cannot create a scheduler obligation.
   const redisPublication = await readActiveDataPublicationItems(scope, ['context']);
-  let canonicalPublication: Awaited<
-    ReturnType<typeof syncOperationsRepository.findActivePublication>
+  let canonicalManifest: Awaited<
+    ReturnType<typeof syncOperationsRepository.findActivePublicationManifest>
   > = null;
   let databaseAvailable = true;
   try {
     // The identity query is intentionally metadata-only. It fences a valid but
     // stale Redis pointer while avoiding the large publication-item join that
     // caused the scheduler timeout incident.
-    canonicalPublication = await syncOperationsRepository.findActivePublication(
+    canonicalManifest = await syncOperationsRepository.findActivePublicationManifest(
       PRICE_CHANGE_DATASET,
       season,
     );
@@ -1118,10 +1118,10 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
 
   if (
     redisPublication &&
-    ((!databaseAvailable && !canonicalPublication) ||
-      (canonicalPublication &&
-        redisPublication.manifest.publicationId === canonicalPublication.publicationId &&
-        redisPublication.manifest.revision === canonicalPublication.revision))
+    ((!databaseAvailable && !canonicalManifest) ||
+      (canonicalManifest &&
+        redisPublication.manifest.publicationId === canonicalManifest.publicationId &&
+        redisPublication.manifest.revision === canonicalManifest.revision))
   ) {
     const deadlines = parsePriceChangeWatchDeadlines(redisPublication, now);
     if (deadlines) return deadlines;
