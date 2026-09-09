@@ -54,6 +54,8 @@ curl_timeout_with_deadline() {
 IFS=' ' read -r -a compose_cmd <<<"$compose_bin"
 compose() { (cd "$project_dir" && "${compose_cmd[@]}" -f "$compose_file" "$@"); }
 
+runtime_include_media_worker=${RUNTIME_INCLUDE_MEDIA_WORKER:-true}
+
 api_ready=false
 for attempt in $(seq 1 "$attempts"); do
   timeout=$(curl_timeout_with_deadline) || break
@@ -85,7 +87,12 @@ if [ "$api_ready" != true ]; then
   exit 1
 fi
 
-for service in scheduler worker content-worker live-picks-worker official-h2h-worker media-worker; do
+services=(scheduler worker content-worker live-picks-worker official-h2h-worker)
+if [ "$runtime_include_media_worker" != false ]; then
+  services+=(media-worker)
+fi
+
+for service in "${services[@]}"; do
   container=$(compose ps -q "$service" | head -n 1)
   test -n "$container"
   service_ready=false

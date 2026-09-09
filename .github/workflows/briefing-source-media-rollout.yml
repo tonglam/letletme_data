@@ -94,12 +94,41 @@ jobs:
             fi
 
             export CONTENT_MEDIA_ENV_FILE="$media_env_file"
-            current_container=$(docker compose ps -q media-worker | head -n 1)
-            test -n "$current_container"
-            current_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
-            test -n "$current_image"
-            image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$current_image")
-            test "$image_revision" = "$ROLLOUT_SHA"
+            target_container=$(docker compose ps -q api | head -n 1)
+            test -n "$target_container"
+            target_image=$(docker inspect --format '{{.Config.Image}}' "$target_container")
+            test -n "$target_image"
+            target_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$target_image")
+            test "$target_revision" = "$ROLLOUT_SHA"
+            current_container=$(docker compose ps -aq media-worker | head -n 1)
+            previous_media_present=false
+            previous_media_was_running=false
+            previous_media_image=''
+            previous_media_image_id=''
+            previous_media_revision=''
+            if [ -n "$current_container" ]; then
+              previous_media_present=true
+              previous_media_image=$(docker inspect --format '{{.Config.Image}}' "$current_container")
+              test -n "$previous_media_image"
+              previous_media_image_id=$(docker inspect --format '{{.Image}}' "$current_container")
+              test -n "$previous_media_image_id"
+              test "$(docker image inspect --format '{{.Id}}' "$previous_media_image")" = "$previous_media_image_id"
+              previous_media_state=$(docker inspect --format '{{.State.Status}}' "$current_container")
+              case "$previous_media_state" in
+                running|restarting) previous_media_was_running=true ;;
+                created|exited|dead) ;;
+                *) echo "source-media rollout refused: unknown previous worker state=$previous_media_state" >&2; exit 1 ;;
+              esac
+              previous_media_revision=$(docker image inspect \
+                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+                "$previous_media_image")
+              if [[ ! "$previous_media_revision" =~ ^[0-9a-f]{40}$ ]]; then
+                echo 'source-media rollout refused: previous media image has no exact release revision' >&2
+                exit 1
+              fi
+            else
+              echo 'source-media rollout: no existing media-worker container; provisioning will create it'
+            fi
 
             read_container_boolean() {
               key=$1
@@ -186,6 +215,11 @@ jobs:
 
             if [ "$media_env_missing" = true ]; then
               if [ "$ROLLOUT_MODE" = status ]; then
+                if [ "$previous_media_present" = false ]; then
+                  printf '%s\n' '{"event":"briefing_source_media_config","mediaEnvPresent":false,"workerPresent":false,"containerHealth":"absent"}'
+                  release_deploy_lock
+                  exit 0
+                fi
                 container_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
                   "$current_container")
                 test "$container_health" = healthy
@@ -197,7 +231,7 @@ jobs:
                 release_deploy_lock
                 exit 0
               fi
-              if ! APP_IMAGE="$current_image" docker compose run --rm -T --interactive=false --no-deps api \
+              if ! APP_IMAGE="$target_image" docker compose run --rm -T --interactive=false --no-deps api \
                 bun validate-env.ts --probe-bug-report-storage; then
                 release_deploy_lock || true
                 exit 1
@@ -239,9 +273,10 @@ jobs:
             }
 
             wait_for_media_worker() {
+              expected_image=${1:-$target_image}
               container=$(docker compose ps -q media-worker | head -n 1)
               test -n "$container"
-              test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$current_image"
+              test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$expected_image"
               for attempt in $(seq 1 30); do
                 health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
                 if [ "$health" = healthy ]; then return 0; fi
@@ -255,7 +290,12 @@ jobs:
 
             scripts/configure-briefing-source-media-env.sh status "$media_env_file"
             if [ "$ROLLOUT_MODE" = status ]; then
-              wait_for_media_worker
+              if [ "$previous_media_present" = false ]; then
+                printf '%s\n' '{"event":"briefing_source_media_config","workerPresent":false,"containerHealth":"absent"}'
+                release_deploy_lock
+                exit 0
+              fi
+              wait_for_media_worker "$previous_media_image"
               report_health
               release_deploy_lock
               exit 0
@@ -275,7 +315,7 @@ jobs:
                 echo 'enable modes require the production standard probe; use probe_mode=standard' >&2
                 exit 1
               fi
-              APP_IMAGE="$current_image" docker compose run --rm -T --interactive=false --no-deps media-worker \
+              APP_IMAGE="$target_image" docker compose run --rm -T --interactive=false --no-deps media-worker \
                 bun dist/media-worker.js --provision-and-probe "$probe_flag"
             fi
             if [ "$ROLLOUT_MODE" = provision ]; then
@@ -292,6 +332,14 @@ jobs:
             backup_file=''
             rollout_committed=false
             worker_stopped=false
+            worker_restore_needed=false
+            worker_created=false
+            created_media_container=''
+            remove_created_media_worker() {
+              if [ "$worker_created" = true ] && [ -n "$created_media_container" ]; then
+                docker rm -f "$created_media_container" || true
+              fi
+            }
             on_exit() {
               original_status=$?
               trap - EXIT
@@ -300,8 +348,16 @@ jobs:
                 if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
                   mv "$backup_file" "$media_env_file"
                 fi
-                if [ "$worker_stopped" = true ]; then
-                  APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate media-worker || true
+                if [ "$worker_restore_needed" = true ]; then
+                  if [ "$previous_media_was_running" = true ]; then
+                    DEPLOY_SHA="$previous_media_revision" APP_IMAGE="$previous_media_image" \
+                      docker compose up -d --no-build --force-recreate media-worker || true
+                  else
+                    DEPLOY_SHA="$previous_media_revision" APP_IMAGE="$previous_media_image" \
+                      docker compose create --no-build --force-recreate media-worker || true
+                  fi
+                elif [ "$worker_created" = true ]; then
+                  remove_created_media_worker
                 fi
               fi
               if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi
@@ -313,12 +369,31 @@ jobs:
             umask 077
             backup_file=$(mktemp "$expected_workdir/.env.media.rollout-backup.XXXXXX")
             cp -p "$media_env_file" "$backup_file"
-            docker compose stop -t 45 media-worker
-            worker_stopped=true
+            if [ "$previous_media_present" = true ]; then
+              if [ "$previous_media_was_running" = true ]; then
+                worker_restore_needed=true
+                docker compose stop -t 45 media-worker
+                worker_stopped=true
+              fi
+            fi
             if [ "$ROLLOUT_MODE" = enable-retention ]; then retention_preflight; fi
             scripts/configure-briefing-source-media-env.sh "$ROLLOUT_MODE" "$media_env_file"
-            APP_IMAGE="$current_image" docker compose up -d --no-build --force-recreate media-worker
-            wait_for_media_worker
+            if ! APP_IMAGE="$target_image" docker compose up -d --no-build --force-recreate media-worker; then
+              if [ "$previous_media_present" = false ]; then
+                created_media_container=$(docker compose ps -aq media-worker | head -n 1 || true)
+                if [ -n "$created_media_container" ]; then worker_created=true; fi
+              else
+                worker_restore_needed=true
+              fi
+              exit 1
+            fi
+            if [ "$previous_media_present" = true ]; then worker_restore_needed=true; fi
+            if [ "$previous_media_present" = false ]; then
+              created_media_container=$(docker compose ps -aq media-worker | head -n 1)
+              test -n "$created_media_container"
+              worker_created=true
+            fi
+            wait_for_media_worker "$target_image"
             report_health
             rollout_committed=true
             rm -f -- "$backup_file"

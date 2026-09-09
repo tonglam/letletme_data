@@ -13,6 +13,10 @@ const sourceMediaRolloutWorkflow = readFileSync(
   '.github/workflows/briefing-source-media-rollout.yml',
   'utf8',
 );
+const fplRawSnapshotStorageGateWorkflow = readFileSync(
+  '.github/workflows/fpl-raw-snapshot-storage-gate.yml',
+  'utf8',
+);
 const pinnedOpenSshAction = readFileSync('.github/actions/pinned-openssh/action.yml', 'utf8');
 const backupScript = readFileSync('scripts/pre-migration-backup.sh', 'utf8');
 const contentWorker = readFileSync('src/content-worker.ts', 'utf8');
@@ -37,6 +41,8 @@ const mediaWorker = readFileSync('src/media-worker.ts', 'utf8');
 const mediaConfig = readFileSync('src/content/media/source-media-config.ts', 'utf8');
 const queueQuiescence = readFileSync('scripts/assert-queue-quiescence.ts', 'utf8');
 const sourceMediaDeployFence = readFileSync('scripts/hold-source-media-deploy-fence.sh', 'utf8');
+const sourceMediaRepository = readFileSync('src/content/media/source-media-repository.ts', 'utf8');
+const sourceMediaRetention = readFileSync('src/content/media/source-media-retention.ts', 'utf8');
 const quote = String.fromCharCode(39);
 
 function expectNonInteractiveComposeRuns(source: string, label: string) {
@@ -192,14 +198,11 @@ describe('release workflow gates', () => {
     const localAdmission = deployScript.indexOf(
       'if ! drain_content_worker_queues_for_deploy; then',
     );
-    const localMediaStop = deployScript.indexOf('if ! stop_media_worker_with_deadline; then');
     const localSchedulerStop = deployScript.indexOf('if ! compose stop -t 45 scheduler; then');
-    const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
-    const localMediaFence = deployScript.indexOf('if ! acquire_source_media_deploy_fence; then');
-    const localMediaFenceRelease = deployScript.indexOf(
-      'if ! release_source_media_deploy_fence; then',
-      localMediaStop,
+    const localMediaFence = deployScript.indexOf(
+      'if ! acquire_source_media_deploy_fence || ! source_media_deploy_fence_is_active; then',
     );
+    const localProbe = deployScript.indexOf('if ! wait_for_scoped_queue_quiescence 150 2; then');
     const localStop = deployScript.indexOf('if ! compose stop -t 45 content-worker; then');
     const localPrepare = deployScript.indexOf(
       'if ! prepare_content_worker_paused_runs_for_deploy; then',
@@ -210,9 +213,24 @@ describe('release workflow gates', () => {
     expect(localAdmission).toBeLessThan(localProbe);
     expect(localAdmission).toBeLessThan(localSchedulerStop);
     expect(localSchedulerStop).toBeLessThan(localProbe);
-    expect(localProbe).toBeLessThan(localMediaFence);
-    expect(localMediaFence).toBeLessThan(localMediaStop);
-    expect(localMediaStop).toBeLessThan(localMediaFenceRelease);
+    expect(localMediaFence).toBeGreaterThan(localSchedulerStop);
+    expect(localMediaFence).toBeLessThan(localProbe);
+    const localMediaStop = deployScript.indexOf(
+      'if ! stop_source_media_worker_with_deadline; then',
+    );
+    const localMigrationFenceRelease = deployScript.indexOf(
+      'if ! release_source_media_deploy_fence; then',
+      deployScript.indexOf('start_stage migration'),
+    );
+    expect(localMediaStop).toBeGreaterThan(localStop);
+    expect(localMediaStop).toBeLessThan(localPrepare);
+    expect(localMigrationFenceRelease).toBeGreaterThan(-1);
+    expect(localMigrationFenceRelease).toBeLessThan(
+      deployScript.indexOf('DEPLOY_MIGRATION_STARTED=true'),
+    );
+    expect(deployScript).toContain('docker stop --time 45 "$container_id"');
+    expect(deployScript).toContain('docker start "$container_id"');
+    expect(deployScript).toContain('DEPLOY_SOURCE_MEDIA_WORKER_STOPPED');
     expect(localProbe).toBeLessThan(localStop);
     expect(localStop).toBeLessThan(localPrepare);
     expect(localPrepare).toBeLessThan(localRenew);
@@ -235,7 +253,7 @@ describe('release workflow gates', () => {
     );
   });
 
-  test('isolates the durable media worker and includes it in deployment gates', () => {
+  test('keeps the durable media worker on its dedicated rollout lifecycle', () => {
     const mediaServiceStart = composeFile.indexOf('  media-worker:');
     const mediaService = composeFile.slice(mediaServiceStart);
     expect(mediaServiceStart).toBeGreaterThan(0);
@@ -248,6 +266,9 @@ describe('release workflow gates', () => {
     expect(mediaService).not.toContain('/run/letletme-grok-runner');
     expect(mediaService).not.toContain('group_add:');
     expect(mediaConfig).toContain('CONTENT_MEDIA_WORKER_ENABLED');
+    expect(composeFile).toContain(
+      'RUNTIME_INCLUDE_MEDIA_WORKER=${RUNTIME_INCLUDE_MEDIA_WORKER:-true}',
+    );
     expect(mediaWorker).toContain('releaseSourceMediaGateLeases');
     expect(mediaWorker).toContain('controller.abort');
     expect(mediaWorker).toContain('retentionController?.abort');
@@ -255,30 +276,57 @@ describe('release workflow gates', () => {
     expect(mediaWorker).not.toContain('!flags.enabled || retentionInFlight');
     expect(queueQuiescence).toContain('allQueueNames.map');
     expect(queueQuiescence).toContain(String.raw`status = 'RUNNING'`);
-    expect(deployScript).toContain('old_media_container=$(compose ps -q media-worker');
-    expect(deployScript).not.toContain('compose ps -aq media-worker');
-    expect(sourceMediaDeployFence).toContain('FOR UPDATE;');
-    expect(sourceMediaDeployFence).toContain(
-      String.raw`status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE', 'RUNNING')`,
+    expect(deployScript).not.toContain('old_media_container=$(compose ps -q media-worker');
+    expect(deployScript).toContain('acquire_source_media_deploy_fence');
+    expect(deployScript).toContain('source_media_deploy_fence_is_active');
+    expect(sourceMediaRepository).toContain(
+      String.raw`pg_try_advisory_xact_lock(hashtextextended('content-source-media-deploy-v1', 0))`,
     );
+    expect(sourceMediaRepository).toContain('if (fenceRows[0]?.acquired !== true) return []');
+    expect(sourceMediaRetention).toContain(
+      String.raw`pg_try_advisory_lock(
+        hashtextextended('content-source-media-deploy-v1', 0)
+      )`,
+    );
+    expect(sourceMediaRetention).toContain('if (!deployFenceAcquired) return []');
+    expect(sourceMediaDeployFence).toContain(
+      String.raw`pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))`,
+    );
+    expect(sourceMediaDeployFence).toContain(String.raw`to_regclass('content.source_media_gates')`);
+    expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_NOT_REQUIRED');
     expect(sourceMediaDeployFence).toContain(String.raw`status = 'RUNNING'`);
-    expect(sourceMediaDeployFence).toContain('repair_until_at <= clock_timestamp()');
+    expect(sourceMediaDeployFence).toContain('lease_owner IS NOT NULL');
+    expect(sourceMediaDeployFence).toContain(
+      String.raw`storage_state = 'AVAILABLE'
+        AND upload_lease_owner IS NOT NULL`,
+    );
+    expect(sourceMediaDeployFence).toContain(
+      'Durable PENDING/PARTIAL/UNAVAILABLE gates past repair_until_at do not',
+    );
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
-    expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_BUSY');
-    expect(sourceMediaDeployFence).toContain('PERFORM pg_sleep(${hold_seconds});');
+    expect(sourceMediaDeployFence).toContain(
+      'LOCK TABLE content.source_media_gates IN SHARE ROW EXCLUSIVE MODE NOWAIT',
+    );
+    expect(sourceMediaDeployFence).toContain(
+      'LOCK TABLE content.source_media_assets IN SHARE ROW EXCLUSIVE MODE NOWAIT',
+    );
+    expect(sourceMediaDeployFence).toContain('hold_seconds=${2:-1500}');
+    expect(sourceMediaDeployFence).not.toContain('IF ${hold_seconds} = 0 THEN');
+    expect(sourceMediaDeployFence).not.toContain('FOR UPDATE NOWAIT');
+    expect(sourceMediaDeployFence).toContain('WHEN lock_not_available OR raise_exception THEN');
     expect(sourceMediaDeployFence).not.toMatch(/\b(INSERT|DELETE|TRUNCATE)\b|^\s*UPDATE\b/m);
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'if [[ ! "$previous_media_revision" =~ ^[0-9a-f]{40}$ ]]; then',
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('worker_created=false');
+    expect(sourceMediaRolloutWorkflow).toContain('created_media_container=');
+    expect(sourceMediaRolloutWorkflow).toContain('docker rm -f "$created_media_container"');
     expect(deployScript).toContain('release_source_media_deploy_fence()');
     expect(deployScript).toContain('docker rm --force "$container_id"');
     expect(deployScript).toContain('run --rm -T --interactive=false -d --no-deps');
-    expect(deployScript).toContain('--provision-and-probe');
-    expect(deployScript).toContain('--probe-fpl-raw-snapshot-storage');
-    expect(deployScript).toContain('bootstrap-briefing-source-media-env.sh');
-    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeGreaterThan(
-      deployScript.indexOf('bun validate-env.ts --probe-fpl-raw-snapshot-storage'),
-    );
-    expect(deployScript.indexOf('bootstrap-briefing-source-media-env.sh')).toBeLessThan(
-      deployScript.indexOf('status()'),
-    );
+    expect(deployScript).not.toContain('--provision-and-probe');
+    expect(deployScript).not.toContain('--probe-fpl-raw-snapshot-storage');
+    expect(deployScript).not.toContain('bootstrap-briefing-source-media-env.sh');
     expect(sourceMediaBootstrapScript).toContain('BUG_REPORT_SCREENSHOT_SUPABASE_SECRET_KEY');
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_WORKER_ENABLED=false');
     expect(sourceMediaBootstrapScript).toContain('CONTENT_MEDIA_RETENTION_ENABLED=false');
@@ -294,7 +342,11 @@ describe('release workflow gates', () => {
     expect(runtimeHealthScript).toContain('deadline_seconds=${HEALTH_DEADLINE_SECONDS:-300}');
     expect(runtimeHealthScript).toContain('deadline_reached()');
     expect(workflow).toContain('timeout: 30m');
-    expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=true');
+    expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=false');
+    expect(runtimeHealthScript).toContain(
+      'runtime_include_media_worker=${RUNTIME_INCLUDE_MEDIA_WORKER:-true}',
+    );
+    expect(runtimeHealthScript).toContain('services+=(media-worker)');
     expect(deployStateMachine).toContain(
       'export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"',
     );
@@ -400,6 +452,7 @@ describe('release workflow gates', () => {
     expect(securityWorkflow).not.toMatch(mutableAction);
     expect(briefingRolloutWorkflow).not.toMatch(mutableAction);
     expect(sourceMediaRolloutWorkflow).not.toMatch(mutableAction);
+    expect(fplRawSnapshotStorageGateWorkflow).not.toMatch(mutableAction);
     expect(ciWorkflow).not.toContain(`bun-version: [${quote}1.3.3${quote}]`);
     expect(ciWorkflow).toContain(`bun-version: [${quote}1.3.14${quote}]`);
     expect(dockerfile).not.toContain('apk upgrade');
@@ -504,6 +557,27 @@ describe('release workflow gates', () => {
     );
     expect(sourceMediaRolloutWorkflow).toContain('read_container_boolean');
     expect(sourceMediaRolloutWorkflow).toContain('"containerHealth":"%s"');
+    expect(sourceMediaRolloutWorkflow).toContain('target_container=$(docker compose ps -q api');
+    expect(sourceMediaRolloutWorkflow).toContain('target_revision');
+    expect(sourceMediaRolloutWorkflow).toContain('previous_media_image=$(docker inspect');
+    expect(sourceMediaRolloutWorkflow).toContain('previous_media_present=false');
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'no existing media-worker container; provisioning will create it',
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('previous_media_revision=$(docker image inspect');
+    expect(sourceMediaRolloutWorkflow).toContain('APP_IMAGE="$target_image"');
+    expect(sourceMediaRolloutWorkflow).toContain('APP_IMAGE="$previous_media_image"');
+    expect(sourceMediaRolloutWorkflow).toContain('DEPLOY_SHA="$previous_media_revision"');
+    expect(sourceMediaRolloutWorkflow).toContain('wait_for_media_worker "$previous_media_image"');
+    expect(sourceMediaRolloutWorkflow).toContain('if [ "$previous_media_present" = true ]; then');
+    expect(sourceMediaRolloutWorkflow).toContain('if [ "$worker_restore_needed" = true ]; then');
+    expect(sourceMediaRolloutWorkflow).toContain('previous_media_was_running=false');
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'previous_media_state=$(docker inspect --format \'{{.State.Status}}\' "$current_container")',
+    );
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'docker compose create --no-build --force-recreate media-worker',
+    );
     expect(
       sourceMediaRolloutWorkflow.indexOf(
         'source-media rollout refused: Storage secret is present in .env.deploy',
@@ -524,6 +598,24 @@ describe('release workflow gates', () => {
     expect(sourceMediaRolloutWorkflow).not.toContain('script_stop:');
   });
 
+  test('keeps FPL raw snapshot Storage provisioning on an explicit release gate', () => {
+    expect(fplRawSnapshotStorageGateWorkflow).toContain('name: FPL raw snapshot Storage gate');
+    expect(fplRawSnapshotStorageGateWorkflow).toContain('workflow_dispatch:');
+    expect(fplRawSnapshotStorageGateWorkflow).toContain(
+      `if: github.ref == ${quote}refs/heads/main${quote}`,
+    );
+    expect(fplRawSnapshotStorageGateWorkflow).toContain('test "$main_sha" = "$GITHUB_SHA"');
+    expect(fplRawSnapshotStorageGateWorkflow).toContain(
+      'test "$(git rev-parse HEAD)" = "$ROLLOUT_SHA"',
+    );
+    expect(fplRawSnapshotStorageGateWorkflow).toContain('acquire_deploy_lock');
+    expect(fplRawSnapshotStorageGateWorkflow).toContain('release_deploy_lock');
+    expect(fplRawSnapshotStorageGateWorkflow).toContain(
+      'bun validate-env.ts --probe-fpl-raw-snapshot-storage',
+    );
+    expect(fplRawSnapshotStorageGateWorkflow).not.toContain('CONTENT_MEDIA_SUPABASE_SECRET_KEY:');
+  });
+
   test('keeps Briefing acquisition rollout on protected main with rollback and fixed modes', () => {
     expect(briefingRolloutWorkflow).toContain(`if: github.ref == ${quote}refs/heads/main${quote}`);
     expect(briefingRolloutWorkflow).toContain('test "$main_sha" = "$GITHUB_SHA"');
@@ -534,6 +626,7 @@ describe('release workflow gates', () => {
     );
     expect(briefingRolloutWorkflow).toContain('mv "$backup_file" "$env_file"');
     expect(briefingRolloutWorkflow).toContain('--force-recreate content-worker');
+    expect(briefingRolloutWorkflow).toContain('RUNTIME_INCLUDE_MEDIA_WORKER=false');
     expect(briefingRolloutWorkflow).toContain('content-worker || true');
     expect(briefingRolloutWorkflow).toContain(
       'runner_socket=/run/letletme-grok-runner/runner.sock',
@@ -612,6 +705,10 @@ describe('release workflow gates', () => {
       'scripts/run-briefing-control-probe.sh "$env_file" "$migration_env_file" "$ROLLOUT_SHA" "$runner_socket"',
     );
     expect(briefingRolloutWorkflow).not.toContain('dataDeploymentContinues');
+    expect(briefingRolloutWorkflow).not.toContain('test "$media_image" = "$current_image"');
+    expect(briefingRolloutWorkflow).toContain('Source-media has a dedicated rollout');
+    expect(briefingRolloutWorkflow).not.toContain('current_media_container');
+    expect(briefingRolloutWorkflow).not.toContain('media_image');
   });
 
   test('requires exact successful CI for both automatic and manual deployment', () => {
@@ -714,13 +811,8 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=false');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
     expect(deployScript).toContain('"$DEPLOY_ROLLBACK_ELIGIBLE" != true');
-    const rollbackAdmission = deployScript.indexOf(
-      'if [[ "$DEPLOY_OLD_MEDIA_PRESENT" = true && "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then',
-    );
-    expect(rollbackAdmission).toBeGreaterThan(deployScript.indexOf('rollback_runtime_is_eligible'));
-    expect(rollbackAdmission).toBeLessThan(
-      deployScript.indexOf('if ! acquire_source_media_deploy_fence; then'),
-    );
+    expect(deployScript).not.toContain('DEPLOY_OLD_MEDIA_PRESENT');
+    expect(deployScript).toContain('acquire_source_media_deploy_fence');
     expect(deployScript).toContain('DEPLOY_OLD_RUNNER_RELEASE_SHA=$(cat');
     expect(deployScript.lastIndexOf('rollback_runtime_is_eligible')).toBeGreaterThan(
       deployScript.indexOf('Migration plan and queue quiescence passed before stopping services'),

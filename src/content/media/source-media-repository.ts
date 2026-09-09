@@ -116,6 +116,15 @@ export async function claimSourceMediaGates(input: {
 }): Promise<readonly ClaimedSourceMediaGate[]> {
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
+    // The general Data deployment holds this advisory fence while it crosses
+    // the database migration boundary. A transaction-level try-lock keeps the
+    // worker on the dedicated rollout lifecycle without allowing a claim to
+    // slip in between the deployment's quiescence checks. Returning an empty
+    // claim also avoids touching lease-expiry rows while the fence is held.
+    const fenceRows = await tx.execute<{ acquired: boolean }>(
+      sql`SELECT pg_try_advisory_xact_lock(hashtextextended('content-source-media-deploy-v1', 0)) AS acquired`,
+    );
+    if (fenceRows[0]?.acquired !== true) return [];
     const dbNow = await databaseNow(tx);
 
     await tx
