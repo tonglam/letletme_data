@@ -640,6 +640,31 @@ describe('tournament management service', () => {
     });
   });
 
+  test('releases the management scope before the setup queue handoff', async () => {
+    let inScope = false;
+    let committed = false;
+    const service = createTestService(createRepository(), {
+      withMutationScopes: async (_input, operation) => {
+        inScope = true;
+        try {
+          return await operation();
+        } finally {
+          inScope = false;
+          committed = true;
+        }
+      },
+      requeueSetup: async (_season, tournamentId) => {
+        expect(inScope).toBe(false);
+        expect(committed).toBe(true);
+        return { id: `setup-${tournamentId}` };
+      },
+    });
+
+    await expect(service.retrySetup(42, { adminEntryId: 123 })).resolves.toEqual({
+      id: 'setup-42',
+    });
+  });
+
   test('validates roster retries and returns the injected operation id', async () => {
     const snapshotService = createTestService(createRepository());
     await expect(snapshotService.retryRoster(42, { adminEntryId: 123 })).rejects.toMatchObject({

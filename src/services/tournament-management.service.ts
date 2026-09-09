@@ -293,10 +293,7 @@ export function createTournamentManagementService(
     return tournament;
   };
 
-  const assertNoPendingOfficialResume = async (
-    season: FplSeasonRef,
-    tournament: TournamentManagementRecord,
-  ) => {
+  const assertNoPendingOfficialResumeState = (tournament: TournamentManagementRecord): boolean => {
     if (tournament.rosterMode === 'official_sync' && tournament.rosterSyncStatus === 'pending') {
       throw new ConflictError(
         'Tournament roster reconciliation is already pending.',
@@ -322,16 +319,26 @@ export function createTournamentManagementService(
           'TOURNAMENT_RESUME_PENDING',
         );
       }
-      const [reconcileJob, setupJob] = await Promise.all([
-        findRosterReconcileJob(
-          season,
-          tournament.id,
-          true,
-          tournament.setupProgressUpdatedAt ?? undefined,
-        ),
-        findSetupJob(season, tournament.id, tournament.setupProgressUpdatedAt),
-      ]);
-      if (!reconcileJob && !setupJob) return;
+      return true;
+    }
+    return false;
+  };
+
+  const assertNoPendingOfficialResume = async (
+    season: FplSeasonRef,
+    tournament: TournamentManagementRecord,
+  ) => {
+    if (!assertNoPendingOfficialResumeState(tournament)) return;
+    const [reconcileJob, setupJob] = await Promise.all([
+      findRosterReconcileJob(
+        season,
+        tournament.id,
+        true,
+        tournament.setupProgressUpdatedAt ?? undefined,
+      ),
+      findSetupJob(season, tournament.id, tournament.setupProgressUpdatedAt),
+    ]);
+    if (reconcileJob || setupJob) {
       throw new ConflictError(
         'Tournament activation is already reconciling its authoritative roster.',
         'TOURNAMENT_RESUME_PENDING',
@@ -715,7 +722,11 @@ export function createTournamentManagementService(
     retrySetup: async (tournamentId: number, input: unknown) => {
       const season = await getSeason();
       const payload = tournamentOwnerSchema.parse(input);
-      return scopeRunner(
+      const observed = await assertCanManage(season, tournamentId, payload);
+      // Queue probes are read-only and may wait on Redis. Perform them before
+      // taking the lifecycle lock; the durable state is rechecked below.
+      await assertNoPendingOfficialResume(season, observed);
+      await scopeRunner(
         {
           queueName: 'tournament-management',
           jobName: 'tournament-setup-retry',
@@ -724,10 +735,29 @@ export function createTournamentManagementService(
         },
         async () => {
           const current = await assertCanManage(season, tournamentId, payload);
-          await assertNoPendingOfficialResume(season, current);
-          return requeueSetup(season, tournamentId);
+          if (
+            current.updatedAt !== observed.updatedAt ||
+            current.setupProgressUpdatedAt !== observed.setupProgressUpdatedAt ||
+            current.rosterSyncStatus !== observed.rosterSyncStatus ||
+            current.setupStatus !== observed.setupStatus ||
+            current.setupPhase !== observed.setupPhase ||
+            current.setupError !== observed.setupError ||
+            current.state !== observed.state ||
+            current.rosterMode !== observed.rosterMode
+          ) {
+            throw new ConflictError(
+              'Tournament state changed while retry was checking queued work.',
+              'TOURNAMENT_STATE_CHANGED',
+            );
+          }
+          // Recheck only durable state while holding the lock. Redis/BullMQ
+          // inspection remains outside the transaction.
+          assertNoPendingOfficialResumeState(current);
         },
       );
+      // The lifecycle transaction has committed. Requeue performs its queue
+      // inspection and admission after the lock is released.
+      return requeueSetup(season, tournamentId);
     },
 
     retryRoster: async (tournamentId: number, input: unknown) => {
