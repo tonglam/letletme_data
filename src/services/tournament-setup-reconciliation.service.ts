@@ -17,7 +17,7 @@ import { withMutationScopes } from '../utils/mutation-scopes';
 export async function reconcileReadyTournamentWarnings(season: FplSeasonRef): Promise<void> {
   const tournamentIds = await tournamentInfoRepository.findReadyWithWarnings(season);
   for (const tournamentId of tournamentIds) {
-    await withMutationScopes(
+    const unresolved = await withMutationScopes(
       {
         queueName: 'tournament-repair',
         jobName: 'reconcile-ready-tournament',
@@ -26,7 +26,7 @@ export async function reconcileReadyTournamentWarnings(season: FplSeasonRef): Pr
       },
       async () => {
         const tournament = await tournamentInfoRepository.findSetupConfig(season, tournamentId);
-        if (!tournament) return;
+        if (!tournament) return [];
         const currentStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
         const finalizedEvent = await eventRepository.findLatestFinalized(season);
         const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
@@ -51,21 +51,26 @@ export async function reconcileReadyTournamentWarnings(season: FplSeasonRef): Pr
             tournamentId,
             warningCount: currentStatus?.setupWarningCount ?? 0,
           });
-          return;
+          return [];
         }
         await tournamentSetupIssueRepository.sync(season, tournamentId, issues);
-        const unresolved = await tournamentSetupIssueRepository.listUnresolved(
+        const unresolvedIssues = await tournamentSetupIssueRepository.listUnresolved(
           season,
           tournamentId,
         );
-        await Promise.all(
-          unresolved.map((issue) => enqueueTournamentRepair(season, issue, 'reconciliation')),
-        );
         logInfo('Reconciled ready tournament warnings', {
           tournamentId,
-          warningCount: unresolved.filter((issue) => issue.severity === 'warning').length,
+          warningCount: unresolvedIssues.filter((issue) => issue.severity === 'warning').length,
         });
+        return unresolvedIssues;
       },
+    );
+    // BullMQ admission can wait on Redis. Dispatch only after the durable
+    // issue reconciliation commits so the lifecycle lock is never held across
+    // queue I/O. Unresolved issues remain durable for a later reconciliation
+    // if an individual enqueue fails.
+    await Promise.all(
+      unresolved.map((issue) => enqueueTournamentRepair(season, issue, 'reconciliation')),
     );
   }
 }
