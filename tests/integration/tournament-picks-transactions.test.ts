@@ -115,3 +115,28 @@ test('an unfinished entry prevents publication and retry fetches only the remain
   expect(await run()).toMatchObject({ reusedUnits: 1, succeededUnits: 1, failedUnits: 0 });
   expect(fetched).toEqual([101, 102]);
 });
+
+test('mixed rosters require publication only for tournaments eligible for this event', async () => {
+  spyOn(tournamentInfoRepository, 'findActive').mockResolvedValue([
+    { id: 995_801 },
+    { id: 995_802 },
+  ] as never);
+  spyOn(tournamentEntryRepository, 'findEntryIdsByTournamentId').mockImplementation(
+    async (_season, id) => (id === 995_801 ? [101] : [102]),
+  );
+  spyOn(entryInfoRepository, 'findByIds').mockResolvedValue([
+    { id: 101, startedEvent: 1 },
+    { id: 102, startedEvent: eventId + 1 },
+  ] as never);
+  spyOn(trends, 'publishTournamentTrendScopes').mockImplementation(
+    async (_season, _event, ids) =>
+      ({
+        succeeded: ids.length,
+        failed: 0,
+        results: ids.map((id) => ({ isActive: id === 995_801 })),
+      }) as never,
+  );
+  expect(await run()).toMatchObject({ succeededUnits: 1, failedUnits: 0 });
+  expect(fetched).toEqual([101]);
+  expect(trends.publishTournamentTrendScopes).toHaveBeenCalledWith(TEST_SEASON, eventId, [995_801]);
+});
