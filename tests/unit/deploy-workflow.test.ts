@@ -264,11 +264,11 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('acquire_source_media_deploy_fence');
     expect(deployScript).toContain('source_media_deploy_fence_is_active');
     expect(sourceMediaRepository).toContain(
-      "pg_try_advisory_xact_lock(hashtextextended('content-source-media-deploy-v1', 0))",
+      String.raw`pg_try_advisory_xact_lock(hashtextextended('content-source-media-deploy-v1', 0))`,
     );
     expect(sourceMediaRepository).toContain('if (fenceRows[0]?.acquired !== true) return []');
     expect(sourceMediaDeployFence).toContain(
-      "pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))",
+      String.raw`pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))`,
     );
     expect(sourceMediaDeployFence).toContain(String.raw`status = 'RUNNING'`);
     expect(sourceMediaDeployFence).toContain('lease_owner IS NOT NULL');
