@@ -788,6 +788,56 @@ export async function readActiveDataPublicationManifest(
   }
 }
 
+/**
+ * Read a selected set of items from the active publication without loading
+ * unrelated payloads. Control-plane callers use this when they need a small
+ * scheduling context while the full publication remains the consumer/audit
+ * path. The manifest is still validated in full, and every selected item is
+ * checked against its declared size, checksum, and count.
+ */
+export async function readActiveDataPublicationItems(
+  scope: DataPublicationScope,
+  itemNames: readonly string[],
+  redisClient?: Redis,
+): Promise<DataPublicationReadResult | null> {
+  assertScope(scope);
+  if (
+    itemNames.length === 0 ||
+    new Set(itemNames).size !== itemNames.length ||
+    itemNames.some((name) => !/^[a-z][a-zA-Z0-9]*$/.test(name))
+  ) {
+    return null;
+  }
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  try {
+    const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
+    if (!manifest || !assertManifestMatchesScope(manifest, scope) || manifest.items.length === 0) {
+      return null;
+    }
+    const selected = itemNames.map((name) => manifest.items.find((item) => item.name === name));
+    if (selected.some((item): item is undefined => item === undefined)) return null;
+    const payloads = await redis.mget(...selected.map((item) => item!.key));
+    const items: Record<string, unknown> = {};
+    for (let index = 0; index < selected.length; index += 1) {
+      const item = selected[index]!;
+      const payload = payloads[index];
+      if (
+        payload === null ||
+        Buffer.byteLength(payload, 'utf8') !== item.bytes ||
+        sha256(payload) !== item.sha256
+      ) {
+        return null;
+      }
+      const parsed = JSON.parse(payload) as unknown;
+      if (itemCount(parsed) !== item.count) return null;
+      items[item.name] = parsed;
+    }
+    return { manifest, items };
+  } catch {
+    return null;
+  }
+}
+
 export async function retireActiveDataPublication(
   scope: DataPublicationScope,
   redisClient?: Redis,

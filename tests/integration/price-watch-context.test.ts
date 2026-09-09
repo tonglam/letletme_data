@@ -3,12 +3,21 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import postgres from 'postgres';
-import { prepareDataPublication } from '../../src/cache/data-publication';
+import Redis from 'ioredis';
+import { activeDataPublicationKey, prepareDataPublication } from '../../src/cache/data-publication';
 import { databaseSingleton } from '../../src/db/singleton';
 import { loadActivePriceChangeContext } from '../../src/repositories/data-publication-outbox';
 import { getPriceChangeWatchDeadlines } from '../../src/services/price-change-predictions.service';
 
 const db = postgres(process.env.DATABASE_URL!, { max: 1 });
+const redis = new Redis({
+  host: process.env.CACHE_REDIS_HOST,
+  port: Number(process.env.CACHE_REDIS_PORT),
+  password: process.env.CACHE_REDIS_PASSWORD,
+  db: Number(process.env.CACHE_REDIS_DB),
+  lazyConnect: true,
+  maxRetriesPerRequest: 1,
+});
 const season = { seasonId: 2093, seasonCode: '9394' };
 const now = new Date('2093-08-22T00:00:00Z');
 const publicationId = '00000000-0000-4000-8000-000000009394';
@@ -37,6 +46,7 @@ const prepared = prepareDataPublication({
   ],
 });
 beforeAll(async () => {
+  await redis.connect();
   await db`INSERT INTO fpl.seasons (season_id, season_code, display_name, start_year, end_year, lifecycle_state)
     VALUES (2093, '9394', '2093/94', 2093, 2094, 'reference_only')`;
 });
@@ -48,8 +58,18 @@ beforeEach(async () => {
     await db`INSERT INTO ops.dataset_publication_items (publication_id,item_name,payload,item_count,checksum)
       VALUES (${publicationId},${item.manifest.name},${db.json(JSON.parse(item.payload))},${item.manifest.count},${item.manifest.sha256})`;
   }
+  await redis.set(
+    activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
+    JSON.stringify(prepared.manifest),
+  );
+  await Promise.all(prepared.items.map((item) => redis.set(item.manifest.key, item.payload)));
 });
 afterAll(async () => {
+  await redis.del(
+    activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
+  );
+  await Promise.all(prepared.items.map((item) => redis.del(item.manifest.key)));
+  redis.disconnect();
   await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
   await db`DELETE FROM fpl.seasons WHERE season_id=2093`;
   await databaseSingleton.disconnect();

@@ -3,14 +3,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   prepareDataPublication,
   readActiveDataPublication,
+  readActiveDataPublicationItems,
   type DataPublicationReadResult,
 } from '../cache/data-publication';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import {
-  loadActivePriceChangeContext,
-  loadDataPublicationDelivery,
-} from '../repositories/data-publication-outbox';
+import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
 import { seasonRepository } from '../repositories/seasons';
 import {
@@ -1093,7 +1091,14 @@ export function parsePriceChangeWatchDeadlines(
 }
 
 export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Date) {
-  const publication = await loadActivePriceChangeContext(season);
+  // Deadline discovery is a scheduler control-plane read. Use the active
+  // consumer publication in Redis and fetch only its small context item so a
+  // publication transaction updating PostgreSQL item rows cannot occupy the
+  // scheduler's database pool or consume its ten-second resolution budget.
+  const publication = await readActiveDataPublicationItems(
+    { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode },
+    ['context'],
+  );
   return publication ? parsePriceChangeWatchDeadlines(publication, now) : null;
 }
 

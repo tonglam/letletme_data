@@ -6,8 +6,11 @@ import {
   activeDataPublicationKey,
   dataPublicationItemKey,
   parseDataPublicationManifest,
+  prepareDataPublication,
+  readActiveDataPublicationItems,
   type DataPublicationManifest,
 } from '../../src/cache/data-publication';
+import type Redis from 'ioredis';
 
 const scope = { dataset: 'fpl:core' as const, seasonCode: '2627' };
 const payload = JSON.stringify([{ id: 1 }]);
@@ -160,5 +163,38 @@ describe('data publication contract', () => {
   test('rejects a generic manifest carrying an event', () => {
     const manifest = validManifest();
     expect(parseDataPublicationManifest(JSON.stringify({ ...manifest, eventId: 1 }))).toBeNull();
+  });
+
+  test('reads only selected active publication items', async () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const prepared = prepareDataPublication({
+      ...priceScope,
+      revision: 11,
+      publicationId: '00000000-0000-4000-8000-000000000011',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items: [
+        { name: 'context', value: { deadline: '2026-08-09T02:00:00.000Z' } },
+        { name: 'players', value: [{ id: 1 }] },
+      ],
+    });
+    const values = new Map<string, string>([
+      [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+      ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
+    ]);
+    const requested: string[] = [];
+    const redis = {
+      get: async (key: string) => values.get(key) ?? null,
+      mget: async (...keys: string[]) => {
+        requested.push(...keys);
+        return keys.map((key) => values.get(key) ?? null);
+      },
+    } as unknown as Redis;
+
+    await expect(readActiveDataPublicationItems(priceScope, ['context'], redis)).resolves.toEqual({
+      manifest: prepared.manifest,
+      items: { context: { deadline: '2026-08-09T02:00:00.000Z' } },
+    });
+    expect(requested).toEqual([dataPublicationItemKey(priceScope, 11, 'context')]);
   });
 });
