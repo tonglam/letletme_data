@@ -2,9 +2,9 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 
-import { getDbClient } from '../../src/db/singleton';
+import { databaseTransactionStorage, getDbClient } from '../../src/db/singleton';
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
 import { withMutationScopes } from '../../src/utils/mutation-scopes';
@@ -304,4 +304,129 @@ describe('authoritative tournament roster publication', () => {
       ),
     ).rejects.toMatchObject({ code: 'TOURNAMENT_OFFICIAL_H2H_RECOVERY_UNSAFE' });
   });
+});
+
+for (const phase of ['profile', 'transfers'] as const) {
+  test(`roster ${phase} provider wait leaves entrant mutation scope available`, async () => {
+    const { reconcileTournamentRoster } = await import(
+      '../../src/services/tournament-roster.service'
+    );
+    const leagueMembers = await import('../../src/services/tournament-league-members.service');
+    const backfill = await import('../../src/services/tournament-backfill.service');
+    const { fplClient } = await import('../../src/clients/fpl');
+    const { acquireMutationScopes } = await import('../../src/utils/mutation-scopes');
+    const { tournamentEntryCoreScopes } = await import('../../src/domain/mutation-scope');
+    const postgres = (await import('postgres')).default;
+    const sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let heldTransaction = false;
+    const failProvider = async (): Promise<never> => {
+      heldTransaction = databaseTransactionStorage.getStore() !== undefined;
+      enter();
+      await released;
+      throw new Error('owned provider failure');
+    };
+    const league = spyOn(leagueMembers, 'fetchLeagueParticipants').mockResolvedValue({
+      leagueId: LEAGUE_ID,
+      leagueType: 'h2h',
+      leagueName: 'Fixture',
+      startEventId: 1,
+      knockoutRounds: 0,
+      participants: ENTRY_IDS.map((id) => ({
+        id: String(id),
+        team: 'Fixture',
+        manager: 'Fixture',
+        overallRank: 1,
+        totalPoints: 0,
+      })),
+    });
+    const profiles =
+      phase === 'transfers'
+        ? spyOn(backfill, 'syncTournamentEntryDetails').mockResolvedValue([])
+        : undefined;
+    const provider =
+      phase === 'profile'
+        ? spyOn(fplClient, 'getEntrySummary').mockImplementation(failProvider)
+        : spyOn(fplClient, 'getEntryTransfers').mockImplementation(failProvider);
+    const history = spyOn(fplClient, 'getEntryHistory').mockResolvedValue({
+      current: [],
+      past: [],
+      chips: [],
+    });
+    const work = reconcileTournamentRoster(explicitSeasonRef(SEASON_CODE), TOURNAMENT_ID).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    try {
+      await Promise.race([
+        entered,
+        work.then(() => {
+          throw new Error('Reconciliation ended before provider');
+        }),
+      ]);
+      expect(heldTransaction).toBe(false);
+      // A separate database session can acquire this same entry's canonical
+      // mutation lock while the reconciliation is waiting on its provider.
+      await sql.begin(async (tx) => {
+        await tx`SET LOCAL lock_timeout = '250ms'`;
+        await acquireMutationScopes(tx, tournamentEntryCoreScopes(SEASON_ID, [ENTRY_IDS[2]]));
+      });
+      release();
+      expect(await work).toBeInstanceOf(Error);
+      const [saved] =
+        await sql`SELECT count(*)::integer AS count FROM competition.tournament_entries
+        WHERE season_id=${SEASON_ID} AND tournament_id=${TOURNAMENT_ID}`;
+      expect(saved!.count).toBe(2);
+    } finally {
+      release();
+      await work;
+      league.mockRestore();
+      profiles?.mockRestore();
+      provider.mockRestore();
+      history.mockRestore();
+      await sql`DELETE FROM ops.mutation_scopes WHERE scope_key = ANY(${tournamentEntryCoreScopes(SEASON_ID, [ENTRY_IDS[2]])}::text[])`;
+      await sql.end();
+    }
+  }, 15000);
+}
+
+test('core result backfill enters provider work without holding the batch scope', async () => {
+  const { ensureTournamentCoreResults } = await import(
+    '../../src/services/tournament-backfill.service'
+  );
+  const eventResults = await import('../../src/services/tournament-event-results.service');
+  const { acquireMutationScopes } = await import('../../src/utils/mutation-scopes');
+  const { tournamentEntryCoreScopes } = await import('../../src/domain/mutation-scope');
+  const postgres = (await import('postgres')).default;
+  const sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+  const failure = new Error('owned backfill provider failure');
+  const provider = spyOn(eventResults, 'syncTournamentEventResultsForEntryIds').mockImplementation(
+    async () => {
+      expect(databaseTransactionStorage.getStore()).toBeUndefined();
+      await sql.begin(async (tx) => {
+        await tx`SET LOCAL lock_timeout = '250ms'`;
+        await acquireMutationScopes(tx, tournamentEntryCoreScopes(SEASON_ID, [ENTRY_IDS[0]]));
+      });
+      throw failure;
+    },
+  );
+  try {
+    await expect(
+      ensureTournamentCoreResults(explicitSeasonRef(SEASON_CODE), [ENTRY_IDS[0]], {
+        startEventId: 1,
+        endEventId: 1,
+      }),
+    ).rejects.toBe(failure);
+  } finally {
+    provider.mockRestore();
+    await sql`DELETE FROM ops.mutation_scopes WHERE scope_key = ANY(${tournamentEntryCoreScopes(SEASON_ID, [ENTRY_IDS[0]])}::text[])`;
+    await sql.end();
+  }
 });

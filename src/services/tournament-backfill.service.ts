@@ -395,18 +395,11 @@ export async function ensureTournamentCoreResults(
   });
 
   for (const [eventId, missingEntryIds] of missing) {
-    await withMutationScopes(
-      {
-        queueName: 'tournament-setup',
-        jobName: 'entry-event-results',
-        scopes: tournamentEntryCoreScopes(season.seasonId, missingEntryIds),
-      },
-      () =>
-        syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
-          concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-          skipTransfers: true,
-        }),
-    );
+    await syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
+      concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      skipTransfers: true,
+      perEntryMutationScopes: true,
+    });
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);
   }

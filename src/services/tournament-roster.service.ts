@@ -4,7 +4,7 @@ import { entryEventTransfersRepository } from '../repositories/entry-event-trans
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
-import { tournamentEntryCoreScopes, tournamentSetupRebuildScopes } from '../domain/mutation-scope';
+import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import {
   diffTournamentRoster,
   getTournamentBackfillWindow,
@@ -274,15 +274,10 @@ async function reconcileTournamentRosterUnlocked(
 
     if (addedEntryIds.length > 0) {
       const targetEventId = window?.endEventId ?? 0;
-      const entryIssues = await withMutationScopes(
-        {
-          queueName: 'tournament-roster',
-          jobName: 'entry-profile',
-          tournamentId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, addedEntryIds),
-        },
-        () => syncTournamentEntryDetails(season, addedEntryIds, { targetEventId }),
-      );
+      // Provider reads run before syncEntryInfo acquires its per-entry write scope.
+      const entryIssues = await syncTournamentEntryDetails(season, addedEntryIds, {
+        targetEventId,
+      });
       if (entryIssues.length > 0) {
         const failedCount = entryIssues.reduce(
           (count, issue) => count + (issue.failedEntries?.length ?? 0),
@@ -299,18 +294,10 @@ async function reconcileTournamentRosterUnlocked(
         addedEntryIds,
         targetEventId,
       );
-      const transfers = await withMutationScopes(
-        {
-          queueName: 'tournament-roster',
-          jobName: 'entry-transfer-history',
-          tournamentId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, transferEntryIds),
-        },
-        () =>
-          syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
-            concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-          }),
-      );
+      const transfers = await syncEntryTransferHistories(season, transferEntryIds, targetEventId, {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        perEntryMutationScopes: true,
+      });
       if (transfers.errors > 0) {
         throw new Error(
           `Unable to prepare transfer history for ${transfers.errors} new entrant(s)`,
