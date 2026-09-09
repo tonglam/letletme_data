@@ -7,7 +7,7 @@ import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import { tournamentSetupLifecycleScope } from '../../src/domain/mutation-scope';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { reserveSchedulerObligation } from '../../src/repositories/scheduler-obligations';
-import { getDbClient } from '../../src/db/singleton';
+import { databaseTransactionStorage, getDbClient } from '../../src/db/singleton';
 import { withMutationScopes } from '../../src/utils/mutation-scopes';
 import { withTournamentSetupPhase } from '../../src/utils/tournament-setup-execution';
 
@@ -663,3 +663,130 @@ test('league eligibility changes cannot turn an empty write batch into success',
   ).rejects.toMatchObject({ code: 'LEAGUE_ENTRY_SOURCE_STALE' });
   expect(publish).not.toHaveBeenCalled();
 });
+
+for (const outcome of ['accepted', 'clear', 'superseded', 'failed-after-supersession'] as const) {
+  test(`manual setup checks resume queues without a database transaction: ${outcome}`, async () => {
+    const seasonJobs = await import('../../src/services/season-scoped-job.service');
+    const setup = await import('../../src/services/tournament-setup.service');
+    const rosterJobs = await import('../../src/jobs/tournament-sync.jobs');
+    const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+    const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+    spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+    const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+    await sql`UPDATE competition.tournaments SET state='inactive', roster_sync_status='failed',
+      setup_status='failed',setup_phase='failed',setup_progress_updated_at='2095-01-01',
+      setup_next_retry_at='2095-01-03',
+      roster_sync_execution_id=gen_random_uuid() WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    let queueChecks = 0;
+    spyOn(setupJobs, 'findTournamentSetupJob').mockImplementation(async () => {
+      expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
+      queueChecks += 1;
+      return null;
+    });
+    spyOn(rosterJobs, 'findTournamentRosterReconcileJob').mockImplementation(async () => {
+      expect(Boolean(databaseTransactionStorage.getStore())).toBe(false);
+      queueChecks += 1;
+      if (outcome === 'accepted') return { id: 'accepted-resume' } as never;
+      if (outcome === 'clear') return null;
+      await sql`UPDATE competition.tournaments SET setup_progress_updated_at='2095-01-02'
+        WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+      if (outcome === 'failed-after-supersession') throw new Error('queue response lost');
+      return null;
+    });
+    await processTournamentSetupJob({
+      id: `integration-resume-admission-${outcome}`,
+      name: 'tournament-setup',
+      queueName: 'tournament-setup',
+      data: { ...season, tournamentId, source: 'manual', triggeredAt: new Date().toISOString() },
+      attemptsMade: 0,
+      opts: { attempts: 3 },
+      updateProgress: async () => {},
+    } as never);
+    expect(queueChecks).toBe(2);
+    expect(run).toHaveBeenCalledTimes(outcome === 'clear' ? 1 : 0);
+    const status = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+    expect(status!.setupStatus).toBe(outcome === 'clear' ? 'processing' : 'failed');
+    if (outcome !== 'clear') {
+      expect(status!.setupProgressUpdatedAt).toBe(
+        outcome === 'accepted' ? '2095-01-01 00:00:00+00' : '2095-01-02 00:00:00+00',
+      );
+    } else {
+      expect(status!.setupAttempt).toBe(1);
+    }
+    if (outcome === 'clear') expect(status!.setupNextRetryAt).toBeNull();
+    else expect(Date.parse(status!.setupNextRetryAt!)).toBe(Date.parse('2095-01-03T00:00:00Z'));
+  });
+}
+
+for (const intent of ['resume', 'roster-retry'] as const) {
+  test(`unmarked manual setup cannot bypass committed ${intent} intent before queue handoff`, async () => {
+    const seasonJobs = await import('../../src/services/season-scoped-job.service');
+    const setup = await import('../../src/services/tournament-setup.service');
+    const rosterJobs = await import('../../src/jobs/tournament-sync.jobs');
+    const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+    const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+    spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+    const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+    const rosterQueue = spyOn(rosterJobs, 'findTournamentRosterReconcileJob').mockResolvedValue(
+      null,
+    );
+    const setupQueue = spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue(null);
+    await sql`UPDATE competition.tournaments SET state='inactive', roster_sync_status=${intent === 'resume' ? 'processing' : 'pending'},
+    setup_status='pending',setup_phase='queued',setup_progress_updated_at='2095-01-01',
+    roster_sync_execution_id=gen_random_uuid() WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    await processTournamentSetupJob({
+      id: 'integration-resume-before-handoff',
+      name: 'tournament-setup',
+      queueName: 'tournament-setup',
+      data: { ...season, tournamentId, source: 'manual', triggeredAt: new Date().toISOString() },
+      attemptsMade: 0,
+      opts: { attempts: 3 },
+      updateProgress: async () => {},
+    } as never);
+    expect(run).not.toHaveBeenCalled();
+    expect(rosterQueue).not.toHaveBeenCalled();
+    expect(setupQueue).not.toHaveBeenCalled();
+    const status = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
+    expect(status!.setupStatus).toBe('pending');
+    expect(status!.setupProgressUpdatedAt).toBe('2095-01-01 00:00:00+00');
+  });
+}
+for (const rosterStatus of ['failed', 'processing'] as const) {
+  test(`prepared manual retry of a failed official resume reaches setup execution with roster=${rosterStatus}`, async () => {
+    const seasonJobs = await import('../../src/services/season-scoped-job.service');
+    const setup = await import('../../src/services/tournament-setup.service');
+    const rosterJobs = await import('../../src/jobs/tournament-sync.jobs');
+    const setupJobs = await import('../../src/jobs/tournament-setup.jobs');
+    const { processTournamentSetupJob } = await import('../../src/workers/tournament-setup.worker');
+    spyOn(seasonJobs, 'requireCurrentSeasonForJob').mockResolvedValue(season);
+    const run = spyOn(setup, 'setupTournamentStructure').mockResolvedValue(undefined);
+    spyOn(rosterJobs, 'findTournamentRosterReconcileJob').mockResolvedValue(null);
+    spyOn(setupJobs, 'findTournamentSetupJob').mockResolvedValue(null);
+    await sql`UPDATE competition.tournaments SET state='inactive',roster_sync_status=${rosterStatus},
+    setup_status='failed',setup_phase='failed',setup_error='terminal resume failure',
+    setup_progress_updated_at='2095-01-01' WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    spyOn(setupJobs, 'enqueueTournamentSetup').mockImplementation(
+      async (_season, id, source, options) => {
+        await options?.prepareEnqueue?.();
+        const prepared = await tournamentInfoRepository.findSetupStatus(season, id);
+        expect(prepared!.setupStatus).toBe('processing');
+        expect(prepared!.setupPhase).toBe('queued');
+        await processTournamentSetupJob({
+          id: 'integration-prepared-manual-retry',
+          name: 'tournament-setup',
+          queueName: 'tournament-setup',
+          data: { ...season, tournamentId: id, source, triggeredAt: new Date().toISOString() },
+          attemptsMade: 0,
+          opts: { attempts: 3 },
+          updateProgress: async () => {},
+        } as never);
+        return { id: 'integration-prepared-manual-retry' } as never;
+      },
+    );
+    await setup.requeueTournamentSetup(season, tournamentId);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(
+      (await tournamentInfoRepository.findSetupStatus(season, tournamentId))!.setupAttempt,
+    ).toBe(1);
+  });
+}
