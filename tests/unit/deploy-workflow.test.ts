@@ -548,11 +548,17 @@ describe('release workflow gates', () => {
     expect(sourceMediaRolloutWorkflow).toContain('target_container=$(docker compose ps -q api');
     expect(sourceMediaRolloutWorkflow).toContain('target_revision');
     expect(sourceMediaRolloutWorkflow).toContain('previous_media_image=$(docker inspect');
+    expect(sourceMediaRolloutWorkflow).toContain('previous_media_present=false');
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'no existing media-worker container; provisioning will create it',
+    );
     expect(sourceMediaRolloutWorkflow).toContain('previous_media_revision=$(docker image inspect');
     expect(sourceMediaRolloutWorkflow).toContain('APP_IMAGE="$target_image"');
     expect(sourceMediaRolloutWorkflow).toContain('APP_IMAGE="$previous_media_image"');
     expect(sourceMediaRolloutWorkflow).toContain('DEPLOY_SHA="$previous_media_revision"');
     expect(sourceMediaRolloutWorkflow).toContain('wait_for_media_worker "$previous_media_image"');
+    expect(sourceMediaRolloutWorkflow).toContain('if [ "$previous_media_present" = true ]; then');
+    expect(sourceMediaRolloutWorkflow).toContain('if [ "$worker_stopped" = true ]; then');
     expect(
       sourceMediaRolloutWorkflow.indexOf(
         'source-media rollout refused: Storage secret is present in .env.deploy',

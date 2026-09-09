@@ -39,62 +39,75 @@ psql "$DATABASE_URL" -X --set=ON_ERROR_STOP=1 <<SQL
 BEGIN;
 SET LOCAL lock_timeout = '0';
 SET LOCAL statement_timeout = '0';
-DO \$advisory_fence\$
-DECLARE
-  advisory_acquired boolean;
-  wait_deadline timestamptz := clock_timestamp() + make_interval(secs => ${wait_seconds});
-BEGIN
-  LOOP
-    SELECT pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))
-    INTO advisory_acquired;
-    EXIT WHEN advisory_acquired;
-    IF clock_timestamp() >= wait_deadline THEN
-      RAISE EXCEPTION
-        'Source-media deployment advisory fence did not become available within ${wait_seconds}s';
-    END IF;
-    PERFORM pg_sleep(1);
-  END LOOP;
-END
-\$advisory_fence\$;
 DO \$deploy_fence\$
 DECLARE
   running_count integer;
   expiring_count integer;
+  advisory_acquired boolean;
   wait_deadline timestamptz := clock_timestamp() + make_interval(secs => ${wait_seconds});
 BEGIN
   LOOP
-    BEGIN
-      -- SHARE ROW EXCLUSIVE conflicts with legacy FOR UPDATE claims,
-      -- retention leases, and new gate/asset inserts or updates. This table
-      -- level fence covers rows inserted after the first scan and therefore
-      -- closes the post-READY producer race without retaining row locks into
-      -- schema migrations. It is released when the helper transaction ends.
-      LOCK TABLE content.source_media_gates IN SHARE ROW EXCLUSIVE MODE NOWAIT;
-      LOCK TABLE content.source_media_assets IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+    -- Do this first without the deploy advisory so a live media worker can
+    -- drain an overdue repair window. Taking the advisory before this check
+    -- would make the worker return an empty claim forever.
+    SELECT count(*) FILTER (
+      WHERE status = 'RUNNING' AND lease_owner IS NOT NULL
+    )::integer,
+    count(*) FILTER (
+      WHERE status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE')
+        AND repair_exhausted_at IS NULL
+        AND repair_until_at <= clock_timestamp()
+    )::integer
+    INTO running_count, expiring_count
+    FROM content.source_media_gates;
 
-      SELECT count(*) FILTER (
-        WHERE status = 'RUNNING' AND lease_owner IS NOT NULL
-      )::integer,
-      count(*) FILTER (
-        WHERE status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE')
-          AND repair_exhausted_at IS NULL
-          AND repair_until_at <= clock_timestamp()
-      )::integer
-      INTO running_count, expiring_count
-      FROM content.source_media_gates;
-      IF running_count = 0 AND expiring_count = 0 THEN
-        RAISE NOTICE 'SOURCE_MEDIA_DEPLOY_FENCE_READY';
-        PERFORM pg_sleep(${hold_seconds});
-        RETURN;
-      END IF;
-      RAISE EXCEPTION 'SOURCE_MEDIA_DEPLOY_FENCE_BUSY';
-    EXCEPTION
-      WHEN lock_not_available OR raise_exception THEN
-        -- A legacy worker may still own a row/table lock. The nested block
-        -- releases any table locks acquired in this attempt, then retries
-        -- until the bounded wait deadline.
-        NULL;
-    END;
+    IF running_count = 0 AND expiring_count = 0 THEN
+      BEGIN
+        advisory_acquired := false;
+        SELECT pg_try_advisory_lock(hashtextextended('content-source-media-deploy-v1', 0))
+        INTO advisory_acquired;
+        IF NOT advisory_acquired THEN
+          RAISE EXCEPTION 'SOURCE_MEDIA_DEPLOY_FENCE_RETRY';
+        END IF;
+
+        -- SHARE ROW EXCLUSIVE conflicts with legacy FOR UPDATE claims,
+        -- retention leases, and new gate/asset inserts or updates. This table
+        -- level fence covers rows inserted after the first scan and therefore
+        -- closes the post-READY producer race without retaining row locks into
+        -- schema migrations. It is released when the helper transaction ends.
+        LOCK TABLE content.source_media_gates IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+        LOCK TABLE content.source_media_assets IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+
+        SELECT count(*) FILTER (
+          WHERE status = 'RUNNING' AND lease_owner IS NOT NULL
+        )::integer,
+        count(*) FILTER (
+          WHERE status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE')
+            AND repair_exhausted_at IS NULL
+            AND repair_until_at <= clock_timestamp()
+        )::integer
+        INTO running_count, expiring_count
+        FROM content.source_media_gates;
+        IF running_count = 0 AND expiring_count = 0 THEN
+          RAISE NOTICE 'SOURCE_MEDIA_DEPLOY_FENCE_READY';
+          PERFORM pg_sleep(${hold_seconds});
+          RETURN;
+        END IF;
+        RAISE EXCEPTION 'SOURCE_MEDIA_DEPLOY_FENCE_RETRY';
+      EXCEPTION
+        WHEN lock_not_available OR raise_exception THEN
+          -- A legacy worker may still own a row/table lock, or a repair may
+          -- have become due between the two scans. Release any advisory lock
+          -- acquired in this attempt and let the media worker drain before
+          -- trying the fenced hand-off again.
+          IF advisory_acquired THEN
+            PERFORM pg_advisory_unlock(
+              hashtextextended('content-source-media-deploy-v1', 0)
+            );
+            advisory_acquired := false;
+          END IF;
+      END;
+    END IF;
     IF clock_timestamp() >= wait_deadline THEN
       RAISE EXCEPTION
         'Source-media deployment fence did not become idle within ${wait_seconds}s';
