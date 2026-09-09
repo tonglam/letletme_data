@@ -40,6 +40,7 @@ END
 DO \$deploy_fence\$
 DECLARE
   running_count integer;
+  expiring_count integer;
   wait_deadline timestamptz := clock_timestamp() + make_interval(secs => ${wait_seconds});
 BEGIN
   LOOP
@@ -60,12 +61,18 @@ BEGIN
         ORDER BY gate_id
         FOR UPDATE NOWAIT;
 
-        SELECT count(*) FILTER (
-          WHERE status = 'RUNNING' AND lease_owner IS NOT NULL
-        )::integer
-        INTO running_count
+        SELECT
+          count(*) FILTER (
+            WHERE status = 'RUNNING' AND lease_owner IS NOT NULL
+          )::integer,
+          count(*) FILTER (
+            WHERE status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE')
+              AND repair_exhausted_at IS NULL
+              AND repair_until_at <= clock_timestamp()
+          )::integer
+        INTO running_count, expiring_count
         FROM content.source_media_gates;
-        IF running_count = 0 THEN
+        IF running_count = 0 AND expiring_count = 0 THEN
           RAISE NOTICE 'SOURCE_MEDIA_DEPLOY_FENCE_READY';
           IF ${hold_seconds} = 0 THEN
             -- Keep the transaction and its session-level advisory lock until
@@ -79,11 +86,14 @@ BEGIN
           END IF;
           RETURN;
         END IF;
+        RAISE EXCEPTION 'SOURCE_MEDIA_DEPLOY_FENCE_BUSY';
       EXCEPTION
-        WHEN lock_not_available THEN
+        WHEN lock_not_available OR raise_exception THEN
           -- A legacy worker can still hold a row lock because it predates the
           -- advisory check. Release any locks acquired in this nested block,
-          -- then retry until the bounded wait deadline.
+          -- then retry until the bounded wait deadline. The same path waits
+          -- for pending gates whose repair window has elapsed, preserving the
+          -- final-attempt grace that the original fence provided.
           NULL;
       END;
     END IF;

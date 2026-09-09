@@ -272,11 +272,12 @@ describe('release workflow gates', () => {
     );
     expect(sourceMediaDeployFence).toContain(String.raw`status = 'RUNNING'`);
     expect(sourceMediaDeployFence).toContain('lease_owner IS NOT NULL');
+    expect(sourceMediaDeployFence).toContain('repair_until_at <= clock_timestamp()');
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
     expect(sourceMediaDeployFence).toContain('IF ${hold_seconds} = 0 THEN');
     expect(sourceMediaDeployFence).toContain('PERFORM pg_sleep(5);');
     expect(sourceMediaDeployFence).toContain('FOR UPDATE NOWAIT');
-    expect(sourceMediaDeployFence).toContain('WHEN lock_not_available THEN');
+    expect(sourceMediaDeployFence).toContain('WHEN lock_not_available OR raise_exception THEN');
     expect(sourceMediaDeployFence).not.toMatch(/\b(INSERT|DELETE|TRUNCATE)\b|^\s*UPDATE\b/m);
     expect(deployScript).toContain('release_source_media_deploy_fence()');
     expect(deployScript).toContain('docker rm --force "$container_id"');
