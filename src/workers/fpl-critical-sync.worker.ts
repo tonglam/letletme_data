@@ -25,6 +25,7 @@ import { syncOperationsRepository } from '../repositories/sync-operations';
 import {
   preparePriceChangePublication,
   persistPriceChangePublication,
+  reconcilePriceChangeAfterCommit,
   PriceChangeCorePublicationRequiredError,
   PriceChangeHotEventSupersededError,
   type PriceChangeHotEventEvidence,
@@ -589,7 +590,6 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
           persistPriceChangePublication(prepared, {
             deferDelivery: true,
             readLatestHotEvent,
-            onHotEventSuperseded: enqueueNewerHotPriceEvent,
             publicationFence: {
               laneId,
               dispatchGeneration,
@@ -630,6 +630,7 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       }
       throw error;
     }
+    await reconcilePriceChangeAfterCommit(prepared, readLatestHotEvent, enqueueNewerHotPriceEvent);
     if (!persisted.publicationId || persisted.revision === undefined) {
       throw new Error('Price-change publication did not return durable identity');
     }

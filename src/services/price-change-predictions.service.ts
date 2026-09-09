@@ -1470,8 +1470,6 @@ export async function persistPriceChangePublication(
     readonly deferDelivery?: boolean;
     /** Read-only Redis evidence used for the optimistic hot-event fence. */
     readonly readLatestHotEvent?: () => Promise<PriceChangeHotEventEvidence | null | undefined>;
-    /** Requeue a newer hot event observed after the DB commit. */
-    readonly onHotEventSuperseded?: (evidence: PriceChangeHotEventEvidence) => Promise<void>;
     readonly publicationFence?: {
       readonly laneId: string;
       readonly dispatchGeneration: number;
@@ -1649,28 +1647,6 @@ export async function persistPriceChangePublication(
       },
     });
     dbActivated = true;
-    // A hot pointer can advance in the small interval after the transaction
-    // fence and before this function returns. Compensate that unavoidable
-    // cross-system race by immediately creating a durable latest-wins target
-    // for the exact newer hot revision. The hot board remains user-visible
-    // while that target converges the DB and outbox.
-    if (options.readLatestHotEvent) {
-      const latestHotEvent = await options.readLatestHotEvent();
-      if (
-        latestHotEvent &&
-        isPriceChangeHotEventNewer(
-          latestHotEvent,
-          prepared.hotEventEvidence?.event ?? board.latestEvent,
-        )
-      ) {
-        if (!options.onHotEventSuperseded) {
-          throw new PriceChangeHotEventSupersededError(
-            'A newer hot price-change event was published after activation',
-          );
-        }
-        await options.onHotEventSuperseded(latestHotEvent);
-      }
-    }
     if (!options.deferDelivery) {
       await ensurePriceChangePublicationDelivered(
         season,
@@ -1719,6 +1695,24 @@ export async function persistPriceChangePublication(
       }
     }
     throw error;
+  }
+}
+
+/** Run after the caller's mutation scope commits; required enqueue failures propagate. */
+export async function reconcilePriceChangeAfterCommit(
+  prepared: PreparedPriceChangePublication,
+  readLatestHotEvent: () => Promise<PriceChangeHotEventEvidence | null | undefined>,
+  enqueueNewer: (evidence: PriceChangeHotEventEvidence) => Promise<void>,
+): Promise<void> {
+  const latest = await readLatestHotEvent();
+  if (
+    latest &&
+    isPriceChangeHotEventNewer(
+      latest,
+      prepared.hotEventEvidence?.event ?? prepared.board.latestEvent,
+    )
+  ) {
+    await enqueueNewer(latest);
   }
 }
 
