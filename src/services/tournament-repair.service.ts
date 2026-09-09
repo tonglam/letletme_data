@@ -1,6 +1,6 @@
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
-  tournamentEntryCoreScopes,
+  resolveMutationScopes,
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
@@ -11,7 +11,12 @@ import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { tournamentSetupIssueRepository } from '../repositories/tournament-setup-issues';
+import {
+  tournamentSetupIssueRepository,
+  type TournamentRepairState,
+} from '../repositories/tournament-setup-issues';
+import { withTournamentRepairPhase } from '../utils/tournament-repair-phase';
+import { registerDatabasePostCommit } from '../db/singleton';
 import { syncEntryTransferHistories } from './tournament-event-results.service';
 import {
   normalizeTournamentSetupIssue,
@@ -77,10 +82,14 @@ function dedupeIssues(issues: TournamentSetupIssue[]) {
   return [...byKey.values()];
 }
 
-async function repairTournamentSetupIssueUnlocked(
+async function repairTournamentSetupIssuePrepared(
   season: FplSeasonRef,
   issueId: number,
+  owner: TournamentRepairState,
+  onStateCaptured?: (state: TournamentRepairState) => void,
 ): Promise<void> {
+  const runPhase = <T>(scopes: readonly string[], operation: () => Promise<T>) =>
+    withTournamentRepairPhase(season, issueId, owner, scopes, operation);
   const issue = await tournamentSetupIssueRepository.findUnresolvedById(season, issueId);
   if (!issue) return;
 
@@ -104,38 +113,20 @@ async function repairTournamentSetupIssueUnlocked(
   switch (issue.code) {
     case 'ENTRY_PROFILE_INCOMPLETE': {
       if (targetEntryIds.length === 0) break;
-      const entryIssues = await withMutationScopes(
-        {
-          queueName: 'tournament-repair',
-          jobName: 'entry-profile',
-          tournamentId: issue.tournamentId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, targetEntryIds),
-        },
-        () =>
-          syncTournamentEntryDetails(season, targetEntryIds, {
-            targetEventId: window?.endEventId ?? 0,
-            forceSnapshotRefresh: true,
-          }),
-      );
+      const entryIssues = await syncTournamentEntryDetails(season, targetEntryIds, {
+        targetEventId: window?.endEventId ?? 0,
+        forceSnapshotRefresh: true,
+      });
       repairIssues.push(...entryIssues);
       break;
     }
 
     case 'ENTRY_HISTORY_INCOMPLETE': {
       if (targetEntryIds.length === 0 || eventId === null) break;
-      const transferResult = await withMutationScopes(
-        {
-          queueName: 'tournament-repair',
-          jobName: 'entry-transfer-history',
-          tournamentId: issue.tournamentId,
-          eventId,
-          scopes: tournamentEntryCoreScopes(season.seasonId, targetEntryIds),
-        },
-        () =>
-          syncEntryTransferHistories(season, targetEntryIds, eventId, {
-            concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-          }),
-      );
+      const transferResult = await syncEntryTransferHistories(season, targetEntryIds, eventId, {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        perEntryMutationScopes: true,
+      });
       if (transferResult.errors > 0) {
         repairIssues.push({
           scope: 'event-results',
@@ -189,7 +180,11 @@ async function repairTournamentSetupIssueUnlocked(
             jobName: 'selection-insights',
             tournamentId: issue.tournamentId,
             eventId,
-            scopes: tournamentEntryCoreScopes(season.seasonId, allEntryIds),
+            scopes: resolveMutationScopes({
+              queueName: 'tournament-sync',
+              jobName: 'tournament-selection-stats',
+              eventId,
+            }),
           },
           () =>
             syncTournamentSelectionStats(season, eventId, {
@@ -224,14 +219,8 @@ async function repairTournamentSetupIssueUnlocked(
         season,
         issue.tournamentId,
       );
-      await withMutationScopes(
-        {
-          queueName: 'tournament-repair',
-          jobName: 'structure',
-          tournamentId: issue.tournamentId,
-          scopes: tournamentSetupRebuildScopes(issue.tournamentId),
-        },
-        () => rebuildTournamentStructure(season, tournament, entrySeeds),
+      await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
+        rebuildTournamentStructure(season, tournament, entrySeeds),
       );
       // A topology rebuild can change group membership, phase boundaries, or
       // bracket edges for every settled event. Defer the correction reset
@@ -253,6 +242,7 @@ async function repairTournamentSetupIssueUnlocked(
         tournament,
         targetEntryIds,
         eventId,
+        { issueId, owner },
       );
       repairIssues.push(...resultIssues);
       if (resultIssues.length === 0) {
@@ -267,60 +257,81 @@ async function repairTournamentSetupIssueUnlocked(
     }
   }
 
-  const verifiedAudit = await auditTournamentSetup(season, tournament, window);
-  const auditIssues = verifiedAudit.issues.map((message) =>
-    tournamentSetupIssueFromAuditMessage(message, {
-      affectedEntryIds: message.startsWith('missing entry_league_infos')
-        ? verifiedAudit.missingEntryLeagueInfoIds
-        : message.startsWith('missing entry_infos')
-          ? verifiedAudit.missingEntryInfoIds
-          : allEntryIds,
-    }),
-  );
-  const persisted = dedupeIssues([...repairIssues, ...auditIssues]);
-  const existingUnresolved = await tournamentSetupIssueRepository.listUnresolved(
-    season,
-    issue.tournamentId,
-  );
+  const remainingIssues = await runPhase([], async () => {
+    const verifiedAudit = await auditTournamentSetup(season, tournament, window);
+    const auditIssues = verifiedAudit.issues.map((message) =>
+      tournamentSetupIssueFromAuditMessage(message, {
+        affectedEntryIds: message.startsWith('missing entry_league_infos')
+          ? verifiedAudit.missingEntryLeagueInfoIds
+          : message.startsWith('missing entry_infos')
+            ? verifiedAudit.missingEntryInfoIds
+            : allEntryIds,
+      }),
+    );
+    const persisted = dedupeIssues([...repairIssues, ...auditIssues]);
+    const existingUnresolved = await tournamentSetupIssueRepository.listUnresolved(
+      season,
+      issue.tournamentId,
+    );
 
-  // Do not resolve the setup issue before the correction fence is durable. If
-  // the reset/enqueue fails after `sync` clears this row, the repair watchdog
-  // would have no unresolved issue left to retry. The audit result is the
-  // gate: only when this issue key is absent from the repaired set may we
-  // fence immutable review heads first.
-  let correctionEventIds: number[] | null = null;
-  if (reviewCorrection && !persisted.some((candidate) => candidate.issueKey === issue.issueKey)) {
-    correctionEventIds =
-      reviewCorrection.kind === 'tournament'
-        ? await requestTournamentReviewTournamentCorrection(
-            season,
-            issue.tournamentId,
-            reviewCorrection.reason,
-            reviewCorrection.changeId,
-          )
-        : await requestTournamentReviewCorrection(
-            season,
-            issue.tournamentId,
-            reviewCorrection.eventId,
-            reviewCorrection.reason,
-            reviewCorrection.changeId,
-            true,
-          );
-  }
-  await tournamentSetupIssueRepository.sync(season, issue.tournamentId, persisted, {
-    preserveUnresolvedIssueKeys: existingUnresolved
-      .filter((existing) => existing.issueId !== issueId)
-      .map((existing) => existing.issueKey),
+    // Do not resolve the setup issue before the correction fence is durable. If
+    // the reset/enqueue fails after `sync` clears this row, the repair watchdog
+    // would have no unresolved issue left to retry. The audit result is the
+    // gate: only when this issue key is absent from the repaired set may we
+    // fence immutable review heads first.
+    let correctionEventIds: number[] | null = null;
+    if (reviewCorrection && !persisted.some((candidate) => candidate.issueKey === issue.issueKey)) {
+      correctionEventIds =
+        reviewCorrection.kind === 'tournament'
+          ? await requestTournamentReviewTournamentCorrection(
+              season,
+              issue.tournamentId,
+              reviewCorrection.reason,
+              reviewCorrection.changeId,
+            )
+          : await requestTournamentReviewCorrection(
+              season,
+              issue.tournamentId,
+              reviewCorrection.eventId,
+              reviewCorrection.reason,
+              reviewCorrection.changeId,
+              true,
+            );
+    }
+    await tournamentSetupIssueRepository.sync(season, issue.tournamentId, persisted, {
+      preserveUnresolvedIssueKeys: existingUnresolved
+        .filter((existing) => existing.issueId !== issueId)
+        .map((existing) => existing.issueKey),
+    });
+    const remainingIssues = await tournamentSetupIssueRepository.listUnresolved(
+      season,
+      issue.tournamentId,
+    );
+    const settledState = await tournamentSetupIssueRepository.lockRepairState(season, issueId);
+    if (settledState)
+      registerDatabasePostCommit(async () => {
+        onStateCaptured?.(settledState);
+      });
+    registerDatabasePostCommit(async () => {
+      await Promise.all(
+        remainingIssues.map((remaining) =>
+          enqueueTournamentRepair(season, remaining, 'reconciliation'),
+        ),
+      );
+      if (correctionEventIds) {
+        await Promise.all(
+          correctionEventIds.map((correctionEventId) =>
+            enqueueTournamentReview(season, 'reconcile', {
+              tournamentId: issue.tournamentId,
+              eventId: correctionEventId,
+              deduplicationId: `tournament-review-repair-${season.seasonCode}-${issue.tournamentId}-${correctionEventId}-${reviewCorrection?.changeId}`,
+            }),
+          ),
+        );
+      }
+    });
+    return remainingIssues;
   });
-  const remainingIssues = await tournamentSetupIssueRepository.listUnresolved(
-    season,
-    issue.tournamentId,
-  );
-  await Promise.all(
-    remainingIssues.map((remaining) =>
-      enqueueTournamentRepair(season, remaining, 'reconciliation'),
-    ),
-  );
   logInfo('Tournament setup issue repair completed', {
     tournamentId: issue.tournamentId,
     issueId,
@@ -334,44 +345,27 @@ async function repairTournamentSetupIssueUnlocked(
     // only became eligible for the six-attempt/5-minute retry policy.
     throw new Error(`Tournament setup repair remains incomplete: ${issue.code}`);
   }
-
-  if (correctionEventIds !== null) {
-    if (correctionEventIds.length > 0) {
-      await Promise.all(
-        correctionEventIds.map((correctionEventId) =>
-          enqueueTournamentReview(season, 'reconcile', {
-            tournamentId: issue.tournamentId,
-            eventId: correctionEventId,
-            deduplicationId: `tournament-review-repair-${season.seasonCode}-${issue.tournamentId}-${correctionEventId}-${reviewCorrection?.changeId}`,
-          }),
-        ),
-      );
-    }
-
-    // A topology/result repair is never allowed to fall through to routine
-    // reconciliation: that path deliberately skips READY obligations and
-    // would leave a frozen head on the pre-repair facts. An empty result is
-    // valid only when the tournament has not created a review obligation yet.
-    // In that case the normal eligibility discovery will create its initial
-    // publication; there is no READY head to invalidate.
-    return;
-  }
 }
 
 export async function repairTournamentSetupIssue(
   season: FplSeasonRef,
   issueId: number,
+  onStateCaptured?: (state: TournamentRepairState) => void,
 ): Promise<void> {
   const candidate = await tournamentSetupIssueRepository.findUnresolvedById(season, issueId);
   if (!candidate) return;
 
-  await withMutationScopes(
+  const owner = await withMutationScopes(
     {
       queueName: 'tournament-repair',
       jobName: 'repair-issue',
       tournamentId: candidate.tournamentId,
       scopes: [tournamentSetupLifecycleScope(candidate.tournamentId)],
     },
-    () => repairTournamentSetupIssueUnlocked(season, issueId),
+    () => tournamentSetupIssueRepository.lockRepairState(season, issueId),
   );
+  if (owner) {
+    onStateCaptured?.(owner);
+    await repairTournamentSetupIssuePrepared(season, issueId, owner, onStateCaptured);
+  }
 }

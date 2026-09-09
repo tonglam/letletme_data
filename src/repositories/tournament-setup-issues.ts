@@ -12,6 +12,12 @@ import {
   type TournamentSetupIssueRecord,
 } from '../domain/tournament-setup-issue';
 
+export type TournamentRepairState = {
+  tournamentId: number;
+  issueRevision: string;
+  tournamentState: string;
+};
+
 const table = tournamentSetupIssuesInCompetition;
 
 function timestamp(value: Date | string | null): Date | null {
@@ -22,6 +28,30 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
+    // Call inside the short lifecycle transaction. The issue revision changes
+    // when a new occurrence or retry is recorded; cosmetic tournament edits
+    // do not invalidate canonical repair work.
+    lockRepairState: async (
+      season: FplSeasonRef,
+      issueId: number,
+    ): Promise<TournamentRepairState | null> => {
+      const db = await getDbInstance();
+      const rows = await db.execute<TournamentRepairState>(sql`
+        SELECT i.tournament_id AS "tournamentId", i.xmin::text AS "issueRevision",
+          (to_jsonb(t) - ARRAY[
+            'name', 'source_league_name', 'updated_at', 'setup_warning_count',
+            'profiles_ready_at', 'insights_ready_at'
+          ]::text[])::text AS "tournamentState"
+        FROM competition.tournament_setup_issues i
+        JOIN competition.tournaments t
+          ON t.season_id = i.season_id AND t.tournament_id = i.tournament_id
+        WHERE i.season_id = ${season.seasonId} AND i.issue_id = ${issueId}
+          AND i.resolved_at IS NULL
+        FOR UPDATE OF i, t
+      `);
+      return rows[0] ?? null;
+    },
+
     findUnresolvedById: async (
       season: FplSeasonRef,
       issueId: number,
@@ -275,6 +305,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
       issueId: number,
       nextRepairAt: Date | null,
       exhausted: boolean,
+      expectedRevision: string,
     ): Promise<void> => {
       const db = await getDbInstance();
       await db
@@ -285,7 +316,13 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
           repairExhaustedAt: exhausted ? new Date() : null,
           updatedAt: new Date(),
         })
-        .where(eq(table.issueId, issueId));
+        .where(
+          and(
+            eq(table.issueId, issueId),
+            sql`${table.resolvedAt} IS NULL`,
+            sql`xmin::text = ${expectedRevision}`,
+          ),
+        );
     },
   };
 };

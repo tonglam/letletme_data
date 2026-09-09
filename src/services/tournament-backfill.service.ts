@@ -1,3 +1,5 @@
+import type { TournamentRepairState } from '../repositories/tournament-setup-issues';
+import { withTournamentRepairPhase } from '../utils/tournament-repair-phase';
 import {
   tournamentEntryCoreScopes,
   tournamentSetupBackfillEventScopes,
@@ -706,21 +708,13 @@ export async function runTournamentEventBackfill(
   tournament: TournamentConfig,
   entryIds: number[],
   eventId: number,
+  repair?: { issueId: number; owner: TournamentRepairState },
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
-  const eventResults = await withMutationScopes(
-    {
-      queueName: 'tournament-setup',
-      jobName: 'entry-event-results',
-      tournamentId,
-      eventId,
-      scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
-    },
-    () =>
-      syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
-        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-      }),
-  );
+  const eventResults = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
+    concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+    perEntryMutationScopes: true,
+  });
   logInfo('Tournament event results sync completed for tournament', {
     tournamentId,
     eventId,
@@ -745,19 +739,14 @@ export async function runTournamentEventBackfill(
     });
   }
 
-  const leagueEventResults = await withMutationScopes(
+  const leagueEventResults = await syncLeagueEventResultsByTournament(
+    season,
+    tournamentId,
+    eventId,
     {
-      queueName: 'tournament-setup',
-      jobName: 'league-event-results',
-      tournamentId,
-      eventId,
-      scopes: tournamentEntryCoreScopes(season.seasonId, entryIds),
+      concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      entryIds,
     },
-    () =>
-      syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
-        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-        entryIds,
-      }),
   );
   if (
     leagueEventResults.skipped > 0 ||
@@ -782,6 +771,19 @@ export async function runTournamentEventBackfill(
   // Structure writes only: hold tournament-structure:global around points /
   // knockout upserts — not around FPL entry/league fetch above (Codex P2).
   const structureScopes = tournamentSetupBackfillEventScopes(eventId);
+  const writeResults = <T>(operation: () => Promise<T>) =>
+    repair
+      ? withTournamentRepairPhase(season, repair.issueId, repair.owner, structureScopes, operation)
+      : withMutationScopes(
+          {
+            queueName: 'tournament-setup',
+            jobName: 'tournament-setup',
+            tournamentId,
+            eventId,
+            scopes: structureScopes,
+          },
+          operation,
+        );
 
   if (
     tournament.groupMode === 'points_races' &&
@@ -790,15 +792,8 @@ export async function runTournamentEventBackfill(
     eventId >= tournament.groupStartedEventId &&
     eventId <= tournament.groupEndedEventId
   ) {
-    const pointsRaceResult = await withMutationScopes(
-      {
-        queueName: 'tournament-setup',
-        jobName: 'tournament-setup',
-        tournamentId,
-        eventId,
-        scopes: structureScopes,
-      },
-      () => syncTournamentPointsRaceResultsForTournament(season, tournament, eventId),
+    const pointsRaceResult = await writeResults(() =>
+      syncTournamentPointsRaceResultsForTournament(season, tournament, eventId),
     );
     if (pointsRaceResult.skipped > 0) {
       issues.push({
@@ -823,15 +818,8 @@ export async function runTournamentEventBackfill(
     eventId >= tournament.groupStartedEventId &&
     eventId <= tournament.groupEndedEventId
   ) {
-    const battleRaceResult = await withMutationScopes(
-      {
-        queueName: 'tournament-setup',
-        jobName: 'tournament-setup',
-        tournamentId,
-        eventId,
-        scopes: structureScopes,
-      },
-      () => syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
+    const battleRaceResult = await writeResults(() =>
+      syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
     );
     if (battleRaceResult.skipped > 0) {
       issues.push({
@@ -857,15 +845,8 @@ export async function runTournamentEventBackfill(
     eventId <= tournament.knockoutEndedEventId
   ) {
     const { syncKnockoutForTournament } = await import('./tournament-knockout-results.service');
-    const knockoutResult = await withMutationScopes(
-      {
-        queueName: 'tournament-setup',
-        jobName: 'tournament-setup',
-        tournamentId,
-        eventId,
-        scopes: structureScopes,
-      },
-      () => syncKnockoutForTournament(season, tournament, eventId),
+    const knockoutResult = await writeResults(() =>
+      syncKnockoutForTournament(season, tournament, eventId),
     );
     if (knockoutResult.skipped > 0) {
       issues.push({

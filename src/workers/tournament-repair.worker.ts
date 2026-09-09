@@ -35,12 +35,16 @@ export function createTournamentRepairWorker(): WorkerRuntime {
   const connection = getQueueConnection();
   const queueEvents = new QueueEvents(tournamentRepairQueueName, { connection });
   let watchdog: ReturnType<typeof setInterval> | null = null;
+  const observedRevisions = new Map<string, string>();
   const worker = new Worker<TournamentRepairJobData>(
     tournamentRepairQueueName,
     async (job: Job<TournamentRepairJobData>) => {
       const season = await seasonRepository.findByCode(job.data.seasonCode);
       if (!season) return;
-      await repairTournamentSetupIssue(season, job.data.issueId);
+      observedRevisions.delete(String(job.id));
+      await repairTournamentSetupIssue(season, job.data.issueId, (state) => {
+        observedRevisions.set(String(job.id), state.issueRevision);
+      });
     },
     {
       connection,
@@ -53,8 +57,14 @@ export function createTournamentRepairWorker(): WorkerRuntime {
     },
   );
 
+  worker.on('completed', (job) => {
+    observedRevisions.delete(String(job.id));
+  });
   worker.on('failed', (job, error) => {
     if (!job) return;
+    const revision = observedRevisions.get(String(job.id));
+    observedRevisions.delete(String(job.id));
+    if (!revision) return;
     void (async () => {
       const issue = await tournamentSetupIssueRepository.findUnresolvedById(
         { seasonId: job.data.seasonId, seasonCode: job.data.seasonCode },
@@ -69,6 +79,7 @@ export function createTournamentRepairWorker(): WorkerRuntime {
         issue.issueId,
         nextRepairAt,
         exhausted,
+        revision,
       );
     })().catch((stateError) => {
       logError('Failed to persist tournament repair retry state', stateError, {
