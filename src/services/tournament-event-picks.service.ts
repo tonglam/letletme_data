@@ -125,11 +125,23 @@ export async function syncTournamentEventPicks(
 
   // Publish ownership/captaincy as soon as durable picks converge. Transfer
   // counts remain explicitly unavailable until the transfer checkpoint lands.
-  await publishTournamentTrendScopes(
+  const publication = await publishTournamentTrendScopes(
     season,
     eventId,
     tournaments.map((tournament) => tournament.id),
   );
+
+  const incompletePublications =
+    publication.failed + publication.results.filter((result) => !result.isActive).length;
+  if (incompletePublications > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament picks converged but required Trends publications are incomplete',
+      publication.failed + publication.results.length,
+      0,
+      publication.results.filter((result) => result.isActive).length,
+      incompletePublications,
+    );
+  }
 
   return {
     eventId,
