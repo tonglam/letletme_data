@@ -282,7 +282,7 @@ describe('production environment preflight', () => {
     const stateMachine = readFileSync('scripts/deploy-state-machine.sh', 'utf8');
     const stopServices = deployScript.indexOf('if ! compose stop -t 45 api worker; then');
     const databaseQuiescenceCommand =
-      'compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped';
+      'bun scripts/assert-queue-quiescence.ts --database-only --scoped';
     const redisQuiescenceCommand =
       'run_scoped_queue_quiescence_probe "$final_queue_probe_output" 10';
     const databaseQuiescenceBeforeStop = deployScript.lastIndexOf(
@@ -310,7 +310,7 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 content-worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T --interactive=false migration bun scripts\/assert-queue-quiescence\.ts --database-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T --interactive=false[\s\S]*?migration bun scripts\/assert-queue-quiescence\.ts --database-only --scoped; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     const configuredRuntimeUrl = deployScript.indexOf('data_runtime_database_url=$(sed -n');
     expect(configuredRuntimeUrl).toBeGreaterThan(0);

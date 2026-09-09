@@ -764,7 +764,9 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T --interactive=false migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
+  if ! compose run --rm -T --interactive=false \
+    -e DEPLOY_QUIESCENCE_SOURCE_MEDIA_FENCED=true \
+    migration bun scripts/assert-queue-quiescence.ts --database-only --scoped; then
     log_error "Database work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1

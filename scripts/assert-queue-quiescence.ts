@@ -663,7 +663,12 @@ async function readDatabaseQuiescenceState(database: postgres.Sql): Promise<{
     `;
     stagingPublications = row?.count ?? 0;
   }
-  if (catalog.has_source_media_gates) {
+  // The deployment fence takes a SHARE ROW EXCLUSIVE lock on the source-media
+  // tables before this probe runs. Its READY recheck already proves that no
+  // media lease is active; reading the table here would wait on the fence that
+  // the probe is validating and make the deployment time out itself.
+  const sourceMediaIsFenced = process.env.DEPLOY_QUIESCENCE_SOURCE_MEDIA_FENCED === 'true';
+  if (catalog.has_source_media_gates && !sourceMediaIsFenced) {
     const [row] = await database<{ count: number }[]>`
       SELECT count(*)::integer AS count
       FROM content.source_media_gates
