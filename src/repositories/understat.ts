@@ -198,6 +198,13 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
 
   async upsertSeason(season: UnderstatSeason): Promise<void> {
     const db = await getDatabase(dbInstance);
+    const mergedState = sql`CASE
+      WHEN ${understatSeasons.state} = 'complete' OR excluded.state = 'complete' THEN 'complete'::understat.season_state
+      WHEN ${understatSeasons.state} = 'active' OR excluded.state = 'active' THEN 'active'::understat.season_state
+      ELSE 'planned'::understat.season_state
+    END`;
+    const mergedFirstSeenAt = sql`LEAST(${understatSeasons.firstSeenAt}, excluded.first_seen_at)`;
+    const mergedLastSeenAt = sql`GREATEST(${understatSeasons.lastSeenAt}, excluded.last_seen_at)`;
     await db
       .insert(understatSeasons)
       .values({ ...toSeasonRow(season), updatedAt: sql`clock_timestamp()` })
@@ -206,15 +213,30 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
         set: {
           sourceYear: sql`excluded.source_year`,
           league: sql`excluded.league`,
-          state: sql`CASE
-            WHEN ${understatSeasons.state} = 'complete' OR excluded.state = 'complete' THEN 'complete'::understat.season_state
-            WHEN ${understatSeasons.state} = 'active' OR excluded.state = 'active' THEN 'active'::understat.season_state
-            ELSE 'planned'::understat.season_state
-          END`,
-          firstSeenAt: sql`LEAST(${understatSeasons.firstSeenAt}, excluded.first_seen_at)`,
-          lastSeenAt: sql`GREATEST(${understatSeasons.lastSeenAt}, excluded.last_seen_at)`,
+          state: mergedState,
+          firstSeenAt: mergedFirstSeenAt,
+          lastSeenAt: mergedLastSeenAt,
           updatedAt: sql`clock_timestamp()`,
         },
+        // An unchanged discovery must not advance the source clock.  The
+        // Player State refresh uses understat.seasons.updated_at as source
+        // evidence, so updating this observation timestamp on every poll
+        // would defeat its no-op watermark guard.
+        where: sql`
+          ROW(
+            ${understatSeasons.sourceYear},
+            ${understatSeasons.league},
+            ${understatSeasons.state},
+            ${understatSeasons.firstSeenAt},
+            ${understatSeasons.lastSeenAt}
+          ) IS DISTINCT FROM ROW(
+            excluded.source_year,
+            excluded.league,
+            ${mergedState},
+            ${mergedFirstSeenAt},
+            ${mergedLastSeenAt}
+          )
+        `,
       });
   },
 

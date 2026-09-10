@@ -9,6 +9,7 @@ import { createTournamentKnockoutResultsRepository } from '../../src/repositorie
 import { createTournamentPointsGroupResultsRepository } from '../../src/repositories/tournament-points-group-results';
 import { createTournamentGroupRepository } from '../../src/repositories/tournament-groups';
 import { createTournamentKnockoutsRepository } from '../../src/repositories/tournament-knockouts';
+import { createUnderstatReferenceRepository } from '../../src/repositories/understat';
 import { resolveTournamentPointsRaceSourceUpdatedAt } from '../../src/services/tournament-points-race-results.service';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
@@ -126,4 +127,21 @@ test('points race uses one cohort watermark for every ranked output', () => {
   ]);
 
   expect(watermark.toISOString()).toBe('2026-08-31T00:00:00.000Z');
+});
+
+test('understat season upsert does not advance its source clock on unchanged input', async () => {
+  const fake = fakeDatabase();
+  await createUnderstatReferenceRepository(fake.db as never).upsertSeason({
+    season: '9899',
+    sourceYear: 2098,
+    league: 'EPL',
+    state: 'complete',
+    firstSeenAt: new Date('2026-08-30T00:00:00Z'),
+    lastSeenAt: new Date('2026-08-31T00:00:00Z'),
+  });
+  const config = fake.onConflictDoUpdate.mock.calls[0]?.[0] as { where?: SQL };
+  const guardSql = renderSql(config.where);
+  expect(guardSql).toContain('IS DISTINCT FROM');
+  expect(guardSql).toContain('excluded.source_year');
+  expect(guardSql).toContain('excluded.last_seen_at');
 });
