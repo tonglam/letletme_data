@@ -818,6 +818,12 @@ export const freshnessSloWindowsInOps = ops.table(
     index('freshness_slo_windows_pending_due_idx')
       .on(table.dueAt, table.windowId)
       .where(sql`status = 'PENDING'`),
+    index('freshness_slo_windows_observer_due_idx')
+      .on(table.dueAt, table.windowId.desc())
+      .where(sql`status IN ('PENDING','INVALID')`),
+    index('freshness_slo_windows_supersede_idx')
+      .on(table.contractKey, table.scopeKey, table.obligationDueAt)
+      .where(sql`status IN ('PENDING','INVALID')`),
     index('freshness_slo_windows_breach_idx')
       .on(table.contractKey, table.status, table.dueAt.desc())
       .where(sql`status IN ('BREACHED','INVALID')`),
