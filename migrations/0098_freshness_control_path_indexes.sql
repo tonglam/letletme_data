@@ -4,7 +4,7 @@
 SET LOCAL lock_timeout = '5s';
 
 CREATE INDEX freshness_slo_windows_observer_due_idx
-  ON ops.freshness_slo_windows (due_at, window_id DESC)
+  ON ops.freshness_slo_windows (due_at, window_id DESC NULLS LAST)
   WHERE status IN ('PENDING','INVALID');
 
 -- Latest-wins supersession filters by contract, scope, and the immutable

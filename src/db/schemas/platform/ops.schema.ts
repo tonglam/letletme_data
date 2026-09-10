@@ -819,7 +819,7 @@ export const freshnessSloWindowsInOps = ops.table(
       .on(table.dueAt, table.windowId)
       .where(sql`status = 'PENDING'`),
     index('freshness_slo_windows_observer_due_idx')
-      .on(table.dueAt, table.windowId.desc())
+      .on(table.dueAt, table.windowId.desc().nullsLast())
       .where(sql`status IN ('PENDING','INVALID')`),
     index('freshness_slo_windows_supersede_idx')
       .on(table.contractKey, table.scopeKey, table.obligationDueAt)

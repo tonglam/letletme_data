@@ -78,7 +78,9 @@ describe('scheduler obligation hot-path indexes', () => {
       expect(freshnessMigration).toContain(indexName);
       expect(schema).toContain(indexName);
     }
-    expect(freshnessMigration).toContain('ON ops.freshness_slo_windows (due_at, window_id DESC)');
+    expect(freshnessMigration).toContain(
+      'ON ops.freshness_slo_windows (due_at, window_id DESC NULLS LAST)',
+    );
     expect(freshnessMigration).toContain(
       'ON ops.freshness_slo_windows (contract_key, scope_key, obligation_due_at)',
     );
