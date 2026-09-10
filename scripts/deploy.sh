@@ -763,11 +763,18 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  # The media worker has its own dedicated lifecycle, but it must be bounded
-  # out of the database-critical section. The helper takes the deploy
-  # advisory plus source-media table locks; this blocks legacy claims,
+  # The media worker has its own dedicated lifecycle, but it must be stopped
+  # before the database-critical section. Let in-flight writes drain without
+  # waiting behind the table fence; otherwise Docker's bounded stop leaves a
+  # pooled backend waiting until statement_timeout. The helper then takes the
+  # deploy advisory plus source-media table locks, blocking legacy claims,
   # retention writes, and producer inserts after the READY scan without making
   # a Storage request or recreating the worker.
+  if ! stop_source_media_worker_with_deadline; then
+    log_error "Source-media worker did not stop cleanly; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
   if ! acquire_source_media_deploy_fence || ! source_media_deploy_fence_is_active; then
     log_error "Could not establish the source-media claim fence; services were not stopped."
     restore_stopped_services
@@ -782,11 +789,6 @@ deploy() {
   log_info "Stopping content-worker after active content work drained"
   if ! compose stop -t 45 content-worker; then
     log_error "Content worker did not stop cleanly after queue drain; migration was not started."
-    restore_stopped_services
-    exit 1
-  fi
-  if ! stop_source_media_worker_with_deadline; then
-    log_error "Source-media worker did not stop cleanly; migration was not started."
     restore_stopped_services
     exit 1
   fi
