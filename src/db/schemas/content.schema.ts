@@ -436,6 +436,11 @@ export const contentAcquisitionRuns = content.table(
     index('content_acquisition_runs_active_x_lease_idx')
       .on(table.leaseExpiresAt)
       .where(sql`adapter_kind IN ('X_ACCOUNT', 'X_SEMANTIC') AND status IN ('PENDING', 'RUNNING')`),
+    index('content_acquisition_runs_trigger_recovery_idx')
+      .on(table.leaseExpiresAt, table.runId)
+      .where(
+        sql`schedule_id IS NULL AND job_kind <> 'X_IDENTITY' AND status IN ('PENDING', 'RUNNING') AND lease_expires_at IS NOT NULL`,
+      ),
     index('content_acquisition_runs_lease_idx')
       .on(table.leaseExpiresAt, table.runId)
       .where(sql`status = 'RUNNING' AND lease_expires_at IS NOT NULL`),
@@ -861,6 +866,9 @@ export const contentSourceMediaGates = content.table(
     index('content_source_media_gates_reclaim_idx')
       .on(table.leaseExpiresAt, table.gateId)
       .where(sql`status = 'RUNNING'`),
+    index('content_source_media_gates_repair_expiry_idx')
+      .on(table.repairUntilAt, table.gateId)
+      .where(sql`status IN ('PENDING', 'PARTIAL', 'UNAVAILABLE') AND repair_exhausted_at IS NULL`),
   ],
 );
 
