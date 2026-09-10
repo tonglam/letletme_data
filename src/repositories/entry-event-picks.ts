@@ -9,6 +9,7 @@ import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { withEntrySeasonSyncTransaction } from './entry-event-transfers';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -254,6 +255,9 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     publication?: EntryEventPicksPublicationMetadata,
     options?: EntryEventPicksUpsertOptions,
   ): Promise<boolean> => {
+    // Every write caller holds the season/entry advisory and parent-row fence
+    // from withEntrySeasonSyncTransaction. Child-row FOR UPDATE locks would
+    // add one WAL record per pick/head row without improving serialization.
     const existing = await db
       .select({
         position: entryEventPicksInCompetition.position,
@@ -275,8 +279,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           eq(entryEventPicksInCompetition.entryId, entryId),
           eq(entryEventPicksInCompetition.eventId, eventId),
         ),
-      )
-      .for('update');
+      );
 
     const [existingHead] = await db
       .select({
@@ -292,7 +295,6 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           eq(entryEventPickHeadsInCompetition.eventId, eventId),
         ),
       )
-      .for('update')
       .limit(1);
 
     const candidateContent = normalizedPickContent(picks);
@@ -346,26 +348,24 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     // Redis-first publication, so the head is checkpointed below without a
     // delete/insert cycle.
     if (sameContent) {
-      const [existingHead] = await db
-        .select({
-          publicationId: entryEventPickHeadsInCompetition.publicationId,
-          picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
-          contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
-        })
-        .from(entryEventPickHeadsInCompetition)
-        .where(
-          and(
-            eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
-            eq(entryEventPickHeadsInCompetition.entryId, entryId),
-            eq(entryEventPickHeadsInCompetition.eventId, eventId),
-          ),
-        )
-        .limit(1);
+      // Tournament result refreshes carry no publication metadata. Once the
+      // complete V2 head exists, the source snapshot is already durable and
+      // immutable; rewriting its heartbeat on every five-minute replay only
+      // produces WAL and hides the real publication cadence. A publication
+      // supplied by the Redis checkpoint lane is different: it may be
+      // repairing checkpointedAt or a missing head and must still be fenced.
+      if (
+        existingHead?.state === 'COMPLETE' &&
+        existingHead.rowCount === 15 &&
+        publication === undefined
+      ) {
+        return false;
+      }
       const requestedContentUpdatedAt = publication?.contentUpdatedAt
         ? publication.contentUpdatedAt instanceof Date
           ? publication.contentUpdatedAt
           : new Date(publication.contentUpdatedAt)
-        : (existingHead?.contentUpdatedAt ?? syncedAt);
+        : syncedAt;
       if (!Number.isFinite(requestedContentUpdatedAt.getTime())) {
         throw new Error('A valid picks content timestamp is required');
       }
@@ -484,6 +484,16 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           sourceCreatedAt: sql`excluded.source_created_at`,
           sourceUpdatedAt: sql`excluded.source_updated_at`,
         },
+        where: sql`
+          ${entryEventPicksInCompetition.elementId} IS DISTINCT FROM excluded.element_id
+          OR ${entryEventPicksInCompetition.eventTeamId} IS DISTINCT FROM excluded.event_team_id
+          OR ${entryEventPicksInCompetition.multiplier} IS DISTINCT FROM excluded.multiplier
+          OR ${entryEventPicksInCompetition.isCaptain} IS DISTINCT FROM excluded.is_captain
+          OR ${entryEventPicksInCompetition.isViceCaptain} IS DISTINCT FROM excluded.is_vice_captain
+          OR ${entryEventPicksInCompetition.activeChip} IS DISTINCT FROM excluded.active_chip
+          OR ${entryEventPicksInCompetition.transfers} IS DISTINCT FROM excluded.transfers
+          OR ${entryEventPicksInCompetition.transfersCost} IS DISTINCT FROM excluded.transfers_cost
+        `,
       });
 
     const contentUpdatedAt = publication?.contentUpdatedAt
@@ -854,9 +864,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
               publication,
               options,
             )
-          : await (
-              await getDb()
-            ).transaction((tx) =>
+          : await withEntrySeasonSyncTransaction(season, entryId, (tx) =>
               replaceScope(
                 tx,
                 season,

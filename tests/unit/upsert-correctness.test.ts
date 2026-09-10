@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 
-import { buildTransferReplacementRows } from '../../src/repositories/entry-event-transfers';
+import {
+  buildTransferReplacementRows,
+  transferRowsMatch,
+} from '../../src/repositories/entry-event-transfers';
 import type { RawFPLEntryTransfer } from '../../src/types';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
@@ -71,5 +74,42 @@ describe('entry-event-transfers upsert (H5)', () => {
     expect(rows).toHaveLength(3);
     expect(rows.map((row) => row.eventId)).toEqual([9, 10, 10]);
     expect(rows.map((row) => row.elementInId)).toEqual([100, 100, 101]);
+  });
+
+  it('recognizes an identical enriched history so replacement can be skipped', () => {
+    const existing = [
+      {
+        id: 1,
+        seasonId: TEST_SEASON.seasonId,
+        transferId: 1,
+        entryId: 12345,
+        eventId: 10,
+        elementInId: 100,
+        elementInCost: 55,
+        elementInPoints: 8,
+        elementInPlayed: true,
+        elementOutId: 200,
+        elementOutCost: 60,
+        elementOutPoints: 2,
+        transferTime: new Date(TRANSFER.time),
+        createdAt: new Date('2026-07-17T10:00:00Z'),
+        updatedAt: new Date('2026-07-17T10:00:00Z'),
+      },
+    ];
+    const candidate = buildTransferReplacementRows({
+      season: TEST_SEASON,
+      entryId: 12345,
+      eventId: 10,
+      transfers: [TRANSFER],
+      existing,
+    });
+
+    expect(transferRowsMatch(existing, candidate)).toBe(true);
+    expect(
+      transferRowsMatch(
+        existing,
+        candidate.map((row) => ({ ...row, elementInPoints: 9 })),
+      ),
+    ).toBe(false);
   });
 });
