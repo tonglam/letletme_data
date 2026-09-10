@@ -37,6 +37,50 @@ function mapTransfer(
   return { ...row, id: row.transferId };
 }
 
+/**
+ * Compare the canonical transfer payload while ignoring identity/audit
+ * columns. A complete provider history can be replayed many times; deleting
+ * and reinserting an identical set only burns WAL and index pages.
+ */
+export function transferRowsMatch(
+  existing: readonly DbEntryEventTransfer[],
+  candidate: readonly DbEntryEventTransferInsert[],
+): boolean {
+  if (existing.length !== candidate.length) return false;
+  const existingBySignature = new Map<string, DbEntryEventTransfer[]>();
+  for (const row of existing) {
+    const signature = transferSignature(row);
+    const rows = existingBySignature.get(signature);
+    if (rows) {
+      rows.push(row);
+    } else {
+      existingBySignature.set(signature, [row]);
+    }
+  }
+  return candidate.every((row) => {
+    const signature = transferSignature({
+      eventId: row.eventId,
+      elementInId: row.elementInId ?? null,
+      elementOutId: row.elementOutId ?? null,
+      transferTime: row.transferTime as Date,
+    });
+    const matchingRows = existingBySignature.get(signature);
+    const matchingIndex = matchingRows?.findIndex(
+      (previous) =>
+        previous.elementInCost === row.elementInCost &&
+        previous.elementInPoints === row.elementInPoints &&
+        previous.elementInPlayed === row.elementInPlayed &&
+        previous.elementOutCost === row.elementOutCost &&
+        previous.elementOutPoints === row.elementOutPoints,
+    );
+    if (matchingRows === undefined || matchingIndex === undefined || matchingIndex < 0) {
+      return false;
+    }
+    matchingRows.splice(matchingIndex, 1);
+    return true;
+  });
+}
+
 export async function acquireEntrySeasonWriteFence(
   tx: TransactionHandle,
   season: FplSeasonRef,
@@ -382,8 +426,6 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbOrTransaction
             .from(entryEventTransfersInCompetition)
             .where(transferScope);
           const existing = existingRows.map(mapTransfer);
-          await tx.delete(entryEventTransfersInCompetition).where(transferScope);
-
           const rows = buildTransferReplacementRows({
             season,
             entryId,
@@ -394,32 +436,36 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbOrTransaction
             elementInPlayed: options?.elementInPlayed,
             defaultPoints: options?.defaultPoints ?? null,
           });
-          if (rows.length > 0) {
-            await tx.insert(entryEventTransfersInCompetition).values(rows);
-          }
+          const changed = !transferRowsMatch(existing, rows);
+          if (changed) {
+            await tx.delete(entryEventTransfersInCompetition).where(transferScope);
+            if (rows.length > 0) {
+              await tx.insert(entryEventTransfersInCompetition).values(rows);
+            }
 
-          const persisted = await tx
-            .select({
-              eventId: entryEventTransfersInCompetition.eventId,
-              elementInId: entryEventTransfersInCompetition.elementInId,
-              elementOutId: entryEventTransfersInCompetition.elementOutId,
-              transferTime: entryEventTransfersInCompetition.transferTime,
-            })
-            .from(entryEventTransfersInCompetition)
-            .where(transferScope);
-          const expected = new Set(
-            rows.map((row) =>
-              transferSignature({
-                eventId: row.eventId,
-                elementInId: row.elementInId ?? null,
-                elementOutId: row.elementOutId ?? null,
-                transferTime: row.transferTime as Date,
-              }),
-            ),
-          );
-          const actual = new Set(persisted.map(transferSignature));
-          if (actual.size !== expected.size || [...expected].some((key) => !actual.has(key))) {
-            throw new Error('Full transfer history failed canonical replacement verification');
+            const persisted = await tx
+              .select({
+                eventId: entryEventTransfersInCompetition.eventId,
+                elementInId: entryEventTransfersInCompetition.elementInId,
+                elementOutId: entryEventTransfersInCompetition.elementOutId,
+                transferTime: entryEventTransfersInCompetition.transferTime,
+              })
+              .from(entryEventTransfersInCompetition)
+              .where(transferScope);
+            const expected = new Set(
+              rows.map((row) =>
+                transferSignature({
+                  eventId: row.eventId,
+                  elementInId: row.elementInId ?? null,
+                  elementOutId: row.elementOutId ?? null,
+                  transferTime: row.transferTime as Date,
+                }),
+              ),
+            );
+            const actual = new Set(persisted.map(transferSignature));
+            if (actual.size !== expected.size || [...expected].some((key) => !actual.has(key))) {
+              throw new Error('Full transfer history failed canonical replacement verification');
+            }
           }
 
           await tx
