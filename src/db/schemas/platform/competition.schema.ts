@@ -1195,6 +1195,9 @@ export const tournamentPointsGroupResultsInCompetition = competition.table(
     cumulativeAutoSubPoints: integer('cumulative_auto_sub_points').default(0).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    // Source result watermark is separate from updated_at, which records the
+    // durable write time required by publication freshness proofs.
+    sourceUpdatedAt: timestamp('source_updated_at', { withTimezone: true, mode: 'date' }),
   },
   (table) => [
     index('tournament_review_points_results_reconcile_idx').on(

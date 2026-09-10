@@ -42,21 +42,19 @@ function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null) {
   return picks.filter((pick) => pick.position <= 11).map((pick) => pick.element);
 }
 
-export async function loadFinalizedKnockoutLiveMap(
+type FinalizedKnockoutLiveRow = Pick<DbEventLive, 'elementId' | 'goalsScored' | 'goalsConceded'>;
+
+type FinalizedKnockoutLiveSnapshot = {
+  liveMap: Map<number, { goalsScored: number | null; goalsConceded: number | null }>;
+  sourceCheckedAt: Date | null;
+};
+
+function buildFinalizedKnockoutLiveSnapshot(
   eventId: number,
-  season: FplSeasonRef,
   requiredElementIds: readonly number[],
-  findRows: (
-    targetEventId: number,
-    targetSeason: FplSeasonRef,
-  ) => Promise<
-    ReadonlyArray<Pick<DbEventLive, 'elementId' | 'goalsScored' | 'goalsConceded'>>
-  > = async (targetEventId, targetSeason) => {
-    const checkpoint = await readLivePublicationV2Checkpoint(targetSeason, targetEventId);
-    return checkpoint?.publication.state === 'FINALIZED' ? checkpoint.eventLives : [];
-  },
-) {
-  const eventLives = await findRows(eventId, season);
+  eventLives: ReadonlyArray<FinalizedKnockoutLiveRow>,
+  sourceCheckedAt: Date | null,
+): FinalizedKnockoutLiveSnapshot {
   const liveMap = new Map(
     eventLives.map((live) => [
       live.elementId,
@@ -72,7 +70,46 @@ export async function loadFinalizedKnockoutLiveMap(
         `missing elements: ${missingElementIds.slice(0, 10).join(',')}`,
     );
   }
-  return liveMap;
+  return { liveMap, sourceCheckedAt };
+}
+
+async function loadFinalizedKnockoutLiveSnapshot(
+  eventId: number,
+  season: FplSeasonRef,
+  requiredElementIds: readonly number[],
+): Promise<FinalizedKnockoutLiveSnapshot> {
+  const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
+  const finalized = checkpoint?.publication.state === 'FINALIZED';
+  const sourceCheckedAt = finalized ? new Date(checkpoint.publication.sourceCheckedAt) : null;
+  if (sourceCheckedAt && !Number.isFinite(sourceCheckedAt.getTime())) {
+    throw new Error(
+      `Finalized event live source timestamp is invalid for knockout event ${eventId}`,
+    );
+  }
+  return buildFinalizedKnockoutLiveSnapshot(
+    eventId,
+    requiredElementIds,
+    finalized ? checkpoint.eventLives : [],
+    sourceCheckedAt,
+  );
+}
+
+export async function loadFinalizedKnockoutLiveMap(
+  eventId: number,
+  season: FplSeasonRef,
+  requiredElementIds: readonly number[],
+  findRows: (
+    targetEventId: number,
+    targetSeason: FplSeasonRef,
+  ) => Promise<
+    ReadonlyArray<Pick<DbEventLive, 'elementId' | 'goalsScored' | 'goalsConceded'>>
+  > = async (targetEventId, targetSeason) => {
+    const checkpoint = await readLivePublicationV2Checkpoint(targetSeason, targetEventId);
+    return checkpoint?.publication.state === 'FINALIZED' ? checkpoint.eventLives : [];
+  },
+) {
+  const eventLives = await findRows(eventId, season);
+  return buildFinalizedKnockoutLiveSnapshot(eventId, requiredElementIds, eventLives, null).liveMap;
 }
 
 function sumGoals(
@@ -294,8 +331,17 @@ export async function syncKnockoutForTournament(
     }
     requiredElementIds.push(...pickElements(picks, entryResult.eventChip ?? null));
   }
-  const liveMap = await loadFinalizedKnockoutLiveMap(eventId, season, requiredElementIds);
-  const sourceCheckedAt = new Date();
+  const liveSnapshot = await loadFinalizedKnockoutLiveSnapshot(eventId, season, requiredElementIds);
+  const liveMap = liveSnapshot.liveMap;
+  // Keep retries tied to the source result watermark. A wall-clock timestamp
+  // made an unchanged finalized event appear new on every pass.
+  const sourceCheckedAt = [
+    ...eventResults.map((result) => result.richSyncedAt ?? result.updatedAt ?? new Date(0)),
+    ...(liveSnapshot.sourceCheckedAt ? [liveSnapshot.sourceCheckedAt] : []),
+  ].reduce(
+    (latest, candidate) => (candidate.getTime() > latest.getTime() ? candidate : latest),
+    new Date(0),
+  );
 
   const updatedResults = knockoutResults.map((result) => {
     const homeEntryId = result.homeEntryId ?? null;

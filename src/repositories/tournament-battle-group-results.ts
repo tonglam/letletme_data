@@ -175,7 +175,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
           };
           return { ...rest, seasonId: season.seasonId };
         });
-        await db
+        const result = await db
           .insert(tournamentBattleGroupResultsInCompetition)
           .values(rows)
           .onConflictDoUpdate({
@@ -194,12 +194,49 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
               awayRank: sql`excluded.away_rank`,
               awayMatchPoints: sql`excluded.away_match_points`,
               sourceCheckedAt: sql`COALESCE(excluded.source_checked_at, ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt})`,
-              updatedAt: new Date(),
+              updatedAt: sql`clock_timestamp()`,
             },
-          });
+            where: sql`
+              (
+                ROW(
+                  ${tournamentBattleGroupResultsInCompetition.homeNetPoints},
+                  ${tournamentBattleGroupResultsInCompetition.homeRank},
+                  ${tournamentBattleGroupResultsInCompetition.homeMatchPoints},
+                  ${tournamentBattleGroupResultsInCompetition.awayNetPoints},
+                  ${tournamentBattleGroupResultsInCompetition.awayRank},
+                  ${tournamentBattleGroupResultsInCompetition.awayMatchPoints}
+                ) IS DISTINCT FROM ROW(
+                  excluded.home_net_points,
+                  excluded.home_rank,
+                  excluded.home_match_points,
+                  excluded.away_net_points,
+                  excluded.away_rank,
+                  excluded.away_match_points
+                )
+                OR (
+                  excluded.source_checked_at IS NOT NULL
+                  AND (
+                    ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt} IS NULL
+                    OR excluded.source_checked_at > ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}
+                  )
+                )
+              )
+              AND (
+                ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt} IS NULL
+                OR (
+                  excluded.source_checked_at IS NOT NULL
+                  AND excluded.source_checked_at >= ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}
+                )
+              )
+            `,
+          })
+          .returning({ sourceResultId: tournamentBattleGroupResultsInCompetition.sourceResultId });
 
-        logInfo('Upserted tournament battle group results', { count: results.length });
-        return results.length;
+        logInfo('Upserted tournament battle group results', {
+          count: result.length,
+          submitted: results.length,
+        });
+        return result.length;
       } catch (error) {
         logError('Failed to upsert tournament battle group results', error, {
           count: results.length,

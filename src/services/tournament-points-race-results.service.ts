@@ -184,6 +184,7 @@ export async function syncTournamentPointsRaceResultsForTournament(
       totalTransfersCost: 0,
       totalNetPoints: 0,
     };
+    const sourceUpdatedAt = eventResult.richSyncedAt ?? eventResult.updatedAt;
 
     const play = eventId - tournament.groupStartedEventId + 1;
     const groupUpdate = {
@@ -234,6 +235,7 @@ export async function syncTournamentPointsRaceResultsForTournament(
       eventCost: eventResult.eventTransfersCost,
       eventNetPoints,
       eventRank: eventResult.eventRank,
+      sourceUpdatedAt,
       createdAt: existingPoints?.createdAt ?? new Date(),
     });
   }

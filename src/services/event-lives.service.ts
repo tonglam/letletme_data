@@ -1,3 +1,5 @@
+import { sql } from 'drizzle-orm';
+
 import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
@@ -69,6 +71,12 @@ export async function persistPreparedEventLives(
 ): Promise<EventLive[]> {
   const { eventId, eventLives, explains, fixtureEvidence } = prepared;
   const persist = async (tx: DbOrTransaction) => {
+    // Direct callers do not necessarily arrive through the V2 checkpoint
+    // scope fence. Serialize the read/diff/write scoring reconciliation with
+    // every other writer for this season/event.
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${season.seasonCode}:${eventId}`}, 0))`,
+    );
     const txEventLiveRepository = createEventLiveRepository(tx);
     const txExplainsRepository = createEventLiveExplainsRepository(tx);
     const txFixtureStatsRepository = createFplPlayerFixtureStatsRepository(tx);
@@ -96,26 +104,37 @@ export async function persistPreparedEventLives(
       changes: fixtureChanges,
     });
 
-    return eventLives;
+    return {
+      eventLives,
+      changed: changedLives.length > 0 || savedExplains.length > 0 || fixtureChanges > 0,
+    };
   };
 
   if (dbInstance) {
-    return persist(dbInstance);
+    const result = await persist(dbInstance);
+    return result.eventLives;
   }
   const db = await getDb();
   const saved = await db.transaction(persist);
   // Direct callers are also canonical gameweek writers. Keep the reporting
   // read model current after their transaction commits; a failed refresh must
   // not roll back the authoritative event-live facts.
-  try {
-    await refreshPlayerSeasonSummaries(season);
-  } catch (error) {
-    logError('Player season summary refresh failed after direct event-live write', error, {
+  if (saved.changed) {
+    try {
+      await refreshPlayerSeasonSummaries(season);
+    } catch (error) {
+      logError('Player season summary refresh failed after direct event-live write', error, {
+        season: season.seasonCode,
+        eventId,
+      });
+    }
+  } else {
+    logDebug('Skipped player season summary refresh for unchanged event-live snapshot', {
       season: season.seasonCode,
       eventId,
     });
   }
-  return saved;
+  return saved.eventLives;
 }
 
 /**

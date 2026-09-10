@@ -200,13 +200,16 @@ async function persistCoreSnapshotRows(
     sourceCheckedAt,
     snapshot.fixtures.map((fixture) => fixture.code),
   );
-  const savedFixtures = await fixtureRepository.upsertBatch(season, snapshot.fixtures);
+  await fixtureRepository.upsertBatch(season, snapshot.fixtures);
 
   requirePersistedCount('events', savedEvents.length, snapshot.events.length);
   requirePersistedCount('teams', savedTeams.length, snapshot.teams.length);
   requirePersistedCount('players', savedPlayers.length, snapshot.players.length);
   requirePersistedCount('phases', savedPhases.length, snapshot.phases.length);
-  requirePersistedCount('fixtures', savedFixtures.length, snapshot.fixtures.length);
+  // Fixture upserts use a null-safe conflict guard and therefore return only
+  // rows that changed. The complete source batch was still submitted inside
+  // this transaction, so a shorter RETURNING result is a valid idempotent
+  // replay rather than an incomplete canonical snapshot.
 
   // Keep the normalized official selection rules beside the season authority
   // so the GraphQL PostgreSQL fallback can expose the same contract as Redis.
@@ -239,7 +242,7 @@ async function persistCoreSnapshotRows(
     teams: savedTeams.length,
     players: savedPlayers.length,
     phases: savedPhases.length,
-    fixtures: savedFixtures.length,
+    fixtures: snapshot.fixtures.length,
   };
 }
 

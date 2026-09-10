@@ -3,6 +3,11 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
 import { createEventLiveRepository } from '../../src/repositories/event-lives';
+import { createFixtureRepository } from '../../src/repositories/fixtures';
+import { createTournamentBattleGroupResultsRepository } from '../../src/repositories/tournament-battle-group-results';
+import { createTournamentKnockoutResultsRepository } from '../../src/repositories/tournament-knockout-results';
+import { createTournamentPointsGroupResultsRepository } from '../../src/repositories/tournament-points-group-results';
+import { createTournamentGroupRepository } from '../../src/repositories/tournament-groups';
 import { createTournamentKnockoutsRepository } from '../../src/repositories/tournament-knockouts';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
@@ -34,6 +39,42 @@ test('derived batch upserts skip unchanged conflict rows', async () => {
       run: async (db: object) =>
         createTournamentKnockoutsRepository(db as never).upsertBatch(TEST_SEASON, [{} as never]),
     },
+    {
+      name: 'fixture',
+      fake: fakeDatabase(),
+      run: async (db: object) =>
+        createFixtureRepository(db as never).upsertBatch(TEST_SEASON, [{} as never]),
+    },
+    {
+      name: 'tournament group',
+      fake: fakeDatabase(),
+      run: async (db: object) =>
+        createTournamentGroupRepository(db as never).upsertBatch(TEST_SEASON, [{} as never]),
+    },
+    {
+      name: 'tournament points result',
+      fake: fakeDatabase(),
+      run: async (db: object) =>
+        createTournamentPointsGroupResultsRepository(db as never).upsertBatch(TEST_SEASON, [
+          {} as never,
+        ]),
+    },
+    {
+      name: 'tournament battle result',
+      fake: fakeDatabase(),
+      run: async (db: object) =>
+        createTournamentBattleGroupResultsRepository(db as never).upsertBatch(TEST_SEASON, [
+          {} as never,
+        ]),
+    },
+    {
+      name: 'tournament knockout result',
+      fake: fakeDatabase(),
+      run: async (db: object) =>
+        createTournamentKnockoutResultsRepository(db as never).upsertBatch(TEST_SEASON, [
+          {} as never,
+        ]),
+    },
   ];
 
   for (const repository of repositories) {
@@ -48,4 +89,25 @@ test('derived batch upserts skip unchanged conflict rows', async () => {
       `${repository.name} guard must be null-safe`,
     ).toBe(true);
   }
+});
+
+test('points result guards reject stale source watermarks and advance proof independently', async () => {
+  const fake = fakeDatabase();
+  await createTournamentPointsGroupResultsRepository(fake.db as never).upsertBatch(TEST_SEASON, [
+    { sourceUpdatedAt: new Date('2026-08-30T00:00:00Z') } as never,
+  ]);
+  const config = fake.onConflictDoUpdate.mock.calls[0]?.[0] as { where?: SQL };
+  const guardSql = renderSql(config.where);
+  expect(guardSql).toContain('source_updated_at');
+  expect(guardSql).toContain('>=');
+  expect(guardSql).toContain('>');
+});
+
+test('points result repairs without a source marker cannot overwrite a sourced row', async () => {
+  const fake = fakeDatabase();
+  await createTournamentPointsGroupResultsRepository(fake.db as never).upsertBatch(TEST_SEASON, [
+    {} as never,
+  ]);
+  const config = fake.onConflictDoUpdate.mock.calls[0]?.[0] as { where?: SQL };
+  expect(renderSql(config.where)).toContain('source_updated_at" IS NULL');
 });
