@@ -20,6 +20,21 @@ function groupRankKey(totalNetPoints: number, overallRank: number | null) {
   return `${totalNetPoints}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
 }
 
+/**
+ * A points-race result ranks every member of a group against the same input
+ * cohort.  Carry the newest source watermark across that cohort on every
+ * output row so an older calculation cannot partially overwrite a newer
+ * group's ranks while concurrent entry-result refreshes complete.
+ */
+export function resolveTournamentPointsRaceSourceUpdatedAt(
+  eventResults: ReadonlyArray<{ richSyncedAt: Date | null; updatedAt: Date }>,
+): Date {
+  return eventResults.reduce((latest, result) => {
+    const candidate = result.richSyncedAt ?? result.updatedAt;
+    return candidate.getTime() > latest.getTime() ? candidate : latest;
+  }, new Date(0));
+}
+
 /** Clamp an entry's cumulative-results lower bound to the tournament window. */
 export function effectiveTournamentReviewEntryStartEventId(
   groupStartedEventId: number,
@@ -130,6 +145,7 @@ export async function syncTournamentPointsRaceResultsForTournament(
     return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
   }
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
+  const sourceUpdatedAt = resolveTournamentPointsRaceSourceUpdatedAt(eventResults);
 
   const tournamentGroups = await tournamentGroupRepository.findByTournamentAndEntries(
     season,
@@ -184,8 +200,6 @@ export async function syncTournamentPointsRaceResultsForTournament(
       totalTransfersCost: 0,
       totalNetPoints: 0,
     };
-    const sourceUpdatedAt = eventResult.richSyncedAt ?? eventResult.updatedAt;
-
     const play = eventId - tournament.groupStartedEventId + 1;
     const groupUpdate = {
       id: group.id,

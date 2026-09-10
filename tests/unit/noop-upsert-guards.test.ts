@@ -9,6 +9,7 @@ import { createTournamentKnockoutResultsRepository } from '../../src/repositorie
 import { createTournamentPointsGroupResultsRepository } from '../../src/repositories/tournament-points-group-results';
 import { createTournamentGroupRepository } from '../../src/repositories/tournament-groups';
 import { createTournamentKnockoutsRepository } from '../../src/repositories/tournament-knockouts';
+import { resolveTournamentPointsRaceSourceUpdatedAt } from '../../src/services/tournament-points-race-results.service';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const dialect = new PgDialect();
@@ -110,4 +111,19 @@ test('points result repairs without a source marker cannot overwrite a sourced r
   ]);
   const config = fake.onConflictDoUpdate.mock.calls[0]?.[0] as { where?: SQL };
   expect(renderSql(config.where)).toContain('source_updated_at" IS NULL');
+});
+
+test('points race uses one cohort watermark for every ranked output', () => {
+  const watermark = resolveTournamentPointsRaceSourceUpdatedAt([
+    {
+      richSyncedAt: new Date('2026-08-30T00:00:00Z'),
+      updatedAt: new Date('2026-08-29T00:00:00Z'),
+    },
+    {
+      richSyncedAt: null,
+      updatedAt: new Date('2026-08-31T00:00:00Z'),
+    },
+  ]);
+
+  expect(watermark.toISOString()).toBe('2026-08-31T00:00:00.000Z');
 });
