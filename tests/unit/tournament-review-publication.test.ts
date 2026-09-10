@@ -346,6 +346,16 @@ describe('My Tournament Review V2 format and retry policy', () => {
   });
 
   test('reconciles incrementally and retires scopes under the publication lock', () => {
+    const entryMetadataCte = publicationSource.slice(
+      publicationSource.indexOf('WITH entry_metadata AS MATERIALIZED'),
+      publicationSource.indexOf('), canonical_group_assignments AS MATERIALIZED'),
+    );
+    const groupAssignmentsCte = publicationSource.slice(
+      publicationSource.indexOf('canonical_group_assignments AS MATERIALIZED'),
+      publicationSource.indexOf('), candidate_formats AS'),
+    );
+    expect(entryMetadataCte).toContain('${targetTournamentId}::integer IS NULL');
+    expect(groupAssignmentsCte).toContain('${targetTournamentId}::integer IS NULL');
     expect(publicationSource).toContain('COALESCE(state.existing_eligible_at');
     expect(publicationSource).toContain('event.updated_at AS event_updated_at');
     expect(publicationSource).toContain('const eventMetadataChanged =');
