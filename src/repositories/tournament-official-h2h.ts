@@ -396,6 +396,11 @@ export const tournamentOfficialH2HRepository = {
                   ELSE excluded.updated_at
                 END`,
               },
+              // Incremental H2H imports may carry persisted rows that were not
+              // fetched in this run. Do not rewrite those rows when the
+              // immutable score payload is unchanged; fetched rows still
+              // refresh sourceCheckedAt as the observation marker.
+              where: sql`${officialMatchWasFetched} OR NOT (${battlePayloadUnchanged})`,
             });
         }
 
@@ -512,6 +517,7 @@ export const tournamentOfficialH2HRepository = {
                   ELSE excluded.updated_at
                 END`,
               },
+              where: sql`${officialMatchWasFetched} OR NOT (${knockoutPayloadUnchanged})`,
             });
         }
 

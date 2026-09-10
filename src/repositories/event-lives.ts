@@ -18,6 +18,8 @@ export type EventLiveCheckpointBinding = Readonly<{
   publicationId: string;
   generation: number;
   eventLiveSha256: string;
+  /** Rebind rows when the terminal FINALIZED publication has the same payload. */
+  forceIdentity?: boolean;
 }>;
 
 /**
@@ -162,6 +164,61 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
         }));
 
         const db = await getDbInstance();
+        // Live polling frequently returns the same player values.  The payload
+        // hash is stable across identical publications, so a new non-terminal
+        // checkpoint does not rewrite every row.  A terminal checkpoint may
+        // force the exact FINALIZED publication identity onto the rows even
+        // when its payload is unchanged.
+        const payloadChanged = sql`
+          ROW(
+            ${playerGameweekStatsInFpl.minutes},
+            ${playerGameweekStatsInFpl.goalsScored},
+            ${playerGameweekStatsInFpl.assists},
+            ${playerGameweekStatsInFpl.cleanSheets},
+            ${playerGameweekStatsInFpl.goalsConceded},
+            ${playerGameweekStatsInFpl.ownGoals},
+            ${playerGameweekStatsInFpl.penaltiesSaved},
+            ${playerGameweekStatsInFpl.penaltiesMissed},
+            ${playerGameweekStatsInFpl.yellowCards},
+            ${playerGameweekStatsInFpl.redCards},
+            ${playerGameweekStatsInFpl.saves},
+            ${playerGameweekStatsInFpl.bonus},
+            ${playerGameweekStatsInFpl.bps},
+            ${playerGameweekStatsInFpl.defensiveContribution},
+            ${playerGameweekStatsInFpl.starts},
+            ${playerGameweekStatsInFpl.expectedGoals},
+            ${playerGameweekStatsInFpl.expectedAssists},
+            ${playerGameweekStatsInFpl.expectedGoalInvolvements},
+            ${playerGameweekStatsInFpl.expectedGoalsConceded},
+            ${playerGameweekStatsInFpl.inDreamTeam},
+            ${playerGameweekStatsInFpl.totalPoints},
+            ${playerGameweekStatsInFpl.publicationEventLiveSha256}
+          ) IS DISTINCT FROM ROW(
+            excluded.minutes,
+            excluded.goals_scored,
+            excluded.assists,
+            excluded.clean_sheets,
+            excluded.goals_conceded,
+            excluded.own_goals,
+            excluded.penalties_saved,
+            excluded.penalties_missed,
+            excluded.yellow_cards,
+            excluded.red_cards,
+            excluded.saves,
+            excluded.bonus,
+            excluded.bps,
+            excluded.defensive_contribution,
+            excluded.starts,
+            excluded.expected_goals,
+            excluded.expected_assists,
+            excluded.expected_goal_involvements,
+            excluded.expected_goals_conceded,
+            excluded.in_dream_team,
+            excluded.total_points,
+            excluded.publication_event_live_sha256
+          )
+          OR ${options.checkpoint?.forceIdentity === true ? sql`TRUE` : sql`FALSE`}
+        `;
         const result = await db
           .insert(playerGameweekStatsInFpl)
           .values(newRecords)
@@ -198,6 +255,7 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
               publicationEventLiveSha256: sql`excluded.publication_event_live_sha256`,
               updatedAt: sql`NOW()`,
             },
+            where: payloadChanged,
           })
           .returning();
 

@@ -101,6 +101,29 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
 
       try {
         const db = await getDbInstance();
+        const payloadChanged = sql`
+          ROW(
+            ${tournamentPointsGroupResultsInCompetition.eventGroupRank},
+            ${tournamentPointsGroupResultsInCompetition.eventPoints},
+            ${tournamentPointsGroupResultsInCompetition.eventCost},
+            ${tournamentPointsGroupResultsInCompetition.eventNetPoints},
+            ${tournamentPointsGroupResultsInCompetition.eventRank},
+            ${tournamentPointsGroupResultsInCompetition.cumulativeTransfers},
+            ${tournamentPointsGroupResultsInCompetition.cumulativeCosts},
+            ${tournamentPointsGroupResultsInCompetition.cumulativeBenchPoints},
+            ${tournamentPointsGroupResultsInCompetition.cumulativeAutoSubPoints}
+          ) IS DISTINCT FROM ROW(
+            excluded.event_group_rank,
+            excluded.event_points,
+            excluded.event_cost,
+            excluded.event_net_points,
+            excluded.event_rank,
+            excluded.cumulative_transfers,
+            excluded.cumulative_costs,
+            excluded.cumulative_bench_points,
+            excluded.cumulative_auto_sub_points
+          )
+        `;
         await db
           .insert(tournamentPointsGroupResultsInCompetition)
           .values(results.map((result) => ({ ...result, seasonId: season.seasonId })))
@@ -122,6 +145,7 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
               cumulativeAutoSubPoints: sql`excluded.cumulative_auto_sub_points`,
               updatedAt: new Date(),
             },
+            where: payloadChanged,
           });
 
         logInfo('Upserted tournament points group results', { count: results.length });

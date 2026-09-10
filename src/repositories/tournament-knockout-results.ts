@@ -173,6 +173,32 @@ export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTrans
 
       try {
         const db = await getDbInstance();
+        // sourceCheckedAt is a local observation timestamp.  It is deliberately
+        // excluded from the no-op test so replaying an unchanged fixture does
+        // not rewrite the row solely to refresh that timestamp.
+        const payloadChanged = sql`
+          ROW(
+            ${tournamentKnockoutResultsInCompetition.homeEntryId},
+            ${tournamentKnockoutResultsInCompetition.homeNetPoints},
+            ${tournamentKnockoutResultsInCompetition.homeGoalsScored},
+            ${tournamentKnockoutResultsInCompetition.homeGoalsConceded},
+            ${tournamentKnockoutResultsInCompetition.awayEntryId},
+            ${tournamentKnockoutResultsInCompetition.awayNetPoints},
+            ${tournamentKnockoutResultsInCompetition.awayGoalsScored},
+            ${tournamentKnockoutResultsInCompetition.awayGoalsConceded},
+            ${tournamentKnockoutResultsInCompetition.matchWinner}
+          ) IS DISTINCT FROM ROW(
+            excluded.home_entry_id,
+            excluded.home_net_points,
+            excluded.home_goals_scored,
+            excluded.home_goals_conceded,
+            excluded.away_entry_id,
+            excluded.away_net_points,
+            excluded.away_goals_scored,
+            excluded.away_goals_conceded,
+            excluded.match_winner
+          )
+        `;
         await db
           .insert(tournamentKnockoutResultsInCompetition)
           .values(
@@ -203,6 +229,7 @@ export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTrans
               sourceCheckedAt: sql`COALESCE(excluded.source_checked_at, ${tournamentKnockoutResultsInCompetition.sourceCheckedAt})`,
               updatedAt: new Date(),
             },
+            where: payloadChanged,
           });
 
         logInfo('Upserted tournament knockout results', { count: results.length });
