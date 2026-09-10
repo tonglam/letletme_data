@@ -222,8 +222,8 @@ describe('release workflow gates', () => {
       'if ! release_source_media_deploy_fence; then',
       deployScript.indexOf('start_stage migration'),
     );
-    expect(localMediaStop).toBeGreaterThan(localStop);
-    expect(localMediaStop).toBeLessThan(localPrepare);
+    expect(localMediaStop).toBeGreaterThan(localSchedulerStop);
+    expect(localMediaStop).toBeLessThan(localMediaFence);
     expect(localMigrationFenceRelease).toBeGreaterThan(-1);
     expect(localMigrationFenceRelease).toBeLessThan(
       deployScript.indexOf('DEPLOY_MIGRATION_STARTED=true'),
@@ -285,6 +285,12 @@ describe('release workflow gates', () => {
     expect(deployScript).toContain('-e DEPLOY_QUIESCENCE_SOURCE_MEDIA_FENCED=true');
     expect(deployScript).toContain('source_media_worker_container_id()');
     expect(deployScript).toContain('Could not enumerate running source-media worker containers');
+    expect(deployScript).toContain('pooled backend waiting until statement_timeout');
+    expect(deployScript.indexOf('if ! stop_source_media_worker_with_deadline; then')).toBeLessThan(
+      deployScript.indexOf(
+        'if ! acquire_source_media_deploy_fence || ! source_media_deploy_fence_is_active; then',
+      ),
+    );
     expect(deployScript).toContain('label=com.docker.compose.oneoff=True');
     expect(deployScript).toContain('label=com.docker.compose.oneoff=False');
     expect(sourceMediaRolloutWorkflow).toContain('media_worker_container_id()');
