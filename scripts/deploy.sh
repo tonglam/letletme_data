@@ -207,13 +207,26 @@ terminate_source_media_deploy_fence_backend() {
   # after the short-lived psql container is removed. Terminate only the
   # backend opened by this deployment's uniquely named fence, then verify that
   # no matching sleeper remains before allowing source-media writes again.
-  fence_sql="SELECT COALESCE(bool_and(pg_terminate_backend(pid, 5000)), true) FROM pg_stat_activity WHERE application_name = '${application_name}' AND usename = 'postgres' AND query LIKE 'DO \$deploy_fence\$%'; SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = '${application_name}' AND usename = 'postgres' AND query LIKE 'DO \$deploy_fence\$%') THEN 'present' ELSE 'clear' END;"
+  fence_sql="SELECT COALESCE(bool_and(pg_terminate_backend(pid, 5000)), true) FROM pg_stat_activity WHERE application_name = '${application_name}' AND usename = 'postgres' AND query LIKE 'DO \$deploy_fence\$%';"
   if ! output=$(compose_direct --profile migration run --rm -T --interactive=false --no-deps \
     --env "SOURCE_MEDIA_FENCE_SQL=${fence_sql}" \
     --entrypoint sh backup -euc \
     'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "$SOURCE_MEDIA_FENCE_SQL"'
   ); then
     log_error "Could not terminate the source-media deployment fence backend"
+    return 1
+  fi
+  # pg_stat_activity is a statistics view and PostgreSQL can keep its snapshot
+  # for a transaction. Open a new session for the post-termination check so a
+  # pooled backend that was just killed cannot appear present from the first
+  # statement's snapshot.
+  fence_sql="SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = '${application_name}' AND usename = 'postgres' AND query LIKE 'DO \$deploy_fence\$%') THEN 'present' ELSE 'clear' END;"
+  if ! output=$(compose_direct --profile migration run --rm -T --interactive=false --no-deps \
+    --env "SOURCE_MEDIA_FENCE_SQL=${fence_sql}" \
+    --entrypoint sh backup -euc \
+    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "$SOURCE_MEDIA_FENCE_SQL"'
+  ); then
+    log_error "Could not verify source-media deployment fence backend termination"
     return 1
   fi
   if ! printf '%s\n' "$output" | tail -n 1 | grep -Fxq 'clear'; then
@@ -337,7 +350,6 @@ acquire_source_media_deploy_fence() {
     --env "SOURCE_MEDIA_FENCE_APPLICATION_NAME=${fence_application_name}" \
     --entrypoint bash backup \
     /app/scripts/hold-source-media-deploy-fence.sh 300 1500); then
-    DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
     log_error "Could not start the source-media deployment fence container"
     return 1
   fi
@@ -349,7 +361,6 @@ acquire_source_media_deploy_fence() {
       DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=$container_id
       release_source_media_deploy_fence || true
     fi
-    DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
     return 1
   fi
   DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=$container_id

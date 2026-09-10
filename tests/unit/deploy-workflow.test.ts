@@ -302,6 +302,24 @@ describe('release workflow gates', () => {
       '--env "SOURCE_MEDIA_FENCE_APPLICATION_NAME=${fence_application_name}"',
     );
     expect(deployScript).toContain('pg_terminate_backend(pid, 5000)');
+    expect(deployScript).toContain('Open a new session for the post-termination check so a');
+    expect(deployScript).toContain('pooled backend that was just killed cannot appear present');
+    expect(deployScript).toContain(
+      'Could not verify source-media deployment fence backend termination',
+    );
+    expect(deployScript.match(/SOURCE_MEDIA_FENCE_SQL=\$\{fence_sql\}/g)?.length).toBe(2);
+    const detachedFenceStart = deployScript.indexOf(
+      'if ! create_output=$(run_deploy_command_with_pause_renewal',
+    );
+    const detachedFenceFailure = deployScript.indexOf(
+      'Could not start the source-media deployment fence container',
+      detachedFenceStart,
+    );
+    expect(detachedFenceStart).toBeGreaterThan(-1);
+    expect(detachedFenceFailure).toBeGreaterThan(detachedFenceStart);
+    expect(deployScript.slice(detachedFenceStart, detachedFenceFailure)).not.toContain(
+      `DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=${quote}${quote}`,
+    );
     expect(deployScript).toContain(String.raw`query LIKE 'DO \$deploy_fence\$%'`);
     expect(deployScript).toContain(`THEN ${quote}present${quote} ELSE ${quote}clear${quote} END`);
     expect(sourceMediaRepository).toContain(
