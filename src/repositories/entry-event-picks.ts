@@ -484,16 +484,6 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           sourceCreatedAt: sql`excluded.source_created_at`,
           sourceUpdatedAt: sql`excluded.source_updated_at`,
         },
-        where: sql`
-          ${entryEventPicksInCompetition.elementId} IS DISTINCT FROM excluded.element_id
-          OR ${entryEventPicksInCompetition.eventTeamId} IS DISTINCT FROM excluded.event_team_id
-          OR ${entryEventPicksInCompetition.multiplier} IS DISTINCT FROM excluded.multiplier
-          OR ${entryEventPicksInCompetition.isCaptain} IS DISTINCT FROM excluded.is_captain
-          OR ${entryEventPicksInCompetition.isViceCaptain} IS DISTINCT FROM excluded.is_vice_captain
-          OR ${entryEventPicksInCompetition.activeChip} IS DISTINCT FROM excluded.active_chip
-          OR ${entryEventPicksInCompetition.transfers} IS DISTINCT FROM excluded.transfers
-          OR ${entryEventPicksInCompetition.transfersCost} IS DISTINCT FROM excluded.transfers_cost
-        `,
       });
 
     const contentUpdatedAt = publication?.contentUpdatedAt
