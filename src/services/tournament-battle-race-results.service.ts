@@ -183,7 +183,12 @@ export async function syncTournamentBattleRaceResultsForTournament(
   // are excluded from the upsert; they can be scored later once results arrive.
   let skipped = 0;
   const scoredBattleResults = [];
-  const sourceCheckedAt = new Date();
+  // Replays of the same finalized event must carry the same source watermark;
+  // using wall-clock time here made every retry look like new evidence.
+  const sourceCheckedAt = eventResults.reduce((latest, result) => {
+    const candidate = result.richSyncedAt ?? result.updatedAt ?? new Date(0);
+    return candidate.getTime() > latest.getTime() ? candidate : latest;
+  }, new Date(0));
   for (const result of battleResults) {
     if (
       result.officialMatchId != null ||
@@ -221,6 +226,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
         awayNetPoints: null,
         awayRank: null,
         awayMatchPoints: null,
+        sourceCheckedAt,
       });
       continue;
     }

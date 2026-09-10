@@ -358,6 +358,43 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
                 pulseId: sql`excluded.pulse_id`,
                 updatedAt: sql`clock_timestamp()`,
               },
+              where: sql`
+                ROW(
+                  ${fixturesInFpl.code},
+                  ${fixturesInFpl.eventId},
+                  ${fixturesInFpl.finished},
+                  ${fixturesInFpl.finishedProvisional},
+                  ${fixturesInFpl.kickoffTime},
+                  ${fixturesInFpl.minutes},
+                  ${fixturesInFpl.provisionalStartTime},
+                  ${fixturesInFpl.started},
+                  ${fixturesInFpl.teamAId},
+                  ${fixturesInFpl.teamAScore},
+                  ${fixturesInFpl.teamHId},
+                  ${fixturesInFpl.teamHScore},
+                  ${fixturesInFpl.stats},
+                  ${fixturesInFpl.teamHDifficulty},
+                  ${fixturesInFpl.teamADifficulty},
+                  ${fixturesInFpl.pulseId}
+                ) IS DISTINCT FROM ROW(
+                  excluded.code,
+                  excluded.event_id,
+                  excluded.finished,
+                  excluded.finished_provisional,
+                  excluded.kickoff_time,
+                  excluded.minutes,
+                  excluded.provisional_start_time,
+                  excluded.started,
+                  excluded.team_a_id,
+                  excluded.team_a_score,
+                  excluded.team_h_id,
+                  excluded.team_h_score,
+                  excluded.stats,
+                  excluded.team_h_difficulty,
+                  excluded.team_a_difficulty,
+                  excluded.pulse_id
+                )
+              `,
             })
             .returning();
 

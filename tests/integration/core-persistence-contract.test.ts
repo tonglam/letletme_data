@@ -1137,7 +1137,7 @@ persistenceTest(
         groupName: 'Runtime Battle Group A',
       }));
       expect(await tournamentGroupRepository.upsertBatch(season, pointGroups)).toBe(2);
-      expect(await tournamentGroupRepository.upsertBatch(season, pointGroups)).toBe(2);
+      expect(await tournamentGroupRepository.upsertBatch(season, pointGroups)).toBe(0);
       expect(await tournamentGroupRepository.upsertBatch(season, battleGroups)).toBe(2);
 
       const pointsRepository = createTournamentPointsGroupResultsRepository(db);
@@ -1157,7 +1157,7 @@ persistenceTest(
         cumulativeAutoSubPoints: 0,
       }));
       expect(await pointsRepository.upsertBatch(season, pointResults)).toBe(2);
-      expect(await pointsRepository.upsertBatch(season, pointResults)).toBe(2);
+      expect(await pointsRepository.upsertBatch(season, pointResults)).toBe(0);
 
       const battleRepository = createTournamentBattleGroupResultsRepository(db);
       const battleResults = [
@@ -1178,7 +1178,7 @@ persistenceTest(
         },
       ];
       expect(await battleRepository.upsertBatch(season, battleResults)).toBe(1);
-      expect(await battleRepository.upsertBatch(season, battleResults)).toBe(1);
+      expect(await battleRepository.upsertBatch(season, battleResults)).toBe(0);
 
       const knockoutsRepository = createTournamentKnockoutsRepository(db);
       const knockouts = [
@@ -1224,7 +1224,7 @@ persistenceTest(
         },
       ];
       expect(await knockoutResultsRepository.upsertBatch(season, knockoutResults)).toBe(1);
-      expect(await knockoutResultsRepository.upsertBatch(season, knockoutResults)).toBe(1);
+      expect(await knockoutResultsRepository.upsertBatch(season, knockoutResults)).toBe(0);
 
       const [tournamentFactCounts] = await client<
         Array<{

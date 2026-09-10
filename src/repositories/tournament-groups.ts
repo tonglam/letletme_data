@@ -156,7 +156,7 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
 
       try {
         const db = await getDbInstance();
-        await db
+        const result = await db
           .insert(tournamentGroupsInCompetition)
           .values(groups.map((group) => ({ ...group, seasonId: season.seasonId })))
           .onConflictDoUpdate({
@@ -182,12 +182,64 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
               qualified: sql`excluded.qualified`,
               overallRank: sql`excluded.overall_rank`,
               officialSourceCheckedAt: sql`COALESCE(excluded.official_source_checked_at, ${tournamentGroupsInCompetition.officialSourceCheckedAt})`,
-              updatedAt: new Date(),
+              updatedAt: sql`clock_timestamp()`,
             },
-          });
+            where: sql`
+              (
+                ROW(
+                  ${tournamentGroupsInCompetition.groupName},
+                  ${tournamentGroupsInCompetition.groupIndex},
+                  ${tournamentGroupsInCompetition.startedEventId},
+                  ${tournamentGroupsInCompetition.endedEventId},
+                  ${tournamentGroupsInCompetition.groupPoints},
+                  ${tournamentGroupsInCompetition.groupRank},
+                  ${tournamentGroupsInCompetition.played},
+                  ${tournamentGroupsInCompetition.won},
+                  ${tournamentGroupsInCompetition.drawn},
+                  ${tournamentGroupsInCompetition.lost},
+                  ${tournamentGroupsInCompetition.totalPoints},
+                  ${tournamentGroupsInCompetition.totalTransfersCost},
+                  ${tournamentGroupsInCompetition.totalNetPoints},
+                  ${tournamentGroupsInCompetition.qualified},
+                  ${tournamentGroupsInCompetition.overallRank}
+                ) IS DISTINCT FROM ROW(
+                  excluded.group_name,
+                  excluded.group_index,
+                  excluded.started_event_id,
+                  excluded.ended_event_id,
+                  excluded.group_points,
+                  excluded.group_rank,
+                  excluded.played,
+                  excluded.won,
+                  excluded.drawn,
+                  excluded.lost,
+                  excluded.total_points,
+                  excluded.total_transfers_cost,
+                  excluded.total_net_points,
+                  excluded.qualified,
+                  excluded.overall_rank
+                )
+                OR (
+                  excluded.official_source_checked_at IS NOT NULL
+                  AND (
+                    ${tournamentGroupsInCompetition.officialSourceCheckedAt} IS NULL
+                    OR excluded.official_source_checked_at > ${tournamentGroupsInCompetition.officialSourceCheckedAt}
+                  )
+                )
+              )
+              AND (
+                ${tournamentGroupsInCompetition.officialSourceCheckedAt} IS NULL
+                OR (
+                  excluded.official_source_checked_at IS NOT NULL
+                  AND excluded.official_source_checked_at >= ${tournamentGroupsInCompetition.officialSourceCheckedAt}
+                )
+              )
+            `,
+          })
+          .returning({ sourceGroupRowId: tournamentGroupsInCompetition.sourceGroupRowId });
 
-        logInfo('Upserted tournament groups', { count: groups.length });
-        return groups.length;
+        logInfo('Upserted tournament groups', { count: result.length, submitted: groups.length });
+        return result.length;
       } catch (error) {
         logError('Failed to upsert tournament groups', error, { count: groups.length });
         throw new DatabaseError(

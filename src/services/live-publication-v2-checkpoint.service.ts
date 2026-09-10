@@ -9,6 +9,7 @@ import {
   liveLeagueCheckpointsInCompetition,
   livePointsPublicationCheckpointsInCompetition,
   livePointsPublicationSeedClaimsInCompetition,
+  playerGameweekStatsInFpl,
   tournamentsInCompetition,
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
@@ -1373,6 +1374,32 @@ export async function checkpointLivePublicationV2(
       // manifest already validates eventLiveCount and eventLiveSha256 before
       // this transaction; a short RETURNING result therefore represents a
       // valid no-op replay, not an incomplete checkpoint write.
+      // A new checkpoint identity can rebind every gameweek row even when the
+      // event payload is unchanged. Compare the durable content hash before
+      // the upsert so identity-only publication updates do not trigger a
+      // season-wide reporting refresh.
+      const existingLiveHashRows = await tx
+        .select({ eventLiveSha256: playerGameweekStatsInFpl.publicationEventLiveSha256 })
+        .from(playerGameweekStatsInFpl)
+        .where(
+          and(
+            eq(playerGameweekStatsInFpl.seasonId, season.seasonId),
+            eq(playerGameweekStatsInFpl.eventId, eventId),
+          ),
+        );
+      const existingLiveHashes = new Set(
+        existingLiveHashRows
+          .map((row) => row.eventLiveSha256)
+          .filter((hash): hash is string => hash !== null),
+      );
+      const livePayloadChanged =
+        eventLives.length > 0 &&
+        (existingLiveHashRows.length !== eventLives.length ||
+          existingLiveHashes.size !== 1 ||
+          !existingLiveHashes.has(publication.items.eventLive.sha256) ||
+          existingLiveHashRows.some(
+            (row) => row.eventLiveSha256 !== publication.items.eventLive.sha256,
+          ));
       const changedLives = await createEventLiveRepository(tx).upsertBatch(
         season,
         [...eventLives],
@@ -1390,9 +1417,14 @@ export async function checkpointLivePublicationV2(
         sourceCount: eventLives.length,
         changedCount: changedLives.length,
       });
-      await createEventLiveExplainsRepository(tx).replaceEvent(season, [...explains]);
-      await createFplPlayerFixtureStatsRepository(tx).upsertEvidence(season, [...fixtureEvidence]);
-      await createFixtureRepository(tx).upsertBatch(season, [...fixtures]);
+      const changedExplains = await createEventLiveExplainsRepository(tx).replaceEvent(season, [
+        ...explains,
+      ]);
+      const changedFixtureEvidence = await createFplPlayerFixtureStatsRepository(tx).upsertEvidence(
+        season,
+        [...fixtureEvidence],
+      );
+      const changedFixtures = await createFixtureRepository(tx).upsertBatch(season, [...fixtures]);
       // Keep the checked/finalized timestamps in one UPDATE. A finalized event
       // may already have a historical finalized timestamp that is older than a
       // late source observation. Updating checked first would violate
@@ -1450,10 +1482,17 @@ export async function checkpointLivePublicationV2(
           throw new Error('Live Points V2 seed claim disappeared before checkpoint commit');
         }
       }
-      return true;
+      return {
+        committed: true,
+        canonicalChanged:
+          livePayloadChanged ||
+          changedExplains.length > 0 ||
+          changedFixtureEvidence > 0 ||
+          changedFixtures.length > 0,
+      };
     })
-    .then(async (committed) => {
-      if (committed) {
+    .then(async (outcome) => {
+      if (outcome !== false && outcome.canonicalChanged) {
         // The reporting projection is deliberately refreshed only after the
         // authoritative transaction commits. Its failure must not invalidate a
         // Redis-first publication; the bounded repair lane can retry it.
@@ -1465,7 +1504,12 @@ export async function checkpointLivePublicationV2(
             eventId,
           });
         }
+      } else if (outcome !== false) {
+        logDebug('Skipped player season summary refresh for unchanged live checkpoint', {
+          season: season.seasonCode,
+          eventId,
+        });
       }
-      return committed;
+      return outcome === false ? false : outcome.committed;
     });
 }

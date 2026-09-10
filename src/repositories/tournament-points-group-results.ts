@@ -101,31 +101,99 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
 
       try {
         const db = await getDbInstance();
-        await db
-          .insert(tournamentPointsGroupResultsInCompetition)
-          .values(results.map((result) => ({ ...result, seasonId: season.seasonId })))
-          .onConflictDoUpdate({
-            target: [
-              tournamentPointsGroupResultsInCompetition.tournamentId,
-              tournamentPointsGroupResultsInCompetition.eventId,
-              tournamentPointsGroupResultsInCompetition.entryId,
-            ],
-            set: {
-              eventGroupRank: sql`excluded.event_group_rank`,
-              eventPoints: sql`excluded.event_points`,
-              eventCost: sql`excluded.event_cost`,
-              eventNetPoints: sql`excluded.event_net_points`,
-              eventRank: sql`excluded.event_rank`,
-              cumulativeTransfers: sql`excluded.cumulative_transfers`,
-              cumulativeCosts: sql`excluded.cumulative_costs`,
-              cumulativeBenchPoints: sql`excluded.cumulative_bench_points`,
-              cumulativeAutoSubPoints: sql`excluded.cumulative_auto_sub_points`,
-              updatedAt: new Date(),
-            },
-          });
+        const rows = results.map((result) => ({ ...result, seasonId: season.seasonId }));
+        // Keep the source watermark separate from updated_at. The latter is a
+        // durable write timestamp used by publication freshness proofs; using
+        // a provider timestamp there can make a valid result appear older than
+        // event.data_checked_at. Structural callers omit the source marker and
+        // use the payload guard alone.
+        const rowsWithSourceWatermark = rows.filter((row) => row.sourceUpdatedAt != null);
+        const rowsWithoutSourceWatermark = rows.filter((row) => row.sourceUpdatedAt == null);
+        const changedRows = [];
+        const upsertRows = async (
+          input: typeof rows,
+          includeSourceWatermark: boolean,
+        ): Promise<void> => {
+          if (input.length === 0) return;
+          const payloadChanged = sql`
+            ROW(
+              ${tournamentPointsGroupResultsInCompetition.eventGroupRank},
+              ${tournamentPointsGroupResultsInCompetition.eventPoints},
+              ${tournamentPointsGroupResultsInCompetition.eventCost},
+              ${tournamentPointsGroupResultsInCompetition.eventNetPoints},
+              ${tournamentPointsGroupResultsInCompetition.eventRank},
+              ${tournamentPointsGroupResultsInCompetition.cumulativeTransfers},
+              ${tournamentPointsGroupResultsInCompetition.cumulativeCosts},
+              ${tournamentPointsGroupResultsInCompetition.cumulativeBenchPoints},
+              ${tournamentPointsGroupResultsInCompetition.cumulativeAutoSubPoints}
+            ) IS DISTINCT FROM ROW(
+              excluded.event_group_rank,
+              excluded.event_points,
+              excluded.event_cost,
+              excluded.event_net_points,
+              excluded.event_rank,
+              excluded.cumulative_transfers,
+              excluded.cumulative_costs,
+              excluded.cumulative_bench_points,
+              excluded.cumulative_auto_sub_points
+            )
+          `;
+          const result = await db
+            .insert(tournamentPointsGroupResultsInCompetition)
+            .values(input)
+            .onConflictDoUpdate({
+              target: [
+                tournamentPointsGroupResultsInCompetition.tournamentId,
+                tournamentPointsGroupResultsInCompetition.eventId,
+                tournamentPointsGroupResultsInCompetition.entryId,
+              ],
+              set: {
+                eventGroupRank: sql`excluded.event_group_rank`,
+                eventPoints: sql`excluded.event_points`,
+                eventCost: sql`excluded.event_cost`,
+                eventNetPoints: sql`excluded.event_net_points`,
+                eventRank: sql`excluded.event_rank`,
+                cumulativeTransfers: sql`excluded.cumulative_transfers`,
+                cumulativeCosts: sql`excluded.cumulative_costs`,
+                cumulativeBenchPoints: sql`excluded.cumulative_bench_points`,
+                cumulativeAutoSubPoints: sql`excluded.cumulative_auto_sub_points`,
+                ...(includeSourceWatermark
+                  ? {
+                      sourceUpdatedAt: sql`excluded.source_updated_at`,
+                      updatedAt: sql`clock_timestamp()`,
+                    }
+                  : { updatedAt: sql`clock_timestamp()` }),
+              },
+              where: includeSourceWatermark
+                ? sql`
+                    (
+                      ${payloadChanged}
+                      OR ${tournamentPointsGroupResultsInCompetition.sourceUpdatedAt} IS NULL
+                      OR excluded.source_updated_at > ${tournamentPointsGroupResultsInCompetition.sourceUpdatedAt}
+                    )
+                    AND (
+                      ${tournamentPointsGroupResultsInCompetition.sourceUpdatedAt} IS NULL
+                      OR excluded.source_updated_at >= ${tournamentPointsGroupResultsInCompetition.sourceUpdatedAt}
+                    )
+                  `
+                : sql`
+                    ${payloadChanged}
+                    AND ${tournamentPointsGroupResultsInCompetition.sourceUpdatedAt} IS NULL
+                  `,
+            })
+            .returning({
+              sourceResultId: tournamentPointsGroupResultsInCompetition.sourceResultId,
+            });
+          changedRows.push(...result);
+        };
+        await upsertRows(rowsWithSourceWatermark, true);
+        await upsertRows(rowsWithoutSourceWatermark, false);
 
-        logInfo('Upserted tournament points group results', { count: results.length });
-        return results.length;
+        logInfo('Upserted tournament points group results', {
+          count: changedRows.length,
+          submitted: results.length,
+        });
+        return changedRows.length;
       } catch (error) {
         logError('Failed to upsert tournament points group results', error, {
           count: results.length,

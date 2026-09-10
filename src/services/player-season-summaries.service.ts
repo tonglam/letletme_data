@@ -642,6 +642,16 @@ async function findStalePlayerSeasonSummaries(): Promise<FplSeasonRef[]> {
       SELECT
         season.season_id,
         season.season_code,
+        (
+          SELECT count(*)::integer
+          FROM fpl.players player
+          WHERE player.season_id = season.season_id
+        ) AS source_player_count,
+        (
+          SELECT count(*)::bigint
+          FROM fpl.player_gameweek_stats stats
+          WHERE stats.season_id = season.season_id
+        ) AS source_stats_row_count,
         GREATEST(
           COALESCE((
             SELECT max(player.updated_at)
@@ -662,6 +672,35 @@ async function findStalePlayerSeasonSummaries(): Promise<FplSeasonRef[]> {
       ON refresh.season_id = source.season_id
     WHERE refresh.season_id IS NULL
       OR refresh.source_updated_at < source.source_updated_at
+      OR refresh.player_count <> source.source_player_count
+      OR refresh.stats_row_count <> source.source_stats_row_count
+      OR (
+        SELECT count(*)::integer
+        FROM reporting.player_season_summary_rows summary
+        WHERE summary.season_id = source.season_id
+      ) <> source.source_player_count
+      OR EXISTS (
+        SELECT 1
+        FROM fpl.players player
+        WHERE player.season_id = source.season_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM reporting.player_season_summary_rows summary
+            WHERE summary.season_id = player.season_id
+              AND summary.element_id = player.element_id
+          )
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM reporting.player_season_summary_rows summary
+        WHERE summary.season_id = source.season_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM fpl.players player
+            WHERE player.season_id = summary.season_id
+              AND player.element_id = summary.element_id
+          )
+      )
     ORDER BY source.season_id
   `;
   return rows.map((row) => ({ seasonId: row.season_id, seasonCode: row.season_code }));
@@ -674,6 +713,11 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
       SELECT
         season.season_id,
         season.season_code,
+        (
+          SELECT count(*)::integer
+          FROM fpl.players player
+          WHERE player.season_id = season.season_id
+        ) AS source_player_count,
         GREATEST(
           COALESCE((
             SELECT max(player.updated_at)
@@ -772,6 +816,45 @@ async function findStalePlayerStateSeasons(): Promise<FplSeasonRef[]> {
       OR refresh.fpl_source_updated_at < source.fpl_source_updated_at
       OR refresh.understat_source_updated_at < source.understat_source_updated_at
       OR refresh.bridge_source_updated_at < source.bridge_source_updated_at
+      OR refresh.player_count <> source.source_player_count
+      OR (
+        SELECT count(*)::integer
+        FROM reporting.player_state_season_rows state_row
+        WHERE state_row.season_id = source.season_id
+      ) <> source.source_player_count
+      OR EXISTS (
+        SELECT 1
+        FROM fpl.players player
+        WHERE player.season_id = source.season_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM reporting.player_state_season_rows state_row
+            WHERE state_row.season_id = player.season_id
+              AND state_row.element_id = player.element_id
+          )
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM reporting.player_state_season_rows state_row
+        WHERE state_row.season_id = source.season_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM fpl.players player
+            WHERE player.season_id = state_row.season_id
+              AND player.element_id = state_row.element_id
+          )
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM reporting.player_state_season_rows state_row
+        JOIN fpl.seasons season
+          ON season.season_id = state_row.season_id
+        WHERE state_row.season_id = source.season_id
+          AND (
+            state_row.season_code IS DISTINCT FROM season.season_code
+            OR state_row.lifecycle_state IS DISTINCT FROM season.lifecycle_state
+          )
+      )
     ORDER BY source.season_id
   `;
   return rows.map((row) => ({ seasonId: row.season_id, seasonCode: row.season_code }));
@@ -813,10 +896,19 @@ export async function repairPlayerSeasonSummaries(): Promise<{
   refreshed: number;
 }> {
   const seasons = await findStalePlayerSeasonSummaries();
-  const results = await Promise.allSettled(seasons.map(refreshPlayerSeasonSummaries));
-  const failures = results.flatMap((result, index) =>
-    result.status === 'rejected' ? [{ season: seasons[index], reason: result.reason }] : [],
-  );
+  const failures: { season: FplSeasonRef; reason: unknown }[] = [];
+  let refreshed = 0;
+  // Keep repairs one season at a time. Each refresh holds an advisory lock and
+  // performs large aggregate scans; launching every stale season concurrently
+  // turns a recovery pass into a predictable I/O burst.
+  for (const season of seasons) {
+    try {
+      await refreshPlayerSeasonSummaries(season);
+      refreshed += 1;
+    } catch (reason) {
+      failures.push({ season, reason });
+    }
+  }
   for (const failure of failures) {
     logError('Player season summary repair failed', failure.reason, {
       season: failure.season.seasonCode,
@@ -831,6 +923,6 @@ export async function repairPlayerSeasonSummaries(): Promise<{
   const playerState = await repairPlayerStateSeasons();
   return {
     checked: seasons.length + playerState.checked,
-    refreshed: results.length + playerState.refreshed,
+    refreshed: refreshed + playerState.refreshed,
   };
 }

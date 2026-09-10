@@ -173,7 +173,7 @@ export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTrans
 
       try {
         const db = await getDbInstance();
-        await db
+        const result = await db
           .insert(tournamentKnockoutResultsInCompetition)
           .values(
             results.map((result) => {
@@ -201,12 +201,55 @@ export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTrans
               awayGoalsConceded: sql`excluded.away_goals_conceded`,
               matchWinner: sql`excluded.match_winner`,
               sourceCheckedAt: sql`COALESCE(excluded.source_checked_at, ${tournamentKnockoutResultsInCompetition.sourceCheckedAt})`,
-              updatedAt: new Date(),
+              updatedAt: sql`clock_timestamp()`,
             },
-          });
+            where: sql`
+              (
+                ROW(
+                  ${tournamentKnockoutResultsInCompetition.homeEntryId},
+                  ${tournamentKnockoutResultsInCompetition.homeNetPoints},
+                  ${tournamentKnockoutResultsInCompetition.homeGoalsScored},
+                  ${tournamentKnockoutResultsInCompetition.homeGoalsConceded},
+                  ${tournamentKnockoutResultsInCompetition.awayEntryId},
+                  ${tournamentKnockoutResultsInCompetition.awayNetPoints},
+                  ${tournamentKnockoutResultsInCompetition.awayGoalsScored},
+                  ${tournamentKnockoutResultsInCompetition.awayGoalsConceded},
+                  ${tournamentKnockoutResultsInCompetition.matchWinner}
+                ) IS DISTINCT FROM ROW(
+                  excluded.home_entry_id,
+                  excluded.home_net_points,
+                  excluded.home_goals_scored,
+                  excluded.home_goals_conceded,
+                  excluded.away_entry_id,
+                  excluded.away_net_points,
+                  excluded.away_goals_scored,
+                  excluded.away_goals_conceded,
+                  excluded.match_winner
+                )
+                OR (
+                  excluded.source_checked_at IS NOT NULL
+                  AND (
+                    ${tournamentKnockoutResultsInCompetition.sourceCheckedAt} IS NULL
+                    OR excluded.source_checked_at > ${tournamentKnockoutResultsInCompetition.sourceCheckedAt}
+                  )
+                )
+              )
+              AND (
+                ${tournamentKnockoutResultsInCompetition.sourceCheckedAt} IS NULL
+                OR (
+                  excluded.source_checked_at IS NOT NULL
+                  AND excluded.source_checked_at >= ${tournamentKnockoutResultsInCompetition.sourceCheckedAt}
+                )
+              )
+            `,
+          })
+          .returning({ sourceResultId: tournamentKnockoutResultsInCompetition.sourceResultId });
 
-        logInfo('Upserted tournament knockout results', { count: results.length });
-        return results.length;
+        logInfo('Upserted tournament knockout results', {
+          count: result.length,
+          submitted: results.length,
+        });
+        return result.length;
       } catch (error) {
         logError('Failed to upsert tournament knockout results', error, { count: results.length });
         throw new DatabaseError(

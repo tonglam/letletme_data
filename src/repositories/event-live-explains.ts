@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   playerGameweekScoringItemsInFpl,
@@ -138,6 +138,12 @@ function flattenExplain(
   return rows;
 }
 
+function scoringItemKey(
+  row: Pick<DbEventLiveExplainInsert, 'elementId' | 'scoringIdentifier'>,
+): string {
+  return `${row.elementId}:${row.scoringIdentifier}`;
+}
+
 export const createEventLiveExplainsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
 
@@ -194,25 +200,89 @@ export const createEventLiveExplainsRepository = (dbInstance?: DbOrTransaction) 
       const eventId = records[0].eventId;
       const inserts = records.flatMap((record) => flattenExplain(season, record));
 
+      const incomingByKey = new Map<string, DbEventLiveExplainInsert>();
+      for (const row of inserts) {
+        const key = scoringItemKey(row);
+        if (incomingByKey.has(key)) {
+          throw new Error(`Duplicate event live scoring item ${key}`);
+        }
+        incomingByKey.set(key, row);
+      }
+
       const replace = async (db: DbOrTransaction): Promise<DbEventLiveExplain[]> => {
-        await db
-          .delete(playerGameweekScoringItemsInFpl)
+        const existing = await db
+          .select()
+          .from(playerGameweekScoringItemsInFpl)
           .where(
             and(
               eq(playerGameweekScoringItemsInFpl.seasonId, season.seasonId),
               eq(playerGameweekScoringItemsInFpl.eventId, eventId),
             ),
           );
-        return inserts.length === 0
-          ? []
-          : await db.insert(playerGameweekScoringItemsInFpl).values(inserts).returning();
+
+        const existingByKey = new Map(existing.map((row) => [scoringItemKey(row), row]));
+        const changedInserts = inserts.filter((row) => {
+          const current = existingByKey.get(scoringItemKey(row));
+          return (
+            current === undefined ||
+            current.scoringValue !== row.scoringValue ||
+            current.points !== row.points
+          );
+        });
+
+        const changed =
+          changedInserts.length === 0
+            ? []
+            : await db
+                .insert(playerGameweekScoringItemsInFpl)
+                .values(changedInserts)
+                .onConflictDoUpdate({
+                  target: [
+                    playerGameweekScoringItemsInFpl.seasonId,
+                    playerGameweekScoringItemsInFpl.eventId,
+                    playerGameweekScoringItemsInFpl.elementId,
+                    playerGameweekScoringItemsInFpl.scoringIdentifier,
+                  ],
+                  set: {
+                    scoringValue: sql`excluded.scoring_value`,
+                    points: sql`excluded.points`,
+                    updatedAt: sql`clock_timestamp()`,
+                  },
+                  where: sql`
+                    ${playerGameweekScoringItemsInFpl.scoringValue} IS DISTINCT FROM excluded.scoring_value
+                    OR ${playerGameweekScoringItemsInFpl.points} IS DISTINCT FROM excluded.points
+                  `,
+                })
+                .returning();
+
+        const staleIds = existing
+          .filter((row) => !incomingByKey.has(scoringItemKey(row)))
+          .map((row) => row.sourceExplainId);
+        const deleted: DbEventLiveExplain[] = [];
+        for (let offset = 0; offset < staleIds.length; offset += 500) {
+          const batch = staleIds.slice(offset, offset + 500);
+          if (batch.length === 0) continue;
+          deleted.push(
+            ...(await db
+              .delete(playerGameweekScoringItemsInFpl)
+              .where(
+                and(
+                  eq(playerGameweekScoringItemsInFpl.seasonId, season.seasonId),
+                  eq(playerGameweekScoringItemsInFpl.eventId, eventId),
+                  inArray(playerGameweekScoringItemsInFpl.sourceExplainId, batch),
+                ),
+              )
+              .returning()),
+          );
+        }
+        return [...changed, ...deleted];
       };
 
       try {
         const result = dbInstance
           ? await replace(dbInstance)
           : await (await getDb()).transaction((transaction) => replace(transaction));
-        logInfo('Replaced event live scoring items', {
+        logInfo('Reconciled event live scoring items', {
           season: season.seasonCode,
           eventId,
           count: result.length,
