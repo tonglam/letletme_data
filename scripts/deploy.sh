@@ -113,6 +113,7 @@ DEPLOY_CONTENT_WORKER_FENCED=false
 DEPLOY_SCHEDULER_STOP_ATTEMPTED=false
 DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
 DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
 DEPLOY_SOURCE_MEDIA_WORKER_CONTAINER=''
 DEPLOY_SOURCE_MEDIA_WORKER_WAS_RUNNING=false
 DEPLOY_SOURCE_MEDIA_WORKER_STOPPED=false
@@ -197,21 +198,65 @@ source_media_deploy_fence_is_active() {
   [[ "$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)" = running ]]
 }
 
+terminate_source_media_deploy_fence_backend() {
+  local application_name=${DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME:-}
+  local fence_sql output
+  [[ -n "$application_name" ]] || return 0
+
+  # Supabase session pooling can keep the upstream PostgreSQL backend alive
+  # after the short-lived psql container is removed. Terminate only the
+  # backend opened by this deployment's uniquely named fence, then verify that
+  # no matching sleeper remains before allowing source-media writes again.
+  fence_sql="SELECT COALESCE(bool_and(pg_terminate_backend(pid, 5000)), true) FROM pg_stat_activity WHERE application_name = '${application_name}' AND usename = 'postgres' AND query LIKE 'DO \$deploy_fence\$%';"
+  if ! output=$(compose_direct --profile migration run --rm -T --interactive=false --no-deps \
+    --env "SOURCE_MEDIA_FENCE_SQL=${fence_sql}" \
+    --entrypoint sh backup -euc \
+    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "$SOURCE_MEDIA_FENCE_SQL"'
+  ); then
+    log_error "Could not terminate the source-media deployment fence backend"
+    return 1
+  fi
+  # pg_stat_activity is a statistics view and PostgreSQL can keep its snapshot
+  # for a transaction. Open a new session for the post-termination check so a
+  # pooled backend that was just killed cannot appear present from the first
+  # statement's snapshot.
+  fence_sql="SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = '${application_name}' AND usename = 'postgres' AND query LIKE 'DO \$deploy_fence\$%') THEN 'present' ELSE 'clear' END;"
+  if ! output=$(compose_direct --profile migration run --rm -T --interactive=false --no-deps \
+    --env "SOURCE_MEDIA_FENCE_SQL=${fence_sql}" \
+    --entrypoint sh backup -euc \
+    'exec psql "$DATABASE_URL" -X -qAt --set=ON_ERROR_STOP=1 -c "$SOURCE_MEDIA_FENCE_SQL"'
+  ); then
+    log_error "Could not verify source-media deployment fence backend termination"
+    return 1
+  fi
+  if ! printf '%s\n' "$output" | tail -n 1 | grep -Fxq 'clear'; then
+    log_error "Source-media deployment fence backend is still active"
+    return 1
+  fi
+  return 0
+}
+
 release_source_media_deploy_fence() {
   local container_id=${DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER:-}
   if [[ -z "$container_id" ]]; then
+    if ! terminate_source_media_deploy_fence_backend; then return 1; fi
     DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+    DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
     return 0
   fi
   if ! docker inspect "$container_id" >/dev/null 2>&1; then
+    if ! terminate_source_media_deploy_fence_backend; then return 1; fi
     DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
     DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+    DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
     return 0
   fi
   if ! source_media_deploy_fence_is_exact "$container_id"; then
     if ! docker inspect "$container_id" >/dev/null 2>&1; then
+      if ! terminate_source_media_deploy_fence_backend; then return 1; fi
       DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
       DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+      DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
       return 0
     fi
     log_error "Refusing to remove an unverified source-media deployment fence container"
@@ -219,8 +264,10 @@ release_source_media_deploy_fence() {
   fi
   if ! docker rm --force "$container_id" >/dev/null; then
     if ! docker inspect "$container_id" >/dev/null 2>&1; then
+      if ! terminate_source_media_deploy_fence_backend; then return 1; fi
       DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
       DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+      DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
       return 0
     fi
     log_error "Could not remove the exact source-media deployment fence container"
@@ -230,8 +277,10 @@ release_source_media_deploy_fence() {
     log_error "Source-media deployment fence container still exists after removal"
     return 1
   fi
+  if ! terminate_source_media_deploy_fence_backend; then return 1; fi
   DEPLOY_SOURCE_MEDIA_FENCE_CONTAINER=''
   DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+  DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
 }
 
 parse_source_media_schema_state() {
@@ -254,6 +303,7 @@ parse_source_media_schema_state() {
 
 acquire_source_media_deploy_fence() {
   local create_output container_id service_state fence_logs schema_probe_output schema_probe_sql schema_state
+  local fence_application_name deploy_sha_fragment
   # A fresh database has not created the source-media tables yet.  Probe the
   # catalog through the migration LOGIN and let that migration establish the
   # schema before a helper can attempt to lock it.
@@ -277,6 +327,7 @@ acquire_source_media_deploy_fence() {
     absent)
       log_info "Source-media tables are not present yet; migration will create them"
       DEPLOY_SOURCE_MEDIA_FENCE_REQUIRED=false
+      DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
       return 0
       ;;
     present)
@@ -287,9 +338,16 @@ acquire_source_media_deploy_fence() {
       return 1
       ;;
   esac
+  deploy_sha_fragment=${DEPLOY_SHA:-unknown}
+  deploy_sha_fragment=${deploy_sha_fragment//[^[:alnum:]_.-]/}
+  deploy_sha_fragment=${deploy_sha_fragment:0:12}
+  fence_application_name="letletme-source-fence-${deploy_sha_fragment}-$(date +%s)-$$"
+  fence_application_name=${fence_application_name:0:63}
+  DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=$fence_application_name
   local ready_deadline=$(( $(date +%s) + 310 ))
   if ! create_output=$(run_deploy_command_with_pause_renewal \
     compose_direct --profile migration run --rm -T --interactive=false -d --no-deps \
+    --env "SOURCE_MEDIA_FENCE_APPLICATION_NAME=${fence_application_name}" \
     --entrypoint bash backup \
     /app/scripts/hold-source-media-deploy-fence.sh 300 1500); then
     log_error "Could not start the source-media deployment fence container"

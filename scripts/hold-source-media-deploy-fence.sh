@@ -3,6 +3,11 @@
 set -euo pipefail
 
 : "${DATABASE_URL:?DATABASE_URL is required}"
+: "${SOURCE_MEDIA_FENCE_APPLICATION_NAME:?SOURCE_MEDIA_FENCE_APPLICATION_NAME is required}"
+if ! [[ "$SOURCE_MEDIA_FENCE_APPLICATION_NAME" =~ ^[A-Za-z0-9_.-]{1,63}$ ]]; then
+  echo 'SOURCE_MEDIA_FENCE_APPLICATION_NAME must contain only safe application-name characters' >&2
+  exit 1
+fi
 
 wait_seconds=${1:-300}
 # A detached fence must have a finite lifetime.  The deploy shell checks the
@@ -36,6 +41,7 @@ case "$schema_state" in
 esac
 
 psql "$DATABASE_URL" -X --set=ON_ERROR_STOP=1 <<SQL
+SET application_name = '${SOURCE_MEDIA_FENCE_APPLICATION_NAME}';
 BEGIN;
 SET LOCAL lock_timeout = '0';
 SET LOCAL statement_timeout = '0';
