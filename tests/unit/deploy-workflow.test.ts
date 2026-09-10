@@ -297,6 +297,13 @@ describe('release workflow gates', () => {
     expect(deployScript).not.toContain('old_media_container=$(compose ps -q media-worker');
     expect(deployScript).toContain('acquire_source_media_deploy_fence');
     expect(deployScript).toContain('source_media_deploy_fence_is_active');
+    expect(deployScript).toContain('DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME');
+    expect(deployScript).toContain(
+      '--env "SOURCE_MEDIA_FENCE_APPLICATION_NAME=${fence_application_name}"',
+    );
+    expect(deployScript).toContain('pg_terminate_backend(pid, 5000)');
+    expect(deployScript).toContain(String.raw`query LIKE 'DO \$deploy_fence\$%'`);
+    expect(deployScript).toContain(`THEN ${quote}present${quote} ELSE ${quote}clear${quote} END`);
     expect(sourceMediaRepository).toContain(
       String.raw`pg_try_advisory_xact_lock(hashtextextended('content-source-media-deploy-v1', 0))`,
     );
@@ -322,6 +329,12 @@ describe('release workflow gates', () => {
       'Durable PENDING/PARTIAL/UNAVAILABLE gates past repair_until_at do not',
     );
     expect(sourceMediaDeployFence).toContain('SOURCE_MEDIA_DEPLOY_FENCE_READY');
+    expect(sourceMediaDeployFence).toContain(
+      ': "${SOURCE_MEDIA_FENCE_APPLICATION_NAME:?SOURCE_MEDIA_FENCE_APPLICATION_NAME is required}"',
+    );
+    expect(sourceMediaDeployFence).toContain(
+      `SET application_name = ${quote}\${SOURCE_MEDIA_FENCE_APPLICATION_NAME}${quote};`,
+    );
     expect(sourceMediaDeployFence).toContain(
       'LOCK TABLE content.source_media_gates IN SHARE ROW EXCLUSIVE MODE NOWAIT',
     );
