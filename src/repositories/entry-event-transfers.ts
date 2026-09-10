@@ -47,16 +47,25 @@ export function transferRowsMatch(
   candidate: readonly DbEntryEventTransferInsert[],
 ): boolean {
   if (existing.length !== candidate.length) return false;
-  const existingBySignature = new Map(existing.map((row) => [transferSignature(row), row]));
+  const existingBySignature = new Map<string, DbEntryEventTransfer[]>();
+  for (const row of existing) {
+    const signature = transferSignature(row);
+    const rows = existingBySignature.get(signature);
+    if (rows) {
+      rows.push(row);
+    } else {
+      existingBySignature.set(signature, [row]);
+    }
+  }
   return candidate.every((row) => {
-    const previous = existingBySignature.get(
-      transferSignature({
-        eventId: row.eventId,
-        elementInId: row.elementInId ?? null,
-        elementOutId: row.elementOutId ?? null,
-        transferTime: row.transferTime as Date,
-      }),
-    );
+    const signature = transferSignature({
+      eventId: row.eventId,
+      elementInId: row.elementInId ?? null,
+      elementOutId: row.elementOutId ?? null,
+      transferTime: row.transferTime as Date,
+    });
+    const matchingRows = existingBySignature.get(signature);
+    const previous = matchingRows?.shift();
     return (
       previous !== undefined &&
       previous.elementInCost === row.elementInCost &&

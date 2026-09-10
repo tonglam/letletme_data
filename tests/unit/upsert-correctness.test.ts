@@ -112,4 +112,56 @@ describe('entry-event-transfers upsert (H5)', () => {
       ),
     ).toBe(false);
   });
+
+  it('does not treat duplicate transfer keys as an identical multiset', () => {
+    const existing = [
+      {
+        id: 1,
+        seasonId: TEST_SEASON.seasonId,
+        transferId: 1,
+        entryId: 12345,
+        eventId: 9,
+        elementInId: 100,
+        elementInCost: 55,
+        elementInPoints: 8,
+        elementInPlayed: true,
+        elementOutId: 200,
+        elementOutCost: 60,
+        elementOutPoints: 2,
+        transferTime: new Date('2026-07-10T10:00:00Z'),
+        createdAt: new Date('2026-07-10T10:00:00Z'),
+        updatedAt: new Date('2026-07-10T10:00:00Z'),
+      },
+      {
+        id: 2,
+        seasonId: TEST_SEASON.seasonId,
+        transferId: 2,
+        entryId: 12345,
+        eventId: 10,
+        elementInId: 101,
+        elementInCost: 56,
+        elementInPoints: 7,
+        elementInPlayed: true,
+        elementOutId: 201,
+        elementOutCost: 61,
+        elementOutPoints: 3,
+        transferTime: new Date('2026-07-17T10:00:00Z'),
+        createdAt: new Date('2026-07-17T10:00:00Z'),
+        updatedAt: new Date('2026-07-17T10:00:00Z'),
+      },
+    ];
+    const candidate = buildTransferReplacementRows({
+      season: TEST_SEASON,
+      entryId: 12345,
+      eventId: 10,
+      transfers: [
+        { ...TRANSFER, event: 9, time: '2026-07-10T10:00:00Z' },
+        { ...TRANSFER, event: 9, time: '2026-07-10T10:00:00Z' },
+      ],
+      existing,
+    });
+
+    expect(candidate).toHaveLength(2);
+    expect(transferRowsMatch(existing, candidate)).toBe(false);
+  });
 });
