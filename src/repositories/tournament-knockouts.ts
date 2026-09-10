@@ -318,6 +318,7 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
                 ELSE excluded.updated_at
               END`,
             },
+            where: sql`${bracketMatchWasFetched} OR NOT (${knockoutPayloadUnchanged})`,
           });
 
         logInfo('Upserted tournament knockouts', { count: records.length });

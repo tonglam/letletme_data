@@ -73,13 +73,16 @@ export async function persistPreparedEventLives(
     const txExplainsRepository = createEventLiveExplainsRepository(tx);
     const txFixtureStatsRepository = createFplPlayerFixtureStatsRepository(tx);
 
-    const savedLives = await txEventLiveRepository.upsertBatch(season, eventLives);
-    if (savedLives.length !== eventLives.length) {
-      throw new Error(
-        `Incomplete event live write: expected ${eventLives.length}, persisted ${savedLives.length}`,
-      );
-    }
-    logInfo('Event lives upserted to database', { eventId, count: savedLives.length });
+    // ON CONFLICT ... WHERE intentionally omits unchanged conflict rows from
+    // RETURNING. The statement is still atomic and the input is the complete
+    // source snapshot, so a shorter result means a no-op replay, not a partial
+    // write. Checkpoint callers validate the source count/hash separately.
+    const changedLives = await txEventLiveRepository.upsertBatch(season, eventLives);
+    logInfo('Event lives upserted to database', {
+      eventId,
+      sourceCount: eventLives.length,
+      changedCount: changedLives.length,
+    });
 
     const savedExplains = await txExplainsRepository.replaceEvent(season, explains);
     logInfo('Event live explains upserted to database', {

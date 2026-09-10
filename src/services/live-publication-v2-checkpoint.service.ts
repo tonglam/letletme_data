@@ -34,7 +34,7 @@ import {
 } from '../cache/live-publication-v2';
 import { validateLiveLeaguePublicationV2Checkpoint } from '../cache/live-league-publication-v2';
 import { canonicalJson, contentHash } from '../utils/content-hash';
-import { logError } from '../utils/logger';
+import { logDebug, logError } from '../utils/logger';
 
 const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
 const LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS = 5 * 60_000;
@@ -1368,18 +1368,28 @@ export async function checkpointLivePublicationV2(
       // fixture rows, and freshness markers in the same short transaction as the
       // checkpoint head so recovery cannot expose a durable publication while
       // core reconciliation still points at an older fact set.
-      const savedLives = await createEventLiveRepository(tx).upsertBatch(season, [...eventLives], {
-        checkpoint: {
-          publicationId: publication.publicationId,
-          generation: publication.generation,
-          eventLiveSha256: publication.items.eventLive.sha256,
+      // The repository skips unchanged conflicts, so PostgreSQL RETURNING may
+      // contain fewer rows than the complete publication. The checkpoint
+      // manifest already validates eventLiveCount and eventLiveSha256 before
+      // this transaction; a short RETURNING result therefore represents a
+      // valid no-op replay, not an incomplete checkpoint write.
+      const changedLives = await createEventLiveRepository(tx).upsertBatch(
+        season,
+        [...eventLives],
+        {
+          checkpoint: {
+            publicationId: publication.publicationId,
+            generation: publication.generation,
+            eventLiveSha256: publication.items.eventLive.sha256,
+            forceIdentity: publication.state === 'FINALIZED',
+          },
         },
+      );
+      logDebug('Event live checkpoint rows reconciled', {
+        eventId,
+        sourceCount: eventLives.length,
+        changedCount: changedLives.length,
       });
-      if (savedLives.length !== eventLives.length) {
-        throw new Error(
-          `Incomplete event live checkpoint: expected ${eventLives.length}, persisted ${savedLives.length}`,
-        );
-      }
       await createEventLiveExplainsRepository(tx).replaceEvent(season, [...explains]);
       await createFplPlayerFixtureStatsRepository(tx).upsertEvidence(season, [...fixtureEvidence]);
       await createFixtureRepository(tx).upsertBatch(season, [...fixtures]);
