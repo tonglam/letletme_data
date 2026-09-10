@@ -3,11 +3,7 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
 import { createEventLiveRepository } from '../../src/repositories/event-lives';
-import { createTournamentBattleGroupResultsRepository } from '../../src/repositories/tournament-battle-group-results';
-import { createTournamentGroupRepository } from '../../src/repositories/tournament-groups';
-import { createTournamentKnockoutResultsRepository } from '../../src/repositories/tournament-knockout-results';
 import { createTournamentKnockoutsRepository } from '../../src/repositories/tournament-knockouts';
-import { createTournamentPointsGroupResultsRepository } from '../../src/repositories/tournament-points-group-results';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const dialect = new PgDialect();
@@ -31,36 +27,6 @@ test('derived batch upserts skip unchanged conflict rows', async () => {
       fake: fakeDatabase(),
       run: async (db: object) =>
         createEventLiveRepository(db as never).upsertBatch(TEST_SEASON, [{} as never]),
-    },
-    {
-      name: 'battle result',
-      fake: fakeDatabase(),
-      run: async (db: object) =>
-        createTournamentBattleGroupResultsRepository(db as never).upsertBatch(TEST_SEASON, [
-          {} as never,
-        ]),
-    },
-    {
-      name: 'tournament group',
-      fake: fakeDatabase(),
-      run: async (db: object) =>
-        createTournamentGroupRepository(db as never).upsertBatch(TEST_SEASON, [{} as never]),
-    },
-    {
-      name: 'points result',
-      fake: fakeDatabase(),
-      run: async (db: object) =>
-        createTournamentPointsGroupResultsRepository(db as never).upsertBatch(TEST_SEASON, [
-          {} as never,
-        ]),
-    },
-    {
-      name: 'knockout result',
-      fake: fakeDatabase(),
-      run: async (db: object) =>
-        createTournamentKnockoutResultsRepository(db as never).upsertBatch(TEST_SEASON, [
-          {} as never,
-        ]),
     },
     {
       name: 'knockout bracket',

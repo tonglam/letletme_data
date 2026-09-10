@@ -175,27 +175,6 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
           };
           return { ...rest, seasonId: season.seasonId };
         });
-        // Local battle sync stamps sourceCheckedAt with the current run time.
-        // It is an observation marker, not part of the scored payload identity;
-        // including it would turn every replay into a heap update.  Only the
-        // six derived score fields can make this row materially different.
-        const payloadChanged = sql`
-          ROW(
-            ${tournamentBattleGroupResultsInCompetition.homeNetPoints},
-            ${tournamentBattleGroupResultsInCompetition.homeRank},
-            ${tournamentBattleGroupResultsInCompetition.homeMatchPoints},
-            ${tournamentBattleGroupResultsInCompetition.awayNetPoints},
-            ${tournamentBattleGroupResultsInCompetition.awayRank},
-            ${tournamentBattleGroupResultsInCompetition.awayMatchPoints}
-          ) IS DISTINCT FROM ROW(
-            excluded.home_net_points,
-            excluded.home_rank,
-            excluded.home_match_points,
-            excluded.away_net_points,
-            excluded.away_rank,
-            excluded.away_match_points
-          )
-        `;
         await db
           .insert(tournamentBattleGroupResultsInCompetition)
           .values(rows)
@@ -217,7 +196,6 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
               sourceCheckedAt: sql`COALESCE(excluded.source_checked_at, ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt})`,
               updatedAt: new Date(),
             },
-            where: payloadChanged,
           });
 
         logInfo('Upserted tournament battle group results', { count: results.length });

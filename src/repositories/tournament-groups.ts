@@ -156,47 +156,6 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
 
       try {
         const db = await getDbInstance();
-        // Do not create a new tuple for a replay whose derived standings are
-        // unchanged.  The official timestamp is compared with the same
-        // COALESCE expression used by the update so local syncs (which omit
-        // it) remain no-ops while a new official observation is retained.
-        const payloadChanged = sql`
-          ROW(
-            ${tournamentGroupsInCompetition.groupName},
-            ${tournamentGroupsInCompetition.groupIndex},
-            ${tournamentGroupsInCompetition.startedEventId},
-            ${tournamentGroupsInCompetition.endedEventId},
-            ${tournamentGroupsInCompetition.groupPoints},
-            ${tournamentGroupsInCompetition.groupRank},
-            ${tournamentGroupsInCompetition.played},
-            ${tournamentGroupsInCompetition.won},
-            ${tournamentGroupsInCompetition.drawn},
-            ${tournamentGroupsInCompetition.lost},
-            ${tournamentGroupsInCompetition.totalPoints},
-            ${tournamentGroupsInCompetition.totalTransfersCost},
-            ${tournamentGroupsInCompetition.totalNetPoints},
-            ${tournamentGroupsInCompetition.qualified},
-            ${tournamentGroupsInCompetition.overallRank},
-            ${tournamentGroupsInCompetition.officialSourceCheckedAt}
-          ) IS DISTINCT FROM ROW(
-            excluded.group_name,
-            excluded.group_index,
-            excluded.started_event_id,
-            excluded.ended_event_id,
-            excluded.group_points,
-            excluded.group_rank,
-            excluded.played,
-            excluded.won,
-            excluded.drawn,
-            excluded.lost,
-            excluded.total_points,
-            excluded.total_transfers_cost,
-            excluded.total_net_points,
-            excluded.qualified,
-            excluded.overall_rank,
-            COALESCE(excluded.official_source_checked_at, ${tournamentGroupsInCompetition.officialSourceCheckedAt})
-          )
-        `;
         await db
           .insert(tournamentGroupsInCompetition)
           .values(groups.map((group) => ({ ...group, seasonId: season.seasonId })))
@@ -225,7 +184,6 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
               officialSourceCheckedAt: sql`COALESCE(excluded.official_source_checked_at, ${tournamentGroupsInCompetition.officialSourceCheckedAt})`,
               updatedAt: new Date(),
             },
-            where: payloadChanged,
           });
 
         logInfo('Upserted tournament groups', { count: groups.length });
