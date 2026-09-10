@@ -3259,6 +3259,9 @@ export async function reconcileTournamentReviewObligations(
         retired_obligation_count: number | string;
       }>
     >`
+    -- Targeted repair jobs carry a tournament id. Restrict the two JSON
+    -- aggregates to that tournament; the global safety scan passes NULL and
+    -- retains the all-ready-tournaments semantics.
     WITH entry_metadata AS MATERIALIZED (
       SELECT tournament.season_id,
              tournament.tournament_id,
@@ -3285,6 +3288,10 @@ export async function reconcileTournamentReviewObligations(
        AND entry.entry_id = tournament_entry.entry_id
       WHERE tournament.season_id = ${season.seasonId}
         AND tournament.setup_status = 'ready'
+        AND (
+          ${targetTournamentId}::integer IS NULL
+          OR tournament.tournament_id = ${targetTournamentId}
+        )
       GROUP BY tournament.season_id, tournament.tournament_id
     ), canonical_group_assignments AS MATERIALIZED (
       SELECT tournament.season_id,
@@ -3306,6 +3313,10 @@ export async function reconcileTournamentReviewObligations(
        AND group_row.tournament_id = tournament.tournament_id
       WHERE tournament.season_id = ${season.seasonId}
         AND tournament.setup_status = 'ready'
+        AND (
+          ${targetTournamentId}::integer IS NULL
+          OR tournament.tournament_id = ${targetTournamentId}
+        )
       GROUP BY tournament.season_id, tournament.tournament_id
     ), candidate_formats AS (
       SELECT tournament.tournament_id,
