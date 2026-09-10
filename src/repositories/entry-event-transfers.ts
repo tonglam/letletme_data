@@ -65,15 +65,19 @@ export function transferRowsMatch(
       transferTime: row.transferTime as Date,
     });
     const matchingRows = existingBySignature.get(signature);
-    const previous = matchingRows?.shift();
-    return (
-      previous !== undefined &&
-      previous.elementInCost === row.elementInCost &&
-      previous.elementInPoints === row.elementInPoints &&
-      previous.elementInPlayed === row.elementInPlayed &&
-      previous.elementOutCost === row.elementOutCost &&
-      previous.elementOutPoints === row.elementOutPoints
+    const matchingIndex = matchingRows?.findIndex(
+      (previous) =>
+        previous.elementInCost === row.elementInCost &&
+        previous.elementInPoints === row.elementInPoints &&
+        previous.elementInPlayed === row.elementInPlayed &&
+        previous.elementOutCost === row.elementOutCost &&
+        previous.elementOutPoints === row.elementOutPoints,
     );
+    if (matchingRows === undefined || matchingIndex === undefined || matchingIndex < 0) {
+      return false;
+    }
+    matchingRows.splice(matchingIndex, 1);
+    return true;
   });
 }
 
