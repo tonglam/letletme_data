@@ -17,7 +17,11 @@ import { eventRepository } from '../repositories/events';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { allQueueNames } from '../queues/names';
 import { getQueueConnection } from '../utils/queue';
-import { checkRuntimeHeartbeat, readRuntimeHeartbeat } from '../utils/runtime-heartbeat';
+import {
+  checkRuntimeHeartbeat,
+  isRuntimeRoleRequired,
+  readRuntimeHeartbeat,
+} from '../utils/runtime-heartbeat';
 import {
   liveFinalRetentionObligationStatuses,
   schedulerObligationRecoveryMatches,
@@ -1248,12 +1252,36 @@ export async function getJobsStatus(
       })(),
     })),
     runtime: {
-      scheduler: { healthy: scheduler, heartbeat: schedulerHeartbeat },
-      queueWorker: { healthy: queueWorker, heartbeat: queueWorkerHeartbeat },
-      livePicksWorker: { healthy: livePicksWorker, heartbeat: livePicksWorkerHeartbeat },
-      officialH2HWorker: { healthy: officialH2HWorker, heartbeat: officialH2HWorkerHeartbeat },
-      contentWorker: { healthy: contentWorker, heartbeat: contentWorkerHeartbeat },
-      mediaWorker: { healthy: mediaWorker, heartbeat: mediaWorkerHeartbeat },
+      scheduler: {
+        required: isRuntimeRoleRequired('scheduler'),
+        healthy: scheduler,
+        heartbeat: schedulerHeartbeat,
+      },
+      queueWorker: {
+        required: isRuntimeRoleRequired('queueWorker'),
+        healthy: queueWorker,
+        heartbeat: queueWorkerHeartbeat,
+      },
+      livePicksWorker: {
+        required: isRuntimeRoleRequired('livePicksWorker'),
+        healthy: livePicksWorker,
+        heartbeat: livePicksWorkerHeartbeat,
+      },
+      officialH2HWorker: {
+        required: isRuntimeRoleRequired('officialH2HWorker'),
+        healthy: officialH2HWorker,
+        heartbeat: officialH2HWorkerHeartbeat,
+      },
+      contentWorker: {
+        required: isRuntimeRoleRequired('contentWorker'),
+        healthy: contentWorker,
+        heartbeat: contentWorkerHeartbeat,
+      },
+      mediaWorker: {
+        required: isRuntimeRoleRequired('mediaWorker'),
+        healthy: mediaWorker,
+        heartbeat: mediaWorkerHeartbeat,
+      },
     },
     obligations,
     myFplSnapshots,

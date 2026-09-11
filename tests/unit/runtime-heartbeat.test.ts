@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   isRuntimeHeartbeatHealthy,
+  isRuntimeRoleRequired,
   RUNTIME_HEARTBEAT_MAX_AGE_MS,
   type RuntimeHeartbeat,
 } from '../../src/utils/runtime-heartbeat';
@@ -37,5 +38,20 @@ describe('runtime heartbeat release identity', () => {
     expect(
       isRuntimeHeartbeatHealthy(heartbeat({ lastSeenAt: 'not-a-timestamp' }), 'a'.repeat(40), now),
     ).toBe(false);
+  });
+
+  test('marks media optional only for the general Data rollout', () => {
+    const previous = process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
+    try {
+      process.env.RUNTIME_INCLUDE_MEDIA_WORKER = 'false';
+      expect(isRuntimeRoleRequired('mediaWorker')).toBe(false);
+      expect(isRuntimeRoleRequired('scheduler')).toBe(true);
+
+      process.env.RUNTIME_INCLUDE_MEDIA_WORKER = 'true';
+      expect(isRuntimeRoleRequired('mediaWorker')).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
+      else process.env.RUNTIME_INCLUDE_MEDIA_WORKER = previous;
+    }
   });
 });

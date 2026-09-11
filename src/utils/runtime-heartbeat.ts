@@ -24,6 +24,16 @@ export type RuntimeHeartbeat = Readonly<{
   queueMonitors?: Readonly<Record<string, QueueMonitorRuntimeState>>;
 }>;
 
+/**
+ * Source-media has an independent rollout because its startup can perform
+ * external Storage I/O.  The general Data release therefore keeps that
+ * worker optional; a dedicated source-media rollout leaves it required.
+ */
+export function isRuntimeRoleRequired(role: RuntimeRole): boolean {
+  if (role !== 'mediaWorker') return true;
+  return process.env.RUNTIME_INCLUDE_MEDIA_WORKER?.trim().toLowerCase() !== 'false';
+}
+
 function heartbeatKey(role: RuntimeRole): string {
   return `ops:runtime-heartbeat:${role}`;
 }

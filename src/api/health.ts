@@ -3,7 +3,7 @@ import { databaseSingleton } from '../db/singleton';
 import { queueRedisSingleton } from '../queues/redis';
 import { seasonRepository } from '../repositories/seasons';
 import { getConfig, isBugReportScreenshotStorageConfigured } from '../utils/config';
-import { checkRuntimeHeartbeat } from '../utils/runtime-heartbeat';
+import { checkRuntimeHeartbeat, isRuntimeRoleRequired } from '../utils/runtime-heartbeat';
 import { readActiveDataPublication } from '../cache/data-publication';
 import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
@@ -115,7 +115,7 @@ const officialH2HWorkerProbe: DependencyProbe = () => checkRuntimeHeartbeat('off
  * false; the default keeps local and dedicated rollouts strict.
  */
 export function isMediaWorkerRequired(): boolean {
-  return process.env.RUNTIME_INCLUDE_MEDIA_WORKER?.trim().toLowerCase() !== 'false';
+  return isRuntimeRoleRequired('mediaWorker');
 }
 
 const PUBLICATION_MISMATCH_GRACE_MS = 120_000;
