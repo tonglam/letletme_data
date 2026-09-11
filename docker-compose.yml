@@ -76,6 +76,10 @@ services:
       # The general Data deploy leaves source-media on its dedicated rollout
       # lifecycle. Standalone/local Compose runs keep the historical default.
       - RUNTIME_INCLUDE_MEDIA_WORKER=${RUNTIME_INCLUDE_MEDIA_WORKER:-true}
+      # This policy is separate from service inclusion so a general Data
+      # release can leave an enabled media worker running and still require
+      # its heartbeat after the API restarts.
+      - RUNTIME_MEDIA_WORKER_REQUIRED=${RUNTIME_MEDIA_WORKER_REQUIRED:-true}
       # Keep the sum of long-lived process pools below 80% of the usual
       # 15-session Supavisor budget, leaving room for migrations/probes.
       - DATABASE_POOL_MAX=1

@@ -16,6 +16,15 @@ attempts=${HEALTH_ATTEMPTS:-90}
 delay_seconds=${HEALTH_DELAY_SECONDS:-2}
 curl_timeout_seconds=${HEALTH_CURL_TIMEOUT_SECONDS:-5}
 deadline_seconds=${HEALTH_DEADLINE_SECONDS:-300}
+runtime_health_core_only=${RUNTIME_HEALTH_CORE_ONLY:-false}
+
+case "$runtime_health_core_only" in
+  true|false) ;;
+  *)
+    echo "runtime health: RUNTIME_HEALTH_CORE_ONLY must be true or false" >&2
+    exit 2
+    ;;
+esac
 
 deadline_at=$((SECONDS + deadline_seconds))
 
@@ -56,25 +65,58 @@ compose() { (cd "$project_dir" && "${compose_cmd[@]}" -f "$compose_file" "$@"); 
 
 runtime_include_media_worker=${RUNTIME_INCLUDE_MEDIA_WORKER:-true}
 
+core_deploy_payload_is_ready() {
+  local payload=$1
+  local expected_sha=$2
+  local dependency
+  printf '%s' "$payload" | grep -Fq "\"deploySha\":\"$expected_sha\"" || return 1
+  printf '%s' "$payload" | grep -Eq '"status":"deploy_(ready|not_ready)"' || return 1
+  printf '%s' "$payload" | grep -Eq '"mediaWorker":(true|false)' || return 1
+  for dependency in \
+    postgres cacheRedis queueRedis activeSeason screenshotRetentionConfigured \
+    scheduler queueWorker contentWorker livePicksWorker officialH2HWorker \
+    publicationConsistency; do
+    printf '%s' "$payload" | grep -Fq "\"$dependency\":true" || return 1
+  done
+}
+
 api_ready=false
 for attempt in $(seq 1 "$attempts"); do
   timeout=$(curl_timeout_with_deadline) || break
   if curl --fail --silent --show-error --max-time "$timeout" \
-    "$api_url/health/live" >/dev/null \
-    && timeout=$(curl_timeout_with_deadline) \
-    && curl --fail --silent --show-error --max-time "$timeout" \
-      "$api_url/health/deploy" >"$api_payload_file"; then
-    if [ -z "$expected_deploy_sha" ]; then
+    "$api_url/health/live" >/dev/null; then
+    timeout=$(curl_timeout_with_deadline) || break
+    deploy_probe_ok=false
+    deploy_curl_flags=(--silent --show-error --max-time "$timeout")
+    # Core-only recovery may inspect an HTTP 503 body to prove that every core
+    # dependency is healthy while media is unavailable.  Every other mode,
+    # including a probe without release identity, still requires HTTP success.
+    if [ "$runtime_health_core_only" != true ] || [ -z "$expected_deploy_sha" ]; then
+      deploy_curl_flags+=(--fail)
+    fi
+    if curl "${deploy_curl_flags[@]}" "$api_url/health/deploy" >"$api_payload_file"; then
+      deploy_probe_ok=true
+    else
+      : >"$api_payload_file"
+    fi
+    if [ "$deploy_probe_ok" = true ] && [ -z "$expected_deploy_sha" ]; then
       api_ready=true
       break
     fi
-    payload=$(tr -d '[:space:]' < "$api_payload_file")
-    if printf '%s' "$payload" | grep -Fq '"status":"deploy_ready"' && \
-      printf '%s' "$payload" | grep -Fq "\"deploySha\":\"$expected_deploy_sha\""; then
-      api_ready=true
-      break
+    if [ "$deploy_probe_ok" = true ] && [ -s "$api_payload_file" ]; then
+      payload=$(tr -d '[:space:]' < "$api_payload_file")
+      if [ "$runtime_health_core_only" = true ]; then
+        if core_deploy_payload_is_ready "$payload" "$expected_deploy_sha"; then
+          api_ready=true
+          break
+        fi
+      elif printf '%s' "$payload" | grep -Fq '"status":"deploy_ready"' && \
+        printf '%s' "$payload" | grep -Fq "\"deploySha\":\"$expected_deploy_sha\""; then
+        api_ready=true
+        break
+      fi
+      echo "runtime health: /health/deploy identity mismatch (expected=$expected_deploy_sha)" >&2
     fi
-    echo "runtime health: /health/deploy identity mismatch (expected=$expected_deploy_sha)" >&2
   fi
   if [ "$attempt" -lt "$attempts" ] && sleep_with_deadline; then
     continue

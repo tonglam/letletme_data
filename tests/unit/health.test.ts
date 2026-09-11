@@ -89,7 +89,9 @@ describe('data API readiness', () => {
 
   test('allows strict readiness while the separately rolled out media worker is absent', async () => {
     const previous = process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
+    const previousRequired = process.env.RUNTIME_MEDIA_WORKER_REQUIRED;
     process.env.RUNTIME_INCLUDE_MEDIA_WORKER = 'false';
+    delete process.env.RUNTIME_MEDIA_WORKER_REQUIRED;
     try {
       expect(isMediaWorkerRequired()).toBe(false);
       const result = await checkReadiness({
@@ -113,6 +115,8 @@ describe('data API readiness', () => {
     } finally {
       if (previous === undefined) delete process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
       else process.env.RUNTIME_INCLUDE_MEDIA_WORKER = previous;
+      if (previousRequired === undefined) delete process.env.RUNTIME_MEDIA_WORKER_REQUIRED;
+      else process.env.RUNTIME_MEDIA_WORKER_REQUIRED = previousRequired;
     }
   });
 });

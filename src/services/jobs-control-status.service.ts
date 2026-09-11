@@ -15,6 +15,7 @@ import { allQueueNames } from '../queues/names';
 import { createSyncOperationsRepository } from '../repositories/sync-operations';
 import {
   isRuntimeHeartbeatHealthy,
+  isRuntimeRoleRequired,
   readRuntimeHeartbeat,
   type RuntimeHeartbeat,
   type RuntimeRole,
@@ -121,13 +122,21 @@ const RUNTIME_ROLES = [
 ] as const satisfies readonly RuntimeRole[];
 
 async function readRuntimeControlStatus(): Promise<
-  Record<string, Readonly<{ healthy: boolean; heartbeat: RuntimeHeartbeat | null }>>
+  Record<
+    string,
+    Readonly<{
+      required: boolean;
+      healthy: boolean;
+      heartbeat: RuntimeHeartbeat | null;
+    }>
+  >
 > {
   const heartbeats = await Promise.all(RUNTIME_ROLES.map((role) => readRuntimeHeartbeat(role)));
   return Object.fromEntries(
     RUNTIME_ROLES.map((role, index) => [
       role,
       {
+        required: isRuntimeRoleRequired(role),
         healthy: Boolean(heartbeats[index] && isRuntimeHeartbeatHealthy(heartbeats[index])),
         heartbeat: heartbeats[index] ?? null,
       },

@@ -165,24 +165,130 @@ jobs:
               echo 'source-media rollout: no existing media-worker container; provisioning will create it'
             fi
 
-            read_container_boolean() {
-              key=$1
-              value=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-                "$current_container" | awk -v key="$key" '
+            read_container_setting() {
+              local container_id=$1
+              local key=$2
+              local env_output
+              if ! env_output=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                "$container_id"); then
+                return 1
+              fi
+              printf '%s\n' "$env_output" | awk -v key="$key" '
                 $0 ~ "^" key "=" {
-                  sub("^" key "=", "", $0)
-                  gsub("^[[:space:]]+|[[:space:]]+$", "", $0)
-                  gsub("^\"|\"$", "", $0)
-                  gsub("^\047|\047$", "", $0)
-                  print tolower($0)
-                  exit
+                  count += 1
+                  value = $0
+                  sub("^" key "=", "", value)
+                  gsub("^[[:space:]]+|[[:space:]]+$", "", value)
+                  gsub("^\"|\"$", "", value)
+                  gsub("^\047|\047$", "", value)
                 }
-              ')
+                END {
+                  if (count > 1) exit 42
+                  if (count == 1) print tolower(value)
+                }
+              '
+            }
+
+            read_container_boolean_for() {
+              local container_id=$1
+              local key=$2
+              local value
+              value=$(read_container_setting "$container_id" "$key")
               case "$value" in
                 1 | true | yes | on) printf true ;;
                 '' | 0 | false | no | off) printf false ;;
                 *) return 1 ;;
               esac
+            }
+
+            read_container_boolean() {
+              read_container_boolean_for "$current_container" "$1"
+            }
+
+            read_runtime_media_requirement_from_container() {
+              local container_id=$1
+              local value
+              if ! value=$(read_container_setting "$container_id" RUNTIME_MEDIA_WORKER_REQUIRED); then
+                return 1
+              fi
+              if [[ -z "$value" ]]; then
+                if ! value=$(read_container_setting "$container_id" RUNTIME_INCLUDE_MEDIA_WORKER); then
+                  return 1
+                fi
+              fi
+              if [[ -z "$value" ]]; then value=true; fi
+              case "$value" in
+                1 | true | yes | on) printf true ;;
+                0 | false | no | off) printf false ;;
+                *) return 1 ;;
+              esac
+            }
+
+            previous_api_image=$target_image
+            previous_api_revision=$target_revision
+            if ! previous_api_media_requirement=$(read_runtime_media_requirement_from_container "$target_container"); then
+              echo 'source-media rollout refused: API media requirement is invalid' >&2
+              exit 1
+            fi
+            api_requirement_restore_needed=false
+
+            api_container_id() {
+              local container_id
+              container_id=$(docker compose ps -q api | head -n 1)
+              test -n "$container_id"
+              printf '%s\n' "$container_id"
+            }
+
+            wait_for_api() {
+              local expected_image=${1:-$target_image}
+              local container health attempt
+              container=$(api_container_id)
+              test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$expected_image"
+              for attempt in $(seq 1 30); do
+                health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
+                if [ "$health" = healthy ]; then return 0; fi
+                if [ "$attempt" -eq 30 ]; then
+                  docker compose ps api || true
+                  return 1
+                fi
+                sleep 2
+              done
+            }
+
+            ensure_api_media_requirement() {
+              local required=$1
+              local configured
+              case "$required" in
+                true|false) ;;
+                *) echo 'source-media rollout refused: invalid API media requirement' >&2; return 1 ;;
+              esac
+              if ! configured=$(read_container_setting "$target_container" RUNTIME_MEDIA_WORKER_REQUIRED); then
+                echo 'source-media rollout: could not read the serving API media requirement' >&2
+                return 1
+              fi
+              if [[ "$configured" = "$required" ]]; then return 0; fi
+              api_requirement_restore_needed=true
+              if ! RUNTIME_MEDIA_WORKER_REQUIRED="$required" APP_IMAGE="$target_image" \
+                DEPLOY_SHA="$ROLLOUT_SHA" docker compose up -d --no-build --force-recreate api; then
+                return 1
+              fi
+              wait_for_api "$target_image"
+              local container
+              container=$(api_container_id)
+              test "$(read_container_setting "$container" RUNTIME_MEDIA_WORKER_REQUIRED)" = "$required"
+            }
+
+            restore_api_media_requirement() {
+              if [ "$api_requirement_restore_needed" != true ]; then return 0; fi
+              if ! RUNTIME_MEDIA_WORKER_REQUIRED="$previous_api_media_requirement" \
+                APP_IMAGE="$previous_api_image" DEPLOY_SHA="$previous_api_revision" \
+                docker compose up -d --no-build --force-recreate api; then
+                return 1
+              fi
+              if ! wait_for_api "$previous_api_image"; then
+                return 1
+              fi
+              api_requirement_restore_needed=false
             }
 
             read_boolean() {
@@ -323,6 +429,57 @@ jobs:
               done
             }
 
+            verify_media_runtime_heartbeat() {
+              local expected_release=$1
+              local container started_at
+              container=$(media_worker_container_id)
+              test -n "$container"
+              test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$target_image"
+              started_at=$(docker inspect --format '{{.State.StartedAt}}' "$container")
+              test -n "$started_at"
+              if ! docker exec \
+                -e "EXPECTED_MEDIA_RELEASE_SHA=$expected_release" \
+                -e "MIN_MEDIA_HEARTBEAT_AT=$started_at" \
+                "$container" bun -e '
+                  import Redis from "ioredis";
+                  const expected = process.env.EXPECTED_MEDIA_RELEASE_SHA;
+                  const minimum = Date.parse(process.env.MIN_MEDIA_HEARTBEAT_AT ?? "");
+                  const redis = new Redis({
+                    host: process.env.QUEUE_REDIS_HOST,
+                    port: Number(process.env.QUEUE_REDIS_PORT),
+                    password: process.env.QUEUE_REDIS_PASSWORD,
+                    db: Number(process.env.QUEUE_REDIS_DB),
+                    lazyConnect: true,
+                    enableReadyCheck: true,
+                    connectTimeout: 5_000,
+                    commandTimeout: 5_000,
+                    maxRetriesPerRequest: 1,
+                    retryStrategy: () => null,
+                  });
+                  try {
+                    await redis.connect();
+                    const raw = await redis.get("ops:runtime-heartbeat:mediaWorker");
+                    const payload = raw ? JSON.parse(raw) : null;
+                    const lastSeen = Date.parse(payload?.lastSeenAt ?? "");
+                    if (
+                      payload?.role !== "mediaWorker" ||
+                      payload?.releaseSha !== expected ||
+                      !Number.isFinite(minimum) ||
+                      !Number.isFinite(lastSeen) ||
+                      lastSeen < minimum - 5_000 ||
+                      Date.now() - lastSeen > 90_000
+                    ) {
+                      throw new Error("media worker heartbeat is not current");
+                    }
+                  } finally {
+                    redis.disconnect();
+                  }
+                ' >/dev/null 2>&1; then
+                echo 'source-media rollout: current media worker heartbeat was not observed in Queue Redis' >&2
+                return 1
+              fi
+            }
+
             scripts/configure-briefing-source-media-env.sh status "$media_env_file"
             if [ "$ROLLOUT_MODE" = status ]; then
               if [ "$previous_media_present" = false ]; then
@@ -394,6 +551,9 @@ jobs:
                 elif [ "$worker_created" = true ]; then
                   remove_created_media_worker
                 fi
+                if ! restore_api_media_requirement; then
+                  echo 'source-media rollout: API media requirement could not be restored' >&2
+                fi
               fi
               if [ -n "$backup_file" ]; then rm -f -- "$backup_file"; fi
               release_deploy_lock || true
@@ -429,6 +589,12 @@ jobs:
               worker_created=true
             fi
             wait_for_media_worker "$target_image"
+            if [ "$ROLLOUT_MODE" = enable ] || [ "$ROLLOUT_MODE" = enable-retention ]; then
+              ensure_api_media_requirement true
+            elif [ "$ROLLOUT_MODE" = disable ]; then
+              ensure_api_media_requirement false
+            fi
+            verify_media_runtime_heartbeat "$ROLLOUT_SHA"
             report_health
             rollout_committed=true
             rm -f -- "$backup_file"

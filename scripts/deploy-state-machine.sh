@@ -1176,6 +1176,10 @@ rollback_runtime_is_eligible() {
     echo 'rollback target is ineligible: API container is not running and healthy' >&2
     return 1
   }
+  # Rollback eligibility protects the core runtime recovery path.  Source-media
+  # has an independent rollout and can be unhealthy while the core dependencies
+  # remain a valid recovery target; requiring deploy_ready here would turn that
+  # optional failure into a reason to leave scheduler and API stopped.
   if ! docker exec \
     -e "EXPECTED_DEPLOY_SHA=$previous_release_sha" \
     "$container_id" bun -e '
@@ -1184,12 +1188,28 @@ rollback_runtime_is_eligible() {
         signal: AbortSignal.timeout(5000),
       });
       const payload = await response.json();
-      if (!response.ok || payload?.success !== true ||
-          payload?.status !== "deploy_ready" || payload?.deploySha !== expected) {
+      const dependencies = payload?.dependencies;
+      const coreDependencies = [
+        "postgres",
+        "cacheRedis",
+        "queueRedis",
+        "activeSeason",
+        "screenshotRetentionConfigured",
+        "scheduler",
+        "queueWorker",
+        "contentWorker",
+        "livePicksWorker",
+        "officialH2HWorker",
+        "publicationConsistency",
+      ];
+      if (payload?.deploySha !== expected ||
+          !dependencies || typeof dependencies !== "object" ||
+          typeof dependencies.mediaWorker !== "boolean" ||
+          coreDependencies.some((key) => dependencies[key] !== true)) {
         process.exit(1);
       }
     ' >/dev/null 2>&1; then
-    echo 'rollback target is ineligible: strict deploy health or release identity failed' >&2
+    echo 'rollback target is ineligible: core deploy health or release identity failed' >&2
     return 1
   fi
   echo "rollback target eligible at $previous_release_sha"
@@ -1201,6 +1221,7 @@ restore_runtime_services() {
   local previous_runner_release_sha=${3:-unknown}
   local previous_media_present=${4:-auto}
   local previous_image_id=${5:-}
+  local previous_media_required=${6:-${RUNTIME_MEDIA_WORKER_REQUIRED:-true}}
   local resolved_image_id
   local control_image=${DEPLOY_CONTENT_WORKER_CONTROL_IMAGE:-${APP_IMAGE:-letletme-data:local}}
   local control_image_id=''
@@ -1213,6 +1234,13 @@ restore_runtime_services() {
     ! "$previous_runner_release_sha" =~ ^[0-9a-f]{7,128}$ ]]; then
     previous_runner_release_sha=unknown
   fi
+  case "$previous_media_required" in
+    true|false) ;;
+    *)
+      echo 'rollback media heartbeat requirement is invalid' >&2
+      return 1
+      ;;
+  esac
   # A default local deploy builds and rolls back through the same mutable tag.
   # Preserve the new image before repinning that tag to the old image so the
   # new control protocol remains available during recovery cleanup.
@@ -1251,6 +1279,7 @@ restore_runtime_services() {
     export CONTENT_MANIFEST_GIT_REVISION="$previous_release_sha"
     export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"
     export RUNTIME_INCLUDE_MEDIA_WORKER="$previous_media_present"
+    export RUNTIME_MEDIA_WORKER_REQUIRED="$previous_media_required"
     # The rollback image may predate the new provider-heavy lane entrypoints.
     # Filter only services whose executable is actually present in that image;
     # otherwise a pre-migration failure would restore the old API alongside
@@ -1272,6 +1301,7 @@ restore_last_known_healthy_if_ledger_unchanged() {
   local previous_media_present=${6:-auto}
   local rollback_eligible=${7:-false}
   local previous_image_id=${8:-}
+  local previous_media_required=${9:-${RUNTIME_MEDIA_WORKER_REQUIRED:-true}}
   local ledger_after
   if [[ "$rollback_eligible" != true ]]; then
     echo 'rollback target was not proven healthy before deployment; forward-only recovery required' >&2
@@ -1286,7 +1316,7 @@ restore_last_known_healthy_if_ledger_unchanged() {
     fi
     restore_runtime_services \
       "$previous_image" "$previous_release_sha" "$previous_runner_release_sha" \
-      "$previous_media_present" "$previous_image_id"
+      "$previous_media_present" "$previous_image_id" "$previous_media_required"
     return 0
   fi
   echo 'migration ledger changed or could not be proven unchanged; forward-only recovery required' >&2

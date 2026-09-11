@@ -396,6 +396,9 @@ describe('release workflow gates', () => {
     expect(runtimeHealthScript).toContain('attempts=${HEALTH_ATTEMPTS:-90}');
     expect(runtimeHealthScript).toContain('deadline_seconds=${HEALTH_DEADLINE_SECONDS:-300}');
     expect(runtimeHealthScript).toContain('deadline_reached()');
+    expect(runtimeHealthScript).toContain(
+      'runtime_health_core_only=${RUNTIME_HEALTH_CORE_ONLY:-false}',
+    );
     expect(workflow).toContain('timeout: 30m');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=false');
     expect(runtimeHealthScript).toContain(
@@ -724,6 +727,22 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(sourceMediaRolloutWorkflow).not.toContain('script_stop:');
   });
 
+  test('keeps API media requirement aligned with the dedicated rollout', () => {
+    expect(composeFile).toContain(
+      'RUNTIME_MEDIA_WORKER_REQUIRED=${RUNTIME_MEDIA_WORKER_REQUIRED:-true}',
+    );
+    expect(deployScript).toContain('export RUNTIME_MEDIA_WORKER_REQUIRED=false');
+    expect(sourceMediaRolloutWorkflow).toContain('ensure_api_media_requirement true');
+    expect(sourceMediaRolloutWorkflow).toContain('ensure_api_media_requirement false');
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'RUNTIME_MEDIA_WORKER_REQUIRED="$required" APP_IMAGE="$target_image"',
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('restore_api_media_requirement');
+    expect(sourceMediaRolloutWorkflow).toContain('verify_media_runtime_heartbeat');
+    expect(sourceMediaRolloutWorkflow).toContain('ops:runtime-heartbeat:mediaWorker');
+    expect(sourceMediaRolloutWorkflow).toContain('retryStrategy: () => null');
+  });
+
   test('keeps FPL raw snapshot Storage provisioning on an explicit release gate', () => {
     expect(fplRawSnapshotStorageGateWorkflow).toContain('name: FPL raw snapshot Storage gate');
     expect(fplRawSnapshotStorageGateWorkflow).toContain('workflow_dispatch:');
@@ -916,6 +935,11 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(deployStateMachine).toContain('"$container_health" = healthy');
     expect(deployStateMachine).toContain('http://127.0.0.1:3000/health/deploy');
     expect(deployStateMachine).toContain('payload?.deploySha !== expected');
+    expect(deployStateMachine).toContain('const coreDependencies = [');
+    expect(deployStateMachine).toContain('typeof dependencies.mediaWorker !== "boolean"');
+    expect(deployStateMachine).toContain(
+      'coreDependencies.some((key) => dependencies[key] !== true)',
+    );
     expect(deployStateMachine).toContain('rollback_eligible=${7:-false}');
     expect(deployStateMachine).toContain('"$rollback_eligible" != true');
     expect(deployStateMachine).toContain('restore_runtime_services');
@@ -926,6 +950,10 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(deployStateMachine).toContain(
       'export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"',
     );
+    expect(deployStateMachine).toContain(
+      'export RUNTIME_MEDIA_WORKER_REQUIRED="$previous_media_required"',
+    );
+    expect(deployScript).toContain('RUNTIME_HEALTH_CORE_ONLY=true');
     expect(deployScript).toContain(
       String.raw`DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}'`,
     );
@@ -933,6 +961,7 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
       String.raw`DEPLOY_OLD_IMAGE_ID=$(docker inspect --format '{{.Image}}'`,
     );
     expect(deployScript).toContain('DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_container');
+    expect(deployScript).toContain('DEPLOY_OLD_MEDIA_WORKER_REQUIRED');
     expect(deployScript).toContain('resolved_old_revision=$(git -C');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=false');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
@@ -950,7 +979,43 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(runtimeHealthScript).toContain('--max-time "$timeout"');
   });
 
-  test('rejects a rollback runtime unless identity, health, and strict readiness agree', () => {
+  test('does not accept a failed deploy health probe when release identity is omitted', () => {
+    const script = String.raw`
+      set -euo pipefail
+      tmp_dir=$(mktemp -d)
+      trap 'rm -rf "$tmp_dir"' EXIT
+      cat >"$tmp_dir/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+url=
+for arg do url=$arg; done
+case "$url" in
+  */health/live) exit 0 ;;
+  */health/deploy)
+    printf '%s\n' '{"status":"deploy_not_ready"}'
+    if [[ " $* " == *' --fail '* ]]; then exit 22; fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+CURL
+      chmod 700 "$tmp_dir/curl"
+      PATH="$tmp_dir:$PATH" \
+        API_HEALTH_URL=http://unit-test \
+        COMPOSE_BIN=true \
+        HEALTH_ATTEMPTS=1 \
+        HEALTH_DEADLINE_SECONDS=5 \
+        HEALTH_CURL_TIMEOUT_SECONDS=1 \
+        HEALTH_DELAY_SECONDS=1 \
+        scripts/verify-runtime-health.sh
+    `;
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: { ...process.env },
+    });
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test('rejects a rollback runtime unless identity, health, and core readiness agree', () => {
     expect(runRollbackEligibility().exitCode).toBe(0);
     expect(runRollbackEligibility({ MOCK_CONTAINER_RELEASE: '' }).exitCode).toBe(0);
     expect(
