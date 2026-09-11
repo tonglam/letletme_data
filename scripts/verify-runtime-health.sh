@@ -87,15 +87,14 @@ for attempt in $(seq 1 "$attempts"); do
     "$api_url/health/live" >/dev/null; then
     timeout=$(curl_timeout_with_deadline) || break
     deploy_probe_ok=false
-    if [ "$runtime_health_core_only" = true ]; then
-      if curl --silent --show-error --max-time "$timeout" \
-        "$api_url/health/deploy" >"$api_payload_file"; then
-        deploy_probe_ok=true
-      else
-        : >"$api_payload_file"
-      fi
-    elif curl --fail --silent --show-error --max-time "$timeout" \
-      "$api_url/health/deploy" >"$api_payload_file"; then
+    deploy_curl_flags=(--silent --show-error --max-time "$timeout")
+    # Core-only recovery may inspect an HTTP 503 body to prove that every core
+    # dependency is healthy while media is unavailable.  Every other mode,
+    # including a probe without release identity, still requires HTTP success.
+    if [ "$runtime_health_core_only" != true ] || [ -z "$expected_deploy_sha" ]; then
+      deploy_curl_flags+=(--fail)
+    fi
+    if curl "${deploy_curl_flags[@]}" "$api_url/health/deploy" >"$api_payload_file"; then
       deploy_probe_ok=true
     else
       : >"$api_payload_file"
