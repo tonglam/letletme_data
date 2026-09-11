@@ -979,6 +979,42 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(runtimeHealthScript).toContain('--max-time "$timeout"');
   });
 
+  test('does not accept a failed deploy health probe when release identity is omitted', () => {
+    const script = String.raw`
+      set -euo pipefail
+      tmp_dir=$(mktemp -d)
+      trap 'rm -rf "$tmp_dir"' EXIT
+      cat >"$tmp_dir/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+url=
+for arg do url=$arg; done
+case "$url" in
+  */health/live) exit 0 ;;
+  */health/deploy)
+    printf '%s\n' '{"status":"deploy_not_ready"}'
+    if [[ " $* " == *' --fail '* ]]; then exit 22; fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+CURL
+      chmod 700 "$tmp_dir/curl"
+      PATH="$tmp_dir:$PATH" \
+        API_HEALTH_URL=http://unit-test \
+        COMPOSE_BIN=true \
+        HEALTH_ATTEMPTS=1 \
+        HEALTH_DEADLINE_SECONDS=5 \
+        HEALTH_CURL_TIMEOUT_SECONDS=1 \
+        HEALTH_DELAY_SECONDS=1 \
+        scripts/verify-runtime-health.sh
+    `;
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: { ...process.env },
+    });
+    expect(result.exitCode).not.toBe(0);
+  });
+
   test('rejects a rollback runtime unless identity, health, and core readiness agree', () => {
     expect(runRollbackEligibility().exitCode).toBe(0);
     expect(runRollbackEligibility({ MOCK_CONTAINER_RELEASE: '' }).exitCode).toBe(0);

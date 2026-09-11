@@ -86,18 +86,25 @@ for attempt in $(seq 1 "$attempts"); do
   if curl --fail --silent --show-error --max-time "$timeout" \
     "$api_url/health/live" >/dev/null; then
     timeout=$(curl_timeout_with_deadline) || break
+    deploy_probe_ok=false
     if [ "$runtime_health_core_only" = true ]; then
-      curl --silent --show-error --max-time "$timeout" \
-        "$api_url/health/deploy" >"$api_payload_file" || true
-    elif ! curl --fail --silent --show-error --max-time "$timeout" \
+      if curl --silent --show-error --max-time "$timeout" \
+        "$api_url/health/deploy" >"$api_payload_file"; then
+        deploy_probe_ok=true
+      else
+        : >"$api_payload_file"
+      fi
+    elif curl --fail --silent --show-error --max-time "$timeout" \
       "$api_url/health/deploy" >"$api_payload_file"; then
+      deploy_probe_ok=true
+    else
       : >"$api_payload_file"
     fi
-    if [ -z "$expected_deploy_sha" ]; then
+    if [ "$deploy_probe_ok" = true ] && [ -z "$expected_deploy_sha" ]; then
       api_ready=true
       break
     fi
-    if [ -s "$api_payload_file" ]; then
+    if [ "$deploy_probe_ok" = true ] && [ -s "$api_payload_file" ]; then
       payload=$(tr -d '[:space:]' < "$api_payload_file")
       if [ "$runtime_health_core_only" = true ]; then
         if core_deploy_payload_is_ready "$payload" "$expected_deploy_sha"; then
