@@ -580,6 +580,7 @@ restore_stopped_services() {
       log_warn "Recovered core runtime is healthy but the existing source-media worker remains stopped"
     fi
     if ! run_deploy_command_with_pause_renewal env \
+      RUNTIME_HEALTH_CORE_ONLY=true \
       EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
       PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
       scripts/verify-runtime-health.sh; then
@@ -625,6 +626,7 @@ deploy() {
             log_warn "Rolled-back core runtime is healthy but the existing source-media worker remains stopped"
           fi
           if run_deploy_command_with_pause_renewal env \
+            RUNTIME_HEALTH_CORE_ONLY=true \
             EXPECTED_DEPLOY_SHA="$DEPLOY_OLD_RELEASE_SHA" \
             PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
             scripts/verify-runtime-health.sh && restore_content_deploy_controls; then

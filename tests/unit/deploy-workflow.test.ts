@@ -396,6 +396,9 @@ describe('release workflow gates', () => {
     expect(runtimeHealthScript).toContain('attempts=${HEALTH_ATTEMPTS:-90}');
     expect(runtimeHealthScript).toContain('deadline_seconds=${HEALTH_DEADLINE_SECONDS:-300}');
     expect(runtimeHealthScript).toContain('deadline_reached()');
+    expect(runtimeHealthScript).toContain(
+      'runtime_health_core_only=${RUNTIME_HEALTH_CORE_ONLY:-false}',
+    );
     expect(workflow).toContain('timeout: 30m');
     expect(deployScript).toContain('export RUNTIME_INCLUDE_MEDIA_WORKER=false');
     expect(runtimeHealthScript).toContain(
@@ -735,6 +738,9 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
       'RUNTIME_MEDIA_WORKER_REQUIRED="$required" APP_IMAGE="$target_image"',
     );
     expect(sourceMediaRolloutWorkflow).toContain('restore_api_media_requirement');
+    expect(sourceMediaRolloutWorkflow).toContain('verify_media_runtime_heartbeat');
+    expect(sourceMediaRolloutWorkflow).toContain('ops:runtime-heartbeat:mediaWorker');
+    expect(sourceMediaRolloutWorkflow).toContain('retryStrategy: () => null');
   });
 
   test('keeps FPL raw snapshot Storage provisioning on an explicit release gate', () => {
@@ -947,6 +953,7 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(deployStateMachine).toContain(
       'export RUNTIME_MEDIA_WORKER_REQUIRED="$previous_media_required"',
     );
+    expect(deployScript).toContain('RUNTIME_HEALTH_CORE_ONLY=true');
     expect(deployScript).toContain(
       String.raw`DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}'`,
     );
