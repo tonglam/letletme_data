@@ -120,6 +120,7 @@ DEPLOY_SOURCE_MEDIA_FENCE_APPLICATION_NAME=''
 DEPLOY_SOURCE_MEDIA_WORKER_CONTAINER=''
 DEPLOY_SOURCE_MEDIA_WORKER_WAS_RUNNING=false
 DEPLOY_SOURCE_MEDIA_WORKER_STOPPED=false
+DEPLOY_OLD_MEDIA_WORKER_REQUIRED=false
 
 start_stage() {
   ACTIVE_DEPLOY_STAGE=$1
@@ -509,6 +510,43 @@ start_source_media_worker_best_effort() {
   return 0
 }
 
+runtime_media_worker_requirement_for_container() {
+  local container_id=$1
+  local env_entry value='' media_required_value='' include_value=''
+  local media_required_count=0 include_count=0
+  local env_output
+  if ! env_output=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id"); then
+    return 1
+  fi
+  while IFS= read -r env_entry; do
+    case "$env_entry" in
+      RUNTIME_MEDIA_WORKER_REQUIRED=*)
+        media_required_count=$((media_required_count + 1))
+        media_required_value=${env_entry#*=}
+        ;;
+      RUNTIME_INCLUDE_MEDIA_WORKER=*)
+        include_count=$((include_count + 1))
+        include_value=${env_entry#*=}
+        ;;
+    esac
+  done <<<"$env_output"
+  if (( media_required_count > 1 || include_count > 1 )); then
+    return 1
+  fi
+  if (( media_required_count == 1 )); then
+    value=$media_required_value
+  elif (( include_count == 1 )); then
+    value=$include_value
+  else
+    value=true
+  fi
+  case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) printf true ;;
+    0 | false | no | off) printf false ;;
+    *) return 1 ;;
+  esac
+}
+
 restore_stopped_services() {
   local restored=false
   if [[ "$DEPLOY_ROLLBACK_ELIGIBLE" != true ]]; then
@@ -527,7 +565,7 @@ restore_stopped_services() {
   if [[ -n "${DEPLOY_OLD_IMAGE:-}" ]]; then
     if restore_runtime_services \
       "$DEPLOY_OLD_IMAGE" "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
-      false "$DEPLOY_OLD_IMAGE_ID"; then
+      false "$DEPLOY_OLD_IMAGE_ID" "$DEPLOY_OLD_MEDIA_WORKER_REQUIRED"; then
       restored=true
     else
       log_error "Last-known-healthy services could not be restored; manual recovery is required."
@@ -582,7 +620,7 @@ deploy() {
           "$DEPLOY_OLD_IMAGE" "$DEPLOY_LEDGER_BEFORE" "$DEPLOY_OLD_REVISION" \
           "$DEPLOY_OLD_RELEASE_SHA" "$DEPLOY_OLD_RUNNER_RELEASE_SHA" \
           false "$DEPLOY_ROLLBACK_ELIGIBLE" \
-          "$DEPLOY_OLD_IMAGE_ID"; then
+          "$DEPLOY_OLD_IMAGE_ID" "$DEPLOY_OLD_MEDIA_WORKER_REQUIRED"; then
           if ! start_source_media_worker_best_effort; then
             log_warn "Rolled-back core runtime is healthy but the existing source-media worker remains stopped"
           fi
@@ -651,6 +689,10 @@ deploy() {
     DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$old_container")
     DEPLOY_OLD_IMAGE_ID=$(docker inspect --format '{{.Image}}' "$old_container")
     DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_container "$old_container")
+    if ! DEPLOY_OLD_MEDIA_WORKER_REQUIRED=$(runtime_media_worker_requirement_for_container "$old_container"); then
+      log_error "Serving API has an invalid media heartbeat requirement; services were not stopped."
+      exit 1
+    fi
     DEPLOY_OLD_REVISION=''
     if [[ "$DEPLOY_OLD_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
       resolved_old_revision=$(git -C "${PROJECT_DIR}" rev-parse \

@@ -929,6 +929,11 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(deployStateMachine).toContain('"$container_health" = healthy');
     expect(deployStateMachine).toContain('http://127.0.0.1:3000/health/deploy');
     expect(deployStateMachine).toContain('payload?.deploySha !== expected');
+    expect(deployStateMachine).toContain('const coreDependencies = [');
+    expect(deployStateMachine).toContain('typeof dependencies.mediaWorker !== "boolean"');
+    expect(deployStateMachine).toContain(
+      'coreDependencies.some((key) => dependencies[key] !== true)',
+    );
     expect(deployStateMachine).toContain('rollback_eligible=${7:-false}');
     expect(deployStateMachine).toContain('"$rollback_eligible" != true');
     expect(deployStateMachine).toContain('restore_runtime_services');
@@ -939,6 +944,9 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(deployStateMachine).toContain(
       'export CONTENT_GROK_RUNNER_RELEASE_SHA="$previous_runner_release_sha"',
     );
+    expect(deployStateMachine).toContain(
+      'export RUNTIME_MEDIA_WORKER_REQUIRED="$previous_media_required"',
+    );
     expect(deployScript).toContain(
       String.raw`DEPLOY_OLD_IMAGE=$(docker inspect --format '{{.Config.Image}}'`,
     );
@@ -946,6 +954,7 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
       String.raw`DEPLOY_OLD_IMAGE_ID=$(docker inspect --format '{{.Image}}'`,
     );
     expect(deployScript).toContain('DEPLOY_OLD_RELEASE_SHA=$(release_sha_for_container');
+    expect(deployScript).toContain('DEPLOY_OLD_MEDIA_WORKER_REQUIRED');
     expect(deployScript).toContain('resolved_old_revision=$(git -C');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=false');
     expect(deployScript).toContain('DEPLOY_ROLLBACK_ELIGIBLE=true');
@@ -963,7 +972,7 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(runtimeHealthScript).toContain('--max-time "$timeout"');
   });
 
-  test('rejects a rollback runtime unless identity, health, and strict readiness agree', () => {
+  test('rejects a rollback runtime unless identity, health, and core readiness agree', () => {
     expect(runRollbackEligibility().exitCode).toBe(0);
     expect(runRollbackEligibility({ MOCK_CONTAINER_RELEASE: '' }).exitCode).toBe(0);
     expect(
