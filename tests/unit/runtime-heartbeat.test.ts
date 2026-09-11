@@ -42,16 +42,23 @@ describe('runtime heartbeat release identity', () => {
 
   test('marks media optional only for the general Data rollout', () => {
     const previous = process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
+    const previousRequired = process.env.RUNTIME_MEDIA_WORKER_REQUIRED;
     try {
+      delete process.env.RUNTIME_MEDIA_WORKER_REQUIRED;
       process.env.RUNTIME_INCLUDE_MEDIA_WORKER = 'false';
       expect(isRuntimeRoleRequired('mediaWorker')).toBe(false);
       expect(isRuntimeRoleRequired('scheduler')).toBe(true);
 
       process.env.RUNTIME_INCLUDE_MEDIA_WORKER = 'true';
       expect(isRuntimeRoleRequired('mediaWorker')).toBe(true);
+
+      process.env.RUNTIME_MEDIA_WORKER_REQUIRED = 'false';
+      expect(isRuntimeRoleRequired('mediaWorker')).toBe(false);
     } finally {
       if (previous === undefined) delete process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
       else process.env.RUNTIME_INCLUDE_MEDIA_WORKER = previous;
+      if (previousRequired === undefined) delete process.env.RUNTIME_MEDIA_WORKER_REQUIRED;
+      else process.env.RUNTIME_MEDIA_WORKER_REQUIRED = previousRequired;
     }
   });
 });

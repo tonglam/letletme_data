@@ -724,6 +724,21 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(sourceMediaRolloutWorkflow).not.toContain('script_stop:');
   });
 
+  test('keeps API media requirement aligned with the dedicated rollout', () => {
+    expect(composeFile).toContain(
+      'RUNTIME_MEDIA_WORKER_REQUIRED=${RUNTIME_MEDIA_WORKER_REQUIRED:-true}',
+    );
+    expect(deployScript).toContain('resolve_runtime_media_worker_requirement()');
+    expect(deployScript).toContain('read_media_worker_enabled_assignment');
+    expect(deployScript).toContain('export RUNTIME_MEDIA_WORKER_REQUIRED="$required"');
+    expect(sourceMediaRolloutWorkflow).toContain('ensure_api_media_requirement true');
+    expect(sourceMediaRolloutWorkflow).toContain('ensure_api_media_requirement false');
+    expect(sourceMediaRolloutWorkflow).toContain(
+      'RUNTIME_MEDIA_WORKER_REQUIRED="$required" APP_IMAGE="$target_image"',
+    );
+    expect(sourceMediaRolloutWorkflow).toContain('restore_api_media_requirement');
+  });
+
   test('keeps FPL raw snapshot Storage provisioning on an explicit release gate', () => {
     expect(fplRawSnapshotStorageGateWorkflow).toContain('name: FPL raw snapshot Storage gate');
     expect(fplRawSnapshotStorageGateWorkflow).toContain('workflow_dispatch:');

@@ -26,12 +26,15 @@ export type RuntimeHeartbeat = Readonly<{
 
 /**
  * Source-media has an independent rollout because its startup can perform
- * external Storage I/O.  The general Data release therefore keeps that
- * worker optional; a dedicated source-media rollout leaves it required.
+ * external Storage I/O. The API receives the durable rollout policy through
+ * RUNTIME_MEDIA_WORKER_REQUIRED; keep the older include flag as a fallback
+ * while hosts roll forward to that explicit policy.
  */
 export function isRuntimeRoleRequired(role: RuntimeRole): boolean {
   if (role !== 'mediaWorker') return true;
-  return process.env.RUNTIME_INCLUDE_MEDIA_WORKER?.trim().toLowerCase() !== 'false';
+  const configured =
+    process.env.RUNTIME_MEDIA_WORKER_REQUIRED ?? process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
+  return configured?.trim().toLowerCase() !== 'false';
 }
 
 function heartbeatKey(role: RuntimeRole): string {
