@@ -20,8 +20,11 @@ export CONTENT_MEDIA_ENV_FILE
 # Source-media has its own protected rollout. A general Data release must not
 # recreate, stop, or health-gate that worker, because its startup performs an
 # external Storage request. Keep the existing worker untouched while the
-# dedicated rollout owns its image and configuration lifecycle.
+# dedicated rollout owns its image and configuration lifecycle. The API
+# requirement is deferred until that rollout proves the worker on the current
+# image; otherwise an old media release would block the core deploy gate.
 export RUNTIME_INCLUDE_MEDIA_WORKER=false
+export RUNTIME_MEDIA_WORKER_REQUIRED=false
 export DEPLOY_SHA
 export CONTENT_MANIFEST_GIT_REVISION="$DEPLOY_SHA"
 export CONTENT_GROK_RUNNER_RELEASE_SHA="$DEPLOY_SHA"
@@ -430,77 +433,6 @@ source_media_worker_container_id() {
   printf '%s\n' "$container_id"
 }
 
-read_media_worker_enabled_assignment() {
-  local file=$1
-  awk '
-    $0 ~ "^[[:space:]]*(export[[:space:]]+)?CONTENT_MEDIA_WORKER_ENABLED[[:space:]]*=" {
-      count += 1
-      value = $0
-      sub("^[[:space:]]*(export[[:space:]]+)?CONTENT_MEDIA_WORKER_ENABLED[[:space:]]*=", "", value)
-      sub("^[[:space:]]+", "", value)
-      sub("[[:space:]]+$", "", value)
-      if (value ~ /^\".*\"$/ || value ~ /^\047.*\047$/) {
-        value = substr(value, 2, length(value) - 2)
-      }
-    }
-    END {
-      if (count > 1) exit 42
-      if (count == 1) print value
-    }
-  ' "$file"
-}
-
-read_media_worker_enabled_from_container() {
-  local container_id=$1
-  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" |
-    awk '
-      $0 ~ "^CONTENT_MEDIA_WORKER_ENABLED=" {
-        count += 1
-        value = $0
-        sub("^CONTENT_MEDIA_WORKER_ENABLED=", "", value)
-        gsub("^[[:space:]]+|[[:space:]]+$", "", value)
-        gsub("^\"|\"$", "", value)
-        gsub("^\047|\047$", "", value)
-      }
-      END {
-        if (count > 1) exit 42
-        if (count == 1) print value
-      }
-    '
-}
-
-resolve_runtime_media_worker_requirement() {
-  local value required=false container_id
-  if [[ -n "${RUNTIME_MEDIA_WORKER_REQUIRED+x}" ]]; then
-    value=${RUNTIME_MEDIA_WORKER_REQUIRED}
-  elif [[ -f "$CONTENT_MEDIA_ENV_FILE" && ! -L "$CONTENT_MEDIA_ENV_FILE" ]]; then
-    if ! value=$(read_media_worker_enabled_assignment "$CONTENT_MEDIA_ENV_FILE"); then
-      log_error "Could not read CONTENT_MEDIA_WORKER_ENABLED from ${CONTENT_MEDIA_ENV_FILE}"
-      return 1
-    fi
-  else
-    if ! container_id=$(source_media_worker_container_id); then
-      return 1
-    fi
-    if [[ -n "$container_id" ]]; then
-      if ! value=$(read_media_worker_enabled_from_container "$container_id"); then
-        log_error "Could not read source-media worker enablement"
-        return 1
-      fi
-    fi
-  fi
-
-  case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
-    1 | true | yes | on) required=true ;;
-    '' | 0 | false | no | off) required=false ;;
-    *)
-      log_error "CONTENT_MEDIA_WORKER_ENABLED must be a boolean"
-      return 1
-      ;;
-  esac
-  export RUNTIME_MEDIA_WORKER_REQUIRED="$required"
-}
-
 stop_source_media_worker_with_deadline() {
   local container_id state service
   container_id=$(source_media_worker_container_id)
@@ -693,10 +625,6 @@ deploy() {
   trap deploy_on_exit EXIT
   require_compose
   require_files
-  if ! resolve_runtime_media_worker_requirement; then
-    log_error "Could not determine the source-media heartbeat requirement; services were not stopped."
-    exit 1
-  fi
   # Validate the immutable V2 seed scope while services are still serving the
   # old release. A missing deployment variable must never stop a healthy
   # stack and discover the error only after migration has started.

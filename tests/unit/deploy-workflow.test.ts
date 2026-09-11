@@ -728,9 +728,7 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(composeFile).toContain(
       'RUNTIME_MEDIA_WORKER_REQUIRED=${RUNTIME_MEDIA_WORKER_REQUIRED:-true}',
     );
-    expect(deployScript).toContain('resolve_runtime_media_worker_requirement()');
-    expect(deployScript).toContain('read_media_worker_enabled_assignment');
-    expect(deployScript).toContain('export RUNTIME_MEDIA_WORKER_REQUIRED="$required"');
+    expect(deployScript).toContain('export RUNTIME_MEDIA_WORKER_REQUIRED=false');
     expect(sourceMediaRolloutWorkflow).toContain('ensure_api_media_requirement true');
     expect(sourceMediaRolloutWorkflow).toContain('ensure_api_media_requirement false');
     expect(sourceMediaRolloutWorkflow).toContain(
