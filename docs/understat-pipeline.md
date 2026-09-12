@@ -313,10 +313,9 @@ Every apply invocation also runs that stale-selector repair when no mapping is c
 projection-only failure can be retried with the same approval file after the bridge write has
 already committed. Generic manual status changes leave durable `evidence.manualReview` provenance;
 later quarantine therefore remains manual review instead of becoming an automatic recovery.
-Automatic reconciliation quarantines record `evidence.recoveryProvenance: "automatic"`. Older
-quarantines without either marker remain eligible for read-only evidence review, but cannot be
-applied until the approval file explicitly backfills the automatic provenance for that exact report
-item.
+Older quarantines without either marker remain eligible for read-only evidence review, but cannot
+be applied until the approval file explicitly backfills the automatic provenance for that exact
+report item. The status-review endpoint never infers automatic provenance from a prior status.
 
 ## 13. Internal HTTP API
 

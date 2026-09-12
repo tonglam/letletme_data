@@ -227,20 +227,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
               // that this pair was explicitly reviewed by an operator.
               evidence: sql`COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb) || jsonb_build_object('manualReview', true)`,
             }
-          : status === 'quarantined'
-            ? {
-                // Quarantine emitted by the automatic reconciliation path
-                // keeps an explicit provenance marker. A prior manual review
-                // marker remains untouched because the old status is then
-                // manual_verified (or the evidence already carries it).
-                evidence: sql`CASE
-                  WHEN ${providerEntityLinks.status} = 'auto_verified'
-                  THEN COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb)
-                    || jsonb_build_object('recoveryProvenance', 'automatic')
-                  ELSE ${providerEntityLinks.evidence}
-                END`,
-              }
-            : {}),
+          : {}),
         updatedAt: sql`clock_timestamp()`,
       })
       .where(eq(providerEntityLinks.linkId, id))
