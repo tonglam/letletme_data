@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "seasonKey": "2026-27",
-  "manifestHash": "7582bff0cbe111a0891ddd633bb4a41f2cc7f3a086e80372c346699fd6279840",
+  "manifestHash": "dcb3fddd6eec33b8b36d983449ca74e709ea112a3f42da81f516033251290c15",
   "entityCount": 85,
   "endpointCount": 108,
   "endpointCounts": {
@@ -13,9 +13,9 @@
   },
   "partitionCount": 44,
   "forecastCalls": {
-    "NORMAL": 856,
-    "APPROACHING": 1672,
-    "FINAL90": 2440
+    "NORMAL": 416,
+    "APPROACHING": 656,
+    "FINAL90": 800
   },
   "xForecastWindowMinutes": {
     "NORMAL": 1440,
@@ -29,7 +29,7 @@
       "REPORTER": 110,
       "CREATOR": 5,
       "LONGFORM": 5,
-      "SEMANTIC": 48
+      "SEMANTIC": 4
     },
     "APPROACHING": {
       "OFFICIAL": 10,
@@ -37,7 +37,7 @@
       "REPORTER": 110,
       "CREATOR": 5,
       "LONGFORM": 5,
-      "SEMANTIC": 96
+      "SEMANTIC": 4
     },
     "FINAL90": {
       "OFFICIAL": 10,
@@ -45,7 +45,7 @@
       "REPORTER": 110,
       "CREATOR": 5,
       "LONGFORM": 5,
-      "SEMANTIC": 12
+      "SEMANTIC": 4
     }
   },
   "xLaneCallCaps": {
@@ -55,7 +55,7 @@
       "REPORTER": 132,
       "CREATOR": 6,
       "LONGFORM": 6,
-      "SEMANTIC": 58
+      "SEMANTIC": 5
     },
     "APPROACHING": {
       "OFFICIAL": 12,
@@ -63,7 +63,7 @@
       "REPORTER": 132,
       "CREATOR": 6,
       "LONGFORM": 6,
-      "SEMANTIC": 116
+      "SEMANTIC": 5
     },
     "FINAL90": {
       "OFFICIAL": 12,
@@ -71,7 +71,7 @@
       "REPORTER": 132,
       "CREATOR": 6,
       "LONGFORM": 6,
-      "SEMANTIC": 15
+      "SEMANTIC": 5
     }
   },
   "backstopMainCalls": 80,

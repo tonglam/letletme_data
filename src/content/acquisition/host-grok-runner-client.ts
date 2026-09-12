@@ -291,6 +291,15 @@ export class HostGrokRunnerClient {
 
     let healthResponse = await readHealth();
     assertIdentity(healthResponse.health);
+    // A known successful process that has merely been idle may use the real
+    // scan as its next liveness check. Health remains stale until it succeeds.
+    // New/restarted processes and explicit failures still require a probe.
+    if (
+      healthResponse.response.statusCode === 503 &&
+      healthResponse.health.lastXProbeOk === true &&
+      healthResponse.health.lastXProbeAt !== null
+    )
+      return;
     if (
       healthResponse.response.statusCode !== 200 ||
       !healthResponse.health.ready ||
