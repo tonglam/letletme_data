@@ -53,7 +53,6 @@ import { eventRepository } from '../repositories/events';
 import {
   appendSchedulerObligationRecovery,
   getSchedulerObligation,
-  getLatestFailedSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import {
@@ -1438,10 +1437,7 @@ export async function assertManualLiveFinalRetentionRecoveryTarget(input: {
   eventId: number;
   target: { obligationId: string; periodKey: string; generation: number };
 }): Promise<void> {
-  const target = await getLatestFailedSchedulerObligation({
-    jobName: 'live-final-retention',
-    scopeKey: `${input.season.seasonCode}:event:${input.eventId}`,
-  });
+  const target = await getSchedulerObligation({ obligationId: input.target.obligationId });
   if (
     !target ||
     target.obligationId !== input.target.obligationId ||
