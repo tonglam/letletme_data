@@ -200,6 +200,18 @@ describe('provider roster matcher', () => {
         understat: [],
       }),
     ).toBe(false);
+    expect(
+      providerPlayerNamesMatch('Silva', 'Silva', {
+        fpl: ['Bernardo Silva'],
+        understat: [],
+      }),
+    ).toBe(false);
+    expect(
+      providerPlayerNamesMatch('Silva', 'Bernardo Silva', {
+        fpl: ['Bernardo Silva'],
+        understat: [],
+      }),
+    ).toBe(true);
     expect(rosterEvidenceAligns({ ...fpl, name: 'Isak', nameAvailable: false }, understat, 3)).toBe(
       false,
     );

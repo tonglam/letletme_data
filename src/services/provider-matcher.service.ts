@@ -248,7 +248,10 @@ export function providerPlayerNamesMatch(
 ): boolean {
   const fplNames = normalizedNames([fplNameValue, ...aliases.fpl]);
   const understatNames = normalizedNames([understatNameValue, ...aliases.understat]);
-  return [...fplNames].some((name) => understatNames.has(name));
+  // A one-token current name must never win merely because it intersects a
+  // trusted alias on the other side. Only the actual intersecting value may
+  // establish identity, and it must be a full deterministic name.
+  return [...fplNames].some((name) => hasProviderFullName(name) && understatNames.has(name));
 }
 
 export function rosterEvidenceAligns(
@@ -257,10 +260,8 @@ export function rosterEvidenceAligns(
   mappedTeamCode: number | undefined,
   aliases: ProviderPlayerNameAliases = { fpl: [], understat: [] },
 ): boolean {
-  const trustedAliasNames = normalizedNames([...aliases.fpl, ...aliases.understat]);
   return (
     fixtureOutcomeEvidenceAligns(fpl, understat, mappedTeamCode) &&
-    ((fpl.nameAvailable && hasProviderFullName(fpl.name)) || trustedAliasNames.size > 0) &&
     providerPlayerNamesMatch(fpl.name, understat.name, aliases)
   );
 }
@@ -862,8 +863,13 @@ type ProviderPlayerEvidenceSnapshot = Readonly<{
   entityLinks: ProviderEntityLink[];
   fplRows: FplFixturePlayerEvidence[];
   understatRows: UnderstatRosterEvidence[];
+  understatSeasonById: Map<number, { name: string; position: string }>;
   fplPlayers: Awaited<ReturnType<typeof fplSeasonDataRepository.findPlayers>>;
   fplByCode: Map<number, FplFixturePlayerEvidence>;
+  fplPlayerByCode: Map<
+    number,
+    Awaited<ReturnType<typeof fplSeasonDataRepository.findPlayers>>[number]
+  >;
   understatById: Map<number, UnderstatRosterEvidence>;
   candidatesByPlayer: Map<number, Set<number>>;
   evidenceCount: Map<number, number>;
@@ -892,57 +898,70 @@ async function collectProviderPlayerEvidence(
   season: string,
 ): Promise<ProviderPlayerEvidenceSnapshot> {
   const db = await getDb();
-  const [entityLinks, matchLinks, fplRows, understatRows, fplPlayers, fplFixtures, aliasRows] =
-    await Promise.all([
-      providerIdentityRepository.findEntityLinks(),
-      providerIdentityRepository.findMatchLinks({ season, statuses: [...VERIFIED_STATUSES] }),
-      fplSeasonDataRepository.findPlayerEvidence(season),
-      db
-        .select({
-          matchId: understatPlayerMatchStats.matchId,
-          playerId: understatPlayerMatchStats.playerId,
-          teamId: understatPlayerMatchStats.teamId,
-          position: understatPlayerMatchStats.position,
-          seasonPosition: understatPlayerSeasons.position,
-          minutes: understatPlayerMatchStats.minutes,
-          started: understatPlayerMatchStats.started,
-          goals: understatPlayerMatchStats.goals,
-          assists: understatPlayerMatchStats.assists,
-          ownGoals: understatPlayerMatchStats.ownGoals,
-          yellowCards: understatPlayerMatchStats.yellowCards,
-          redCards: understatPlayerMatchStats.redCards,
-          name: sql<string>`COALESCE(${understatPlayerSeasons.sourceName}, ${understatPlayers.name})`,
-        })
-        .from(understatPlayerMatchStats)
-        .innerJoin(
-          understatPlayers,
-          eq(understatPlayerMatchStats.playerId, understatPlayers.playerId),
-        )
-        .innerJoin(
-          understatMatches,
-          eq(understatPlayerMatchStats.matchId, understatMatches.matchId),
-        )
-        .leftJoin(
-          understatPlayerSeasons,
-          and(
-            eq(understatPlayerSeasons.playerId, understatPlayerMatchStats.playerId),
-            eq(understatPlayerSeasons.seasonCode, season),
-          ),
-        )
-        .where(and(eq(understatMatches.seasonCode, season), eq(understatMatches.isResult, true))),
-      fplSeasonDataRepository.findPlayers(season),
-      fplSeasonDataRepository.findFixtures(season),
-      db
-        .select({
-          entityType: providerEntityAliases.entityType,
-          provider: providerEntityAliases.provider,
-          providerEntityId: providerEntityAliases.providerEntityId,
-          alias: providerEntityAliases.alias,
-          source: providerEntityAliases.source,
-        })
-        .from(providerEntityAliases)
-        .where(eq(providerEntityAliases.entityType, 'player')),
-    ]);
+  const [
+    entityLinks,
+    matchLinks,
+    fplRows,
+    understatRows,
+    understatSeasonRows,
+    fplPlayers,
+    fplFixtures,
+    aliasRows,
+  ] = await Promise.all([
+    providerIdentityRepository.findEntityLinks(),
+    providerIdentityRepository.findMatchLinks({ season, statuses: [...VERIFIED_STATUSES] }),
+    fplSeasonDataRepository.findPlayerEvidence(season),
+    db
+      .select({
+        matchId: understatPlayerMatchStats.matchId,
+        playerId: understatPlayerMatchStats.playerId,
+        teamId: understatPlayerMatchStats.teamId,
+        position: understatPlayerMatchStats.position,
+        seasonPosition: understatPlayerSeasons.position,
+        minutes: understatPlayerMatchStats.minutes,
+        started: understatPlayerMatchStats.started,
+        goals: understatPlayerMatchStats.goals,
+        assists: understatPlayerMatchStats.assists,
+        ownGoals: understatPlayerMatchStats.ownGoals,
+        yellowCards: understatPlayerMatchStats.yellowCards,
+        redCards: understatPlayerMatchStats.redCards,
+        name: sql<string>`COALESCE(${understatPlayerSeasons.sourceName}, ${understatPlayers.name})`,
+      })
+      .from(understatPlayerMatchStats)
+      .innerJoin(
+        understatPlayers,
+        eq(understatPlayerMatchStats.playerId, understatPlayers.playerId),
+      )
+      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.matchId))
+      .leftJoin(
+        understatPlayerSeasons,
+        and(
+          eq(understatPlayerSeasons.playerId, understatPlayerMatchStats.playerId),
+          eq(understatPlayerSeasons.seasonCode, season),
+        ),
+      )
+      .where(and(eq(understatMatches.seasonCode, season), eq(understatMatches.isResult, true))),
+    db
+      .select({
+        playerId: understatPlayerSeasons.playerId,
+        name: understatPlayerSeasons.sourceName,
+        position: understatPlayerSeasons.position,
+      })
+      .from(understatPlayerSeasons)
+      .where(eq(understatPlayerSeasons.seasonCode, season)),
+    fplSeasonDataRepository.findPlayers(season),
+    fplSeasonDataRepository.findFixtures(season),
+    db
+      .select({
+        entityType: providerEntityAliases.entityType,
+        provider: providerEntityAliases.provider,
+        providerEntityId: providerEntityAliases.providerEntityId,
+        alias: providerEntityAliases.alias,
+        source: providerEntityAliases.source,
+      })
+      .from(providerEntityAliases)
+      .where(eq(providerEntityAliases.entityType, 'player')),
+  ]);
   const teamMap = verifiedTeamMap(entityLinks, season);
   const verifiedPlayerPairsByFpl = new Map<number, Set<number>>();
   for (const link of entityLinks) {
@@ -986,8 +1005,14 @@ async function collectProviderPlayerEvidence(
     }));
   const fplByCode = new Map<number, FplFixturePlayerEvidence>();
   for (const row of normalizedFpl) fplByCode.set(row.playerCode, row);
+  const fplPlayerByCode = new Map(fplPlayers.map((player) => [player.playerCode, player] as const));
   const understatById = new Map<number, UnderstatRosterEvidence>();
   for (const row of understatRows) understatById.set(row.playerId, row);
+  const understatSeasonById = new Map(
+    understatSeasonRows.map(
+      (row) => [row.playerId, { name: row.name, position: row.position }] as const,
+    ),
+  );
   const candidatesByPlayer = new Map<number, Set<number>>();
   const evidenceCount = new Map<number, number>();
   const observationsByPair = new Map<string, Set<number>>();
@@ -1050,8 +1075,10 @@ async function collectProviderPlayerEvidence(
     entityLinks,
     fplRows: normalizedFpl,
     understatRows,
+    understatSeasonById,
     fplPlayers,
     fplByCode,
+    fplPlayerByCode,
     understatById,
     candidatesByPlayer,
     evidenceCount,
@@ -1089,9 +1116,10 @@ function quarantinedPlayerLinkHasSeasonEvidence(
   // actually encountered during this audit, so do not hide those links from
   // recovery merely because their historical range is stale.
   return (
-    snapshot.understatRows.some((row) => row.playerId === understatPlayerId) &&
+    (snapshot.understatRows.some((row) => row.playerId === understatPlayerId) ||
+      snapshot.understatSeasonById.has(understatPlayerId)) &&
     (snapshot.fplRows.some((row) => row.playerCode === fplPlayerCode) ||
-      snapshot.fplPlayers.some((row) => row.playerCode === fplPlayerCode))
+      snapshot.fplPlayerByCode.has(fplPlayerCode))
   );
 }
 
@@ -1407,8 +1435,15 @@ export async function inspectQuarantinedProviderPlayers(
         understatName:
           understatPlayerId === null
             ? null
-            : (snapshot.understatById.get(understatPlayerId)?.name ?? null),
-        fplName: snapshot.fplByCode.get(fplPlayerCode)?.name ?? null,
+            : (snapshot.understatById.get(understatPlayerId)?.name ??
+              snapshot.understatSeasonById.get(understatPlayerId)?.name ??
+              null),
+        fplName:
+          snapshot.fplByCode.get(fplPlayerCode)?.name ??
+          (() => {
+            const player = snapshot.fplPlayerByCode.get(fplPlayerCode);
+            return player ? fplName(player) : null;
+          })(),
         originalStatus: link.status,
         sourceEvidenceHash: contentHash(link.evidence),
         priorConfirmedSeasons: priorConfirmedSeasons(link, season),

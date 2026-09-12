@@ -291,9 +291,11 @@ It emits a JSON report that classifies current-season quarantined links as `reco
 approval list containing each report item's `linkId`, `understatPlayerId`, `fplPlayerCode`, and
 `evidenceHash` values. The hash binds approval to the report snapshot:
 
-The audit includes a quarantined pair when current-season Understat and FPL player evidence exists,
-even if an older status update left the link's `firstSeenSeason`/`lastSeenSeason` range behind the
-season being audited.
+The audit includes a quarantined pair when current-season Understat player-season or membership
+evidence and an FPL season player exist, even if an older status update left the link's
+`firstSeenSeason`/`lastSeenSeason` range behind the season being audited. Result-match roster rows
+remain the separate evidence required to classify a pair as recoverable; a season member without
+those rows is reported as insufficient evidence instead of being omitted.
 
 ```bash
 bun run understat:mapping-recovery --season 2627 --apply --approved-file approved.json

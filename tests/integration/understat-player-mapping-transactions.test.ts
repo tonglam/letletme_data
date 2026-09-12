@@ -44,8 +44,11 @@ const fplFixtureIds = [baseId + 11, baseId + 12];
 const fplFixtureCodes = [baseId + 13, baseId + 14];
 const understatPlayerIds = Array.from({ length: 22 }, (_, index) => baseId + 100 + index);
 const targetUnderstatPlayerId = understatPlayerIds[0]!;
+const seasonOnlyUnderstatPlayerId = baseId + 500;
 const targetFplElementId = baseId + 200;
 const targetFplCode = baseId + 201;
+const seasonOnlyFplElementId = baseId + 202;
+const seasonOnlyFplCode = baseId + 203;
 const now = new Date('2100-08-08T12:00:00.000Z');
 const observer = postgres(process.env.DATABASE_URL!, { max: 1 });
 const entityLinkIds: string[] = [];
@@ -81,7 +84,10 @@ async function cleanup(): Promise<void> {
   await db
     .delete(playersInFpl)
     .where(
-      and(eq(playersInFpl.seasonId, seasonId), eq(playersInFpl.elementId, targetFplElementId)),
+      and(
+        eq(playersInFpl.seasonId, seasonId),
+        inArray(playersInFpl.elementId, [targetFplElementId, seasonOnlyFplElementId]),
+      ),
     );
   await db
     .delete(teamsInFpl)
@@ -99,12 +105,17 @@ async function cleanup(): Promise<void> {
     .where(
       and(
         eq(playerSeasonsInUnderstat.seasonCode, season),
-        eq(playerSeasonsInUnderstat.playerId, targetUnderstatPlayerId),
+        inArray(playerSeasonsInUnderstat.playerId, [
+          targetUnderstatPlayerId,
+          seasonOnlyUnderstatPlayerId,
+        ]),
       ),
     );
   await db
     .delete(playersInUnderstat)
-    .where(inArray(playersInUnderstat.playerId, understatPlayerIds));
+    .where(
+      inArray(playersInUnderstat.playerId, [...understatPlayerIds, seasonOnlyUnderstatPlayerId]),
+    );
   await db.delete(matchesInUnderstat).where(inArray(matchesInUnderstat.matchId, understatMatchIds));
   await db.delete(teamsInUnderstat).where(inArray(teamsInUnderstat.teamId, understatTeamIds));
   await db.delete(seasonsInUnderstat).where(eq(seasonsInUnderstat.seasonCode, season));
@@ -115,7 +126,9 @@ async function cleanup(): Promise<void> {
         eq(entityAliasesInBridge.entityType, 'player'),
         inArray(entityAliasesInBridge.providerEntityId, [
           String(targetUnderstatPlayerId),
+          String(seasonOnlyUnderstatPlayerId),
           String(targetFplCode),
+          String(seasonOnlyFplCode),
         ]),
       ),
     );
@@ -145,37 +158,66 @@ async function seedGraph(): Promise<void> {
     })),
   );
   await db.insert(playersInUnderstat).values(
-    understatPlayerIds.map((playerId, index) => ({
+    [...understatPlayerIds, seasonOnlyUnderstatPlayerId].map((playerId, index) => ({
       playerId,
-      name: index === 0 ? 'Alexander Test' : `Transaction Player ${index}`,
+      name:
+        index === 0
+          ? 'Alexander Test'
+          : playerId === seasonOnlyUnderstatPlayerId
+            ? 'Season Only Example'
+            : `Transaction Player ${index}`,
       favoritePosition: null,
       firstSeenSeason: season,
       lastSeenSeason: season,
       sourceHash: hash({ playerId, season }),
     })),
   );
-  await db.insert(playerSeasonsInUnderstat).values({
-    seasonCode: season,
-    playerId: targetUnderstatPlayerId,
-    sourceName: 'Alexander Test',
-    sourceTeamTitle: 'Understat Transaction Team 0',
-    games: 2,
-    timeMinutes: 156,
-    goals: 1,
-    nonPenaltyGoals: 1,
-    assists: 0,
-    shots: 2,
-    keyPasses: 0,
-    yellowCards: 1,
-    redCards: 0,
-    xg: 0.8,
-    nonPenaltyXg: 0.8,
-    xa: 0.1,
-    xgChain: 0.9,
-    xgBuildup: 0.2,
-    position: 'FW',
-    sourceHash: hash({ targetUnderstatPlayerId, season }),
-  });
+  await db.insert(playerSeasonsInUnderstat).values([
+    {
+      seasonCode: season,
+      playerId: targetUnderstatPlayerId,
+      sourceName: 'Alexander Test',
+      sourceTeamTitle: 'Understat Transaction Team 0',
+      games: 2,
+      timeMinutes: 156,
+      goals: 1,
+      nonPenaltyGoals: 1,
+      assists: 0,
+      shots: 2,
+      keyPasses: 0,
+      yellowCards: 1,
+      redCards: 0,
+      xg: 0.8,
+      nonPenaltyXg: 0.8,
+      xa: 0.1,
+      xgChain: 0.9,
+      xgBuildup: 0.2,
+      position: 'FW',
+      sourceHash: hash({ targetUnderstatPlayerId, season }),
+    },
+    {
+      seasonCode: season,
+      playerId: seasonOnlyUnderstatPlayerId,
+      sourceName: 'Season Only Example',
+      sourceTeamTitle: 'Understat Transaction Team 0',
+      games: 0,
+      timeMinutes: 0,
+      goals: 0,
+      nonPenaltyGoals: 0,
+      assists: 0,
+      shots: 0,
+      keyPasses: 0,
+      yellowCards: 0,
+      redCards: 0,
+      xg: 0,
+      nonPenaltyXg: 0,
+      xa: 0,
+      xgChain: 0,
+      xgBuildup: 0,
+      position: 'FW',
+      sourceHash: hash({ seasonOnlyUnderstatPlayerId, season }),
+    },
+  ]);
   await db.insert(matchesInUnderstat).values(
     understatMatchIds.map((matchId, index) => ({
       matchId,
@@ -256,16 +298,28 @@ async function seedGraph(): Promise<void> {
       shortName: `FT${index}`,
     })),
   );
-  await db.insert(playersInFpl).values({
-    seasonId,
-    elementId: targetFplElementId,
-    code: targetFplCode,
-    elementType: 4,
-    teamId: fplTeamIds[0]!,
-    firstName: 'Alexander',
-    secondName: 'Test',
-    webName: 'Test',
-  });
+  await db.insert(playersInFpl).values([
+    {
+      seasonId,
+      elementId: targetFplElementId,
+      code: targetFplCode,
+      elementType: 4,
+      teamId: fplTeamIds[0]!,
+      firstName: 'Alexander',
+      secondName: 'Test',
+      webName: 'Test',
+    },
+    {
+      seasonId,
+      elementId: seasonOnlyFplElementId,
+      code: seasonOnlyFplCode,
+      elementType: 4,
+      teamId: fplTeamIds[0]!,
+      firstName: 'Season Only',
+      secondName: 'Example',
+      webName: 'Example',
+    },
+  ]);
   await db.insert(fixturesInFpl).values(
     fplFixtureIds.map((fixtureId, index) => ({
       seasonId,
@@ -346,6 +400,19 @@ async function seedGraph(): Promise<void> {
     evidence: { confirmedSeasons: ['8999'] },
   });
   entityLinkIds.push(playerLink.id);
+  const seasonOnlyPlayerLink = await providerIdentityRepository.upsertEntityLink({
+    entityType: 'player',
+    leftProvider: 'understat',
+    leftEntityId: String(seasonOnlyUnderstatPlayerId),
+    rightProvider: 'fpl',
+    rightEntityId: String(seasonOnlyFplCode),
+    status: 'quarantined',
+    method: 'integration-test-quarantine',
+    ruleId: 'integration-test-player',
+    season,
+    evidence: { confirmedSeasons: ['8999'] },
+  });
+  entityLinkIds.push(seasonOnlyPlayerLink.id);
 }
 
 beforeAll(seedGraph);
@@ -362,7 +429,7 @@ test('keeps verified identity across stat differences and applies recovery insid
   const [confirmed] = await db
     .select({ status: providerEntityLinks.status, evidence: providerEntityLinks.evidence })
     .from(providerEntityLinks)
-    .where(eq(providerEntityLinks.linkId, entityLinkIds.at(-1)!));
+    .where(eq(providerEntityLinks.linkId, entityLinkIds.at(-2)!));
   expect(confirmed?.status).toBe('auto_verified');
   expect((confirmed?.evidence as { confirmedSeasons?: string[] }).confirmedSeasons).toContain(
     season,
@@ -371,23 +438,28 @@ test('keeps verified identity across stat differences and applies recovery insid
   await db
     .update(providerEntityLinks)
     .set({ status: 'quarantined', firstSeenSeason: '2526', lastSeenSeason: '2526' })
-    .where(eq(providerEntityLinks.linkId, entityLinkIds.at(-1)!));
+    .where(inArray(providerEntityLinks.linkId, [entityLinkIds.at(-2)!, entityLinkIds.at(-1)!]));
   const report = await inspectQuarantinedProviderPlayers(season);
   const item = report.items.find((candidate) => candidate.linkId === entityLinkIds.at(-1));
-  expect(item?.disposition).toBe('recoverable');
-  expect(item?.observedMatchIds).toHaveLength(2);
+  expect(item?.fplName).toBe('Season Only Example');
+  expect(item?.understatName).toBe('Season Only Example');
+  expect(item?.disposition).toBe('insufficient_evidence');
+  expect(item?.reasonCodes).toContain('OBSERVED_MATCHES_BELOW_MINIMUM');
+  const targetItem = report.items.find((candidate) => candidate.linkId === entityLinkIds.at(-2));
+  expect(targetItem?.disposition).toBe('recoverable');
+  expect(targetItem?.observedMatchIds).toHaveLength(2);
 
   const staleApproval = await restoreQuarantinedProviderPlayers(season, [
     {
-      linkId: item!.linkId,
-      understatPlayerId: item!.understatPlayerId!,
-      fplPlayerCode: item!.fplPlayerCode,
+      linkId: targetItem!.linkId,
+      understatPlayerId: targetItem!.understatPlayerId!,
+      fplPlayerCode: targetItem!.fplPlayerCode,
       evidenceHash: '0'.repeat(64),
     },
   ]);
   expect(staleApproval.applied).toEqual([]);
   expect(staleApproval.skipped).toEqual([
-    { linkId: item!.linkId, reason: 'APPROVAL_NO_LONGER_MATCHES_REPORT' },
+    { linkId: targetItem!.linkId, reason: 'APPROVAL_NO_LONGER_MATCHES_REPORT' },
   ]);
 
   let lockObserved = false;
@@ -415,17 +487,17 @@ test('keeps verified identity across stat differences and applies recovery insid
   try {
     applied = await restoreQuarantinedProviderPlayers(season, [
       {
-        linkId: item!.linkId,
-        understatPlayerId: item!.understatPlayerId!,
-        fplPlayerCode: item!.fplPlayerCode,
-        evidenceHash: item!.evidenceHash,
+        linkId: targetItem!.linkId,
+        understatPlayerId: targetItem!.understatPlayerId!,
+        fplPlayerCode: targetItem!.fplPlayerCode,
+        evidenceHash: targetItem!.evidenceHash,
       },
     ]);
   } finally {
     upsertSpy.mockRestore();
   }
   expect(lockObserved).toBe(true);
-  expect(applied.applied).toEqual([item!.linkId]);
+  expect(applied.applied).toEqual([targetItem!.linkId]);
   expect(applied.skipped).toEqual([]);
   const [restored] = await db
     .select({
@@ -434,7 +506,7 @@ test('keeps verified identity across stat differences and applies recovery insid
       evidence: providerEntityLinks.evidence,
     })
     .from(providerEntityLinks)
-    .where(eq(providerEntityLinks.linkId, item!.linkId));
+    .where(eq(providerEntityLinks.linkId, targetItem!.linkId));
   expect(restored?.status).toBe('auto_verified');
   expect(restored?.method).toBe('verified-match-roster-recovery');
   expect((restored?.evidence as { confirmedSeasons?: string[] }).confirmedSeasons).toEqual([
@@ -466,12 +538,14 @@ test('keeps verified identity across stat differences and applies recovery insid
 
   const repeated = await restoreQuarantinedProviderPlayers(season, [
     {
-      linkId: item!.linkId,
-      understatPlayerId: item!.understatPlayerId!,
-      fplPlayerCode: item!.fplPlayerCode,
-      evidenceHash: item!.evidenceHash,
+      linkId: targetItem!.linkId,
+      understatPlayerId: targetItem!.understatPlayerId!,
+      fplPlayerCode: targetItem!.fplPlayerCode,
+      evidenceHash: targetItem!.evidenceHash,
     },
   ]);
   expect(repeated.applied).toEqual([]);
-  expect(repeated.skipped).toEqual([{ linkId: item!.linkId, reason: 'NOT_CURRENTLY_QUARANTINED' }]);
+  expect(repeated.skipped).toEqual([
+    { linkId: targetItem!.linkId, reason: 'NOT_CURRENTLY_QUARANTINED' },
+  ]);
 });
