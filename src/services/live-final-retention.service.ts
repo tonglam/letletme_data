@@ -82,7 +82,6 @@ import { logError, logInfo } from '../utils/logger';
 import {
   buildFinalEntryLiveInputFromBaseAndResult,
   checkpointEntryLiveInputV2,
-  entryLiveFinalResultCheckpointHash,
   entryLivePicksBaseCheckpointHash,
 } from './entries.service';
 import {
@@ -816,11 +815,12 @@ async function processEntryHead(
       dataCheckedAt,
     );
     // picksBase.revision identifies the deadline-time input. contentSha256
-    // independently identifies the durable rows, whose multipliers may have
-    // changed at finalization. Never compare those two granular identities.
+    // independently identifies the preserved durable rows, whose multipliers
+    // may have changed at finalization. Validate the base rows here; the FINAL
+    // result hash intentionally describes the adjusted response instead.
     if (
       !finalInput ||
-      entryLiveFinalResultCheckpointHash(finalInput) !== head.contentSha256 ||
+      entryLivePicksBaseCheckpointHash(finalInput) !== head.contentSha256 ||
       !durableResult.richSyncedAt
     ) {
       family.failed += 1;

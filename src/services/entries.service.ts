@@ -1378,9 +1378,29 @@ export async function rebuildFinalEntryLiveInputsV2(
         redis,
       });
       if (
-        publication.published &&
-        publication.publication.state === 'FINAL' &&
-        publication.publication.entryId === entryId
+        publication.publication.state !== 'FINAL' ||
+        publication.publication.entryId !== entryId
+      ) {
+        continue;
+      }
+      if (publication.published) {
+        rebuilt += 1;
+        continue;
+      }
+      // A prior attempt may have promoted this exact FINAL and crashed before
+      // checkpointing it. The CAS returns the immutable current publication
+      // as `published: false`; accept it only after reading the current item
+      // and proving that its complete input is the same candidate.
+      const current = await readEntryLiveInputV2(
+        { season: season.seasonCode, eventId, entryId },
+        redis,
+      );
+      if (
+        current?.servedFrom === 'REDIS_CURRENT' &&
+        current.publication.state === 'FINAL' &&
+        current.publication.publicationId === publication.publication.publicationId &&
+        current.publication.generation === publication.publication.generation &&
+        contentHash(current.input) === contentHash(input)
       ) {
         rebuilt += 1;
       }

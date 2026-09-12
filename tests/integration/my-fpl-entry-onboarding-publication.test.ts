@@ -27,6 +27,7 @@ import {
   checkpointFinalEntryFromProviderResponse,
   checkpointEntryLiveInputV2,
   hasFinalEntryCheckpoint,
+  rebuildFinalEntryLiveInputsV2,
 } from '../../src/services/entries.service';
 import { getDbClient } from '../../src/db/singleton';
 import {
@@ -808,6 +809,9 @@ test('historical result with no durable input or Redis pointer gains one idempot
   expect(restored?.publication.state).toBe('FINAL');
   expect(restored?.input.finalResult?.score).toEqual({ eventPoints: 67, totalPoints: 67 });
   expect(restored?.publication.checkpointedAt).not.toBeNull();
+  // A recovery attempt can stop after Redis promotion but before its durable
+  // checkpoint. A retry must accept the matching immutable FINAL as progress.
+  expect(await rebuildFinalEntryLiveInputsV2(SEASON, EVENT_ID, [ENTRY_IDS[0]], boundary)).toBe(1);
   expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).size).toBe(0);
   // Cache loss followed by a fresh provisional publication cannot downgrade durable FINAL.
   await redis.unlink(entryLiveV2Key(scope, 'active'), entryLiveV2Key(scope, 'previous'));
@@ -1063,15 +1067,30 @@ test('historical recovery preserves a durable provisional base and advances an o
       })
     ).size,
   ).toBe(0);
+  const currentFinal = await readEntryLiveInputV2(scope);
+  expect(currentFinal?.publication.state).toBe('FINAL');
+  const currentSource = currentFinal!.publication.sourceCheckedAt;
+  const currentDate = new Date(currentSource);
+  const exactCorrectionBoundary = `${currentSource.slice(0, 19)}.${String(
+    currentDate.getUTCMilliseconds(),
+  ).padStart(3, '0')}500Z`;
+  const microsecondAdvance = await publishEntryLiveInputV2({
+    ...scope,
+    input: currentFinal!.input,
+    sourceCheckedAt: new Date(currentDate.getTime() + 1).toISOString(),
+    generationFloor: currentFinal!.publication.generation,
+    finalizationCorrectionBoundary: exactCorrectionBoundary,
+  });
+  expect(microsecondAdvance.published).toBe(true);
   const refused = await publishEntryLiveInputV2({
     ...scope,
     input: adjusted,
     sourceCheckedAt: new Date(observed.getTime() + 1000),
-    generationFloor: refreshed!.publication.generation,
+    generationFloor: microsecondAdvance.publication.generation,
     finalizationCorrectionBoundary: new Date(observed.getTime() + 500),
   });
   expect(refused.published).toBe(false);
   expect((await readEntryLiveInputV2(scope))?.publication.publicationId).toBe(
-    refreshed!.publication.publicationId,
+    microsecondAdvance.publication.publicationId,
   );
 });
