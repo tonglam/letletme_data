@@ -3,8 +3,11 @@ import { describe, expect, test } from 'bun:test';
 import {
   candidatesWithMinimumMatchObservations,
   fixtureOutcomeEvidenceAligns,
+  hasCompleteRosterEvidence,
   hasUnderstatFixtureParticipation,
+  normalizeProviderPlayerName,
   isAutoMappingProtectedStatus,
+  providerPlayerNamesMatch,
   providerTeamConfirmedForSeason,
   resolveUniqueProviderAssignments,
   rosterEvidenceAligns,
@@ -42,7 +45,7 @@ const understat = {
   ownGoals: 0,
   yellowCards: 1,
   redCards: 0,
-  name: 'Completely Different Name',
+  name: 'Benjamin Example',
 };
 
 describe('provider roster matcher', () => {
@@ -125,20 +128,82 @@ describe('provider roster matcher', () => {
     ).toBe(false);
   });
 
-  test('uses provider evidence rather than names, with assists only auxiliary', () => {
+  test('uses exact names and mapped teams while allowing provider stat differences', () => {
     expect(rosterEvidenceAligns(fpl, understat, 3)).toBe(true);
-    expect(rosterEvidenceAligns(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
+    expect(rosterEvidenceAligns(fpl, { ...understat, redCards: 1, minutes: 92 }, 3)).toBe(true);
     expect(rosterEvidenceAligns(fpl, understat, 4)).toBe(false);
-    expect(rosterEvidenceAligns({ ...fpl, starts: null }, understat, 3)).toBe(true);
+    expect(rosterEvidenceAligns(fpl, { ...understat, name: 'Different Example' }, 3)).toBe(false);
     expect(
-      rosterEvidenceAligns({ ...fpl, starts: null }, { ...understat, started: false }, 3),
+      rosterEvidenceAligns({ ...fpl, name: 'Example' }, { ...understat, name: 'Example' }, 3),
+    ).toBe(false);
+  });
+
+  test('keeps all provider statistics source-specific during fixture verification', () => {
+    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 3)).toBe(true);
+    expect(
+      fixtureOutcomeEvidenceAligns(
+        { ...fpl, minutes: 63, goals: 2, yellowCards: 1 },
+        { ...understat, minutes: 66, goals: 1, redCards: 1 },
+        3,
+      ),
+    ).toBe(true);
+    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 4)).toBe(false);
+  });
+
+  test('accepts Isak-style minute and position differences with an exact name', () => {
+    expect(
+      rosterEvidenceAligns(
+        { ...fpl, name: 'Alexander Isak', elementType: 4, teamCode: 14, minutes: 63 },
+        { ...understat, name: 'Alexander Isak', position: 'FW', minutes: 66 },
+        14,
+      ),
     ).toBe(true);
   });
 
-  test('keeps assists auxiliary during manual fixture verification', () => {
-    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 3)).toBe(true);
-    expect(fixtureOutcomeEvidenceAligns(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
-    expect(fixtureOutcomeEvidenceAligns(fpl, understat, 4)).toBe(false);
+  test('requires both complete starting elevens before using a match as identity evidence', () => {
+    const starters = [
+      ...Array.from({ length: 11 }, (_, index) => ({ teamId: 1, started: true, playerId: index })),
+      ...Array.from({ length: 11 }, (_, index) => ({
+        teamId: 2,
+        started: true,
+        playerId: index + 11,
+      })),
+    ];
+    expect(hasCompleteRosterEvidence(starters)).toBe(true);
+    expect(hasCompleteRosterEvidence(starters.slice(1))).toBe(false);
+    expect(hasCompleteRosterEvidence([...starters, { teamId: 3, started: true }])).toBe(false);
+    expect(
+      hasCompleteRosterEvidence(
+        starters.map((row, index) => (index === 1 ? { ...row, playerId: 0 } : row)),
+      ),
+    ).toBe(false);
+  });
+
+  test('normalizes full names and accepts only explicit trusted aliases', () => {
+    expect(normalizeProviderPlayerName('  Álex.  Isak ')).toBe('alex isak');
+    expect(providerPlayerNamesMatch('Alexander Isak', 'alexander isak')).toBe(true);
+    expect(providerPlayerNamesMatch('Alexander Isak', 'Isak')).toBe(false);
+    expect(
+      providerPlayerNamesMatch('Alexander Isak', 'Alex Isaksson', {
+        fpl: ['Alex Isaksson'],
+        understat: [],
+      }),
+    ).toBe(true);
+    expect(
+      providerPlayerNamesMatch('Alexander Isak', 'Alexander Isaksson', {
+        fpl: [],
+        understat: [],
+      }),
+    ).toBe(false);
+    expect(rosterEvidenceAligns({ ...fpl, name: 'Isak', nameAvailable: false }, understat, 3)).toBe(
+      false,
+    );
+    expect(
+      rosterEvidenceAligns({ ...fpl, name: 'Isak', nameAvailable: false }, understat, 3, {
+        fpl: ['Benjamin Example'],
+        understat: [],
+      }),
+    ).toBe(true);
   });
 
   test('ignores only a true zero-participation Understat bench row', () => {

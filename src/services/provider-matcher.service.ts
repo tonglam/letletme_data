@@ -1,6 +1,7 @@
 import { and, eq, sql } from 'drizzle-orm';
 
 import {
+  entityAliasesInBridge as providerEntityAliases,
   matchesInUnderstat as understatMatches,
   playersInUnderstat as understatPlayers,
   playerMatchStatsInUnderstat as understatPlayerMatchStats,
@@ -16,11 +17,16 @@ import {
 } from '../domain/provider-identity';
 import { providerIdentityRepository } from '../repositories/provider-identity';
 import { fplSeasonDataRepository } from '../repositories/fpl-season-data';
+import { contentHash } from '../utils/content-hash';
+import { withMutationScopes } from '../utils/mutation-scopes';
 
 const TEAM_RULE_ID = 'understat-fpl-team-season-confirmation';
 const MATCH_RULE_ID = 'understat-fpl-match-kickoff-score';
 export const PLAYER_RULE_ID = 'understat-fpl-player-roster-evidence';
+export const PLAYER_RECOVERY_RULE_ID = 'understat-fpl-player-roster-recovery-v1';
 const VERIFIED_STATUSES = ['auto_verified', 'manual_verified'] as const;
+const MIN_PLAYER_MAPPING_OBSERVATIONS = 2;
+const TRUSTED_PLAYER_ALIAS_SOURCES = new Set(['manual-season-confirmation']);
 
 export function isAutoMappingProtectedStatus(status: ProviderLinkStatus): boolean {
   return isVerifiedProviderLinkStatus(status) || status === 'quarantined' || status === 'rejected';
@@ -68,6 +74,51 @@ type UnderstatFixtureOutcomeEvidence = Pick<
   'teamId' | 'minutes' | 'started' | 'goals' | 'ownGoals' | 'yellowCards' | 'redCards'
 >;
 
+export type ProviderPlayerNameAliases = Readonly<{
+  fpl: readonly string[];
+  understat: readonly string[];
+}>;
+
+export type UnderstatPlayerMappingRecoveryDisposition =
+  | 'recoverable'
+  | 'identity_conflict'
+  | 'insufficient_evidence'
+  | 'manual_review';
+
+export type UnderstatPlayerMappingRecoveryItem = Readonly<{
+  linkId: string;
+  understatPlayerId: number | null;
+  fplPlayerCode: number;
+  understatName: string | null;
+  fplName: string | null;
+  originalStatus: ProviderLinkStatus;
+  evidenceHash: string;
+  priorConfirmedSeasons: readonly string[];
+  observedMatchIds: readonly number[];
+  fixtureCodes: readonly number[];
+  disposition: UnderstatPlayerMappingRecoveryDisposition;
+  reasonCodes: readonly string[];
+}>;
+
+export type UnderstatPlayerMappingRecoveryReport = Readonly<{
+  season: string;
+  generatedAt: string;
+  items: readonly UnderstatPlayerMappingRecoveryItem[];
+  summary: Readonly<Record<UnderstatPlayerMappingRecoveryDisposition, number>>;
+}>;
+
+export type UnderstatPlayerMappingRecoveryApproval = Readonly<{
+  linkId: string;
+  understatPlayerId: number;
+  fplPlayerCode: number;
+}>;
+
+export type UnderstatPlayerMappingRecoveryApplyResult = Readonly<{
+  season: string;
+  applied: readonly string[];
+  skipped: readonly Readonly<{ linkId: string; reason: string }>[];
+}>;
+
 /** Ignore a completed-match roster row only when it proves no participation. */
 export function hasUnderstatFixtureParticipation(
   row: Pick<
@@ -98,49 +149,70 @@ function fplName(row: {
   );
 }
 
-function understatPositionTypes(position: string, seasonPosition: string | null): Set<number> {
-  const source = position === 'Sub' ? (seasonPosition ?? '') : position;
-  const result = new Set<number>();
-  if (source.includes('GK')) result.add(1);
-  if (/(^|\s|,|\/)(D|DC|DL|DR|DM)/.test(source) || /D[CLRMC]/.test(source)) result.add(2);
-  if (/(^|\s|,|\/)(M|MC|ML|MR|AM)/.test(source) || /[AD]?M[CLR]?/.test(source)) {
-    result.add(3);
-  }
-  if (/(^|\s|,|\/)(F|FW|ST)/.test(source) || source.includes('FW')) result.add(4);
-  return result;
+function fplHasFullName(row: { firstName: string | null; secondName: string | null }): boolean {
+  return Boolean(row.firstName?.trim() && row.secondName?.trim());
+}
+
+/**
+ * Normalize provider names for deterministic identity comparisons. This is
+ * deliberately conservative: it removes presentation differences while
+ * refusing fuzzy, surname-only, or substring matches.
+ */
+export function normalizeProviderPlayerName(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/\p{Mark}/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function normalizedNames(values: readonly string[]): Set<string> {
+  return new Set(values.map(normalizeProviderPlayerName).filter(Boolean));
+}
+
+function hasProviderFullName(value: string): boolean {
+  return normalizeProviderPlayerName(value).split(' ').filter(Boolean).length >= 2;
+}
+
+/** Match full names or a manually confirmed provider alias exactly. */
+export function providerPlayerNamesMatch(
+  fplNameValue: string,
+  understatNameValue: string,
+  aliases: ProviderPlayerNameAliases = { fpl: [], understat: [] },
+): boolean {
+  const fplNames = normalizedNames([fplNameValue, ...aliases.fpl]);
+  const understatNames = normalizedNames([understatNameValue, ...aliases.understat]);
+  return [...fplNames].some((name) => understatNames.has(name));
 }
 
 export function rosterEvidenceAligns(
   fpl: FplFixturePlayerEvidence,
   understat: UnderstatRosterEvidence,
   mappedTeamCode: number | undefined,
+  aliases: ProviderPlayerNameAliases = { fpl: [], understat: [] },
 ): boolean {
+  const trustedAliasNames = normalizedNames([...aliases.fpl, ...aliases.understat]);
   return (
-    understatPositionTypes(understat.position, understat.seasonPosition).has(fpl.elementType) &&
-    fixtureOutcomeEvidenceAligns(fpl, understat, mappedTeamCode)
+    fixtureOutcomeEvidenceAligns(fpl, understat, mappedTeamCode) &&
+    ((fpl.nameAvailable && hasProviderFullName(fpl.name)) || trustedAliasNames.size > 0) &&
+    providerPlayerNamesMatch(fpl.name, understat.name, aliases)
   );
 }
 
 /**
- * Compare fixture-grain facts shared by automatic and manual player mapping.
- * Assists are deliberately auxiliary because FPL and Understat can attribute
- * the same goal differently; identity still requires team, participation,
- * goals, own goals and card evidence to agree.
+ * Compare only the fixture relationship needed for identity evidence. The
+ * providers own their statistical interpretations; differences in minutes,
+ * starts, position, goals, assists, or cards must never quarantine an
+ * otherwise supported identity.
  */
 export function fixtureOutcomeEvidenceAligns(
   fpl: FplFixtureOutcomeEvidence,
   understat: UnderstatFixtureOutcomeEvidence,
   mappedTeamCode: number | undefined,
 ): boolean {
-  return (
-    mappedTeamCode === fpl.teamCode &&
-    (fpl.starts === null || understat.started === fpl.starts > 0) &&
-    Math.abs(understat.minutes - fpl.minutes) <= 2 &&
-    understat.goals === fpl.goals &&
-    understat.ownGoals === fpl.ownGoals &&
-    understat.yellowCards === fpl.yellowCards &&
-    understat.redCards === fpl.redCards
-  );
+  return mappedTeamCode === fpl.teamCode;
 }
 
 export function resolveUniqueProviderAssignments(
@@ -352,7 +424,8 @@ export async function manualVerifyProviderTeam(input: {
  * Confirm one exact provider-player mapping from a reviewer-approved season.
  * This is intentionally separate from the automatic reconcile pass: a manual
  * confirmation must prove the selected season, team, verified match links,
- * and fixture-grain statistics before it can change a quarantined candidate.
+ * and complete-match roster evidence before it can change a quarantined
+ * candidate. Provider statistics remain source-specific and are not compared.
  */
 export async function manualVerifyProviderPlayer(input: {
   season: string;
@@ -361,58 +434,81 @@ export async function manualVerifyProviderPlayer(input: {
   reviewedBy: string;
 }) {
   const db = await getDb();
-  const [understatSeason, fplPlayer, understatEvidence, fplEvidence, entityLinks, matchLinks] =
-    await Promise.all([
-      db
-        .select({
-          playerId: understatPlayerSeasons.playerId,
-          sourceName: understatPlayerSeasons.sourceName,
-          sourceTeamTitle: understatPlayerSeasons.sourceTeamTitle,
-          timeMinutes: understatPlayerSeasons.timeMinutes,
-          position: understatPlayerSeasons.position,
-        })
-        .from(understatPlayerSeasons)
-        .where(
-          and(
-            eq(understatPlayerSeasons.seasonCode, input.season),
-            eq(understatPlayerSeasons.playerId, input.understatPlayerId),
-          ),
-        )
-        .limit(1),
-      fplSeasonDataRepository
-        .findPlayers(input.season)
-        .then((players) => players.find((player) => player.playerCode === input.fplPlayerCode)),
-      db
-        .select({
-          matchId: understatPlayerMatchStats.matchId,
-          teamId: understatPlayerMatchStats.teamId,
-          minutes: understatPlayerMatchStats.minutes,
-          started: understatPlayerMatchStats.started,
-          goals: understatPlayerMatchStats.goals,
-          assists: understatPlayerMatchStats.assists,
-          ownGoals: understatPlayerMatchStats.ownGoals,
-          yellowCards: understatPlayerMatchStats.yellowCards,
-          redCards: understatPlayerMatchStats.redCards,
-        })
-        .from(understatPlayerMatchStats)
-        .innerJoin(
-          understatMatches,
-          eq(understatPlayerMatchStats.matchId, understatMatches.matchId),
-        )
-        .where(
-          and(
-            eq(understatPlayerMatchStats.playerId, input.understatPlayerId),
-            eq(understatMatches.seasonCode, input.season),
-            eq(understatMatches.isResult, true),
-          ),
+  const [
+    understatSeason,
+    fplPlayer,
+    understatEvidence,
+    understatRosterEvidence,
+    fplEvidence,
+    fplFixtures,
+    entityLinks,
+    matchLinks,
+  ] = await Promise.all([
+    db
+      .select({
+        playerId: understatPlayerSeasons.playerId,
+        sourceName: understatPlayerSeasons.sourceName,
+        sourceTeamTitle: understatPlayerSeasons.sourceTeamTitle,
+        timeMinutes: understatPlayerSeasons.timeMinutes,
+        position: understatPlayerSeasons.position,
+      })
+      .from(understatPlayerSeasons)
+      .where(
+        and(
+          eq(understatPlayerSeasons.seasonCode, input.season),
+          eq(understatPlayerSeasons.playerId, input.understatPlayerId),
         ),
-      fplSeasonDataRepository.findPlayerEvidence(input.season),
-      providerIdentityRepository.findEntityLinks(),
-      providerIdentityRepository.findMatchLinks({
-        season: input.season,
-        statuses: [...VERIFIED_STATUSES],
-      }),
-    ]);
+      )
+      .limit(1),
+    fplSeasonDataRepository
+      .findPlayers(input.season)
+      .then((players) => players.find((player) => player.playerCode === input.fplPlayerCode)),
+    db
+      .select({
+        matchId: understatPlayerMatchStats.matchId,
+        teamId: understatPlayerMatchStats.teamId,
+        minutes: understatPlayerMatchStats.minutes,
+        started: understatPlayerMatchStats.started,
+        goals: understatPlayerMatchStats.goals,
+        assists: understatPlayerMatchStats.assists,
+        ownGoals: understatPlayerMatchStats.ownGoals,
+        yellowCards: understatPlayerMatchStats.yellowCards,
+        redCards: understatPlayerMatchStats.redCards,
+      })
+      .from(understatPlayerMatchStats)
+      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.matchId))
+      .where(
+        and(
+          eq(understatPlayerMatchStats.playerId, input.understatPlayerId),
+          eq(understatMatches.seasonCode, input.season),
+          eq(understatMatches.isResult, true),
+        ),
+      ),
+    db
+      .select({
+        matchId: understatPlayerMatchStats.matchId,
+        teamId: understatPlayerMatchStats.teamId,
+        started: understatPlayerMatchStats.started,
+        minutes: understatPlayerMatchStats.minutes,
+        goals: understatPlayerMatchStats.goals,
+        assists: understatPlayerMatchStats.assists,
+        ownGoals: understatPlayerMatchStats.ownGoals,
+        yellowCards: understatPlayerMatchStats.yellowCards,
+        redCards: understatPlayerMatchStats.redCards,
+      })
+      .from(understatPlayerMatchStats)
+      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.matchId))
+      .where(
+        and(eq(understatMatches.seasonCode, input.season), eq(understatMatches.isResult, true)),
+      ),
+    fplSeasonDataRepository.findPlayerEvidence(input.season),
+    fplSeasonDataRepository.findFixtures(input.season),
+    providerIdentityRepository.findEntityLinks(),
+    providerIdentityRepository.findMatchLinks({
+      season: input.season,
+      statuses: [...VERIFIED_STATUSES],
+    }),
+  ]);
 
   const understatPlayer = understatSeason[0];
   if (!understatPlayer || understatPlayer.playerId !== input.understatPlayerId) {
@@ -433,6 +529,18 @@ export async function manualVerifyProviderPlayer(input: {
     )
   ) {
     throw new Error('Understat player minutes do not match fixture evidence');
+  }
+  const rosterByMatch = new Map<number, typeof understatRosterEvidence>();
+  for (const row of understatRosterEvidence) {
+    const current = rosterByMatch.get(row.matchId) ?? [];
+    current.push(row);
+    rosterByMatch.set(row.matchId, current);
+  }
+  for (const row of participatingUnderstatEvidence) {
+    const roster = rosterByMatch.get(row.matchId) ?? [];
+    if (!hasCompleteRosterEvidence(roster)) {
+      throw new Error(`Understat match ${row.matchId} does not have a complete roster`);
+    }
   }
 
   const verifiedEntityLinks = entityLinks.filter((link) =>
@@ -466,9 +574,15 @@ export async function manualVerifyProviderPlayer(input: {
       )
       .map((link) => [Number(link.leftMatchId), Number(link.rightMatchId)]),
   );
+  const completedFixtureCodes = new Set(
+    fplFixtures.filter((fixture) => fixture.finished).map((fixture) => fixture.fixtureCode),
+  );
   const fplRowsByFixture = new Map(
     fplEvidence
-      .filter((row) => row.playerCode === input.fplPlayerCode)
+      .filter(
+        (row) =>
+          row.playerCode === input.fplPlayerCode && completedFixtureCodes.has(row.fixtureCode),
+      )
       .map((row) => [row.fixtureCode, row]),
   );
   const evidence = participatingUnderstatEvidence.map((row) => {
@@ -634,93 +748,227 @@ function intersect(values: Set<number>, candidates: Set<number>): Set<number> {
   return new Set([...values].filter((value) => candidates.has(value)));
 }
 
-function hasCompleteRosterEvidence(rows: readonly UnderstatRosterEvidence[]): boolean {
+export function hasCompleteRosterEvidence(
+  rows: readonly Pick<UnderstatRosterEvidence, 'teamId' | 'started'>[],
+): boolean {
   const startsByTeam = new Map<number, number>();
+  const startedPlayerIdsByTeam = new Map<number, Set<number>>();
+  const startedPlayerIds = new Set<number>();
+  let playerIdsAvailable = true;
   for (const row of rows) {
     if (!row.started) continue;
     startsByTeam.set(row.teamId, (startsByTeam.get(row.teamId) ?? 0) + 1);
+    const playerId = (row as Partial<Pick<UnderstatRosterEvidence, 'playerId'>>).playerId;
+    if (typeof playerId !== 'number' || !Number.isSafeInteger(playerId)) {
+      playerIdsAvailable = false;
+      continue;
+    }
+    const teamPlayerIds = startedPlayerIdsByTeam.get(row.teamId) ?? new Set<number>();
+    teamPlayerIds.add(playerId);
+    startedPlayerIdsByTeam.set(row.teamId, teamPlayerIds);
+    startedPlayerIds.add(playerId);
   }
-  return startsByTeam.size >= 2 && [...startsByTeam.values()].every((count) => count >= 11);
+  if (startsByTeam.size !== 2 || ![...startsByTeam.values()].every((count) => count === 11)) {
+    return false;
+  }
+  const knownStartedPlayerCount = [...startedPlayerIdsByTeam.values()].reduce(
+    (total, playerIds) => total + playerIds.size,
+    0,
+  );
+  if (startedPlayerIds.size !== knownStartedPlayerCount) return false;
+  if (!playerIdsAvailable) return true;
+  return (
+    [...startedPlayerIdsByTeam.entries()].every(
+      ([teamId, playerIds]) => playerIds.size === startsByTeam.get(teamId),
+    ) &&
+    startedPlayerIds.size ===
+      [...startedPlayerIdsByTeam.values()].reduce((total, playerIds) => total + playerIds.size, 0)
+  );
 }
 
-export async function reconcileProviderPlayers(season: string) {
+type ProviderPlayerAliasRow = Readonly<{
+  entityType: string;
+  provider: string;
+  providerEntityId: string;
+  alias: string;
+  source: string;
+}>;
+
+type ProviderPlayerEvidenceSnapshot = Readonly<{
+  entityLinks: ProviderEntityLink[];
+  fplRows: FplFixturePlayerEvidence[];
+  understatRows: UnderstatRosterEvidence[];
+  fplPlayers: Awaited<ReturnType<typeof fplSeasonDataRepository.findPlayers>>;
+  fplByCode: Map<number, FplFixturePlayerEvidence>;
+  understatById: Map<number, UnderstatRosterEvidence>;
+  candidatesByPlayer: Map<number, Set<number>>;
+  evidenceCount: Map<number, number>;
+  observationsByPair: Map<string, Set<number>>;
+  fixtureCodesByPair: Map<string, Set<number>>;
+  multipleCandidatesByPlayer: Set<number>;
+}>;
+
+function aliasKey(provider: string, providerEntityId: string): string {
+  return `${provider}:${providerEntityId}`;
+}
+
+function trustedPlayerAliasIndex(rows: readonly ProviderPlayerAliasRow[]): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!TRUSTED_PLAYER_ALIAS_SOURCES.has(row.source)) continue;
+    const key = aliasKey(row.provider, row.providerEntityId);
+    const aliases = result.get(key) ?? [];
+    aliases.push(row.alias);
+    result.set(key, aliases);
+  }
+  return result;
+}
+
+async function collectProviderPlayerEvidence(
+  season: string,
+): Promise<ProviderPlayerEvidenceSnapshot> {
   const db = await getDb();
-  const [entityLinks, matchLinks, fplRows, understatRows, fplPlayers] = await Promise.all([
-    providerIdentityRepository.findEntityLinks(),
-    providerIdentityRepository.findMatchLinks({ season, statuses: [...VERIFIED_STATUSES] }),
-    fplSeasonDataRepository.findPlayerEvidence(season),
-    db
-      .select({
-        matchId: understatPlayerMatchStats.matchId,
-        playerId: understatPlayerMatchStats.playerId,
-        teamId: understatPlayerMatchStats.teamId,
-        position: understatPlayerMatchStats.position,
-        seasonPosition: understatPlayerSeasons.position,
-        minutes: understatPlayerMatchStats.minutes,
-        started: understatPlayerMatchStats.started,
-        goals: understatPlayerMatchStats.goals,
-        assists: understatPlayerMatchStats.assists,
-        ownGoals: understatPlayerMatchStats.ownGoals,
-        yellowCards: understatPlayerMatchStats.yellowCards,
-        redCards: understatPlayerMatchStats.redCards,
-        name: sql<string>`COALESCE(${understatPlayerSeasons.sourceName}, ${understatPlayers.name})`,
-      })
-      .from(understatPlayerMatchStats)
-      .innerJoin(
-        understatPlayers,
-        eq(understatPlayerMatchStats.playerId, understatPlayers.playerId),
-      )
-      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.matchId))
-      .leftJoin(
-        understatPlayerSeasons,
-        and(
-          eq(understatPlayerSeasons.playerId, understatPlayerMatchStats.playerId),
-          eq(understatPlayerSeasons.seasonCode, season),
-        ),
-      )
-      .where(eq(understatMatches.seasonCode, season)),
-    fplSeasonDataRepository.findPlayers(season),
-  ]);
+  const [entityLinks, matchLinks, fplRows, understatRows, fplPlayers, fplFixtures, aliasRows] =
+    await Promise.all([
+      providerIdentityRepository.findEntityLinks(),
+      providerIdentityRepository.findMatchLinks({ season, statuses: [...VERIFIED_STATUSES] }),
+      fplSeasonDataRepository.findPlayerEvidence(season),
+      db
+        .select({
+          matchId: understatPlayerMatchStats.matchId,
+          playerId: understatPlayerMatchStats.playerId,
+          teamId: understatPlayerMatchStats.teamId,
+          position: understatPlayerMatchStats.position,
+          seasonPosition: understatPlayerSeasons.position,
+          minutes: understatPlayerMatchStats.minutes,
+          started: understatPlayerMatchStats.started,
+          goals: understatPlayerMatchStats.goals,
+          assists: understatPlayerMatchStats.assists,
+          ownGoals: understatPlayerMatchStats.ownGoals,
+          yellowCards: understatPlayerMatchStats.yellowCards,
+          redCards: understatPlayerMatchStats.redCards,
+          name: sql<string>`COALESCE(${understatPlayerSeasons.sourceName}, ${understatPlayers.name})`,
+        })
+        .from(understatPlayerMatchStats)
+        .innerJoin(
+          understatPlayers,
+          eq(understatPlayerMatchStats.playerId, understatPlayers.playerId),
+        )
+        .innerJoin(
+          understatMatches,
+          eq(understatPlayerMatchStats.matchId, understatMatches.matchId),
+        )
+        .leftJoin(
+          understatPlayerSeasons,
+          and(
+            eq(understatPlayerSeasons.playerId, understatPlayerMatchStats.playerId),
+            eq(understatPlayerSeasons.seasonCode, season),
+          ),
+        )
+        .where(and(eq(understatMatches.seasonCode, season), eq(understatMatches.isResult, true))),
+      fplSeasonDataRepository.findPlayers(season),
+      fplSeasonDataRepository.findFixtures(season),
+      db
+        .select({
+          entityType: providerEntityAliases.entityType,
+          provider: providerEntityAliases.provider,
+          providerEntityId: providerEntityAliases.providerEntityId,
+          alias: providerEntityAliases.alias,
+          source: providerEntityAliases.source,
+        })
+        .from(providerEntityAliases)
+        .where(eq(providerEntityAliases.entityType, 'player')),
+    ]);
   const teamMap = verifiedTeamMap(entityLinks, season);
+  const verifiedPlayerPairsByFpl = new Map<number, Set<number>>();
+  for (const link of entityLinks) {
+    if (
+      link.entityType !== 'player' ||
+      link.leftProvider !== 'understat' ||
+      link.rightProvider !== 'fpl' ||
+      link.leftEntityId === null ||
+      !isVerifiedProviderLinkStatus(link.status)
+    ) {
+      continue;
+    }
+    const fplPlayerCode = Number(link.rightEntityId);
+    const understatPlayerId = Number(link.leftEntityId);
+    if (!Number.isSafeInteger(fplPlayerCode) || !Number.isSafeInteger(understatPlayerId)) continue;
+    const pairs = verifiedPlayerPairsByFpl.get(fplPlayerCode) ?? new Set<number>();
+    pairs.add(understatPlayerId);
+    verifiedPlayerPairsByFpl.set(fplPlayerCode, pairs);
+  }
   const matchMap = new Map(
     matchLinks
       .filter((link) => link.leftProvider === 'understat' && link.rightProvider === 'fpl')
       .map((link) => [Number(link.rightMatchId), Number(link.leftMatchId)]),
   );
+  const aliases = trustedPlayerAliasIndex(aliasRows);
   const rosterByMatch = new Map<number, UnderstatRosterEvidence[]>();
   for (const row of understatRows) {
     const current = rosterByMatch.get(row.matchId) ?? [];
     current.push(row);
     rosterByMatch.set(row.matchId, current);
   }
-  const normalizedFpl: FplFixturePlayerEvidence[] = fplRows.map((row) => ({
-    ...row,
-    name: fplName(row),
-    nameAvailable: Boolean(row.firstName || row.secondName || row.webName),
-  }));
+  const completedFixtureCodes = new Set(
+    fplFixtures.filter((fixture) => fixture.finished).map((fixture) => fixture.fixtureCode),
+  );
+  const normalizedFpl: FplFixturePlayerEvidence[] = fplRows
+    .filter((row) => completedFixtureCodes.has(row.fixtureCode))
+    .map((row) => ({
+      ...row,
+      name: fplName(row),
+      nameAvailable: fplHasFullName(row),
+    }));
+  const fplByCode = new Map<number, FplFixturePlayerEvidence>();
+  for (const row of normalizedFpl) fplByCode.set(row.playerCode, row);
+  const understatById = new Map<number, UnderstatRosterEvidence>();
+  for (const row of understatRows) understatById.set(row.playerId, row);
   const candidatesByPlayer = new Map<number, Set<number>>();
   const evidenceCount = new Map<number, number>();
   const observationsByPair = new Map<string, Set<number>>();
+  const fixtureCodesByPair = new Map<string, Set<number>>();
+  const multipleCandidatesByPlayer = new Set<number>();
   for (const fpl of normalizedFpl) {
     const matchId = matchMap.get(fpl.fixtureCode);
-    if (!matchId) continue;
+    if (matchId === undefined) continue;
     const roster = rosterByMatch.get(matchId);
     if (!roster || !hasCompleteRosterEvidence(roster)) continue;
-    let candidates = new Set(
+    // An existing verified ID pair is durable identity evidence. Once the
+    // mapped teams and complete result match are known, record the observation
+    // even when provider names or statistics differ. New pairs still use the
+    // strict name/alias candidate path below.
+    for (const understatPlayerId of verifiedPlayerPairsByFpl.get(fpl.playerCode) ?? []) {
+      const understat = roster.find((row) => row.playerId === understatPlayerId);
+      if (
+        !understat ||
+        !fixtureOutcomeEvidenceAligns(fpl, understat, teamMap.get(understat.teamId))
+      ) {
+        continue;
+      }
+      const key = `${fpl.playerCode}:${understatPlayerId}`;
+      const observedMatches = observationsByPair.get(key) ?? new Set<number>();
+      observedMatches.add(matchId);
+      observationsByPair.set(key, observedMatches);
+      const fixtureCodes = fixtureCodesByPair.get(key) ?? new Set<number>();
+      fixtureCodes.add(fpl.fixtureCode);
+      fixtureCodesByPair.set(key, fixtureCodes);
+    }
+    const candidates = new Set(
       roster
-        .filter((understat) => rosterEvidenceAligns(fpl, understat, teamMap.get(understat.teamId)))
+        .filter((understat) =>
+          rosterEvidenceAligns(fpl, understat, teamMap.get(understat.teamId), {
+            fpl: aliases.get(aliasKey('fpl', String(fpl.playerCode))) ?? [],
+            understat: aliases.get(aliasKey('understat', String(understat.playerId))) ?? [],
+          }),
+        )
         .map((understat) => understat.playerId),
     );
-    if (candidates.size > 1) {
-      const assistCandidates = new Set(
-        roster
-          .filter(
-            (understat) => candidates.has(understat.playerId) && understat.assists === fpl.assists,
-          )
-          .map((understat) => understat.playerId),
-      );
-      if (assistCandidates.size > 0) candidates = assistCandidates;
-    }
+    if (candidates.size > 1) multipleCandidatesByPlayer.add(fpl.playerCode);
+    // A complete match can legitimately omit a player who was not in the
+    // provider roster. Preserve evidence from other complete matches instead
+    // of turning one missing observation into an identity contradiction.
+    if (candidates.size === 0) continue;
     const previous = candidatesByPlayer.get(fpl.playerCode);
     candidatesByPlayer.set(fpl.playerCode, previous ? intersect(previous, candidates) : candidates);
     evidenceCount.set(fpl.playerCode, (evidenceCount.get(fpl.playerCode) ?? 0) + 1);
@@ -729,10 +977,102 @@ export async function reconcileProviderPlayers(season: string) {
       const observedMatches = observationsByPair.get(key) ?? new Set<number>();
       observedMatches.add(matchId);
       observationsByPair.set(key, observedMatches);
+      const fixtureCodes = fixtureCodesByPair.get(key) ?? new Set<number>();
+      fixtureCodes.add(fpl.fixtureCode);
+      fixtureCodesByPair.set(key, fixtureCodes);
     }
   }
+  return {
+    entityLinks,
+    fplRows: normalizedFpl,
+    understatRows,
+    fplPlayers,
+    fplByCode,
+    understatById,
+    candidatesByPlayer,
+    evidenceCount,
+    observationsByPair,
+    fixtureCodesByPair,
+    multipleCandidatesByPlayer,
+  };
+}
 
-  let quarantined = 0;
+function linkCoversSeason(link: ProviderEntityLink, season: string): boolean {
+  return (
+    (!link.firstSeenSeason || link.firstSeenSeason <= season) &&
+    (!link.lastSeenSeason || link.lastSeenSeason >= season)
+  );
+}
+
+function priorConfirmedSeasons(
+  link: Pick<ProviderEntityLink, 'evidence'>,
+  season: string,
+): string[] {
+  const confirmed = Array.isArray(link.evidence.confirmedSeasons)
+    ? link.evidence.confirmedSeasons.filter(
+        (value): value is string =>
+          typeof value === 'string' && /^\d{4}$/.test(value) && value !== season,
+      )
+    : [];
+  return [...new Set(confirmed)].sort();
+}
+
+function hasExplicitManualReview(
+  link: Pick<ProviderEntityLink, 'reviewedBy' | 'method' | 'evidence'>,
+): boolean {
+  return (
+    link.reviewedBy !== null ||
+    link.method.startsWith('manual-') ||
+    link.evidence.manualReview === true
+  );
+}
+
+export function classifyQuarantinedProviderPlayerMapping(input: {
+  link: Pick<ProviderEntityLink, 'reviewedBy' | 'method' | 'evidence'>;
+  season: string;
+  understatPlayerId: number | null;
+  fplPlayerCode: number;
+  observedCandidates: ReadonlySet<number> | undefined;
+  observedMatchIds: readonly number[];
+  hasVerifiedConflict: boolean;
+  hasAmbiguousObservation?: boolean;
+}): Pick<UnderstatPlayerMappingRecoveryItem, 'disposition' | 'reasonCodes'> {
+  if (hasExplicitManualReview(input.link)) {
+    return { disposition: 'manual_review', reasonCodes: ['MANUAL_REVIEW_REQUIRED'] };
+  }
+  if (input.hasVerifiedConflict) {
+    return { disposition: 'identity_conflict', reasonCodes: ['VERIFIED_IDENTITY_CONFLICT'] };
+  }
+  const reasonCodes: string[] = [];
+  if (input.understatPlayerId === null) reasonCodes.push('UNDERSTAT_ID_INVALID');
+  if (!input.observedCandidates?.has(input.understatPlayerId ?? -1)) {
+    reasonCodes.push('NAME_OR_TEAM_EVIDENCE_MISSING');
+  } else if (input.observedCandidates.size !== 1 || input.hasAmbiguousObservation) {
+    reasonCodes.push('MULTIPLE_IDENTITY_CANDIDATES');
+  }
+  if (input.observedMatchIds.length < MIN_PLAYER_MAPPING_OBSERVATIONS) {
+    reasonCodes.push('OBSERVED_MATCHES_BELOW_MINIMUM');
+  }
+  if (priorConfirmedSeasons(input.link, input.season).length === 0) {
+    reasonCodes.push('NO_PRIOR_CONFIRMED_SEASON');
+  }
+  return reasonCodes.length === 0
+    ? { disposition: 'recoverable', reasonCodes: ['PRIOR_IDENTITY_AND_COMPLETE_MATCH_EVIDENCE'] }
+    : { disposition: 'insufficient_evidence', reasonCodes };
+}
+
+export async function reconcileProviderPlayers(season: string) {
+  const {
+    entityLinks,
+    fplRows: normalizedFpl,
+    fplPlayers,
+    fplByCode,
+    understatById,
+    candidatesByPlayer,
+    evidenceCount,
+    observationsByPair,
+    multipleCandidatesByPlayer,
+  } = await collectProviderPlayerEvidence(season);
   let confirmed = 0;
   const verifiedPlayerLinks = entityLinks.filter(
     (link) =>
@@ -745,21 +1085,21 @@ export async function reconcileProviderPlayers(season: string) {
   for (const link of verifiedPlayerLinks) {
     const playerCode = Number(link.rightEntityId);
     const understatPlayerId = Number(link.leftEntityId);
-    const observedCandidates = candidatesByPlayer.get(playerCode);
-    if (observedCandidates && !observedCandidates.has(understatPlayerId)) {
-      await providerIdentityRepository.updateEntityStatus(link.id, 'quarantined');
-      quarantined += 1;
-      continue;
-    }
-    const observedMatches = observationsByPair.get(`${playerCode}:${understatPlayerId}`)?.size ?? 0;
     if (
-      !observedCandidates?.has(understatPlayerId) ||
-      !shouldConfirmProviderPlayerSeason(link, season, observedMatches)
+      verifiedPlayerMappingConflict(
+        verifiedPlayerLinks.filter((candidate) => candidate.id !== link.id),
+        understatPlayerId,
+        playerCode,
+      )
     ) {
       continue;
     }
-    const fpl = normalizedFpl.find((row) => row.playerCode === playerCode);
-    const understat = understatRows.find((row) => row.playerId === understatPlayerId);
+    const observedMatches = observationsByPair.get(`${playerCode}:${understatPlayerId}`)?.size ?? 0;
+    if (!shouldConfirmProviderPlayerSeason(link, season, observedMatches)) {
+      continue;
+    }
+    const fpl = fplByCode.get(playerCode);
+    const understat = understatById.get(understatPlayerId);
     if (!fpl || !understat) continue;
     // The entity link is shared across seasons. Keep the durable evidence
     // season-neutral and only append the newly confirmed season; otherwise a
@@ -791,7 +1131,6 @@ export async function reconcileProviderPlayers(season: string) {
       link.entityType === 'player' &&
       link.leftProvider === 'understat' &&
       link.rightProvider === 'fpl' &&
-      link.leftEntityId !== null &&
       isAutoMappingProtectedStatus(link.status),
   );
   const protectedFplPlayers = new Set(
@@ -814,11 +1153,14 @@ export async function reconcileProviderPlayers(season: string) {
     unresolved,
     observationsByPair,
   );
+  for (const playerCode of multipleCandidatesByPlayer) {
+    eligibleForAutoVerification.set(playerCode, new Set());
+  }
   const assignments = resolveUniqueProviderAssignments(eligibleForAutoVerification);
   let verified = 0;
   for (const [playerCode, playerId] of assignments) {
-    const fpl = normalizedFpl.find((row) => row.playerCode === playerCode);
-    const understat = understatRows.find((row) => row.playerId === playerId);
+    const fpl = fplByCode.get(playerCode);
+    const understat = understatById.get(playerId);
     if (!fpl || !understat) continue;
     const existingLink = entityLinks.find(
       (link) =>
@@ -869,10 +1211,11 @@ export async function reconcileProviderPlayers(season: string) {
   let pending = 0;
   for (const [playerCode, values] of unresolved) {
     if (assignments.has(playerCode) || values.size === 0) continue;
-    const status = values.size > 1 ? 'ambiguous' : 'pending';
+    const status =
+      values.size > 1 || multipleCandidatesByPlayer.has(playerCode) ? 'ambiguous' : 'pending';
     for (const playerId of values) {
-      const fpl = normalizedFpl.find((row) => row.playerCode === playerCode);
-      const understat = understatRows.find((row) => row.playerId === playerId);
+      const fpl = fplByCode.get(playerCode);
+      const understat = understatById.get(playerId);
       if (!fpl || !understat) continue;
       await providerIdentityRepository.upsertEntityLink({
         entityType: 'player',
@@ -913,7 +1256,210 @@ export async function reconcileProviderPlayers(season: string) {
     if (observedFplCodes.has(player.playerCode) || linkedFplCodes.has(player.playerCode)) continue;
     notObserved += 1;
   }
-  return { verified, confirmed, ambiguous, pending, quarantined, notObserved };
+  return { verified, confirmed, ambiguous, pending, quarantined: 0, notObserved };
+}
+
+export async function inspectQuarantinedProviderPlayers(
+  season: string,
+): Promise<UnderstatPlayerMappingRecoveryReport> {
+  const snapshot = await collectProviderPlayerEvidence(season);
+  const verifiedLinks = snapshot.entityLinks.filter(
+    (link) =>
+      link.entityType === 'player' &&
+      link.leftProvider === 'understat' &&
+      link.rightProvider === 'fpl' &&
+      link.leftEntityId !== null &&
+      isVerifiedProviderLinkStatus(link.status),
+  );
+  const quarantined = snapshot.entityLinks.filter(
+    (link) =>
+      link.entityType === 'player' &&
+      link.leftProvider === 'understat' &&
+      link.rightProvider === 'fpl' &&
+      link.status === 'quarantined' &&
+      linkCoversSeason(link, season),
+  );
+  const items = quarantined.map((link): UnderstatPlayerMappingRecoveryItem => {
+    const fplPlayerCode = Number(link.rightEntityId);
+    const understatPlayerId =
+      link.leftEntityId !== null && Number.isSafeInteger(Number(link.leftEntityId))
+        ? Number(link.leftEntityId)
+        : null;
+    const key = `${fplPlayerCode}:${understatPlayerId ?? 'invalid'}`;
+    const observedMatchIds = [...(snapshot.observationsByPair.get(key) ?? [])].sort(
+      (a, b) => a - b,
+    );
+    const fixtureCodes = [...(snapshot.fixtureCodesByPair.get(key) ?? [])].sort((a, b) => a - b);
+    const classification = classifyQuarantinedProviderPlayerMapping({
+      link,
+      season,
+      understatPlayerId,
+      fplPlayerCode,
+      observedCandidates: snapshot.candidatesByPlayer.get(fplPlayerCode),
+      observedMatchIds,
+      hasAmbiguousObservation: snapshot.multipleCandidatesByPlayer.has(fplPlayerCode),
+      hasVerifiedConflict:
+        understatPlayerId !== null &&
+        Boolean(
+          verifiedPlayerMappingConflict(
+            verifiedLinks.filter((candidate) => candidate.id !== link.id),
+            understatPlayerId,
+            fplPlayerCode,
+          ),
+        ),
+    });
+    return {
+      linkId: link.id,
+      understatPlayerId,
+      fplPlayerCode,
+      understatName:
+        understatPlayerId === null
+          ? null
+          : (snapshot.understatById.get(understatPlayerId)?.name ?? null),
+      fplName: snapshot.fplByCode.get(fplPlayerCode)?.name ?? null,
+      originalStatus: link.status,
+      evidenceHash: contentHash(link.evidence),
+      priorConfirmedSeasons: priorConfirmedSeasons(link, season),
+      observedMatchIds,
+      fixtureCodes,
+      ...classification,
+    };
+  });
+  const summary: Record<UnderstatPlayerMappingRecoveryDisposition, number> = {
+    recoverable: 0,
+    identity_conflict: 0,
+    insufficient_evidence: 0,
+    manual_review: 0,
+  };
+  for (const item of items) summary[item.disposition] += 1;
+  return { season, generatedAt: new Date().toISOString(), items, summary };
+}
+
+export async function restoreQuarantinedProviderPlayers(
+  season: string,
+  approvals: readonly UnderstatPlayerMappingRecoveryApproval[],
+): Promise<UnderstatPlayerMappingRecoveryApplyResult> {
+  const seen = new Set<string>();
+  for (const approval of approvals) {
+    if (
+      !approval.linkId ||
+      !Number.isSafeInteger(approval.understatPlayerId) ||
+      approval.understatPlayerId <= 0 ||
+      !Number.isSafeInteger(approval.fplPlayerCode) ||
+      approval.fplPlayerCode <= 0
+    ) {
+      throw new Error('Recovery approvals contain an invalid player mapping');
+    }
+    if (seen.has(approval.linkId))
+      throw new Error(`Duplicate recovery approval ${approval.linkId}`);
+    seen.add(approval.linkId);
+  }
+  return withMutationScopes(
+    {
+      queueName: 'understat-mappings',
+      jobName: 'understat-mappings-recovery',
+      scopes: ['understat:reference:all', `understat:reference:${season}`],
+    },
+    async () => {
+      const report = await inspectQuarantinedProviderPlayers(season);
+      const currentLinks = await providerIdentityRepository.findEntityLinks({
+        entityType: 'player',
+      });
+      const applied: string[] = [];
+      const skipped: { linkId: string; reason: string }[] = [];
+      const candidates: {
+        approval: UnderstatPlayerMappingRecoveryApproval;
+        item: UnderstatPlayerMappingRecoveryItem;
+        current: ProviderEntityLink & { leftEntityId: string };
+      }[] = [];
+      for (const approval of approvals) {
+        const item = report.items.find((candidate) => candidate.linkId === approval.linkId);
+        if (!item) {
+          skipped.push({ linkId: approval.linkId, reason: 'NOT_CURRENTLY_QUARANTINED' });
+          continue;
+        }
+        if (
+          item.disposition !== 'recoverable' ||
+          item.understatPlayerId !== approval.understatPlayerId ||
+          item.fplPlayerCode !== approval.fplPlayerCode
+        ) {
+          skipped.push({ linkId: approval.linkId, reason: 'APPROVAL_NO_LONGER_MATCHES_REPORT' });
+          continue;
+        }
+        const current = currentLinks.find((candidate) => candidate.id === approval.linkId);
+        if (
+          !current ||
+          current.status !== 'quarantined' ||
+          current.leftEntityId === null ||
+          current.leftEntityId !== String(approval.understatPlayerId) ||
+          current.rightEntityId !== String(approval.fplPlayerCode) ||
+          contentHash(current.evidence) !== item.evidenceHash
+        ) {
+          skipped.push({ linkId: approval.linkId, reason: 'LINK_CHANGED_BEFORE_APPLY' });
+          continue;
+        }
+        const verifiedConflict = verifiedPlayerMappingConflict(
+          currentLinks.filter((candidate) => isVerifiedProviderLinkStatus(candidate.status)),
+          approval.understatPlayerId,
+          approval.fplPlayerCode,
+        );
+        if (verifiedConflict) {
+          skipped.push({ linkId: approval.linkId, reason: 'VERIFIED_IDENTITY_CONFLICT' });
+          continue;
+        }
+        candidates.push({
+          approval,
+          item,
+          current: { ...current, leftEntityId: current.leftEntityId },
+        });
+      }
+      const approvalsByUnderstatId = new Map<string, number>();
+      const approvalsByFplCode = new Map<string, number>();
+      for (const candidate of candidates) {
+        const understatId = candidate.current.leftEntityId;
+        const fplCode = candidate.current.rightEntityId;
+        approvalsByUnderstatId.set(understatId, (approvalsByUnderstatId.get(understatId) ?? 0) + 1);
+        approvalsByFplCode.set(fplCode, (approvalsByFplCode.get(fplCode) ?? 0) + 1);
+      }
+      const recoveredAt = new Date().toISOString();
+      for (const { approval, item, current } of candidates) {
+        if (
+          (approvalsByUnderstatId.get(current.leftEntityId) ?? 0) > 1 ||
+          (approvalsByFplCode.get(current.rightEntityId) ?? 0) > 1
+        ) {
+          skipped.push({ linkId: approval.linkId, reason: 'BATCH_IDENTITY_CONFLICT' });
+          continue;
+        }
+        await providerIdentityRepository.upsertEntityLink({
+          entityType: current.entityType,
+          leftProvider: current.leftProvider,
+          leftEntityId: current.leftEntityId,
+          rightProvider: current.rightProvider,
+          rightEntityId: current.rightEntityId,
+          status: 'auto_verified',
+          method: 'verified-match-roster-recovery',
+          ruleId: PLAYER_RECOVERY_RULE_ID,
+          season,
+          evidence: {
+            ...current.evidence,
+            confirmedSeasons: [
+              ...new Set([...priorConfirmedSeasons(current, season), season]),
+            ].sort(),
+            recovery: {
+              ruleId: PLAYER_RECOVERY_RULE_ID,
+              restoredFrom: current.status,
+              reasonCodes: item.reasonCodes,
+              recoveredAt,
+              observedMatchIds: item.observedMatchIds,
+              fixtureCodes: item.fixtureCodes,
+            },
+          },
+        });
+        applied.push(approval.linkId);
+      }
+      return { season, applied, skipped };
+    },
+  );
 }
 
 export async function reconcileProviderMappings(season: string) {
