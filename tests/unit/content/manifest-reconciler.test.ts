@@ -4,11 +4,22 @@ import { loadBriefingManifest } from '../../../src/content/acquisition/acquisiti
 import {
   deterministicScheduleJitterMs,
   initialEndpointIdentity,
+  isDiscoveryCadenceUpgrade,
   reconcileEndpointIdentity,
 } from '../../../src/content/acquisition/manifest-reconciler';
 import { compileBriefingRegistryState } from '../../../src/content/acquisition/registry-state';
 
 describe('Briefing source manifest reconciler', () => {
+  test('recognizes only the explicit same-source discovery cadence upgrade', () => {
+    expect(isDiscoveryCadenceUpgrade('x-semantic-official-v1', 'x-semantic-official-v2')).toBe(
+      true,
+    );
+    expect(isDiscoveryCadenceUpgrade('youtube-caption-first-v1', 'youtube-caption-first-v2')).toBe(
+      true,
+    );
+    expect(isDiscoveryCadenceUpgrade('x-semantic-official-v1', 'x-semantic-lineup-v2')).toBe(false);
+    expect(isDiscoveryCadenceUpgrade('x-official-v1', 'x-official-v2')).toBe(false);
+  });
   test('treats configured semantic and YouTube IDs as stable identities', async () => {
     const state = compileBriefingRegistryState(await loadBriefingManifest());
     const now = new Date('2026-08-22T00:00:00.000Z');

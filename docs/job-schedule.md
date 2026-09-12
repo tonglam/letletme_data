@@ -357,6 +357,27 @@ obligation in its durable retry state and produces a non-zero exit for the
 release operator to investigate; it is never silently treated as a successful
 partial backfill.
 
+## Briefing discovery cadence
+
+X account partitions remain on one scan per 24 hours. Semantic discovery v2
+runs each of its four profiles once per 24 hours in every deadline phase.
+Its request ends at the current UTC midnight and starts at the previous
+midnight, or an earlier durable checkpoint rounded down to midnight after
+downtime. Provider date bounds are therefore always distinct. Old immutable
+requests and same-day EMPTY history are not rewritten.
+
+YouTube channel feed v2 polls every two hours in every phase. HTTP status and
+timeout failures retry after 15 minutes, one hour, then six hours for subsequent
+consecutive failures. Both next due and circuit probe eligibility use that
+delay. Success resets the streak; failures preserve the feed checkpoint.
+Metadata and transcript work retain their own policies.
+
+The host Grok runner still reports stale health after 30 minutes without
+success. A scan may recheck an idle process with a previous successful X result
+without first paying for a separate identity probe. Startup, restart and known
+provider/process failures require the probe; release, sandbox and tool gates
+remain enforced. A scan failure never becomes EMPTY.
+
 ## Gate definitions
 
 - `isFPLSeason`: UTC day range from the earliest GW1 kickoff through the

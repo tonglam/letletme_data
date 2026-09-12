@@ -57,6 +57,23 @@ const CONFIG = {
 const X_PROBE_MAX_AGE_MS = 30 * 60_000;
 const X_PROBE_MIN_INTERVAL_MS = 60_000;
 
+export function invalidatesProviderHealth(result: {
+  providerProcessStarted: boolean;
+  failureClass: string;
+}): boolean {
+  return (
+    result.providerProcessStarted &&
+    [
+      'GROK_PROCESS_FAILED',
+      'GROK_TOOL_FAILED',
+      'GROK_TIMEOUT',
+      'GROK_ABORTED',
+      'GROK_OUTPUT_LIMIT',
+      'GROK_UTF8_INVALID',
+    ].includes(result.failureClass)
+  );
+}
+
 type RunnerFailure = Readonly<{
   failureClass: string;
   providerProcessStarted: boolean;
@@ -511,6 +528,10 @@ export async function startHostGrokRunner(): Promise<{
           // the runner has been idle long enough for this signal to expire.
           lastXProbeAt = new Date().toISOString();
           lastXProbeOk = true;
+        } else if (invalidatesProviderHealth(result)) {
+          // A provider/process failure invalidates old success evidence.
+          // The next execution must pass the dedicated probe again.
+          lastXProbeOk = false;
         }
         executions.set(executionRequest.runId, {
           requestHash,

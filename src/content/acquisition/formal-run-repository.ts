@@ -274,7 +274,22 @@ async function partitionSnapshot(tx: TransactionHandle, partitionId: string) {
   };
 }
 
-function requestWindow(input: {
+export function youtubeFeedRetryDelayMs(
+  adapterKind: string | null,
+  jobKind: string | null,
+  failureClass: string,
+  failureStreak: number,
+): number | null {
+  if (
+    adapterKind !== 'YOUTUBE_CHANNEL' ||
+    (jobKind !== 'FEED_POLL' && jobKind !== 'FEED_BOOTSTRAP') ||
+    !['HTTP_STATUS', 'HTTP_TIMEOUT'].includes(failureClass)
+  )
+    return null;
+  return (failureStreak <= 1 ? 15 : failureStreak === 2 ? 60 : 360) * 60_000;
+}
+
+export function requestWindow(input: {
   adapterKind: string;
   scheduleRole?: 'PRIMARY' | 'BACKSTOP';
   scheduleKey?: string;
@@ -285,7 +300,19 @@ function requestWindow(input: {
   bootstrapEnabled: boolean;
   lookbackMinutes: number;
 }): { windowStart: Date; windowEnd: Date } {
-  if (input.adapterKind === 'X_ACCOUNT' || input.adapterKind === 'X_SEMANTIC') {
+  if (input.adapterKind === 'X_SEMANTIC') {
+    // Search accepts dates, not hours. Never emit equal from/to dates.
+    // Keep an earlier durable checkpoint for bounded-result catch-up; do not
+    // reclassify the historical same-day EMPTY runs or manufacture receipts.
+    const windowEnd = new Date(input.dbNow);
+    windowEnd.setUTCHours(0, 0, 0, 0);
+    const previousDay = windowEnd.getTime() - 24 * 60 * 60_000;
+    const checkpointEnd = dateValue(asString(input.checkpoint.windowEnd));
+    const windowStart = new Date(Math.min(checkpointEnd?.getTime() ?? previousDay, previousDay));
+    windowStart.setUTCHours(0, 0, 0, 0);
+    return { windowStart, windowEnd };
+  }
+  if (input.adapterKind === 'X_ACCOUNT') {
     const windowEnd =
       input.scheduleRole === 'BACKSTOP' && input.scheduleKey && input.scheduleDueAt
         ? backstopSlotEndForDueAt({
@@ -310,9 +337,6 @@ function requestWindow(input: {
     // window would silently skip the uncovered interval; saturation handling
     // and Receipt ID deduplication keep an extended recovery window safe.
     const boundedStart = checkpointEnd ? overlapped : defaultStart;
-    if (input.adapterKind === 'X_SEMANTIC') {
-      boundedStart.setUTCHours(0, 0, 0, 0);
-    }
     return {
       windowStart: boundedStart,
       windowEnd,
@@ -1596,9 +1620,11 @@ export async function failFormalRun(input: {
     }
     if (run.scheduleId) {
       const circuitOpen = outputContractBlocked || failureStreak >= 3;
-      const retryDelayMs = circuitOpen
-        ? 30 * 60_000
-        : (input.retryDelayMs ?? (failureStreak === 1 ? 60_000 : 5 * 60_000));
+      const retryDelayMs =
+        youtubeFeedRetryDelayMs(run.adapterKind, run.jobKind, failureClass, failureStreak) ??
+        (circuitOpen
+          ? 30 * 60_000
+          : (input.retryDelayMs ?? (failureStreak === 1 ? 60_000 : 5 * 60_000)));
       await tx
         .update(contentSourceSchedules)
         .set({
@@ -1610,7 +1636,7 @@ export async function failFormalRun(input: {
           // another billable call.  A null probe_after keeps the schedule
           // blocked until the revision-aware rearm operation runs.
           probeAfter:
-            circuitOpen && !outputContractBlocked ? new Date(dbNow.getTime() + 30 * 60_000) : null,
+            circuitOpen && !outputContractBlocked ? new Date(dbNow.getTime() + retryDelayMs) : null,
           nextDueAt: new Date(dbNow.getTime() + retryDelayMs),
           checkpoint: exhaustedXWindow
             ? {

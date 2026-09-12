@@ -109,8 +109,8 @@ export function compileXSemanticRequest(input: {
     toolName: 'x_semantic_search',
     query,
     // Grok Build 1.0.5's semantic tool accepts day bounds only. The scheduler
-    // aligns the persisted semantic window start to UTC midnight so the local
-    // evidence gate matches the provider's actual date precision.
+    // uses complete UTC dates for new scans. Historical persisted requests
+    // remain replayable; this compiler does not rewrite their bounds.
     fromDate: input.windowStart.toISOString().slice(0, 10),
     toDate: input.windowEnd.toISOString().slice(0, 10),
     limit: input.limit ?? 10,

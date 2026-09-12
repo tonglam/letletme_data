@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+import { invalidatesProviderHealth } from '../../../src/content/host-grok-runner';
+
 import { HostGrokRunnerClient } from '../../../src/content/acquisition/host-grok-runner-client';
 import {
   hostGrokExecutionRequestV1Schema,
@@ -19,12 +21,35 @@ import {
 
 const servers: Array<{ close: () => Promise<void>; directory: string }> = [];
 
+test('a timed-out provider invalidates old health but pre-start capacity and output schema failures do not', () => {
+  for (const failureClass of [
+    'GROK_TIMEOUT',
+    'GROK_PROCESS_FAILED',
+    'GROK_TOOL_FAILED',
+    'GROK_ABORTED',
+    'GROK_OUTPUT_LIMIT',
+    'GROK_UTF8_INVALID',
+  ]) {
+    expect(invalidatesProviderHealth({ providerProcessStarted: true, failureClass })).toBe(true);
+  }
+  expect(
+    invalidatesProviderHealth({ providerProcessStarted: false, failureClass: 'GROK_TIMEOUT' }),
+  ).toBe(false);
+  expect(
+    invalidatesProviderHealth({
+      providerProcessStarted: true,
+      failureClass: 'GROK_FINAL_SCHEMA_INVALID',
+    }),
+  ).toBe(false);
+});
+
 async function fakeRunner(input: {
   releaseSha?: string;
   fail?: boolean;
   failBeforeStart?: boolean;
   metadataMismatch?: boolean;
   probeReady?: boolean;
+  idleSuccess?: boolean;
   probeRefreshSucceeds?: boolean;
   malformedResponse?: boolean;
 }) {
@@ -48,8 +73,12 @@ async function fakeRunner(input: {
         runnerReleaseSha: releaseSha,
         grokVersion: '1.0.5',
         sandbox: 'strict',
-        lastXProbeAt: probeReady ? new Date().toISOString() : null,
-        lastXProbeOk: probeReady ? true : null,
+        lastXProbeAt: input.idleSuccess
+          ? '2026-01-01T00:00:00.000Z'
+          : probeReady
+            ? new Date().toISOString()
+            : null,
+        lastXProbeOk: probeReady || input.idleSuccess ? true : null,
         outputContractRevision: 3,
       });
       return;
@@ -268,7 +297,24 @@ describe('host Grok runner client contract', () => {
     await expect(client.assertVersion()).rejects.toThrow('not ready');
   });
 
-  test('refreshes a stale probe before executing the next X request', async () => {
+  test('uses an idle process with prior success without a billable probe', async () => {
+    const runner = await fakeRunner({ probeReady: false, idleSuccess: true });
+    const client = new HostGrokRunnerClient({
+      socketPath: runner.socketPath,
+      expectedVersion: '1.0.5',
+      expectedRunnerReleaseSha: 'abc1234',
+      timeoutMs: 2_000,
+    });
+    let probes = 0;
+    await client.assertVersion({
+      onProbeRequest: async () => {
+        probes++;
+      },
+    });
+    expect(probes).toBe(0);
+  });
+
+  test('probes a process without prior success before executing the next X request', async () => {
     const runner = await fakeRunner({ probeReady: false, probeRefreshSucceeds: true });
     const client = new HostGrokRunnerClient({
       socketPath: runner.socketPath,

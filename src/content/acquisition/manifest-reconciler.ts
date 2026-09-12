@@ -175,6 +175,14 @@ export function reconcileEndpointIdentity(input: {
   };
 }
 
+export function isDiscoveryCadenceUpgrade(previous: string, next: string): boolean {
+  return (
+    /^(x-semantic-(official|availability|lineup|longform)|youtube-caption-first)-v1$/.test(
+      previous,
+    ) && next === previous.replace(/-v1$/, '-v2')
+  );
+}
+
 export function deterministicScheduleJitterMs(input: {
   scheduleKey: string;
   adapterKind: AdapterKind;
@@ -663,7 +671,10 @@ export async function reconcileBriefingSourceRegistry(input: {
       const desiredPartitionByKey = new Map(
         partitionRows.map((partition) => [partition.partitionKey, partition]),
       );
-      const endpointContractChanged = (endpointKey: string): boolean => {
+      const endpointContractChanged = (
+        endpointKey: string,
+        allowCadenceUpgrade = false,
+      ): boolean => {
         const existing = endpointByKey.get(endpointKey);
         const desired = desiredEndpointByKey.get(endpointKey);
         return (
@@ -671,11 +682,18 @@ export async function reconcileBriefingSourceRegistry(input: {
           !desired ||
           existing.sourceId !== desired.sourceId ||
           existing.adapterKind !== desired.adapterKind ||
-          existing.profileKey !== desired.profileKey ||
+          (existing.profileKey !== desired.profileKey &&
+            !(
+              allowCadenceUpgrade &&
+              isDiscoveryCadenceUpgrade(existing.profileKey, desired.profileKey)
+            )) ||
           canonicalLocator(existing.locator) !== canonicalLocator(desired.locator)
         );
       };
-      const partitionContractChanged = (partitionKey: string): boolean => {
+      const partitionContractChanged = (
+        partitionKey: string,
+        allowCadenceUpgrade = false,
+      ): boolean => {
         const existing = existingPartitionByKey.get(partitionKey);
         const desired = desiredPartitionByKey.get(partitionKey);
         const desiredState = state.partitions.find(
@@ -690,12 +708,17 @@ export async function reconcileBriefingSourceRegistry(input: {
         const existingMemberIds = existingMemberIdsByPartition.get(existing.partitionId) ?? [];
         return (
           existing.adapterKind !== desired.adapterKind ||
-          existing.profileKey !== desired.profileKey ||
+          (existing.profileKey !== desired.profileKey &&
+            !(
+              allowCadenceUpgrade &&
+              isDiscoveryCadenceUpgrade(existing.profileKey, desired.profileKey)
+            )) ||
           canonicalJson(existingMemberIds) !== canonicalJson(desiredMemberIds) ||
-          desiredState.endpointKeys.some(endpointContractChanged)
+          desiredState.endpointKeys.some((key) => endpointContractChanged(key, allowCadenceUpgrade))
         );
       };
       const changedScheduleIds = new Set<string>();
+      const preserveCheckpointIds = new Set<string>();
       const desiredScheduleKeys = new Set(state.schedules.map((schedule) => schedule.scheduleKey));
       for (const existing of existingSchedules) {
         if (!desiredScheduleKeys.has(existing.scheduleKey))
@@ -726,6 +749,22 @@ export async function reconcileBriefingSourceRegistry(input: {
             : partitionContractChanged(schedule.target.partitionKey);
         if (targetChanged || scheduleChanged || acquisitionTargetChanged) {
           changedScheduleIds.add(existing.scheduleId);
+          const sameAcquisitionTarget =
+            schedule.target.kind === 'endpoint'
+              ? !endpointContractChanged(schedule.target.endpointKey, true)
+              : !partitionContractChanged(schedule.target.partitionKey, true);
+          if (
+            !targetChanged &&
+            sameAcquisitionTarget &&
+            existing.jobKind === schedule.jobKind &&
+            existing.adapterKind === schedule.adapterKind &&
+            existing.scheduleRole === schedule.scheduleRole &&
+            existing.profileRevision === 1 &&
+            schedule.profileRevision === 2 &&
+            isDiscoveryCadenceUpgrade(existing.profileKey, schedule.profileKey)
+          ) {
+            preserveCheckpointIds.add(existing.scheduleId);
+          }
         }
       }
       const scheduleRows = state.schedules.map((schedule) => {
@@ -833,10 +872,14 @@ export async function reconcileBriefingSourceRegistry(input: {
               circuitState: 'CLOSED',
               probeAfter: null,
               cacheNotBefore: null,
-              validator: {},
-              checkpoint: {},
-              bootstrapCompletedAt: null,
-              bootstrapCutoffAt: dbNow,
+              ...(preserveCheckpointIds.has(existing.scheduleId)
+                ? {}
+                : {
+                    validator: {},
+                    checkpoint: {},
+                    bootstrapCompletedAt: null,
+                    bootstrapCutoffAt: dbNow,
+                  }),
               underLimitStreak: 0,
               updatedAt: dbNow,
             })

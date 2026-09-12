@@ -211,18 +211,18 @@ partitions:
       - all-about-fpl-x
 
   - partitionKey: semantic-official-changes
-    profileKey: x-semantic-official-v1
+    profileKey: x-semantic-official-v2
     priority: 40
     endpointKeys: [semantic-official-changes-x]
   - partitionKey: semantic-availability
-    profileKey: x-semantic-availability-v1
+    profileKey: x-semantic-availability-v2
     priority: 40
     endpointKeys: [semantic-availability-x]
   - partitionKey: semantic-lineup-role
-    profileKey: x-semantic-lineup-v1
+    profileKey: x-semantic-lineup-v2
     priority: 40
     endpointKeys: [semantic-lineup-role-x]
   - partitionKey: semantic-analysis-longform
-    profileKey: x-semantic-longform-v1
+    profileKey: x-semantic-longform-v2
     priority: 40
     endpointKeys: [semantic-analysis-longform-x]

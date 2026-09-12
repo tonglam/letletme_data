@@ -104,13 +104,18 @@ const dailyXProfile = (
     cadenceMinutes: dailyXAccountCadence,
   });
 
-const semanticProfile = (profileKey: string, priority: number): AcquisitionProfile => ({
+const semanticProfile = (
+  profileKey: string,
+  priority: number,
+  revision = 1,
+): AcquisitionProfile => ({
   profileKey,
-  revision: 1,
+  revision,
   adapterKind: 'X_SEMANTIC',
   lane: 'SEMANTIC',
   priority,
-  cadenceMinutes: { NORMAL: 120, APPROACHING: 60, FINAL90: 30 },
+  cadenceMinutes:
+    revision === 1 ? { NORMAL: 120, APPROACHING: 60, FINAL90: 30 } : dailyXAccountCadence,
   bootstrap: { lookbackMinutes: 360, maxItems: 10, maxContentJobs: 0 },
   saturationThreshold: 10,
   partitionMaxMembers: 1,
@@ -178,6 +183,10 @@ export const ACQUISITION_PROFILES: Readonly<Record<string, AcquisitionProfile>> 
   'x-semantic-availability-v1': semanticProfile('x-semantic-availability-v1', 40),
   'x-semantic-lineup-v1': semanticProfile('x-semantic-lineup-v1', 40),
   'x-semantic-longform-v1': semanticProfile('x-semantic-longform-v1', 40),
+  'x-semantic-official-v2': semanticProfile('x-semantic-official-v2', 40, 2),
+  'x-semantic-availability-v2': semanticProfile('x-semantic-availability-v2', 40, 2),
+  'x-semantic-lineup-v2': semanticProfile('x-semantic-lineup-v2', 40, 2),
+  'x-semantic-longform-v2': semanticProfile('x-semantic-longform-v2', 40, 2),
   'rss-news-v1': {
     profileKey: 'rss-news-v1',
     revision: 1,
@@ -204,6 +213,15 @@ export const ACQUISITION_PROFILES: Readonly<Record<string, AcquisitionProfile>> 
     priority: 60,
     cadenceMinutes: { NORMAL: 60, APPROACHING: 30, FINAL90: 30 },
     bootstrap: { lookbackMinutes: 14 * 24 * 60, maxItems: 3, maxContentJobs: 1 },
+  },
+  'youtube-caption-first-v2': {
+    profileKey: 'youtube-caption-first-v2',
+    revision: 2,
+    adapterKind: 'YOUTUBE_CHANNEL',
+    lane: 'YOUTUBE',
+    priority: 50,
+    cadenceMinutes: { NORMAL: 120, APPROACHING: 120, FINAL90: 120 },
+    bootstrap: { lookbackMinutes: 14 * 24 * 60, maxItems: 15, maxContentJobs: 5 },
   },
   'youtube-caption-first-v1': {
     profileKey: 'youtube-caption-first-v1',

@@ -648,7 +648,7 @@ entities:
       - endpointKey: fpl-general-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCxj4WVoWBuwXPGJsvUFPVig }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
 
   - sourceKey: fpl-focal
     sourceType: CREATOR
@@ -661,7 +661,7 @@ entities:
       - endpointKey: fpl-focal-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UC72QokPHXQ9r98ROfNZmaDw }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
 
   - sourceKey: lateriser
     sourceType: CREATOR
@@ -701,7 +701,7 @@ entities:
       - endpointKey: fpl-raptor-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UC54QLWzsMifTRjNQ02z5pCw }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
 
   - sourceKey: fpl-harry
     sourceType: CREATOR
@@ -714,7 +714,7 @@ entities:
       - endpointKey: fpl-harry-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCcPWnCj5AKC19HaySZjb25g }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
 
   - sourceKey: lets-talk-fpl
     sourceType: CREATOR
@@ -727,7 +727,7 @@ entities:
       - endpointKey: lets-talk-fpl-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCxeOc7eFxq37yW_Nc-69deA }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
 
   - sourceKey: fpl-salah
     sourceType: CREATOR
@@ -753,7 +753,7 @@ entities:
       - endpointKey: fantasy-football-scout-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCVEKeBG9nbkufZxHWVtDHzQ }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
 
   - sourceKey: planet-fpl
     sourceType: SHOW
@@ -766,7 +766,7 @@ entities:
       - endpointKey: planet-fpl-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UC8043oOKTB4uP8Nq15Kz6bg }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
       - endpointKey: planet-fpl-podcast
         adapterKind: PODCAST_FEED
         locator: { url: https://feeds.megaphone.fm/COMG5751810297 }
@@ -783,7 +783,7 @@ entities:
       - endpointKey: the-fpl-wire-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCtIPFexB6PLKNNl0XH3SKKw }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
       - endpointKey: the-fpl-wire-podcast
         adapterKind: PODCAST_FEED
         locator: { url: https://feeds.megaphone.fm/BLU9598812574 }
@@ -800,7 +800,7 @@ entities:
       - endpointKey: fpl-blackbox-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCGJ8-xqhOLwyJNuPMsVoQWQ }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
       - endpointKey: fpl-blackbox-podcast
         adapterKind: PODCAST_FEED
         locator: { url: https://feeds.megaphone.fm/BLU4752868283 }
@@ -817,7 +817,7 @@ entities:
       - endpointKey: who-got-the-assist-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCkk58co4Qe1A1GFRPVziSGQ }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
       - endpointKey: who-got-the-assist-podcast
         adapterKind: PODCAST_FEED
         locator: { url: https://feeds.megaphone.fm/COMG2325258523 }
@@ -873,7 +873,7 @@ entities:
       - endpointKey: fantasy-football-hub-youtube
         adapterKind: YOUTUBE_CHANNEL
         locator: { channelId: UCcqEr3DfrRwtoF2a1yW8qgQ }
-        profileKey: youtube-caption-first-v1
+        profileKey: youtube-caption-first-v2
 
   - sourceKey: all-about-fpl
     sourceType: PUBLICATION
@@ -904,16 +904,16 @@ entities:
       - endpointKey: semantic-official-changes-x
         adapterKind: X_SEMANTIC
         locator: { semanticProfileKey: gw-official-changes-v1 }
-        profileKey: x-semantic-official-v1
+        profileKey: x-semantic-official-v2
       - endpointKey: semantic-availability-x
         adapterKind: X_SEMANTIC
         locator: { semanticProfileKey: availability-v1 }
-        profileKey: x-semantic-availability-v1
+        profileKey: x-semantic-availability-v2
       - endpointKey: semantic-lineup-role-x
         adapterKind: X_SEMANTIC
         locator: { semanticProfileKey: lineup-role-v1 }
-        profileKey: x-semantic-lineup-v1
+        profileKey: x-semantic-lineup-v2
       - endpointKey: semantic-analysis-longform-x
         adapterKind: X_SEMANTIC
         locator: { semanticProfileKey: analysis-longform-v1 }
-        profileKey: x-semantic-longform-v1
+        profileKey: x-semantic-longform-v2
