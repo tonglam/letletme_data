@@ -547,21 +547,32 @@ export async function attachFreshnessWindowToSchedulerObligation(input: {
     return false;
   }
   const db = input.db ?? (await getDb());
+  const existingWindowIds = sql`CASE
+    WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
+      THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
+    ELSE '[]'::jsonb
+  END`;
+  const containsWindow = sql`${existingWindowIds} @> jsonb_build_array(${input.freshnessWindowId}::bigint)`;
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({
       evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
         'freshnessWindowId', ${input.freshnessWindowId}::bigint,
         'freshnessWindowIds',
-        CASE
-          WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
-            THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
-          ELSE '[]'::jsonb
-        END || jsonb_build_array(${input.freshnessWindowId}::bigint)
+        CASE WHEN ${containsWindow} THEN ${existingWindowIds}
+          ELSE ${existingWindowIds} || jsonb_build_array(${input.freshnessWindowId}::bigint)
+        END
       )`,
       updatedAt: sql`clock_timestamp()`,
     })
-    .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+    .where(
+      and(
+        eq(schedulerObligationsInOps.obligationId, input.obligationId),
+        sql`(NOT (${containsWindow}) OR
+        ${schedulerObligationsInOps.evidence}->'freshnessWindowId'
+          IS DISTINCT FROM to_jsonb(${input.freshnessWindowId}::bigint))`,
+      ),
+    )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });
   return updated.length === 1;
 }

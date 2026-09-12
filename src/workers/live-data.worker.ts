@@ -37,7 +37,10 @@ import {
   recordFreshnessObservation,
   recordPendingLiveSnapshotCheckpointEvidence,
 } from '../services/data-governance.service';
-import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
+import {
+  readLivePublicationV2Checkpoint,
+  readLiveFinalizationPrerequisites,
+} from '../services/live-publication-v2-checkpoint.service';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import {
   completeSchedulerObligation,
@@ -143,7 +146,9 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
                 obligationId: fence.obligationId,
                 generation: fence.generation,
               }
-            : { kind: 'manual-current' },
+            : job.data.retentionRecoveryTarget
+              ? { kind: 'manual-recovery', target: job.data.retentionRecoveryTarget }
+              : { kind: 'manual-current' },
       });
       if (result.status !== 'succeeded') {
         throw new LiveFinalRetentionIncompleteError(result);
@@ -194,6 +199,27 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         throw new Error(`Live Match checkpoint obligation was not created for event ${eventId}`);
       }
       return result;
+    }
+    if (job.data.finalizeEvent === true) {
+      const prerequisite = await readLiveFinalizationPrerequisites(season, eventId);
+      if (prerequisite.blocked) {
+        const evidence = {
+          finalization: 'waiting-for-entry-input',
+          reason: 'DATA_INCOMPLETE:FINAL_ENTRY_INPUT_REQUIRES_PROVIDER_RECOVERY',
+        };
+        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            delayMs: LIVE_FINALIZATION_RETRY_DELAY_MS,
+            evidence,
+          });
+          if (!deferred) throw new Error('Stale scheduler finalization preflight');
+        } else {
+          throw new Error(evidence.reason);
+        }
+        return evidence;
+      }
     }
     const snapshot = await syncLiveSnapshotV2(season, eventId, {
       finalizeEvent: job.data.finalizeEvent === true,

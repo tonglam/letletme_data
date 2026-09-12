@@ -10,7 +10,6 @@ import {
   livePointsPublicationCheckpointsInCompetition,
   livePointsPublicationSeedClaimsInCompetition,
   playerGameweekStatsInFpl,
-  tournamentsInCompetition,
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -62,6 +61,11 @@ type FinalCheckpointValidationCacheEntry = Readonly<{
   validatedAtMs: number;
 }>;
 
+const leagueCheckpointValidationCache = new Map<
+  string,
+  { identity: string; validatedAtMs: number }
+>();
+
 const finalCheckpointValidationCache = new Map<string, FinalCheckpointValidationCacheEntry>();
 
 const checkpointDateIdentity = (value: Date | null): string | null => value?.toISOString() ?? null;
@@ -103,7 +107,7 @@ const rememberFinalCheckpointValidation = (
  * FINALIZED league checkpoint with the same self-contained contract used by
  * readers before treating the event as durably complete.
  */
-async function hasFinalLiveLeagueCheckpointsV2(
+export async function hasFinalLiveLeagueCheckpointsV2(
   season: FplSeasonRef,
   eventId: number,
 ): Promise<boolean> {
@@ -111,57 +115,76 @@ async function hasFinalLiveLeagueCheckpointsV2(
   const requiredScopes = await listRequiredLiveLeagueFinalCheckpointScopesV2(season, eventId, db);
   if (requiredScopes.length === 0) return true;
 
-  const rows = await db
+  const metadata = await db
     .select({
       tournamentId: liveLeagueCheckpointsInCompetition.tournamentId,
       scopeKind: liveLeagueCheckpointsInCompetition.scopeKind,
       state: liveLeagueCheckpointsInCompetition.state,
       publicationId: liveLeagueCheckpointsInCompetition.publicationId,
       generation: liveLeagueCheckpointsInCompetition.generation,
-      manifest: liveLeagueCheckpointsInCompetition.manifest,
-      indexPayload: liveLeagueCheckpointsInCompetition.indexPayload,
-      payload: liveLeagueCheckpointsInCompetition.payload,
       rowCount: liveLeagueCheckpointsInCompetition.rowCount,
       payloadBytes: liveLeagueCheckpointsInCompetition.payloadBytes,
       payloadSha256: liveLeagueCheckpointsInCompetition.payloadSha256,
+      checkpointedAt: liveLeagueCheckpointsInCompetition.checkpointedAt,
     })
     .from(liveLeagueCheckpointsInCompetition)
-    .innerJoin(
-      tournamentsInCompetition,
-      and(
-        eq(tournamentsInCompetition.seasonId, liveLeagueCheckpointsInCompetition.seasonId),
-        eq(tournamentsInCompetition.tournamentId, liveLeagueCheckpointsInCompetition.tournamentId),
-      ),
-    )
     .where(
       and(
         eq(liveLeagueCheckpointsInCompetition.seasonId, season.seasonId),
         eq(liveLeagueCheckpointsInCompetition.eventId, eventId),
         eq(liveLeagueCheckpointsInCompetition.state, 'FINALIZED'),
-        eq(tournamentsInCompetition.state, 'active'),
-        eq(tournamentsInCompetition.setupStatus, 'ready'),
       ),
     );
-  const checkpointByScope = new Map(
-    rows.map((row) => [`${row.tournamentId}:${row.scopeKind}`, row] as const),
+  const metadataByScope = new Map(
+    metadata.map((row) => [`${row.tournamentId}:${row.scopeKind}`, row]),
   );
-  for (const requiredScope of requiredScopes) {
-    const row = checkpointByScope.get(`${requiredScope.tournamentId}:${requiredScope.scope}`);
-    if (!row || row.state !== 'FINALIZED') return false;
+  // Missing scopes need no payload transfer or JSON validation. Check the full
+  // required set on every pass, including while a prior validation is cached.
+  if (requiredScopes.some((scope) => !metadataByScope.has(`${scope.tournamentId}:${scope.scope}`)))
+    return false;
+  for (const scope of requiredScopes) {
+    const metadataRow = metadataByScope.get(`${scope.tournamentId}:${scope.scope}`)!;
+    const key = `${season.seasonId}:${eventId}:${scope.tournamentId}:${scope.scope}`;
+    const identity = canonicalJson(metadataRow);
+    const cached = leagueCheckpointValidationCache.get(key);
     if (
-      row.scopeKind !== 'CLASSIC' &&
-      row.scopeKind !== 'H2H_HEAD' &&
-      row.scopeKind !== 'H2H_STANDINGS'
-    ) {
-      return false;
-    }
+      cached?.identity === identity &&
+      Date.now() - cached.validatedAtMs < LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS
+    )
+      continue;
+    leagueCheckpointValidationCache.delete(key);
+    const [row] = await db
+      .select()
+      .from(liveLeagueCheckpointsInCompetition)
+      .where(
+        and(
+          eq(liveLeagueCheckpointsInCompetition.seasonId, season.seasonId),
+          eq(liveLeagueCheckpointsInCompetition.eventId, eventId),
+          eq(liveLeagueCheckpointsInCompetition.tournamentId, scope.tournamentId),
+          eq(liveLeagueCheckpointsInCompetition.scopeKind, scope.scope),
+        ),
+      );
+    // A concurrent replacement must be retried, never cached under the old identity.
     if (
+      !row ||
+      row.state !== 'FINALIZED' ||
+      canonicalJson({
+        tournamentId: row.tournamentId,
+        scopeKind: row.scopeKind,
+        state: row.state,
+        publicationId: row.publicationId,
+        generation: row.generation,
+        rowCount: row.rowCount,
+        payloadBytes: row.payloadBytes,
+        payloadSha256: row.payloadSha256,
+        checkpointedAt: row.checkpointedAt,
+      }) !== identity ||
       !validateLiveLeaguePublicationV2Checkpoint(
         {
           season: season.seasonCode,
           eventId,
-          tournamentId: row.tournamentId,
-          scope: row.scopeKind,
+          tournamentId: scope.tournamentId,
+          scope: scope.scope,
         },
         row.manifest,
         row.indexPayload,
@@ -175,11 +198,66 @@ async function hasFinalLiveLeagueCheckpointsV2(
           payloadSha256: row.payloadSha256,
         },
       )
-    ) {
+    )
       return false;
+    leagueCheckpointValidationCache.set(key, { identity, validatedAtMs: Date.now() });
+    while (leagueCheckpointValidationCache.size > LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT) {
+      const oldest = leagueCheckpointValidationCache.keys().next().value;
+      if (oldest === undefined) break;
+      leagueCheckpointValidationCache.delete(oldest);
     }
   }
   return true;
+}
+
+// Shared by target planning and the worker's preflight. A missing semantic
+// input requires the accepted provider-response repair path, not another full
+// global FINAL publication pass.
+function missingClassicFinalizationInput(seasonCode: string): SQL {
+  return sql`EXISTS (
+              SELECT 1
+              FROM competition.tournament_entries AS final_roster
+              WHERE final_roster.season_id = league_tournament.season_id
+                AND final_roster.tournament_id = league_tournament.tournament_id
+                AND EXISTS (
+                  SELECT 1
+                  FROM competition.entries AS final_entry
+                  WHERE final_entry.season_id = final_roster.season_id
+                    AND final_entry.entry_id = final_roster.entry_id
+                    AND (final_entry.started_event IS NULL OR final_entry.started_event <= ${eventsInFpl.eventId})
+                )
+                AND NOT (
+                  ${hasDurableFinalEntryInput(seasonCode, sql.raw('final_roster.entry_id'))}
+                )
+            )`;
+}
+
+export async function readLiveFinalizationPrerequisites(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<{ blocked: boolean }> {
+  const db = await getDb();
+  const [row] = await db
+    .select({
+      blocked: sql<boolean>`EXISTS (
+    SELECT 1 FROM competition.tournaments AS league_tournament
+    WHERE league_tournament.season_id = ${eventsInFpl.seasonId}
+      AND league_tournament.state = 'active'
+      AND league_tournament.setup_status = 'ready'
+      AND league_tournament.league_type = 'classic'
+      AND ${missingClassicFinalizationInput(season.seasonCode)}
+  )`,
+    })
+    .from(eventsInFpl)
+    .where(
+      and(
+        eq(eventsInFpl.seasonId, season.seasonId),
+        eq(eventsInFpl.eventId, eventId),
+        eq(eventsInFpl.finished, true),
+        eq(eventsInFpl.dataChecked, true),
+      ),
+    );
+  return { blocked: row?.blocked === true };
 }
 
 /**
@@ -936,22 +1014,7 @@ export async function findLivePublicationV2FinalizationTargets(
                 AND league_checkpoint.scope_kind = 'CLASSIC'
                 AND league_checkpoint.state = 'FINALIZED'
             )
-            AND NOT EXISTS (
-              SELECT 1
-              FROM competition.tournament_entries AS final_roster
-              WHERE final_roster.season_id = league_tournament.season_id
-                AND final_roster.tournament_id = league_tournament.tournament_id
-                AND EXISTS (
-                  SELECT 1
-                  FROM competition.entries AS final_entry
-                  WHERE final_entry.season_id = final_roster.season_id
-                    AND final_entry.entry_id = final_roster.entry_id
-                    AND (final_entry.started_event IS NULL OR final_entry.started_event <= ${eventsInFpl.eventId})
-                )
-                AND NOT (
-                  ${hasDurableFinalEntryInput(season.seasonCode, sql.raw('final_roster.entry_id'))}
-                )
-            )
+            AND NOT (${missingClassicFinalizationInput(season.seasonCode)})
           )
           OR (
             league_tournament.league_type = 'h2h'
@@ -1132,6 +1195,11 @@ export async function findLivePublicationV2FinalizationTargets(
       detailPayloadBytes: row.detailPayloadBytes ?? null,
       detailCheckpointedAt: checkpointDateIdentity(row.detailCheckpointedAt ?? null),
     };
+    if (!(await hasFinalLiveLeagueCheckpointsV2(season, row.eventId))) {
+      finalCheckpointValidationCache.delete(key);
+      targets.push(row.eventId);
+      continue;
+    }
     const cachedValidation = finalCheckpointValidationCache.get(key);
     if (
       cachedValidation &&
@@ -1141,11 +1209,6 @@ export async function findLivePublicationV2FinalizationTargets(
       continue;
     }
     if (!(await hasFinalLiveMatchCheckpointsV3(season, row.eventId))) {
-      finalCheckpointValidationCache.delete(key);
-      targets.push(row.eventId);
-      continue;
-    }
-    if (!(await hasFinalLiveLeagueCheckpointsV2(season, row.eventId))) {
       finalCheckpointValidationCache.delete(key);
       targets.push(row.eventId);
       continue;
