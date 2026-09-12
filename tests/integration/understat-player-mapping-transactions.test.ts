@@ -618,4 +618,23 @@ test('keeps verified identity across stat differences and applies recovery insid
   expect(repeated.skipped).toEqual([
     { linkId: targetItem!.linkId, reason: 'NOT_CURRENTLY_QUARANTINED' },
   ]);
+
+  const operatorQuarantine = await providerIdentityRepository.updateEntityStatus(
+    targetItem!.linkId,
+    'quarantined',
+  );
+  expect(operatorQuarantine?.evidence).toMatchObject({
+    manualReview: true,
+    quarantineProvenance: 'operator',
+  });
+  expect(
+    (operatorQuarantine?.evidence as { recoveryProvenance?: unknown }).recoveryProvenance,
+  ).toBeUndefined();
+  expect(
+    (operatorQuarantine?.evidence as { recovery?: { provenance?: unknown } }).recovery?.provenance,
+  ).toBeUndefined();
+  const operatorQuarantineReport = await inspectQuarantinedProviderPlayers(season);
+  expect(
+    operatorQuarantineReport.items.find((item) => item.linkId === targetItem!.linkId)?.disposition,
+  ).toBe('manual_review');
 });
