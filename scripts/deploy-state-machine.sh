@@ -29,7 +29,7 @@ DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKEN=${DEPLOY_CONTENT_WORKER_PAUSE_OWNER_TOKE
 # bound even though the control command is healthy; keep the probe bounded
 # while allowing that startup window to complete.
 DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS:-30}
-DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS:-10}
+DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS:-30}
 # The Redis pause-owner marker expires after one hour.  Refresh well inside
 # that window so backup, migration, seed, and recovery stages can be longer
 # than the original control operation without losing release ownership.

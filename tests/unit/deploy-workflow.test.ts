@@ -180,6 +180,9 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain(
       'DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS:-30}',
     );
+    expect(deployStateMachine).toContain(
+      'DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_ADMISSION_CONTROL_TIMEOUT_SECONDS:-30}',
+    );
 
     for (const source of [deployStateMachine, deployScript, workflow]) {
       expect(source).not.toContain('start_content_x_scan_advisory_fence');
