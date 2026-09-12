@@ -220,6 +220,10 @@ describe('production environment preflight', () => {
       'start_content_worker_pause_renewal',
       replaceServices,
     );
+    const reenablePauseRenewalGuard = deployScript.indexOf(
+      'DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=true',
+      restartPauseRenewal,
+    );
     const runtimeHealth = deployScript.indexOf('scripts/verify-runtime-health.sh', replaceServices);
 
     expect(preflight).toBeGreaterThan(0);
@@ -248,6 +252,8 @@ describe('production environment preflight', () => {
     expect(stopPauseRenewalForRestart).toBeGreaterThan(publishCore);
     expect(stopPauseRenewalForRestart).toBeLessThan(replaceServices);
     expect(restartPauseRenewal).toBeGreaterThan(replaceServices);
+    expect(reenablePauseRenewalGuard).toBeGreaterThan(restartPauseRenewal);
+    expect(reenablePauseRenewalGuard).toBeLessThan(runtimeHealth);
     expect(restartPauseRenewal).toBeLessThan(runtimeHealth);
     expect(deployScript).toContain('Using the configured Data runtime URL without rewriting it');
     expect(deployScript).toContain('DEPLOY_COMMITTED=false');

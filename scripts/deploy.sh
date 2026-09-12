@@ -1073,6 +1073,7 @@ deploy() {
     log_error "Could not restart content-worker control renewal after service start."
     exit 1
   fi
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=true
   if ! run_deploy_command_with_pause_renewal env \
     EXPECTED_DEPLOY_SHA="$DEPLOY_SHA" \
     PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
