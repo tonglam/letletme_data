@@ -834,7 +834,7 @@ export async function checkpointFinalEntryFromProviderResponse(
       current.publication.publicationId !== head.publicationId ||
       current.publication.generation !== head.generation ||
       current.input.picksBase.revision !== head.picksBaseRevision ||
-      isFreshnessBoundaryNewer(head.sourceCheckedAt, dataCheckedAt)
+      isFreshnessBoundaryNewer(head.sourceCheckedAtExact ?? head.sourceCheckedAt, dataCheckedAt)
     ) {
       const currentEvent = await eventRepository.findById(season, eventId);
       const currentEventBoundary = currentEvent
@@ -873,7 +873,10 @@ export async function checkpointFinalEntryFromProviderResponse(
     season: season.seasonCode,
     eventId,
     entryId,
-    sourceCheckedAt: result.richSyncedAt,
+    // Keep the caller's exact database ordering timestamp.  The mapped Date
+    // on result.richSyncedAt has only millisecond precision and can fall below
+    // a microsecond finalization fence even when the accepted source is valid.
+    sourceCheckedAt,
     dataCheckedAt,
     finalResult: {
       score: { eventPoints: result.eventPoints, totalPoints: result.overallPoints },
@@ -982,13 +985,14 @@ export function hasFinalEntryCheckpoint(
   dataCheckedAt: Date | string,
 ): boolean {
   const input = head.inputPayload;
+  const sourceCheckedAt = head.sourceCheckedAtExact ?? head.sourceCheckedAt;
   if (
     head.state !== 'COMPLETE' ||
     head.rowCount !== 15 ||
     !Number.isSafeInteger(head.generation) ||
     head.generation < 1 ||
-    !Number.isFinite(head.sourceCheckedAt.getTime()) ||
-    isFreshnessBoundaryNewer(head.sourceCheckedAt, dataCheckedAt) ||
+    !Number.isFinite(new Date(sourceCheckedAt).getTime()) ||
+    isFreshnessBoundaryNewer(sourceCheckedAt, dataCheckedAt) ||
     !validateEntryLiveInputV2(input, {
       season: season.seasonCode,
       eventId,
@@ -1247,7 +1251,7 @@ function buildFinalEntryLiveInputFromCheckpoint(
     head.generation <= 0 ||
     !/^[0-9a-f]{64}$/.test(head.picksBaseRevision) ||
     !/^[0-9a-f]{64}$/.test(head.contentSha256) ||
-    !Number.isFinite(head.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(new Date(head.sourceCheckedAtExact ?? head.sourceCheckedAt).getTime()) ||
     !Number.isFinite(head.contentUpdatedAt.getTime()) ||
     !Number.isFinite(head.checkpointedAt.getTime()) ||
     durableLiveInputContentHash(rows) !== head.contentSha256
@@ -1296,7 +1300,8 @@ function buildFinalEntryLiveInputFromCheckpoint(
     !automaticSubs ||
     !richSyncedAt ||
     !Number.isFinite(richSyncedAt.getTime()) ||
-    richSyncedAt.getTime() < dataCheckedAt.getTime()
+    richSyncedAt.getTime() < dataCheckedAt.getTime() ||
+    isFreshnessBoundaryNewer(head.sourceCheckedAtExact ?? head.sourceCheckedAt, dataCheckedAt)
   ) {
     return null;
   }
@@ -1396,6 +1401,9 @@ export async function rebuildFinalEntryLiveInputsV2(
     );
     if (!input) continue;
     try {
+      if (finalizationCorrectionBoundary !== undefined) {
+        await assertCurrentFinalizationBoundary(season, eventId, finalizationCorrectionBoundary);
+      }
       const publication = await publishEntryLiveInputV2({
         season: season.seasonCode,
         eventId,

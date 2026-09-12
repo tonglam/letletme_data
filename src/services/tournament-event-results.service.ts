@@ -1,8 +1,10 @@
 import {
+  checkpointEntryLiveInputV2,
   checkpointFinalEntryFromProviderResponse,
   completedFinalEntryIds,
+  rebuildFinalEntryLiveInputsV2,
 } from './entries.service';
-import { readLivePublicationV2 } from '../cache/live-publication-v2';
+import { readEntryLiveInputV2, readLivePublicationV2 } from '../cache/live-publication-v2';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
@@ -23,7 +25,7 @@ import {
 import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import type { RawFPLEntryTransfersResponse } from '../types';
+import type { RawFPLEntryEventPicksResponse, RawFPLEntryTransfersResponse } from '../types';
 import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -251,16 +253,91 @@ export async function syncTournamentEventResultsForEntryIds(
   const transferSourceCheckedAt = options?.skipTransfers
     ? null
     : (options?.transferSourceCheckedAt ?? sourceOrdering.exact);
-  const live = await resolveEventPointsPayload(season, eventId, options?.live);
-  const pointsByElement = new Map<number, number>();
-  for (const element of live.elements) {
-    pointsByElement.set(element.id, element.stats.total_points);
+  const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+  const requestedRecoveryEntryIds = new Set(
+    [...(options?.finalizationRecoveryEntryIds ?? [])].filter((entryId) =>
+      uniqueEntryIds.includes(entryId),
+    ),
+  );
+  const finalizationCheckpointFailureEntryIds = new Set<number>();
+  let recoveredFinalEntryIds = new Set<number>();
+
+  // A missing Redis pointer does not imply missing canonical facts. Rebuild
+  // those entries from the durable head/result before touching FPL so an
+  // outage in the historical endpoint cannot block a cache-only repair.
+  if (finalizationDate && finalizationCutoff && requestedRecoveryEntryIds.size > 0) {
+    const recoveryIds = [...requestedRecoveryEntryIds];
+    try {
+      await rebuildFinalEntryLiveInputsV2(
+        season,
+        eventId,
+        recoveryIds,
+        finalizationCutoff,
+        undefined,
+        finalizationCutoff,
+      );
+      // Rebuild publishes the immutable FINAL candidate. Complete its durable
+      // marker from that candidate, still without a provider request.
+      await mapWithConcurrency(recoveryIds, 1, async (entryId) => {
+        try {
+          const current = await readEntryLiveInputV2({
+            season: season.seasonCode,
+            eventId,
+            entryId,
+          });
+          if (
+            current?.servedFrom !== 'REDIS_CURRENT' ||
+            current.publication.state !== 'FINAL' ||
+            isFreshnessBoundaryNewer(current.publication.sourceCheckedAt, finalizationCutoff)
+          ) {
+            return false;
+          }
+          return (await checkpointEntryLiveInputV2(season, eventId, entryId)) === 'checkpointed';
+        } catch (error) {
+          logError('Durable FINAL recovery marker failed before provider fetch', error, {
+            eventId,
+            entryId,
+          });
+          return false;
+        }
+      });
+      const recoveryHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+        season,
+        eventId,
+        recoveryIds,
+      );
+      const completedRecoveryIds = await completedFinalEntryIds(
+        season,
+        eventId,
+        recoveryHeads,
+        finalizationCutoff,
+      );
+      recoveredFinalEntryIds = new Set(
+        [...completedRecoveryIds].filter((entryId) => requestedRecoveryEntryIds.has(entryId)),
+      );
+    } catch (error) {
+      logError('Durable FINAL recovery before provider fetch did not converge', error, {
+        eventId,
+        entries: recoveryIds.length,
+      });
+    }
   }
 
-  const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  const finalizationRecoveryEntryIds = options?.finalizationRecoveryEntryIds ?? new Set<number>();
-  const finalizationCheckpointFailureEntryIds = new Set<number>();
-  await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
+  const providerEntryIds = uniqueEntryIds.filter((entryId) => !recoveredFinalEntryIds.has(entryId));
+  const live =
+    providerEntryIds.length > 0
+      ? await resolveEventPointsPayload(season, eventId, options?.live)
+      : null;
+  const pointsByElement = new Map<number, number>();
+  if (live) {
+    for (const element of live.elements) {
+      pointsByElement.set(element.id, element.stats.total_points);
+    }
+  }
+  const acceptedEntryIds = new Set<number>();
+  const persistedEntryIds = new Set<number>();
+  const picksByEntry = new Map<number, RawFPLEntryEventPicksResponse>();
+  await mapWithConcurrency(providerEntryIds, concurrency, async (entryId) => {
     let accepted = false;
     try {
       const [picks, transfers] = await withTimeout(
@@ -277,6 +354,7 @@ export async function syncTournamentEventResultsForEntryIds(
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
+      picksByEntry.set(entryId, picks);
       const persistEntry = async () => {
         await withEntrySeasonSyncTransaction(
           season,
@@ -287,7 +365,7 @@ export async function syncTournamentEventResultsForEntryIds(
               entryId,
               eventId,
               picks,
-              live,
+              live!,
               sourceOrdering.exact,
             );
             await createEntryEventPicksRepository(tx).upsertFromPicks(
@@ -329,27 +407,18 @@ export async function syncTournamentEventResultsForEntryIds(
       } else {
         await persistEntry();
       }
-      if (finalizationDate && (accepted || finalizationRecoveryEntryIds.has(entryId))) {
-        await checkpointFinalEntryFromProviderResponse(
-          season,
-          entryId,
-          eventId,
-          picks,
-          sourceOrdering.exact,
-          finalizationCutoff ?? finalizationDate,
-          live,
-        );
-      }
+      persistedEntryIds.add(entryId);
+      if (accepted) acceptedEntryIds.add(entryId);
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
-      if (finalizationDate && (accepted || finalizationRecoveryEntryIds.has(entryId))) {
-        finalizationCheckpointFailureEntryIds.add(entryId);
-      }
       logError('Failed to sync tournament entry results', error, { eventId, entryId });
       return { entryId, success: false } satisfies EntrySyncOutcome;
     }
   });
 
+  // Do not publish any FINAL while provider work can still change the event's
+  // finalization fence. The batch boundary check below is the gate; the
+  // per-entry helper repeats it immediately before each CAS publication.
   const afterEvent = await eventRepository.findById(season, eventId);
   const afterFinalization =
     afterEvent?.finished && afterEvent.dataChecked ? afterEvent.dataCheckedAt : null;
@@ -377,6 +446,39 @@ export async function syncTournamentEventResultsForEntryIds(
       uniqueEntryIds.length,
     );
   }
+
+  if (finalizationDate && finalizationCutoff) {
+    const finalizationEntryIds = providerEntryIds.filter(
+      (entryId) =>
+        acceptedEntryIds.has(entryId) ||
+        persistedEntryIds.has(entryId) ||
+        requestedRecoveryEntryIds.has(entryId),
+    );
+    await mapWithConcurrency(finalizationEntryIds, concurrency, async (entryId) => {
+      const picks = picksByEntry.get(entryId);
+      if (!picks || !live) {
+        finalizationCheckpointFailureEntryIds.add(entryId);
+        return false;
+      }
+      try {
+        await checkpointFinalEntryFromProviderResponse(
+          season,
+          entryId,
+          eventId,
+          picks,
+          sourceOrdering.exact,
+          finalizationCutoff,
+          live,
+        );
+        return true;
+      } catch (error) {
+        finalizationCheckpointFailureEntryIds.add(entryId);
+        logError('Failed to checkpoint historical FINAL entry', error, { eventId, entryId });
+        return false;
+      }
+    });
+  }
+
   const [staleResultEntryIds, persistedPickEntryIds, missingTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findEntryIdsNeedingRichSync(
       season,
@@ -390,6 +492,10 @@ export async function syncTournamentEventResultsForEntryIds(
       : entryEventTransfersRepository.findEntryIdsNeedingSync(season, uniqueEntryIds, eventId),
   ]);
   const freshResultEntryIds = freshEntryIds(uniqueEntryIds, staleResultEntryIds);
+  // A durable FINAL checkpoint is authoritative for a historical recovery. Its
+  // source timestamp may predate this pass's wall-clock freshness probe, but
+  // that does not make the already finalized result incomplete again.
+  for (const entryId of recoveredFinalEntryIds) freshResultEntryIds.add(entryId);
   const persistedPickSet = new Set(persistedPickEntryIds);
   const missingTransferSet = new Set(missingTransferEntryIds);
   const finalHeads = finalizationDate

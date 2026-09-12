@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type Redis from 'ioredis';
 
 import type { EventLive } from '../domain/event-lives';
+import { isFreshnessBoundaryNewer } from '../domain/freshness';
 import { validateSerializedFixtures } from '../domain/fixtures';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
@@ -907,6 +908,10 @@ if current then
     -- candidate as the only fallback so a rejected pre-boundary FINAL can
     -- never be served after the active pointer or its item is lost.
     redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+    -- The superseded FINAL is no longer reachable from either pointer. Remove
+    -- its payload and manifest metadata instead of leaving a full retention
+    -- lease on an orphaned immutable generation.
+    redis.call('DEL', current.item.key, current.item.key .. ':meta')
   else
     redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
     if current.item.key and redis.call('EXISTS', current.item.key) == 1 then
@@ -2178,6 +2183,8 @@ export async function publishEntryLiveInputV2(input: {
   readonly entryId: number;
   readonly input: EntryLiveInputV2;
   readonly sourceCheckedAt: Date | string;
+  /** Preserve PostgreSQL microseconds for a finalized source observation. */
+  readonly preserveSourceCheckedAtPrecision?: boolean;
   /** Zero is explicit evidence that no durable V2 head exists. */
   readonly generationFloor: number;
   /** Canonical finalized-event boundary, checked by the recovery service. */
@@ -2205,7 +2212,9 @@ export async function publishEntryLiveInputV2(input: {
     entryLiveV2Key(scope, 'sequence'),
     Math.max(input.generationFloor, current?.publication.generation ?? 0),
   );
-  const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
+  const sourceCheckedAt = input.preserveSourceCheckedAtPrecision
+    ? exactTimestamp(input.sourceCheckedAt)
+    : sourceDate(input.sourceCheckedAt);
   const item = buildEntryItem(scope, allocation.generation, input.input);
   const publication: EntryLivePublicationV2 = {
     contractVersion: LIVE_POINTS_CONTRACT_VERSION,
@@ -2289,9 +2298,9 @@ export async function publishEntryLiveFinalResultV2(input: {
 }> {
   const scope = { season: input.season, eventId: input.eventId, entryId: input.entryId } as const;
   assertEntryScope(scope);
-  const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
-  const dataCheckedAt = sourceDate(input.dataCheckedAt);
-  if (new Date(sourceCheckedAt).getTime() < new Date(dataCheckedAt).getTime()) {
+  const sourceCheckedAt = exactTimestamp(input.sourceCheckedAt);
+  const dataCheckedAt = exactTimestamp(input.dataCheckedAt);
+  if (isFreshnessBoundaryNewer(sourceCheckedAt, dataCheckedAt)) {
     throw new CacheError(
       'Final V2 entry result predates the event data_checked fence',
       'LIVE_V2_FINAL_EVIDENCE_STALE',
@@ -2345,6 +2354,7 @@ export async function publishEntryLiveFinalResultV2(input: {
     entryId: input.entryId,
     input: nextInput,
     sourceCheckedAt,
+    preserveSourceCheckedAtPrecision: true,
     generationFloor: current.publication.generation,
     finalizationCorrectionBoundary: input.finalizationCorrectionBoundary ?? dataCheckedAt,
     redis: input.redis,
