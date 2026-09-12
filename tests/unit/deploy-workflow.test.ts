@@ -177,6 +177,9 @@ describe('release workflow gates', () => {
     expect(deployStateMachine).toContain('DEPLOY_QUIESCENCE_CONSUMER_QUEUE_NAMES=(\n  entry-sync');
     expect(deployStateMachine).toContain('DEPLOY_QUIESCENCE_ALLOW_PAUSED_QUEUES');
     expect(deployStateMachine).toContain('run_bounded_deploy_probe');
+    expect(deployStateMachine).toContain(
+      'DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS=${DEPLOY_CONTENT_WORKER_CONSUMER_CONTROL_TIMEOUT_SECONDS:-30}',
+    );
 
     for (const source of [deployStateMachine, deployScript, workflow]) {
       expect(source).not.toContain('start_content_x_scan_advisory_fence');
