@@ -48,6 +48,7 @@ import {
   syncEntryEventTransfers,
   checkpointEntryLiveInputV2,
 } from '../services/entries.service';
+import { publishActiveTournamentTrendScopesAfterEntryPicks } from '../services/tournament-event-picks.service';
 import {
   markEntryInfoSyncedToday,
   shouldMarkEntryInfoSynced,
@@ -263,6 +264,7 @@ type RequiredEntrySelector = (
 interface HandleEntryJobOptions {
   selectRequired?: RequiredEntrySelector;
   auditRequired?: (entryIds: number[]) => Promise<number[]>;
+  afterComplete?: PostCommitIntent;
 }
 
 type PostCommitIntent = () => Promise<void>;
@@ -301,6 +303,7 @@ async function handleEntryJob(
       jobName,
       afterEntryId: loaded.afterEntryId,
     });
+    const afterCommit = loaded.fetchedFromDb ? options.afterComplete : undefined;
     return {
       value: {
         total: 0,
@@ -316,6 +319,7 @@ async function handleEntryJob(
         succeededUnits: 0,
         failedUnits: 0,
       },
+      ...(afterCommit ? { afterCommit } : {}),
     };
   }
 
@@ -476,6 +480,7 @@ async function handleEntryJob(
   }
 
   const scanComplete = loaded.fetchedFromDb && decision.action === 'complete';
+  const afterCommit = scanComplete ? options.afterComplete : undefined;
   return {
     value: {
       ...result,
@@ -489,6 +494,7 @@ async function handleEntryJob(
       succeededUnits: result.success,
       failedUnits: result.failed,
     },
+    ...(afterCommit ? { afterCommit } : {}),
   };
 }
 
@@ -658,6 +664,13 @@ export function createEntrySyncWorker(
               (entryId) => syncEntryEventPicks(season, entryId, targetEventId!),
               effectiveJobData,
               {
+                afterComplete:
+                  targetEventId !== undefined &&
+                  effectiveJobData?.entryIds === undefined &&
+                  input.lane !== 'live-picks' &&
+                  effectiveJobData?.lane !== 'live-picks'
+                    ? () => publishActiveTournamentTrendScopesAfterEntryPicks(season, targetEventId)
+                    : undefined,
                 selectRequired: async (entryIds) => {
                   if (targetEventId === undefined) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };

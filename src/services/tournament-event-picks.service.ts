@@ -24,6 +24,63 @@ export function findMissingTournamentPickEntryIds(
   return expectedEntryIds.filter((entryId) => !persistedEntryIds.has(entryId));
 }
 
+async function loadActiveTournamentEventScope(season: FplSeasonRef, eventId: number) {
+  const tournaments = await tournamentInfoRepository.findActive(season);
+  if (tournaments.length === 0) {
+    return { tournaments, entryIds: [], publicationTournamentIds: [] };
+  }
+
+  const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
+    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
+  );
+  const candidateEntryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
+  const entryInfos = await entryInfoRepository.findByIds(season, candidateEntryIds);
+  const entryIds = findEventEligibleEntryIds(candidateEntryIds, entryInfos, eventId);
+  const eligibleEntryIds = new Set(entryIds);
+  const publicationTournamentIds = tournaments
+    .filter((_tournament, index) =>
+      entryLists[index].some((entryId) => eligibleEntryIds.has(entryId)),
+    )
+    .map((tournament) => tournament.id);
+
+  return { tournaments, entryIds, publicationTournamentIds };
+}
+
+function assertCompleteTournamentTrendPublication(
+  publication: Awaited<ReturnType<typeof publishTournamentTrendScopes>>,
+  message: string,
+): void {
+  const inactive = publication.results.filter((result) => !result.isActive).length;
+  const incomplete = publication.failed + inactive;
+  if (incomplete === 0) return;
+
+  throw new IncompleteDataSyncError(
+    message,
+    publication.failed + publication.results.length,
+    0,
+    publication.results.filter((result) => result.isActive).length,
+    incomplete,
+  );
+}
+
+/**
+ * Publish ownership/captaincy as soon as the canonical full entry-picks scan
+ * has converged. Transfer counts stay unavailable until their own checkpoint.
+ */
+export async function publishActiveTournamentTrendScopesAfterEntryPicks(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<void> {
+  const { publicationTournamentIds } = await loadActiveTournamentEventScope(season, eventId);
+  if (publicationTournamentIds.length === 0) return;
+
+  const publication = await publishTournamentTrendScopes(season, eventId, publicationTournamentIds);
+  assertCompleteTournamentTrendPublication(
+    publication,
+    'Tournament Trends publication failed after entry picks converged',
+  );
+}
+
 export async function syncTournamentEventPicks(
   season: FplSeasonRef,
   eventId: number,
@@ -41,7 +98,10 @@ export async function syncTournamentEventPicks(
 }> {
   logInfo('Starting tournament event picks sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive(season);
+  const { tournaments, entryIds, publicationTournamentIds } = await loadActiveTournamentEventScope(
+    season,
+    eventId,
+  );
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event picks', { eventId });
     return {
@@ -58,12 +118,6 @@ export async function syncTournamentEventPicks(
   }
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
-  );
-  const candidateEntryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
-  const entryInfos = await entryInfoRepository.findByIds(season, candidateEntryIds);
-  const entryIds = findEventEligibleEntryIds(candidateEntryIds, entryInfos, eventId);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event picks', { eventId });
     return {
@@ -78,13 +132,6 @@ export async function syncTournamentEventPicks(
       failedUnits: 0,
     };
   }
-
-  const eligibleEntryIds = new Set(entryIds);
-  const publicationTournamentIds = tournaments
-    .filter((_tournament, index) =>
-      entryLists[index].some((entryId) => eligibleEntryIds.has(entryId)),
-    )
-    .map((tournament) => tournament.id);
 
   const existing = await entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds);
   const existingSet = new Set(existing);
@@ -134,17 +181,10 @@ export async function syncTournamentEventPicks(
   // counts remain explicitly unavailable until the transfer checkpoint lands.
   const publication = await publishTournamentTrendScopes(season, eventId, publicationTournamentIds);
 
-  const incompletePublications =
-    publication.failed + publication.results.filter((result) => !result.isActive).length;
-  if (incompletePublications > 0) {
-    throw new IncompleteDataSyncError(
-      'Tournament picks converged but required Trends publications are incomplete',
-      publication.failed + publication.results.length,
-      0,
-      publication.results.filter((result) => result.isActive).length,
-      incompletePublications,
-    );
-  }
+  assertCompleteTournamentTrendPublication(
+    publication,
+    'Tournament picks converged but required Trends publications are incomplete',
+  );
 
   return {
     eventId,
