@@ -273,8 +273,9 @@ source-specific values; a difference in any of them must not quarantine an exist
 link. A verified link is retained when a complete mapped match does not observe that pair, and a
 newly observed complete match may only add its season confirmation.
 
-New automatic links require deterministic normalized full-name equality (case, accents, whitespace,
-and punctuation differences are ignored), or a manually confirmed alias, on the same mapped team.
+New automatic links require deterministic normalized full-name equality (HTML entities, case,
+accents, compatibility letters such as `ø`, whitespace, and punctuation differences are ignored),
+or a manually confirmed alias, on the same mapped team.
 The pair must be uniquely resolved and observed in at least two complete mapped matches. Name
 fragments, fuzzy matching, statistical equality, and a single incomplete match do not establish a
 new identity. One-to-one verified link conflicts remain blocked.
@@ -287,7 +288,12 @@ bun run understat:mapping-recovery --season 2627
 
 It emits a JSON report that classifies current-season quarantined links as `recoverable`,
 `identity_conflict`, `insufficient_evidence`, or `manual_review`. Recovery requires an explicit JSON
-approval list containing the report's `linkId`, `understatPlayerId`, and `fplPlayerCode` values:
+approval list containing each report item's `linkId`, `understatPlayerId`, `fplPlayerCode`, and
+`evidenceHash` values. The hash binds approval to the report snapshot:
+
+The audit includes a quarantined pair when current-season Understat and FPL player evidence exists,
+even if an older status update left the link's `firstSeenSeason`/`lastSeenSeason` range behind the
+season being audited.
 
 ```bash
 bun run understat:mapping-recovery --season 2627 --apply --approved-file approved.json

@@ -181,7 +181,12 @@ describe('provider roster matcher', () => {
 
   test('normalizes full names and accepts only explicit trusted aliases', () => {
     expect(normalizeProviderPlayerName('  Álex.  Isak ')).toBe('alex isak');
+    expect(normalizeProviderPlayerName('Martin Ødegaard')).toBe('martin odegaard');
+    expect(normalizeProviderPlayerName('Nico O&#039;Reilly')).toBe('nico o reilly');
+    expect(normalizeProviderPlayerName('Nico O\u0026#x27;Reilly')).toBe('nico o reilly');
     expect(providerPlayerNamesMatch('Alexander Isak', 'alexander isak')).toBe(true);
+    expect(providerPlayerNamesMatch('Martin Odegaard', 'Martin Ødegaard')).toBe(true);
+    expect(providerPlayerNamesMatch('Nico O Reilly', 'Nico O&#039;Reilly')).toBe(true);
     expect(providerPlayerNamesMatch('Alexander Isak', 'Isak')).toBe(false);
     expect(
       providerPlayerNamesMatch('Alexander Isak', 'Alex Isaksson', {

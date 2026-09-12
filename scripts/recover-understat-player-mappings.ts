@@ -71,14 +71,19 @@ function parseApproval(value: unknown, index: number): UnderstatPlayerMappingRec
   if (
     typeof row.linkId !== 'string' ||
     !Number.isSafeInteger(understatPlayerId) ||
-    !Number.isSafeInteger(fplPlayerCode)
+    !Number.isSafeInteger(fplPlayerCode) ||
+    typeof row.evidenceHash !== 'string' ||
+    !/^[0-9a-f]{64}$/i.test(row.evidenceHash)
   ) {
-    throw new Error(`approval ${index + 1} requires linkId, understatPlayerId, and fplPlayerCode`);
+    throw new Error(
+      `approval ${index + 1} requires linkId, understatPlayerId, fplPlayerCode, and a 64-character evidenceHash`,
+    );
   }
   return {
     linkId: row.linkId,
     understatPlayerId: understatPlayerId as number,
     fplPlayerCode: fplPlayerCode as number,
+    evidenceHash: row.evidenceHash,
   };
 }
 

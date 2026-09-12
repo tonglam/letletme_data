@@ -368,11 +368,27 @@ test('keeps verified identity across stat differences and applies recovery insid
     season,
   );
 
-  await providerIdentityRepository.updateEntityStatus(entityLinkIds.at(-1)!, 'quarantined');
+  await db
+    .update(providerEntityLinks)
+    .set({ status: 'quarantined', firstSeenSeason: '2526', lastSeenSeason: '2526' })
+    .where(eq(providerEntityLinks.linkId, entityLinkIds.at(-1)!));
   const report = await inspectQuarantinedProviderPlayers(season);
   const item = report.items.find((candidate) => candidate.linkId === entityLinkIds.at(-1));
   expect(item?.disposition).toBe('recoverable');
   expect(item?.observedMatchIds).toHaveLength(2);
+
+  const staleApproval = await restoreQuarantinedProviderPlayers(season, [
+    {
+      linkId: item!.linkId,
+      understatPlayerId: item!.understatPlayerId!,
+      fplPlayerCode: item!.fplPlayerCode,
+      evidenceHash: '0'.repeat(64),
+    },
+  ]);
+  expect(staleApproval.applied).toEqual([]);
+  expect(staleApproval.skipped).toEqual([
+    { linkId: item!.linkId, reason: 'APPROVAL_NO_LONGER_MATCHES_REPORT' },
+  ]);
 
   let lockObserved = false;
   const originalUpsert = providerIdentityRepository.upsertEntityLink.bind(
@@ -402,6 +418,7 @@ test('keeps verified identity across stat differences and applies recovery insid
         linkId: item!.linkId,
         understatPlayerId: item!.understatPlayerId!,
         fplPlayerCode: item!.fplPlayerCode,
+        evidenceHash: item!.evidenceHash,
       },
     ]);
   } finally {
@@ -452,6 +469,7 @@ test('keeps verified identity across stat differences and applies recovery insid
       linkId: item!.linkId,
       understatPlayerId: item!.understatPlayerId!,
       fplPlayerCode: item!.fplPlayerCode,
+      evidenceHash: item!.evidenceHash,
     },
   ]);
   expect(repeated.applied).toEqual([]);

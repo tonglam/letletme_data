@@ -111,6 +111,7 @@ export type UnderstatPlayerMappingRecoveryApproval = Readonly<{
   linkId: string;
   understatPlayerId: number;
   fplPlayerCode: number;
+  evidenceHash: string;
 }>;
 
 export type UnderstatPlayerMappingRecoveryApplyResult = Readonly<{
@@ -153,13 +154,75 @@ function fplHasFullName(row: { firstName: string | null; secondName: string | nu
   return Boolean(row.firstName?.trim() && row.secondName?.trim());
 }
 
+const PROVIDER_HTML_ENTITIES: Readonly<Record<string, string>> = {
+  amp: '&',
+  apos: String.fromCodePoint(39),
+  gt: '>',
+  lt: '<',
+  nbsp: ' ',
+  quot: '"',
+  rdquo: '”',
+  ldquo: '“',
+  rsquo: '’',
+  lsquo: '‘',
+};
+
+const PROVIDER_COMPATIBILITY_LETTERS: Readonly<Record<string, string>> = {
+  Æ: 'AE',
+  æ: 'ae',
+  Ð: 'D',
+  ð: 'd',
+  Đ: 'D',
+  đ: 'd',
+  Ł: 'L',
+  ł: 'l',
+  Ø: 'O',
+  ø: 'o',
+  Þ: 'TH',
+  þ: 'th',
+  ß: 'ss',
+  Ħ: 'H',
+  ħ: 'h',
+  Ŀ: 'L',
+  ŀ: 'l',
+  ı: 'i',
+  Ŧ: 'T',
+  ŧ: 't',
+  Œ: 'OE',
+  œ: 'oe',
+};
+
+function decodeProviderHtmlEntities(value: string): string {
+  return value.replace(
+    /&(?:#(\d+)|#x([\da-f]+)|([a-z][a-z\d]+));/giu,
+    (entity, decimal, hexadecimal, named) => {
+      if (decimal !== undefined || hexadecimal !== undefined) {
+        const codePoint = Number.parseInt(decimal ?? hexadecimal, decimal ? 10 : 16);
+        if (Number.isSafeInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff) {
+          try {
+            return String.fromCodePoint(codePoint);
+          } catch {
+            return entity;
+          }
+        }
+        return entity;
+      }
+      return PROVIDER_HTML_ENTITIES[named.toLowerCase()] ?? entity;
+    },
+  );
+}
+
 /**
  * Normalize provider names for deterministic identity comparisons. This is
  * deliberately conservative: it removes presentation differences while
  * refusing fuzzy, surname-only, or substring matches.
  */
 export function normalizeProviderPlayerName(value: string): string {
-  return value
+  return decodeProviderHtmlEntities(value)
+    .replace(
+      /[ÆæÐðĐđŁłØøÞþßĦħĿŀıŦŧŒœ]/gu,
+      (letter) => PROVIDER_COMPATIBILITY_LETTERS[letter] ?? letter,
+    )
     .normalize('NFKD')
     .replace(/\p{Mark}/gu, '')
     .toLowerCase()
@@ -1004,6 +1067,33 @@ function linkCoversSeason(link: ProviderEntityLink, season: string): boolean {
   );
 }
 
+function quarantinedPlayerLinkHasSeasonEvidence(
+  link: ProviderEntityLink,
+  season: string,
+  snapshot: ProviderPlayerEvidenceSnapshot,
+): boolean {
+  if (linkCoversSeason(link, season)) return true;
+  const understatPlayerId = Number(link.leftEntityId);
+  const fplPlayerCode = Number(link.rightEntityId);
+  if (
+    !Number.isSafeInteger(understatPlayerId) ||
+    !Number.isSafeInteger(fplPlayerCode) ||
+    understatPlayerId <= 0 ||
+    fplPlayerCode <= 0
+  ) {
+    return false;
+  }
+  // Old reconciliation updated status without advancing last_seen_season.
+  // Current-season provider rows are the durable evidence that the pair was
+  // actually encountered during this audit, so do not hide those links from
+  // recovery merely because their historical range is stale.
+  return (
+    snapshot.understatRows.some((row) => row.playerId === understatPlayerId) &&
+    (snapshot.fplRows.some((row) => row.playerCode === fplPlayerCode) ||
+      snapshot.fplPlayers.some((row) => row.playerCode === fplPlayerCode))
+  );
+}
+
 function priorConfirmedSeasons(
   link: Pick<ProviderEntityLink, 'evidence'>,
   season: string,
@@ -1277,7 +1367,7 @@ export async function inspectQuarantinedProviderPlayers(
       link.leftProvider === 'understat' &&
       link.rightProvider === 'fpl' &&
       link.status === 'quarantined' &&
-      linkCoversSeason(link, season),
+      quarantinedPlayerLinkHasSeasonEvidence(link, season, snapshot),
   );
   const items = quarantined.map((link): UnderstatPlayerMappingRecoveryItem => {
     const fplPlayerCode = Number(link.rightEntityId);
@@ -1346,9 +1436,10 @@ export async function restoreQuarantinedProviderPlayers(
       !Number.isSafeInteger(approval.understatPlayerId) ||
       approval.understatPlayerId <= 0 ||
       !Number.isSafeInteger(approval.fplPlayerCode) ||
-      approval.fplPlayerCode <= 0
+      approval.fplPlayerCode <= 0 ||
+      !/^[0-9a-f]{64}$/i.test(approval.evidenceHash)
     ) {
-      throw new Error('Recovery approvals contain an invalid player mapping');
+      throw new Error('Recovery approvals contain an invalid player mapping or evidence hash');
     }
     if (seen.has(approval.linkId))
       throw new Error(`Duplicate recovery approval ${approval.linkId}`);
@@ -1381,7 +1472,8 @@ export async function restoreQuarantinedProviderPlayers(
         if (
           item.disposition !== 'recoverable' ||
           item.understatPlayerId !== approval.understatPlayerId ||
-          item.fplPlayerCode !== approval.fplPlayerCode
+          item.fplPlayerCode !== approval.fplPlayerCode ||
+          item.evidenceHash !== approval.evidenceHash
         ) {
           skipped.push({ linkId: approval.linkId, reason: 'APPROVAL_NO_LONGER_MATCHES_REPORT' });
           continue;
@@ -1393,7 +1485,7 @@ export async function restoreQuarantinedProviderPlayers(
           current.leftEntityId === null ||
           current.leftEntityId !== String(approval.understatPlayerId) ||
           current.rightEntityId !== String(approval.fplPlayerCode) ||
-          contentHash(current.evidence) !== item.evidenceHash
+          contentHash(current.evidence) !== approval.evidenceHash
         ) {
           skipped.push({ linkId: approval.linkId, reason: 'LINK_CHANGED_BEFORE_APPLY' });
           continue;

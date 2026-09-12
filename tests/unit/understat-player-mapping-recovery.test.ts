@@ -1,10 +1,16 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 
 import {
   classifyQuarantinedProviderPlayerMapping,
   PLAYER_RECOVERY_RULE_ID,
 } from '../../src/services/provider-matcher.service';
-import { parseRecoveryArguments } from '../../scripts/recover-understat-player-mappings';
+import {
+  parseRecoveryArguments,
+  readRecoveryApprovals,
+} from '../../scripts/recover-understat-player-mappings';
 
 const baseLink = {
   reviewedBy: null,
@@ -122,6 +128,39 @@ describe('Understat player mapping recovery', () => {
       apply: true,
       approvedFile: 'approved.json',
     });
+  });
+
+  test('requires each approval to bind the report evidence hash', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'understat-recovery-'));
+    const path = join(directory, 'approved.json');
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify([{ linkId: 'link-1', understatPlayerId: 5232, fplPlayerCode: 219168 }]),
+      );
+      expect(() => readRecoveryApprovals(path)).toThrow('evidenceHash');
+      writeFileSync(
+        path,
+        JSON.stringify([
+          {
+            linkId: 'link-1',
+            understatPlayerId: 5232,
+            fplPlayerCode: 219168,
+            evidenceHash: 'a'.repeat(64),
+          },
+        ]),
+      );
+      expect(readRecoveryApprovals(path)).toEqual([
+        {
+          linkId: 'link-1',
+          understatPlayerId: 5232,
+          fplPlayerCode: 219168,
+          evidenceHash: 'a'.repeat(64),
+        },
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test('uses the versioned recovery rule for restored links', () => {
