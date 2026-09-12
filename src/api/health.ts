@@ -9,6 +9,7 @@ import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import { eventRepository } from '../repositories/events';
+import { fixtureRepository } from '../repositories/fixtures';
 import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { readLiveCheckpointDesiredV2 } from '../cache/live-publication-v2';
 import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../domain/job-schedules';
@@ -150,9 +151,33 @@ export const mismatchSinceForPublication = (
   return Number.isFinite(existingSince) ? Math.min(existingSince as number, anchor) : anchor;
 };
 
+/**
+ * The FPL event deadline can precede the first fixture kickoff by hours. A
+ * missing Live Points publication is therefore expected until the fixture
+ * cohort has actually started (or a publication/checkpoint obligation exists).
+ * Keep this check tied to the current event's provider fixture state; a
+ * scheduled kickoff alone is not start evidence.
+ */
+export const hasStartedOrFinishedFixture = (value: unknown, eventId: number): boolean => {
+  if (!Array.isArray(value) || !Number.isInteger(eventId)) return false;
+  return value.some((candidate) => {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return false;
+    }
+    const fixture = candidate as Record<string, unknown>;
+    return (
+      fixture.event === eventId &&
+      (fixture.started === true ||
+        fixture.finished === true ||
+        fixture.finishedProvisional === true)
+    );
+  });
+};
+
 const publicationConsistencyProbe: DependencyProbe = async () => {
   const season = await seasonRepository.findCurrent();
   let consistent = true;
+  let coreRedisActive: Awaited<ReturnType<typeof readActiveDataPublication>> = null;
   const currentEvent = await eventRepository.findCurrent(season);
   const scopes = [
     { dataset: 'fpl:core' as const, seasonCode: season.seasonCode, eventId: undefined },
@@ -166,6 +191,7 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       scope.eventId,
     );
     const redisActive = await readActiveDataPublication(scope);
+    if (scope.dataset === 'fpl:core') coreRedisActive = redisActive;
     const durableEvidence = dbActive
       ? await loadDataPublicationDelivery(dbActive.publicationId).catch(() => null)
       : null;
@@ -203,7 +229,7 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   }
   if (currentEvent && !currentEventBeforeDeadline) {
     const liveKey = currentLiveKey as string;
-    const [redisLive, checkpointLive, desiredLive] = await Promise.all([
+    const [redisLive, checkpointLive, desiredLive, canonicalFixtures] = await Promise.all([
       readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(
         () => null,
       ),
@@ -212,40 +238,56 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
         season: season.seasonCode,
         eventId: currentEvent.id,
       }).catch(() => null),
+      fixtureRepository.findByEvent(season, currentEvent.id).catch(() => null),
     ]);
-    // A Redis-first publication may legitimately be ahead of PostgreSQL while
-    // its merged checkpoint obligation is pending.  Once Redis marks a
-    // publication checkpointed, however, both authorities must identify the
-    // same immutable generation.
-    // The desired pointer preserves the first outstanding obligation time.
-    // Use it as the grace anchor so a new heartbeat/publication cannot keep a
-    // broken checkpoint path green indefinitely. If the obligation pointer was
-    // itself unavailable, the current publication is the only bounded anchor.
-    const pendingCheckpointStartedAt = Date.parse(
-      desiredLive?.requestedAt ?? redisLive?.publication.publishedAt ?? '',
+    // The FPL deadline is a picks cutoff, not the first kickoff. During the
+    // gap between those moments event-live may legitimately return 503 while
+    // the scheduler remains in PICKS_PROBE. Do not age that expected absence
+    // into a deploy failure; once fixture state or a V2 obligation exists, the
+    // normal publication/checkpoint fence below applies.
+    const liveWindowStarted =
+      hasStartedOrFinishedFixture(canonicalFixtures, currentEvent.id) ||
+      hasStartedOrFinishedFixture(coreRedisActive?.items.fixtures, currentEvent.id);
+    const liveConsistencyRequired = Boolean(
+      redisLive || desiredLive || checkpointLive || liveWindowStarted || canonicalFixtures === null,
     );
-    const pendingCheckpointWithinGrace =
-      Number.isFinite(pendingCheckpointStartedAt) &&
-      Date.now() - pendingCheckpointStartedAt <= publicationMismatchGraceMs(liveKey);
-    const liveMatches =
-      Boolean(redisLive) &&
-      redisLive !== null &&
-      (redisLive.publication.checkpointedAt === null
-        ? pendingCheckpointWithinGrace
-        : checkpointLive !== null &&
-          checkpointLive.publication.publicationId === redisLive.publication.publicationId &&
-          checkpointLive.publication.generation === redisLive.publication.generation);
-    if (!liveMatches) {
-      consistent = false;
-      publicationMismatchSince.set(
-        liveKey,
-        mismatchSinceForPublication(
-          publicationMismatchSince.get(liveKey),
-          pendingCheckpointStartedAt,
-        ),
-      );
-    } else {
+    if (!liveConsistencyRequired) {
       publicationMismatchSince.delete(liveKey);
+    } else {
+      // A Redis-first publication may legitimately be ahead of PostgreSQL while
+      // its merged checkpoint obligation is pending.  Once Redis marks a
+      // publication checkpointed, however, both authorities must identify the
+      // same immutable generation.
+      // The desired pointer preserves the first outstanding obligation time.
+      // Use it as the grace anchor so a new heartbeat/publication cannot keep a
+      // broken checkpoint path green indefinitely. If the obligation pointer was
+      // itself unavailable, the current publication is the only bounded anchor.
+      const pendingCheckpointStartedAt = Date.parse(
+        desiredLive?.requestedAt ?? redisLive?.publication.publishedAt ?? '',
+      );
+      const pendingCheckpointWithinGrace =
+        Number.isFinite(pendingCheckpointStartedAt) &&
+        Date.now() - pendingCheckpointStartedAt <= publicationMismatchGraceMs(liveKey);
+      const liveMatches =
+        Boolean(redisLive) &&
+        redisLive !== null &&
+        (redisLive.publication.checkpointedAt === null
+          ? pendingCheckpointWithinGrace
+          : checkpointLive !== null &&
+            checkpointLive.publication.publicationId === redisLive.publication.publicationId &&
+            checkpointLive.publication.generation === redisLive.publication.generation);
+      if (!liveMatches) {
+        consistent = false;
+        publicationMismatchSince.set(
+          liveKey,
+          mismatchSinceForPublication(
+            publicationMismatchSince.get(liveKey),
+            pendingCheckpointStartedAt,
+          ),
+        );
+      } else {
+        publicationMismatchSince.delete(liveKey);
+      }
     }
   }
   if (consistent) return true;
