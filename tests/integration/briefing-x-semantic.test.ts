@@ -112,7 +112,7 @@ function allRejectedSemanticExecution(request: XToolRequestV1): GrokBuildExecuti
 function saturatedSemanticExecution(request: XToolRequestV1): GrokBuildExecutionResult {
   const result = semanticExecution(request);
   const posts = Array.from({ length: 10 }, (_, index) => {
-    const createdAt = new Date(Date.now() - (index + 2) * 60_000);
+    const createdAt = new Date(Date.parse(result.posts[0]!.createdAt) + (index + 10) * 60_000);
     const postId = snowflakeAt(createdAt, index + 10);
     return {
       postId,
