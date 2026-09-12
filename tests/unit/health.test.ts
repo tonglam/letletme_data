@@ -29,13 +29,21 @@ describe('data API readiness', () => {
 
   test('does not treat a scheduled kickoff as live start evidence', () => {
     expect(
-      hasStartedOrFinishedFixture([
-        { kickoffTime: '2026-09-12T14:00:00.000Z', started: false, finished: false },
-      ]),
+      hasStartedOrFinishedFixture(
+        [{ event: 4, kickoffTime: '2026-09-12T14:00:00.000Z', started: false, finished: false }],
+        4,
+      ),
     ).toBe(false);
-    expect(hasStartedOrFinishedFixture([{ started: true, finished: false }])).toBe(true);
-    expect(hasStartedOrFinishedFixture([{ started: false, finishedProvisional: true }])).toBe(true);
-    expect(hasStartedOrFinishedFixture(null)).toBe(false);
+    expect(hasStartedOrFinishedFixture([{ event: 3, started: true, finished: false }], 4)).toBe(
+      false,
+    );
+    expect(hasStartedOrFinishedFixture([{ event: 4, started: true, finished: false }], 4)).toBe(
+      true,
+    );
+    expect(
+      hasStartedOrFinishedFixture([{ event: 4, started: false, finishedProvisional: true }], 4),
+    ).toBe(true);
+    expect(hasStartedOrFinishedFixture(null, 4)).toBe(false);
   });
 
   test('hot-path readiness ignores PostgreSQL and queue Redis', async () => {

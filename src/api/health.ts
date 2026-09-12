@@ -154,18 +154,21 @@ export const mismatchSinceForPublication = (
  * The FPL event deadline can precede the first fixture kickoff by hours. A
  * missing Live Points publication is therefore expected until the fixture
  * cohort has actually started (or a publication/checkpoint obligation exists).
- * Keep this check tied to provider fixture state; a scheduled kickoff alone is
- * not start evidence.
+ * Keep this check tied to the current event's provider fixture state; a
+ * scheduled kickoff alone is not start evidence.
  */
-export const hasStartedOrFinishedFixture = (value: unknown): boolean => {
-  if (!Array.isArray(value)) return false;
+export const hasStartedOrFinishedFixture = (value: unknown, eventId: number): boolean => {
+  if (!Array.isArray(value) || !Number.isInteger(eventId)) return false;
   return value.some((candidate) => {
     if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
       return false;
     }
     const fixture = candidate as Record<string, unknown>;
     return (
-      fixture.started === true || fixture.finished === true || fixture.finishedProvisional === true
+      fixture.event === eventId &&
+      (fixture.started === true ||
+        fixture.finished === true ||
+        fixture.finishedProvisional === true)
     );
   });
 };
@@ -240,7 +243,10 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
     // the scheduler remains in PICKS_PROBE. Do not age that expected absence
     // into a deploy failure; once fixture state or a V2 obligation exists, the
     // normal publication/checkpoint fence below applies.
-    const liveWindowStarted = hasStartedOrFinishedFixture(coreRedisActive?.items.fixtures);
+    const liveWindowStarted = hasStartedOrFinishedFixture(
+      coreRedisActive?.items.fixtures,
+      currentEvent.id,
+    );
     const liveConsistencyRequired = Boolean(redisLive || desiredLive || liveWindowStarted);
     if (!liveConsistencyRequired) {
       publicationMismatchSince.delete(liveKey);
