@@ -217,7 +217,11 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
             excluded.total_points,
             excluded.publication_event_live_sha256
           )
-          OR ${options.checkpoint?.forceIdentity === true ? sql`TRUE` : sql`FALSE`}
+          OR (${options.checkpoint?.forceIdentity === true ? sql`TRUE` : sql`FALSE`}
+            AND ROW(
+              ${playerGameweekStatsInFpl.publicationId},
+              ${playerGameweekStatsInFpl.publicationGeneration}
+            ) IS DISTINCT FROM ROW(excluded.publication_id, excluded.publication_generation))
         `;
         const result = await db
           .insert(playerGameweekStatsInFpl)

@@ -1,3 +1,4 @@
+import { classifyDataError } from '../domain/error-classification';
 import type Redis from 'ioredis';
 import type { DbEntryEventResult } from '../db/schemas/platform.types';
 
@@ -103,6 +104,7 @@ export type LiveFinalRetentionFamilyStats = {
   renewed: number;
   restored: number;
   failed: number;
+  infrastructureFailed?: number;
   minRemainingTtlMs: number | null;
 };
 
@@ -127,6 +129,10 @@ export type LiveFinalRetentionResult = {
 
 export type LiveFinalRetentionAuthority =
   | Readonly<{ kind: 'manual-current' }>
+  | Readonly<{
+      kind: 'manual-recovery';
+      target: { obligationId: string; periodKey: string; generation: number };
+    }>
   | Readonly<{ kind: 'scheduler'; obligationId: string; generation: number }>;
 
 /**
@@ -136,12 +142,18 @@ export type LiveFinalRetentionAuthority =
  */
 export class LiveFinalRetentionIncompleteError extends Error {
   readonly evidence: Record<string, unknown>;
+  readonly code: string;
 
   constructor(result: LiveFinalRetentionResult) {
     super(
       `Live final retention did not complete for event ${result.eventId}: failed=${result.failed} minTtlMs=${result.minRemainingTtlMs ?? 'null'}`,
     );
     this.name = 'LiveFinalRetentionIncompleteError';
+    this.code = Object.values(result.families).some(
+      (family) => (family.infrastructureFailed ?? 0) > 0,
+    )
+      ? 'RETENTION_INFRA_FAILURE'
+      : 'DATA_SYNC_INCOMPLETE';
     this.evidence = liveFinalRetentionCompletionEvidence(result);
   }
 }
@@ -170,6 +182,14 @@ async function assertLiveFinalRetentionAuthority(
   currentEventId: number | null,
   authority: LiveFinalRetentionAuthority,
 ): Promise<void> {
+  if (authority.kind === 'manual-recovery') {
+    await assertManualLiveFinalRetentionRecoveryTarget({
+      season,
+      eventId,
+      target: authority.target,
+    });
+    return;
+  }
   if (authority.kind === 'manual-current') {
     if (currentEventId !== eventId) {
       throw new Error(`Manual live final retention event ${eventId} is not current`);
@@ -458,6 +478,8 @@ async function processGlobal(
     );
     return restored.publication;
   } catch (error) {
+    if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+      family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
     family.failed += 1;
     logError('Live final retention global restore failed', error, {
       season: season.seasonCode,
@@ -652,6 +674,8 @@ async function processMatchDesk(
     updateMinimum(family, await minimumTtl(redis, keys(restored.publication)));
     return restored.publication;
   } catch (error) {
+    if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+      family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
     family.failed += 1;
     logError('Live final retention Match desk restore failed', error, {
       season: season.seasonCode,
@@ -728,6 +752,8 @@ async function processMatchDetail(
     updateMinimum(family, await minimumTtl(redis, keys(restored.publication)));
     return restored.publication;
   } catch (error) {
+    if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+      family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
     family.failed += 1;
     logError('Live final retention Match detail restore failed', error, {
       season: season.seasonCode,
@@ -872,6 +898,8 @@ async function processEntryHead(
         ]),
       );
     } catch (error) {
+      if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+        family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
       family.failed += 1;
       logError('Live final retention entry final recovery failed', error, {
         season: season.seasonCode,
@@ -974,6 +1002,8 @@ async function processEntryHead(
     family.restored += 1;
     updateMinimum(family, await minimumTtl(redis, keys(publication)));
   } catch (error) {
+    if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+      family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
     family.failed += 1;
     logError('Live final retention entry restore failed', error, {
       season: season.seasonCode,
@@ -1081,6 +1111,8 @@ async function processLeagueScope(
     updateMinimum(family, await minimumTtl(redis, keys(checkpoint)));
     return true;
   } catch (error) {
+    if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+      family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
     family.failed += 1;
     logError('Live final retention league restore failed', error, {
       season: scope.season,
@@ -1266,6 +1298,8 @@ export async function runLiveFinalRetentionV2(
         restoredClassicScopes.add(item.scope.tournamentId);
       }
     } catch (error) {
+      if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+        families.league.infrastructureFailed = (families.league.infrastructureFailed ?? 0) + 1;
       logError('Live final retention Classic checkpoint recovery failed', error, {
         season: season.seasonCode,
         eventId,
@@ -1332,6 +1366,8 @@ export async function runLiveFinalRetentionV2(
         }
       }
     } catch (error) {
+      if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+        families.league.infrastructureFailed = (families.league.infrastructureFailed ?? 0) + 1;
       families.league.failed += missingH2HMatches.length;
       logError('Live final retention H2H match recompute failed', error, {
         season: season.seasonCode,
@@ -1380,17 +1416,27 @@ export async function runLiveFinalRetentionV2(
 export async function recordManualLiveFinalRetentionRecovery(input: {
   season: FplSeasonRef;
   eventId: number;
-  target: { obligationId: string; periodKey: string; generation: number };
+  target: {
+    obligationId: string;
+    periodKey: string;
+    generation: number;
+    recoveryReason?: string;
+  };
   result: LiveFinalRetentionResult;
   jobId: string;
 }): Promise<void> {
+  const recoveryReason =
+    input.target.recoveryReason?.trim() || 'Authorized scoped event retention verification';
+  if (recoveryReason.length > 300) {
+    throw new Error('Live final retention recovery reason is too long');
+  }
   const changed = await appendSchedulerObligationRecovery({
     jobName: 'live-final-retention',
     scopeKey: `${input.season.seasonCode}:event:${input.eventId}`,
     ...input.target,
     recoveryRevision: input.jobId,
     recoveryActor: 'manual-live-final-retention',
-    recoveryReason: 'Authorized current-event retention verification',
+    recoveryReason,
     retention: liveFinalRetentionCompletionEvidence(input.result),
   });
   if (!changed) throw new Error('Live final retention recovery target is no longer eligible');
@@ -1399,11 +1445,17 @@ export async function recordManualLiveFinalRetentionRecovery(input: {
 export async function assertManualLiveFinalRetentionRecoveryTarget(input: {
   season: FplSeasonRef;
   eventId: number;
-  target: { obligationId: string; periodKey: string; generation: number };
+  target: {
+    obligationId: string;
+    periodKey: string;
+    generation: number;
+    recoveryReason?: string;
+  };
 }): Promise<void> {
   const target = await getSchedulerObligation({ obligationId: input.target.obligationId });
   if (
     !target ||
+    target.obligationId !== input.target.obligationId ||
     target.jobName !== 'live-final-retention' ||
     target.scopeKey !== `${input.season.seasonCode}:event:${input.eventId}` ||
     target.periodKey !== input.target.periodKey ||

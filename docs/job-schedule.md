@@ -406,3 +406,17 @@ DB/Redis identity consistency. The optional `section` values are
 `/ops/data-governance/overview` endpoint. Some manual paths intentionally
 bypass a cron time gate for recovery; operators must verify upstream readiness
 before using them.
+
+
+### Scoped historical FINAL retention recovery
+
+Inspect an explicit event set in the canonical current season before enqueueing recovery:
+
+```sh
+bun scripts/recover-live-final-retention.ts --season 2627 --events 1,2,3
+bun scripts/recover-live-final-retention.ts --season 2627 --events 1,2,3 --apply --reason "Authorized historical FINAL repair verification"
+```
+
+Inspection does not import queues or write state. Apply uses the existing retention enqueue path and binds each event to its latest failed obligation's ID, period and generation. The worker checks that identity again before recovery and appends verified recovery evidence; original failures remain intact. The ordinary HTTP trigger remains limited to the current event.
+
+Finalization waits 60 seconds when an eligible Classic roster member lacks durable semantic input. Planner and worker share this prerequisite; waiting does not rewrite the global FINAL. Required league scopes and checkpoint metadata are checked every pass. Valid payload checks are reused by scope and identity for at most five minutes, and a missing scope needs no payload read.

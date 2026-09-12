@@ -1,3 +1,5 @@
+import { classifyDataError } from '../../src/domain/error-classification';
+import { parseRecoveryArgs } from '../../scripts/recover-live-final-retention';
 import { describe, expect, test } from 'bun:test';
 
 import {
@@ -294,6 +296,35 @@ describe('final entry retention recovery', () => {
 });
 
 describe('Live final retention failure evidence', () => {
+  test('distinguishes missing facts from infrastructure failure', () => {
+    const result = retentionResult();
+    expect(classifyDataError(new LiveFinalRetentionIncompleteError(result))).toBe(
+      'DATA_INCOMPLETE',
+    );
+    result.families.entry.infrastructureFailed = 1;
+    expect(classifyDataError(new LiveFinalRetentionIncompleteError(result))).toBe(
+      'TRANSIENT_INFRA',
+    );
+  });
+  test('retention recovery defaults to inspection and requires bounded explicit write scope', () => {
+    expect(parseRecoveryArgs(['--season', '2627', '--events', '3,1,2'])).toMatchObject({
+      apply: false,
+      events: [1, 2, 3],
+    });
+    expect(() => parseRecoveryArgs(['--season', '2627', '--events', '1,1'])).toThrow();
+    expect(() => parseRecoveryArgs(['--season', '2627', '--events', '1', '--apply'])).toThrow();
+    expect(
+      parseRecoveryArgs([
+        '--season',
+        '2627',
+        '--events',
+        '1',
+        '--apply',
+        '--reason',
+        'Accepted recovery',
+      ]),
+    ).toMatchObject({ apply: true, reason: 'Accepted recovery' });
+  });
   test('keeps bounded family evidence on failed results without payloads', () => {
     const result = retentionResult();
     const evidence = liveFinalRetentionCompletionEvidence(result);

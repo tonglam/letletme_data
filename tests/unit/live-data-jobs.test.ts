@@ -199,6 +199,24 @@ describe('Live Points V2 snapshot enqueue', () => {
     });
   });
 
+  test('carries the bounded manual recovery reason into the queued job', async () => {
+    const now = new Date('2026-08-09T12:34:56.000Z');
+    const retentionRecoveryTarget = {
+      obligationId: 'obligation-retention',
+      periodKey: 'retention-cycle',
+      generation: 3,
+      recoveryReason: 'Restore the accepted event retention proof',
+    };
+    await enqueueLiveFinalRetention(TEST_SEASON, 12, 'manual', {
+      now,
+      retentionRecoveryTarget,
+      jobId: 'manual-recovery',
+      reuseExisting: true,
+    });
+
+    expect(addCalls[0]?.data.retentionRecoveryTarget).toEqual(retentionRecoveryTarget);
+  });
+
   test('coalesces a pending final-retention bucket', async () => {
     const now = new Date('2026-08-09T12:34:56.000Z');
     waitingJobs.push({
