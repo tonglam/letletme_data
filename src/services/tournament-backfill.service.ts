@@ -367,12 +367,14 @@ async function auditMissingUnits(
     if (kind === 'results' && present.length > 0) {
       const event = await eventRepository.findById(season, eventId);
       if (event?.finished && event.dataChecked && event.dataCheckedAt) {
+        const exactDataCheckedAt =
+          (await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt;
         const heads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
           season,
           eventId,
           present,
         );
-        const complete = await completedFinalEntryIds(season, eventId, heads, event.dataCheckedAt);
+        const complete = await completedFinalEntryIds(season, eventId, heads, exactDataCheckedAt);
         present = present.filter((entryId) => complete.has(entryId));
       }
     }

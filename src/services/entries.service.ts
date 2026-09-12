@@ -19,6 +19,7 @@ import {
 import { eventRepository } from '../repositories/events';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
+import { isFreshnessBoundaryNewer } from '../domain/freshness';
 import { assistantManagerPointsFactFromProviderObservation } from '../domain/event-live-manager-points';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { contentHash } from '../utils/content-hash';
@@ -303,7 +304,7 @@ export async function persistEntryEventPicksResponse(
     /** Provider event-live response sharing the picks capture boundary. */
     readonly providerEventLive?: EventPointsPayload | null;
     /** Historical FINAL recovery may use a verified durable global observation. */
-    readonly historicalFinalBoundary?: Date;
+    readonly historicalFinalBoundary?: Date | string;
     /** Preserve canonical deadline picks while taking reported facts from this provider response. */
     readonly preservedPicksBase?: RawFPLEntryEventPicksResponse;
   },
@@ -331,8 +332,10 @@ export async function persistEntryEventPicksResponse(
       options?.historicalFinalBoundary &&
       (currentObservation?.servedFrom !== 'REDIS_CURRENT' ||
         currentObservation.publication.state !== 'FINALIZED' ||
-        new Date(currentObservation.publication.sourceCheckedAt).getTime() <
-          options.historicalFinalBoundary.getTime())
+        isFreshnessBoundaryNewer(
+          currentObservation.publication.sourceCheckedAt,
+          options.historicalFinalBoundary,
+        ))
     ) {
       currentObservation = null;
       const { readLivePublicationV2Checkpoint } = await import(
@@ -341,8 +344,10 @@ export async function persistEntryEventPicksResponse(
       const durable = await readLivePublicationV2Checkpoint(season, eventId);
       if (
         durable?.publication.state === 'FINALIZED' &&
-        new Date(durable.publication.sourceCheckedAt).getTime() >=
-          options.historicalFinalBoundary.getTime()
+        !isFreshnessBoundaryNewer(
+          durable.publication.sourceCheckedAt,
+          options.historicalFinalBoundary,
+        )
       ) {
         currentObservation = durable;
       }
@@ -716,9 +721,13 @@ export async function checkpointFinalEntryFromProviderResponse(
   eventId: number,
   picks: RawFPLEntryEventPicksResponse,
   sourceCheckedAt: Date | string,
-  dataCheckedAt: Date,
+  dataCheckedAt: Date | string,
   providerEventLive?: EventPointsPayload,
 ): Promise<void> {
+  const dataCheckedAtDate = new Date(dataCheckedAt);
+  if (!Number.isFinite(dataCheckedAtDate.getTime())) {
+    throw new Error('Historical FINAL recovery requires a valid finalization boundary');
+  }
   const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
   const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
     season,
@@ -767,7 +776,7 @@ export async function checkpointFinalEntryFromProviderResponse(
     !finalPicks ||
     !automaticSubs ||
     !result.richSyncedAt ||
-    result.richSyncedAt.getTime() < dataCheckedAt.getTime() ||
+    isFreshnessBoundaryNewer(result.richSyncedAt, dataCheckedAt) ||
     result.richSyncedAt.getTime() !== new Date(sourceCheckedAt).getTime()
   ) {
     throw new Error('Historical FINAL publication requires the accepted source result');
@@ -822,13 +831,18 @@ export async function checkpointFinalEntryFromProviderResponse(
       current.publication.publicationId !== head.publicationId ||
       current.publication.generation !== head.generation ||
       current.input.picksBase.revision !== head.picksBaseRevision ||
-      head.sourceCheckedAt.getTime() < dataCheckedAt.getTime()
+      isFreshnessBoundaryNewer(head.sourceCheckedAt, dataCheckedAt)
     ) {
       const event = await eventRepository.findById(season, eventId);
+      const exactEventBoundary = event
+        ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt)
+        : null;
       if (
         !event?.finished ||
         !event.dataChecked ||
-        event.dataCheckedAt?.getTime() !== dataCheckedAt.getTime()
+        !exactEventBoundary ||
+        isFreshnessBoundaryNewer(dataCheckedAt, exactEventBoundary) ||
+        isFreshnessBoundaryNewer(exactEventBoundary, dataCheckedAt)
       ) {
         throw new Error('Historical FINAL canonical boundary changed');
       }
@@ -858,7 +872,7 @@ export async function checkpointFinalEntryFromProviderResponse(
       automaticSubs,
     },
   });
-  if (new Date(finalPublication.publication.sourceCheckedAt).getTime() < dataCheckedAt.getTime()) {
+  if (isFreshnessBoundaryNewer(finalPublication.publication.sourceCheckedAt, dataCheckedAt)) {
     throw new Error('Historical FINAL publication still predates canonical boundary');
   }
   if (finalPublication.publication.checkpointedAt === null) {
@@ -899,7 +913,7 @@ export async function completedFinalEntryIds(
   season: FplSeasonRef,
   eventId: number,
   heads: readonly EntryEventPickHeadMetadata[],
-  dataCheckedAt: Date,
+  dataCheckedAt: Date | string,
 ): Promise<Set<number>> {
   const complete = heads.filter((head) =>
     hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt),
@@ -936,7 +950,7 @@ export function hasFinalEntryCheckpoint(
   season: FplSeasonRef,
   eventId: number,
   head: EntryEventPickHeadMetadata,
-  dataCheckedAt: Date,
+  dataCheckedAt: Date | string,
 ): boolean {
   const input = head.inputPayload;
   if (
@@ -945,7 +959,7 @@ export function hasFinalEntryCheckpoint(
     !Number.isSafeInteger(head.generation) ||
     head.generation < 1 ||
     !Number.isFinite(head.sourceCheckedAt.getTime()) ||
-    head.sourceCheckedAt.getTime() < dataCheckedAt.getTime() ||
+    isFreshnessBoundaryNewer(head.sourceCheckedAt, dataCheckedAt) ||
     !validateEntryLiveInputV2(input, {
       season: season.seasonCode,
       eventId,

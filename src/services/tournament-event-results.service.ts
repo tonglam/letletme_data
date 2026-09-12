@@ -377,7 +377,12 @@ export async function syncTournamentEventResultsForEntryIds(
     ? await entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds)
     : [];
   const finalEntryIds = finalizationDate
-    ? await completedFinalEntryIds(season, eventId, finalHeads, finalizationDate)
+    ? await completedFinalEntryIds(
+        season,
+        eventId,
+        finalHeads,
+        finalizationCutoff ?? finalizationDate,
+      )
     : new Set<number>();
   const failedEntryIds = uniqueEntryIds.filter(
     (entryId) =>

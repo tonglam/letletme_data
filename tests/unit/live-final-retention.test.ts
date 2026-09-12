@@ -617,6 +617,10 @@ test('historical completion requires durable FINAL facts, not merely fifteen per
   };
   const season = { seasonId: 2026, seasonCode: '2627' };
   expect(hasFinalEntryCheckpoint(season, 2, head, boundary)).toBe(true);
+  // PostgreSQL keeps microseconds while the ordinary Date mapping does not;
+  // evidence captured at the same millisecond must not pass a later exact
+  // finalization fence.
+  expect(hasFinalEntryCheckpoint(season, 2, head, '2026-09-04T08:05:00.000900Z')).toBe(false);
   expect(hasFinalEntryCheckpoint(season, 2, { ...head, inputPayload: null }, boundary)).toBe(false);
   expect(
     hasFinalEntryCheckpoint(season, 2, { ...head, inputPayload: provisionalInput() }, boundary),
