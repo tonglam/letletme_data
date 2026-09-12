@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   checkReadiness,
+  hasStartedOrFinishedFixture,
   isMediaWorkerRequired,
   mismatchSinceForPublication,
   publicationMismatchGraceMs,
@@ -24,6 +25,17 @@ describe('data API readiness', () => {
     expect(publicationMismatchGraceMs('live-points-v2:2627:3')).toBe(
       LIVE_SCORE_CHECKPOINT_INTERVAL_MS + 120_000,
     );
+  });
+
+  test('does not treat a scheduled kickoff as live start evidence', () => {
+    expect(
+      hasStartedOrFinishedFixture([
+        { kickoffTime: '2026-09-12T14:00:00.000Z', started: false, finished: false },
+      ]),
+    ).toBe(false);
+    expect(hasStartedOrFinishedFixture([{ started: true, finished: false }])).toBe(true);
+    expect(hasStartedOrFinishedFixture([{ started: false, finishedProvisional: true }])).toBe(true);
+    expect(hasStartedOrFinishedFixture(null)).toBe(false);
   });
 
   test('hot-path readiness ignores PostgreSQL and queue Redis', async () => {
