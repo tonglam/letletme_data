@@ -92,6 +92,7 @@ export type UnderstatPlayerMappingRecoveryItem = Readonly<{
   understatName: string | null;
   fplName: string | null;
   originalStatus: ProviderLinkStatus;
+  sourceEvidenceHash: string;
   evidenceHash: string;
   priorConfirmedSeasons: readonly string[];
   observedMatchIds: readonly number[];
@@ -1369,60 +1370,68 @@ export async function inspectQuarantinedProviderPlayers(
       link.status === 'quarantined' &&
       quarantinedPlayerLinkHasSeasonEvidence(link, season, snapshot),
   );
-  const items = quarantined.map((link): UnderstatPlayerMappingRecoveryItem => {
-    const fplPlayerCode = Number(link.rightEntityId);
-    const understatPlayerId =
-      link.leftEntityId !== null && Number.isSafeInteger(Number(link.leftEntityId))
-        ? Number(link.leftEntityId)
-        : null;
-    const key = `${fplPlayerCode}:${understatPlayerId ?? 'invalid'}`;
-    const observedMatchIds = [...(snapshot.observationsByPair.get(key) ?? [])].sort(
-      (a, b) => a - b,
-    );
-    const fixtureCodes = [...(snapshot.fixtureCodesByPair.get(key) ?? [])].sort((a, b) => a - b);
-    const classification = classifyQuarantinedProviderPlayerMapping({
-      link,
-      season,
-      understatPlayerId,
-      fplPlayerCode,
-      observedCandidates: snapshot.candidatesByPlayer.get(fplPlayerCode),
-      observedMatchIds,
-      hasAmbiguousObservation: snapshot.multipleCandidatesByPlayer.has(fplPlayerCode),
-      hasVerifiedConflict:
-        understatPlayerId !== null &&
-        Boolean(
-          verifiedPlayerMappingConflict(
-            verifiedLinks.filter((candidate) => candidate.id !== link.id),
-            understatPlayerId,
-            fplPlayerCode,
+  const items = quarantined.map(
+    (link): Omit<UnderstatPlayerMappingRecoveryItem, 'evidenceHash'> => {
+      const fplPlayerCode = Number(link.rightEntityId);
+      const understatPlayerId =
+        link.leftEntityId !== null && Number.isSafeInteger(Number(link.leftEntityId))
+          ? Number(link.leftEntityId)
+          : null;
+      const key = `${fplPlayerCode}:${understatPlayerId ?? 'invalid'}`;
+      const observedMatchIds = [...(snapshot.observationsByPair.get(key) ?? [])].sort(
+        (a, b) => a - b,
+      );
+      const fixtureCodes = [...(snapshot.fixtureCodesByPair.get(key) ?? [])].sort((a, b) => a - b);
+      const classification = classifyQuarantinedProviderPlayerMapping({
+        link,
+        season,
+        understatPlayerId,
+        fplPlayerCode,
+        observedCandidates: snapshot.candidatesByPlayer.get(fplPlayerCode),
+        observedMatchIds,
+        hasAmbiguousObservation: snapshot.multipleCandidatesByPlayer.has(fplPlayerCode),
+        hasVerifiedConflict:
+          understatPlayerId !== null &&
+          Boolean(
+            verifiedPlayerMappingConflict(
+              verifiedLinks.filter((candidate) => candidate.id !== link.id),
+              understatPlayerId,
+              fplPlayerCode,
+            ),
           ),
-        ),
-    });
-    return {
-      linkId: link.id,
-      understatPlayerId,
-      fplPlayerCode,
-      understatName:
-        understatPlayerId === null
-          ? null
-          : (snapshot.understatById.get(understatPlayerId)?.name ?? null),
-      fplName: snapshot.fplByCode.get(fplPlayerCode)?.name ?? null,
-      originalStatus: link.status,
-      evidenceHash: contentHash(link.evidence),
-      priorConfirmedSeasons: priorConfirmedSeasons(link, season),
-      observedMatchIds,
-      fixtureCodes,
-      ...classification,
-    };
-  });
+      });
+      return {
+        linkId: link.id,
+        understatPlayerId,
+        fplPlayerCode,
+        understatName:
+          understatPlayerId === null
+            ? null
+            : (snapshot.understatById.get(understatPlayerId)?.name ?? null),
+        fplName: snapshot.fplByCode.get(fplPlayerCode)?.name ?? null,
+        originalStatus: link.status,
+        sourceEvidenceHash: contentHash(link.evidence),
+        priorConfirmedSeasons: priorConfirmedSeasons(link, season),
+        observedMatchIds,
+        fixtureCodes,
+        ...classification,
+      };
+    },
+  );
+  const itemsWithEvidenceHash = items.map((item) => ({
+    ...item,
+    // Bind the approval to the complete report item, including current names,
+    // match observations, classification, and the stored quarantine evidence.
+    evidenceHash: contentHash({ season, item }),
+  }));
   const summary: Record<UnderstatPlayerMappingRecoveryDisposition, number> = {
     recoverable: 0,
     identity_conflict: 0,
     insufficient_evidence: 0,
     manual_review: 0,
   };
-  for (const item of items) summary[item.disposition] += 1;
-  return { season, generatedAt: new Date().toISOString(), items, summary };
+  for (const item of itemsWithEvidenceHash) summary[item.disposition] += 1;
+  return { season, generatedAt: new Date().toISOString(), items: itemsWithEvidenceHash, summary };
 }
 
 export async function restoreQuarantinedProviderPlayers(
@@ -1485,7 +1494,7 @@ export async function restoreQuarantinedProviderPlayers(
           current.leftEntityId === null ||
           current.leftEntityId !== String(approval.understatPlayerId) ||
           current.rightEntityId !== String(approval.fplPlayerCode) ||
-          contentHash(current.evidence) !== approval.evidenceHash
+          contentHash(current.evidence) !== item.sourceEvidenceHash
         ) {
           skipped.push({ linkId: approval.linkId, reason: 'LINK_CHANGED_BEFORE_APPLY' });
           continue;
