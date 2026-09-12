@@ -71,10 +71,7 @@ type LeagueCheckpointValidationEventCache = {
   entries: Map<string, { identity: string; validatedAtMs: number }>;
 };
 
-const leagueCheckpointValidationCache = new Map<
-  string,
-  LeagueCheckpointValidationEventCache
->();
+const leagueCheckpointValidationCache = new Map<string, LeagueCheckpointValidationEventCache>();
 
 const finalCheckpointValidationCache = new Map<string, FinalCheckpointValidationCacheEntry>();
 
