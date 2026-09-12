@@ -1,3 +1,7 @@
+import {
+  checkpointFinalEntryFromProviderResponse,
+  hasFinalEntryCheckpoint,
+} from './entries.service';
 import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
@@ -265,12 +269,13 @@ export async function syncTournamentEventResultsForEntryIds(
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
+      let accepted = false;
       const persistEntry = async () => {
         await withEntrySeasonSyncTransaction(
           season,
           entryId,
           async (tx) => {
-            await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+            accepted = await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
               season,
               entryId,
               eventId,
@@ -317,6 +322,16 @@ export async function syncTournamentEventResultsForEntryIds(
       } else {
         await persistEntry();
       }
+      if (accepted && finalizationDate) {
+        await checkpointFinalEntryFromProviderResponse(
+          season,
+          entryId,
+          eventId,
+          picks,
+          sourceOrdering.exact,
+          finalizationDate,
+        );
+      }
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
       logError('Failed to sync tournament entry results', error, { eventId, entryId });
@@ -339,8 +354,17 @@ export async function syncTournamentEventResultsForEntryIds(
   const freshResultEntryIds = freshEntryIds(uniqueEntryIds, staleResultEntryIds);
   const persistedPickSet = new Set(persistedPickEntryIds);
   const missingTransferSet = new Set(missingTransferEntryIds);
+  const finalHeads = finalizationDate
+    ? await entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds)
+    : [];
+  const finalEntryIds = new Set(
+    finalHeads
+      .filter((head) => hasFinalEntryCheckpoint(season, eventId, head, finalizationDate!))
+      .map((head) => head.entryId),
+  );
   const failedEntryIds = uniqueEntryIds.filter(
     (entryId) =>
+      (finalizationDate !== null && !finalEntryIds.has(entryId)) ||
       !freshResultEntryIds.has(entryId) ||
       !persistedPickSet.has(entryId) ||
       missingTransferSet.has(entryId),

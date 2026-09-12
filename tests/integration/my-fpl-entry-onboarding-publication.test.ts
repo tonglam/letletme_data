@@ -1,8 +1,12 @@
+import { fplClient } from '../../src/clients/fpl';
+import { findMissingCoreResults } from '../../src/services/tournament-backfill.service';
+import { syncTournamentEventResultsForEntryIds } from '../../src/services/tournament-event-results.service';
+import { entryEventPicksRepository } from '../../src/repositories/entry-event-picks';
 import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test, spyOn } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
 import type { EventLive } from '../../src/domain/event-lives';
@@ -15,7 +19,11 @@ import {
   publishLivePublicationV2,
   readEntryLiveInputV2,
 } from '../../src/cache/live-publication-v2';
-import { checkpointEntryLiveInputV2 } from '../../src/services/entries.service';
+import {
+  checkpointFinalEntryFromProviderResponse,
+  checkpointEntryLiveInputV2,
+  hasFinalEntryCheckpoint,
+} from '../../src/services/entries.service';
 import { getDbClient } from '../../src/db/singleton';
 import {
   captureMyFplSnapshot,
@@ -628,4 +636,93 @@ describe('My FPL onboarding publication correction', () => {
       active_revision: supersedingFinal.publication.revision,
     });
   });
+});
+
+test('historical result with no durable input or Redis pointer gains one idempotent FINAL checkpoint', async () => {
+  await cleanup();
+  await seedBase();
+  await seedEntry(ENTRY_IDS[0], true);
+  const sql = await getDbClient();
+  const redis = await redisSingleton.getClient();
+  const scope = { season: SEASON.seasonCode, eventId: EVENT_ID, entryId: ENTRY_IDS[0] };
+  const boundary = new Date(CAPTURE_NOW.getTime() - 1000);
+  await sql`UPDATE fpl.events SET finished = true, data_checked = true,
+    data_checked_at = ${boundary.toISOString()}::timestamptz
+    WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}`;
+  const picks = {
+    active_chip: null,
+    automatic_subs: [],
+    picks: EVENT_PICKS,
+    entry_history: {
+      event: EVENT_ID,
+      points: 67,
+      total_points: 67,
+      rank: 1,
+      overall_rank: 1000,
+      bank: 10,
+      value: 1000,
+      event_transfers: 0,
+      event_transfers_cost: 0,
+      points_on_bench: 0,
+    },
+  };
+  await entryEventPicksRepository.upsertFromPicks(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+  );
+  await redis.unlink(entryLiveV2Key(scope, 'active'), entryLiveV2Key(scope, 'previous'));
+  const before = await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID);
+  expect(before?.inputPayload).toBeNull();
+  expect(hasFinalEntryCheckpoint(SEASON, EVENT_ID, before!, boundary)).toBe(false);
+  await expect(
+    checkpointFinalEntryFromProviderResponse(
+      SEASON,
+      ENTRY_IDS[0],
+      EVENT_ID,
+      picks,
+      CAPTURE_NOW,
+      new Date(CAPTURE_NOW.getTime() + 1000),
+    ),
+  ).rejects.toThrow('accepted source result');
+  expect(await readEntryLiveInputV2(scope)).toBeNull();
+  const window = { startEventId: EVENT_ID, endEventId: EVENT_ID };
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).get(EVENT_ID)).toEqual([
+    ENTRY_IDS[0],
+  ]);
+  const provider = spyOn(fplClient, 'getEntryEventPicks').mockResolvedValue(picks);
+  try {
+    await syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
+      skipTransfers: true,
+      concurrency: 1,
+      live: {
+        elements: PLAYER_IDS.map((id, index) => ({
+          id,
+          stats: { total_points: index === 0 ? 33 : index === 1 ? 1 : 0 },
+        })),
+      },
+    });
+  } finally {
+    provider.mockRestore();
+  }
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).size).toBe(0);
+
+  const active = await readEntryLiveInputV2(scope);
+  const head = await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID);
+  expect(active?.publication.state).toBe('FINAL');
+  expect(active?.input.finalResult?.score).toEqual({ eventPoints: 67, totalPoints: 67 });
+  expect(head?.publicationId).toBe(active?.publication.publicationId);
+  expect(hasFinalEntryCheckpoint(SEASON, EVENT_ID, head!, boundary)).toBe(true);
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+    boundary,
+  );
+  expect(await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID)).toEqual(head);
+  expect((await readEntryLiveInputV2(scope))?.publication).toEqual(active?.publication);
 });

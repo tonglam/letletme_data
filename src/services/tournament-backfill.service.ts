@@ -1,3 +1,5 @@
+import { hasFinalEntryCheckpoint } from './entries.service';
+import { eventRepository } from '../repositories/events';
 import { publishTournamentTrendScope } from './tournament-trends-publication.service';
 import type { TournamentSetupExecution } from '../repositories/tournament-infos';
 import { withTournamentSetupPhase } from '../utils/tournament-setup-execution';
@@ -361,6 +363,22 @@ async function auditMissingUnits(
         eventId,
         eligibleEntryIds,
       );
+    }
+    if (kind === 'results' && present.length > 0) {
+      const event = await eventRepository.findById(season, eventId);
+      if (event?.finished && event.dataChecked && event.dataCheckedAt) {
+        const heads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+          season,
+          eventId,
+          present,
+        );
+        const complete = new Set(
+          heads
+            .filter((head) => hasFinalEntryCheckpoint(season, eventId, head, event.dataCheckedAt!))
+            .map((head) => head.entryId),
+        );
+        present = present.filter((entryId) => complete.has(entryId));
+      }
     }
     const presentSet = new Set(present);
     const missingEntryIds = eligibleEntryIds.filter((entryId) => !presentSet.has(entryId));

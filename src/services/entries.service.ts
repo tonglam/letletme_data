@@ -663,63 +663,15 @@ export async function syncEntryEventResults(
     if (!accepted) return { entryId, eventId };
     const event = await eventRepository.findById(season, eventId);
     if (event?.finished && event.dataChecked && event.dataCheckedAt) {
-      // Establish the V2 base publication before attaching the final
-      // milestone. This is a no-op when the deadline canary already created
-      // the exact same picks input.
-      await persistEntryEventPicksResponse(
+      await checkpointFinalEntryFromProviderResponse(
         season,
         entryId,
         eventId,
         picks,
         richSyncStartedAt.exact,
-        { providerEventLive: live },
+        event.dataCheckedAt,
+        live,
       );
-      const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
-        season,
-        eventId,
-        [entryId],
-      );
-      const finalPicks = normalizeFinalPicks(result?.eventPicks, entryId, eventId);
-      const automaticSubs = finalPicks
-        ? normalizeFinalAutomaticSubs(
-            result?.eventAutoSub,
-            new Set(finalPicks.map((pick) => pick.element)),
-          )
-        : null;
-      const richSyncedAt = result?.richSyncedAt ?? null;
-      if (
-        result &&
-        finalPicks &&
-        automaticSubs &&
-        richSyncedAt &&
-        richSyncedAt.getTime() >= event.dataCheckedAt.getTime()
-      ) {
-        const finalPublication = await publishEntryLiveFinalResultV2({
-          season: season.seasonCode,
-          eventId,
-          entryId,
-          sourceCheckedAt: richSyncedAt,
-          dataCheckedAt: event.dataCheckedAt,
-          finalResult: {
-            score: {
-              eventPoints: result.eventPoints,
-              totalPoints: result.overallPoints,
-            },
-            picks: finalPicks,
-            automaticSubs,
-          },
-        });
-        if (finalPublication.publication.checkpointedAt === null) {
-          const finalPublicationToCheckpoint = finalPublication.publication;
-          await setEntryCheckpointDesiredV2(finalPublicationToCheckpoint);
-          const checkpointed = await checkpointEntryLiveInputV2(season, eventId, entryId);
-          if (checkpointed !== 'checkpointed') {
-            throw new Error(
-              `Final V2 entry publication was not durably checkpointed for ${entryId}/${eventId}`,
-            );
-          }
-        }
-      }
     }
     logInfo('Entry event results sync completed', { entryId, eventId });
     return { entryId, eventId };
@@ -727,6 +679,112 @@ export async function syncEntryEventResults(
     logError('Sync entry event results failed', error, { entryId, eventId });
     throw error;
   }
+}
+
+/** Complete a historical FINAL publication using observed provider facts and an accepted result. */
+export async function checkpointFinalEntryFromProviderResponse(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+  picks: RawFPLEntryEventPicksResponse,
+  sourceCheckedAt: Date | string,
+  dataCheckedAt: Date,
+  providerEventLive?: RawFPLEventLiveResponse,
+): Promise<void> {
+  const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  if (head && hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt)) return;
+  const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
+    season,
+    eventId,
+    [entryId],
+  );
+  const finalPicks = normalizeFinalPicks(result?.eventPicks, entryId, eventId);
+  const automaticSubs = finalPicks
+    ? normalizeFinalAutomaticSubs(
+        result?.eventAutoSub,
+        new Set(finalPicks.map((pick) => pick.element)),
+      )
+    : null;
+  if (
+    !result ||
+    !finalPicks ||
+    !automaticSubs ||
+    !result.richSyncedAt ||
+    result.richSyncedAt.getTime() < dataCheckedAt.getTime() ||
+    result.richSyncedAt.getTime() !== new Date(sourceCheckedAt).getTime()
+  ) {
+    throw new Error('Historical FINAL publication requires the accepted source result');
+  }
+  if (!head?.inputPayload) {
+    const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
+    await persistEntryEventPicksResponse(season, entryId, eventId, picks, sourceCheckedAt, {
+      providerEventLive:
+        providerEventLive ?? (managerChip ? await fplClient.getEventLive(eventId) : undefined),
+    });
+  } else {
+    // Recover the original base from its durable payload, preserving deadline facts.
+    const current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+    if (!current) {
+      await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
+    }
+  }
+  const finalPublication = await publishEntryLiveFinalResultV2({
+    season: season.seasonCode,
+    eventId,
+    entryId,
+    sourceCheckedAt: result.richSyncedAt,
+    dataCheckedAt,
+    finalResult: {
+      score: { eventPoints: result.eventPoints, totalPoints: result.overallPoints },
+      picks: finalPicks,
+      automaticSubs,
+    },
+  });
+  if (finalPublication.publication.checkpointedAt === null) {
+    await setEntryCheckpointDesiredV2(finalPublication.publication);
+  }
+  if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
+    throw new Error('Historical FINAL publication was not durably checkpointed');
+  }
+}
+
+export function hasFinalEntryCheckpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  head: EntryEventPickHeadMetadata,
+  dataCheckedAt: Date,
+): boolean {
+  const input = head.inputPayload;
+  if (
+    head.state !== 'COMPLETE' ||
+    head.rowCount !== 15 ||
+    !Number.isSafeInteger(head.generation) ||
+    head.generation < 1 ||
+    !Number.isFinite(head.sourceCheckedAt.getTime()) ||
+    head.sourceCheckedAt.getTime() < dataCheckedAt.getTime() ||
+    !validateEntryLiveInputV2(input, {
+      season: season.seasonCode,
+      eventId,
+      entryId: head.entryId,
+    }) ||
+    !input.finalResult ||
+    !input.finalResult.score ||
+    !Number.isSafeInteger(input.finalResult.score.eventPoints) ||
+    (input.finalResult.score.totalPoints !== null &&
+      !Number.isSafeInteger(input.finalResult.score.totalPoints)) ||
+    input.picksBase.revision !== head.picksBaseRevision
+  )
+    return false;
+  const finalPicks = normalizeFinalPicks(input.finalResult.picks, head.entryId, eventId);
+  return (
+    finalPicks !== null &&
+    normalizeFinalAutomaticSubs(
+      input.finalResult.automaticSubs,
+      new Set(finalPicks.map((pick) => pick.element)),
+    ) !== null &&
+    (head.contentSha256 === entryLivePicksBaseCheckpointHash(input) ||
+      head.contentSha256 === entryLiveFinalResultCheckpointHash(input))
+  );
 }
 
 export function normalizeFinalPicks(
