@@ -347,7 +347,7 @@ export async function syncTournamentEventResultsForEntryIds(
     : null;
   if (
     afterCutoff &&
-    (!finalizationCutoff || isFreshnessBoundaryNewer(afterCutoff, finalizationCutoff))
+    (!finalizationCutoff || isFreshnessBoundaryNewer(finalizationCutoff, afterCutoff))
   ) {
     throw new IncompleteDataSyncError(
       'Event finalized during historical sync; fresh source evidence is required',

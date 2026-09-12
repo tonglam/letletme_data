@@ -709,6 +709,12 @@ test('historical result with no durable input or Redis pointer gains one idempot
         element_in: PLAYER_IDS[11]!,
         element_out: PLAYER_IDS[1]!,
       },
+      {
+        entry: ENTRY_IDS[0],
+        event: EVENT_ID,
+        element_in: PLAYER_IDS[12]!,
+        element_out: PLAYER_IDS[2]!,
+      },
     ],
   };
   const provider = spyOn(fplClient, 'getEntryEventPicks').mockResolvedValue(adjustedPicks);
@@ -753,6 +759,19 @@ test('historical result with no durable input or Redis pointer gains one idempot
   );
   expect(await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID)).toEqual(head);
   expect((await readEntryLiveInputV2(scope))?.publication).toEqual(active?.publication);
+  // Independent substitutions have no semantic array order.
+  await sql`UPDATE competition.entry_event_results
+    SET automatic_substitutions=${JSON.stringify([...adjustedPicks.automatic_subs].reverse())}::jsonb
+    WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID} AND entry_id=${ENTRY_IDS[0]}`;
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+    boundary,
+  );
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).size).toBe(0);
   // PostgreSQL committed, but the process died before marking the Redis manifest.
   const unmarked = { ...active!.publication, checkpointedAt: null };
   await redis.set(entryLiveV2Key(scope, 'active'), JSON.stringify(unmarked), 'KEEPTTL');
@@ -790,6 +809,30 @@ test('historical result with no durable input or Redis pointer gains one idempot
   expect(restored?.input.finalResult?.score).toEqual({ eventPoints: 67, totalPoints: 67 });
   expect(restored?.publication.checkpointedAt).not.toBeNull();
   expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).size).toBe(0);
+  // Cache loss followed by a fresh provisional publication cannot downgrade durable FINAL.
+  await redis.unlink(entryLiveV2Key(scope, 'active'), entryLiveV2Key(scope, 'previous'));
+  const provisional = { ...restored!.input, finalResult: null };
+  await publishEntryLiveInputV2({
+    ...scope,
+    input: provisional,
+    sourceCheckedAt: new Date(),
+    generationFloor: restored!.publication.generation + 1,
+  });
+  expect((await readEntryLiveInputV2(scope))?.publication.state).toBe('PROVISIONAL');
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+    boundary,
+  );
+  const afterProvisional = await readEntryLiveInputV2(scope);
+  expect(afterProvisional?.publication.state).toBe('FINAL');
+  expect(
+    (await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID))?.inputPayload,
+  ).toMatchObject({ finalResult: restored!.input.finalResult });
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).size).toBe(0);
   await sql`UPDATE competition.entry_event_results SET event_points = event_points + 1
     WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID} AND entry_id = ${ENTRY_IDS[0]}`;
   await expect(
@@ -806,7 +849,7 @@ test('historical result with no durable input or Redis pointer gains one idempot
     ENTRY_IDS[0],
   ]);
   expect((await readEntryLiveInputV2(scope))?.publication.publicationId).toBe(
-    restored?.publication.publicationId,
+    afterProvisional?.publication.publicationId,
   );
   await sql`UPDATE fpl.events SET finished = false, data_checked = false, data_checked_at = null
     WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}`;
@@ -818,24 +861,28 @@ test('historical result with no durable input or Redis pointer gains one idempot
     },
   );
   try {
-    await expect(
-      syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
-        skipTransfers: true,
-        concurrency: 1,
-        live: {
-          elements: PLAYER_IDS.map((id, index) => ({
-            id,
-            stats: { total_points: index === 0 ? 33 : index === 1 || index === 11 ? 1 : 0 },
-          })),
-        },
-      }),
-    ).rejects.toThrow('Event finalized during historical sync');
+    for (const alreadyFinalized of [false, true]) {
+      await sql`UPDATE fpl.events SET finished=${alreadyFinalized}, data_checked=${alreadyFinalized}, data_checked_at=${alreadyFinalized ? boundary.toISOString() : null}::timestamptz
+        WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+      await expect(
+        syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
+          skipTransfers: true,
+          concurrency: 1,
+          live: {
+            elements: PLAYER_IDS.map((id, index) => ({
+              id,
+              stats: { total_points: index === 0 ? 33 : index === 1 || index === 11 ? 1 : 0 },
+            })),
+          },
+        }),
+      ).rejects.toThrow('Event finalized during historical sync');
+    }
   } finally {
     finalizeDuringFetch.mockRestore();
   }
 });
 
-test('historical manager input uses a verified FINAL global checkpoint when Redis global is absent', async () => {
+test('historical manager input uses a verified FINAL global checkpoint when Redis serves a previous provisional observation', async () => {
   await cleanup();
   await seedBase();
   await seedEntry(ENTRY_IDS[0], true);
@@ -845,6 +892,10 @@ test('historical manager input uses a verified FINAL global checkpoint when Redi
   const boundary = new Date(observedAt.getTime() - 1000);
   await sql`UPDATE competition.entry_event_results SET event_points=72, overall_points=72,
     rich_synced_at=${observedAt.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]} AND event_id=${EVENT_ID}`;
+  const previousGlobal = await readLivePublicationV2({
+    season: SEASON.seasonCode,
+    eventId: EVENT_ID,
+  });
   await publishLivePublicationV2({
     season: SEASON.seasonCode,
     eventId: EVENT_ID,
@@ -862,6 +913,8 @@ test('historical manager input uses a verified FINAL global checkpoint when Redi
     entryLiveV2Key(scope, 'active'),
     entryLiveV2Key(scope, 'previous'),
   );
+  await redis.set(liveV2Key(scope, 'previous'), JSON.stringify(previousGlobal!.publication));
+  expect((await readLivePublicationV2(scope))?.servedFrom).toBe('REDIS_PREVIOUS');
   const checkpoint = spyOn(globalCheckpoints, 'readLivePublicationV2Checkpoint').mockResolvedValue(
     durable,
   );

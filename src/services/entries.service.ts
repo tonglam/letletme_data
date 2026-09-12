@@ -324,7 +324,14 @@ export async function persistEntryEventPicksResponse(
       season: season.seasonCode,
       eventId,
     });
-    if (!currentObservation && options?.historicalFinalBoundary) {
+    if (
+      options?.historicalFinalBoundary &&
+      (currentObservation?.servedFrom !== 'REDIS_CURRENT' ||
+        currentObservation.publication.state !== 'FINALIZED' ||
+        new Date(currentObservation.publication.sourceCheckedAt).getTime() <
+          options.historicalFinalBoundary.getTime())
+    ) {
+      currentObservation = null;
       const { readLivePublicationV2Checkpoint } = await import(
         './live-publication-v2-checkpoint.service'
       );
@@ -721,9 +728,23 @@ export async function checkpointFinalEntryFromProviderResponse(
         'Accepted result differs from immutable FINAL; explicit correction is required',
       );
     }
-    const current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
-    if (current?.servedFrom !== 'REDIS_CURRENT')
+    let current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+    if (
+      current?.servedFrom !== 'REDIS_CURRENT' ||
+      current.publication.state !== 'FINAL' ||
+      current.publication.publicationId !== head.publicationId ||
+      current.publication.generation !== head.generation
+    ) {
       await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
+      current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+    }
+    if (
+      current?.servedFrom !== 'REDIS_CURRENT' ||
+      current.publication.state !== 'FINAL' ||
+      !finalEntryMatchesResult(current.input, result)
+    ) {
+      throw new Error('Historical FINAL reconstruction remains incomplete');
+    }
     // A previous attempt may have committed PostgreSQL and then failed to mark Redis.
     if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
       throw new Error('Historical FINAL checkpoint marker remains incomplete');
@@ -824,6 +845,12 @@ function finalEntryMatchesResult(input: EntryLiveInputV2, result: DbEntryEventRe
   const elements = new Set(expectedPicks.map((pick) => pick.element));
   const expectedSubs = normalizeFinalAutomaticSubs(result.eventAutoSub, elements);
   const actualSubs = normalizeFinalAutomaticSubs(input.finalResult.automaticSubs, elements);
+  const compareSubs = (
+    a: { inElement: number; outElement: number },
+    b: { inElement: number; outElement: number },
+  ) => a.inElement - b.inElement || a.outElement - b.outElement;
+  expectedSubs?.sort(compareSubs);
+  actualSubs?.sort(compareSubs);
   return (
     expectedSubs !== null &&
     actualSubs !== null &&
