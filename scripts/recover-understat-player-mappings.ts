@@ -122,13 +122,14 @@ async function main(): Promise<void> {
   const result = await restoreQuarantinedProviderPlayers(args.season, approvals);
   let projection: { checked: number; refreshed: number } | null = null;
   let projectionError: string | null = null;
-  if (result.applied.length > 0) {
-    try {
-      projection = await repairPlayerStateSeasons();
-    } catch (error) {
-      projectionError = errorMessage(error);
-      process.exitCode = 1;
-    }
+  // Run the stale-selector repair on every apply invocation. This makes a
+  // projection-only retry idempotent after a prior bridge commit succeeded
+  // but its post-commit repair failed.
+  try {
+    projection = await repairPlayerStateSeasons();
+  } catch (error) {
+    projectionError = errorMessage(error);
+    process.exitCode = 1;
   }
   process.stdout.write(
     `${JSON.stringify(

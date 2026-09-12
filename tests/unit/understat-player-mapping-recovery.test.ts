@@ -53,6 +53,20 @@ describe('Understat player mapping recovery', () => {
     ]);
   });
 
+  test('does not treat a later confirmed season as prior evidence', () => {
+    const result = classifyQuarantinedProviderPlayerMapping({
+      link: { ...baseLink, evidence: { confirmedSeasons: ['2728'] } },
+      season: '2627',
+      understatPlayerId: 5232,
+      fplPlayerCode: 219168,
+      observedCandidates: new Set([5232]),
+      observedMatchIds: [31180, 31181],
+      hasVerifiedConflict: false,
+    });
+    expect(result.disposition).toBe('insufficient_evidence');
+    expect(result.reasonCodes).toContain('NO_PRIOR_CONFIRMED_SEASON');
+  });
+
   test('keeps same-name multiple candidates out of automatic recovery', () => {
     const result = classifyQuarantinedProviderPlayerMapping({
       link: baseLink,

@@ -219,6 +219,15 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         status,
         reviewedBy: reviewedBy ?? null,
         reviewedAt: reviewedBy ? new Date() : null,
+        ...(status === 'manual_verified'
+          ? {
+              // Keep a durable provenance marker in the evidence JSON. The
+              // generic review endpoint clears reviewer columns when a later
+              // quarantine/rejection occurs, but recovery must still know
+              // that this pair was explicitly reviewed by an operator.
+              evidence: sql`COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb) || jsonb_build_object('manualReview', true)`,
+            }
+          : {}),
         updatedAt: sql`clock_timestamp()`,
       })
       .where(eq(providerEntityLinks.linkId, id))

@@ -401,7 +401,7 @@ async function seedGraph(): Promise<void> {
     method: 'integration-test',
     ruleId: 'integration-test-player',
     season,
-    evidence: { confirmedSeasons: ['8999'] },
+    evidence: { confirmedSeasons: ['7980'] },
   });
   entityLinkIds.push(playerLink.id);
   const seasonOnlyPlayerLink = await providerIdentityRepository.upsertEntityLink({
@@ -414,7 +414,7 @@ async function seedGraph(): Promise<void> {
     method: 'integration-test-quarantine',
     ruleId: 'integration-test-player',
     season,
-    evidence: { confirmedSeasons: ['8999'] },
+    evidence: { confirmedSeasons: ['7980'] },
   });
   entityLinkIds.push(seasonOnlyPlayerLink.id);
 }
@@ -449,6 +449,21 @@ test('keeps verified identity across stat differences and applies recovery insid
   expect(item?.understatName).toBe('Season Only Example');
   expect(item?.disposition).toBe('insufficient_evidence');
   expect(item?.reasonCodes).toContain('OBSERVED_MATCHES_BELOW_MINIMUM');
+  const manuallyReviewed = await providerIdentityRepository.updateEntityStatus(
+    item!.linkId,
+    'manual_verified',
+    'operator',
+  );
+  expect(manuallyReviewed?.evidence).toMatchObject({ manualReview: true });
+  await db
+    .update(providerEntityLinks)
+    .set({ status: 'quarantined', firstSeenSeason: '2526', lastSeenSeason: '2526' })
+    .where(eq(providerEntityLinks.linkId, item!.linkId));
+  const manualReviewReport = await inspectQuarantinedProviderPlayers(season);
+  const manualReviewItem = manualReviewReport.items.find(
+    (candidate) => candidate.linkId === item!.linkId,
+  );
+  expect(manualReviewItem?.disposition).toBe('manual_review');
   const targetItem = report.items.find((candidate) => candidate.linkId === entityLinkIds.at(-2));
   expect(targetItem?.disposition).toBe('recoverable');
   expect(targetItem?.observedMatchIds).toHaveLength(2);
@@ -527,8 +542,8 @@ test('keeps verified identity across stat differences and applies recovery insid
   expect(restored?.status).toBe('auto_verified');
   expect(restored?.method).toBe('verified-match-roster-recovery');
   expect((restored?.evidence as { confirmedSeasons?: string[] }).confirmedSeasons).toEqual([
+    '7980',
     season,
-    '8999',
   ]);
   expect(
     (restored?.evidence as { recovery?: { observedMatchIds?: number[] } }).recovery

@@ -1130,7 +1130,7 @@ function priorConfirmedSeasons(
   const confirmed = Array.isArray(link.evidence.confirmedSeasons)
     ? link.evidence.confirmedSeasons.filter(
         (value): value is string =>
-          typeof value === 'string' && /^\d{4}$/.test(value) && value !== season,
+          typeof value === 'string' && /^\d{4}$/.test(value) && value < season,
       )
     : [];
   return [...new Set(confirmed)].sort();

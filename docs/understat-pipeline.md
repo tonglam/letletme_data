@@ -306,6 +306,10 @@ existing PostgreSQL mutation scopes. Changed or no-longer-recoverable links are 
 reported. Recovered links retain prior confirmed seasons and record the recovery rule, reason codes,
 and complete match evidence; no Understat or FPL statistics are rewritten. A successful write is
 followed by the existing Player State repair, whose result or failure is reported separately.
+Every apply invocation also runs that stale-selector repair when no mapping is changed, so a
+projection-only failure can be retried with the same approval file after the bridge write has
+already committed. Generic manual status changes leave durable `evidence.manualReview` provenance;
+later quarantine therefore remains manual review instead of becoming an automatic recovery.
 
 ## 13. Internal HTTP API
 
