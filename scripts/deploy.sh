@@ -1048,6 +1048,12 @@ deploy() {
     log_error "Content-worker producer admission could not be renewed before service start."
     exit 1
   fi
+  # The runtime restart briefly removes the content-worker API endpoint. Keep
+  # the durable pause/admission TTL from the renewal immediately above, but
+  # do not let the renewal probe race that intentional outage. Restart
+  # renewal only after the new services are healthy.
+  DEPLOY_CONTENT_WORKER_PAUSE_RENEWAL_GUARD_ACTIVE=false
+  stop_content_worker_pause_renewal
   start_stage serviceReady
   log_info "Starting services"
   if ! source_media_deploy_fence_is_active || ! release_source_media_deploy_fence; then
@@ -1063,6 +1069,10 @@ deploy() {
   fi
   log_info "Current service status"
   compose ps
+  if ! start_content_worker_pause_renewal; then
+    log_error "Could not restart content-worker control renewal after service start."
+    exit 1
+  fi
   if ! run_deploy_command_with_pause_renewal env \
     EXPECTED_DEPLOY_SHA="$DEPLOY_SHA" \
     PROJECT_DIR="$PROJECT_DIR" COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_BIN="$COMPOSE_BIN" \
