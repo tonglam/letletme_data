@@ -725,4 +725,32 @@ test('historical result with no durable input or Redis pointer gains one idempot
   );
   expect(await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID)).toEqual(head);
   expect((await readEntryLiveInputV2(scope))?.publication).toEqual(active?.publication);
+  // PostgreSQL committed, but the process died before marking the Redis manifest.
+  const unmarked = { ...active!.publication, checkpointedAt: null };
+  await redis.set(entryLiveV2Key(scope, 'active'), JSON.stringify(unmarked), 'KEEPTTL');
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+    boundary,
+  );
+  const repaired = await readEntryLiveInputV2(scope);
+  expect(repaired?.publication.publicationId).toBe(active?.publication.publicationId);
+  expect(repaired?.publication.checkpointedAt).not.toBeNull();
+  // A lost Redis pointer is restored from complete durable facts without a provider call.
+  await redis.unlink(entryLiveV2Key(scope, 'active'), entryLiveV2Key(scope, 'previous'));
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+    boundary,
+  );
+  const restored = await readEntryLiveInputV2(scope);
+  expect(restored?.publication.state).toBe('FINAL');
+  expect(restored?.input.finalResult?.score).toEqual({ eventPoints: 67, totalPoints: 67 });
+  expect(restored?.publication.checkpointedAt).not.toBeNull();
 });

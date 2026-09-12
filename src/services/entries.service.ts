@@ -692,7 +692,15 @@ export async function checkpointFinalEntryFromProviderResponse(
   providerEventLive?: RawFPLEventLiveResponse,
 ): Promise<void> {
   const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
-  if (head && hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt)) return;
+  if (head && hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt)) {
+    const current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+    if (!current) await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
+    // A previous attempt may have committed PostgreSQL and then failed to mark Redis.
+    if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
+      throw new Error('Historical FINAL checkpoint marker remains incomplete');
+    }
+    return;
+  }
   const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
     season,
     eventId,
