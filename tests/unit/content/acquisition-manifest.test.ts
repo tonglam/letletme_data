@@ -36,28 +36,28 @@ describe('Briefing acquisition manifest', () => {
     });
     expect(bundle.coverage.partitionCount).toBe(44);
     expect(bundle.coverage.forecastCalls).toEqual({
-      NORMAL: 856,
-      APPROACHING: 1672,
-      FINAL90: 2440,
+      NORMAL: 416,
+      APPROACHING: 656,
+      FINAL90: 800,
     });
     expect(
       Object.values(bundle.coverage.xLaneForecastCalls.NORMAL).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(248);
+    ).toBe(204);
     expect(
       Object.values(bundle.coverage.xLaneForecastCalls.FINAL90).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(212);
+    ).toBe(204);
     expect(
       Object.values(bundle.coverage.xLaneCallCaps.FINAL90).reduce(
         (total, calls) => total + calls,
         0,
       ),
-    ).toBe(255);
+    ).toBe(245);
     expect(bundle.coverage.backstopMainCalls).toBe(80);
     expect(bundle.coverage.backstopSaturationFollowupCalls).toBe(80);
     expect(bundle.coverage.backstopHeadroomCalls).toBe(32);
@@ -134,6 +134,23 @@ describe('Briefing acquisition manifest', () => {
       maxItems: 15,
       maxContentJobs: 5,
     });
+  });
+
+  test('uses daily discovery and two-hour YouTube feeds without changing historical profiles', () => {
+    for (const key of ['official', 'availability', 'lineup', 'longform']) {
+      expect(ACQUISITION_PROFILES[`x-semantic-${key}-v2`]?.cadenceMinutes).toEqual({
+        NORMAL: 1440,
+        APPROACHING: 1440,
+        FINAL90: 1440,
+      });
+      expect(ACQUISITION_PROFILES[`x-semantic-${key}-v1`]?.cadenceMinutes.NORMAL).toBe(120);
+    }
+    expect(ACQUISITION_PROFILES['youtube-caption-first-v2']?.cadenceMinutes).toEqual({
+      NORMAL: 120,
+      APPROACHING: 120,
+      FINAL90: 120,
+    });
+    expect(ACQUISITION_PROFILES['youtube-caption-first-v1']?.cadenceMinutes.FINAL90).toBe(10);
   });
 
   test('keeps every X account profile at one scan per day in every phase', () => {

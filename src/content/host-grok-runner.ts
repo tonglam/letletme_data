@@ -511,6 +511,13 @@ export async function startHostGrokRunner(): Promise<{
           // the runner has been idle long enough for this signal to expire.
           lastXProbeAt = new Date().toISOString();
           lastXProbeOk = true;
+        } else if (
+          result.providerProcessStarted &&
+          ['GROK_PROCESS_FAILED', 'GROK_TOOL_FAILED'].includes(result.failureClass)
+        ) {
+          // A provider/process failure invalidates old success evidence.
+          // The next execution must pass the dedicated probe again.
+          lastXProbeOk = false;
         }
         executions.set(executionRequest.runId, {
           requestHash,
