@@ -32,6 +32,7 @@ import {
   publishEntryLiveInputV2,
   readEntryCheckpointDesiredV2,
   readEntryLiveInputV2,
+  readEntryLiveInputsV2,
   validateEntryLiveInputV2,
   readLivePublicationV2,
   setEntryCheckpointDesiredV2,
@@ -298,6 +299,10 @@ export async function persistEntryEventPicksResponse(
     readonly liveObservation?: LiveObservation | null;
     /** Provider event-live response sharing the picks capture boundary. */
     readonly providerEventLive?: RawFPLEventLiveResponse | null;
+    /** Historical FINAL recovery may use a verified durable global observation. */
+    readonly historicalFinalBoundary?: Date;
+    /** Preserve canonical deadline picks while taking reported facts from this provider response. */
+    readonly preservedPicksBase?: RawFPLEntryEventPicksResponse;
   },
 ) {
   // The live provider lane must not wait for PostgreSQL merely to obtain a
@@ -315,10 +320,23 @@ export async function persistEntryEventPicksResponse(
   let assistantManagerPoints: AssistantManagerPointsFact | undefined;
   const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
   if (managerChip) {
-    const currentObservation = await readLivePublicationV2({
+    let currentObservation = await readLivePublicationV2({
       season: season.seasonCode,
       eventId,
     });
+    if (!currentObservation && options?.historicalFinalBoundary) {
+      const { readLivePublicationV2Checkpoint } = await import(
+        './live-publication-v2-checkpoint.service'
+      );
+      const durable = await readLivePublicationV2Checkpoint(season, eventId);
+      if (
+        durable?.publication.state === 'FINALIZED' &&
+        new Date(durable.publication.sourceCheckedAt).getTime() >=
+          options.historicalFinalBoundary.getTime()
+      ) {
+        currentObservation = durable;
+      }
+    }
     if (
       !currentObservation ||
       (options?.liveObservation &&
@@ -349,7 +367,7 @@ export async function persistEntryEventPicksResponse(
     season,
     eventId,
     entryId,
-    picks,
+    options?.preservedPicksBase ?? picks,
     sourceCheckedAt,
     assistantManagerPoints,
   );
@@ -692,20 +710,27 @@ export async function checkpointFinalEntryFromProviderResponse(
   providerEventLive?: RawFPLEventLiveResponse,
 ): Promise<void> {
   const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
+    season,
+    eventId,
+    [entryId],
+  );
   if (head && hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt)) {
+    if (!result || !finalEntryMatchesResult(head.inputPayload as EntryLiveInputV2, result)) {
+      throw new Error(
+        'Accepted result differs from immutable FINAL; explicit correction is required',
+      );
+    }
     const current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
-    if (!current) await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
+    if (current?.servedFrom !== 'REDIS_CURRENT')
+      await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
     // A previous attempt may have committed PostgreSQL and then failed to mark Redis.
     if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
       throw new Error('Historical FINAL checkpoint marker remains incomplete');
     }
     return;
   }
-  const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
-    season,
-    eventId,
-    [entryId],
-  );
+
   const finalPicks = normalizeFinalPicks(result?.eventPicks, entryId, eventId);
   const automaticSubs = finalPicks
     ? normalizeFinalAutomaticSubs(
@@ -725,14 +750,50 @@ export async function checkpointFinalEntryFromProviderResponse(
   }
   if (!head?.inputPayload) {
     const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
+    let preservedPicksBase: RawFPLEntryEventPicksResponse | undefined;
+    if (head) {
+      const rows = await entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
+        season,
+        eventId,
+        [entryId],
+      );
+      const first = rows.find((row) => row.position === 1);
+      if (
+        rows.length !== 15 ||
+        !first ||
+        first.transfers === null ||
+        first.transfersCost === null ||
+        durableLiveInputContentHash(rows) !== head.contentSha256
+      ) {
+        throw new Error('Historical FINAL recovery requires intact canonical base picks');
+      }
+      preservedPicksBase = {
+        ...picks,
+        active_chip: first.activeChip,
+        entry_history: {
+          ...picks.entry_history,
+          event_transfers: first.transfers,
+          event_transfers_cost: first.transfersCost,
+        },
+        picks: rows.map((row) => ({
+          element: row.elementId,
+          position: row.position,
+          multiplier: row.multiplier,
+          is_captain: row.isCaptain,
+          is_vice_captain: row.isViceCaptain,
+        })),
+      };
+    }
     await persistEntryEventPicksResponse(season, entryId, eventId, picks, sourceCheckedAt, {
+      historicalFinalBoundary: dataCheckedAt,
+      preservedPicksBase,
       providerEventLive:
         providerEventLive ?? (managerChip ? await fplClient.getEventLive(eventId) : undefined),
     });
   } else {
     // Recover the original base from its durable payload, preserving deadline facts.
     const current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
-    if (!current) {
+    if (current?.servedFrom !== 'REDIS_CURRENT') {
       await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
     }
   }
@@ -754,6 +815,63 @@ export async function checkpointFinalEntryFromProviderResponse(
   if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
     throw new Error('Historical FINAL publication was not durably checkpointed');
   }
+}
+
+function finalEntryMatchesResult(input: EntryLiveInputV2, result: DbEntryEventResult): boolean {
+  const expectedPicks = normalizeFinalPicks(result.eventPicks, result.entryId, result.eventId);
+  const actualPicks = normalizeFinalPicks(input.finalResult?.picks, result.entryId, result.eventId);
+  if (!expectedPicks || !actualPicks || !input.finalResult) return false;
+  const elements = new Set(expectedPicks.map((pick) => pick.element));
+  const expectedSubs = normalizeFinalAutomaticSubs(result.eventAutoSub, elements);
+  const actualSubs = normalizeFinalAutomaticSubs(input.finalResult.automaticSubs, elements);
+  return (
+    expectedSubs !== null &&
+    actualSubs !== null &&
+    contentHash({ score: input.finalResult.score, picks: actualPicks, subs: actualSubs }) ===
+      contentHash({
+        score: { eventPoints: result.eventPoints, totalPoints: result.overallPoints },
+        picks: expectedPicks,
+        subs: expectedSubs,
+      })
+  );
+}
+
+/** The backfill boundary requires both durable facts and the exact active checkpoint marker. */
+export async function completedFinalEntryIds(
+  season: FplSeasonRef,
+  eventId: number,
+  heads: readonly EntryEventPickHeadMetadata[],
+  dataCheckedAt: Date,
+): Promise<Set<number>> {
+  const complete = heads.filter((head) =>
+    hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt),
+  );
+  const active = await readEntryLiveInputsV2(
+    complete.map((head) => ({ season: season.seasonCode, eventId, entryId: head.entryId })),
+  );
+  const results = await createEntryEventResultsRepository().findByEventAndEntryIds(
+    season,
+    eventId,
+    complete.map((head) => head.entryId),
+  );
+  const resultsByEntry = new Map(results.map((result) => [result.entryId, result]));
+  return new Set(
+    complete
+      .filter((head) => {
+        const result = resultsByEntry.get(head.entryId);
+        if (!result || !finalEntryMatchesResult(head.inputPayload as EntryLiveInputV2, result))
+          return false;
+        const read = active.get(head.entryId);
+        return (
+          read?.servedFrom === 'REDIS_CURRENT' &&
+          read.publication.state === 'FINAL' &&
+          read.publication.checkpointedAt !== null &&
+          read.publication.publicationId === head.publicationId &&
+          read.publication.generation === head.generation
+        );
+      })
+      .map((head) => head.entryId),
+  );
 }
 
 export function hasFinalEntryCheckpoint(
@@ -869,8 +987,8 @@ export function normalizeFinalAutomaticSubs(
   for (const value of raw) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const row = value as Record<string, unknown>;
-    const inElement = Number(row.element_in ?? row.elementIn);
-    const outElement = Number(row.element_out ?? row.elementOut);
+    const inElement = Number(row.element_in ?? row.elementIn ?? row.inElement);
+    const outElement = Number(row.element_out ?? row.elementOut ?? row.outElement);
     if (
       !Number.isSafeInteger(inElement) ||
       inElement <= 0 ||

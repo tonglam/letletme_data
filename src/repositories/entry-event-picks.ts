@@ -332,8 +332,6 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       options?.preserveCheckpointedInput === true &&
       existingHead?.state === 'COMPLETE' &&
       existingHead.rowCount === 15 &&
-      existingHead.inputPayload !== null &&
-      existingHead.inputPayload !== undefined &&
       storedRowsAreComplete;
 
     if (preserveCheckpointedInput) {

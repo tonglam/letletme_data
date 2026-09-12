@@ -1,6 +1,6 @@
 import {
   checkpointFinalEntryFromProviderResponse,
-  hasFinalEntryCheckpoint,
+  completedFinalEntryIds,
 } from './entries.service';
 import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { fplClient } from '../clients/fpl';
@@ -339,6 +339,24 @@ export async function syncTournamentEventResultsForEntryIds(
     }
   });
 
+  const afterEvent = await eventRepository.findById(season, eventId);
+  const afterFinalization =
+    afterEvent?.finished && afterEvent.dataChecked ? afterEvent.dataCheckedAt : null;
+  const afterCutoff = afterFinalization
+    ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? afterFinalization)
+    : null;
+  if (
+    afterCutoff &&
+    (!finalizationCutoff || isFreshnessBoundaryNewer(afterCutoff, finalizationCutoff))
+  ) {
+    throw new IncompleteDataSyncError(
+      'Event finalized during historical sync; fresh source evidence is required',
+      uniqueEntryIds.length,
+      0,
+      0,
+      uniqueEntryIds.length,
+    );
+  }
   const [staleResultEntryIds, persistedPickEntryIds, missingTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findEntryIdsNeedingRichSync(
       season,
@@ -357,11 +375,9 @@ export async function syncTournamentEventResultsForEntryIds(
   const finalHeads = finalizationDate
     ? await entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds)
     : [];
-  const finalEntryIds = new Set(
-    finalHeads
-      .filter((head) => hasFinalEntryCheckpoint(season, eventId, head, finalizationDate!))
-      .map((head) => head.entryId),
-  );
+  const finalEntryIds = finalizationDate
+    ? await completedFinalEntryIds(season, eventId, finalHeads, finalizationDate)
+    : new Set<number>();
   const failedEntryIds = uniqueEntryIds.filter(
     (entryId) =>
       (finalizationDate !== null && !finalEntryIds.has(entryId)) ||

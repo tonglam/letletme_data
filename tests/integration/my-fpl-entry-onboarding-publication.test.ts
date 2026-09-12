@@ -1,3 +1,5 @@
+import * as globalCheckpoints from '../../src/services/live-publication-v2-checkpoint.service';
+import type { RawFPLEventLiveResponse } from '../../src/types';
 import { fplClient } from '../../src/clients/fpl';
 import { findMissingCoreResults } from '../../src/services/tournament-backfill.service';
 import { syncTournamentEventResultsForEntryIds } from '../../src/services/tournament-event-results.service';
@@ -18,6 +20,8 @@ import {
   publishEntryLiveInputV2,
   publishLivePublicationV2,
   readEntryLiveInputV2,
+  readLivePublicationV2,
+  liveV2Key,
 } from '../../src/cache/live-publication-v2';
 import {
   checkpointFinalEntryFromProviderResponse,
@@ -692,7 +696,22 @@ test('historical result with no durable input or Redis pointer gains one idempot
   expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).get(EVENT_ID)).toEqual([
     ENTRY_IDS[0],
   ]);
-  const provider = spyOn(fplClient, 'getEntryEventPicks').mockResolvedValue(picks);
+  const adjustedPicks = {
+    ...picks,
+    picks: EVENT_PICKS.map((pick, index) => ({
+      ...pick,
+      multiplier: index === 1 ? 0 : index === 11 ? 1 : pick.multiplier,
+    })),
+    automatic_subs: [
+      {
+        entry: ENTRY_IDS[0],
+        event: EVENT_ID,
+        element_in: PLAYER_IDS[11]!,
+        element_out: PLAYER_IDS[1]!,
+      },
+    ],
+  };
+  const provider = spyOn(fplClient, 'getEntryEventPicks').mockResolvedValue(adjustedPicks);
   try {
     await syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
       skipTransfers: true,
@@ -700,7 +719,7 @@ test('historical result with no durable input or Redis pointer gains one idempot
       live: {
         elements: PLAYER_IDS.map((id, index) => ({
           id,
-          stats: { total_points: index === 0 ? 33 : index === 1 ? 1 : 0 },
+          stats: { total_points: index === 0 ? 33 : index === 1 || index === 11 ? 1 : 0 },
         })),
       },
     });
@@ -712,6 +731,15 @@ test('historical result with no durable input or Redis pointer gains one idempot
   const active = await readEntryLiveInputV2(scope);
   const head = await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID);
   expect(active?.publication.state).toBe('FINAL');
+  expect(active?.input.picksBase.picks[1]?.multiplier).toBe(1);
+  expect(active?.input.finalResult?.picks[1]?.multiplier).toBe(0);
+  const storedBase = await entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
+    SEASON,
+    EVENT_ID,
+    [ENTRY_IDS[0]],
+  );
+  expect(storedBase.find((row) => row.position === 2)?.multiplier).toBe(1);
+
   expect(active?.input.finalResult?.score).toEqual({ eventPoints: 67, totalPoints: 67 });
   expect(head?.publicationId).toBe(active?.publication.publicationId);
   expect(hasFinalEntryCheckpoint(SEASON, EVENT_ID, head!, boundary)).toBe(true);
@@ -728,6 +756,9 @@ test('historical result with no durable input or Redis pointer gains one idempot
   // PostgreSQL committed, but the process died before marking the Redis manifest.
   const unmarked = { ...active!.publication, checkpointedAt: null };
   await redis.set(entryLiveV2Key(scope, 'active'), JSON.stringify(unmarked), 'KEEPTTL');
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).get(EVENT_ID)).toEqual([
+    ENTRY_IDS[0],
+  ]);
   await checkpointFinalEntryFromProviderResponse(
     SEASON,
     ENTRY_IDS[0],
@@ -739,8 +770,13 @@ test('historical result with no durable input or Redis pointer gains one idempot
   const repaired = await readEntryLiveInputV2(scope);
   expect(repaired?.publication.publicationId).toBe(active?.publication.publicationId);
   expect(repaired?.publication.checkpointedAt).not.toBeNull();
-  // A lost Redis pointer is restored from complete durable facts without a provider call.
-  await redis.unlink(entryLiveV2Key(scope, 'active'), entryLiveV2Key(scope, 'previous'));
+  // A previous-only fallback must not suppress active FINAL recovery.
+  await redis.set(entryLiveV2Key(scope, 'previous'), JSON.stringify(repaired!.publication));
+  await redis.unlink(entryLiveV2Key(scope, 'active'));
+  expect((await readEntryLiveInputV2(scope))?.servedFrom).toBe('REDIS_PREVIOUS');
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).get(EVENT_ID)).toEqual([
+    ENTRY_IDS[0],
+  ]);
   await checkpointFinalEntryFromProviderResponse(
     SEASON,
     ENTRY_IDS[0],
@@ -753,4 +789,123 @@ test('historical result with no durable input or Redis pointer gains one idempot
   expect(restored?.publication.state).toBe('FINAL');
   expect(restored?.input.finalResult?.score).toEqual({ eventPoints: 67, totalPoints: 67 });
   expect(restored?.publication.checkpointedAt).not.toBeNull();
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).size).toBe(0);
+  await sql`UPDATE competition.entry_event_results SET event_points = event_points + 1
+    WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID} AND entry_id = ${ENTRY_IDS[0]}`;
+  await expect(
+    checkpointFinalEntryFromProviderResponse(
+      SEASON,
+      ENTRY_IDS[0],
+      EVENT_ID,
+      picks,
+      CAPTURE_NOW,
+      boundary,
+    ),
+  ).rejects.toThrow('explicit correction is required');
+  expect((await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], window)).get(EVENT_ID)).toEqual([
+    ENTRY_IDS[0],
+  ]);
+  expect((await readEntryLiveInputV2(scope))?.publication.publicationId).toBe(
+    restored?.publication.publicationId,
+  );
+  await sql`UPDATE fpl.events SET finished = false, data_checked = false, data_checked_at = null
+    WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}`;
+  const finalizeDuringFetch = spyOn(fplClient, 'getEntryEventPicks').mockImplementation(
+    async () => {
+      await sql`UPDATE fpl.events SET finished = true, data_checked = true, data_checked_at = clock_timestamp()
+      WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}`;
+      return adjustedPicks;
+    },
+  );
+  try {
+    await expect(
+      syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
+        skipTransfers: true,
+        concurrency: 1,
+        live: {
+          elements: PLAYER_IDS.map((id, index) => ({
+            id,
+            stats: { total_points: index === 0 ? 33 : index === 1 || index === 11 ? 1 : 0 },
+          })),
+        },
+      }),
+    ).rejects.toThrow('Event finalized during historical sync');
+  } finally {
+    finalizeDuringFetch.mockRestore();
+  }
+});
+
+test('historical manager input uses a verified FINAL global checkpoint when Redis global is absent', async () => {
+  await cleanup();
+  await seedBase();
+  await seedEntry(ENTRY_IDS[0], true);
+  const sql = await getDbClient();
+  const redis = await redisSingleton.getClient();
+  const observedAt = new Date();
+  const boundary = new Date(observedAt.getTime() - 1000);
+  await sql`UPDATE competition.entry_event_results SET event_points=72, overall_points=72,
+    rich_synced_at=${observedAt.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]} AND event_id=${EVENT_ID}`;
+  await publishLivePublicationV2({
+    season: SEASON.seasonCode,
+    eventId: EVENT_ID,
+    state: 'FINALIZED',
+    sourceCheckedAt: observedAt,
+    eventLives: liveRows,
+    fixtures: [],
+  });
+  const durable = await readLivePublicationV2({ season: SEASON.seasonCode, eventId: EVENT_ID });
+  expect(durable?.publication.state).toBe('FINALIZED');
+  const scope = { season: SEASON.seasonCode, eventId: EVENT_ID, entryId: ENTRY_IDS[0] };
+  await redis.unlink(
+    liveV2Key(scope, 'active'),
+    liveV2Key(scope, 'previous'),
+    entryLiveV2Key(scope, 'active'),
+    entryLiveV2Key(scope, 'previous'),
+  );
+  const checkpoint = spyOn(globalCheckpoints, 'readLivePublicationV2Checkpoint').mockResolvedValue(
+    durable,
+  );
+  const picks = {
+    active_chip: 'manager',
+    automatic_subs: [],
+    picks: EVENT_PICKS,
+    entry_history: {
+      event: EVENT_ID,
+      points: 72,
+      total_points: 72,
+      rank: 1,
+      overall_rank: 1000,
+      bank: 10,
+      value: 1000,
+      event_transfers: 0,
+      event_transfers_cost: 0,
+      points_on_bench: 0,
+    },
+  };
+  const providerLive = {
+    elements: liveRows.map((row) => ({
+      id: row.elementId,
+      stats: { total_points: row.totalPoints },
+    })),
+  } as unknown as RawFPLEventLiveResponse;
+  try {
+    await checkpointFinalEntryFromProviderResponse(
+      SEASON,
+      ENTRY_IDS[0],
+      EVENT_ID,
+      picks,
+      observedAt,
+      boundary,
+      providerLive,
+    );
+    const final = await readEntryLiveInputV2(scope);
+    expect(final?.publication.state).toBe('FINAL');
+    expect(final?.input.picksBase.assistantManagerPoints?.points).toBe(5);
+    expect(final?.input.picksBase.assistantManagerPoints?.livePublicationId).toBe(
+      durable?.publication.publicationId,
+    );
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+  } finally {
+    checkpoint.mockRestore();
+  }
 });

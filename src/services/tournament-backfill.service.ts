@@ -1,4 +1,4 @@
-import { hasFinalEntryCheckpoint } from './entries.service';
+import { completedFinalEntryIds } from './entries.service';
 import { eventRepository } from '../repositories/events';
 import { publishTournamentTrendScope } from './tournament-trends-publication.service';
 import type { TournamentSetupExecution } from '../repositories/tournament-infos';
@@ -372,11 +372,7 @@ async function auditMissingUnits(
           eventId,
           present,
         );
-        const complete = new Set(
-          heads
-            .filter((head) => hasFinalEntryCheckpoint(season, eventId, head, event.dataCheckedAt!))
-            .map((head) => head.entryId),
-        );
+        const complete = await completedFinalEntryIds(season, eventId, heads, event.dataCheckedAt);
         present = present.filter((entryId) => complete.has(entryId));
       }
     }
