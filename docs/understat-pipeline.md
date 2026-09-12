@@ -264,7 +264,60 @@ mutation coordination key is authoritative.
 GraphQL may later add a bounded, revision-aware query cache for the few Understat pages, but that
 cache is GraphQL-owned and cannot become a Data ingestion dependency.
 
-## 12. Internal HTTP API
+## 12. Player identity matching and quarantine recovery
+
+Player identity links are supported by provider identity and complete-match roster evidence, not by
+cross-provider statistical equality. Only FPL fixtures marked finished and Understat matches marked
+as results are considered. Minutes, starts, position, goals, assists, own goals, and cards remain
+source-specific values; a difference in any of them must not quarantine an existing verified player
+link. A verified link is retained when a complete mapped match does not observe that pair, and a
+newly observed complete match may only add its season confirmation.
+
+New automatic links require deterministic normalized full-name equality (HTML entities, case,
+accents, compatibility letters such as `ø`, whitespace, and punctuation differences are ignored),
+or a manually confirmed alias, on the same mapped team.
+The pair must be uniquely resolved and observed in at least two complete mapped matches. Name
+fragments, fuzzy matching, statistical equality, and a single incomplete match do not establish a
+new identity. One-to-one verified link conflicts remain blocked.
+
+The read-only quarantine audit is run with:
+
+```bash
+bun run understat:mapping-recovery --season 2627
+```
+
+It emits a JSON report that classifies current-season quarantined links as `recoverable`,
+`identity_conflict`, `insufficient_evidence`, or `manual_review`. Recovery requires an explicit JSON
+approval list containing each report item's `linkId`, `understatPlayerId`, `fplPlayerCode`, and
+`evidenceHash` values. A legacy quarantined link that lacks a durable automatic-quarantine
+provenance marker must also carry `"provenance": "operator-confirmed-automatic"` in its approval
+row; without that explicit backfill decision, apply skips the link. The hash binds approval to the
+report snapshot:
+
+The audit includes a quarantined pair when current-season Understat player-season or membership
+evidence and an FPL season player exist, even if an older status update left the link's
+`firstSeenSeason`/`lastSeenSeason` range behind the season being audited. Result-match roster rows
+remain the separate evidence required to classify a pair as recoverable; a season member without
+those rows is reported as insufficient evidence instead of being omitted.
+
+```bash
+bun run understat:mapping-recovery --season 2627 --apply --approved-file approved.json
+```
+
+The apply path rechecks the report, link status, IDs, and identity evidence while holding the
+existing PostgreSQL mutation scopes. Changed or no-longer-recoverable links are skipped and
+reported. Recovered links retain prior confirmed seasons and record the recovery rule, reason codes,
+and complete match evidence; no Understat or FPL statistics are rewritten. A successful write is
+followed by the existing Player State repair, whose result or failure is reported separately.
+Every apply invocation also runs that stale-selector repair when no mapping is changed, so a
+projection-only failure can be retried with the same approval file after the bridge write has
+already committed. Generic manual status changes leave durable `evidence.manualReview` provenance;
+later quarantine therefore remains manual review instead of becoming an automatic recovery.
+Older quarantines without either marker remain eligible for read-only evidence review, but cannot
+be applied until the approval file explicitly backfills the automatic provenance for that exact
+report item. The status-review endpoint never infers automatic provenance from a prior status.
+
+## 13. Internal HTTP API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -280,7 +333,7 @@ cache is GraphQL-owned and cannot become a Data ingestion dependency.
 The status response declares `storage: 'postgresql'` and `dataCache: 'disabled'`. It reports Team
 and Player runs independently and counts facts directly from the provider tables.
 
-## 13. Failure and recovery
+## 14. Failure and recovery
 
 - Provider/schema/hash/identity failures leave facts untouched and follow BullMQ retry policy.
 - A terminal detail failure marks that item failed; the run does not finalize.
@@ -299,7 +352,7 @@ and Player runs independently and counts facts directly from the provider tables
 - Recovery retries or starts a new scoped run. It does not truncate provider tables or clear Redis.
 - PostgreSQL backup/restore is the recovery path for durable Understat data; Redis restoration is not.
 
-## 14. Acceptance criteria
+## 15. Acceptance criteria
 
 - Typecheck, lint, format, unit tests, integration tests, and build pass.
 - Staging round-trip, timestamp hydration, hash tampering, season mismatch, and resource identity

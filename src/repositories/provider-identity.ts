@@ -219,6 +219,35 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         status,
         reviewedBy: reviewedBy ?? null,
         reviewedAt: reviewedBy ? new Date() : null,
+        ...(status === 'manual_verified'
+          ? {
+              // Keep a durable provenance marker in the evidence JSON. The
+              // generic review endpoint clears reviewer columns when a later
+              // quarantine/rejection occurs, but recovery must still know
+              // that this pair was explicitly reviewed by an operator.
+              evidence: sql`COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb) || jsonb_build_object('manualReview', true)`,
+            }
+          : status === 'quarantined'
+            ? {
+                // A quarantine made through the review endpoint is an
+                // operator decision. Clear automatic recovery provenance so
+                // a later recovery report cannot treat this decision as an
+                // automatic quarantine, while retaining the rest of the
+                // recovery audit fields.
+                evidence: sql`(
+                  CASE
+                    WHEN jsonb_typeof(COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb)->'recovery') = 'object'
+                    THEN jsonb_set(
+                      COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb) - 'recoveryProvenance',
+                      '{recovery}',
+                      (COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb)->'recovery') - 'provenance',
+                      true
+                    )
+                    ELSE COALESCE(${providerEntityLinks.evidence}, '{}'::jsonb) - 'recoveryProvenance'
+                  END
+                ) || jsonb_build_object('manualReview', true, 'quarantineProvenance', 'operator')`,
+              }
+            : {}),
         updatedAt: sql`clock_timestamp()`,
       })
       .where(eq(providerEntityLinks.linkId, id))
