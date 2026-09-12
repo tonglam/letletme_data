@@ -68,15 +68,17 @@ function parseApproval(value: unknown, index: number): UnderstatPlayerMappingRec
   const row = value as Record<string, unknown>;
   const understatPlayerId = row.understatPlayerId;
   const fplPlayerCode = row.fplPlayerCode;
+  const provenance = row.provenance;
   if (
     typeof row.linkId !== 'string' ||
     !Number.isSafeInteger(understatPlayerId) ||
     !Number.isSafeInteger(fplPlayerCode) ||
     typeof row.evidenceHash !== 'string' ||
-    !/^[0-9a-f]{64}$/i.test(row.evidenceHash)
+    !/^[0-9a-f]{64}$/i.test(row.evidenceHash) ||
+    (provenance !== undefined && provenance !== 'operator-confirmed-automatic')
   ) {
     throw new Error(
-      `approval ${index + 1} requires linkId, understatPlayerId, fplPlayerCode, and a 64-character evidenceHash`,
+      `approval ${index + 1} requires linkId, understatPlayerId, fplPlayerCode, a 64-character evidenceHash, and a valid provenance value`,
     );
   }
   return {
@@ -84,6 +86,7 @@ function parseApproval(value: unknown, index: number): UnderstatPlayerMappingRec
     understatPlayerId: understatPlayerId as number,
     fplPlayerCode: fplPlayerCode as number,
     evidenceHash: row.evidenceHash,
+    ...(provenance ? { provenance } : {}),
   };
 }
 

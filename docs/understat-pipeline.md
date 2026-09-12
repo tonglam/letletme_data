@@ -289,7 +289,10 @@ bun run understat:mapping-recovery --season 2627
 It emits a JSON report that classifies current-season quarantined links as `recoverable`,
 `identity_conflict`, `insufficient_evidence`, or `manual_review`. Recovery requires an explicit JSON
 approval list containing each report item's `linkId`, `understatPlayerId`, `fplPlayerCode`, and
-`evidenceHash` values. The hash binds approval to the report snapshot:
+`evidenceHash` values. A legacy quarantined link that lacks a durable automatic-quarantine
+provenance marker must also carry `"provenance": "operator-confirmed-automatic"` in its approval
+row; without that explicit backfill decision, apply skips the link. The hash binds approval to the
+report snapshot:
 
 The audit includes a quarantined pair when current-season Understat player-season or membership
 evidence and an FPL season player exist, even if an older status update left the link's
@@ -310,6 +313,10 @@ Every apply invocation also runs that stale-selector repair when no mapping is c
 projection-only failure can be retried with the same approval file after the bridge write has
 already committed. Generic manual status changes leave durable `evidence.manualReview` provenance;
 later quarantine therefore remains manual review instead of becoming an automatic recovery.
+Automatic reconciliation quarantines record `evidence.recoveryProvenance: "automatic"`. Older
+quarantines without either marker remain eligible for read-only evidence review, but cannot be
+applied until the approval file explicitly backfills the automatic provenance for that exact report
+item.
 
 ## 13. Internal HTTP API
 

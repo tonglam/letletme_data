@@ -161,6 +161,7 @@ describe('Understat player mapping recovery', () => {
             understatPlayerId: 5232,
             fplPlayerCode: 219168,
             evidenceHash: 'a'.repeat(64),
+            provenance: 'operator-confirmed-automatic',
           },
         ]),
       );
@@ -170,8 +171,22 @@ describe('Understat player mapping recovery', () => {
           understatPlayerId: 5232,
           fplPlayerCode: 219168,
           evidenceHash: 'a'.repeat(64),
+          provenance: 'operator-confirmed-automatic',
         },
       ]);
+      writeFileSync(
+        path,
+        JSON.stringify([
+          {
+            linkId: 'link-1',
+            understatPlayerId: 5232,
+            fplPlayerCode: 219168,
+            evidenceHash: 'a'.repeat(64),
+            provenance: 'manual',
+          },
+        ]),
+      );
+      expect(() => readRecoveryApprovals(path)).toThrow('valid provenance');
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

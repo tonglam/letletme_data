@@ -447,6 +447,15 @@ test('keeps verified identity across stat differences and applies recovery insid
       },
     })
     .where(eq(providerEntityLinks.linkId, entityLinkIds.at(-2)!));
+  await db
+    .update(playerSeasonsInUnderstat)
+    .set({ sourceName: 'Joseph O\u0027Brien' })
+    .where(
+      and(
+        eq(playerSeasonsInUnderstat.seasonCode, season),
+        eq(playerSeasonsInUnderstat.playerId, targetUnderstatPlayerId),
+      ),
+    );
 
   await db
     .update(providerEntityLinks)
@@ -475,6 +484,7 @@ test('keeps verified identity across stat differences and applies recovery insid
   expect(manualReviewItem?.disposition).toBe('manual_review');
   const targetItem = report.items.find((candidate) => candidate.linkId === entityLinkIds.at(-2));
   expect(targetItem?.disposition).toBe('recoverable');
+  expect(targetItem?.understatName).toBe('Joseph O\u0027Brien');
   expect(targetItem?.observedMatchIds).toHaveLength(2);
 
   const staleApproval = await restoreQuarantinedProviderPlayers(season, [
@@ -488,6 +498,22 @@ test('keeps verified identity across stat differences and applies recovery insid
   expect(staleApproval.applied).toEqual([]);
   expect(staleApproval.skipped).toEqual([
     { linkId: targetItem!.linkId, reason: 'APPROVAL_NO_LONGER_MATCHES_REPORT' },
+  ]);
+
+  const missingProvenance = await restoreQuarantinedProviderPlayers(season, [
+    {
+      linkId: targetItem!.linkId,
+      understatPlayerId: targetItem!.understatPlayerId!,
+      fplPlayerCode: targetItem!.fplPlayerCode,
+      evidenceHash: targetItem!.evidenceHash,
+    },
+  ]);
+  expect(missingProvenance.applied).toEqual([]);
+  expect(missingProvenance.skipped).toEqual([
+    {
+      linkId: targetItem!.linkId,
+      reason: 'LEGACY_QUARANTINE_PROVENANCE_BACKFILL_REQUIRED',
+    },
   ]);
 
   let lockObserved = false;
@@ -531,6 +557,7 @@ test('keeps verified identity across stat differences and applies recovery insid
         understatPlayerId: targetItem!.understatPlayerId!,
         fplPlayerCode: targetItem!.fplPlayerCode,
         evidenceHash: targetItem!.evidenceHash,
+        provenance: 'operator-confirmed-automatic',
       },
     ]);
   } finally {
@@ -584,6 +611,7 @@ test('keeps verified identity across stat differences and applies recovery insid
       understatPlayerId: targetItem!.understatPlayerId!,
       fplPlayerCode: targetItem!.fplPlayerCode,
       evidenceHash: targetItem!.evidenceHash,
+      provenance: 'operator-confirmed-automatic',
     },
   ]);
   expect(repeated.applied).toEqual([]);

@@ -97,6 +97,7 @@ export type UnderstatPlayerMappingRecoveryItem = Readonly<{
   priorConfirmedSeasons: readonly string[];
   observedMatchIds: readonly number[];
   fixtureCodes: readonly number[];
+  requiresProvenanceBackfill: boolean;
   disposition: UnderstatPlayerMappingRecoveryDisposition;
   reasonCodes: readonly string[];
 }>;
@@ -113,6 +114,7 @@ export type UnderstatPlayerMappingRecoveryApproval = Readonly<{
   understatPlayerId: number;
   fplPlayerCode: number;
   evidenceHash: string;
+  provenance?: 'operator-confirmed-automatic';
 }>;
 
 export type UnderstatPlayerMappingRecoveryApplyResult = Readonly<{
@@ -872,6 +874,7 @@ type ProviderPlayerEvidenceSnapshot = Readonly<{
   >;
   understatById: Map<number, UnderstatRosterEvidence>;
   candidatesByPlayer: Map<number, Set<number>>;
+  recoveryCandidatesByPlayer: Map<number, Set<number>>;
   evidenceCount: Map<number, number>;
   observationsByPair: Map<string, Set<number>>;
   fixtureCodesByPair: Map<string, Set<number>>;
@@ -964,22 +967,29 @@ async function collectProviderPlayerEvidence(
   ]);
   const teamMap = verifiedTeamMap(entityLinks, season);
   const verifiedPlayerPairsByFpl = new Map<number, Set<number>>();
+  const recoveryPlayerPairsByFpl = new Map<number, Set<number>>();
   for (const link of entityLinks) {
     if (
       link.entityType !== 'player' ||
       link.leftProvider !== 'understat' ||
       link.rightProvider !== 'fpl' ||
-      link.leftEntityId === null ||
-      !isVerifiedProviderLinkStatus(link.status)
+      link.leftEntityId === null
     ) {
       continue;
     }
     const fplPlayerCode = Number(link.rightEntityId);
     const understatPlayerId = Number(link.leftEntityId);
     if (!Number.isSafeInteger(fplPlayerCode) || !Number.isSafeInteger(understatPlayerId)) continue;
-    const pairs = verifiedPlayerPairsByFpl.get(fplPlayerCode) ?? new Set<number>();
-    pairs.add(understatPlayerId);
-    verifiedPlayerPairsByFpl.set(fplPlayerCode, pairs);
+    if (isVerifiedProviderLinkStatus(link.status)) {
+      const pairs = verifiedPlayerPairsByFpl.get(fplPlayerCode) ?? new Set<number>();
+      pairs.add(understatPlayerId);
+      verifiedPlayerPairsByFpl.set(fplPlayerCode, pairs);
+    }
+    if (link.status === 'quarantined' && priorConfirmedSeasons(link, season).length > 0) {
+      const recoveryPairs = recoveryPlayerPairsByFpl.get(fplPlayerCode) ?? new Set<number>();
+      recoveryPairs.add(understatPlayerId);
+      recoveryPlayerPairsByFpl.set(fplPlayerCode, recoveryPairs);
+    }
   }
   const matchMap = new Map(
     matchLinks
@@ -1014,6 +1024,7 @@ async function collectProviderPlayerEvidence(
     ),
   );
   const candidatesByPlayer = new Map<number, Set<number>>();
+  const recoveryCandidatesByPlayer = new Map<number, Set<number>>();
   const evidenceCount = new Map<number, number>();
   const observationsByPair = new Map<string, Set<number>>();
   const fixtureCodesByPair = new Map<string, Set<number>>();
@@ -1035,6 +1046,30 @@ async function collectProviderPlayerEvidence(
       ) {
         continue;
       }
+      const key = `${fpl.playerCode}:${understatPlayerId}`;
+      const observedMatches = observationsByPair.get(key) ?? new Set<number>();
+      observedMatches.add(matchId);
+      observationsByPair.set(key, observedMatches);
+      const fixtureCodes = fixtureCodesByPair.get(key) ?? new Set<number>();
+      fixtureCodes.add(fpl.fixtureCode);
+      fixtureCodesByPair.set(key, fixtureCodes);
+    }
+    // A quarantined pair with an earlier confirmed season already has a
+    // durable ID relationship. Recovery may use that relationship with
+    // complete mapped-match roster evidence even when current provider names
+    // have changed; this path never contributes candidates to first mapping.
+    for (const understatPlayerId of recoveryPlayerPairsByFpl.get(fpl.playerCode) ?? []) {
+      const understat = roster.find((row) => row.playerId === understatPlayerId);
+      if (
+        !understat ||
+        !fixtureOutcomeEvidenceAligns(fpl, understat, teamMap.get(understat.teamId))
+      ) {
+        continue;
+      }
+      const recoveryCandidates =
+        recoveryCandidatesByPlayer.get(fpl.playerCode) ?? new Set<number>();
+      recoveryCandidates.add(understatPlayerId);
+      recoveryCandidatesByPlayer.set(fpl.playerCode, recoveryCandidates);
       const key = `${fpl.playerCode}:${understatPlayerId}`;
       const observedMatches = observationsByPair.get(key) ?? new Set<number>();
       observedMatches.add(matchId);
@@ -1081,6 +1116,7 @@ async function collectProviderPlayerEvidence(
     fplPlayerByCode,
     understatById,
     candidatesByPlayer,
+    recoveryCandidatesByPlayer,
     evidenceCount,
     observationsByPair,
     fixtureCodesByPair,
@@ -1143,6 +1179,16 @@ function hasExplicitManualReview(
     link.reviewedBy !== null ||
     link.method.startsWith('manual-') ||
     link.evidence.manualReview === true
+  );
+}
+
+function hasKnownAutomaticRecoveryProvenance(link: Pick<ProviderEntityLink, 'evidence'>): boolean {
+  return (
+    link.evidence.recoveryProvenance === 'automatic' ||
+    (link.evidence.recovery !== null &&
+      typeof link.evidence.recovery === 'object' &&
+      (link.evidence.recovery as { provenance?: unknown }).provenance ===
+        'operator-confirmed-automatic')
   );
 }
 
@@ -1410,14 +1456,20 @@ export async function inspectQuarantinedProviderPlayers(
         (a, b) => a - b,
       );
       const fixtureCodes = [...(snapshot.fixtureCodesByPair.get(key) ?? [])].sort((a, b) => a - b);
+      const observedCandidates = new Set([
+        ...(snapshot.candidatesByPlayer.get(fplPlayerCode) ?? []),
+        ...(snapshot.recoveryCandidatesByPlayer.get(fplPlayerCode) ?? []),
+      ]);
       const classification = classifyQuarantinedProviderPlayerMapping({
         link,
         season,
         understatPlayerId,
         fplPlayerCode,
-        observedCandidates: snapshot.candidatesByPlayer.get(fplPlayerCode),
+        observedCandidates,
         observedMatchIds,
-        hasAmbiguousObservation: snapshot.multipleCandidatesByPlayer.has(fplPlayerCode),
+        hasAmbiguousObservation:
+          snapshot.multipleCandidatesByPlayer.has(fplPlayerCode) ||
+          (snapshot.recoveryCandidatesByPlayer.get(fplPlayerCode)?.size ?? 0) > 1,
         hasVerifiedConflict:
           understatPlayerId !== null &&
           Boolean(
@@ -1449,6 +1501,8 @@ export async function inspectQuarantinedProviderPlayers(
         priorConfirmedSeasons: priorConfirmedSeasons(link, season),
         observedMatchIds,
         fixtureCodes,
+        requiresProvenanceBackfill:
+          !hasExplicitManualReview(link) && !hasKnownAutomaticRecoveryProvenance(link),
         ...classification,
       };
     },
@@ -1481,7 +1535,8 @@ export async function restoreQuarantinedProviderPlayers(
       approval.understatPlayerId <= 0 ||
       !Number.isSafeInteger(approval.fplPlayerCode) ||
       approval.fplPlayerCode <= 0 ||
-      !/^[0-9a-f]{64}$/i.test(approval.evidenceHash)
+      !/^[0-9a-f]{64}$/i.test(approval.evidenceHash) ||
+      (approval.provenance !== undefined && approval.provenance !== 'operator-confirmed-automatic')
     ) {
       throw new Error('Recovery approvals contain an invalid player mapping or evidence hash');
     }
@@ -1529,6 +1584,16 @@ export async function restoreQuarantinedProviderPlayers(
           item.evidenceHash !== approval.evidenceHash
         ) {
           skipped.push({ linkId: approval.linkId, reason: 'APPROVAL_NO_LONGER_MATCHES_REPORT' });
+          continue;
+        }
+        if (
+          item.requiresProvenanceBackfill &&
+          approval.provenance !== 'operator-confirmed-automatic'
+        ) {
+          skipped.push({
+            linkId: approval.linkId,
+            reason: 'LEGACY_QUARANTINE_PROVENANCE_BACKFILL_REQUIRED',
+          });
           continue;
         }
         const current = currentLinks.find((candidate) => candidate.id === approval.linkId);
@@ -1594,6 +1659,9 @@ export async function restoreQuarantinedProviderPlayers(
             recovery: {
               ruleId: PLAYER_RECOVERY_RULE_ID,
               restoredFrom: current.status,
+              ...(approval.provenance
+                ? { provenance: approval.provenance }
+                : { provenance: 'automatic' }),
               reasonCodes: item.reasonCodes,
               recoveredAt,
               observedMatchIds: item.observedMatchIds,
