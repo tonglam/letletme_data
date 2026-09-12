@@ -46,9 +46,10 @@ function snowflakeAt(timestamp: Date, sequence: number): string {
 
 function semanticExecution(request: XToolRequestV1): GrokBuildExecutionResult {
   if (request.toolName !== 'x_semantic_search') throw new Error('Expected semantic request');
-  const knownAt = new Date(Date.now() - 2 * 60_000);
-  const observedAt = new Date(Date.now() - 3 * 60_000);
-  const invalidAt = new Date(Date.now() - 72 * 60 * 60_000);
+  const windowStart = Date.parse(`${request.fromDate}T00:00:00Z`);
+  const knownAt = new Date(windowStart + 2 * 60_000);
+  const observedAt = new Date(windowStart + 3 * 60_000);
+  const invalidAt = new Date(windowStart - 60_000);
   const knownId = snowflakeAt(knownAt, 1);
   const observedId = snowflakeAt(observedAt, 2);
   const invalidId = snowflakeAt(invalidAt, 3);
@@ -191,12 +192,13 @@ test('attributes semantic posts to known sources and non-recurring observed sour
     .from(contentAcquisitionRuns)
     .where(eq(contentAcquisitionRuns.runId, claimed.runId));
   const persistedToolRequest = (
-    claimedSnapshot?.requestSnapshot as { toolRequest?: { fromDate?: string } }
+    claimedSnapshot?.requestSnapshot as { toolRequest?: { fromDate?: string; toDate?: string } }
   ).toolRequest;
   expect(claimedSnapshot?.windowStart?.toISOString().slice(11)).toBe('00:00:00.000Z');
   expect(persistedToolRequest?.fromDate).toBe(
     claimedSnapshot?.windowStart?.toISOString().slice(0, 10),
   );
+  expect(persistedToolRequest?.toDate).not.toBe(persistedToolRequest?.fromDate);
   expect(await confirmFormalRunEnqueued({ runId: claimed.runId })).toBe(true);
   const result = await runFormalXWorker(claimed.job, {
     flags: {
