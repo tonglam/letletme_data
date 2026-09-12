@@ -330,6 +330,7 @@ export async function syncTournamentEventResultsForEntryIds(
           picks,
           sourceOrdering.exact,
           finalizationDate,
+          live,
         );
       }
       return { entryId, success: true } satisfies EntrySyncOutcome;

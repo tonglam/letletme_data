@@ -12,7 +12,10 @@ import {
   entryEventTransfersRepository,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
-import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
+import {
+  createEntryEventResultsRepository,
+  type EventPointsPayload,
+} from '../repositories/entry-event-results';
 import { eventRepository } from '../repositories/events';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
@@ -22,7 +25,7 @@ import { contentHash } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
-import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
+import type { RawFPLEntryEventPicksResponse } from '../types';
 import {
   clearEntryCheckpointDesiredV2,
   entryLiveInputFromFplPicks,
@@ -298,7 +301,7 @@ export async function persistEntryEventPicksResponse(
   options?: {
     readonly liveObservation?: LiveObservation | null;
     /** Provider event-live response sharing the picks capture boundary. */
-    readonly providerEventLive?: RawFPLEventLiveResponse | null;
+    readonly providerEventLive?: EventPointsPayload | null;
     /** Historical FINAL recovery may use a verified durable global observation. */
     readonly historicalFinalBoundary?: Date;
     /** Preserve canonical deadline picks while taking reported facts from this provider response. */
@@ -714,7 +717,7 @@ export async function checkpointFinalEntryFromProviderResponse(
   picks: RawFPLEntryEventPicksResponse,
   sourceCheckedAt: Date | string,
   dataCheckedAt: Date,
-  providerEventLive?: RawFPLEventLiveResponse,
+  providerEventLive?: EventPointsPayload,
 ): Promise<void> {
   const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
   const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
@@ -814,8 +817,33 @@ export async function checkpointFinalEntryFromProviderResponse(
   } else {
     // Recover the original base from its durable payload, preserving deadline facts.
     const current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
-    if (current?.servedFrom !== 'REDIS_CURRENT') {
-      await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
+    if (
+      current?.servedFrom !== 'REDIS_CURRENT' ||
+      current.publication.publicationId !== head.publicationId ||
+      current.publication.generation !== head.generation ||
+      current.input.picksBase.revision !== head.picksBaseRevision ||
+      head.sourceCheckedAt.getTime() < dataCheckedAt.getTime()
+    ) {
+      const event = await eventRepository.findById(season, eventId);
+      if (
+        !event?.finished ||
+        !event.dataChecked ||
+        event.dataCheckedAt?.getTime() !== dataCheckedAt.getTime()
+      ) {
+        throw new Error('Historical FINAL canonical boundary changed');
+      }
+      if (
+        (await rebuildFinalEntryLiveInputsV2(
+          season,
+          eventId,
+          [entryId],
+          dataCheckedAt,
+          undefined,
+          dataCheckedAt,
+        )) !== 1
+      ) {
+        throw new Error('Historical FINAL durable base reconstruction failed');
+      }
     }
   }
   const finalPublication = await publishEntryLiveFinalResultV2({
@@ -830,6 +858,9 @@ export async function checkpointFinalEntryFromProviderResponse(
       automaticSubs,
     },
   });
+  if (new Date(finalPublication.publication.sourceCheckedAt).getTime() < dataCheckedAt.getTime()) {
+    throw new Error('Historical FINAL publication still predates canonical boundary');
+  }
   if (finalPublication.publication.checkpointedAt === null) {
     await setEntryCheckpointDesiredV2(finalPublication.publication);
   }
@@ -1276,6 +1307,7 @@ export async function rebuildFinalEntryLiveInputsV2(
   entryIds: readonly number[],
   dataCheckedAt: Date | string,
   redis?: Redis,
+  finalizationCorrectionBoundary?: Date | string,
 ): Promise<number> {
   const uniqueEntryIds = [...new Set(entryIds)].filter(
     (entryId) => Number.isSafeInteger(entryId) && entryId > 0,
@@ -1328,9 +1360,11 @@ export async function rebuildFinalEntryLiveInputsV2(
         input,
         sourceCheckedAt: result.richSyncedAt!,
         generationFloor: head.generation,
+        finalizationCorrectionBoundary,
         redis,
       });
       if (
+        publication.published &&
         publication.publication.state === 'FINAL' &&
         publication.publication.entryId === entryId
       ) {

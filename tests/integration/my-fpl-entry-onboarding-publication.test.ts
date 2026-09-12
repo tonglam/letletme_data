@@ -890,7 +890,8 @@ test('historical manager input uses a verified FINAL global checkpoint when Redi
   const redis = await redisSingleton.getClient();
   const observedAt = new Date();
   const boundary = new Date(observedAt.getTime() - 1000);
-  await sql`UPDATE competition.entry_event_results SET event_points=72, overall_points=72,
+  await sql`UPDATE fpl.events SET finished=true,data_checked=true,data_checked_at=${boundary.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+  await sql`UPDATE competition.entry_event_results SET event_points=67, overall_points=67,
     rich_synced_at=${observedAt.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]} AND event_id=${EVENT_ID}`;
   const previousGlobal = await readLivePublicationV2({
     season: SEASON.seasonCode,
@@ -941,18 +942,23 @@ test('historical manager input uses a verified FINAL global checkpoint when Redi
       stats: { total_points: row.totalPoints },
     })),
   } as unknown as RawFPLEventLiveResponse;
+  const provider = spyOn(fplClient, 'getEntryEventPicks').mockResolvedValue(picks);
+  const redundantLive = spyOn(fplClient, 'getEventLive').mockRejectedValue(
+    new Error('must reuse event payload'),
+  );
   try {
-    await checkpointFinalEntryFromProviderResponse(
-      SEASON,
-      ENTRY_IDS[0],
-      EVENT_ID,
-      picks,
-      observedAt,
-      boundary,
-      providerLive,
-    );
+    await syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
+      skipTransfers: true,
+      concurrency: 1,
+      live: providerLive,
+    });
+    expect(redundantLive).not.toHaveBeenCalled();
+    const [result] =
+      await sql`SELECT event_points,overall_points FROM competition.entry_event_results WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]} AND event_id=${EVENT_ID}`;
+    expect(result).toEqual({ event_points: 72, overall_points: 72 });
     const final = await readEntryLiveInputV2(scope);
     expect(final?.publication.state).toBe('FINAL');
+    expect(final?.input.finalResult?.score).toEqual({ eventPoints: 72, totalPoints: 72 });
     expect(final?.input.picksBase.assistantManagerPoints?.points).toBe(5);
     expect(final?.input.picksBase.assistantManagerPoints?.livePublicationId).toBe(
       durable?.publication.publicationId,
@@ -960,5 +966,112 @@ test('historical manager input uses a verified FINAL global checkpoint when Redi
     expect(checkpoint).toHaveBeenCalledTimes(1);
   } finally {
     checkpoint.mockRestore();
+    provider.mockRestore();
+    redundantLive.mockRestore();
   }
+});
+
+test('historical recovery preserves a durable provisional base and advances an older FINAL fence', async () => {
+  await cleanup();
+  await seedBase();
+  await seedEntry(ENTRY_IDS[0], true);
+  const sql = await getDbClient();
+  const redis = await redisSingleton.getClient();
+  const scope = { season: SEASON.seasonCode, eventId: EVENT_ID, entryId: ENTRY_IDS[0] };
+  const boundary = new Date(CAPTURE_NOW.getTime() - 1000);
+  await sql`UPDATE fpl.events SET finished=true,data_checked=true,data_checked_at=${boundary.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+  await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0]);
+  const durable = await readEntryLiveInputV2(scope);
+  const head = await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID);
+  const picks = {
+    active_chip: null,
+    automatic_subs: [],
+    picks: EVENT_PICKS,
+    entry_history: {
+      event: EVENT_ID,
+      points: 67,
+      total_points: 67,
+      rank: 1,
+      overall_rank: 1000,
+      bank: 10,
+      value: 1000,
+      event_transfers: 0,
+      event_transfers_cost: 0,
+      points_on_bench: 0,
+    },
+  };
+  await redis.unlink(entryLiveV2Key(scope, 'active'), entryLiveV2Key(scope, 'previous'));
+  const adjusted = entryLiveInputFromFplPicks(
+    SEASON,
+    EVENT_ID,
+    ENTRY_IDS[0],
+    {
+      ...picks,
+      picks: EVENT_PICKS.map((p, i) => ({
+        ...p,
+        multiplier: i === 1 ? 0 : i === 11 ? 1 : p.multiplier,
+      })),
+    },
+    CAPTURE_NOW,
+  );
+  await publishEntryLiveInputV2({
+    ...scope,
+    input: adjusted,
+    sourceCheckedAt: CAPTURE_NOW,
+    generationFloor: head!.generation,
+  });
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+    boundary,
+  );
+  const first = await readEntryLiveInputV2(scope);
+  expect(first?.input.picksBase).toEqual(durable!.input.picksBase);
+  expect(first?.publication.state).toBe('FINAL');
+  const advanced = new Date();
+  const observed = new Date(advanced.getTime() + 1);
+  await sql`UPDATE fpl.events SET data_checked_at=${advanced.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+  await sql`UPDATE competition.entry_event_results SET rich_synced_at=${observed.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID} AND entry_id=${ENTRY_IDS[0]}`;
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    observed,
+    advanced,
+  );
+  const refreshed = await readEntryLiveInputV2(scope);
+  expect(refreshed?.publication.generation).toBeGreaterThan(first!.publication.generation);
+  expect(refreshed?.input.picksBase).toEqual(durable!.input.picksBase);
+  expect(refreshed?.input.finalResult?.score).toEqual(first!.input.finalResult!.score);
+  expect(
+    hasFinalEntryCheckpoint(
+      SEASON,
+      EVENT_ID,
+      (await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID))!,
+      advanced,
+    ),
+  ).toBe(true);
+  expect(
+    (
+      await findMissingCoreResults(SEASON, [ENTRY_IDS[0]], {
+        startEventId: EVENT_ID,
+        endEventId: EVENT_ID,
+      })
+    ).size,
+  ).toBe(0);
+  const refused = await publishEntryLiveInputV2({
+    ...scope,
+    input: adjusted,
+    sourceCheckedAt: new Date(observed.getTime() + 1000),
+    generationFloor: refreshed!.publication.generation,
+    finalizationCorrectionBoundary: new Date(observed.getTime() + 500),
+  });
+  expect(refused.published).toBe(false);
+  expect((await readEntryLiveInputV2(scope))?.publication.publicationId).toBe(
+    refreshed!.publication.publicationId,
+  );
 });

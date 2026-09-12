@@ -870,7 +870,11 @@ if current_generation and current_generation >= candidate.generation then return
 -- A FINAL publication is immutable only when its manifest and immutable item
 -- are both valid. A damaged current item must be repairable by a newer
 -- generation; otherwise the corrupt pointer can block finalization forever.
-if current_state == 'FINAL' and current then return {'stale', current_raw} end
+local correction_boundary = ARGV[8] or ''
+local advancing_final = correction_boundary ~= '' and candidate.state == 'FINAL' and current and
+  type(current.sourceCheckedAt) == 'string' and current.sourceCheckedAt < correction_boundary and
+  candidate.sourceCheckedAt >= correction_boundary
+if current_state == 'FINAL' and current and not advancing_final then return {'stale', current_raw} end
 local item = candidate.item
 local candidate_payload = ARGV[7] or ''
 if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
@@ -2136,6 +2140,8 @@ export async function publishEntryLiveInputV2(input: {
   readonly sourceCheckedAt: Date | string;
   /** Zero is explicit evidence that no durable V2 head exists. */
   readonly generationFloor: number;
+  /** Canonical finalized-event boundary, checked by the recovery service. */
+  readonly finalizationCorrectionBoundary?: Date | string;
   readonly redis?: Redis;
 }): Promise<{
   readonly publication: EntryLivePublicationV2;
@@ -2192,6 +2198,7 @@ export async function publishEntryLiveInputV2(input: {
       currentProof.payload,
       currentProof.valid ? '1' : '0',
       item.payload,
+      input.finalizationCorrectionBoundary ? sourceDate(input.finalizationCorrectionBoundary) : '',
     ),
   );
   if (status === 'stale') {

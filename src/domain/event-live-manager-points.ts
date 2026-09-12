@@ -1,5 +1,5 @@
 import type { EventLive } from './event-lives';
-import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
+import type { RawFPLEntryEventPicksResponse } from '../types';
 
 export type AssistantManagerPointsFact = Readonly<{
   points: number;
@@ -31,7 +31,7 @@ export type LiveScoreObservation = Readonly<{
  */
 export function assistantManagerPointsFactFromProviderObservation(
   picks: RawFPLEntryEventPicksResponse,
-  providerLive: RawFPLEventLiveResponse,
+  providerLive: { elements: readonly { id: number; stats: { total_points: number } }[] },
   observation: LiveScoreObservation,
 ): AssistantManagerPointsFact | null {
   const providerByElement = new Map<number, number>();
