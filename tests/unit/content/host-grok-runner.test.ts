@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+import { invalidatesProviderHealth } from '../../../src/content/host-grok-runner';
+
 import { HostGrokRunnerClient } from '../../../src/content/acquisition/host-grok-runner-client';
 import {
   hostGrokExecutionRequestV1Schema,
@@ -18,6 +20,28 @@ import {
 } from '../../../src/content/acquisition/x-query-compiler';
 
 const servers: Array<{ close: () => Promise<void>; directory: string }> = [];
+
+test('a timed-out provider invalidates old health but pre-start capacity and output schema failures do not', () => {
+  for (const failureClass of [
+    'GROK_TIMEOUT',
+    'GROK_PROCESS_FAILED',
+    'GROK_TOOL_FAILED',
+    'GROK_ABORTED',
+    'GROK_OUTPUT_LIMIT',
+    'GROK_UTF8_INVALID',
+  ]) {
+    expect(invalidatesProviderHealth({ providerProcessStarted: true, failureClass })).toBe(true);
+  }
+  expect(
+    invalidatesProviderHealth({ providerProcessStarted: false, failureClass: 'GROK_TIMEOUT' }),
+  ).toBe(false);
+  expect(
+    invalidatesProviderHealth({
+      providerProcessStarted: true,
+      failureClass: 'GROK_FINAL_SCHEMA_INVALID',
+    }),
+  ).toBe(false);
+});
 
 async function fakeRunner(input: {
   releaseSha?: string;
