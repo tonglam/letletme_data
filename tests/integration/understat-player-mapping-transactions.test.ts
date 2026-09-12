@@ -438,6 +438,15 @@ test('keeps verified identity across stat differences and applies recovery insid
   expect((confirmed?.evidence as { confirmedSeasons?: string[] }).confirmedSeasons).toContain(
     season,
   );
+  await db
+    .update(providerEntityLinks)
+    .set({
+      evidence: {
+        ...((confirmed?.evidence ?? {}) as Record<string, unknown>),
+        confirmedSeasons: ['7980', season, '9091'],
+      },
+    })
+    .where(eq(providerEntityLinks.linkId, entityLinkIds.at(-2)!));
 
   await db
     .update(providerEntityLinks)
@@ -544,6 +553,7 @@ test('keeps verified identity across stat differences and applies recovery insid
   expect((restored?.evidence as { confirmedSeasons?: string[] }).confirmedSeasons).toEqual([
     '7980',
     season,
+    '9091',
   ]);
   expect(
     (restored?.evidence as { recovery?: { observedMatchIds?: number[] } }).recovery

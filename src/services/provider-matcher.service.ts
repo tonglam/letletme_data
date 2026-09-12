@@ -1587,9 +1587,10 @@ export async function restoreQuarantinedProviderPlayers(
           season,
           evidence: {
             ...current.evidence,
-            confirmedSeasons: [
-              ...new Set([...priorConfirmedSeasons(current, season), season]),
-            ].sort(),
+            // Keep the complete validated confirmation history when writing
+            // the restored link. The earlier-only subset is used solely for
+            // recovery eligibility in classifyQuarantinedProviderPlayerMapping.
+            confirmedSeasons: confirmedPlayerSeasons(current, season),
             recovery: {
               ruleId: PLAYER_RECOVERY_RULE_ID,
               restoredFrom: current.status,
