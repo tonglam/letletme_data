@@ -902,10 +902,17 @@ if actual_type ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or re
 if current then
   if current.season ~= candidate.season or current.eventId ~= candidate.eventId or current.entryId ~= candidate.entryId then return {'scope_mismatch'} end
   if current.generation >= candidate.generation then return {'stale', current_raw} end
-  redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
-  if current.item.key and redis.call('EXISTS', current.item.key) == 1 then
-    redis.call('PEXPIRE', current.item.key, ARGV[2])
-    redis.call('PEXPIRE', current.item.key .. ':meta', ARGV[2])
+  if advancing_final then
+    -- A corrected FINAL supersedes the old boundary. Keep the corrected
+    -- candidate as the only fallback so a rejected pre-boundary FINAL can
+    -- never be served after the active pointer or its item is lost.
+    redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+  else
+    redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
+    if current.item.key and redis.call('EXISTS', current.item.key) == 1 then
+      redis.call('PEXPIRE', current.item.key, ARGV[2])
+      redis.call('PEXPIRE', current.item.key .. ':meta', ARGV[2])
+    end
   end
 end
 if candidate.state == 'FINAL' then
@@ -2267,6 +2274,8 @@ export async function publishEntryLiveFinalResultV2(input: {
   readonly entryId: number;
   readonly sourceCheckedAt: Date | string;
   readonly dataCheckedAt: Date | string;
+  /** Canonical finalized-event boundary used to fence correction promotion. */
+  readonly finalizationCorrectionBoundary?: Date | string;
   readonly finalResult: {
     readonly score: FinalScore;
     readonly picks: Exactly15Picks;
@@ -2337,6 +2346,7 @@ export async function publishEntryLiveFinalResultV2(input: {
     input: nextInput,
     sourceCheckedAt,
     generationFloor: current.publication.generation,
+    finalizationCorrectionBoundary: input.finalizationCorrectionBoundary ?? dataCheckedAt,
     redis: input.redis,
   });
 }

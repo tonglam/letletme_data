@@ -696,13 +696,15 @@ export async function syncEntryEventResults(
     if (!accepted) return { entryId, eventId };
     const event = await eventRepository.findById(season, eventId);
     if (event?.finished && event.dataChecked && event.dataCheckedAt) {
+      const exactDataCheckedAt =
+        (await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt;
       await checkpointFinalEntryFromProviderResponse(
         season,
         entryId,
         eventId,
         picks,
         richSyncStartedAt.exact,
-        event.dataCheckedAt,
+        exactDataCheckedAt,
         live,
       );
     }
@@ -735,6 +737,7 @@ export async function checkpointFinalEntryFromProviderResponse(
     [entryId],
   );
   if (head && hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt)) {
+    await assertCurrentFinalizationBoundary(season, eventId, dataCheckedAt);
     if (!result || !finalEntryMatchesResult(head.inputPayload as EntryLiveInputV2, result)) {
       throw new Error(
         'Accepted result differs from immutable FINAL; explicit correction is required',
@@ -833,16 +836,17 @@ export async function checkpointFinalEntryFromProviderResponse(
       current.input.picksBase.revision !== head.picksBaseRevision ||
       isFreshnessBoundaryNewer(head.sourceCheckedAt, dataCheckedAt)
     ) {
-      const event = await eventRepository.findById(season, eventId);
-      const exactEventBoundary = event
-        ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt)
+      const currentEvent = await eventRepository.findById(season, eventId);
+      const currentEventBoundary = currentEvent
+        ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ??
+          currentEvent.dataCheckedAt)
         : null;
       if (
-        !event?.finished ||
-        !event.dataChecked ||
-        !exactEventBoundary ||
-        isFreshnessBoundaryNewer(dataCheckedAt, exactEventBoundary) ||
-        isFreshnessBoundaryNewer(exactEventBoundary, dataCheckedAt)
+        !currentEvent?.finished ||
+        !currentEvent.dataChecked ||
+        !currentEventBoundary ||
+        isFreshnessBoundaryNewer(dataCheckedAt, currentEventBoundary) ||
+        isFreshnessBoundaryNewer(currentEventBoundary, dataCheckedAt)
       ) {
         throw new Error('Historical FINAL canonical boundary changed');
       }
@@ -860,6 +864,11 @@ export async function checkpointFinalEntryFromProviderResponse(
       }
     }
   }
+  // The event can be reopened while the provider response and durable writes
+  // are in flight. Revalidate the canonical finalization boundary immediately
+  // before publishing FINAL so a vanished or changed boundary cannot become a
+  // terminal Redis publication.
+  await assertCurrentFinalizationBoundary(season, eventId, dataCheckedAt);
   const finalPublication = await publishEntryLiveFinalResultV2({
     season: season.seasonCode,
     eventId,
@@ -871,6 +880,7 @@ export async function checkpointFinalEntryFromProviderResponse(
       picks: finalPicks,
       automaticSubs,
     },
+    finalizationCorrectionBoundary: dataCheckedAt,
   });
   if (isFreshnessBoundaryNewer(finalPublication.publication.sourceCheckedAt, dataCheckedAt)) {
     throw new Error('Historical FINAL publication still predates canonical boundary');
@@ -880,6 +890,25 @@ export async function checkpointFinalEntryFromProviderResponse(
   }
   if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
     throw new Error('Historical FINAL publication was not durably checkpointed');
+  }
+}
+
+async function assertCurrentFinalizationBoundary(
+  season: FplSeasonRef,
+  eventId: number,
+  expectedBoundary: Date | string,
+): Promise<void> {
+  const event = await eventRepository.findById(season, eventId);
+  const currentBoundary =
+    event?.finished && event.dataChecked
+      ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt)
+      : null;
+  if (
+    !currentBoundary ||
+    isFreshnessBoundaryNewer(expectedBoundary, currentBoundary) ||
+    isFreshnessBoundaryNewer(currentBoundary, expectedBoundary)
+  ) {
+    throw new Error('Historical FINAL canonical boundary changed before publication');
   }
 }
 

@@ -56,6 +56,11 @@ export type TournamentEventResultsSyncOptions = {
   sourceCheckedAt?: string;
   freshAfter?: Date | string;
   /**
+   * Retry the FINAL publication for entries whose relational result is already
+   * fresh but whose durable V2 checkpoint is incomplete.
+   */
+  finalizationRecoveryEntryIds?: ReadonlySet<number>;
+  /**
    * Keep each entry's canonical writes in its own short mutation scope.
    * Large catch-up batches must not hold one transaction while processing
    * hundreds of entries: that lets entry-info and result jobs deadlock while
@@ -253,7 +258,10 @@ export async function syncTournamentEventResultsForEntryIds(
   }
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+  const finalizationRecoveryEntryIds = options?.finalizationRecoveryEntryIds ?? new Set<number>();
+  const finalizationCheckpointFailureEntryIds = new Set<number>();
   await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
+    let accepted = false;
     try {
       const [picks, transfers] = await withTimeout(
         Promise.all([
@@ -269,7 +277,6 @@ export async function syncTournamentEventResultsForEntryIds(
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
-      let accepted = false;
       const persistEntry = async () => {
         await withEntrySeasonSyncTransaction(
           season,
@@ -322,19 +329,22 @@ export async function syncTournamentEventResultsForEntryIds(
       } else {
         await persistEntry();
       }
-      if (accepted && finalizationDate) {
+      if (finalizationDate && (accepted || finalizationRecoveryEntryIds.has(entryId))) {
         await checkpointFinalEntryFromProviderResponse(
           season,
           entryId,
           eventId,
           picks,
           sourceOrdering.exact,
-          finalizationDate,
+          finalizationCutoff ?? finalizationDate,
           live,
         );
       }
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
+      if (finalizationDate && (accepted || finalizationRecoveryEntryIds.has(entryId))) {
+        finalizationCheckpointFailureEntryIds.add(entryId);
+      }
       logError('Failed to sync tournament entry results', error, { eventId, entryId });
       return { entryId, success: false } satisfies EntrySyncOutcome;
     }
@@ -346,12 +356,21 @@ export async function syncTournamentEventResultsForEntryIds(
   const afterCutoff = afterFinalization
     ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? afterFinalization)
     : null;
+  const finalizationBoundaryChanged =
+    finalizationDate !== null &&
+    (!afterCutoff ||
+      !finalizationCutoff ||
+      isFreshnessBoundaryNewer(finalizationCutoff, afterCutoff) ||
+      isFreshnessBoundaryNewer(afterCutoff, finalizationCutoff));
   if (
-    afterCutoff &&
-    (!finalizationCutoff || isFreshnessBoundaryNewer(finalizationCutoff, afterCutoff))
+    finalizationBoundaryChanged ||
+    (afterCutoff &&
+      (!finalizationCutoff || isFreshnessBoundaryNewer(finalizationCutoff, afterCutoff)))
   ) {
     throw new IncompleteDataSyncError(
-      'Event finalized during historical sync; fresh source evidence is required',
+      finalizationBoundaryChanged
+        ? 'Event finalization boundary changed during historical sync; fresh source evidence is required'
+        : 'Event finalized during historical sync; fresh source evidence is required',
       uniqueEntryIds.length,
       0,
       0,
@@ -389,7 +408,8 @@ export async function syncTournamentEventResultsForEntryIds(
       (finalizationDate !== null && !finalEntryIds.has(entryId)) ||
       !freshResultEntryIds.has(entryId) ||
       !persistedPickSet.has(entryId) ||
-      missingTransferSet.has(entryId),
+      missingTransferSet.has(entryId) ||
+      finalizationCheckpointFailureEntryIds.has(entryId),
   );
   const totalEntries = uniqueEntryIds.length;
   const failedUnits = failedEntryIds.length;
@@ -623,14 +643,33 @@ export async function syncTournamentEventResults(
     new Set(requiredTransferEntryIds),
     options?.skipTransfers,
   );
-  const { requiredResultEntryIds } = plan;
+  const finalizationRecoveryEntryIds = new Set<number>();
+  if (finalizationDate && finalizationCutoff) {
+    const finalHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+      season,
+      eventId,
+      entryIds,
+    );
+    const completedFinalIds = await completedFinalEntryIds(
+      season,
+      eventId,
+      finalHeads,
+      finalizationCutoff,
+    );
+    for (const entryId of entryIds) {
+      if (!completedFinalIds.has(entryId)) finalizationRecoveryEntryIds.add(entryId);
+    }
+  }
+  const requiredResultEntryIds = uniqueNumbers([
+    ...plan.requiredResultEntryIds,
+    ...finalizationRecoveryEntryIds,
+  ]);
 
-  // Both operations write the same season/entry transfer fences.  Running
-  // them in parallel lets one entry-results transaction hold an entry lock
-  // while a transfer transaction holds another, producing a PostgreSQL
-  // advisory-lock cycle.  Preserve best-effort auditing, but make the write
-  // phases strictly ordered so a transient failure is retried by the caller
-  // instead of poisoning the whole batch with 25P02 errors.
+  // Both operations write the same season/entry transfer fences. Running them
+  // in parallel lets one entry-results transaction hold an entry lock while a
+  // transfer transaction holds another, producing an advisory-lock cycle in
+  // PostgreSQL. Keep the write phases strictly ordered and propagate a result-phase
+  // failure so a missing FINAL checkpoint cannot be reported as success.
   if (requiredResultEntryIds.length > 0) {
     try {
       await syncTournamentEventResultsForEntryIds(season, requiredResultEntryIds, eventId, {
@@ -638,9 +677,11 @@ export async function syncTournamentEventResults(
         skipTransfers: true,
         freshAfter,
         sourceCheckedAt: sourceOrdering.exact,
+        finalizationRecoveryEntryIds,
       });
     } catch (error) {
       logError('Tournament result phase did not converge', error, { eventId });
+      throw error;
     }
   }
   if (plan.requiredTransferEntryIds.length > 0) {
@@ -676,7 +717,28 @@ export async function syncTournamentEventResults(
     new Set(missingTransferEntryIds),
     options?.skipTransfers,
   );
-  const failedUnits = audit.requiredResultEntryIds.length + audit.requiredTransferEntryIds.length;
+  const auditedMissingFinalEntryIds = new Set<number>();
+  if (finalizationDate && finalizationCutoff) {
+    const auditedFinalHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+      season,
+      eventId,
+      entryIds,
+    );
+    const auditedCompletedFinalIds = await completedFinalEntryIds(
+      season,
+      eventId,
+      auditedFinalHeads,
+      finalizationCutoff,
+    );
+    for (const entryId of entryIds) {
+      if (!auditedCompletedFinalIds.has(entryId)) auditedMissingFinalEntryIds.add(entryId);
+    }
+  }
+  const failedResultEntryIds = new Set([
+    ...audit.requiredResultEntryIds,
+    ...auditedMissingFinalEntryIds,
+  ]);
+  const failedUnits = failedResultEntryIds.size + audit.requiredTransferEntryIds.length;
   const requiredUnits = Math.max(
     requiredResultEntryIds.length + plan.requiredTransferEntryIds.length,
     failedUnits,
@@ -694,11 +756,24 @@ export async function syncTournamentEventResults(
     );
   }
 
-  const postWorkFinalizationCutoff = await eventRepository.findDataCheckedAtExact(season, eventId);
-  if (isFreshnessBoundaryNewer(freshAfter, postWorkFinalizationCutoff)) {
+  const postWorkEvent = await eventRepository.findById(season, eventId);
+  const postWorkFinalizationCutoff =
+    postWorkEvent?.finished && postWorkEvent.dataChecked
+      ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ??
+        postWorkEvent.dataCheckedAt)
+      : null;
+  const postWorkBoundaryChanged =
+    finalizationDate !== null &&
+    (!postWorkFinalizationCutoff ||
+      !finalizationCutoff ||
+      isFreshnessBoundaryNewer(finalizationCutoff, postWorkFinalizationCutoff) ||
+      isFreshnessBoundaryNewer(postWorkFinalizationCutoff, finalizationCutoff));
+  if (postWorkBoundaryChanged || isFreshnessBoundaryNewer(freshAfter, postWorkFinalizationCutoff)) {
     const retryUnits = Math.max(entryIds.length, requiredUnits);
     throw new IncompleteDataSyncError(
-      'Tournament event finalized during result sync; retrying with final evidence',
+      postWorkBoundaryChanged
+        ? 'Tournament event finalized during result sync; finalization boundary changed, retrying with final evidence'
+        : 'Tournament event finalized during result sync; retrying with final evidence',
       retryUnits,
       0,
       0,

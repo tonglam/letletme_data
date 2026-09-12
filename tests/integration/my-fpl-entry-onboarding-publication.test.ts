@@ -868,21 +868,48 @@ test('historical result with no durable input or Redis pointer gains one idempot
     for (const alreadyFinalized of [false, true]) {
       await sql`UPDATE fpl.events SET finished=${alreadyFinalized}, data_checked=${alreadyFinalized}, data_checked_at=${alreadyFinalized ? boundary.toISOString() : null}::timestamptz
         WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
-      await expect(
-        syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
-          skipTransfers: true,
-          concurrency: 1,
-          live: {
-            elements: PLAYER_IDS.map((id, index) => ({
-              id,
-              stats: { total_points: index === 0 ? 33 : index === 1 || index === 11 ? 1 : 0 },
-            })),
-          },
-        }),
-      ).rejects.toThrow('Event finalized during historical sync');
+      const syncAttempt = syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
+        skipTransfers: true,
+        concurrency: 1,
+        live: {
+          elements: PLAYER_IDS.map((id, index) => ({
+            id,
+            stats: { total_points: index === 0 ? 33 : index === 1 || index === 11 ? 1 : 0 },
+          })),
+        },
+      });
+      await expect(syncAttempt).rejects.toThrow(
+        alreadyFinalized
+          ? 'finalization boundary changed'
+          : 'Event finalized during historical sync',
+      );
     }
   } finally {
     finalizeDuringFetch.mockRestore();
+  }
+
+  await sql`UPDATE fpl.events SET finished=true,data_checked=true,data_checked_at=${boundary.toISOString()}::timestamptz
+    WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+  const reopenDuringFetch = spyOn(fplClient, 'getEntryEventPicks').mockImplementation(async () => {
+    await sql`UPDATE fpl.events SET finished=false, data_checked=false, data_checked_at=null
+        WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+    return adjustedPicks;
+  });
+  try {
+    await expect(
+      syncTournamentEventResultsForEntryIds(SEASON, [ENTRY_IDS[0]], EVENT_ID, {
+        skipTransfers: true,
+        concurrency: 1,
+        live: {
+          elements: PLAYER_IDS.map((id, index) => ({
+            id,
+            stats: { total_points: index === 0 ? 33 : index === 1 || index === 11 ? 1 : 0 },
+          })),
+        },
+      }),
+    ).rejects.toThrow('Event finalization boundary changed');
+  } finally {
+    reopenDuringFetch.mockRestore();
   }
 });
 
@@ -1051,6 +1078,9 @@ test('historical recovery preserves a durable provisional base and advances an o
   expect(refreshed?.publication.generation).toBeGreaterThan(first!.publication.generation);
   expect(refreshed?.input.picksBase).toEqual(durable!.input.picksBase);
   expect(refreshed?.input.finalResult?.score).toEqual(first!.input.finalResult!.score);
+  const correctedPrevious = await redis.get(entryLiveV2Key(scope, 'previous'));
+  expect(correctedPrevious).not.toBeNull();
+  expect(JSON.parse(correctedPrevious!).publicationId).toBe(refreshed?.publication.publicationId);
   expect(
     hasFinalEntryCheckpoint(
       SEASON,
@@ -1082,6 +1112,11 @@ test('historical recovery preserves a durable provisional base and advances an o
     finalizationCorrectionBoundary: exactCorrectionBoundary,
   });
   expect(microsecondAdvance.published).toBe(true);
+  const microsecondPrevious = await redis.get(entryLiveV2Key(scope, 'previous'));
+  expect(microsecondPrevious).not.toBeNull();
+  expect(JSON.parse(microsecondPrevious!).publicationId).toBe(
+    microsecondAdvance.publication.publicationId,
+  );
   const refused = await publishEntryLiveInputV2({
     ...scope,
     input: adjusted,
