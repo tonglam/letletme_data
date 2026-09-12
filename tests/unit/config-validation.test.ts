@@ -220,10 +220,7 @@ describe('production environment preflight', () => {
       'start_content_worker_pause_renewal',
       replaceServices,
     );
-    const runtimeHealth = deployScript.indexOf(
-      'scripts/verify-runtime-health.sh',
-      replaceServices,
-    );
+    const runtimeHealth = deployScript.indexOf('scripts/verify-runtime-health.sh', replaceServices);
 
     expect(preflight).toBeGreaterThan(0);
     expect(fplSourceProbe).toBe(-1);
