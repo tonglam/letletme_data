@@ -972,6 +972,43 @@ test('cache-only historical FINAL recovery skips the provider for a complete dur
   ).toBe(0);
 });
 
+test('durable entry pick heads retain PostgreSQL microsecond source watermarks', async () => {
+  await cleanup();
+  await seedBase();
+  await seedEntry(ENTRY_IDS[0], false);
+  const exactSourceCheckedAt = '2026-09-12T08:00:00.123456Z';
+  const picks = {
+    active_chip: null,
+    automatic_subs: [],
+    picks: EVENT_PICKS,
+    entry_history: {
+      event: EVENT_ID,
+      points: 67,
+      total_points: 67,
+      rank: 1,
+      overall_rank: 1000,
+      bank: 10,
+      value: 1000,
+      event_transfers: 0,
+      event_transfers_cost: 0,
+      points_on_bench: 0,
+    },
+  };
+
+  await entryEventPicksRepository.upsertFromPicks(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    exactSourceCheckedAt,
+  );
+  const head = await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID);
+  expect(head?.sourceCheckedAtExact).toBe(exactSourceCheckedAt);
+  expect(head?.checkpointedAt.getTime()).toBeGreaterThanOrEqual(
+    new Date(exactSourceCheckedAt).getTime(),
+  );
+});
+
 test('historical manager input uses a verified FINAL global checkpoint when Redis serves a previous provisional observation', async () => {
   await cleanup();
   await seedBase();

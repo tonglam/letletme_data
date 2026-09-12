@@ -816,13 +816,6 @@ export async function syncTournamentEventResults(
     ]);
   const auditedFreshResultIds = freshEntryIds(entryIds, auditedStaleResultEntryIds);
   const auditedPickSet = new Set(auditedPickEntryIds);
-  const audit = planTournamentEventSync(
-    entryIds,
-    auditedFreshResultIds,
-    auditedPickSet,
-    new Set(missingTransferEntryIds),
-    options?.skipTransfers,
-  );
   const auditedMissingFinalEntryIds = new Set<number>();
   if (finalizationDate && finalizationCutoff) {
     const auditedFinalHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
@@ -839,7 +832,21 @@ export async function syncTournamentEventResults(
     for (const entryId of entryIds) {
       if (!auditedCompletedFinalIds.has(entryId)) auditedMissingFinalEntryIds.add(entryId);
     }
+    // A cache-only recovery can legitimately reuse an older, complete durable
+    // result. The FINAL checkpoint is the authoritative completion evidence;
+    // do not make the outer freshness audit refetch a provider result merely
+    // because its rich-sync timestamp predates this planner pass.
+    for (const entryId of auditedCompletedFinalIds) {
+      if (finalizationRecoveryEntryIds.has(entryId)) auditedFreshResultIds.add(entryId);
+    }
   }
+  const audit = planTournamentEventSync(
+    entryIds,
+    auditedFreshResultIds,
+    auditedPickSet,
+    new Set(missingTransferEntryIds),
+    options?.skipTransfers,
+  );
   const failedResultEntryIds = new Set([
     ...audit.requiredResultEntryIds,
     ...auditedMissingFinalEntryIds,
