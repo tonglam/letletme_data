@@ -39,6 +39,54 @@ afterAll(async () => {
 });
 
 describe('Briefing source registry reconciliation', () => {
+  test('preserves discovery checkpoints and validators through the v1 to v2 cadence upgrade', async () => {
+    await resetBriefingAcquisitionState();
+    const sourcesYaml = await Bun.file(
+      new URL('../../config/briefing/sources.yaml', import.meta.url),
+    ).text();
+    const acquisitionPlanYaml = await Bun.file(
+      new URL('../../config/briefing/acquisition-plan.yaml', import.meta.url),
+    ).text();
+    const downgrade = (text: string) =>
+      text.replace(
+        /(x-semantic-(?:official|availability|lineup|longform)|youtube-caption-first)-v2/g,
+        '$1-v1',
+      );
+    await reconcileBriefingSourceRegistry({
+      bundle: parseBriefingManifest({
+        sourcesYaml: downgrade(sourcesYaml),
+        acquisitionPlanYaml: downgrade(acquisitionPlanYaml),
+      }),
+      gitRevision: 'discovery-before-upgrade',
+    });
+    const db = await getDb();
+    const keys = ['partition-semantic-official-changes', 'endpoint-fpl-focal-youtube'];
+    const completed = new Date('2026-09-08T12:00:00Z');
+    await db
+      .update(contentSourceSchedules)
+      .set({
+        checkpoint: { windowEnd: completed.toISOString() },
+        validator: { etag: 'preserved-etag' },
+        bootstrapCompletedAt: completed,
+      })
+      .where(inArray(contentSourceSchedules.scheduleKey, keys));
+    await reconcileBriefingSourceRegistry({
+      bundle: parseBriefingManifest({ sourcesYaml, acquisitionPlanYaml }),
+      gitRevision: 'discovery-after-upgrade',
+    });
+    const schedules = await db
+      .select()
+      .from(contentSourceSchedules)
+      .where(inArray(contentSourceSchedules.scheduleKey, keys));
+    expect(schedules).toHaveLength(2);
+    for (const schedule of schedules) {
+      expect(schedule.profileRevision).toBe(2);
+      expect(schedule.checkpoint).toEqual({ windowEnd: completed.toISOString() });
+      expect(schedule.validator).toEqual({ etag: 'preserved-etag' });
+      expect(schedule.bootstrapCompletedAt).toEqual(completed);
+    }
+  });
+
   test('atomically applies the manifest and makes the same hash an unchanged no-op', async () => {
     await resetBriefingAcquisitionState();
     const bundle = await loadBriefingManifest();
