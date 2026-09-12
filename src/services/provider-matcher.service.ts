@@ -1493,7 +1493,16 @@ export async function restoreQuarantinedProviderPlayers(
     {
       queueName: 'understat-mappings',
       jobName: 'understat-mappings-recovery',
-      scopes: ['understat:reference:all', `understat:reference:${season}`],
+      // Recovery rechecks FPL players, fixtures, and player-fixture stats
+      // inside the same transaction. Fence those writers alongside the
+      // Understat reference rows so the approval cannot commit against a
+      // moving FPL snapshot.
+      scopes: [
+        'data-core:fixtures',
+        'data-core:players',
+        'understat:reference:all',
+        `understat:reference:${season}`,
+      ],
     },
     async () => {
       const report = await inspectQuarantinedProviderPlayers(season);

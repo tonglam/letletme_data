@@ -133,6 +133,10 @@ async function cleanup(): Promise<void> {
       ),
     );
   await observer`DELETE FROM ops.mutation_scopes WHERE scope_key=${`understat:reference:${season}`}`;
+  await observer`
+    DELETE FROM ops.mutation_scopes
+    WHERE scope_key IN ('data-core:fixtures', 'data-core:players')
+  `;
 }
 
 async function seedGraph(): Promise<void> {
@@ -463,6 +467,7 @@ test('keeps verified identity across stat differences and applies recovery insid
   ]);
 
   let lockObserved = false;
+  let fplLockObserved = false;
   const originalUpsert = providerIdentityRepository.upsertEntityLink.bind(
     providerIdentityRepository,
   );
@@ -478,6 +483,17 @@ test('keeps verified identity across stat differences and applies recovery insid
           `;
         }),
       ).rejects.toMatchObject({ code: '55P03' });
+      await expect(
+        observer.begin(async (tx) => {
+          await tx`
+            SELECT scope_key
+            FROM ops.mutation_scopes
+            WHERE scope_key IN ('data-core:fixtures', 'data-core:players')
+            FOR UPDATE NOWAIT
+          `;
+        }),
+      ).rejects.toMatchObject({ code: '55P03' });
+      fplLockObserved = true;
       lockObserved = true;
       return originalUpsert(input);
     },
@@ -497,6 +513,7 @@ test('keeps verified identity across stat differences and applies recovery insid
     upsertSpy.mockRestore();
   }
   expect(lockObserved).toBe(true);
+  expect(fplLockObserved).toBe(true);
   expect(applied.applied).toEqual([targetItem!.linkId]);
   expect(applied.skipped).toEqual([]);
   const [restored] = await db
