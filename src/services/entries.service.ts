@@ -206,8 +206,8 @@ export async function checkpointEntryLiveInputV2(
     desired = await setEntryCheckpointDesiredV2(candidate.publication, new Date(), redisClient);
   }
 
-  const sourceCheckedAt = new Date(candidate.publication.sourceCheckedAt);
-  if (!Number.isFinite(sourceCheckedAt.getTime())) return 'missing';
+  const sourceCheckedAt = candidate.publication.sourceCheckedAt;
+  if (!Number.isFinite(new Date(sourceCheckedAt).getTime())) return 'missing';
   const checkpointedAt = new Date();
   const picks = rawPicksFromEntryLiveInput(candidate.input);
   await withMutationScopes(
@@ -1300,8 +1300,7 @@ function buildFinalEntryLiveInputFromCheckpoint(
     !automaticSubs ||
     !richSyncedAt ||
     !Number.isFinite(richSyncedAt.getTime()) ||
-    richSyncedAt.getTime() < dataCheckedAt.getTime() ||
-    isFreshnessBoundaryNewer(head.sourceCheckedAtExact ?? head.sourceCheckedAt, dataCheckedAt)
+    richSyncedAt.getTime() < dataCheckedAt.getTime()
   ) {
     return null;
   }
