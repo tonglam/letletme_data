@@ -9,6 +9,7 @@ import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
 import { eventRepository } from '../repositories/events';
+import { fixtureRepository } from '../repositories/fixtures';
 import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { readLiveCheckpointDesiredV2 } from '../cache/live-publication-v2';
 import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../domain/job-schedules';
@@ -228,7 +229,7 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   }
   if (currentEvent && !currentEventBeforeDeadline) {
     const liveKey = currentLiveKey as string;
-    const [redisLive, checkpointLive, desiredLive] = await Promise.all([
+    const [redisLive, checkpointLive, desiredLive, canonicalFixtures] = await Promise.all([
       readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(
         () => null,
       ),
@@ -237,17 +238,19 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
         season: season.seasonCode,
         eventId: currentEvent.id,
       }).catch(() => null),
+      fixtureRepository.findByEvent(season, currentEvent.id).catch(() => null),
     ]);
     // The FPL deadline is a picks cutoff, not the first kickoff. During the
     // gap between those moments event-live may legitimately return 503 while
     // the scheduler remains in PICKS_PROBE. Do not age that expected absence
     // into a deploy failure; once fixture state or a V2 obligation exists, the
     // normal publication/checkpoint fence below applies.
-    const liveWindowStarted = hasStartedOrFinishedFixture(
-      coreRedisActive?.items.fixtures,
-      currentEvent.id,
+    const liveWindowStarted =
+      hasStartedOrFinishedFixture(canonicalFixtures, currentEvent.id) ||
+      hasStartedOrFinishedFixture(coreRedisActive?.items.fixtures, currentEvent.id);
+    const liveConsistencyRequired = Boolean(
+      redisLive || desiredLive || checkpointLive || liveWindowStarted || canonicalFixtures === null,
     );
-    const liveConsistencyRequired = Boolean(redisLive || desiredLive || liveWindowStarted);
     if (!liveConsistencyRequired) {
       publicationMismatchSince.delete(liveKey);
     } else {

@@ -37,6 +37,9 @@ describe('data API readiness', () => {
     expect(hasStartedOrFinishedFixture([{ event: 3, started: true, finished: false }], 4)).toBe(
       false,
     );
+    expect(hasStartedOrFinishedFixture([{ event: 4, started: true, finished: false }], 3)).toBe(
+      false,
+    );
     expect(hasStartedOrFinishedFixture([{ event: 4, started: true, finished: false }], 4)).toBe(
       true,
     );
