@@ -12,17 +12,21 @@ import {
   entryEventTransfersRepository,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
-import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
+import {
+  createEntryEventResultsRepository,
+  type EventPointsPayload,
+} from '../repositories/entry-event-results';
 import { eventRepository } from '../repositories/events';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
+import { isFreshnessBoundaryNewer } from '../domain/freshness';
 import { assistantManagerPointsFactFromProviderObservation } from '../domain/event-live-manager-points';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { contentHash } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
-import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
+import type { RawFPLEntryEventPicksResponse } from '../types';
 import {
   clearEntryCheckpointDesiredV2,
   entryLiveInputFromFplPicks,
@@ -32,6 +36,7 @@ import {
   publishEntryLiveInputV2,
   readEntryCheckpointDesiredV2,
   readEntryLiveInputV2,
+  readEntryLiveInputsV2,
   validateEntryLiveInputV2,
   readLivePublicationV2,
   setEntryCheckpointDesiredV2,
@@ -201,8 +206,8 @@ export async function checkpointEntryLiveInputV2(
     desired = await setEntryCheckpointDesiredV2(candidate.publication, new Date(), redisClient);
   }
 
-  const sourceCheckedAt = new Date(candidate.publication.sourceCheckedAt);
-  if (!Number.isFinite(sourceCheckedAt.getTime())) return 'missing';
+  const sourceCheckedAt = candidate.publication.sourceCheckedAt;
+  if (!Number.isFinite(new Date(sourceCheckedAt).getTime())) return 'missing';
   const checkpointedAt = new Date();
   const picks = rawPicksFromEntryLiveInput(candidate.input);
   await withMutationScopes(
@@ -297,7 +302,11 @@ export async function persistEntryEventPicksResponse(
   options?: {
     readonly liveObservation?: LiveObservation | null;
     /** Provider event-live response sharing the picks capture boundary. */
-    readonly providerEventLive?: RawFPLEventLiveResponse | null;
+    readonly providerEventLive?: EventPointsPayload | null;
+    /** Historical FINAL recovery may use a verified durable global observation. */
+    readonly historicalFinalBoundary?: Date | string;
+    /** Preserve canonical deadline picks while taking reported facts from this provider response. */
+    readonly preservedPicksBase?: RawFPLEntryEventPicksResponse;
   },
 ) {
   // The live provider lane must not wait for PostgreSQL merely to obtain a
@@ -315,10 +324,34 @@ export async function persistEntryEventPicksResponse(
   let assistantManagerPoints: AssistantManagerPointsFact | undefined;
   const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
   if (managerChip) {
-    const currentObservation = await readLivePublicationV2({
+    let currentObservation = await readLivePublicationV2({
       season: season.seasonCode,
       eventId,
     });
+    if (
+      options?.historicalFinalBoundary &&
+      (currentObservation?.servedFrom !== 'REDIS_CURRENT' ||
+        currentObservation.publication.state !== 'FINALIZED' ||
+        isFreshnessBoundaryNewer(
+          currentObservation.publication.sourceCheckedAt,
+          options.historicalFinalBoundary,
+        ))
+    ) {
+      currentObservation = null;
+      const { readLivePublicationV2Checkpoint } = await import(
+        './live-publication-v2-checkpoint.service'
+      );
+      const durable = await readLivePublicationV2Checkpoint(season, eventId);
+      if (
+        durable?.publication.state === 'FINALIZED' &&
+        !isFreshnessBoundaryNewer(
+          durable.publication.sourceCheckedAt,
+          options.historicalFinalBoundary,
+        )
+      ) {
+        currentObservation = durable;
+      }
+    }
     if (
       !currentObservation ||
       (options?.liveObservation &&
@@ -349,7 +382,7 @@ export async function persistEntryEventPicksResponse(
     season,
     eventId,
     entryId,
-    picks,
+    options?.preservedPicksBase ?? picks,
     sourceCheckedAt,
     assistantManagerPoints,
   );
@@ -663,63 +696,17 @@ export async function syncEntryEventResults(
     if (!accepted) return { entryId, eventId };
     const event = await eventRepository.findById(season, eventId);
     if (event?.finished && event.dataChecked && event.dataCheckedAt) {
-      // Establish the V2 base publication before attaching the final
-      // milestone. This is a no-op when the deadline canary already created
-      // the exact same picks input.
-      await persistEntryEventPicksResponse(
+      const exactDataCheckedAt =
+        (await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt;
+      await checkpointFinalEntryFromProviderResponse(
         season,
         entryId,
         eventId,
         picks,
         richSyncStartedAt.exact,
-        { providerEventLive: live },
+        exactDataCheckedAt,
+        live,
       );
-      const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
-        season,
-        eventId,
-        [entryId],
-      );
-      const finalPicks = normalizeFinalPicks(result?.eventPicks, entryId, eventId);
-      const automaticSubs = finalPicks
-        ? normalizeFinalAutomaticSubs(
-            result?.eventAutoSub,
-            new Set(finalPicks.map((pick) => pick.element)),
-          )
-        : null;
-      const richSyncedAt = result?.richSyncedAt ?? null;
-      if (
-        result &&
-        finalPicks &&
-        automaticSubs &&
-        richSyncedAt &&
-        richSyncedAt.getTime() >= event.dataCheckedAt.getTime()
-      ) {
-        const finalPublication = await publishEntryLiveFinalResultV2({
-          season: season.seasonCode,
-          eventId,
-          entryId,
-          sourceCheckedAt: richSyncedAt,
-          dataCheckedAt: event.dataCheckedAt,
-          finalResult: {
-            score: {
-              eventPoints: result.eventPoints,
-              totalPoints: result.overallPoints,
-            },
-            picks: finalPicks,
-            automaticSubs,
-          },
-        });
-        if (finalPublication.publication.checkpointedAt === null) {
-          const finalPublicationToCheckpoint = finalPublication.publication;
-          await setEntryCheckpointDesiredV2(finalPublicationToCheckpoint);
-          const checkpointed = await checkpointEntryLiveInputV2(season, eventId, entryId);
-          if (checkpointed !== 'checkpointed') {
-            throw new Error(
-              `Final V2 entry publication was not durably checkpointed for ${entryId}/${eventId}`,
-            );
-          }
-        }
-      }
     }
     logInfo('Entry event results sync completed', { entryId, eventId });
     return { entryId, eventId };
@@ -727,6 +714,308 @@ export async function syncEntryEventResults(
     logError('Sync entry event results failed', error, { entryId, eventId });
     throw error;
   }
+}
+
+/** Complete a historical FINAL publication using observed provider facts and an accepted result. */
+export async function checkpointFinalEntryFromProviderResponse(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+  picks: RawFPLEntryEventPicksResponse,
+  sourceCheckedAt: Date | string,
+  dataCheckedAt: Date | string,
+  providerEventLive?: EventPointsPayload,
+): Promise<void> {
+  const dataCheckedAtDate = new Date(dataCheckedAt);
+  if (!Number.isFinite(dataCheckedAtDate.getTime())) {
+    throw new Error('Historical FINAL recovery requires a valid finalization boundary');
+  }
+  const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  const [result] = await createEntryEventResultsRepository().findByEventAndEntryIds(
+    season,
+    eventId,
+    [entryId],
+  );
+  if (head && hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt)) {
+    await assertCurrentFinalizationBoundary(season, eventId, dataCheckedAt);
+    if (!result || !finalEntryMatchesResult(head.inputPayload as EntryLiveInputV2, result)) {
+      throw new Error(
+        'Accepted result differs from immutable FINAL; explicit correction is required',
+      );
+    }
+    let current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+    if (
+      current?.servedFrom !== 'REDIS_CURRENT' ||
+      current.publication.state !== 'FINAL' ||
+      current.publication.publicationId !== head.publicationId ||
+      current.publication.generation !== head.generation
+    ) {
+      await rebuildFinalEntryLiveInputsV2(season, eventId, [entryId], dataCheckedAt);
+      current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+    }
+    if (
+      current?.servedFrom !== 'REDIS_CURRENT' ||
+      current.publication.state !== 'FINAL' ||
+      !finalEntryMatchesResult(current.input, result)
+    ) {
+      throw new Error('Historical FINAL reconstruction remains incomplete');
+    }
+    // A previous attempt may have committed PostgreSQL and then failed to mark Redis.
+    if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
+      throw new Error('Historical FINAL checkpoint marker remains incomplete');
+    }
+    return;
+  }
+
+  const finalPicks = normalizeFinalPicks(result?.eventPicks, entryId, eventId);
+  const automaticSubs = finalPicks
+    ? normalizeFinalAutomaticSubs(
+        result?.eventAutoSub,
+        new Set(finalPicks.map((pick) => pick.element)),
+      )
+    : null;
+  if (
+    !result ||
+    !finalPicks ||
+    !automaticSubs ||
+    !result.richSyncedAt ||
+    isFreshnessBoundaryNewer(result.richSyncedAt, dataCheckedAt) ||
+    result.richSyncedAt.getTime() !== new Date(sourceCheckedAt).getTime()
+  ) {
+    throw new Error('Historical FINAL publication requires the accepted source result');
+  }
+  if (!head?.inputPayload) {
+    const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
+    let preservedPicksBase: RawFPLEntryEventPicksResponse | undefined;
+    if (head) {
+      const rows = await entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
+        season,
+        eventId,
+        [entryId],
+      );
+      const first = rows.find((row) => row.position === 1);
+      if (
+        rows.length !== 15 ||
+        !first ||
+        first.transfers === null ||
+        first.transfersCost === null ||
+        durableLiveInputContentHash(rows) !== head.contentSha256
+      ) {
+        throw new Error('Historical FINAL recovery requires intact canonical base picks');
+      }
+      preservedPicksBase = {
+        ...picks,
+        active_chip: first.activeChip,
+        entry_history: {
+          ...picks.entry_history,
+          event_transfers: first.transfers,
+          event_transfers_cost: first.transfersCost,
+        },
+        picks: rows.map((row) => ({
+          element: row.elementId,
+          position: row.position,
+          multiplier: row.multiplier,
+          is_captain: row.isCaptain,
+          is_vice_captain: row.isViceCaptain,
+        })),
+      };
+    }
+    await persistEntryEventPicksResponse(season, entryId, eventId, picks, sourceCheckedAt, {
+      historicalFinalBoundary: dataCheckedAt,
+      preservedPicksBase,
+      providerEventLive:
+        providerEventLive ?? (managerChip ? await fplClient.getEventLive(eventId) : undefined),
+    });
+  } else {
+    // Recover the original base from its durable payload, preserving deadline facts.
+    const current = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+    if (
+      current?.servedFrom !== 'REDIS_CURRENT' ||
+      current.publication.publicationId !== head.publicationId ||
+      current.publication.generation !== head.generation ||
+      current.input.picksBase.revision !== head.picksBaseRevision ||
+      isFreshnessBoundaryNewer(head.sourceCheckedAtExact ?? head.sourceCheckedAt, dataCheckedAt)
+    ) {
+      const currentEvent = await eventRepository.findById(season, eventId);
+      const currentEventBoundary = currentEvent
+        ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ??
+          currentEvent.dataCheckedAt)
+        : null;
+      if (
+        !currentEvent?.finished ||
+        !currentEvent.dataChecked ||
+        !currentEventBoundary ||
+        isFreshnessBoundaryNewer(dataCheckedAt, currentEventBoundary) ||
+        isFreshnessBoundaryNewer(currentEventBoundary, dataCheckedAt)
+      ) {
+        throw new Error('Historical FINAL canonical boundary changed');
+      }
+      if (
+        (await rebuildFinalEntryLiveInputsV2(
+          season,
+          eventId,
+          [entryId],
+          dataCheckedAt,
+          undefined,
+          dataCheckedAt,
+        )) !== 1
+      ) {
+        throw new Error('Historical FINAL durable base reconstruction failed');
+      }
+    }
+  }
+  // The event can be reopened while the provider response and durable writes
+  // are in flight. Revalidate the canonical finalization boundary immediately
+  // before publishing FINAL so a vanished or changed boundary cannot become a
+  // terminal Redis publication.
+  await assertCurrentFinalizationBoundary(season, eventId, dataCheckedAt);
+  const finalPublication = await publishEntryLiveFinalResultV2({
+    season: season.seasonCode,
+    eventId,
+    entryId,
+    // Keep the caller's exact database ordering timestamp.  The mapped Date
+    // on result.richSyncedAt has only millisecond precision and can fall below
+    // a microsecond finalization fence even when the accepted source is valid.
+    sourceCheckedAt,
+    dataCheckedAt,
+    finalResult: {
+      score: { eventPoints: result.eventPoints, totalPoints: result.overallPoints },
+      picks: finalPicks,
+      automaticSubs,
+    },
+    finalizationCorrectionBoundary: dataCheckedAt,
+  });
+  if (isFreshnessBoundaryNewer(finalPublication.publication.sourceCheckedAt, dataCheckedAt)) {
+    throw new Error('Historical FINAL publication still predates canonical boundary');
+  }
+  if (finalPublication.publication.checkpointedAt === null) {
+    await setEntryCheckpointDesiredV2(finalPublication.publication);
+  }
+  if ((await checkpointEntryLiveInputV2(season, eventId, entryId)) !== 'checkpointed') {
+    throw new Error('Historical FINAL publication was not durably checkpointed');
+  }
+}
+
+async function assertCurrentFinalizationBoundary(
+  season: FplSeasonRef,
+  eventId: number,
+  expectedBoundary: Date | string,
+): Promise<void> {
+  const event = await eventRepository.findById(season, eventId);
+  const currentBoundary =
+    event?.finished && event.dataChecked
+      ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt)
+      : null;
+  if (
+    !currentBoundary ||
+    isFreshnessBoundaryNewer(expectedBoundary, currentBoundary) ||
+    isFreshnessBoundaryNewer(currentBoundary, expectedBoundary)
+  ) {
+    throw new Error('Historical FINAL canonical boundary changed before publication');
+  }
+}
+
+function finalEntryMatchesResult(input: EntryLiveInputV2, result: DbEntryEventResult): boolean {
+  const expectedPicks = normalizeFinalPicks(result.eventPicks, result.entryId, result.eventId);
+  const actualPicks = normalizeFinalPicks(input.finalResult?.picks, result.entryId, result.eventId);
+  if (!expectedPicks || !actualPicks || !input.finalResult) return false;
+  const elements = new Set(expectedPicks.map((pick) => pick.element));
+  const expectedSubs = normalizeFinalAutomaticSubs(result.eventAutoSub, elements);
+  const actualSubs = normalizeFinalAutomaticSubs(input.finalResult.automaticSubs, elements);
+  const compareSubs = (
+    a: { inElement: number; outElement: number },
+    b: { inElement: number; outElement: number },
+  ) => a.inElement - b.inElement || a.outElement - b.outElement;
+  expectedSubs?.sort(compareSubs);
+  actualSubs?.sort(compareSubs);
+  return (
+    expectedSubs !== null &&
+    actualSubs !== null &&
+    contentHash({ score: input.finalResult.score, picks: actualPicks, subs: actualSubs }) ===
+      contentHash({
+        score: { eventPoints: result.eventPoints, totalPoints: result.overallPoints },
+        picks: expectedPicks,
+        subs: expectedSubs,
+      })
+  );
+}
+
+/** The backfill boundary requires both durable facts and the exact active checkpoint marker. */
+export async function completedFinalEntryIds(
+  season: FplSeasonRef,
+  eventId: number,
+  heads: readonly EntryEventPickHeadMetadata[],
+  dataCheckedAt: Date | string,
+): Promise<Set<number>> {
+  const complete = heads.filter((head) =>
+    hasFinalEntryCheckpoint(season, eventId, head, dataCheckedAt),
+  );
+  const active = await readEntryLiveInputsV2(
+    complete.map((head) => ({ season: season.seasonCode, eventId, entryId: head.entryId })),
+  );
+  const results = await createEntryEventResultsRepository().findByEventAndEntryIds(
+    season,
+    eventId,
+    complete.map((head) => head.entryId),
+  );
+  const resultsByEntry = new Map(results.map((result) => [result.entryId, result]));
+  return new Set(
+    complete
+      .filter((head) => {
+        const result = resultsByEntry.get(head.entryId);
+        if (!result || !finalEntryMatchesResult(head.inputPayload as EntryLiveInputV2, result))
+          return false;
+        const read = active.get(head.entryId);
+        return (
+          read?.servedFrom === 'REDIS_CURRENT' &&
+          read.publication.state === 'FINAL' &&
+          read.publication.checkpointedAt !== null &&
+          read.publication.publicationId === head.publicationId &&
+          read.publication.generation === head.generation
+        );
+      })
+      .map((head) => head.entryId),
+  );
+}
+
+export function hasFinalEntryCheckpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  head: EntryEventPickHeadMetadata,
+  dataCheckedAt: Date | string,
+): boolean {
+  const input = head.inputPayload;
+  const sourceCheckedAt = head.sourceCheckedAtExact ?? head.sourceCheckedAt;
+  if (
+    head.state !== 'COMPLETE' ||
+    head.rowCount !== 15 ||
+    !Number.isSafeInteger(head.generation) ||
+    head.generation < 1 ||
+    !Number.isFinite(new Date(sourceCheckedAt).getTime()) ||
+    isFreshnessBoundaryNewer(sourceCheckedAt, dataCheckedAt) ||
+    !validateEntryLiveInputV2(input, {
+      season: season.seasonCode,
+      eventId,
+      entryId: head.entryId,
+    }) ||
+    !input.finalResult ||
+    !input.finalResult.score ||
+    !Number.isSafeInteger(input.finalResult.score.eventPoints) ||
+    (input.finalResult.score.totalPoints !== null &&
+      !Number.isSafeInteger(input.finalResult.score.totalPoints)) ||
+    input.picksBase.revision !== head.picksBaseRevision
+  )
+    return false;
+  const finalPicks = normalizeFinalPicks(input.finalResult.picks, head.entryId, eventId);
+  return (
+    finalPicks !== null &&
+    normalizeFinalAutomaticSubs(
+      input.finalResult.automaticSubs,
+      new Set(finalPicks.map((pick) => pick.element)),
+    ) !== null &&
+    (head.contentSha256 === entryLivePicksBaseCheckpointHash(input) ||
+      head.contentSha256 === entryLiveFinalResultCheckpointHash(input))
+  );
 }
 
 export function normalizeFinalPicks(
@@ -803,8 +1092,8 @@ export function normalizeFinalAutomaticSubs(
   for (const value of raw) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const row = value as Record<string, unknown>;
-    const inElement = Number(row.element_in ?? row.elementIn);
-    const outElement = Number(row.element_out ?? row.elementOut);
+    const inElement = Number(row.element_in ?? row.elementIn ?? row.inElement);
+    const outElement = Number(row.element_out ?? row.elementOut ?? row.outElement);
     if (
       !Number.isSafeInteger(inElement) ||
       inElement <= 0 ||
@@ -962,7 +1251,7 @@ function buildFinalEntryLiveInputFromCheckpoint(
     head.generation <= 0 ||
     !/^[0-9a-f]{64}$/.test(head.picksBaseRevision) ||
     !/^[0-9a-f]{64}$/.test(head.contentSha256) ||
-    !Number.isFinite(head.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(new Date(head.sourceCheckedAtExact ?? head.sourceCheckedAt).getTime()) ||
     !Number.isFinite(head.contentUpdatedAt.getTime()) ||
     !Number.isFinite(head.checkpointedAt.getTime()) ||
     durableLiveInputContentHash(rows) !== head.contentSha256
@@ -1065,6 +1354,7 @@ export async function rebuildFinalEntryLiveInputsV2(
   entryIds: readonly number[],
   dataCheckedAt: Date | string,
   redis?: Redis,
+  finalizationCorrectionBoundary?: Date | string,
 ): Promise<number> {
   const uniqueEntryIds = [...new Set(entryIds)].filter(
     (entryId) => Number.isSafeInteger(entryId) && entryId > 0,
@@ -1110,6 +1400,9 @@ export async function rebuildFinalEntryLiveInputsV2(
     );
     if (!input) continue;
     try {
+      if (finalizationCorrectionBoundary !== undefined) {
+        await assertCurrentFinalizationBoundary(season, eventId, finalizationCorrectionBoundary);
+      }
       const publication = await publishEntryLiveInputV2({
         season: season.seasonCode,
         eventId,
@@ -1117,11 +1410,33 @@ export async function rebuildFinalEntryLiveInputsV2(
         input,
         sourceCheckedAt: result.richSyncedAt!,
         generationFloor: head.generation,
+        finalizationCorrectionBoundary,
         redis,
       });
       if (
-        publication.publication.state === 'FINAL' &&
-        publication.publication.entryId === entryId
+        publication.publication.state !== 'FINAL' ||
+        publication.publication.entryId !== entryId
+      ) {
+        continue;
+      }
+      if (publication.published) {
+        rebuilt += 1;
+        continue;
+      }
+      // A prior attempt may have promoted this exact FINAL and crashed before
+      // checkpointing it. The CAS returns the immutable current publication
+      // as `published: false`; accept it only after reading the current item
+      // and proving that its complete input is the same candidate.
+      const current = await readEntryLiveInputV2(
+        { season: season.seasonCode, eventId, entryId },
+        redis,
+      );
+      if (
+        current?.servedFrom === 'REDIS_CURRENT' &&
+        current.publication.state === 'FINAL' &&
+        current.publication.publicationId === publication.publication.publicationId &&
+        current.publication.generation === publication.publication.generation &&
+        contentHash(current.input) === contentHash(input)
       ) {
         rebuilt += 1;
       }

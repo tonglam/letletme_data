@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type Redis from 'ioredis';
 
 import type { EventLive } from '../domain/event-lives';
+import { isFreshnessBoundaryNewer } from '../domain/freshness';
 import { validateSerializedFixtures } from '../domain/fixtures';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Fixture, RawFPLEntryEventPicksResponse } from '../types';
@@ -839,6 +840,21 @@ return {'published', previous_result}
 
 const PROMOTE_ENTRY_SCRIPT = `
 local candidate = cjson.decode(ARGV[1])
+local function timestamp_key(value)
+  if type(value) ~= 'string' then return '' end
+  local prefix, fraction = string.match(value, '^(.-)%.([0-9]+)Z$')
+  if prefix == nil then
+    prefix = string.match(value, '^(.-)Z$')
+    if prefix == nil then return value end
+    fraction = ''
+  end
+  if string.len(fraction) < 6 then
+    fraction = fraction .. string.rep('0', 6 - string.len(fraction))
+  else
+    fraction = string.sub(fraction, 1, 6)
+  end
+  return prefix .. '.' .. fraction .. 'Z'
+end
 local function valid_generation(value)
   return type(value) == 'number' and value > 0 and value <= 9007199254740991 and value == math.floor(value)
 end
@@ -870,7 +886,14 @@ if current_generation and current_generation >= candidate.generation then return
 -- A FINAL publication is immutable only when its manifest and immutable item
 -- are both valid. A damaged current item must be repairable by a newer
 -- generation; otherwise the corrupt pointer can block finalization forever.
-if current_state == 'FINAL' and current then return {'stale', current_raw} end
+local correction_boundary = ARGV[8] or ''
+local correction_key = timestamp_key(correction_boundary)
+local current_source_key = current and timestamp_key(current.sourceCheckedAt) or ''
+local candidate_source_key = timestamp_key(candidate.sourceCheckedAt)
+local advancing_final = correction_boundary ~= '' and correction_key ~= '' and candidate.state == 'FINAL' and current and
+  current_source_key ~= '' and candidate_source_key ~= '' and current_source_key < correction_key and
+  candidate_source_key >= correction_key
+if current_state == 'FINAL' and current and not advancing_final then return {'stale', current_raw} end
 local item = candidate.item
 local candidate_payload = ARGV[7] or ''
 if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
@@ -880,10 +903,21 @@ if actual_type ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or re
 if current then
   if current.season ~= candidate.season or current.eventId ~= candidate.eventId or current.entryId ~= candidate.entryId then return {'scope_mismatch'} end
   if current.generation >= candidate.generation then return {'stale', current_raw} end
-  redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
-  if current.item.key and redis.call('EXISTS', current.item.key) == 1 then
-    redis.call('PEXPIRE', current.item.key, ARGV[2])
-    redis.call('PEXPIRE', current.item.key .. ':meta', ARGV[2])
+  if advancing_final then
+    -- A corrected FINAL supersedes the old boundary. Keep the corrected
+    -- candidate as the only fallback so a rejected pre-boundary FINAL can
+    -- never be served after the active pointer or its item is lost.
+    redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+    -- The superseded FINAL is no longer reachable from either pointer. Remove
+    -- its payload and manifest metadata instead of leaving a full retention
+    -- lease on an orphaned immutable generation.
+    redis.call('DEL', current.item.key, current.item.key .. ':meta')
+  else
+    redis.call('SET', KEYS[2], current_raw, 'PX', ARGV[2])
+    if current.item.key and redis.call('EXISTS', current.item.key) == 1 then
+      redis.call('PEXPIRE', current.item.key, ARGV[2])
+      redis.call('PEXPIRE', current.item.key .. ':meta', ARGV[2])
+    end
   end
 end
 if candidate.state == 'FINAL' then
@@ -1288,6 +1322,21 @@ function sourceDate(value: string | Date): string {
   if (!Number.isFinite(date.getTime()))
     throw new CacheError('Invalid V2 source timestamp', 'LIVE_V2_TIME_INVALID');
   return date.toISOString();
+}
+
+/** Preserve PostgreSQL microseconds for the correction fence sent to Redis. */
+function exactTimestamp(value: string | Date): string {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime()))
+    throw new CacheError('Invalid V2 correction timestamp', 'LIVE_V2_TIME_INVALID');
+  const iso = date.toISOString();
+  const fraction =
+    typeof value === 'string'
+      ? (/[T ]\d{2}:\d{2}:\d{2}\.(\d+)(?:Z|[+-]\d{2}:?\d{2})$/i.exec(value)?.[1] ??
+        String(date.getUTCMilliseconds()).padStart(3, '0'))
+      : String(date.getUTCMilliseconds()).padStart(3, '0');
+  const micros = `${fraction}000000`.slice(0, 6);
+  return `${iso.slice(0, 19)}.${micros}Z`;
 }
 
 export function buildLivePublicationRevisions(
@@ -2134,8 +2183,12 @@ export async function publishEntryLiveInputV2(input: {
   readonly entryId: number;
   readonly input: EntryLiveInputV2;
   readonly sourceCheckedAt: Date | string;
+  /** Preserve PostgreSQL microseconds for a finalized source observation. */
+  readonly preserveSourceCheckedAtPrecision?: boolean;
   /** Zero is explicit evidence that no durable V2 head exists. */
   readonly generationFloor: number;
+  /** Canonical finalized-event boundary, checked by the recovery service. */
+  readonly finalizationCorrectionBoundary?: Date | string;
   readonly redis?: Redis;
 }): Promise<{
   readonly publication: EntryLivePublicationV2;
@@ -2159,7 +2212,9 @@ export async function publishEntryLiveInputV2(input: {
     entryLiveV2Key(scope, 'sequence'),
     Math.max(input.generationFloor, current?.publication.generation ?? 0),
   );
-  const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
+  const sourceCheckedAt = input.preserveSourceCheckedAtPrecision
+    ? exactTimestamp(input.sourceCheckedAt)
+    : sourceDate(input.sourceCheckedAt);
   const item = buildEntryItem(scope, allocation.generation, input.input);
   const publication: EntryLivePublicationV2 = {
     contractVersion: LIVE_POINTS_CONTRACT_VERSION,
@@ -2192,6 +2247,9 @@ export async function publishEntryLiveInputV2(input: {
       currentProof.payload,
       currentProof.valid ? '1' : '0',
       item.payload,
+      input.finalizationCorrectionBoundary
+        ? exactTimestamp(input.finalizationCorrectionBoundary)
+        : '',
     ),
   );
   if (status === 'stale') {
@@ -2225,6 +2283,8 @@ export async function publishEntryLiveFinalResultV2(input: {
   readonly entryId: number;
   readonly sourceCheckedAt: Date | string;
   readonly dataCheckedAt: Date | string;
+  /** Canonical finalized-event boundary used to fence correction promotion. */
+  readonly finalizationCorrectionBoundary?: Date | string;
   readonly finalResult: {
     readonly score: FinalScore;
     readonly picks: Exactly15Picks;
@@ -2238,9 +2298,9 @@ export async function publishEntryLiveFinalResultV2(input: {
 }> {
   const scope = { season: input.season, eventId: input.eventId, entryId: input.entryId } as const;
   assertEntryScope(scope);
-  const sourceCheckedAt = sourceDate(input.sourceCheckedAt);
-  const dataCheckedAt = sourceDate(input.dataCheckedAt);
-  if (new Date(sourceCheckedAt).getTime() < new Date(dataCheckedAt).getTime()) {
+  const sourceCheckedAt = exactTimestamp(input.sourceCheckedAt);
+  const dataCheckedAt = exactTimestamp(input.dataCheckedAt);
+  if (isFreshnessBoundaryNewer(sourceCheckedAt, dataCheckedAt)) {
     throw new CacheError(
       'Final V2 entry result predates the event data_checked fence',
       'LIVE_V2_FINAL_EVIDENCE_STALE',
@@ -2294,7 +2354,9 @@ export async function publishEntryLiveFinalResultV2(input: {
     entryId: input.entryId,
     input: nextInput,
     sourceCheckedAt,
+    preserveSourceCheckedAtPrecision: true,
     generationFloor: current.publication.generation,
+    finalizationCorrectionBoundary: input.finalizationCorrectionBoundary ?? dataCheckedAt,
     redis: input.redis,
   });
 }

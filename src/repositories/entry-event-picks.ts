@@ -69,6 +69,8 @@ export type EntryEventPickHeadMetadata = {
   readonly inputPayload: unknown | null;
   readonly rowCount: number;
   readonly sourceCheckedAt: Date;
+  /** PostgreSQL source watermark with microsecond precision for final fences. */
+  readonly sourceCheckedAtExact?: string;
   readonly contentUpdatedAt: Date;
   readonly checkpointedAt: Date;
   readonly state: string;
@@ -102,6 +104,7 @@ async function upsertEntryEventPickHead(
   eventId: number,
   picks: RawFPLEntryEventPicksResponse,
   syncedAt: Date,
+  sourceCheckedAtExact: string | undefined,
   publication: EntryEventPicksPublicationMetadata | undefined,
   contentUpdatedAt: Date,
 ): Promise<void> {
@@ -114,6 +117,12 @@ async function upsertEntryEventPickHead(
   if (!Number.isFinite(checkpointedAt.getTime())) {
     throw new Error('A valid picks checkpoint timestamp is required');
   }
+  const sourceCheckedAt = sourceCheckedAtExact
+    ? sql`${sourceCheckedAtExact}::timestamptz`
+    : syncedAt;
+  const checkpointedAtValue = sourceCheckedAtExact
+    ? sql`GREATEST(${checkpointedAt.toISOString()}::timestamptz, ${sourceCheckedAt})`
+    : checkpointedAt;
   const [existingHead] = await db
     .select({
       publicationId: entryEventPickHeadsInCompetition.publicationId,
@@ -181,9 +190,9 @@ async function upsertEntryEventPickHead(
       contentSha256,
       inputPayload: effectiveInputPayload,
       rowCount: 15,
-      sourceCheckedAt: syncedAt,
+      sourceCheckedAt,
       contentUpdatedAt,
-      checkpointedAt,
+      checkpointedAt: checkpointedAtValue,
       state: 'COMPLETE',
     })
     .onConflictDoUpdate({
@@ -199,9 +208,9 @@ async function upsertEntryEventPickHead(
         contentSha256,
         inputPayload: effectiveInputPayload,
         rowCount: 15,
-        sourceCheckedAt: syncedAt,
+        sourceCheckedAt,
         contentUpdatedAt,
-        checkpointedAt,
+        checkpointedAt: checkpointedAtValue,
         state: 'COMPLETE',
       },
     });
@@ -252,9 +261,14 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
     eventId: number,
     picks: RawFPLEntryEventPicksResponse,
     syncedAt: Date,
+    sourceCheckedAtExact: string | undefined,
     publication?: EntryEventPicksPublicationMetadata,
     options?: EntryEventPicksUpsertOptions,
   ): Promise<boolean> => {
+    const syncedAtDate = syncedAt;
+    const syncedAtValue = sourceCheckedAtExact
+      ? sql`${sourceCheckedAtExact}::timestamptz`
+      : syncedAtDate;
     // Every write caller holds the season/entry advisory and parent-row fence
     // from withEntrySeasonSyncTransaction. Child-row FOR UPDATE locks would
     // add one WAL record per pick/head row without improving serialization.
@@ -332,8 +346,6 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       options?.preserveCheckpointedInput === true &&
       existingHead?.state === 'COMPLETE' &&
       existingHead.rowCount === 15 &&
-      existingHead.inputPayload !== null &&
-      existingHead.inputPayload !== undefined &&
       storedRowsAreComplete;
 
     if (preserveCheckpointedInput) {
@@ -376,6 +388,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         eventId,
         picks,
         syncedAt,
+        sourceCheckedAtExact,
         publication,
         requestedContentUpdatedAt,
       );
@@ -460,7 +473,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       transfers: pick.position === 1 ? picks.entry_history.event_transfers : null,
       transfersCost: pick.position === 1 ? picks.entry_history.event_transfers_cost : null,
       sourceCreatedAt,
-      sourceUpdatedAt: syncedAt,
+      sourceUpdatedAt: syncedAtValue,
     }));
     await db
       .insert(entryEventPicksInCompetition)
@@ -501,6 +514,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       eventId,
       picks,
       syncedAt,
+      sourceCheckedAtExact,
       publication,
       contentUpdatedAt,
     );
@@ -678,6 +692,10 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
             inputPayload: entryEventPickHeadsInCompetition.inputPayload,
             rowCount: entryEventPickHeadsInCompetition.rowCount,
             sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+            sourceCheckedAtExact: sql<string>`to_char(
+              ${entryEventPickHeadsInCompetition.sourceCheckedAt} AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+            )`,
             contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
             checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
             state: entryEventPickHeadsInCompetition.state,
@@ -727,6 +745,10 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 inputPayload: entryEventPickHeadsInCompetition.inputPayload,
                 rowCount: entryEventPickHeadsInCompetition.rowCount,
                 sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+                sourceCheckedAtExact: sql<string>`to_char(
+                  ${entryEventPickHeadsInCompetition.sourceCheckedAt} AT TIME ZONE 'UTC',
+                  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                )`,
                 contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
                 checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
                 state: entryEventPickHeadsInCompetition.state,
@@ -789,6 +811,10 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
             inputPayload: entryEventPickHeadsInCompetition.inputPayload,
             rowCount: entryEventPickHeadsInCompetition.rowCount,
             sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+            sourceCheckedAtExact: sql<string>`to_char(
+              ${entryEventPickHeadsInCompetition.sourceCheckedAt} AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+            )`,
             contentUpdatedAt: entryEventPickHeadsInCompetition.contentUpdatedAt,
             checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
             state: entryEventPickHeadsInCompetition.state,
@@ -838,10 +864,11 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           throw new Error(`Refusing incomplete entry picks for entry ${entryId}, event ${eventId}`);
         }
 
-        const exactSyncedAt = syncedAt instanceof Date ? syncedAt : new Date(syncedAt);
-        if (!Number.isFinite(exactSyncedAt.getTime())) {
+        const syncedAtDate = syncedAt instanceof Date ? syncedAt : new Date(syncedAt);
+        if (!Number.isFinite(syncedAtDate.getTime())) {
           throw new Error('A valid picks source timestamp is required');
         }
+        const sourceCheckedAtExact = typeof syncedAt === 'string' ? syncedAt : undefined;
 
         const changed = dbInstance
           ? await replaceScope(
@@ -850,7 +877,8 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
               entryId,
               eventId,
               picks,
-              exactSyncedAt,
+              syncedAtDate,
+              sourceCheckedAtExact,
               publication,
               options,
             )
@@ -861,7 +889,8 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 entryId,
                 eventId,
                 picks,
-                exactSyncedAt,
+                syncedAtDate,
+                sourceCheckedAtExact,
                 publication,
                 options,
               ),

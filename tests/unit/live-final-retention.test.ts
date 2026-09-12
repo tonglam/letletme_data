@@ -13,6 +13,7 @@ import type {
   MatchDetailRead,
 } from '../../src/cache/live-match-publication-v3';
 import {
+  hasFinalEntryCheckpoint,
   buildFinalEntryLiveInputFromBaseAndResult,
   entryLiveFinalResultCheckpointHash,
   entryLivePicksBaseCheckpointHash,
@@ -592,4 +593,49 @@ describe('Live final retention league scope completeness', () => {
       { season: '2627', eventId: 2, tournamentId: 6, scope: 'H2H_STANDINGS' },
     ]);
   });
+});
+
+test('historical completion requires durable FINAL facts, not merely fifteen persisted picks', () => {
+  const boundary = new Date('2026-09-04T08:00:00Z');
+  const input = buildFinalEntryLiveInputFromBaseAndResult(
+    provisionalInput(),
+    finalizedResult(),
+    boundary,
+  )!;
+  const head = {
+    entryId: 777,
+    publicationId: 'fixture',
+    generation: 1,
+    picksBaseRevision: input.picksBase.revision,
+    contentSha256: entryLivePicksBaseCheckpointHash(input),
+    inputPayload: input,
+    rowCount: 15,
+    state: 'COMPLETE',
+    sourceCheckedAt: new Date('2026-09-04T08:05:00Z'),
+    contentUpdatedAt: boundary,
+    checkpointedAt: boundary,
+  };
+  const season = { seasonId: 2026, seasonCode: '2627' };
+  expect(hasFinalEntryCheckpoint(season, 2, head, boundary)).toBe(true);
+  // PostgreSQL keeps microseconds while the ordinary Date mapping does not;
+  // evidence captured at the same millisecond must not pass a later exact
+  // finalization fence.
+  expect(hasFinalEntryCheckpoint(season, 2, head, '2026-09-04T08:05:00.000900Z')).toBe(false);
+  expect(hasFinalEntryCheckpoint(season, 2, { ...head, inputPayload: null }, boundary)).toBe(false);
+  expect(
+    hasFinalEntryCheckpoint(season, 2, { ...head, inputPayload: provisionalInput() }, boundary),
+  ).toBe(false);
+  expect(hasFinalEntryCheckpoint(season, 3, head, boundary)).toBe(false);
+  expect(
+    hasFinalEntryCheckpoint(season, 2, { ...head, contentSha256: '0'.repeat(64) }, boundary),
+  ).toBe(false);
+  expect(hasFinalEntryCheckpoint(season, 2, head, new Date('2026-09-04T08:06:00Z'))).toBe(false);
+  expect(
+    hasFinalEntryCheckpoint(
+      season,
+      2,
+      { ...head, inputPayload: { ...input, finalResult: { ...input.finalResult!, picks: [] } } },
+      boundary,
+    ),
+  ).toBe(false);
 });

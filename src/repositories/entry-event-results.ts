@@ -601,6 +601,13 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
             `Refusing untraceable event-live manager score for entry ${entryId}, event ${eventId}`,
           );
         }
+        const managerChip = picks.active_chip?.toLowerCase() === 'manager';
+        const managerPoints = managerChip ? entryHistory.points - eventLiveScore.eventPoints : 0;
+        if (!Number.isSafeInteger(managerPoints) || managerPoints < 0) {
+          throw new Error('Assistant Manager total does not reconcile with selected player points');
+        }
+        const eventPoints = eventLiveScore.eventPoints + managerPoints;
+        const netEventPoints = eventLiveScore.netEventPoints + managerPoints;
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
         const benchPoints = deriveBenchPointsFromEffectiveMultipliers(picks.picks, elementsPoints);
         const sourcePreviousOverallPoints =
@@ -644,10 +651,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           seasonId: season.seasonId,
           entryId,
           eventId,
-          eventPoints: eventLiveScore.eventPoints,
+          eventPoints,
           eventTransfers: entryHistory.event_transfers,
           eventTransfersCost: entryHistory.event_transfers_cost,
-          eventNetPoints: eventLiveScore.netEventPoints,
+          eventNetPoints: netEventPoints,
           eventBenchPoints: benchPoints,
           eventAutoSubPoints: getAutoSubPoints(autoSubs, elementsPoints),
           eventRank,
@@ -664,7 +671,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           automaticSubstitutions: autoSubs,
           overallPoints: authoritativeUnrankedDeleted
             ? entryHistory.total_points
-            : baseline.previousOverallPoints + eventLiveScore.netEventPoints,
+            : baseline.previousOverallPoints + netEventPoints,
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,

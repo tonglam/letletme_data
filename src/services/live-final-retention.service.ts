@@ -82,7 +82,6 @@ import { logError, logInfo } from '../utils/logger';
 import {
   buildFinalEntryLiveInputFromBaseAndResult,
   checkpointEntryLiveInputV2,
-  entryLiveFinalResultCheckpointHash,
   entryLivePicksBaseCheckpointHash,
 } from './entries.service';
 import {
@@ -316,7 +315,7 @@ function entryPublicationFromHead(
     eventId,
     entryId,
     state: 'FINAL',
-    sourceCheckedAt: head.sourceCheckedAt.toISOString(),
+    sourceCheckedAt: head.sourceCheckedAtExact ?? head.sourceCheckedAt.toISOString(),
     // entry_event_pick_heads predates the publication-time column. Preserve a
     // surviving Redis timestamp when available; a cold head uses its durable
     // checkpoint clock as the only available publication boundary.
@@ -749,6 +748,7 @@ async function processEntryHead(
 ): Promise<void> {
   family.checked += 1;
   const entryId = head.entryId;
+  const headSourceCheckedAt = head.sourceCheckedAtExact ?? head.sourceCheckedAt;
   if (
     !Number.isSafeInteger(entryId) ||
     entryId <= 0 ||
@@ -756,7 +756,7 @@ async function processEntryHead(
     head.rowCount !== 15 ||
     !/^[0-9a-f]{64}$/.test(head.picksBaseRevision) ||
     !/^[0-9a-f]{64}$/.test(head.contentSha256) ||
-    !Number.isFinite(head.sourceCheckedAt.getTime()) ||
+    !Number.isFinite(new Date(headSourceCheckedAt).getTime()) ||
     !Number.isFinite(head.contentUpdatedAt.getTime()) ||
     !Number.isFinite(head.checkpointedAt.getTime()) ||
     (head.inputPayload !== null &&
@@ -801,7 +801,9 @@ async function processEntryHead(
       durableHeadBeforeRecovery.picksBaseRevision !== head.picksBaseRevision ||
       durableHeadBeforeRecovery.contentSha256 !== head.contentSha256 ||
       durableHeadBeforeRecovery.rowCount !== 15 ||
-      durableHeadBeforeRecovery.sourceCheckedAt.getTime() !== head.sourceCheckedAt.getTime() ||
+      (durableHeadBeforeRecovery.sourceCheckedAtExact ??
+        durableHeadBeforeRecovery.sourceCheckedAt.toISOString()) !==
+        (head.sourceCheckedAtExact ?? head.sourceCheckedAt.toISOString()) ||
       durableHeadBeforeRecovery.contentUpdatedAt.getTime() !== head.contentUpdatedAt.getTime() ||
       durableHeadBeforeRecovery.checkpointedAt.getTime() !== head.checkpointedAt.getTime() ||
       durableHeadBeforeRecovery.inputPayload !== null ||
@@ -816,11 +818,12 @@ async function processEntryHead(
       dataCheckedAt,
     );
     // picksBase.revision identifies the deadline-time input. contentSha256
-    // independently identifies the durable rows, whose multipliers may have
-    // changed at finalization. Never compare those two granular identities.
+    // independently identifies the preserved durable rows, whose multipliers
+    // may have changed at finalization. Validate the base rows here; the FINAL
+    // result hash intentionally describes the adjusted response instead.
     if (
       !finalInput ||
-      entryLiveFinalResultCheckpointHash(finalInput) !== head.contentSha256 ||
+      entryLivePicksBaseCheckpointHash(finalInput) !== head.contentSha256 ||
       !durableResult.richSyncedAt
     ) {
       family.failed += 1;
@@ -889,7 +892,8 @@ async function processEntryHead(
     durableHead.generation !== head.generation ||
     durableHead.picksBaseRevision !== head.picksBaseRevision ||
     durableHead.contentSha256 !== head.contentSha256 ||
-    durableHead.sourceCheckedAt.getTime() !== head.sourceCheckedAt.getTime() ||
+    (durableHead.sourceCheckedAtExact ?? durableHead.sourceCheckedAt.toISOString()) !==
+      (head.sourceCheckedAtExact ?? head.sourceCheckedAt.toISOString()) ||
     durableHead.contentUpdatedAt.getTime() !== head.contentUpdatedAt.getTime() ||
     durableHead.checkpointedAt.getTime() !== head.checkpointedAt.getTime() ||
     durableHead.state !== 'COMPLETE' ||
