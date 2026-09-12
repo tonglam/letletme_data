@@ -37,6 +37,11 @@ import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logDebug, logError } from '../utils/logger';
 
 const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
+
+// Keep the complete required scope set for each recently checked event. A
+// global per-scope cap can evict early scopes while a large event is being
+// validated, making every subsequent pass reread all payloads.
+const LIVE_FINAL_CHECKPOINT_VALIDATION_EVENT_CACHE_LIMIT = 64;
 const LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS = 5 * 60_000;
 
 type FinalCheckpointValidationIdentity = Readonly<{
@@ -61,9 +66,14 @@ type FinalCheckpointValidationCacheEntry = Readonly<{
   validatedAtMs: number;
 }>;
 
+type LeagueCheckpointValidationEventCache = {
+  scopeSetKey: string;
+  entries: Map<string, { identity: string; validatedAtMs: number }>;
+};
+
 const leagueCheckpointValidationCache = new Map<
   string,
-  { identity: string; validatedAtMs: number }
+  LeagueCheckpointValidationEventCache
 >();
 
 const finalCheckpointValidationCache = new Map<string, FinalCheckpointValidationCacheEntry>();
@@ -138,21 +148,42 @@ export async function hasFinalLiveLeagueCheckpointsV2(
   const metadataByScope = new Map(
     metadata.map((row) => [`${row.tournamentId}:${row.scopeKind}`, row]),
   );
+  const eventCacheKey = `${season.seasonId}:${eventId}`;
+  const requiredScopeKeys = requiredScopes
+    .map((scope) => `${scope.tournamentId}:${scope.scope}`)
+    .sort();
+  const scopeSetKey = requiredScopeKeys.join('|');
+  let eventCache = leagueCheckpointValidationCache.get(eventCacheKey);
+  if (!eventCache || eventCache.scopeSetKey !== scopeSetKey) {
+    eventCache = { scopeSetKey, entries: new Map() };
+    leagueCheckpointValidationCache.set(eventCacheKey, eventCache);
+  } else {
+    // Touch the event-level LRU without evicting scopes from this event.
+    leagueCheckpointValidationCache.delete(eventCacheKey);
+    leagueCheckpointValidationCache.set(eventCacheKey, eventCache);
+  }
+  while (
+    leagueCheckpointValidationCache.size > LIVE_FINAL_CHECKPOINT_VALIDATION_EVENT_CACHE_LIMIT
+  ) {
+    const oldest = leagueCheckpointValidationCache.keys().next().value;
+    if (oldest === undefined) break;
+    leagueCheckpointValidationCache.delete(oldest);
+  }
   // Missing scopes need no payload transfer or JSON validation. Check the full
   // required set on every pass, including while a prior validation is cached.
   if (requiredScopes.some((scope) => !metadataByScope.has(`${scope.tournamentId}:${scope.scope}`)))
     return false;
   for (const scope of requiredScopes) {
     const metadataRow = metadataByScope.get(`${scope.tournamentId}:${scope.scope}`)!;
-    const key = `${season.seasonId}:${eventId}:${scope.tournamentId}:${scope.scope}`;
+    const scopeKey = `${scope.tournamentId}:${scope.scope}`;
     const identity = canonicalJson(metadataRow);
-    const cached = leagueCheckpointValidationCache.get(key);
+    const cached = eventCache.entries.get(scopeKey);
     if (
       cached?.identity === identity &&
       Date.now() - cached.validatedAtMs < LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS
     )
       continue;
-    leagueCheckpointValidationCache.delete(key);
+    eventCache.entries.delete(scopeKey);
     const [row] = await db
       .select()
       .from(liveLeagueCheckpointsInCompetition)
@@ -200,12 +231,7 @@ export async function hasFinalLiveLeagueCheckpointsV2(
       )
     )
       return false;
-    leagueCheckpointValidationCache.set(key, { identity, validatedAtMs: Date.now() });
-    while (leagueCheckpointValidationCache.size > LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT) {
-      const oldest = leagueCheckpointValidationCache.keys().next().value;
-      if (oldest === undefined) break;
-      leagueCheckpointValidationCache.delete(oldest);
-    }
+    eventCache.entries.set(scopeKey, { identity, validatedAtMs: Date.now() });
   }
   return true;
 }
@@ -245,6 +271,15 @@ export async function readLiveFinalizationPrerequisites(
       AND league_tournament.state = 'active'
       AND league_tournament.setup_status = 'ready'
       AND league_tournament.league_type = 'classic'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM competition.live_league_checkpoints AS final_checkpoint
+        WHERE final_checkpoint.season_id = league_tournament.season_id
+          AND final_checkpoint.event_id = ${eventsInFpl.eventId}
+          AND final_checkpoint.tournament_id = league_tournament.tournament_id
+          AND final_checkpoint.scope_kind = 'CLASSIC'
+          AND final_checkpoint.state = 'FINALIZED'
+      )
       AND ${missingClassicFinalizationInput(season.seasonCode)}
   )`,
     })

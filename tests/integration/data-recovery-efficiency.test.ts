@@ -115,6 +115,20 @@ test('new Classic scope invalidates readiness and missing semantic input blocks 
   await sql`INSERT INTO competition.tournament_entries (season_id,tournament_id,league_id,entry_id) VALUES (${season.seasonId},89001,89001,89001)`;
   expect(await hasFinalLiveLeagueCheckpointsV2(season, 1)).toBe(false);
   expect(await readLiveFinalizationPrerequisites(season, 1)).toEqual({ blocked: true });
+  const checkpointPayload = { index: [], payload: {} };
+  await sql`INSERT INTO competition.live_league_checkpoints (
+    season_id,event_id,tournament_id,scope_kind,publication_id,generation,state,
+    manifest,index_payload,payload,row_count,payload_bytes,payload_sha256,
+    source_checked_at,content_updated_at,published_at,checkpointed_at
+  ) VALUES (
+    ${season.seasonId},1,89001,'CLASSIC','already-finalized',1,'FINALIZED',
+    '{}'::jsonb,'[]'::jsonb,'{}'::jsonb,0,
+    ${Buffer.byteLength(JSON.stringify(checkpointPayload))},
+    ${contentHash(checkpointPayload)},
+    '2089-09-02T00:00:00Z','2089-09-02T00:00:00Z',
+    '2089-09-02T00:00:00Z','2089-09-02T00:00:00Z'
+  )`;
+  expect(await readLiveFinalizationPrerequisites(season, 1)).toEqual({ blocked: false });
 });
 
 test('validated checkpoint payloads are reused until identity changes or five minutes elapse', async () => {

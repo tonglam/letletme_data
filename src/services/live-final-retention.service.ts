@@ -1416,17 +1416,27 @@ export async function runLiveFinalRetentionV2(
 export async function recordManualLiveFinalRetentionRecovery(input: {
   season: FplSeasonRef;
   eventId: number;
-  target: { obligationId: string; periodKey: string; generation: number };
+  target: {
+    obligationId: string;
+    periodKey: string;
+    generation: number;
+    recoveryReason?: string;
+  };
   result: LiveFinalRetentionResult;
   jobId: string;
 }): Promise<void> {
+  const recoveryReason =
+    input.target.recoveryReason?.trim() || 'Authorized scoped event retention verification';
+  if (recoveryReason.length > 300) {
+    throw new Error('Live final retention recovery reason is too long');
+  }
   const changed = await appendSchedulerObligationRecovery({
     jobName: 'live-final-retention',
     scopeKey: `${input.season.seasonCode}:event:${input.eventId}`,
     ...input.target,
     recoveryRevision: input.jobId,
     recoveryActor: 'manual-live-final-retention',
-    recoveryReason: 'Authorized scoped event retention verification',
+    recoveryReason,
     retention: liveFinalRetentionCompletionEvidence(input.result),
   });
   if (!changed) throw new Error('Live final retention recovery target is no longer eligible');
@@ -1435,7 +1445,12 @@ export async function recordManualLiveFinalRetentionRecovery(input: {
 export async function assertManualLiveFinalRetentionRecoveryTarget(input: {
   season: FplSeasonRef;
   eventId: number;
-  target: { obligationId: string; periodKey: string; generation: number };
+  target: {
+    obligationId: string;
+    periodKey: string;
+    generation: number;
+    recoveryReason?: string;
+  };
 }): Promise<void> {
   const target = await getSchedulerObligation({ obligationId: input.target.obligationId });
   if (

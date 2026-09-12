@@ -323,7 +323,7 @@ describe('Live final retention failure evidence', () => {
         '--reason',
         'Accepted recovery',
       ]),
-    ).toMatchObject({ apply: true });
+    ).toMatchObject({ apply: true, reason: 'Accepted recovery' });
   });
   test('keeps bounded family evidence on failed results without payloads', () => {
     const result = retentionResult();

@@ -23,7 +23,13 @@ export interface LiveDataJobData {
   triggeredAt: string;
   runId?: string;
   /** Failed terminal cycle captured before an authorized manual retention pass. */
-  retentionRecoveryTarget?: { obligationId: string; periodKey: string; generation: number };
+  retentionRecoveryTarget?: {
+    obligationId: string;
+    periodKey: string;
+    generation: number;
+    /** Bounded operator rationale persisted with the recovery evidence. */
+    recoveryReason?: string;
+  };
   /** Durable scheduler obligation identity carried through worker completion. */
   obligationId?: string;
   obligationGeneration?: number;

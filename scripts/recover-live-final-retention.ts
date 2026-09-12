@@ -60,6 +60,7 @@ async function main() {
       obligationId: target.obligationId,
       periodKey: target.periodKey,
       generation: target.generation,
+      ...(args.apply && args.reason ? { recoveryReason: args.reason } : {}),
     });
   }
   process.stdout.write(
