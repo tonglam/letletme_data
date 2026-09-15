@@ -15,6 +15,7 @@ import {
   failSchedulerLane,
   fenceSchedulerLaneTarget,
   getSchedulerLaneTargets,
+  listLiveSnapshotRecoveryLanes,
   recoverSchedulerLaneAfterBullLoss,
   replaceBlockedSchedulerLaneAfterCoreSourceStale,
   startSchedulerLane,
@@ -151,6 +152,15 @@ describe('scheduler latest-wins lanes', () => {
       WHERE job_name = ${LIVE_DEFINITION.name} AND scope_key = ${LIVE_SCOPE_KEY}
     `;
     expect(secondCounts).toEqual({ skipped: 500, pending: 1 });
+
+    const recoveryCandidates = await listLiveSnapshotRecoveryLanes({ limit: 1 });
+    expect(recoveryCandidates.map((lane) => lane.laneId)).toEqual([first.lane.laneId]);
+    await sql`
+      UPDATE ops.scheduler_obligations
+      SET status = 'succeeded', completed_at = clock_timestamp()
+      WHERE obligation_id = ${newer.obligationId}::uuid
+    `;
+    expect(await listLiveSnapshotRecoveryLanes({ limit: 1 })).toHaveLength(0);
   });
 
   test('does not let a late same-period live decision overwrite the newer observation', async () => {

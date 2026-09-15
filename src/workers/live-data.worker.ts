@@ -404,9 +404,21 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       throw error;
     }
     const budgetExceeded = [
-      ...(snapshot.stageTimings.controlReadMs !== null &&
-      snapshot.stageTimings.controlReadMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
+      ...(snapshot.stageTimings.durableReadMs !== null &&
+      snapshot.stageTimings.durableReadMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
         ? ['database-read']
+        : []),
+      ...(snapshot.stageTimings.referenceReadMs !== null &&
+      snapshot.stageTimings.referenceReadMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
+        ? ['reference-read']
+        : []),
+      ...(snapshot.stageTimings.fixtureIdentityReadMs !== null &&
+      snapshot.stageTimings.fixtureIdentityReadMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
+        ? ['fixture-identity-read']
+        : []),
+      ...(snapshot.stageTimings.redisReadMs !== null &&
+      snapshot.stageTimings.redisReadMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
+        ? ['redis-read']
         : []),
       ...(snapshot.stageTimings.redisPublishMs !== null &&
       snapshot.stageTimings.redisPublishMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
@@ -427,6 +439,10 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       schedulerDelayMs,
       queueWaitMs: context.queueWaitMs,
       controlReadMs: snapshot.stageTimings.controlReadMs,
+      redisReadMs: snapshot.stageTimings.redisReadMs,
+      durableReadMs: snapshot.stageTimings.durableReadMs,
+      referenceReadMs: snapshot.stageTimings.referenceReadMs,
+      fixtureIdentityReadMs: snapshot.stageTimings.fixtureIdentityReadMs,
       providerMs: snapshot.stageTimings.providerMs,
       redisPublishMs: snapshot.stageTimings.redisPublishMs,
       checkpointMs: snapshot.stageTimings.checkpointMs,

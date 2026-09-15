@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, inArray, isNull, lte, or, sql, type SQLWrapper } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 
 import {
   dataGovernanceCasesInOps,
@@ -140,12 +141,17 @@ function mapObligation(row: typeof schedulerObligationsInOps.$inferSelect): Sche
   };
 }
 
-function scheduledDueAtSql() {
+type SchedulerObligationSqlTable = {
+  evidence: SQLWrapper;
+  dueAt: SQLWrapper;
+};
+
+function scheduledDueAtSql(table: SchedulerObligationSqlTable = schedulerObligationsInOps) {
   return sql`CASE
-    WHEN ${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
-      AND (${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::numeric BETWEEN 0 AND 8640000000000000
-      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'scheduledDueAtMs')::double precision / 1000)
-    ELSE ${schedulerObligationsInOps.dueAt}
+    WHEN ${table.evidence}->>'scheduledDueAtMs' ~ '^[0-9]+$'
+      AND (${table.evidence}->>'scheduledDueAtMs')::numeric BETWEEN 0 AND 8640000000000000
+      THEN to_timestamp((${table.evidence}->>'scheduledDueAtMs')::double precision / 1000)
+    ELSE ${table.dueAt}
   END`;
 }
 
@@ -245,16 +251,19 @@ export function schedulerObligationAuthorityAt(obligation: SchedulerObligation):
   return scheduledDueAt(obligation);
 }
 
-function schedulerObligationAuthorityAtSql(jobName: string) {
-  if (jobName !== 'live-snapshot') return scheduledDueAtSql();
+function schedulerObligationAuthorityAtSql(
+  jobName: string,
+  table: SchedulerObligationSqlTable = schedulerObligationsInOps,
+) {
+  if (jobName !== 'live-snapshot') return scheduledDueAtSql(table);
   return sql`CASE
-    WHEN ${schedulerObligationsInOps.evidence}->>'decisionObservedAtMs' ~ '^[0-9]+$'
-      AND (${schedulerObligationsInOps.evidence}->>'decisionObservedAtMs')::numeric BETWEEN 0 AND 8640000000000000
-      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'decisionObservedAtMs')::double precision / 1000)
-    WHEN ${schedulerObligationsInOps.evidence}->>'decisionObservedAt' ~
+    WHEN ${table.evidence}->>'decisionObservedAtMs' ~ '^[0-9]+$'
+      AND (${table.evidence}->>'decisionObservedAtMs')::numeric BETWEEN 0 AND 8640000000000000
+      THEN to_timestamp((${table.evidence}->>'decisionObservedAtMs')::double precision / 1000)
+    WHEN ${table.evidence}->>'decisionObservedAt' ~
       '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
-      THEN (${schedulerObligationsInOps.evidence}->>'decisionObservedAt')::timestamptz
-    ELSE ${scheduledDueAtSql()}
+      THEN (${table.evidence}->>'decisionObservedAt')::timestamptz
+    ELSE ${scheduledDueAtSql(table)}
   END`;
 }
 
@@ -2080,6 +2089,93 @@ export async function listSchedulerLanes(
       and(input.jobName ? eq(schedulerLanesInOps.jobName, input.jobName) : undefined, stateFilter),
     )
     .orderBy(asc(schedulerLanesInOps.jobName), asc(schedulerLanesInOps.scopeKey));
+  return rows.map(mapLane);
+}
+
+/**
+ * Return only live lanes that can make progress during off-plan recovery.
+ *
+ * A vanished lifecycle plan must still allow a pending/failed desired target
+ * to be dispatched, while an idle lane with no runnable target and no stale
+ * sibling has nothing for the recovery pass to do.  Keep this query bounded
+ * so retained historical lane rows cannot make every scheduler pass perform
+ * one read/transaction per event forever.
+ */
+export async function listLiveSnapshotRecoveryLanes(
+  input: {
+    limit?: number;
+    db?: DbHandle;
+  } = {},
+): Promise<SchedulerLane[]> {
+  const db = input.db ?? (await getDb());
+  const desired = alias(schedulerObligationsInOps, 'live_lane_desired');
+  const stale = alias(schedulerObligationsInOps, 'live_lane_stale');
+  const desiredAuthority = schedulerObligationAuthorityAtSql('live-snapshot', desired);
+  const staleAuthority = schedulerObligationAuthorityAtSql('live-snapshot', stale);
+  const staleSibling = exists(
+    db
+      .select({ one: sql`1` })
+      .from(stale)
+      .where(
+        and(
+          eq(stale.jobName, 'live-snapshot'),
+          eq(stale.scopeKey, schedulerLanesInOps.scopeKey),
+          sql`${stale.obligationId} <> ${schedulerLanesInOps.desiredObligationId}`,
+          inArray(stale.status, ['pending', 'failed', 'enqueued']),
+          sql`(
+            ${staleAuthority} < ${desiredAuthority}
+            OR (
+              ${staleAuthority} = ${desiredAuthority}
+              AND ${stale.periodKey} < ${desired.periodKey}
+            )
+          )`,
+        ),
+      ),
+  );
+  const desiredRunnable = exists(
+    db
+      .select({ one: sql`1` })
+      .from(desired)
+      .where(
+        and(
+          eq(desired.obligationId, schedulerLanesInOps.desiredObligationId),
+          eq(desired.jobName, 'live-snapshot'),
+          inArray(desired.status, ['pending', 'failed']),
+          or(
+            isNull(schedulerLanesInOps.retryNotBefore),
+            lte(schedulerLanesInOps.retryNotBefore, sql`clock_timestamp()`),
+          ),
+        ),
+      ),
+  );
+  const hasStaleSibling = exists(
+    db
+      .select({ one: sql`1` })
+      .from(desired)
+      .where(
+        and(
+          eq(desired.obligationId, schedulerLanesInOps.desiredObligationId),
+          eq(desired.jobName, 'live-snapshot'),
+          staleSibling,
+        ),
+      ),
+  );
+  const rows = await db
+    .select()
+    .from(schedulerLanesInOps)
+    .where(
+      and(
+        eq(schedulerLanesInOps.jobName, 'live-snapshot'),
+        or(
+          inArray(schedulerLanesInOps.state, ['dispatching', 'enqueued', 'running']),
+          and(eq(schedulerLanesInOps.state, 'idle'), or(desiredRunnable, hasStaleSibling)),
+        ),
+      ),
+    )
+    .orderBy(asc(schedulerLanesInOps.updatedAt), asc(schedulerLanesInOps.laneId))
+    .limit(
+      Number.isFinite(input.limit) ? Math.max(1, Math.min(250, Math.floor(input.limit!))) : 250,
+    );
   return rows.map(mapLane);
 }
 

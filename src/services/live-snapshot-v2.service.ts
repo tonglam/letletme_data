@@ -122,7 +122,16 @@ export interface LiveSnapshotV2SyncResult {
 }
 
 export type LiveSnapshotStageTimings = Readonly<{
+  /** Durable PostgreSQL control/checkpoint read. */
   controlReadMs: number | null;
+  /** Serving Redis current-publication read. */
+  redisReadMs: number | null;
+  /** Durable PostgreSQL checkpoint read, retained as a separate stage. */
+  durableReadMs: number | null;
+  /** Core/reference identity read, which may use Redis or PostgreSQL fallback. */
+  referenceReadMs: number | null;
+  /** Fixture identity baseline read, normally from the Core Redis publication. */
+  fixtureIdentityReadMs: number | null;
   providerMs: number | null;
   redisPublishMs: number | null;
   checkpointMs: number | null;
@@ -386,11 +395,19 @@ export async function syncLiveSnapshotV2(
     throw new Error(`Invalid live event ID: ${eventId}`);
   const totalStartedAt = Date.now();
   let controlReadMs: number | null = null;
+  let redisReadMs: number | null = null;
+  let durableReadMs: number | null = null;
+  let referenceReadMs: number | null = null;
+  let fixtureIdentityReadMs: number | null = null;
   let providerMs: number | null = null;
   let redisPublishMs: number | null = null;
   let checkpointMs: number | null = null;
   const stageTimings = (): LiveSnapshotStageTimings => ({
     controlReadMs,
+    redisReadMs,
+    durableReadMs,
+    referenceReadMs,
+    fixtureIdentityReadMs,
     providerMs,
     redisPublishMs,
     checkpointMs,
@@ -413,7 +430,6 @@ export async function syncLiveSnapshotV2(
   // read in parallel; it must never delay the shared provider observation used
   // by the independent Live Matches Redis publication.
   const durableReadStartedAt = Date.now();
-  let durableReadMs: number | null = null;
   const durableReadPromise = (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
     season,
     eventId,
@@ -445,6 +461,7 @@ export async function syncLiveSnapshotV2(
     });
   const current = await currentReadPromise;
   currentReadMs = Math.max(0, Date.now() - currentReadStartedAt);
+  redisReadMs = currentReadMs;
   // Capture the exact Match desk pointer before any FPL request begins. A
   // slower older observation must lose its desk CAS if a newer observation
   // publishes while its provider response is in flight. Custom unit callers
@@ -456,6 +473,8 @@ export async function syncLiveSnapshotV2(
   const observedMatchDetailPromise = dependencies.readObservedMatchDetail
     ? dependencies.readObservedMatchDetail({ season: season.seasonCode, eventId })
     : Promise.resolve(undefined);
+  const providerStartedAt = Date.now();
+  const expectedFixtureIdsStartedAt = Date.now();
   const expectedFixtureIdsPromise = dependencies
     .getExpectedFixtureIds(season, eventId)
     .catch((error) => {
@@ -469,26 +488,39 @@ export async function syncLiveSnapshotV2(
         return current.fixtures.map((fixture) => fixture.id);
       }
       throw error;
+    })
+    .finally(() => {
+      fixtureIdentityReadMs = Math.max(0, Date.now() - expectedFixtureIdsStartedAt);
     });
   const eventLivePromise = dependencies.getEventLive(eventId);
   const fixturesPromise = options.observedFixtures
     ? Promise.resolve([...options.observedFixtures])
     : dependencies.getFixtures(eventId);
-  const referenceDataPromise = dependencies.getReferenceData(
-    season,
-    eventId,
-    databaseBudget?.readDb,
-  );
-  const providerStartedAt = Date.now();
-  const observationPromise = Promise.allSettled([
+  const referenceDataStartedAt = Date.now();
+  const referenceDataPromise = dependencies
+    .getReferenceData(season, eventId, databaseBudget?.readDb)
+    .finally(() => {
+      referenceReadMs = Math.max(0, Date.now() - referenceDataStartedAt);
+    });
+  // Provider timing deliberately covers only the two upstream FPL requests.
+  // Reference/fixture identity reads are concurrent support stages and must
+  // remain visible in their own buckets instead of making a database fallback
+  // look like provider latency.
+  const providerObservationPromise = Promise.allSettled([
     eventLivePromise,
     fixturesPromise,
-    expectedFixtureIdsPromise,
-    referenceDataPromise,
   ] as const).then((result) => {
     providerMs = Math.max(0, Date.now() - providerStartedAt);
     return result;
   });
+  const supportObservationPromise = Promise.allSettled([
+    expectedFixtureIdsPromise,
+    referenceDataPromise,
+  ] as const);
+  const observationPromise = Promise.all([
+    providerObservationPromise,
+    supportObservationPromise,
+  ]).then(([provider, support]) => [provider[0], provider[1], support[0], support[1]] as const);
   const nonFinalMatchLifecycleState =
     options.lifecycleState === 'FINALIZED' ? 'GW_REVIEW' : options.lifecycleState;
   // The score desk depends only on the fixture response and an exact fixture
@@ -655,7 +687,10 @@ export async function syncLiveSnapshotV2(
 
   let matchCheckpointObligationFailed = false;
   const durableRead = await durableReadPromise;
-  controlReadMs = Math.max(currentReadMs ?? 0, durableReadMs ?? 0);
+  // `controlReadMs` is kept for the existing stage contract, but it now means
+  // the durable database control read only. Redis latency is reported by
+  // `redisReadMs` and cannot trigger a PostgreSQL budget warning.
+  controlReadMs = durableReadMs;
   const durableFloor = durableRead.value;
   const recoveringFinalCheckpoint =
     current?.publication.state === 'FINALIZED' && !durableRead.failed && !durableFloor;

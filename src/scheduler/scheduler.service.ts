@@ -32,10 +32,11 @@ import {
   getSchedulerLane,
   getSchedulerLaneTarget,
   getSchedulerLaneTargets,
-  listSchedulerLanes,
+  listLiveSnapshotRecoveryLanes,
   recoverSchedulerLaneAfterBullLoss,
   unblockSchedulerLane,
   type SchedulerLane,
+  type SchedulerLaneTarget,
 } from '../repositories/scheduler-lanes';
 import {
   resolveSchedulerContext,
@@ -1075,20 +1076,20 @@ async function reconcileSingleFlightBullState(
 /**
  * A live lane can outlive the lifecycle plan that created it (for example
  * when an event becomes FINALIZED while its Bull job is lost). Reconcile
- * every persisted live lane independently of the plans selected by the
+ * persisted live-lane candidates independently of the plans selected by the
  * current resolver so a vanished Bull record or a bounded supersession batch
  * cannot strand durable work.
  */
 async function reconcileOutstandingLiveSnapshotLanes(
   selectedLaneKeys: ReadonlySet<string>,
   season: Awaited<ReturnType<typeof seasonRepository.findCurrent>>,
-): Promise<number> {
+): Promise<{ failed: number; dispatchable: SchedulerLaneTarget[] }> {
   let failed = 0;
-  const lanes = await listSchedulerLanes({
-    jobName: 'live-snapshot',
-    states: ['idle', 'dispatching', 'enqueued', 'running'],
-  });
-  const drainSupersededLiveBatch = async (lane: SchedulerLane): Promise<void> => {
+  const dispatchable: SchedulerLaneTarget[] = [];
+  const lanes = await listLiveSnapshotRecoveryLanes({ limit: 250 });
+  const drainSupersededLiveBatch = async (
+    lane: SchedulerLane,
+  ): Promise<SchedulerLaneTarget | null> => {
     const target = await getSchedulerLaneTarget({ laneId: lane.laneId });
     if (!target) {
       throw new Error(`Persisted live lane target disappeared: ${lane.laneId}`);
@@ -1097,7 +1098,7 @@ async function reconcileOutstandingLiveSnapshotLanes(
     // same bounded transition can therefore be repeated on every scheduler
     // pass until all stale pending/failed siblings are terminalized, even if
     // the lifecycle resolver no longer returns this event.
-    await advanceSchedulerLane({
+    const advanced = await advanceSchedulerLane({
       laneKey: lane.laneKey,
       jobName: lane.jobName,
       scopeKey: lane.scopeKey,
@@ -1106,6 +1107,16 @@ async function reconcileOutstandingLiveSnapshotLanes(
       preserveFreshnessHistory: true,
       supersedeBatchSize: 250,
     });
+    if (!advanced.shouldDispatch) return null;
+    // Bull recovery can leave the desired obligation failed after the
+    // lifecycle resolver has stopped emitting the event. Return the exact
+    // persisted target so the normal fenced enqueue path can dispatch it;
+    // dropping this decision would strand the latest obligation forever.
+    const current = await getSchedulerLaneTarget({ laneId: advanced.lane.laneId });
+    if (!current) {
+      throw new Error(`Persisted live lane target disappeared after advance: ${lane.laneId}`);
+    }
+    return current;
   };
   for (const lane of lanes) {
     if (selectedLaneKeys.has(lane.laneKey)) continue;
@@ -1116,8 +1127,11 @@ async function reconcileOutstandingLiveSnapshotLanes(
       // An idle lane may be left behind after its lifecycle plan becomes
       // terminal. Re-run the same bounded latest-wins transition against
       // its persisted target so the next scheduler pass drains the next
-      // batch of stale pending/failed siblings without dispatching it.
-      await drainSupersededLiveBatch(lane);
+      // batch of stale pending/failed siblings. If the target itself is
+      // runnable after Bull recovery, return it to the normal fenced enqueue
+      // loop rather than silently dropping the dispatch decision.
+      const recoveredTarget = await drainSupersededLiveBatch(lane);
+      if (recoveredTarget) dispatchable.push(recoveredTarget);
     } catch (error) {
       failed += 1;
       logError('Persisted live lane reconciliation failed', error, {
@@ -1127,7 +1141,7 @@ async function reconcileOutstandingLiveSnapshotLanes(
       });
     }
   }
-  return failed;
+  return { failed, dispatchable };
 }
 
 async function alertPriceLaneFreshness(
@@ -1839,10 +1853,40 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     }),
   );
   try {
-    failed += await reconcileOutstandingLiveSnapshotLanes(
+    const recoveredLiveLanes = await reconcileOutstandingLiveSnapshotLanes(
       new Set(singleFlightLanes.keys()),
       season,
     );
+    failed += recoveredLiveLanes.failed;
+    for (const target of recoveredLiveLanes.dispatchable) {
+      const definition = definitionByName(target.lane.jobName);
+      if (!definition?.executionPolicy) {
+        failed += 1;
+        logError(
+          'Persisted live lane has no latest-authoritative definition',
+          new Error(`Missing live-snapshot definition for ${target.lane.laneKey}`),
+          { laneId: target.lane.laneId, laneKey: target.lane.laneKey },
+        );
+        continue;
+      }
+      const targetEventId = evidenceNumber(target.obligation.evidence, 'targetEventId');
+      const plan: SchedulerObligationPlan = {
+        scopeKey: target.obligation.scopeKey,
+        periodKey: target.obligation.periodKey,
+        dueAt: target.obligation.dueAt,
+        source: target.obligation.source,
+        ...(targetEventId !== undefined ? { eventId: targetEventId } : {}),
+        evidence: target.obligation.evidence,
+      };
+      singleFlightLanes.set(target.lane.laneKey, {
+        definition,
+        plan,
+        lane: target.lane,
+      });
+      // The recovery query already reconciled Bull for this generation (or
+      // found an idle target), so the normal dispatch loop may claim it.
+      singleFlightReconciled.set(target.lane.laneId, true);
+    }
   } catch (error) {
     failed += 1;
     logError('Persisted live lane listing failed', error);
