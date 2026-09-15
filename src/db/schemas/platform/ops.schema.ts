@@ -659,6 +659,29 @@ export const clientSignalBatchesInOps = ops.table(
   ],
 );
 
+export const clientSignalV2BatchesInOps = ops.table(
+  'client_signal_v2_batches',
+  {
+    batchId: uuid('batch_id').notNull(),
+    client: text().notNull(),
+    clientRelease: text('client_release').notNull(),
+    ingestRelease: text('ingest_release').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    batchRowId: bigint('batch_row_id', { mode: 'number' })
+      .generatedByDefaultAsIdentity()
+      .primaryKey(),
+  },
+  (table) => [
+    uniqueIndex('client_signal_v2_batches_batch_id_unique').on(table.batchId),
+    index('client_signal_v2_batches_received_idx').on(table.receivedAt.desc()),
+    check('client_signal_v2_batches_client_check', sql`client IN ('web','wechat_miniprogram')`),
+    check('client_signal_v2_batches_client_release_check', sql`btrim(client_release) <> ''`),
+    check('client_signal_v2_batches_ingest_release_check', sql`btrim(ingest_release) <> ''`),
+  ],
+);
+
 export const clientSignalWindowsInOps = ops.table(
   'client_signal_windows',
   {
@@ -708,6 +731,90 @@ export const clientSignalWindowsInOps = ops.table(
       'client_signal_windows_dimensions_check',
       sql`btrim(release) <> '' AND btrim(surface) <> '' AND btrim(metric) <> '' AND btrim(device_group) <> '' AND btrim(bucket) <> ''`,
     ),
+  ],
+);
+
+export const clientSignalV2WindowsInOps = ops.table(
+  'client_signal_v2_windows',
+  {
+    windowId: bigint('window_id', { mode: 'number' }).generatedByDefaultAsIdentity().primaryKey(),
+    windowStart: timestamp('window_start', { withTimezone: true, mode: 'date' }).notNull(),
+    client: text().notNull(),
+    clientRelease: text('client_release').notNull(),
+    ingestRelease: text('ingest_release').notNull(),
+    surface: text().notNull(),
+    metric: text().notNull(),
+    deviceGroup: text('device_group').notNull(),
+    sampleSource: text('sample_source').notNull(),
+    result: text().notNull(),
+    reasonCode: text('reason_code').notNull(),
+    measurementKind: text('measurement_kind').notNull(),
+    errorClass: text('error_class'),
+    fingerprint: text(),
+    bucket: text().notNull(),
+    observedCount: bigint('observed_count', { mode: 'number' }).default(0).notNull(),
+    occurrenceCount: bigint('occurrence_count', { mode: 'number' }).default(0).notNull(),
+    estimatedCount: doublePrecision('estimated_count').default(0).notNull(),
+    valueSum: doublePrecision('value_sum').default(0).notNull(),
+    firstObservedAt: timestamp('first_observed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    lastObservedAt: timestamp('last_observed_at', { withTimezone: true, mode: 'date' }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    // Migration 0103 uses NULLS NOT DISTINCT so null error dimensions still
+    // form one idempotent identity. Drizzle cannot express that index option.
+    uniqueIndex('client_signal_v2_windows_identity').on(
+      table.windowStart,
+      table.client,
+      table.clientRelease,
+      table.ingestRelease,
+      table.surface,
+      table.metric,
+      table.deviceGroup,
+      table.sampleSource,
+      table.result,
+      table.reasonCode,
+      table.measurementKind,
+      table.errorClass,
+      table.fingerprint,
+      table.bucket,
+    ),
+    index('client_signal_v2_windows_client_metric_time_idx').on(
+      table.client,
+      table.metric,
+      table.windowStart.desc(),
+    ),
+    index('client_signal_v2_windows_retention_idx').on(table.windowStart),
+    check('client_signal_v2_windows_client_check', sql`client IN ('web','wechat_miniprogram')`),
+    check('client_signal_v2_windows_source_check', sql`sample_source IN ('real','synthetic')`),
+    check(
+      'client_signal_v2_windows_result_check',
+      sql`result IN ('ok','error','timeout','auth_error','stale','unavailable')`,
+    ),
+    check(
+      'client_signal_v2_windows_reason_check',
+      sql`reason_code IN ('none','auth','validation','rate_limit','client_abort','upstream_timeout','connection','unavailable','unknown')`,
+    ),
+    check(
+      'client_signal_v2_windows_measurement_check',
+      sql`measurement_kind IN ('initial_navigation','in_page_navigation','interaction','background_resume','missing_start','request')`,
+    ),
+    check(
+      'client_signal_v2_windows_count_check',
+      sql`observed_count > 0 AND occurrence_count > 0 AND estimated_count > 0`,
+    ),
+    check('client_signal_v2_windows_value_check', sql`value_sum >= 0`),
+    check(
+      'client_signal_v2_windows_dimensions_check',
+      sql`btrim(client_release) <> '' AND btrim(ingest_release) <> '' AND btrim(surface) <> '' AND btrim(metric) <> '' AND btrim(device_group) <> '' AND btrim(bucket) <> ''`,
+    ),
+    check(
+      'client_signal_v2_windows_error_dimensions_check',
+      sql`metric = 'runtime_error' OR (error_class IS NULL AND fingerprint IS NULL)`,
+    ),
+    check('client_signal_v2_windows_error_time_check', sql`first_observed_at <= last_observed_at`),
   ],
 );
 

@@ -5,6 +5,8 @@
   "bugReportsInOps",
   "chipInCompetition",
   "clientSignalBatchesInOps",
+  "clientSignalV2BatchesInOps",
+  "clientSignalV2WindowsInOps",
   "clientSignalWindowsInOps",
   "competition",
   "cupResultInCompetition",

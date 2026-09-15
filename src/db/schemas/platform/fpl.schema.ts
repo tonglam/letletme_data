@@ -518,6 +518,11 @@ export const playerGameweekStatsInFpl = fpl.table(
     publicationEventLiveSha256: text('publication_event_live_sha256'),
   },
   (table) => [
+    index('player_gameweek_stats_season_updated_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.updatedAt.desc().nullsLast(),
+    ),
     index('player_gameweek_stats_player_idx').using(
       'btree',
       table.seasonId.asc().nullsLast(),

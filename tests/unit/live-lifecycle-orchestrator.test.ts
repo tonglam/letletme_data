@@ -8,6 +8,7 @@ import {
   resolveLivePicksEntryDeduplicationId,
   resolveLivePicksProbeBackoffResult,
   resolveLivePicksRefreshFanout,
+  buildLivePicksRoundEvidence,
   resolveLiveLifecycleDelay,
   shouldMarkLivePicksFreshnessNotApplicable,
   shouldMarkLivePicksFreshnessNoSourceWork,
@@ -18,6 +19,38 @@ import {
 const quote = String.fromCharCode(39);
 
 describe('live lifecycle decisions', () => {
+  test('keeps live-picks round evidence bounded and explicit about missing timings', () => {
+    expect(
+      buildLivePicksRoundEvidence({
+        phase: 'fanout',
+        cohortCount: 1_515,
+        newEnqueueCount: 1_500,
+        dedupReusedCount: 15,
+        pendingCheckpointCount: 12,
+        completedCount: 1_503,
+        providerAdmissionWaitP95Ms: null,
+        sqlTimeMs: Number.NaN,
+        remainingDeadlineMs: undefined,
+        sourceReady: true,
+        scanComplete: false,
+      }),
+    ).toEqual({
+      event: 'live_picks_round',
+      phase: 'fanout',
+      cohortCount: 1_515,
+      newEnqueueCount: 1_500,
+      dedupReusedCount: 15,
+      pendingCheckpointCount: 12,
+      completedCount: 1_503,
+      completionRate: 1_503 / 1_515,
+      providerAdmissionWaitP95Ms: null,
+      sqlTimeMs: null,
+      remainingDeadlineMs: null,
+      sourceReady: true,
+      scanComplete: false,
+    });
+  });
+
   test('retires only a completed empty Live Picks cohort as not applicable', () => {
     expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, true)).toBe(true);
     expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, false)).toBe(false);
