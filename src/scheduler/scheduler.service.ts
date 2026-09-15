@@ -1032,7 +1032,9 @@ async function reconcileSingleFlightBullState(
           dispatchGeneration: lane.dispatchGeneration,
           bullJobId: expectedJobId,
           bullState: state,
-          ...(lane.jobName === 'live-snapshot' ? {} : { obligationId: lane.desiredObligationId }),
+          obligationId:
+            job?.data?.obligationId ??
+            (lane.jobName === 'live-snapshot' ? undefined : lane.desiredObligationId),
         });
         if (!recovered) {
           logError('Latest-wins dispatch loss recovery CAS failed', undefined, {
