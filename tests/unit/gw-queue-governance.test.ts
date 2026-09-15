@@ -17,7 +17,6 @@ import {
 import {
   queueHealthPersistenceFingerprint,
   QueueEventAccumulator,
-  queueHealthEventBaselineBeforeMs,
   QUEUE_MONITOR_EVENT_RETENTION_MS,
   queueMonitorEventRetentionMs,
   rollbackQueueSampleArrivals,
@@ -248,17 +247,13 @@ describe('GW queue and data governance primitives', () => {
     });
   });
 
-  test('keeps the in-progress receive-time bucket out of a durable baseline', () => {
-    const nowMs = Date.parse('2026-08-27T00:14:30.000Z');
-    expect(queueHealthEventBaselineBeforeMs(nowMs, 15 * 60_000)).toBe(
-      Date.parse('2026-08-27T00:00:00.000Z'),
-    );
-    expect(queueHealthEventBaselineBeforeMs(nowMs, 60_000)).toBe(
-      Date.parse('2026-08-27T00:14:00.000Z'),
-    );
-    expect(() => queueHealthEventBaselineBeforeMs(nowMs, 0)).toThrow(
-      'Queue health baseline window interval must be positive',
-    );
+  test('drops observations covered by a durable startup baseline', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    accumulator.record('failures', 2_000);
+
+    expect(accumulator.clear()).toBe(2);
+    expect(accumulator.pendingCount()).toBe(0);
   });
 
   test('evicts only observations older than the bounded monitor retention', () => {

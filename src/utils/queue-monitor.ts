@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Job, Queue, QueueEvents } from 'bullmq';
-import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, eq, gte, sql } from 'drizzle-orm';
 
 import { queueHealthWindowsInOps } from '../db/schemas/index.schema';
 import {
@@ -212,21 +212,6 @@ export function queueMonitorEventRetentionMs(
 }
 
 /**
- * The monitor subscribes to QueueEvents before loading its durable baseline.
- * Keep the in-progress receive-time bucket out of that baseline so events
- * observed by this process cannot be replayed after a prior leader commits the
- * same bucket while the read is in flight. The first successful current-window
- * upsert uses greatest(existing, incoming), carrying older durable totals
- * forward without adding them to the new accumulator batch.
- */
-export function queueHealthEventBaselineBeforeMs(nowMs: number, windowIntervalMs: number): number {
-  if (!Number.isFinite(nowMs) || !Number.isFinite(windowIntervalMs) || windowIntervalMs <= 0) {
-    throw new Error('Queue health baseline window interval must be positive');
-  }
-  return windowStart(nowMs, windowIntervalMs).getTime();
-}
-
-/**
  * A no-event arrival delta is derived from the last successful Redis sample.
  * If that sample write fails, the next poll must be allowed to derive the same
  * delta again exactly once; otherwise a transient Redis error double-counts the
@@ -328,6 +313,17 @@ export class QueueEventAccumulator {
       (total, counters) => total + totalQueueEventCounters(counters),
       0,
     );
+  }
+
+  /**
+   * The durable event totals are the restart baseline. Drop observations that
+   * arrived before or during that read so an event already included by the
+   * previous leader is not replayed as a new delta by this monitor.
+   */
+  public clear(): number {
+    const pending = this.pendingCount();
+    this.buckets.clear();
+    return pending;
   }
 }
 
@@ -553,10 +549,8 @@ async function loadQueueHealthEventTotals(
   queueName: string,
   nowMs: number,
   retentionMs: number,
-  windowIntervalMs: number,
 ): Promise<Map<number, QueueEventCounters>> {
   const db = await getDatabaseHandleWithBudget(5_000);
-  const beforeWindowStartMs = queueHealthEventBaselineBeforeMs(nowMs, windowIntervalMs);
   const rows = await db
     .select({
       windowStart: queueHealthWindowsInOps.windowStart,
@@ -570,7 +564,6 @@ async function loadQueueHealthEventTotals(
       and(
         eq(queueHealthWindowsInOps.queueName, queueName),
         gte(queueHealthWindowsInOps.windowStart, new Date(nowMs - retentionMs)),
-        lt(queueHealthWindowsInOps.windowStart, new Date(beforeWindowStartMs)),
       ),
     );
   return new Map(
@@ -757,25 +750,27 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     }
     if (!eventBaselineLoaded) {
       try {
-        // Establish the receive-time cutoff before the database read. Events
-        // arriving during the read stay in eventAccumulator and are folded
-        // by the current poll; only complete buckets before this boundary are
-        // seeded from PostgreSQL.
-        const baselineCutoffMs = pollStartedAtMs;
         const persisted = await loadQueueHealthEventTotals(
           queueName,
-          baselineCutoffMs,
+          pollStartedAtMs,
           eventRetentionMs,
-          windowIntervalMs,
         );
+        const discardedStartupEvents = eventAccumulator.clear();
         for (const [bucketStart, counters] of persisted) {
           acknowledgedEventTotals.set(bucketStart, counters);
+        }
+        const current = persisted.get(eventWindowStartMs);
+        if (current) {
+          windowArrivals = current.arrivals;
+          windowCompletions = current.completions;
+          windowFailures = current.failures;
+          windowStalled = current.stalled;
         }
         eventBaselineLoaded = true;
         logDebug('Queue monitor event baseline loaded', {
           queue: queueName,
           windows: persisted.size,
-          beforeWindowStartMs: queueHealthEventBaselineBeforeMs(baselineCutoffMs, windowIntervalMs),
+          discardedStartupEvents,
           retentionMs: eventRetentionMs,
         });
       } catch (error) {
