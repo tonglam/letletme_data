@@ -1496,6 +1496,10 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
   // reloads the row, while this map records whether Redis gave us a positive
   // answer for the generation we observed.
   const singleFlightReconciled = new Map<string, boolean>();
+  // A recovery pass can return several lanes from one historical season. A
+  // single canonical context is enough for all of them; avoid repeating the
+  // season-wide event read for every lane in the bounded recovery page.
+  const persistedLiveLaneContexts = new Map<string, SchedulerContext>();
   // Definition planning is pure control-plane work. Resolve independently in
   // a bounded batch so one slow repository/provider-adjacent stage cannot hold
   // the entire 30-second pass hostage, while retaining deterministic result
@@ -1896,8 +1900,12 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         );
         continue;
       }
-      const laneContext = await contextForPersistedLiveSnapshotLane(target.lane, context);
       const scopeIdentity = liveSnapshotScopeIdentity(target.obligation.scopeKey);
+      let laneContext = persistedLiveLaneContexts.get(scopeIdentity.seasonCode);
+      if (!laneContext) {
+        laneContext = await contextForPersistedLiveSnapshotLane(target.lane, context);
+        persistedLiveLaneContexts.set(scopeIdentity.seasonCode, laneContext);
+      }
       const targetEventId = evidenceNumber(target.obligation.evidence, 'targetEventId');
       if (targetEventId !== undefined && targetEventId !== scopeIdentity.eventId) {
         failed += 1;
