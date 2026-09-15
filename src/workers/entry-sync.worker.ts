@@ -61,6 +61,7 @@ import {
 } from '../utils/data-sync-attempt';
 import { latestFreshnessTimestamp } from '../domain/freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
+import { runWithJobLogContext } from '../utils/job-log-context';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { isTerminalJobFailure } from '../utils/worker-failure';
@@ -532,7 +533,21 @@ export function createEntrySyncWorker(
     // an explicit skipped root: it must not leave the current obligation
     // running until enqueue recovery misclassifies the completed Bull job.
     if (job.name === 'live-picks-refresh') {
-      const result = await runLivePicksRefreshJob(job.data as unknown as LivePicksRefreshJobData);
+      // The root canary runs before the normal entry-sync runTrackedJob path.
+      // Install the queue context here so its provider admission waits are
+      // attributed to the live-picks scope rather than only global/unattributed
+      // telemetry.
+      const result = await runWithJobLogContext(
+        {
+          jobType: 'queue',
+          queueName: workerQueueName,
+          jobName: job.name,
+          jobId,
+          eventId: job.data.eventId,
+          attempt: job.attemptsMade,
+        },
+        () => runLivePicksRefreshJob(job.data as unknown as LivePicksRefreshJobData),
+      );
       const fence = inspectSchedulerObligationFence(job.data);
       if (result.outcome === 'accepted-backoff') {
         if (fence.kind === 'complete') {

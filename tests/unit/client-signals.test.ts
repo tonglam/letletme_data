@@ -6,7 +6,10 @@ import {
   ClientSignalValidationError,
   clientSignalBucketFor,
   clientSignalRetentionCutoffs,
+  aggregateClientSignalBatchV2,
+  CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT,
   parseClientSignalBatch,
+  parseClientSignalBatchV2,
 } from '../../src/services/client-signals.service';
 
 const now = Date.parse('2026-08-27T00:00:00.000Z');
@@ -25,6 +28,32 @@ const validBatch = () => ({
       deviceGroup: 'desktop',
       sampleSource: 'real',
       result: 'ok',
+      value: 249,
+    },
+  ],
+});
+
+const validBatchV2 = () => ({
+  schemaVersion: 2,
+  batchId: '22222222-2222-4222-8222-222222222222',
+  client: 'web',
+  clientRelease: 'web-abc123',
+  ingestRelease: 'ingest-def456',
+  sentAt: new Date(now).toISOString(),
+  samples: [
+    {
+      observedAt: new Date(now).toISOString(),
+      surface: 'home',
+      metric: 'route_ready_ms',
+      deviceGroup: 'desktop',
+      sampleSource: 'real',
+      result: 'ok',
+      reasonCode: 'none',
+      measurementKind: 'initial_navigation',
+      samplingProbability: 0.25,
+      metricName: 'HOME_TEAM_DESK_READY',
+      navigationId: 'nav-12345678',
+      cacheStatus: 'miss',
       value: 249,
     },
   ],
@@ -123,6 +152,133 @@ describe('anonymous client signal contract', () => {
 
   test('keeps the body budget explicit', () => {
     expect(CLIENT_SIGNAL_MAX_BYTES).toBe(16 * 1024);
+    expect(CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT).toBe(512);
+  });
+
+  test('keeps bounded marker and correlation dimensions in v2 aggregation', () => {
+    const parsed = parseClientSignalBatchV2(validBatchV2(), now);
+    expect(parsed.samples[0]).toMatchObject({
+      metricName: 'HOME_TEAM_DESK_READY',
+      navigationId: 'nav-12345678',
+      cacheStatus: 'miss',
+    });
+    expect(aggregateClientSignalBatchV2(parsed)[0]).toMatchObject({
+      metricName: 'HOME_TEAM_DESK_READY',
+      navigationId: 'nav-12345678',
+      cacheStatus: 'miss',
+    });
+    expect(() =>
+      parseClientSignalBatchV2(
+        {
+          ...validBatchV2(),
+          samples: [{ ...validBatchV2().samples[0], navigationId: 'nav-short' }],
+        },
+        now,
+      ),
+    ).toThrow(ClientSignalValidationError);
+  });
+
+  test('weights v2 success samples by their actual sampling probability', () => {
+    const batch = {
+      ...validBatchV2(),
+      samples: [
+        validBatchV2().samples[0],
+        {
+          ...validBatchV2().samples[0],
+          result: 'error',
+          reasonCode: 'unknown',
+          samplingProbability: 1,
+          metric: 'runtime_error',
+          value: undefined,
+          errorClass: 'TypeError',
+          fingerprint: 'runtime.TypeError',
+          occurrenceCount: 2,
+        },
+      ],
+    };
+    const parsed = parseClientSignalBatchV2(batch, now);
+    const rows = aggregateClientSignalBatchV2(parsed);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.result === 'ok')).toMatchObject({
+      observedCount: 1,
+      occurrenceCount: 1,
+      estimatedCount: 4,
+    });
+    expect(rows.find((row) => row.result === 'error')).toMatchObject({
+      observedCount: 1,
+      occurrenceCount: 2,
+      estimatedCount: 2,
+    });
+  });
+
+  test('preserves bounded marker and performance correlation dimensions', () => {
+    const sample = validBatchV2().samples[0];
+    const batch = {
+      ...validBatchV2(),
+      samples: [
+        {
+          ...sample,
+          metricName: 'PLAYER_DESK_RESPONSE',
+          navigationId: 'nav-12345678',
+          interactionId: 'interaction-12345678',
+          cacheStatus: 'stale',
+        },
+        {
+          ...sample,
+          metricName: 'HOME_TEAM_DESK_READY',
+          navigationId: 'nav-12345678',
+          interactionId: 'interaction-12345678',
+          cacheStatus: 'stale',
+        },
+      ],
+    };
+
+    const parsed = parseClientSignalBatchV2(batch, now);
+    expect(parsed.samples[0]).toMatchObject({
+      metricName: 'PLAYER_DESK_RESPONSE',
+      navigationId: 'nav-12345678',
+      interactionId: 'interaction-12345678',
+      cacheStatus: 'stale',
+    });
+    expect(aggregateClientSignalBatchV2(parsed)).toHaveLength(2);
+  });
+
+  test('rejects unsafe performance correlation dimensions', () => {
+    expect(() =>
+      parseClientSignalBatchV2(
+        {
+          ...validBatchV2(),
+          samples: [{ ...validBatchV2().samples[0], navigationId: 'nav-short' }],
+        },
+        now,
+      ),
+    ).toThrow(ClientSignalValidationError);
+    expect(() =>
+      parseClientSignalBatchV2(
+        {
+          ...validBatchV2(),
+          samples: [{ ...validBatchV2().samples[0], cacheStatus: 'origin' }],
+        },
+        now,
+      ),
+    ).toThrow(ClientSignalValidationError);
+  });
+
+  test('keeps v1 parsing separate and rejects forged ingest or sensitive v2 fields', () => {
+    expect(parseClientSignalBatchV2(validBatchV2(), now).ingestRelease).toBe('ingest-def456');
+    expect(() =>
+      parseClientSignalBatchV2({ ...validBatchV2(), ingestRelease: 'bad release' }, now),
+    ).toThrow(ClientSignalValidationError);
+    expect(() =>
+      parseClientSignalBatchV2(
+        {
+          ...validBatchV2(),
+          samples: [{ ...validBatchV2().samples[0], errorMessage: 'secret' }],
+        },
+        now,
+      ),
+    ).toThrow(ClientSignalValidationError);
+    expect(parseClientSignalBatch(validBatch(), now).schemaVersion).toBe(1);
   });
 
   test('serializes retention cutoffs before binding SQL parameters', () => {

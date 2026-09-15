@@ -28,6 +28,8 @@ export type LivePicksRefreshJobData = Readonly<{
   obligationGeneration?: number;
   /** Exact freshness window being repaired, carried into the child scan. */
   freshnessWindowId?: number;
+  /** Event deadline used only to report remaining round budget. */
+  deadlineAt?: string;
 }>;
 
 export async function enqueueLivePicksRefresh(
@@ -38,6 +40,7 @@ export async function enqueueLivePicksRefresh(
     obligationId?: string;
     obligationGeneration?: number;
     freshnessWindowId?: number;
+    deadlineAt?: Date | null;
     now?: Date;
   }> = {},
 ) {
@@ -62,6 +65,9 @@ export async function enqueueLivePicksRefresh(
       ...(options.freshnessWindowId === undefined
         ? {}
         : { freshnessWindowId: options.freshnessWindowId }),
+      ...(options.deadlineAt instanceof Date && Number.isFinite(options.deadlineAt.getTime())
+        ? { deadlineAt: options.deadlineAt.toISOString() }
+        : {}),
     },
     {
       jobId: options.jobId ?? `live-picks-refresh-${season.seasonCode}-e${eventId}`,
@@ -88,6 +94,7 @@ export async function runLivePicksRefreshJob(
         obligationId: job.obligationId,
         obligationGeneration: job.obligationGeneration,
         freshnessWindowId: job.freshnessWindowId,
+        deadlineAt: job.deadlineAt ? new Date(job.deadlineAt) : undefined,
       },
     );
     if (!result.sourceReady) {

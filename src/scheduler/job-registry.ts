@@ -1269,6 +1269,7 @@ function livePicksDefinition(): ScheduledJobDefinition {
           evidence: {
             lifecycleState: decision.state,
             probe: decision.shouldProbePicks ? 'deadline-or-pre-start' : 'missing-input-repair',
+            deadlineAt: event.deadlineTime ?? null,
           },
         },
       ];
@@ -1281,6 +1282,8 @@ function livePicksDefinition(): ScheduledJobDefinition {
         obligationId,
         obligationGeneration: generation,
         freshnessWindowId,
+        deadlineAt:
+          typeof plan.evidence?.deadlineAt === 'string' ? new Date(plan.evidence.deadlineAt) : null,
         now: plan.dueAt,
       });
       return { bullJobId: job.id };

@@ -218,6 +218,11 @@ export const playerSeasonSummaryRowsInReporting = reporting.table(
       .notNull(),
   },
   (table) => [
+    index('player_season_summary_rows_season_source_updated_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.sourceUpdatedAt.desc().nullsLast(),
+    ),
     index('player_season_summary_rows_cohort_idx').using(
       'btree',
       table.seasonId.asc().nullsLast(),

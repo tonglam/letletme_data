@@ -5,6 +5,7 @@ import {
   CLIENT_SIGNAL_MAX_BYTES,
   ClientSignalValidationError,
   ingestClientSignalBatch,
+  ingestClientSignalBatchV2,
 } from '../services/client-signals.service';
 import { logError } from '../utils/logger';
 
@@ -100,7 +101,14 @@ export const clientSignalsAPI = new Elysia({ prefix: '/internal/ops' })
       }
 
       try {
-        const result = await ingestClientSignalBatch(body);
+        const schemaVersion =
+          body && typeof body === 'object' && !Array.isArray(body)
+            ? (body as { schemaVersion?: unknown }).schemaVersion
+            : undefined;
+        const result =
+          schemaVersion === 2
+            ? await ingestClientSignalBatchV2(body)
+            : await ingestClientSignalBatch(body);
         set.status = 202;
         return { accepted: true, duplicate: result.duplicate };
       } catch (error) {
