@@ -2070,7 +2070,10 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         .where(eq(schedulerObligationsInOps.obligationId, failedObligationId))
         .for('update')
         .limit(1);
-      if (!obligationRow || !['pending', 'enqueued', 'running'].includes(obligationRow.status)) {
+      if (
+        !obligationRow ||
+        !['pending', 'enqueued', 'running', 'failed'].includes(obligationRow.status)
+      ) {
         continue;
       }
       const evidence =
@@ -2086,8 +2089,17 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         evidenceAttempts >= 0
           ? evidenceAttempts
           : obligationRow.attempts;
+      // Lane dispatches do not pass through claimSchedulerObligations, and a
+      // Bull job can therefore exhaust its delivery attempts before
+      // startSchedulerLane records an execution. Count that lost pre-start
+      // generation durably here; otherwise every recovery would observe zero
+      // execution attempts and create an unbounded stream of new generations.
+      const preStartBullLoss = obligationRow.status !== 'running';
+      const nextExecutionAttempts = preStartBullLoss
+        ? Math.min(Number.MAX_SAFE_INTEGER, executionAttempts + 1)
+        : executionAttempts;
       const terminalFailure =
-        !superseded && (!retryPolicy.retryable || executionAttempts >= retryPolicy.maxAttempts);
+        !superseded && (!retryPolicy.retryable || nextExecutionAttempts >= retryPolicy.maxAttempts);
       await tx
         .update(schedulerObligationsInOps)
         .set({
@@ -2100,7 +2112,15 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
                   supersededByObligationId: lane.desiredObligationId,
                 }),
               }
-            : {}),
+            : preStartBullLoss
+              ? {
+                  attempts: sql`${schedulerObligationsInOps.attempts} + 1`,
+                  evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
+                    'executionAttemptCount', ${nextExecutionAttempts}::numeric,
+                    'executionAttemptGeneration', ${obligationRow.generation}::integer
+                  )`,
+                }
+              : {}),
           bullJobId: input.bullJobId,
           lastError: superseded ? null : bullLossError,
           completedAt: superseded || terminalFailure ? dbNow : undefined,
@@ -2111,7 +2131,12 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         .where(
           and(
             eq(schedulerObligationsInOps.obligationId, failedObligationId),
-            inArray(schedulerObligationsInOps.status, ['pending', 'enqueued', 'running']),
+            inArray(schedulerObligationsInOps.status, [
+              'pending',
+              'enqueued',
+              'running',
+              'failed',
+            ]),
           ),
         );
     }

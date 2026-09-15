@@ -1303,6 +1303,66 @@ describe('scheduler latest-wins lanes', () => {
     const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
     expect(targets?.lane.state).toBe('idle');
     expect(targets?.desired?.status).toBe('failed');
+    expect(targets?.desired?.attempts).toBe(1);
+    expect(targets?.desired?.evidence).toMatchObject({
+      executionAttemptCount: 1,
+      executionAttemptGeneration: first.generation,
+    });
+  });
+
+  test('bounds repeated pre-start Bull losses with the durable execution budget', async () => {
+    const first = await reserveLive(
+      Date.parse('2026-08-25T05:16:00.000Z'),
+      'live-pre-start-budget',
+      new Date('2026-08-25T05:15:00.000Z'),
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: first,
+      preserveFreshnessHistory: true,
+    });
+    const firstDispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(firstDispatch).not.toBeNull();
+
+    for (const [index, bullJobId] of [
+      'integration-live-job-pre-start-budget-1',
+      'integration-live-job-pre-start-budget-2',
+      'integration-live-job-pre-start-budget-3',
+    ].entries()) {
+      const dispatch =
+        index === 0
+          ? firstDispatch
+          : await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+      expect(dispatch).not.toBeNull();
+      await confirmSchedulerLaneEnqueued({
+        laneId: initial.lane.laneId,
+        owner: dispatch!.owner,
+        bullJobId,
+        obligationId: first.obligationId,
+      });
+      expect(
+        await recoverSchedulerLaneAfterBullLoss({
+          laneId: initial.lane.laneId,
+          dispatchGeneration: dispatch!.lane.dispatchGeneration,
+          bullJobId,
+          bullState: 'failed',
+          obligationId: first.obligationId,
+        }),
+      ).toBe(true);
+    }
+
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.desired?.status).toBe('irrecoverable');
+    expect(targets?.desired?.attempts).toBe(3);
+    expect(targets?.desired?.evidence).toMatchObject({
+      executionAttemptCount: 3,
+      executionAttemptGeneration: first.generation,
+    });
+    expect(await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId })).toBeNull();
   });
 
   test('terminalizes Bull-loss recovery after the execution retry budget is exhausted', async () => {
