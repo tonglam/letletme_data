@@ -23,7 +23,7 @@ import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { isMatchDayTime } from '../utils/conditions';
 import { logError, logInfo } from '../utils/logger';
 import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './entries.service';
-import { enqueueEntryPicksSyncJob } from '../jobs/entry-sync-enqueue';
+import { enqueueEntryPicksSyncJobWithOutcome } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { createEntryInfoRepository, entryInfoRepository } from '../repositories/entry-infos';
@@ -419,7 +419,9 @@ async function recordLivePicksRoundEvidence(input: {
   sourceReady: boolean;
   scanComplete: boolean;
 }): Promise<void> {
-  const admission = await readFplAdmissionTelemetry(Date.now(), 'live-picks').catch(() => null);
+  const admission = await readFplAdmissionTelemetry(Date.now(), 'live-picks', {
+    throwOnFailure: true,
+  }).catch(() => null);
   const deadlineMs = input.deadlineAt?.getTime() ?? Number.NaN;
   const evidence = buildLivePicksRoundEvidence({
     ...input,
@@ -435,7 +437,7 @@ async function recordLivePicksRoundEvidence(input: {
     eventId: input.eventId,
     providerAdmissionEvidence: admission === null ? 'collection_gap' : 'observed_window',
     sqlEvidence: 'child_attempt_report_required',
-    deadlineEvidence: Number.isFinite(deadlineMs) ? 'event_deadline' : 'unavailable',
+    deadlineEvidence: Number.isFinite(deadlineMs) ? 'coordinator_window' : 'unavailable',
   });
 }
 
@@ -970,6 +972,11 @@ export async function runPicksProbeAndSync(
   freshnessEvidenceRecorded?: boolean;
 }> {
   const sharedState = await readPicksCoordinatorState(season.seasonCode, eventId);
+  // The event deadline describes the provider fixture, while this coordinator
+  // pass has a bounded operational window until its next probe. Evidence must
+  // report the latter so a normal post-deadline repair is not flattened to a
+  // permanent zero remaining budget.
+  const coordinatorDeadlineAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS);
   const state: PicksProbeState = {
     attempts: sharedState.attempts,
     nextProbeAt: sharedState.nextProbeAt,
@@ -1018,6 +1025,18 @@ export async function runPicksProbeAndSync(
       typeof obligation.obligationGeneration === 'number' &&
       Number.isSafeInteger(obligation.obligationGeneration) &&
       obligation.obligationGeneration >= 0;
+    await recordLivePicksRoundEvidence({
+      eventId,
+      deadlineAt: coordinatorDeadlineAt,
+      phase: 'coverage_scan',
+      cohortCount: 0,
+      newEnqueueCount: 0,
+      dedupReusedCount: 0,
+      pendingCheckpointCount: 0,
+      completedCount: 0,
+      sourceReady: state.canarySucceeded,
+      scanComplete: false,
+    });
     return resolveLivePicksProbeBackoffResult(state.canarySucceeded, {
       schedulerFenced,
       retryableRepair: obligation.freshnessWindowId !== undefined,
@@ -1028,7 +1047,7 @@ export async function runPicksProbeAndSync(
     const freshnessEvidenceRecorded = await recordDurableFreshness(true);
     await recordLivePicksRoundEvidence({
       eventId,
-      deadlineAt: obligation.deadlineAt,
+      deadlineAt: coordinatorDeadlineAt,
       phase: 'coverage_scan',
       cohortCount: 0,
       newEnqueueCount: 0,
@@ -1066,11 +1085,11 @@ export async function runPicksProbeAndSync(
     const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete, false);
     await recordLivePicksRoundEvidence({
       eventId,
-      deadlineAt: obligation.deadlineAt,
+      deadlineAt: coordinatorDeadlineAt,
       phase: 'coverage_scan',
       cohortCount: entryIds.length,
       newEnqueueCount: 0,
-      dedupReusedCount: entryIds.length,
+      dedupReusedCount: 0,
       pendingCheckpointCount: pendingCheckpoints.length,
       completedCount: entryIds.length - pendingCheckpoints.length,
       sourceReady: true,
@@ -1143,11 +1162,11 @@ export async function runPicksProbeAndSync(
     const freshnessEvidenceRecorded = await recordDurableFreshness(false);
     await recordLivePicksRoundEvidence({
       eventId,
-      deadlineAt: obligation.deadlineAt,
+      deadlineAt: coordinatorDeadlineAt,
       phase: 'canary_probe',
       cohortCount: entryIds.length,
       newEnqueueCount: 0,
-      dedupReusedCount: entryIds.length - pending.length,
+      dedupReusedCount: 0,
       pendingCheckpointCount: pending.length,
       completedCount: entryIds.length - pending.length,
       sourceReady: false,
@@ -1184,13 +1203,14 @@ export async function runPicksProbeAndSync(
     uniqueNumbers([...remaining, ...successfulCanaryIds]),
   );
   let completedEntryIds: boolean[] = [];
-  let enqueueSuccessCount = 0;
+  let newEnqueueCount = 0;
+  let dedupReusedCount = 0;
   if (remaining.length > 0) {
     // Each entry gets its own BullMQ single-flight identity. The queue still
     // limits provider concurrency to three, but one slow/new entry can no
     // longer deduplicate or delay every other entry in the event cohort.
     completedEntryIds = await mapWithConcurrency(remaining, 8, async (entryId) => {
-      const queuedJob = await enqueueEntryPicksSyncJob(season, 'cron', {
+      const enqueueOutcome = await enqueueEntryPicksSyncJobWithOutcome(season, 'cron', {
         eventId,
         entryIds: [entryId],
         concurrency: 1,
@@ -1203,8 +1223,9 @@ export async function runPicksProbeAndSync(
         freshnessWindowId: obligation.freshnessWindowId,
         deduplicationId: resolveLivePicksEntryDeduplicationId(season.seasonCode, eventId, entryId),
       });
-      enqueueSuccessCount += 1;
-      const childState = await queuedJob.getState();
+      if (enqueueOutcome.dedupReused) dedupReusedCount += 1;
+      else newEnqueueCount += 1;
+      const childState = await enqueueOutcome.job.getState();
       if (childState !== 'completed') return false;
       // A retained completed job is only reusable when its V2 input is still
       // visible. This prevents queue history from being mistaken for a live
@@ -1234,7 +1255,6 @@ export async function runPicksProbeAndSync(
     ...pendingCheckpointAfterQueue,
     ...canaryCheckpointIds,
   ]);
-  const reusedCompletedScan = remaining.length > 0 && pendingAfterQueue.length === 0;
   state.attempts += 1;
   state.nextProbeAt = now.getTime() + (PICKS_RETRY_SCHEDULE_MS[0] ?? 120_000);
   await writePicksCoordinatorState(season.seasonCode, eventId, {
@@ -1249,25 +1269,25 @@ export async function runPicksProbeAndSync(
     totalUniqueEntries: entryIds.length,
     queued: remaining.length,
   });
-  const scanComplete =
-    (pendingAfterQueue.length === 0 || reusedCompletedScan) && pendingCheckpointIds.length === 0;
+  const incompleteEntryIds = uniqueNumbers([...pendingAfterQueue, ...pendingCheckpointIds]);
+  const scanComplete = incompleteEntryIds.length === 0;
   const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete);
   await recordLivePicksRoundEvidence({
     eventId,
-    deadlineAt: obligation.deadlineAt,
+    deadlineAt: coordinatorDeadlineAt,
     phase: 'fanout',
     cohortCount: entryIds.length,
-    newEnqueueCount: enqueueSuccessCount,
-    dedupReusedCount: entryIds.length - pending.length,
+    newEnqueueCount,
+    dedupReusedCount,
     pendingCheckpointCount: pendingCheckpointIds.length,
-    completedCount: entryIds.length - pendingAfterQueue.length - pendingCheckpointIds.length,
+    completedCount: entryIds.length - incompleteEntryIds.length,
     sourceReady: true,
     scanComplete,
   });
   return {
     canaryCount,
     synced: canaryCount,
-    pending: pendingAfterQueue.length + pendingCheckpointIds.length,
+    pending: incompleteEntryIds.length,
     sourceReady: true,
     scanComplete,
     freshnessEvidenceRecorded,

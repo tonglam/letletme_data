@@ -180,12 +180,17 @@ async function findReusableExplicitDeduplicationJob(
   return recentCompleted ? { job: recentCompleted, reason: 'cadence' } : null;
 }
 
-async function enqueueEntrySyncJob(
+export type EntrySyncEnqueueOutcome = Readonly<{
+  job: Job<EntrySyncJobData>;
+  dedupReused: boolean;
+}>;
+
+async function enqueueEntrySyncJobWithOutcome(
   jobName: EntrySyncJobName,
   season: FplSeasonRef,
   source: EntrySyncJobSource = 'cron',
   options: EntrySyncJobOptions = {},
-) {
+): Promise<EntrySyncEnqueueOutcome> {
   try {
     const lane = options.lane ?? 'entry-sync';
     const queue = entryQueueForLane(lane);
@@ -244,7 +249,7 @@ async function enqueueEntrySyncJob(
           queue: queue.name,
           runId: existingManualScan.data.runId,
         });
-        return existingManualScan;
+        return { job: existingManualScan, dedupReused: true };
       }
     }
 
@@ -292,7 +297,7 @@ async function enqueueEntrySyncJob(
           reason: reusable.reason,
         });
         await trackQueueRunJob(reusable.job.data.runId ?? runId, queue.name, reusable.job.id);
-        return reusable.job;
+        return { job: reusable.job, dedupReused: true };
       }
     }
     // Keep queue evidence for every non-manual trigger, including explicit
@@ -385,7 +390,14 @@ async function enqueueEntrySyncJob(
       runId: job.data.runId ?? runId,
     });
     await trackQueueRunJob(job.data.runId ?? runId, queue.name, job.id);
-    return job;
+    return {
+      job,
+      // Coordinator-owned live-picks jobs use a fresh job id together with a
+      // stable Redis deduplication id. BullMQ returns the retained job id when
+      // the add is deduplicated, which lets callers report reuse separately
+      // from a newly accepted enqueue.
+      dedupReused: usesRedisDeduplication && addedJob.id !== jobId,
+    };
   } catch (error) {
     logError('Failed to enqueue entry sync job', error, { jobName, source });
     throw error;
@@ -396,22 +408,30 @@ export const enqueueEntryInfoSyncJob = (
   season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-info', season, source, options);
+) => enqueueEntrySyncJobWithOutcome('entry-info', season, source, options).then(({ job }) => job);
 
 export const enqueueEntryPicksSyncJob = (
   season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-picks', season, source, options);
+) => enqueueEntrySyncJobWithOutcome('entry-picks', season, source, options).then(({ job }) => job);
+
+export const enqueueEntryPicksSyncJobWithOutcome = (
+  season: FplSeasonRef,
+  source?: EntrySyncJobSource,
+  options?: EntrySyncJobOptions,
+) => enqueueEntrySyncJobWithOutcome('entry-picks', season, source, options);
 
 export const enqueueEntryTransfersSyncJob = (
   season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-transfers', season, source, options);
+) =>
+  enqueueEntrySyncJobWithOutcome('entry-transfers', season, source, options).then(({ job }) => job);
 
 export const enqueueEntryResultsSyncJob = (
   season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-results', season, source, options);
+) =>
+  enqueueEntrySyncJobWithOutcome('entry-results', season, source, options).then(({ job }) => job);

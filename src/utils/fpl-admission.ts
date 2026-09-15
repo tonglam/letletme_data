@@ -406,6 +406,7 @@ function readClassTelemetry(
 export async function readFplAdmissionTelemetry(
   now = Date.now(),
   queueName?: string,
+  options: Readonly<{ throwOnFailure?: boolean }> = {},
 ): Promise<FplAdmissionTelemetry> {
   const priorities: readonly FplRequestPriority[] = ['deadline-critical', 'live', 'bulk'];
   const emptyByPriority = (): Record<FplRequestPriority, FplAdmissionClassTelemetry> =>
@@ -515,7 +516,8 @@ export async function readFplAdmissionTelemetry(
       responseSamples,
       byPriority,
     };
-  } catch {
+  } catch (error) {
+    if (options.throwOnFailure) throw error;
     return {
       waitP50Ms: null,
       waitP95Ms: null,

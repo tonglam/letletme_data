@@ -984,6 +984,8 @@ type SummaryAccumulatorV2 = {
   estimatedCount: number;
   valueSum: number;
   buckets: Map<string, number>;
+  firstObservedAt: Date;
+  lastObservedAt: Date;
 };
 
 function v2RepresentativeBucket(metric: string, bucket: string): number | null {
@@ -1087,11 +1089,25 @@ async function getClientSignalV2Summary(
       estimatedCount: 0,
       valueSum: 0,
       buckets: new Map(),
+      firstObservedAt: new Date(row.first_observed_at),
+      lastObservedAt: new Date(row.last_observed_at),
     };
     accumulator.observedCount += Number.isFinite(observedCount) ? observedCount : 0;
     accumulator.occurrenceCount += Number.isFinite(occurrenceCount) ? occurrenceCount : 0;
     accumulator.estimatedCount += Number.isFinite(estimatedCount) ? estimatedCount : 0;
     accumulator.valueSum += Number.isFinite(valueSum) ? valueSum : 0;
+    const firstObservedAt = new Date(row.first_observed_at);
+    const lastObservedAt = new Date(row.last_observed_at);
+    if (Number.isFinite(firstObservedAt.getTime())) {
+      accumulator.firstObservedAt = new Date(
+        Math.min(accumulator.firstObservedAt.getTime(), firstObservedAt.getTime()),
+      );
+    }
+    if (Number.isFinite(lastObservedAt.getTime())) {
+      accumulator.lastObservedAt = new Date(
+        Math.max(accumulator.lastObservedAt.getTime(), lastObservedAt.getTime()),
+      );
+    }
     accumulator.buckets.set(
       row.bucket,
       (accumulator.buckets.get(row.bucket) ?? 0) +
@@ -1115,6 +1131,8 @@ async function getClientSignalV2Summary(
     observedCount: item.observedCount,
     occurrenceCount: item.occurrenceCount,
     estimatedCount: item.estimatedCount,
+    firstObservedAt: item.firstObservedAt.toISOString(),
+    lastObservedAt: item.lastObservedAt.toISOString(),
     estimatedBucketCounts: Object.fromEntries(
       [...item.buckets.entries()].sort(
         (left, right) =>
@@ -1122,7 +1140,10 @@ async function getClientSignalV2Summary(
           (v2RepresentativeBucket(item.metric, right[0]) ?? Number.POSITIVE_INFINITY),
       ),
     ),
-    estimatedValueMean: item.estimatedCount > 0 ? item.valueSum / item.estimatedCount : null,
+    estimatedValueMean:
+      NUMERIC_METRICS.has(item.metric as ClientSignalMetric) && item.estimatedCount > 0
+        ? item.valueSum / item.estimatedCount
+        : null,
     approximateP75: v2ApproximateQuantile(item, 0.75),
     approximateP95: v2ApproximateQuantile(item, 0.95),
     approximateP75Overflow: v2QuantileOverflow(item, 0.75),

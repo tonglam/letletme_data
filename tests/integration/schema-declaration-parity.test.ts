@@ -203,7 +203,10 @@ function normalizeConstraint(row: ConstraintRow): ConstraintRow {
 }
 
 function normalizeIndex(row: IndexRow): IndexRow {
-  if (row.index_name !== 'dataset_publications_one_active_scope_idx') {
+  if (
+    row.index_name !== 'dataset_publications_one_active_scope_idx' &&
+    row.index_name !== 'client_signal_v2_windows_identity'
+  ) {
     return row;
   }
   return {
