@@ -336,12 +336,12 @@ export function resolveLivePicksRefreshFanout(
 
 export type LivePicksRoundEvidence = Readonly<{
   event: 'live_picks_round';
-  phase: 'coverage_scan' | 'canary_probe' | 'fanout';
-  cohortCount: number;
-  newEnqueueCount: number;
-  dedupReusedCount: number;
-  pendingCheckpointCount: number;
-  completedCount: number;
+  phase: 'backoff' | 'coverage_scan' | 'canary_probe' | 'fanout';
+  cohortCount: number | null;
+  newEnqueueCount: number | null;
+  dedupReusedCount: number | null;
+  pendingCheckpointCount: number | null;
+  completedCount: number | null;
   completionRate: number | null;
   providerAdmissionWaitP95Ms: number | null;
   sqlTimeMs: number | null;
@@ -350,8 +350,8 @@ export type LivePicksRoundEvidence = Readonly<{
   scanComplete: boolean;
 }>;
 
-function boundedRoundCount(value: number, maximum: number): number {
-  if (!Number.isFinite(value)) return 0;
+function boundedRoundCount(value: number | null, maximum: number): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
   return Math.max(0, Math.min(maximum, Math.floor(value)));
 }
 
@@ -362,11 +362,11 @@ function boundedRoundCount(value: number, maximum: number): number {
  */
 export function buildLivePicksRoundEvidence(input: {
   phase: LivePicksRoundEvidence['phase'];
-  cohortCount: number;
-  newEnqueueCount: number;
-  dedupReusedCount: number;
-  pendingCheckpointCount: number;
-  completedCount: number;
+  cohortCount: number | null;
+  newEnqueueCount: number | null;
+  dedupReusedCount: number | null;
+  pendingCheckpointCount: number | null;
+  completedCount: number | null;
   providerAdmissionWaitP95Ms?: number | null;
   sqlTimeMs?: number | null;
   remainingDeadlineMs?: number | null;
@@ -374,16 +374,23 @@ export function buildLivePicksRoundEvidence(input: {
   scanComplete: boolean;
 }): LivePicksRoundEvidence {
   const cohortCount = boundedRoundCount(input.cohortCount, Number.MAX_SAFE_INTEGER);
-  const completedCount = boundedRoundCount(input.completedCount, cohortCount);
+  const completedCount =
+    cohortCount === null ? null : boundedRoundCount(input.completedCount, cohortCount);
   return {
     event: 'live_picks_round',
     phase: input.phase,
     cohortCount,
-    newEnqueueCount: boundedRoundCount(input.newEnqueueCount, cohortCount),
-    dedupReusedCount: boundedRoundCount(input.dedupReusedCount, cohortCount),
-    pendingCheckpointCount: boundedRoundCount(input.pendingCheckpointCount, cohortCount),
+    newEnqueueCount:
+      cohortCount === null ? null : boundedRoundCount(input.newEnqueueCount, cohortCount),
+    dedupReusedCount:
+      cohortCount === null ? null : boundedRoundCount(input.dedupReusedCount, cohortCount),
+    pendingCheckpointCount:
+      cohortCount === null ? null : boundedRoundCount(input.pendingCheckpointCount, cohortCount),
     completedCount,
-    completionRate: cohortCount > 0 ? completedCount / cohortCount : null,
+    completionRate:
+      cohortCount !== null && cohortCount > 0 && completedCount !== null
+        ? completedCount / cohortCount
+        : null,
     providerAdmissionWaitP95Ms:
       typeof input.providerAdmissionWaitP95Ms === 'number' &&
       Number.isFinite(input.providerAdmissionWaitP95Ms) &&
@@ -411,11 +418,11 @@ async function recordLivePicksRoundEvidence(input: {
   eventId: number;
   deadlineAt?: Date | null;
   phase: LivePicksRoundEvidence['phase'];
-  cohortCount: number;
-  newEnqueueCount: number;
-  dedupReusedCount: number;
-  pendingCheckpointCount: number;
-  completedCount: number;
+  cohortCount: number | null;
+  newEnqueueCount: number | null;
+  dedupReusedCount: number | null;
+  pendingCheckpointCount: number | null;
+  completedCount: number | null;
   sourceReady: boolean;
   scanComplete: boolean;
 }): Promise<void> {
@@ -1028,12 +1035,15 @@ export async function runPicksProbeAndSync(
     await recordLivePicksRoundEvidence({
       eventId,
       deadlineAt: coordinatorDeadlineAt,
-      phase: 'coverage_scan',
-      cohortCount: 0,
-      newEnqueueCount: 0,
-      dedupReusedCount: 0,
-      pendingCheckpointCount: 0,
-      completedCount: 0,
+      phase: 'backoff',
+      // The coordinator has not resolved the eligible-entry cohort on this
+      // fenced no-op path. Null preserves that unknown state instead of
+      // reporting a false empty cohort or a zero completion count.
+      cohortCount: null,
+      newEnqueueCount: null,
+      dedupReusedCount: null,
+      pendingCheckpointCount: null,
+      completedCount: null,
       sourceReady: state.canarySucceeded,
       scanComplete: false,
     });
@@ -1159,6 +1169,7 @@ export async function runPicksProbeAndSync(
       eventId,
       canaries: canaries.length,
     });
+    const incompleteEntryIds = uniqueNumbers([...pending, ...pendingCheckpoints]);
     const freshnessEvidenceRecorded = await recordDurableFreshness(false);
     await recordLivePicksRoundEvidence({
       eventId,
@@ -1167,8 +1178,8 @@ export async function runPicksProbeAndSync(
       cohortCount: entryIds.length,
       newEnqueueCount: 0,
       dedupReusedCount: 0,
-      pendingCheckpointCount: pending.length,
-      completedCount: entryIds.length - pending.length,
+      pendingCheckpointCount: pendingCheckpoints.length,
+      completedCount: entryIds.length - incompleteEntryIds.length,
       sourceReady: false,
       scanComplete: false,
     });

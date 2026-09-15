@@ -51,6 +51,30 @@ describe('live lifecycle decisions', () => {
     });
   });
 
+  test('keeps fenced backoff cohort counts unknown', () => {
+    expect(
+      buildLivePicksRoundEvidence({
+        phase: 'backoff',
+        cohortCount: null,
+        newEnqueueCount: null,
+        dedupReusedCount: null,
+        pendingCheckpointCount: null,
+        completedCount: null,
+        sourceReady: true,
+        scanComplete: false,
+      }),
+    ).toMatchObject({
+      event: 'live_picks_round',
+      phase: 'backoff',
+      cohortCount: null,
+      newEnqueueCount: null,
+      dedupReusedCount: null,
+      pendingCheckpointCount: null,
+      completedCount: null,
+      completionRate: null,
+    });
+  });
+
   test('retires only a completed empty Live Picks cohort as not applicable', () => {
     expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, true)).toBe(true);
     expect(shouldMarkLivePicksFreshnessNotApplicable(0, 0, false)).toBe(false);
