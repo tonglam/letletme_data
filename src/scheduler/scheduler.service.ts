@@ -24,6 +24,7 @@ import {
   recordCheckpointFreshnessEvidence,
 } from '../services/scheduler-obligation-lifecycle.service';
 import {
+  acknowledgeSupersededSchedulerLane,
   advanceSchedulerLane,
   claimSchedulerLaneDispatch,
   confirmSchedulerLaneEnqueued,
@@ -31,9 +32,12 @@ import {
   getSchedulerLane,
   getSchedulerLaneTarget,
   getSchedulerLaneTargets,
+  listLiveSnapshotRecoveryLanes,
   recoverSchedulerLaneAfterBullLoss,
+  retireSchedulerLaneForStaleSeason,
   unblockSchedulerLane,
   type SchedulerLane,
+  type SchedulerLaneTarget,
 } from '../repositories/scheduler-lanes';
 import {
   resolveSchedulerContext,
@@ -43,6 +47,7 @@ import {
   type SchedulerContext,
   type SchedulerObligationPlan,
 } from './job-registry';
+import { isFplSeasonCode, type FplSeasonRef } from '../domain/fpl-season';
 import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { QueueDrainOnlyError, readQueueAdmission } from '../services/queue-governance.service';
@@ -100,18 +105,63 @@ const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
   'league-event-results',
   'tournament-event-results',
 ] as const;
+// FINAL readiness is evaluated by the worker, which may defer the same
+// durable obligation while source evidence is still incomplete. Revisit its
+// stable period key on every scheduler pass so the persisted due_at/backoff
+// remains the only admission gate for the next real readiness check.
+const FINAL_DEPENDENCY_REVISIT_JOBS = new Set(['my-fpl-finalization']);
 const observedPlanKeys = new Map<string, true>();
+
+export function shouldRevisitSchedulerPlan(
+  definition: Pick<ScheduledJobDefinition, 'name' | 'executionPolicy'>,
+  planWasObserved: boolean,
+): boolean {
+  return (
+    !planWasObserved ||
+    Boolean(definition.executionPolicy) ||
+    FINAL_DEPENDENCY_REVISIT_JOBS.has(definition.name)
+  );
+}
 
 // A definition resolver may still be unwinding after its bounded caller
 // timeout (for example, a driver socket that has not observed cancellation
-// yet). Coalesce that underlying operation per definition so the next 30s
-// pass cannot create another identical provider/DB request while the first is
-// still in flight. The entry is removed only after the actual resolver
-// settles; each pass still gets its own bounded timeout around that promise.
+// yet). Coalesce that underlying operation across scheduler contexts while
+// the season/event inputs are unchanged. `now` intentionally is not part of
+// the key: a new 30-second pass must not start a duplicate provider/DB
+// operation merely because the previous one has not observed cancellation.
+// A changed semantic input replaces the old entry, while the identity check
+// in `finally` prevents the old promise from deleting the newer one.
+type DefinitionResolutionInFlight = Readonly<{
+  contextKey: string;
+  promise: Promise<readonly SchedulerObligationPlan[]>;
+}>;
+
 const definitionResolutionInFlight = new WeakMap<
   ScheduledJobDefinition,
-  Promise<readonly SchedulerObligationPlan[]>
+  DefinitionResolutionInFlight
 >();
+
+function schedulerResolutionContextKey(context: SchedulerContext): string {
+  return JSON.stringify({
+    season: {
+      seasonId: context.season.seasonId,
+      seasonCode: context.season.seasonCode,
+    },
+    currentEventId: context.currentEventId ?? null,
+    currentEventDeadline: context.currentEventDeadline?.getTime() ?? null,
+    latestFinalizedEventId: context.latestFinalizedEventId ?? null,
+    events: [...context.events]
+      .sort((left, right) => left.id - right.id)
+      .map((event) => ({
+        id: event.id,
+        deadlineTime: event.deadlineTime?.getTime() ?? null,
+        finished: event.finished ?? null,
+        dataChecked: event.dataChecked ?? null,
+        dataCheckedAt: event.dataCheckedAt?.getTime() ?? null,
+        updatedAt: event.updatedAt?.getTime() ?? null,
+      })),
+  });
+}
 
 function evidenceNumber(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
   const value = evidence?.[key];
@@ -121,6 +171,31 @@ function evidenceNumber(evidence: Readonly<Record<string, unknown>> | undefined,
 function evidenceString(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
   const value = evidence?.[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+export function liveSnapshotScopeIdentity(scopeKey: string): {
+  seasonCode: string;
+  eventId: number;
+} {
+  const match = /^(\d{4}):event:([1-9][0-9]*)$/.exec(scopeKey);
+  if (!match || !isFplSeasonCode(match[1])) {
+    throw new Error(`Invalid persisted live-snapshot lane scope: ${scopeKey}`);
+  }
+  const eventId = Number(match[2]);
+  if (!Number.isSafeInteger(eventId) || eventId <= 0) {
+    throw new Error(`Invalid persisted live-snapshot lane event scope: ${scopeKey}`);
+  }
+  return { seasonCode: match[1], eventId };
+}
+
+async function contextForPersistedLiveSnapshotLane(
+  lane: Pick<SchedulerLane, 'scopeKey'>,
+  currentContext: SchedulerContext,
+): Promise<SchedulerContext> {
+  const seasonCode = liveSnapshotScopeIdentity(lane.scopeKey).seasonCode;
+  if (seasonCode === currentContext.season.seasonCode) return currentContext;
+  const laneSeason = await seasonRepository.requireByCode(seasonCode);
+  return resolveSchedulerContext(laneSeason, currentContext.now);
 }
 
 function hotSourcePeriodIdentity(options: {
@@ -392,26 +467,27 @@ export async function resolveSchedulerDefinition(
 > {
   try {
     const timeoutMs = options.timeoutMs ?? getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS;
-    let underlying = definitionResolutionInFlight.get(definition);
-    if (!underlying) {
+    const contextKey = schedulerResolutionContextKey(context);
+    let entry = definitionResolutionInFlight.get(definition);
+    if (!entry || entry.contextKey !== contextKey) {
       const resolution = Promise.resolve().then(() => definition.resolve(context));
       const tracked = resolution.finally(() => {
-        if (definitionResolutionInFlight.get(definition) === tracked) {
+        if (definitionResolutionInFlight.get(definition)?.promise === tracked) {
           definitionResolutionInFlight.delete(definition);
         }
       });
-      underlying = tracked;
-      definitionResolutionInFlight.set(definition, tracked);
+      entry = { contextKey, promise: tracked };
+      definitionResolutionInFlight.set(definition, entry);
     }
     const plans = await withTimeout(
-      underlying,
+      entry.promise,
       timeoutMs,
       `Scheduler definition ${definition.name} resolution exceeded ${timeoutMs}ms`,
     );
     return { ok: true, plans };
   } catch (error) {
     if (error instanceof TimeoutError) {
-      const underlying = definitionResolutionInFlight.get(definition);
+      const underlying = definitionResolutionInFlight.get(definition)?.promise;
       if (underlying) {
         // A resolver may be backed by a driver operation that cannot be
         // cancelled by Promise.race. Keep the single-flight promise in the
@@ -666,6 +742,156 @@ export async function triggerPriceChangeLane(
   }
 }
 
+/**
+ * Route an automatic live freshness repair through the event-scoped
+ * latest-authoritative lane. Historical windows whose lifecycle no longer
+ * resolves to an active live plan remain evidence for review and are not
+ * allowed to launch a parallel direct provider job.
+ */
+export async function triggerLiveSnapshotLane(input: {
+  eventId: number;
+  freshnessWindowId?: number;
+  repairKey: string;
+  season: FplSeasonRef;
+}): Promise<{
+  bullJobId?: string | number;
+  runId?: string;
+  state: 'enqueued' | 'pending';
+}> {
+  const definition = definitionByName('live-snapshot');
+  if (!definition?.executionPolicy) {
+    throw new Error('Live-snapshot latest-authoritative lane is disabled');
+  }
+  const season = input.season;
+  const context = await resolveSchedulerContext(season, new Date());
+  const resolution = await resolveSchedulerDefinition(definition, context);
+  if (!resolution.ok) throw resolution.error;
+  const expectedScopeKey = `${season.seasonCode}:event:${input.eventId}`;
+  const sourcePlan = resolution.plans.find(
+    (candidate) =>
+      candidate.eventId === input.eventId &&
+      candidate.scopeKey === expectedScopeKey &&
+      candidate.terminalStatus === undefined,
+  );
+  if (!sourcePlan) {
+    throw new Error(
+      `Live freshness repair is historical or no longer active for event ${input.eventId}`,
+    );
+  }
+  const observedAt = new Date();
+  const plan: SchedulerObligationPlan = {
+    ...sourcePlan,
+    periodKey: `live-repair-${input.eventId}-${input.repairKey}`,
+    dueAt: observedAt,
+    source: 'reconcile',
+    evidence: {
+      ...(sourcePlan.evidence ?? {}),
+      repair: 'freshness-governance',
+      freshnessWindowId: input.freshnessWindowId ?? null,
+      decisionObservedAt: observedAt.toISOString(),
+      decisionObservedAtMs: observedAt.getTime(),
+      scheduledDueAtMs: observedAt.getTime(),
+    },
+  };
+  const obligation = await reserveSchedulerObligation({
+    definition: { ...definition, queueName: schedulerLaneName(definition) },
+    plan,
+  });
+  const laneKey = definition.executionPolicy.laneKey({ context, plan });
+  const advanced = await advanceSchedulerLane({
+    laneKey,
+    jobName: definition.name,
+    scopeKey: plan.scopeKey,
+    queueName: definition.queueName,
+    desiredObligation: obligation,
+    preserveFreshnessHistory: true,
+    supersedeBatchSize: 250,
+  });
+  if (input.freshnessWindowId !== undefined) {
+    await attachFreshnessWindowToSchedulerObligation({
+      obligationId: advanced.lane.desiredObligationId,
+      freshnessWindowId: input.freshnessWindowId,
+    });
+    if (!advanced.shouldDispatch && advanced.lane.activeObligationId) {
+      await attachFreshnessWindowToSchedulerObligation({
+        obligationId: advanced.lane.activeObligationId,
+        freshnessWindowId: input.freshnessWindowId,
+      });
+    }
+  }
+  if (!advanced.shouldDispatch) {
+    return {
+      ...(advanced.lane.bullJobId
+        ? { bullJobId: advanced.lane.bullJobId }
+        : advanced.lane.blockerJobId
+          ? { bullJobId: advanced.lane.blockerJobId }
+          : {}),
+      ...(advanced.lane.runId ? { runId: advanced.lane.runId } : {}),
+      state: 'pending',
+    };
+  }
+  const dispatch = await claimSchedulerLaneDispatch({ laneId: advanced.lane.laneId });
+  if (!dispatch) {
+    const current = await getSchedulerLane({ laneId: advanced.lane.laneId });
+    return {
+      ...(current?.bullJobId ? { bullJobId: current.bullJobId } : {}),
+      ...(current?.runId ? { runId: current.runId } : {}),
+      state: 'pending',
+    };
+  }
+  const target = await getSchedulerLaneTarget({ laneId: dispatch.lane.laneId });
+  if (!target) throw new Error('Live freshness repair target disappeared before enqueue');
+  try {
+    const result = await definition.enqueue({
+      context,
+      plan: {
+        scopeKey: target.obligation.scopeKey,
+        periodKey: target.obligation.periodKey,
+        dueAt: target.obligation.dueAt,
+        source: target.obligation.source,
+        eventId: input.eventId,
+        evidence: target.obligation.evidence,
+      },
+      obligationId: target.obligation.obligationId,
+      generation: target.obligation.generation,
+      freshnessWindowId: input.freshnessWindowId,
+      freshnessWindowIds: freshnessWindowIdsFromEvidence(target.obligation.evidence),
+      laneId: dispatch.lane.laneId,
+      dispatchGeneration: dispatch.lane.dispatchGeneration,
+    });
+    if (result?.bullJobId === undefined)
+      throw new Error('Live freshness repair returned no Bull ID');
+    const confirmed = await confirmSchedulerLaneEnqueued({
+      laneId: dispatch.lane.laneId,
+      owner: dispatch.owner,
+      bullJobId: result.bullJobId,
+      runId: result.runId,
+      obligationId: target.obligation.obligationId,
+      queueName: dispatch.lane.queueName,
+    });
+    if (!confirmed) throw new Error('Live freshness lane enqueue confirmation CAS failed');
+    return { ...result, state: 'enqueued' };
+  } catch (error) {
+    await reconcileSingleFlightBullState(dispatch.lane).catch((reconcileError) => {
+      logError('Live freshness enqueue ambiguity reconciliation failed', reconcileError, {
+        laneId: dispatch.lane.laneId,
+        dispatchGeneration: dispatch.lane.dispatchGeneration,
+      });
+    });
+    const current = await getSchedulerLane({ laneId: dispatch.lane.laneId });
+    if (current?.state === 'enqueued' || current?.state === 'running') {
+      return {
+        ...(current.bullJobId ? { bullJobId: current.bullJobId } : {}),
+        ...(current.runId ? { runId: current.runId } : {}),
+        state: 'pending',
+      };
+    }
+    if (current?.state === 'dispatching') return { state: 'pending' };
+    await failSchedulerLaneDispatch({ laneId: dispatch.lane.laneId, owner: dispatch.owner, error });
+    throw error;
+  }
+}
+
 let compatibilityPassInFlight: Promise<void> | null = null;
 
 function definitionByName(name: string): ScheduledJobDefinition | undefined {
@@ -774,7 +1000,12 @@ async function reconcileSingleFlightBullState(
       // enqueueFplCriticalPriceChangeJob applies the season prefix through
       // getExplicitDataSyncQueueJobId; mirror that exact Bull identity when
       // recovering an enqueue whose response was lost.
-      const expectedJobId = `${lane.scopeKey}-scheduler-lane-${lane.laneId}-g${lane.dispatchGeneration}`;
+      // Live snapshot scopes include `season:event:<id>` while Bull's
+      // explicit ID is prefixed by the season code. Price lanes keep the
+      // historical season-only scope, so derive the same prefix for both.
+      const bullIdPrefix =
+        lane.jobName === 'live-snapshot' ? lane.scopeKey.split(':')[0] : lane.scopeKey;
+      const expectedJobId = `${bullIdPrefix}-scheduler-lane-${lane.laneId}-g${lane.dispatchGeneration}`;
       const job = await queue.getJob(expectedJobId);
       const state = job ? await job.getState() : 'missing';
       if (['waiting', 'delayed', 'active', 'paused', 'prioritized'].includes(state)) {
@@ -801,7 +1032,9 @@ async function reconcileSingleFlightBullState(
           dispatchGeneration: lane.dispatchGeneration,
           bullJobId: expectedJobId,
           bullState: state,
-          obligationId: lane.desiredObligationId,
+          obligationId:
+            job?.data?.obligationId ??
+            (lane.jobName === 'live-snapshot' ? undefined : lane.desiredObligationId),
         });
         if (!recovered) {
           logError('Latest-wins dispatch loss recovery CAS failed', undefined, {
@@ -838,26 +1071,9 @@ async function reconcileSingleFlightBullState(
   if (!['enqueued', 'running'].includes(lane.state) || !lane.bullJobId) return;
   const queue = new Queue(lane.queueName, { connection: getQueueConnection() });
   try {
-    const runnableJobs = await queue.getJobs(
-      ['waiting', 'delayed', 'active', 'prioritized', 'paused'],
-      0,
-      -1,
-    );
-    const laneRunnableJobs = runnableJobs.filter(
-      (job) => job.name === lane.jobName && job.data?.laneId === lane.laneId,
-    );
-    if (laneRunnableJobs.length > 1) {
-      await notifyTwoBots(
-        [
-          'Critical: more than one runnable latest-wins price job',
-          `Lane: ${lane.laneKey}`,
-          `Runnable jobs: ${laneRunnableJobs.map((job) => job.id).join(', ')}`,
-        ].join('\n'),
-        {
-          idempotencyKey: `scheduler-lane-runnable-duplicate:${lane.laneId}:${lane.dispatchGeneration}`,
-        },
-      ).catch(() => undefined);
-    }
+    // The deterministic lane Bull ID is the authoritative bounded lookup.
+    // Duplicate runnable jobs are prevented by the lane CAS and must not be
+    // diagnosed by materializing every runnable job in the queue.
     const job = await queue.getJob(lane.bullJobId);
     const state = job ? await job.getState() : 'missing';
     if (lane.state === 'running' && Date.now() - lane.lastProgressAt.getTime() >= 2 * 60_000) {
@@ -887,6 +1103,14 @@ async function reconcileSingleFlightBullState(
       return;
     }
     if (state === 'completed') {
+      if (lane.jobName === 'live-snapshot') {
+        const settled = await acknowledgeSupersededSchedulerLane({
+          laneId: lane.laneId,
+          dispatchGeneration: lane.dispatchGeneration,
+          bullJobId: lane.bullJobId,
+        });
+        if (settled) return;
+      }
       await notifyTwoBots(
         [
           'Latest-wins lane completed without durable completion',
@@ -905,6 +1129,93 @@ async function reconcileSingleFlightBullState(
   } finally {
     await queue.close();
   }
+}
+
+/**
+ * A live lane can outlive the lifecycle plan that created it (for example
+ * when an event becomes FINALIZED while its Bull job is lost). Reconcile
+ * persisted live-lane candidates independently of the plans selected by the
+ * current resolver so a vanished Bull record or a bounded supersession batch
+ * cannot strand durable work.
+ */
+async function reconcileOutstandingLiveSnapshotLanes(
+  selectedLaneKeys: ReadonlySet<string>,
+  season: Awaited<ReturnType<typeof seasonRepository.findCurrent>>,
+): Promise<{ failed: number; dispatchable: SchedulerLaneTarget[] }> {
+  let failed = 0;
+  const dispatchable: SchedulerLaneTarget[] = [];
+  const lanes = await listLiveSnapshotRecoveryLanes({ limit: 250 });
+  const drainSupersededLiveBatch = async (
+    lane: SchedulerLane,
+  ): Promise<SchedulerLaneTarget | null> => {
+    const target = await getSchedulerLaneTarget({ laneId: lane.laneId });
+    if (!target) {
+      throw new Error(`Persisted live lane target disappeared: ${lane.laneId}`);
+    }
+    // Use the persisted target and lane identity after any Bull recovery. The
+    // same bounded transition can therefore be repeated on every scheduler
+    // pass until all stale pending/failed siblings are terminalized, even if
+    // the lifecycle resolver no longer returns this event.
+    const advanced = await advanceSchedulerLane({
+      laneKey: lane.laneKey,
+      jobName: lane.jobName,
+      scopeKey: lane.scopeKey,
+      queueName: lane.queueName,
+      desiredObligation: target.obligation,
+      preserveFreshnessHistory: true,
+      supersedeBatchSize: 250,
+    });
+    if (!advanced.shouldDispatch) return null;
+    // Bull recovery can leave the desired obligation failed after the
+    // lifecycle resolver has stopped emitting the event. Return the exact
+    // persisted target so the normal fenced enqueue path can dispatch it;
+    // dropping this decision would strand the latest obligation forever.
+    const current = await getSchedulerLaneTarget({ laneId: advanced.lane.laneId });
+    if (!current) {
+      throw new Error(`Persisted live lane target disappeared after advance: ${lane.laneId}`);
+    }
+    return current;
+  };
+  for (const lane of lanes) {
+    if (selectedLaneKeys.has(lane.laneKey)) continue;
+    try {
+      const scopeIdentity = liveSnapshotScopeIdentity(lane.scopeKey);
+      if (scopeIdentity.seasonCode !== season.seasonCode) {
+        const retired = await retireSchedulerLaneForStaleSeason({
+          laneId: lane.laneId,
+          currentSeasonCode: season.seasonCode,
+        });
+        if (retired) {
+          logInfo('Retired stale-season live snapshot lane before recovery', {
+            laneId: lane.laneId,
+            laneKey: lane.laneKey,
+            staleSeason: scopeIdentity.seasonCode,
+            currentSeason: season.seasonCode,
+          });
+        }
+        continue;
+      }
+      if (lane.state !== 'idle') {
+        await reconcileSingleFlightBullState(lane, season);
+      }
+      // An idle lane may be left behind after its lifecycle plan becomes
+      // terminal. Re-run the same bounded latest-wins transition against
+      // its persisted target so the next scheduler pass drains the next
+      // batch of stale pending/failed siblings. If the target itself is
+      // runnable after Bull recovery, return it to the normal fenced enqueue
+      // loop rather than silently dropping the dispatch decision.
+      const recoveredTarget = await drainSupersededLiveBatch(lane);
+      if (recoveredTarget) dispatchable.push(recoveredTarget);
+    } catch (error) {
+      failed += 1;
+      logError('Persisted live lane reconciliation failed', error, {
+        laneId: lane.laneId,
+        laneKey: lane.laneKey,
+        state: lane.state,
+      });
+    }
+  }
+  return { failed, dispatchable };
 }
 
 async function alertPriceLaneFreshness(
@@ -1223,6 +1534,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     string,
     Readonly<{
       definition: ScheduledJobDefinition;
+      context: SchedulerContext;
       plan: SchedulerObligationPlan;
       lane: SchedulerLane;
     }>
@@ -1233,6 +1545,10 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
   // reloads the row, while this map records whether Redis gave us a positive
   // answer for the generation we observed.
   const singleFlightReconciled = new Map<string, boolean>();
+  // A recovery pass can return several lanes from one historical season. A
+  // single canonical context is enough for all of them; avoid repeating the
+  // season-wide event read for every lane in the bounded recovery page.
+  const persistedLiveLaneContexts = new Map<string, SchedulerContext>();
   // Definition planning is pure control-plane work. Resolve independently in
   // a bounded batch so one slow repository/provider-adjacent stage cannot hold
   // the entire 30-second pass hostage, while retaining deterministic result
@@ -1364,9 +1680,11 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       const planKey = schedulerPlanKey(definition, plan);
       // Single-flight lanes must revisit an existing period on every pass so
       // a newly-created desired target can be reconciled after a prior job
-      // completed. All other definitions keep the in-process observation
-      // guard to avoid redundant reservation reads.
-      if (wasPlanObserved(planKey) && !definition.executionPolicy) continue;
+      // completed. FINAL dependency waits use the same stable period key, but
+      // must revisit every pass so a due backoff can trigger a real readiness
+      // check. All other definitions keep the in-process observation guard to
+      // avoid redundant reservation reads.
+      if (!shouldRevisitSchedulerPlan(definition, wasPlanObserved(planKey))) continue;
       try {
         const obligation = await reserveSchedulerObligation({
           definition: { ...definition, queueName: schedulerLaneName(definition) },
@@ -1411,9 +1729,13 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
             scopeKey: plan.scopeKey,
             queueName: definition.queueName,
             desiredObligation: obligation,
+            ...(definition.name === 'live-snapshot'
+              ? { preserveFreshnessHistory: true, supersedeBatchSize: 250 }
+              : {}),
           });
           singleFlightLanes.set(laneKey, {
             definition,
+            context,
             plan,
             lane: advanced.lane,
           });
@@ -1610,6 +1932,61 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       }
     }),
   );
+  try {
+    const recoveredLiveLanes = await reconcileOutstandingLiveSnapshotLanes(
+      new Set(singleFlightLanes.keys()),
+      season,
+    );
+    failed += recoveredLiveLanes.failed;
+    for (const target of recoveredLiveLanes.dispatchable) {
+      const definition = definitionByName(target.lane.jobName);
+      if (!definition?.executionPolicy) {
+        failed += 1;
+        logError(
+          'Persisted live lane has no latest-authoritative definition',
+          new Error(`Missing live-snapshot definition for ${target.lane.laneKey}`),
+          { laneId: target.lane.laneId, laneKey: target.lane.laneKey },
+        );
+        continue;
+      }
+      const scopeIdentity = liveSnapshotScopeIdentity(target.obligation.scopeKey);
+      let laneContext = persistedLiveLaneContexts.get(scopeIdentity.seasonCode);
+      if (!laneContext) {
+        laneContext = await contextForPersistedLiveSnapshotLane(target.lane, context);
+        persistedLiveLaneContexts.set(scopeIdentity.seasonCode, laneContext);
+      }
+      const targetEventId = evidenceNumber(target.obligation.evidence, 'targetEventId');
+      if (targetEventId !== undefined && targetEventId !== scopeIdentity.eventId) {
+        failed += 1;
+        logError(
+          'Persisted live lane target event does not match its scope',
+          new Error(`Expected event ${scopeIdentity.eventId}, found ${targetEventId}`),
+          { laneId: target.lane.laneId, laneKey: target.lane.laneKey },
+        );
+        continue;
+      }
+      const plan: SchedulerObligationPlan = {
+        scopeKey: target.obligation.scopeKey,
+        periodKey: target.obligation.periodKey,
+        dueAt: target.obligation.dueAt,
+        source: target.obligation.source,
+        eventId: scopeIdentity.eventId,
+        evidence: target.obligation.evidence,
+      };
+      singleFlightLanes.set(target.lane.laneKey, {
+        definition,
+        context: laneContext,
+        plan,
+        lane: target.lane,
+      });
+      // The recovery query already reconciled Bull for this generation (or
+      // found an idle target), so the normal dispatch loop may claim it.
+      singleFlightReconciled.set(target.lane.laneId, true);
+    }
+  } catch (error) {
+    failed += 1;
+    logError('Persisted live lane listing failed', error);
+  }
   for (const [laneKey, entry] of singleFlightLanes) {
     if (singleFlightReconciled.get(entry.lane.laneId) !== true) continue;
     const dispatch = await claimSchedulerLaneDispatch({ laneId: entry.lane.laneId });
@@ -1618,16 +1995,22 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     try {
       const target = await getSchedulerLaneTarget({ laneId: dispatch.lane.laneId });
       if (!target) throw new Error(`Scheduler lane target disappeared: ${laneKey}`);
+      const liveScopeIdentity =
+        entry.definition.name === 'live-snapshot'
+          ? liveSnapshotScopeIdentity(target.obligation.scopeKey)
+          : undefined;
       const result = await entry.definition.enqueue({
-        context,
+        context: entry.context,
         plan: {
           scopeKey: target.obligation.scopeKey,
           periodKey: target.obligation.periodKey,
           dueAt: target.obligation.dueAt,
           source: target.obligation.source,
-          ...(typeof target.obligation.evidence.targetEventId === 'number'
-            ? { eventId: target.obligation.evidence.targetEventId }
-            : {}),
+          ...(liveScopeIdentity
+            ? { eventId: liveScopeIdentity.eventId }
+            : typeof target.obligation.evidence.targetEventId === 'number'
+              ? { eventId: target.obligation.evidence.targetEventId }
+              : {}),
           evidence: target.obligation.evidence,
         },
         obligationId: target.obligation.obligationId,

@@ -2070,6 +2070,127 @@ describe('scheduler obligation generation fencing', () => {
     });
   });
 
+  test('removes a provisional execution attempt while retaining claim history', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, bull_job_id, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'live-finalization',
+        'integration:event:dependency-attempt-budget',
+        'case-c',
+        '30-second post-match finalization reconciliation',
+        'UTC',
+        'running',
+        'catchup',
+        clock_timestamp(),
+        0,
+        4,
+        'live-finalization-dependency-attempt',
+        jsonb_build_object('executionAttemptCount', 1, 'executionAttemptGeneration', 0)
+      )
+    `;
+
+    expect(
+      await deferSchedulerObligationForWorker({
+        obligationId: OBLIGATION_ID,
+        generation: 0,
+        dependencyWait: { reasonCodes: ['CLASSIC_LEAGUE_FINAL_NOT_READY'] },
+      }),
+    ).toBe(true);
+    const [row] = await sql<Array<{ attempts: number; evidence: Record<string, unknown> }>>`
+      SELECT attempts, evidence
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(row?.attempts).toBe(4);
+    expect(row?.evidence).toMatchObject({
+      executionAttemptCount: 0,
+      executionAttemptGeneration: null,
+    });
+  });
+
+  test('uses an independent dependency backoff sequence and preserves it across generations', async () => {
+    const sql = await getDbClient();
+    const obligationId = OBLIGATION_ID;
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${obligationId}::uuid,
+        'live-finalization',
+        'integration:event:dependency-backoff',
+        'final-checkpoint',
+        '30-second post-match finalization reconciliation',
+        'UTC',
+        'running',
+        'catchup',
+        clock_timestamp(),
+        0,
+        7,
+        '{}'::jsonb
+      )
+    `;
+
+    const expectedDelays = [60_000, 180_000, 600_000, 900_000, 900_000];
+    let generation = 0;
+    let firstDependencyWaitAt: unknown = null;
+    for (const [index, expectedDelay] of expectedDelays.entries()) {
+      expect(
+        await deferSchedulerObligationForWorker({
+          obligationId,
+          generation,
+          dependencyWait: { reasonCodes: ['CLASSIC_LEAGUE_FINAL_NOT_READY'] },
+        }),
+      ).toBe(true);
+      const [row] = await sql<
+        Array<{
+          status: string;
+          generation: number;
+          attempts: number;
+          evidence: Record<string, unknown>;
+          dueAt: Date;
+        }>
+      >`
+        SELECT status, generation, attempts, evidence, due_at AS "dueAt"
+        FROM ops.scheduler_obligations
+        WHERE obligation_id = ${obligationId}::uuid
+      `;
+      expect(row?.status).toBe('pending');
+      expect(row?.generation).toBe(index + 1);
+      expect(row?.attempts).toBe(7);
+      expect(row?.evidence).toMatchObject({
+        dependencyWaitCount: index + 1,
+        deferDelayMs: expectedDelay,
+        lastDependencyReasonCodes: ['CLASSIC_LEAGUE_FINAL_NOT_READY'],
+      });
+      if (firstDependencyWaitAt === null)
+        firstDependencyWaitAt = row?.evidence.firstDependencyWaitAt;
+      expect(row?.evidence.firstDependencyWaitAt).toBe(firstDependencyWaitAt);
+      expect(Date.parse(String(row?.dueAt))).toBeGreaterThan(Date.now() + expectedDelay - 5_000);
+      generation = index + 1;
+      if (index < expectedDelays.length - 1) {
+        await sql`
+          UPDATE ops.scheduler_obligations
+          SET status = 'running'
+          WHERE obligation_id = ${obligationId}::uuid
+        `;
+      }
+    }
+    expect(
+      await deferSchedulerObligationForWorker({
+        obligationId,
+        generation: generation - 1,
+        dependencyWait: { reasonCodes: ['STALE_CALLBACK'] },
+      }),
+    ).toBe(false);
+  });
+
   test('retries a corrected same-slot authority after the in-flight generation drains', async () => {
     const sql = await getDbClient();
     const originalAuthorityAtMs = Date.parse('2026-08-23T10:00:00Z');

@@ -35,6 +35,10 @@ import {
 import { validateLiveLeaguePublicationV2Checkpoint } from '../cache/live-league-publication-v2';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logDebug, logError } from '../utils/logger';
+import {
+  assertSchedulerLanePublicationFence,
+  type SchedulerLanePublicationFence,
+} from '../repositories/scheduler-lanes';
 
 const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
 
@@ -258,8 +262,9 @@ function missingClassicFinalizationInput(seasonCode: string): SQL {
 export async function readLiveFinalizationPrerequisites(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<{ blocked: boolean }> {
-  const db = await getDb();
+  const db = dbInstance ?? (await getDb());
   const [row] = await db
     .select({
       blocked: sql<boolean>`EXISTS (
@@ -526,6 +531,14 @@ export type LivePublicationV2CheckpointRequest = {
    * proves the facts were observed after the current relational authority.
    */
   readonly observationCheckedAt?: Date | string;
+  /** Optional bounded Drizzle handle supplied by the live worker. */
+  readonly db?: DbOrTransaction;
+  /**
+   * Latest-authoritative live workers keep this lane identity locked while
+   * the durable checkpoint transaction runs. A scheduler cutover therefore
+   * cannot leave a superseded publication checkpointed as the winner.
+   */
+  readonly schedulerLaneFence?: SchedulerLanePublicationFence;
   /**
    * Seed recovery uses an absent durable head as part of its eligibility
    * proof. Enforce that proof only after taking the scope advisory lock so a
@@ -1305,9 +1318,16 @@ export async function checkpointLivePublicationV2(
   ) {
     throw new Error('Live Points V2 checkpoint source timestamp is invalid');
   }
-  const db = await getDb();
+  const db = request.db ?? (await getDb());
   return db
     .transaction(async (tx) => {
+      if (request.schedulerLaneFence) {
+        // Keep the same lane -> scope ordering as scheduler advancement. The
+        // lock is held for the short checkpoint transaction so a newer target
+        // cannot advance between the durable write and its Redis checkpoint
+        // marker.
+        await assertSchedulerLanePublicationFence(tx, request.schedulerLaneFence);
+      }
       const scopeLock = `${season.seasonCode}:${eventId}`;
       // Claim ownership and generation/final ordering are scope-local. Take
       // this lock first so an already-started checkpoint cannot lose its claim

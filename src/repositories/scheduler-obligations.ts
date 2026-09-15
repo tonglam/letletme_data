@@ -1,7 +1,18 @@
 import { validLiveFinalRetentionRecovery } from '../domain/live-final-retention-policy';
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  lte,
+  notInArray,
+  sql,
+  type SQL,
+  type SQLWrapper,
+} from 'drizzle-orm';
 
 import {
   dataGovernanceCasesInOps,
@@ -13,6 +24,7 @@ import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-
 import {
   contractForSchedulerJob,
   contractHasFreshnessWindow,
+  finalDependencyRetryDelayMs,
   registeredSchedulerJobNames,
 } from '../domain/data-contracts';
 import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
@@ -137,6 +149,27 @@ function dateValue(value: Date | string | null | undefined): Date | null {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error('Invalid scheduler timestamp');
   return date;
+}
+
+function liveDecisionObservedAtMs(evidence: unknown): number | null {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return null;
+  const record = evidence as Record<string, unknown>;
+  const numeric = record.decisionObservedAtMs;
+  if (typeof numeric === 'number' && Number.isSafeInteger(numeric) && numeric >= 0) {
+    const date = new Date(numeric);
+    return Number.isFinite(date.getTime()) ? numeric : null;
+  }
+  if (typeof numeric === 'string' && /^[0-9]+$/.test(numeric)) {
+    const parsed = Number(numeric);
+    const date = new Date(parsed);
+    return Number.isSafeInteger(parsed) && parsed >= 0 && Number.isFinite(date.getTime())
+      ? parsed
+      : null;
+  }
+  const iso = record.decisionObservedAt;
+  if (typeof iso !== 'string') return null;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function freshnessWindowIdsFromEvidence(evidence: unknown): number[] {
@@ -326,6 +359,18 @@ function postMatchScheduleAnchorForSql(evidence: SQL) {
   END`;
 }
 
+function liveDecisionObservedAtSql(evidence: SQLWrapper) {
+  return sql`CASE
+    WHEN ${evidence}->>'decisionObservedAtMs' ~ '^[0-9]+$'
+      AND (${evidence}->>'decisionObservedAtMs')::numeric BETWEEN 0 AND 8640000000000000
+      THEN to_timestamp((${evidence}->>'decisionObservedAtMs')::double precision / 1000)
+    WHEN ${evidence}->>'decisionObservedAt' ~
+      '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+      THEN (${evidence}->>'decisionObservedAt')::timestamptz
+    ELSE NULL
+  END`;
+}
+
 // Slot indexes are relative to the last fixture's expected end and can move
 // when that fixture is rescheduled. Rank schedule versions by their persisted
 // fixture update timestamp, then slots within one version by their immutable
@@ -415,6 +460,42 @@ function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
         ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
       )
     ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'decisionObservedAt'
+      THEN jsonb_build_object(
+        'decisionObservedAt', ${schedulerObligationsInOps.evidence}->'decisionObservedAt'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'decisionObservedAtMs'
+      THEN jsonb_build_object(
+        'decisionObservedAtMs', ${schedulerObligationsInOps.evidence}->'decisionObservedAtMs'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'dependencyWaitCount'
+      THEN jsonb_build_object(
+        'dependencyWaitCount', ${schedulerObligationsInOps.evidence}->'dependencyWaitCount'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'firstDependencyWaitAt'
+      THEN jsonb_build_object(
+        'firstDependencyWaitAt', ${schedulerObligationsInOps.evidence}->'firstDependencyWaitAt'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'lastDependencyReasonCodes'
+      THEN jsonb_build_object(
+        'lastDependencyReasonCodes', ${schedulerObligationsInOps.evidence}->'lastDependencyReasonCodes'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'deferDelayMs'
+      THEN jsonb_build_object(
+        'deferDelayMs', ${schedulerObligationsInOps.evidence}->'deferDelayMs'
+      )
+    ELSE '{}'::jsonb
   END`;
 }
 
@@ -485,6 +566,51 @@ export async function reserveSchedulerObligation(input: {
     .limit(1);
   const row = existing[0];
   if (!row) throw new Error('Scheduler obligation disappeared after conflict');
+  // A live lifecycle decision can be re-evaluated inside the same bucket. Keep
+  // the durable target identity stable, but refresh its observed decision time
+  // and state while it is still waiting so latest-authoritative ordering is
+  // based on the real observation rather than the first poll in the bucket.
+  if (
+    input.definition.name === 'live-snapshot' &&
+    input.plan.evidence &&
+    liveDecisionObservedAtMs(input.plan.evidence) !== null &&
+    ['pending', 'failed'].includes(row.status)
+  ) {
+    const incomingObservedAtMs = liveDecisionObservedAtMs(input.plan.evidence)!;
+    const currentObservedAtMs = liveDecisionObservedAtMs(row.evidence);
+    // A retry/replay can arrive after a newer scheduler decision for the same
+    // period has already been persisted. Keep the newer observation as the
+    // lane waterline; equal observations remain idempotent and may merge
+    // lifecycle metadata.
+    if (currentObservedAtMs === null || incomingObservedAtMs >= currentObservedAtMs) {
+      const persistedObservedAt = liveDecisionObservedAtSql(schedulerObligationsInOps.evidence);
+      const refreshed = await db
+        .update(schedulerObligationsInOps)
+        .set({
+          evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(input.plan.evidence)}::jsonb`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(schedulerObligationsInOps.obligationId, row.obligationId),
+            inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+            sql`${persistedObservedAt} IS NULL OR ${persistedObservedAt} <= to_timestamp(${incomingObservedAtMs}::double precision / 1000)`,
+          ),
+        )
+        .returning();
+      if (refreshed[0]) return mapRow(refreshed[0]);
+    }
+    // Another scheduler replica may have won the compare-and-set after this
+    // caller read `row`. Return the committed row rather than stale lifecycle
+    // evidence that could be dispatched by the caller.
+    const current = await db
+      .select()
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, row.obligationId))
+      .limit(1);
+    if (!current[0]) throw new Error('Scheduler obligation disappeared during live refresh');
+    return mapRow(current[0]);
+  }
   const eventPriority =
     input.definition.name === 'my-fpl-finalization' ? myFplEventPriorityFromPlan(input.plan) : null;
   if (eventPriority !== null) {
@@ -1226,6 +1352,8 @@ export async function deferSchedulerObligationForWorker(input: {
   generation: number;
   delayMs?: number;
   evidence?: Record<string, unknown>;
+  /** Dependency waits use their own bounded backoff and do not consume attempts. */
+  dependencyWait?: Readonly<{ reasonCodes?: readonly string[] }>;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -1234,11 +1362,54 @@ export async function deferSchedulerObligationForWorker(input: {
     throw new Error('Scheduler generation must be a non-negative integer');
   }
   if (!Number.isSafeInteger(delayMs)) throw new Error('Scheduler defer delay must be an integer');
+  const dependencyReasonCodes = (input.dependencyWait?.reasonCodes ?? [])
+    .filter((code): code is string => typeof code === 'string' && code.length > 0)
+    .slice(0, 16)
+    .map((code) => code.slice(0, 160));
+  const dependencyWaitCountSql = sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'dependencyWaitCount' ~ '^[0-9]+$'
+      THEN LEAST((${schedulerObligationsInOps.evidence}->>'dependencyWaitCount')::numeric, 1000000)
+    ELSE 0
+  END`;
+  const nextDependencyWaitCountSql = sql`(${dependencyWaitCountSql} + 1)`;
+  const dependencyDelaySql = sql`(
+    CASE
+      WHEN ${nextDependencyWaitCountSql} = 1 THEN ${finalDependencyRetryDelayMs(0)}
+      WHEN ${nextDependencyWaitCountSql} = 2 THEN ${finalDependencyRetryDelayMs(1)}
+      WHEN ${nextDependencyWaitCountSql} = 3 THEN ${finalDependencyRetryDelayMs(2)}
+      ELSE ${finalDependencyRetryDelayMs(3)}
+    END
+  )::bigint`;
+  const executionAttemptCountSql = sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'executionAttemptCount' ~ '^[0-9]+$'
+      THEN (${schedulerObligationsInOps.evidence}->>'executionAttemptCount')::numeric
+    ELSE NULL
+  END`;
+  const executionAttemptGenerationIsCurrentSql = sql`(
+    ${schedulerObligationsInOps.evidence}->>'executionAttemptGeneration' = ${String(input.generation)}
+  )`;
+  const dependencyEvidenceSql = input.dependencyWait
+    ? sql`jsonb_build_object(
+        'dependencyWaitCount', ${nextDependencyWaitCountSql},
+        'firstDependencyWaitAt', COALESCE(${schedulerObligationsInOps.evidence}->>'firstDependencyWaitAt', clock_timestamp()::text),
+        'lastDependencyReasonCodes', ${JSON.stringify(dependencyReasonCodes)}::jsonb,
+        'deferDelayMs', ${dependencyDelaySql},
+        'executionAttemptCount', CASE
+          WHEN ${executionAttemptGenerationIsCurrentSql}
+            AND ${executionAttemptCountSql} IS NOT NULL
+            THEN GREATEST(${executionAttemptCountSql} - 1, 0)
+          ELSE ${executionAttemptCountSql}
+        END,
+        'executionAttemptGeneration', NULL
+      )`
+    : sql`'{}'::jsonb`;
   const result = await db
     .update(schedulerObligationsInOps)
     .set({
       status: 'pending',
-      dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
+      dueAt: input.dependencyWait
+        ? sql`clock_timestamp() + ${dependencyDelaySql} * interval '1 millisecond'`
+        : sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
       generation: sql`${schedulerObligationsInOps.generation} + 1`,
       leaseOwner: null,
       leaseExpiresAt: null,
@@ -1250,8 +1421,8 @@ export async function deferSchedulerObligationForWorker(input: {
         ...(input.evidence ?? {}),
         deferredForPrerequisite: true,
         deferredAt: new Date().toISOString(),
-        deferDelayMs: delayMs,
-      })}::jsonb`,
+        ...(input.dependencyWait ? {} : { deferDelayMs: delayMs }),
+      })}::jsonb || ${dependencyEvidenceSql}`,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(
@@ -1449,6 +1620,17 @@ export async function claimSchedulerObligations(
           status: 'enqueued',
           generation: nextGeneration,
           attempts: sql`${schedulerObligationsInOps.attempts} + 1`,
+          // `attempts` remains the durable claim history. Track execution
+          // attempts separately so a prerequisite-only claim can be removed
+          // from the retry budget when the worker defers it before doing work.
+          evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
+            'executionAttemptCount', CASE
+              WHEN ${schedulerObligationsInOps.evidence}->>'executionAttemptCount' ~ '^[0-9]+$'
+                THEN (${schedulerObligationsInOps.evidence}->>'executionAttemptCount')::numeric + 1
+              ELSE 1
+            END,
+            'executionAttemptGeneration', ${nextGeneration}::integer
+          )`,
           leaseOwner: owner,
           leaseExpiresAt,
           // Correlation belongs to one generation. A failed generation must
@@ -2098,7 +2280,12 @@ export async function failSchedulerObligation(input: {
   // generation.  Keep transient/provider retries bounded at the scheduler
   // layer as well as at Bull's per-job attempt layer; otherwise a source that
   // stays unavailable would create an unbounded stream of new generations.
-  const terminalAfterThisAttempt = sql`${schedulerObligationsInOps.attempts} >= ${retryPolicy.maxAttempts}`;
+  const executionAttempts = sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'executionAttemptCount' ~ '^[0-9]+$'
+      THEN (${schedulerObligationsInOps.evidence}->>'executionAttemptCount')::numeric
+    ELSE ${schedulerObligationsInOps.attempts}
+  END`;
+  const terminalAfterThisAttempt = sql`${executionAttempts} >= ${retryPolicy.maxAttempts}`;
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({

@@ -139,7 +139,7 @@ export async function withCoreSnapshotWriteLock<T>(
 export async function withCoreSnapshotReadLock<T>(
   season: FplSeasonRef,
   operation: (transaction: DbOrTransaction) => Promise<T>,
-  dbInstance?: DbHandle,
+  dbInstance?: DbOrTransaction,
 ): Promise<T> {
   const db = dbInstance ?? (await getDb());
   return db.transaction(async (transaction) => {

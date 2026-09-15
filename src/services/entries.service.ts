@@ -2,6 +2,7 @@ import { fplClient } from '../clients/fpl';
 import type Redis from 'ioredis';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import type { DbEntryEventResult } from '../db/schemas/platform.types';
+import type { DbOrTransaction } from '../db/singleton';
 import {
   createEntryEventPicksRepository,
   entryEventPicksRepository,
@@ -16,7 +17,7 @@ import {
   createEntryEventResultsRepository,
   type EventPointsPayload,
 } from '../repositories/entry-event-results';
-import { eventRepository } from '../repositories/events';
+import { createEventRepository, eventRepository } from '../repositories/events';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
 import { isFreshnessBoundaryNewer } from '../domain/freshness';
@@ -900,11 +901,13 @@ async function assertCurrentFinalizationBoundary(
   season: FplSeasonRef,
   eventId: number,
   expectedBoundary: Date | string,
+  databaseRead?: DbOrTransaction,
 ): Promise<void> {
-  const event = await eventRepository.findById(season, eventId);
+  const repository = databaseRead ? createEventRepository(databaseRead) : eventRepository;
+  const event = await repository.findById(season, eventId);
   const currentBoundary =
     event?.finished && event.dataChecked
-      ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt)
+      ? ((await repository.findDataCheckedAtExact(season, eventId)) ?? event.dataCheckedAt)
       : null;
   if (
     !currentBoundary ||
@@ -1355,6 +1358,7 @@ export async function rebuildFinalEntryLiveInputsV2(
   dataCheckedAt: Date | string,
   redis?: Redis,
   finalizationCorrectionBoundary?: Date | string,
+  databaseRead?: DbOrTransaction,
 ): Promise<number> {
   const uniqueEntryIds = [...new Set(entryIds)].filter(
     (entryId) => Number.isSafeInteger(entryId) && entryId > 0,
@@ -1363,14 +1367,13 @@ export async function rebuildFinalEntryLiveInputsV2(
   const boundary =
     dataCheckedAt instanceof Date ? new Date(dataCheckedAt) : new Date(dataCheckedAt);
   if (!Number.isFinite(boundary.getTime())) return 0;
-  const resultsRepository = createEntryEventResultsRepository();
+  const picksRepository = databaseRead
+    ? createEntryEventPicksRepository(databaseRead)
+    : entryEventPicksRepository;
+  const resultsRepository = createEntryEventResultsRepository(databaseRead);
   const [pickRows, heads, results] = await Promise.all([
-    entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
-      season,
-      eventId,
-      uniqueEntryIds,
-    ),
-    entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds),
+    picksRepository.findLiveInputPickRowsByEventAndEntryIds(season, eventId, uniqueEntryIds),
+    picksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds),
     resultsRepository.findByEventAndEntryIds(season, eventId, uniqueEntryIds),
   ]);
   const rowsByEntry = new Map<number, EntryLiveInputPickRow[]>();
@@ -1401,7 +1404,12 @@ export async function rebuildFinalEntryLiveInputsV2(
     if (!input) continue;
     try {
       if (finalizationCorrectionBoundary !== undefined) {
-        await assertCurrentFinalizationBoundary(season, eventId, finalizationCorrectionBoundary);
+        await assertCurrentFinalizationBoundary(
+          season,
+          eventId,
+          finalizationCorrectionBoundary,
+          databaseRead,
+        );
       }
       const publication = await publishEntryLiveInputV2({
         season: season.seasonCode,

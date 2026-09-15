@@ -1,5 +1,6 @@
 import { fplClient } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { DbOrTransaction } from '../db/singleton';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import {
   readLiveMatchDeskFenceV3,
@@ -16,6 +17,7 @@ export interface LiveMatchObservationV3Options {
   readonly lifecycleState?: MatchLifecycleState;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly promoteActiveEvent?: boolean;
+  readonly databaseRead?: DbOrTransaction;
   readonly dependencies?: LiveMatchObservationV3Dependencies;
 }
 
@@ -29,6 +31,7 @@ export interface LiveMatchObservationV3Dependencies {
   readonly getReferenceData: (
     season: FplSeasonRef,
     eventId: number,
+    dbInstance?: DbOrTransaction,
   ) => Promise<LiveSnapshotReferenceData>;
   readonly syncMatches: typeof syncLiveMatchesV3FromObservation;
 }
@@ -37,7 +40,8 @@ const defaultDependencies: LiveMatchObservationV3Dependencies = {
   getFixtures: (eventId) => fplClient.getFixtures(eventId),
   getCore: (season) => readCoreSnapshotCache(season),
   getDeskFence: (season, eventId) => readLiveMatchDeskFenceV3({ season, eventId }),
-  getReferenceData: loadLiveReferenceData,
+  getReferenceData: (season, eventId, dbInstance) =>
+    loadLiveReferenceData(season, eventId, dbInstance),
   syncMatches: syncLiveMatchesV3FromObservation,
 };
 
@@ -67,7 +71,7 @@ export async function syncLiveMatchObservationV3(
   const [rawFixtures, core, referenceData] = await Promise.all([
     dependencies.getFixtures(eventId),
     dependencies.getCore(season.seasonCode).catch(() => null),
-    dependencies.getReferenceData(season, eventId).catch(() => undefined),
+    dependencies.getReferenceData(season, eventId, options.databaseRead).catch(() => undefined),
   ]);
   const currentDesk = observedDesk.read;
   const expectedFixtureIds = core
@@ -87,5 +91,6 @@ export async function syncLiveMatchObservationV3(
     lifecycleState: options.lifecycleState,
     expectedNextCheckAt: options.expectedNextCheckAt,
     promoteActiveEvent: options.promoteActiveEvent,
+    databaseRead: options.databaseRead,
   });
 }

@@ -28,6 +28,8 @@ import {
   type LeagueLiveScope,
 } from '../cache/live-league-publication-v2';
 import { redisSingleton } from '../cache/singleton';
+import type postgres from 'postgres';
+import type { DbOrTransaction } from '../db/singleton';
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
@@ -47,6 +49,12 @@ const LIVE_LEAGUE_ALGORITHM_VERSION = 'live-league-v2:classic:1';
 const LIVE_ACTIVE_CADENCE_MS = 30_000;
 const LIVE_LEAGUE_CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 const MAX_RETIREMENT_KEYS = 10_000;
+
+/** Bounded database handles supplied by the live worker for tagged-SQL reads. */
+export type LiveLeagueDatabaseOptions = Readonly<{
+  databaseRead?: DbOrTransaction;
+  databaseReadClient?: postgres.Sql;
+}>;
 
 export type ClassicRosterRow = {
   tournamentId: number;
@@ -190,8 +198,9 @@ async function findClassicRosters(
   season: FplSeasonRef,
   eventId: number,
   tournamentId?: number,
+  databaseReadClient?: postgres.Sql,
 ): Promise<ClassicRoster[]> {
-  const client = await getDbClient();
+  const client = databaseReadClient ?? (await getDbClient());
   const tournamentFilter =
     tournamentId === undefined ? client`` : client`AND tournament.tournament_id = ${tournamentId}`;
   const rows = await client<ClassicRosterQueryRow[]>`
@@ -447,6 +456,7 @@ async function publishClassicRoster(
   global: NonNullable<Awaited<ReturnType<typeof readLivePublicationV2>>>,
   roster: ClassicRoster,
   expectedNextCheckAtValue?: Date | string | null,
+  databaseOptions: LiveLeagueDatabaseOptions = {},
 ): Promise<'published' | 'unchanged' | 'pending' | 'skipped'> {
   if (roster.expectedEntryCount > 5_000) return 'skipped';
   if (roster.rows.length === 0) return 'pending';
@@ -481,6 +491,8 @@ async function publishClassicRoster(
         entriesNeedingFinalRecovery.map((row) => row.entryId),
         finalizationAt,
         redis,
+        undefined,
+        databaseOptions.databaseRead,
       );
       inputs = await readEntryLiveInputsV2(
         eligibleRows.map((row) => ({ season: season.seasonCode, eventId, entryId: row.entryId })),
@@ -672,11 +684,17 @@ export async function syncLiveClassicLeaguePublicationsV2(
   season: FplSeasonRef,
   eventId: number,
   expectedNextCheckAtValue?: Date | string | null,
+  databaseOptions: LiveLeagueDatabaseOptions = {},
 ): Promise<LiveLeaguePublicationSyncResult | null> {
   const redis = await redisSingleton.getClient();
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
-  const rosters = await findClassicRosters(season, eventId);
+  const rosters = await findClassicRosters(
+    season,
+    eventId,
+    undefined,
+    databaseOptions.databaseReadClient,
+  );
   await retireInactiveClassicPublications(
     season,
     eventId,
@@ -697,6 +715,7 @@ export async function syncLiveClassicLeaguePublicationsV2(
         global,
         roster,
         expectedNextCheckAtValue,
+        databaseOptions,
       );
       counts[status] += 1;
     } catch (error) {
@@ -895,8 +914,9 @@ export function hasExpectedH2HMatchSet(
 
 async function findOfficialH2HTournaments(
   season: FplSeasonRef,
+  databaseReadClient?: postgres.Sql,
 ): Promise<readonly OfficialH2HTournament[]> {
-  const client = await getDbClient();
+  const client = databaseReadClient ?? (await getDbClient());
   const rows = await client<H2HTournamentRow[]>`
     SELECT
       tournament_id AS "tournamentId",
@@ -1108,8 +1128,9 @@ async function findOfficialH2HMatches(
   season: FplSeasonRef,
   tournamentId: number,
   eventId: number,
+  databaseReadClient?: postgres.Sql,
 ): Promise<H2HMatchRow[]> {
-  const client = await getDbClient();
+  const client = databaseReadClient ?? (await getDbClient());
   const rows = await client<H2HMatchRow[]>`
     SELECT
       battle.tournament_id AS "tournamentId",
@@ -1208,8 +1229,9 @@ async function findOfficialH2HStandings(
   season: FplSeasonRef,
   eventId: number,
   tournamentId: number,
+  databaseReadClient?: postgres.Sql,
 ): Promise<H2HStandingsRead> {
-  const client = await getDbClient();
+  const client = databaseReadClient ?? (await getDbClient());
   const rows = await client<H2HStandingRow[]>`
     WITH roster AS (
       SELECT
@@ -1984,11 +2006,12 @@ export async function syncLiveH2HLeaguePublicationsV2(
   season: FplSeasonRef,
   eventId: number,
   expectedNextCheckAtValue?: Date | string | null,
+  databaseOptions: LiveLeagueDatabaseOptions = {},
 ): Promise<LiveH2HLeaguePublicationSyncResult | null> {
   const redis = await redisSingleton.getClient();
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
-  const tournaments = await findOfficialH2HTournaments(season);
+  const tournaments = await findOfficialH2HTournaments(season, databaseOptions.databaseReadClient);
   await retireInactiveH2HPublications(
     season,
     eventId,
@@ -2007,7 +2030,12 @@ export async function syncLiveH2HLeaguePublicationsV2(
       scope: 'H2H_HEAD' as const,
     };
     try {
-      const sourceMatches = await findOfficialH2HMatches(season, tournamentId, eventId);
+      const sourceMatches = await findOfficialH2HMatches(
+        season,
+        tournamentId,
+        eventId,
+        databaseOptions.databaseReadClient,
+      );
       if (sourceMatches.length === 0 || sourceMatches.length > LIVE_LEAGUE_MAX_ENTRIES) {
         totals.skipped += 1;
         if (global.publication.state === 'FINALIZED' && phaseActive) {
@@ -2049,6 +2077,8 @@ export async function syncLiveH2HLeaguePublicationsV2(
             entryIdsNeedingFinalRecovery,
             finalizationAt,
             redis,
+            undefined,
+            databaseOptions.databaseRead,
           );
           inputs = await readEntryLiveInputsV2(
             entryIds.map((entryId) => ({ season: season.seasonCode, eventId, entryId })),
@@ -2117,7 +2147,12 @@ export async function syncLiveH2HLeaguePublicationsV2(
         else totals.retained += 1;
       }
 
-      const standingsRead = await findOfficialH2HStandings(season, eventId, tournamentId);
+      const standingsRead = await findOfficialH2HStandings(
+        season,
+        eventId,
+        tournamentId,
+        databaseOptions.databaseReadClient,
+      );
       const standings = standingsRead.rows;
       const revisions = h2hRevisions(global, prepared, standings);
       const standingsScope = {

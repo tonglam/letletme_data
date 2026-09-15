@@ -1,4 +1,5 @@
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
+import type { DbOrTransaction } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   createFplPlayerFixtureStatsRepository,
@@ -151,9 +152,13 @@ function addEventPinnedIdentities(
 async function loadEventPinnedIdentities(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<readonly FplPlayerFixtureIdentity[] | null> {
   try {
-    return await createFplPlayerFixtureStatsRepository().findIdentityByEvent(season, eventId);
+    return await createFplPlayerFixtureStatsRepository(dbInstance).findIdentityByEvent(
+      season,
+      eventId,
+    );
   } catch (error) {
     // Event-time identity enriches the fixture-grain detail publication; it
     // must never take an already valid Core/live observation off the serving
@@ -226,6 +231,7 @@ export async function resolveLiveReferenceDataForDetail(
 export async function loadLiveReferenceData(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<LiveSnapshotReferenceData> {
   const cached = await readCoreSnapshotCache(season.seasonCode);
   if (cached) {
@@ -233,23 +239,27 @@ export async function loadLiveReferenceData(
     // identity read immediately without making the Core lookup wait for DB.
     return {
       ...referenceDataFromCore(season, cached.teams, cached.players),
-      eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+      eventPinnedIdentities: loadEventPinnedIdentities(season, eventId, dbInstance),
     };
   }
 
   // When Redis Core is absent, finish the short coherent Core transaction
   // first. This avoids letting the optional identity query win the only Data
   // pool connection and delay the baseline it is meant to enrich.
-  const coreReferenceData = await withCoreSnapshotReadLock(season, async (transaction) => {
-    const [teams, players] = await Promise.all([
-      createTeamRepository(transaction).findAll(season),
-      createPlayerRepository(transaction).findAll(season),
-    ]);
-    return referenceDataFromCore(season, teams, players);
-  });
+  const coreReferenceData = await withCoreSnapshotReadLock(
+    season,
+    async (transaction) => {
+      const [teams, players] = await Promise.all([
+        createTeamRepository(transaction).findAll(season),
+        createPlayerRepository(transaction).findAll(season),
+      ]);
+      return referenceDataFromCore(season, teams, players);
+    },
+    dbInstance,
+  );
   return {
     ...coreReferenceData,
-    eventPinnedIdentities: loadEventPinnedIdentities(season, eventId),
+    eventPinnedIdentities: loadEventPinnedIdentities(season, eventId, dbInstance),
   };
 }
 

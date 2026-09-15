@@ -64,8 +64,13 @@ export function classifyDataError(error: unknown): DataErrorClass {
       : error instanceof Error && 'code' in error
         ? String(error.code)
         : '';
-  const message =
-    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  // BullMQ's UnrecoverableError only preserves a message for non-Error
+  // failures. Recover the bounded classification prefix emitted by the live
+  // worker before applying the broad legacy message heuristics below.
+  const persisted = parsePersistedDataError(rawMessage);
+  if (persisted) return persisted.errorClass;
+  const message = rawMessage.toLowerCase();
   if (code === 'STALE_GENERATION' || message.includes('stale scheduler')) return 'STALE_GENERATION';
   if (code === 'SOURCE_ARCHIVE_MISSING' || message.includes('archive'))
     return 'SOURCE_ARCHIVE_MISSING';

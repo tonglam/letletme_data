@@ -39,6 +39,20 @@ import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
 import { canonicalJson } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
+import type { DbOrTransaction } from '../db/singleton';
+import {
+  createLiveSnapshotDatabaseBudget,
+  type LiveSnapshotDatabaseBudget,
+} from '../utils/live-snapshot-db-budget';
+import type { SchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
+
+/**
+ * Run a Redis publication activation while the caller holds its durable
+ * latest-authoritative lane fence. The generic callback keeps the cache
+ * service independent of scheduler transactions while allowing the worker to
+ * hold its row lock across the activation command.
+ */
+export type LiveSnapshotPublicationActivation = <T>(activate: () => Promise<T>) => Promise<T>;
 
 export interface LiveSnapshotV2SyncOptions {
   /**
@@ -54,6 +68,12 @@ export interface LiveSnapshotV2SyncOptions {
   readonly sourceRunId?: string;
   readonly expectedNextCheckAt?: Date | string | null;
   readonly dependencies?: LiveSnapshotV2Dependencies;
+  /** Worker-owned local database budget; omitted by hermetic unit callers. */
+  readonly databaseBudget?: LiveSnapshotDatabaseBudget;
+  /** Exact latest-authoritative lane identity for durable checkpoints. */
+  readonly schedulerLaneFence?: SchedulerLanePublicationFence;
+  /** Hold the lane fence through the Redis publication activation command. */
+  readonly withPublicationActivationFence?: LiveSnapshotPublicationActivation;
 }
 
 export interface LiveSnapshotV2Dependencies {
@@ -66,6 +86,7 @@ export interface LiveSnapshotV2Dependencies {
   readonly getReferenceData: (
     season: FplSeasonRef,
     eventId: number,
+    dbInstance?: DbOrTransaction,
   ) => Promise<LiveSnapshotReferenceData>;
   readonly readObservedMatchDesk?: typeof readLiveMatchDeskFenceV3;
   readonly readObservedMatchDetail?: typeof readLiveMatchDetailFenceV3;
@@ -76,6 +97,7 @@ export interface LiveSnapshotV2Dependencies {
   readonly readCheckpointed?: (
     season: FplSeasonRef,
     eventId: number,
+    dbInstance?: DbOrTransaction,
   ) => Promise<LivePublicationRead | null>;
   readonly checkpointPublication: (request: {
     readonly season: FplSeasonRef;
@@ -88,6 +110,7 @@ export interface LiveSnapshotV2Dependencies {
       PreparedLiveSnapshot['eventLives']['fixtureEvidence'][number]
     >;
     readonly observationCheckedAt?: Date | string;
+    readonly db?: DbOrTransaction;
   }) => Promise<boolean>;
 }
 
@@ -107,7 +130,26 @@ export interface LiveSnapshotV2SyncResult {
   readonly checkpointed: boolean;
   /** Match desk/detail checkpoint creation failed after the Redis publication. */
   readonly checkpointObligationFailed: boolean;
+  /** Bounded stage timings used to distinguish queue, provider, Redis and DB delay. */
+  readonly stageTimings: LiveSnapshotStageTimings;
 }
+
+export type LiveSnapshotStageTimings = Readonly<{
+  /** Durable PostgreSQL control/checkpoint read. */
+  controlReadMs: number | null;
+  /** Serving Redis current-publication read. */
+  redisReadMs: number | null;
+  /** Durable PostgreSQL checkpoint read, retained as a separate stage. */
+  durableReadMs: number | null;
+  /** Core/reference identity read, which may use Redis or PostgreSQL fallback. */
+  referenceReadMs: number | null;
+  /** Fixture identity baseline read, normally from the Core Redis publication. */
+  fixtureIdentityReadMs: number | null;
+  providerMs: number | null;
+  redisPublishMs: number | null;
+  checkpointMs: number | null;
+  totalMs: number;
+}>;
 
 const defaultDependencies: LiveSnapshotV2Dependencies = {
   getEventLive: (eventId) => fplClient.getEventLive(eventId),
@@ -123,10 +165,12 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
   },
   readObservedMatchDesk: (input) => readLiveMatchDeskFenceV3(input),
   readObservedMatchDetail: (input) => readLiveMatchDetailFenceV3(input),
-  getReferenceData: (season, eventId) => loadLiveReferenceData(season, eventId),
+  getReferenceData: (season, eventId, dbInstance) =>
+    loadLiveReferenceData(season, eventId, dbInstance),
   syncLiveMatches: syncLiveMatchesV3FromObservation,
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
-  readCheckpointed: readLivePublicationV2Checkpoint,
+  readCheckpointed: (season, eventId, dbInstance) =>
+    readLivePublicationV2Checkpoint(season, eventId, dbInstance),
   checkpointPublication: checkpointLivePublicationV2,
 };
 
@@ -216,6 +260,8 @@ async function checkpoint(
   publication: LivePublicationRead['publication'],
   desired: Awaited<ReturnType<typeof setLiveCheckpointDesiredV2>> | null,
   observationCheckedAt?: Date | string,
+  databaseBudget?: LiveSnapshotDatabaseBudget | null,
+  schedulerLaneFence?: SchedulerLanePublicationFence,
 ): Promise<boolean> {
   try {
     const checkpointed = await dependencies.checkpointPublication({
@@ -227,6 +273,8 @@ async function checkpoint(
       explains: payload.explains,
       fixtureEvidence: payload.fixtureEvidence,
       observationCheckedAt,
+      ...(databaseBudget ? { db: databaseBudget.writeDb } : {}),
+      ...(schedulerLaneFence ? { schedulerLaneFence } : {}),
     });
     if (!checkpointed) return false;
     const marked = await markLivePublicationCheckpointedV2(publication, new Date());
@@ -360,14 +408,49 @@ export async function syncLiveSnapshotV2(
 ): Promise<LiveSnapshotV2SyncResult> {
   if (!Number.isSafeInteger(eventId) || eventId <= 0)
     throw new Error(`Invalid live event ID: ${eventId}`);
+  const totalStartedAt = Date.now();
+  let controlReadMs: number | null = null;
+  let redisReadMs: number | null = null;
+  let durableReadMs: number | null = null;
+  let referenceReadMs: number | null = null;
+  let fixtureIdentityReadMs: number | null = null;
+  let providerMs: number | null = null;
+  let redisPublishMs: number | null = null;
+  let checkpointMs: number | null = null;
+  const stageTimings = (): LiveSnapshotStageTimings => ({
+    controlReadMs,
+    redisReadMs,
+    durableReadMs,
+    referenceReadMs,
+    fixtureIdentityReadMs,
+    providerMs,
+    redisPublishMs,
+    checkpointMs,
+    totalMs: Math.max(0, Date.now() - totalStartedAt),
+  });
   const dependencies = options.dependencies ?? defaultDependencies;
+  const activatePublication: LiveSnapshotPublicationActivation =
+    options.withPublicationActivationFence ?? (async <T>(activate: () => Promise<T>) => activate());
+  const databaseBudget =
+    options.databaseBudget ??
+    (dependencies === defaultDependencies
+      ? await createLiveSnapshotDatabaseBudget().catch((error) => {
+          logError('Live snapshot database budget initialization failed', error, {
+            season: season.seasonCode,
+            eventId,
+          });
+          throw error;
+        })
+      : null);
   // Redis is the serving authority, but a rebuilt Redis sequence must not be
   // allowed to fence an older durable checkpoint forever. Start that durable
   // read in parallel; it must never delay the shared provider observation used
   // by the independent Live Matches Redis publication.
+  const durableReadStartedAt = Date.now();
   const durableReadPromise = (dependencies.readCheckpointed ?? readLivePublicationV2Checkpoint)(
     season,
     eventId,
+    databaseBudget?.readDb,
   )
     .then((value) => ({ value, failed: false as const }))
     .catch((error) => {
@@ -376,7 +459,12 @@ export async function syncLiveSnapshotV2(
         eventId,
       });
       return { value: null, failed: true as const };
+    })
+    .finally(() => {
+      durableReadMs = Math.max(0, Date.now() - durableReadStartedAt);
     });
+  const currentReadStartedAt = Date.now();
+  let currentReadMs: number | null = null;
   const currentReadPromise = dependencies
     .readPublished(season.seasonCode, eventId)
     .catch((error) => {
@@ -389,6 +477,8 @@ export async function syncLiveSnapshotV2(
       return null;
     });
   const current = await currentReadPromise;
+  currentReadMs = Math.max(0, Date.now() - currentReadStartedAt);
+  redisReadMs = currentReadMs;
   // Capture the exact Match desk pointer before any FPL request begins. A
   // slower older observation must lose its desk CAS if a newer observation
   // publishes while its provider response is in flight. Custom unit callers
@@ -400,6 +490,8 @@ export async function syncLiveSnapshotV2(
   const observedMatchDetailPromise = dependencies.readObservedMatchDetail
     ? dependencies.readObservedMatchDetail({ season: season.seasonCode, eventId })
     : Promise.resolve(undefined);
+  const providerStartedAt = Date.now();
+  const expectedFixtureIdsStartedAt = Date.now();
   const expectedFixtureIdsPromise = dependencies
     .getExpectedFixtureIds(season, eventId)
     .catch((error) => {
@@ -413,18 +505,39 @@ export async function syncLiveSnapshotV2(
         return current.fixtures.map((fixture) => fixture.id);
       }
       throw error;
+    })
+    .finally(() => {
+      fixtureIdentityReadMs = Math.max(0, Date.now() - expectedFixtureIdsStartedAt);
     });
   const eventLivePromise = dependencies.getEventLive(eventId);
   const fixturesPromise = options.observedFixtures
     ? Promise.resolve([...options.observedFixtures])
     : dependencies.getFixtures(eventId);
-  const referenceDataPromise = dependencies.getReferenceData(season, eventId);
-  const observationPromise = Promise.allSettled([
+  const referenceDataStartedAt = Date.now();
+  const referenceDataPromise = dependencies
+    .getReferenceData(season, eventId, databaseBudget?.readDb)
+    .finally(() => {
+      referenceReadMs = Math.max(0, Date.now() - referenceDataStartedAt);
+    });
+  // Provider timing deliberately covers only the two upstream FPL requests.
+  // Reference/fixture identity reads are concurrent support stages and must
+  // remain visible in their own buckets instead of making a database fallback
+  // look like provider latency.
+  const providerObservationPromise = Promise.allSettled([
     eventLivePromise,
     fixturesPromise,
+  ] as const).then((result) => {
+    providerMs = Math.max(0, Date.now() - providerStartedAt);
+    return result;
+  });
+  const supportObservationPromise = Promise.allSettled([
     expectedFixtureIdsPromise,
     referenceDataPromise,
   ] as const);
+  const observationPromise = Promise.all([
+    providerObservationPromise,
+    supportObservationPromise,
+  ]).then(([provider, support]) => [provider[0], provider[1], support[0], support[1]] as const);
   const nonFinalMatchLifecycleState =
     options.lifecycleState === 'FINALIZED' ? 'GW_REVIEW' : options.lifecycleState;
   // The score desk depends only on the fixture response and an exact fixture
@@ -452,6 +565,7 @@ export async function syncLiveSnapshotV2(
         lifecycleState: nonFinalMatchLifecycleState,
         expectedNextCheckAt: options.expectedNextCheckAt,
         observedDesk,
+        databaseRead: databaseBudget?.readDb,
       });
     })
     .then((result) => ({ result, error: null as unknown }))
@@ -485,6 +599,7 @@ export async function syncLiveSnapshotV2(
           expectedNextCheckAt: options.expectedNextCheckAt,
           observedDesk,
           observedDetail,
+          databaseRead: databaseBudget?.readDb,
           publishedDesk:
             early.result === null
               ? undefined
@@ -575,6 +690,7 @@ export async function syncLiveSnapshotV2(
       expectedNextCheckAt: options.expectedNextCheckAt,
       observedDetail,
       publishedDesk,
+      databaseRead: databaseBudget?.readDb,
     });
     if (result.checkpointObligationFailed === true) {
       matchCheckpointObligationFailed = true;
@@ -588,6 +704,10 @@ export async function syncLiveSnapshotV2(
 
   let matchCheckpointObligationFailed = false;
   const durableRead = await durableReadPromise;
+  // `controlReadMs` is kept for the existing stage contract, but it now means
+  // the durable database control read only. Redis latency is reported by
+  // `redisReadMs` and cannot trigger a PostgreSQL budget warning.
+  controlReadMs = durableReadMs;
   const durableFloor = durableRead.value;
   const recoveringFinalCheckpoint =
     current?.publication.state === 'FINALIZED' && !durableRead.failed && !durableFloor;
@@ -617,6 +737,7 @@ export async function syncLiveSnapshotV2(
         checkpointScheduled: false,
         checkpointed: current.publication.checkpointedAt !== null,
         checkpointObligationFailed: matchCheckpointObligationFailed,
+        stageTimings: stageTimings(),
       };
     }
   }
@@ -631,11 +752,13 @@ export async function syncLiveSnapshotV2(
     // FINALIZED is an immutable durable boundary. Restore that exact
     // checkpoint before considering any newly fetched provisional candidate;
     // otherwise a fresh generation could supersede final data.
-    const restored = await (
-      dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint
-    )({
-      checkpoint: durableFloor,
-    });
+    const redisStartedAt = Date.now();
+    const restored = await activatePublication(() =>
+      (dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint)({
+        checkpoint: durableFloor,
+      }),
+    );
+    redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
     // A stale response is not proof that the durable FINAL is serving. Even
     // an equal identity must be rejected here: the active pointer or its
     // immutable items may still be invalid, and returning success would leave
@@ -683,6 +806,7 @@ export async function syncLiveSnapshotV2(
       checkpointScheduled: false,
       checkpointed: true,
       checkpointObligationFailed: matchCheckpointObligationFailed,
+      stageTimings: stageTimings(),
     };
   }
 
@@ -742,6 +866,7 @@ export async function syncLiveSnapshotV2(
       checkpointScheduled: desired !== null,
       checkpointed: false,
       checkpointObligationFailed: matchCheckpointObligationFailed,
+      stageTimings: stageTimings(),
     };
   }
 
@@ -783,6 +908,7 @@ export async function syncLiveSnapshotV2(
         checkpointScheduled: desired !== null,
         checkpointed: false,
         checkpointObligationFailed: matchCheckpointObligationFailed,
+        stageTimings: stageTimings(),
       };
     }
 
@@ -792,6 +918,7 @@ export async function syncLiveSnapshotV2(
     // observation through the relational ordering fence so a later core
     // heartbeat cannot permanently reject recovery of the same facts.
     const observationCheckedAt = new Date();
+    const checkpointStartedAt = Date.now();
     const checkpointed = await checkpoint(
       dependencies,
       season,
@@ -805,7 +932,10 @@ export async function syncLiveSnapshotV2(
       current.publication,
       desired,
       observationCheckedAt,
+      databaseBudget,
+      options.schedulerLaneFence,
     );
+    checkpointMs = Math.max(0, Date.now() - checkpointStartedAt);
     if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
     return {
       eventId,
@@ -821,6 +951,7 @@ export async function syncLiveSnapshotV2(
       checkpointScheduled: !checkpointed && desired !== null,
       checkpointed,
       checkpointObligationFailed: matchCheckpointObligationFailed,
+      stageTimings: stageTimings(),
     };
   }
   // This timestamp is evidence that the coherent fetch and all completeness
@@ -844,11 +975,15 @@ export async function syncLiveSnapshotV2(
     current?.servedFrom === 'REDIS_CURRENT' &&
     !durableGenerationConflict
   ) {
-    const touched = await touchLivePublicationV2(
-      current.publication,
-      sourceCheckedAt,
-      options.expectedNextCheckAt ?? null,
+    const redisStartedAt = Date.now();
+    const touched = await activatePublication(() =>
+      touchLivePublicationV2(
+        current.publication,
+        sourceCheckedAt,
+        options.expectedNextCheckAt ?? null,
+      ),
     );
+    redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
     const publication = touched ?? current.publication;
     let desired = await readLiveCheckpointDesiredV2({
       season: season.seasonCode,
@@ -873,6 +1008,7 @@ export async function syncLiveSnapshotV2(
         });
       }
     }
+    const checkpointStartedAt = checkpointDue ? Date.now() : null;
     const checkpointed = checkpointDue
       ? await checkpoint(
           dependencies,
@@ -886,8 +1022,13 @@ export async function syncLiveSnapshotV2(
           },
           publication,
           desired,
+          undefined,
+          databaseBudget,
+          options.schedulerLaneFence,
         )
       : false;
+    checkpointMs =
+      checkpointStartedAt === null ? null : Math.max(0, Date.now() - checkpointStartedAt);
     const servedPublication = checkpointed
       ? ((await dependencies.readPublished(season.seasonCode, eventId))?.publication ?? publication)
       : publication;
@@ -906,22 +1047,27 @@ export async function syncLiveSnapshotV2(
       checkpointScheduled: desired !== null,
       checkpointed: publication.checkpointedAt !== null || checkpointed,
       checkpointObligationFailed: matchCheckpointObligationFailed,
+      stageTimings: stageTimings(),
     };
   }
 
   await requireProvisionalMatchDetail();
 
-  const promoted = await publishLivePublicationV2({
-    season: season.seasonCode,
-    eventId,
-    state,
-    sourceCheckedAt,
-    expectedNextCheckAt: options.expectedNextCheckAt ?? null,
-    eventLives: prepared.eventLives.eventLives,
-    fixtures: prepared.fixtures,
-    previous: current?.publication ?? null,
-    generationFloor,
-  });
+  const redisStartedAt = Date.now();
+  const promoted = await activatePublication(() =>
+    publishLivePublicationV2({
+      season: season.seasonCode,
+      eventId,
+      state,
+      sourceCheckedAt,
+      expectedNextCheckAt: options.expectedNextCheckAt ?? null,
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
+      previous: current?.publication ?? null,
+      generationFloor,
+    }),
+  );
+  redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
   if (!promoted.published) {
     // A stale result is an ordering/finalization fence, not a publication
     // failure. In particular, once FINALIZED is current, never checkpoint the
@@ -940,6 +1086,7 @@ export async function syncLiveSnapshotV2(
       checkpointScheduled: false,
       checkpointed: promoted.publication.checkpointedAt !== null,
       checkpointObligationFailed: matchCheckpointObligationFailed,
+      stageTimings: stageTimings(),
     };
   }
   if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
@@ -981,9 +1128,11 @@ export async function syncLiveSnapshotV2(
       checkpointScheduled: desired !== null,
       checkpointed: false,
       checkpointObligationFailed: matchCheckpointObligationFailed,
+      stageTimings: stageTimings(),
     };
   }
 
+  const checkpointStartedAt = Date.now();
   const checkpointed = await checkpoint(
     dependencies,
     season,
@@ -996,7 +1145,11 @@ export async function syncLiveSnapshotV2(
     },
     promoted.publication,
     desired,
+    undefined,
+    databaseBudget,
+    options.schedulerLaneFence,
   );
+  checkpointMs = Math.max(0, Date.now() - checkpointStartedAt);
   logInfo('Live Points V2 publication complete', {
     season: season.seasonCode,
     eventId,
@@ -1021,5 +1174,6 @@ export async function syncLiveSnapshotV2(
     checkpointScheduled: desired !== null,
     checkpointed,
     checkpointObligationFailed: matchCheckpointObligationFailed,
+    stageTimings: stageTimings(),
   };
 }

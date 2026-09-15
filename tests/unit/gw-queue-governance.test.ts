@@ -16,13 +16,19 @@ import {
 } from '../../src/services/queue-governance.service';
 import {
   queueHealthPersistenceFingerprint,
+  QueueEventAccumulator,
+  QUEUE_MONITOR_EVENT_RETENTION_MS,
+  queueMonitorEventRetentionMs,
+  retainQueueEventsAfterWatermarks,
+  rollbackQueueSampleArrivals,
   resolveJobDispatchBudgetMs,
+  resolveQueueArrivalContribution,
   resolveQueueDispatchBudgetMs,
   resolveQueueTimingMetrics,
   shouldPersistQueueHealthWindow,
 } from '../../src/utils/queue-monitor';
 import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
-import { summarizeDataError } from '../../src/domain/error-classification';
+import { classifyDataError, summarizeDataError } from '../../src/domain/error-classification';
 import { FPLClientError } from '../../src/utils/errors';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
 import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
@@ -43,7 +49,10 @@ import {
   freshnessRepairLaneForWindow,
   selectFreshnessRecoveryRevision,
 } from '../../src/services/data-governance.service';
-import { shouldCreateFreshnessWindowForObligation } from '../../src/scheduler/scheduler.service';
+import {
+  liveSnapshotScopeIdentity,
+  shouldCreateFreshnessWindowForObligation,
+} from '../../src/scheduler/scheduler.service';
 
 describe('GW queue and data governance primitives', () => {
   test('uses one late-entry denominator rule across GW1-GW4', () => {
@@ -214,6 +223,190 @@ describe('GW queue and data governance primitives', () => {
         lastPersistedAtMs: Date.parse(snapshot.observedAt),
       }),
     ).toBe(true);
+  });
+
+  test('acknowledges one captured event batch without losing events received during the poll', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    const captured = accumulator.capture();
+    accumulator.record('completions', 2_000);
+
+    // A successful snapshot acknowledges only the captured batch. The event
+    // received while the poll was awaiting Redis/DB remains for the next poll.
+    expect(accumulator.pendingCount()).toBe(1);
+    expect(captured.get(0)).toEqual({ arrivals: 1, completions: 0, failures: 0, stalled: 0 });
+
+    // A failed persistence attempt puts the captured batch back beside the
+    // newer event, so neither observation is silently discarded.
+    accumulator.restore(captured);
+    expect(accumulator.pendingCount()).toBe(2);
+    expect(accumulator.capture().get(0)).toEqual({
+      arrivals: 1,
+      completions: 1,
+      failures: 0,
+      stalled: 0,
+    });
+  });
+
+  test('drops observations covered by a durable startup baseline', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    accumulator.record('failures', 2_000);
+
+    expect(accumulator.clear()).toBe(2);
+    expect(accumulator.pendingCount()).toBe(0);
+  });
+
+  test('rotates the startup batch while retaining events received during baseline loading', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000, '1000-0');
+    const startup = accumulator.captureWithWatermarks();
+    accumulator.record('failures', 2_000, '2000-0');
+
+    expect(startup.counters.get(0)).toEqual({
+      arrivals: 1,
+      completions: 0,
+      failures: 0,
+      stalled: 0,
+    });
+    expect(startup.latestReceivedAtMs.get(0)).toBe(1_000);
+    expect(startup.latestEventStreamId.get(0)).toBe('00000000000000001000-00000000000000000000');
+    expect(accumulator.pendingCount()).toBe(1);
+  });
+
+  test('drops startup events only when a durable stream cursor covers them', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000, '1000-0');
+    accumulator.record('failures', 2_000, '2000-0');
+    const capture = accumulator.captureWithWatermarks();
+
+    const partiallyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, '1500-0']]));
+    // A bucket-level cursor cannot prove which member of a mixed bucket was
+    // persisted. Retain the aggregate conservatively instead of keeping one
+    // object per QueueEvent to split it exactly.
+    expect(partiallyCovered.discarded).toBe(0);
+    expect(partiallyCovered.capture.counters.get(0)).toEqual({
+      arrivals: 1,
+      completions: 0,
+      failures: 1,
+      stalled: 0,
+    });
+
+    const fullyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, '2000-0']]));
+    expect(fullyCovered.discarded).toBe(2);
+    expect(fullyCovered.capture.counters.has(0)).toBe(false);
+
+    const unproven = retainQueueEventsAfterWatermarks(capture, new Map());
+    expect(unproven.discarded).toBe(0);
+    expect(unproven.capture.counters.get(0)).toEqual({
+      arrivals: 1,
+      completions: 0,
+      failures: 1,
+      stalled: 0,
+    });
+  });
+
+  test('retains aggregate observations when QueueEvents did not provide a causal ID', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    const capture = accumulator.captureWithWatermarks();
+
+    const retained = retainQueueEventsAfterWatermarks(capture, new Map([[0, '9999-0']]));
+    expect(retained.discarded).toBe(0);
+    expect(retained.capture.latestEventStreamId.get(0)).toBeNull();
+    expect(retained.capture.counters.get(0)?.arrivals).toBe(1);
+  });
+
+  test('keeps receive-time buckets while retaining the causal stream cursor', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    // The first event is delivered after the local minute boundary, while the
+    // second is delivered before it. Health windows stay tied to observation
+    // time; stream IDs remain available for restart deduplication.
+    accumulator.record('arrivals', 60_001, '59999-0');
+    accumulator.record('completions', 59_999, '60001-0');
+    const capture = accumulator.captureWithWatermarks();
+
+    expect(capture.counters.get(60_000)?.arrivals).toBe(1);
+    expect(capture.counters.get(0)?.completions).toBe(1);
+    expect(retainQueueEventsAfterWatermarks(capture, new Map([[0, '59999-0']])).discarded).toBe(0);
+  });
+
+  test('retains events received after the durable baseline statement snapshot', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    accumulator.record('failures', 2_000);
+    accumulator.record('stalled', 3_000);
+
+    // The aggregate cutoff is intentionally conservative for a mixed bucket:
+    // the latest event is newer than the statement snapshot, so all counters
+    // remain pending and can be persisted without per-event history.
+    expect(accumulator.discardReceivedAtOrBefore(2_000)).toBe(0);
+    expect(accumulator.capture().get(0)).toEqual({
+      arrivals: 1,
+      completions: 0,
+      failures: 1,
+      stalled: 1,
+    });
+  });
+
+  test('evicts only observations older than the bounded monitor retention', () => {
+    const accumulator = new QueueEventAccumulator(60_000, 15 * 60_000);
+    accumulator.record('arrivals', 0);
+    expect(accumulator.record('failures', 15 * 60_000 + 1)).toBe(1);
+    expect(accumulator.pendingCount()).toBe(1);
+  });
+
+  test('keeps a full configured health window plus one poll interval', () => {
+    expect(queueMonitorEventRetentionMs(60 * 60_000, 15 * 60_000)).toBe(75 * 60_000);
+    const accumulator = new QueueEventAccumulator(60 * 60_000, 75 * 60_000);
+    accumulator.record('arrivals', 0);
+    accumulator.record('completions', 60 * 60_000 - 1);
+    expect(accumulator.pendingCount()).toBe(2);
+  });
+
+  test('does not double-count a sampled arrival after Redis snapshot failure', () => {
+    // The failed write leaves lastSnapshot unchanged, so the next poll must
+    // sample the same count delta again. Roll back only the uncommitted fold.
+    expect(rollbackQueueSampleArrivals(8, 3, false)).toBe(5);
+    expect(rollbackQueueSampleArrivals(8, 3, true)).toBe(8);
+    expect(rollbackQueueSampleArrivals(8, 0, false)).toBe(8);
+  });
+
+  test('prefers event arrivals and marks count deltas as retryable samples', () => {
+    const previousSnapshot = { waiting: 2, active: 1 };
+    const snapshot = { waiting: 5, active: 2 };
+    expect(
+      resolveQueueArrivalContribution({ previousSnapshot, snapshot, eventArrivals: 0 }),
+    ).toEqual({ arrivals: 4, sampledArrivals: 4 });
+    expect(
+      resolveQueueArrivalContribution({ previousSnapshot, snapshot, eventArrivals: 2 }),
+    ).toEqual({ arrivals: 2, sampledArrivals: 0 });
+    expect(
+      resolveQueueArrivalContribution({
+        previousSnapshot,
+        snapshot,
+        eventArrivals: 0,
+        adjacentEventArrivals: 1,
+      }),
+    ).toEqual({ arrivals: 3, sampledArrivals: 3 });
+    expect(
+      resolveQueueArrivalContribution({
+        previousSnapshot: { waiting: 0, active: 0 },
+        snapshot: { waiting: 1, active: 0 },
+        eventArrivals: 0,
+        adjacentEventArrivals: 1,
+      }),
+    ).toEqual({ arrivals: 0, sampledArrivals: 0 });
+  });
+
+  test('validates the persisted live-snapshot season and event scope', () => {
+    expect(liveSnapshotScopeIdentity('2526:event:9')).toEqual({ seasonCode: '2526', eventId: 9 });
+    expect(() => liveSnapshotScopeIdentity('2527:event:9')).toThrow(
+      'Invalid persisted live-snapshot lane scope',
+    );
+    expect(() => liveSnapshotScopeIdentity('2526:event:0')).toThrow(
+      'Invalid persisted live-snapshot lane scope',
+    );
   });
 
   test('distinguishes disabled optional monitors from missing observations', () => {
@@ -680,5 +873,11 @@ describe('GW queue and data governance primitives', () => {
     );
     expect(summary.errorClass).toBe('TRANSIENT_INFRA');
     expect(summary.errorCode).toBe('FPL_ADMISSION_DEADLINE_EXCEEDED');
+  });
+
+  test('recovers the durable classification prefix from a Bull unrecoverable message', () => {
+    expect(classifyDataError(new Error('CONFIG_AUTH:AUTH_FAILED credentials=[redacted]'))).toBe(
+      'CONFIG_AUTH',
+    );
   });
 });

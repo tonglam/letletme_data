@@ -413,6 +413,7 @@ describe('Live Points and Live Matches shared observation', () => {
     } as LivePublicationRead;
     const finalizeFlags: boolean[] = [];
     let restoreCalls = 0;
+    let activationCalls = 0;
     const provisionalResult = {
       season: season.seasonCode,
       eventId: 2,
@@ -456,12 +457,19 @@ describe('Live Points and Live Matches shared observation', () => {
         readCheckpointed: async () => durable,
         checkpointPublication: async () => false,
       },
+      withPublicationActivationFence: async (activate) => {
+        activationCalls += 1;
+        return activate();
+      },
     });
 
     const result = await sync;
     expect(restoreCalls).toBe(1);
+    expect(activationCalls).toBe(1);
     expect(finalizeFlags).toEqual([false, false, true]);
     expect(result.state).toBe('FINALIZED');
+    expect(result.stageTimings.totalMs).toBeGreaterThanOrEqual(0);
+    expect(result.stageTimings.providerMs).toEqual(expect.any(Number));
   });
 
   test('rejects a final Live Points publication when provisional Match detail is unavailable', async () => {
