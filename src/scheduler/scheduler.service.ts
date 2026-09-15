@@ -34,6 +34,7 @@ import {
   getSchedulerLaneTargets,
   listLiveSnapshotRecoveryLanes,
   recoverSchedulerLaneAfterBullLoss,
+  retireSchedulerLaneForStaleSeason,
   unblockSchedulerLane,
   type SchedulerLane,
   type SchedulerLaneTarget,
@@ -124,13 +125,14 @@ export function shouldRevisitSchedulerPlan(
 
 // A definition resolver may still be unwinding after its bounded caller
 // timeout (for example, a driver socket that has not observed cancellation
-// yet). Coalesce that underlying operation per definition so the next 30s
-// pass cannot create another identical provider/DB request while the first is
-// still in flight. The entry is removed only after the actual resolver
-// settles; each pass still gets its own bounded timeout around that promise.
+// yet). Coalesce that underlying operation only for the exact scheduler
+// context that created it. A later pass can have a different season, clock,
+// or event snapshot; reusing the old promise there would feed stale plans into
+// the new pass. The entry is removed only after the actual resolver settles;
+// each caller still gets its own bounded timeout around that promise.
 const definitionResolutionInFlight = new WeakMap<
   ScheduledJobDefinition,
-  Promise<readonly SchedulerObligationPlan[]>
+  WeakMap<SchedulerContext, Promise<readonly SchedulerObligationPlan[]>>
 >();
 
 function evidenceNumber(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
@@ -437,16 +439,21 @@ export async function resolveSchedulerDefinition(
 > {
   try {
     const timeoutMs = options.timeoutMs ?? getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS;
-    let underlying = definitionResolutionInFlight.get(definition);
+    let byContext = definitionResolutionInFlight.get(definition);
+    if (!byContext) {
+      byContext = new WeakMap();
+      definitionResolutionInFlight.set(definition, byContext);
+    }
+    let underlying = byContext.get(context);
     if (!underlying) {
       const resolution = Promise.resolve().then(() => definition.resolve(context));
       const tracked = resolution.finally(() => {
-        if (definitionResolutionInFlight.get(definition) === tracked) {
-          definitionResolutionInFlight.delete(definition);
+        if (byContext?.get(context) === tracked) {
+          byContext.delete(context);
         }
       });
       underlying = tracked;
-      definitionResolutionInFlight.set(definition, tracked);
+      byContext.set(context, tracked);
     }
     const plans = await withTimeout(
       underlying,
@@ -456,7 +463,7 @@ export async function resolveSchedulerDefinition(
     return { ok: true, plans };
   } catch (error) {
     if (error instanceof TimeoutError) {
-      const underlying = definitionResolutionInFlight.get(definition);
+      const underlying = definitionResolutionInFlight.get(definition)?.get(context);
       if (underlying) {
         // A resolver may be backed by a driver operation that cannot be
         // cancelled by Promise.race. Keep the single-flight promise in the
@@ -1146,6 +1153,22 @@ async function reconcileOutstandingLiveSnapshotLanes(
   for (const lane of lanes) {
     if (selectedLaneKeys.has(lane.laneKey)) continue;
     try {
+      const scopeIdentity = liveSnapshotScopeIdentity(lane.scopeKey);
+      if (scopeIdentity.seasonCode !== season.seasonCode) {
+        const retired = await retireSchedulerLaneForStaleSeason({
+          laneId: lane.laneId,
+          currentSeasonCode: season.seasonCode,
+        });
+        if (retired) {
+          logInfo('Retired stale-season live snapshot lane before recovery', {
+            laneId: lane.laneId,
+            laneKey: lane.laneKey,
+            staleSeason: scopeIdentity.seasonCode,
+            currentSeason: season.seasonCode,
+          });
+        }
+        continue;
+      }
       if (lane.state !== 'idle') {
         await reconcileSingleFlightBullState(lane, season);
       }

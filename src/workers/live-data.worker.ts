@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Worker, Job, QueueEvents } from 'bullmq';
 
+import { seasonRefFromJobData } from '../domain/season-scoped-job';
+import type { DbOrTransaction } from '../db/singleton';
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   LIVE_JOBS,
@@ -33,6 +35,7 @@ import { getQueueConnection } from '../utils/queue';
 import { logDebug, logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { createEventRepository, eventRepository } from '../repositories/events';
+import { createSeasonRepository } from '../repositories/seasons';
 import { runtimeReleaseRevision } from '../utils/runtime-heartbeat';
 import {
   recordFreshnessObservation,
@@ -91,6 +94,34 @@ function scheduledDueAtMsForLiveObligation(obligation: {
     }
   }
   return obligation.dueAt.getTime();
+}
+
+/**
+ * Scheduler-owned live lanes may be recovered after an FPL season rollover.
+ * The lane scope is the durable authority for that exception; ordinary and
+ * manual live jobs must still pass the current-season fence.
+ */
+async function requireLiveSnapshotSeason(
+  data: LiveDataJobData,
+  laneScopeKey: string | undefined,
+  db?: DbOrTransaction,
+) {
+  if (laneScopeKey === undefined) return requireCurrentSeasonForJob(data, db);
+
+  const requested = seasonRefFromJobData(data);
+  if (!Number.isSafeInteger(data.eventId) || data.eventId <= 0) {
+    throw new Error('Fenced live snapshot job has an invalid event ID');
+  }
+  const expectedScopeKey = `${requested.seasonCode}:event:${data.eventId}`;
+  if (laneScopeKey !== expectedScopeKey) {
+    throw new Error(
+      `Fenced live snapshot job scope ${laneScopeKey} does not match ${expectedScopeKey}`,
+    );
+  }
+
+  // Require the season row to exist, but do not require it to remain current:
+  // this is the explicit, lane-fenced historical recovery path.
+  return createSeasonRepository(db).requireByCode(requested.seasonCode);
 }
 
 /**
@@ -163,6 +194,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         obligationDueAtMs: number;
       }
     | undefined;
+  let liveLaneScopeKey: string | undefined;
   if (hasLaneIdentity) {
     const laneId = job.data.laneId;
     const laneGeneration = job.data.laneGeneration;
@@ -227,6 +259,9 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       // scheduler delay look artificially short.
       obligationDueAtMs: scheduledDueAtMsForLiveObligation(fencedLane.obligation),
     };
+    if (job.name === LIVE_JOBS.LIVE_SNAPSHOT) {
+      liveLaneScopeKey = fencedLane.obligation.scopeKey;
+    }
     // The Bull payload can have been queued before a newer target became the
     // lane winner. Carry the fenced obligation identity into the normal
     // generation completion path; the event/scope itself remains unchanged.
@@ -242,7 +277,11 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
   ) {
     return { skipped: true, staleSchedulerGeneration: true };
   }
-  const season = await requireCurrentSeasonForJob(job.data, databaseBudget?.readDb);
+  const season = await requireLiveSnapshotSeason(
+    job.data,
+    job.name === LIVE_JOBS.LIVE_SNAPSHOT ? liveLaneScopeKey : undefined,
+    databaseBudget?.readDb,
+  );
   const { eventId, source } = job.data;
   const context = {
     jobType: 'queue' as const,

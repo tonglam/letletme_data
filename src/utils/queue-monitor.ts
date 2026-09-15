@@ -314,14 +314,27 @@ export class QueueEventAccumulator {
       0,
     );
   }
+
+  /**
+   * The durable event totals are the restart baseline. Drop observations that
+   * arrived before or during that read so an event already included by the
+   * previous leader is not replayed as a new delta by this monitor.
+   */
+  public clear(): number {
+    const pending = this.pendingCount();
+    this.buckets.clear();
+    return pending;
+  }
 }
 
 export function resolveQueueArrivalContribution(input: {
   previousSnapshot?: Pick<QueueHealthSnapshot, 'waiting' | 'active'>;
   snapshot: Pick<QueueHealthSnapshot, 'waiting' | 'active'>;
   eventArrivals: number;
+  /** Arrivals assigned to an adjacent receive-time bucket. */
+  adjacentEventArrivals?: number;
 }): Readonly<{ arrivals: number; sampledArrivals: number }> {
-  const sampledArrivals = input.previousSnapshot
+  const countDelta = input.previousSnapshot
     ? Math.max(
         0,
         input.snapshot.waiting +
@@ -330,6 +343,10 @@ export function resolveQueueArrivalContribution(input: {
           input.previousSnapshot.active,
       )
     : 0;
+  // A boundary-crossing QueueEvents arrival may still be waiting when the
+  // next point-in-time count is read. Remove that already-accounted event
+  // before using the count delta as the no-event fallback.
+  const sampledArrivals = Math.max(0, countDelta - Math.max(0, input.adjacentEventArrivals ?? 0));
   if (input.eventArrivals > 0) {
     return { arrivals: input.eventArrivals, sampledArrivals: 0 };
   }
@@ -738,6 +755,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           pollStartedAtMs,
           eventRetentionMs,
         );
+        const discardedStartupEvents = eventAccumulator.clear();
         for (const [bucketStart, counters] of persisted) {
           acknowledgedEventTotals.set(bucketStart, counters);
         }
@@ -752,6 +770,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         logDebug('Queue monitor event baseline loaded', {
           queue: queueName,
           windows: persisted.size,
+          discardedStartupEvents,
           retentionMs: eventRetentionMs,
         });
       } catch (error) {
@@ -872,6 +891,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       const capturedOutsideWindow = [...capturedEventTotals.entries()].filter(
         ([bucketStart]) => bucketStart !== eventWindowStartMs,
       );
+      const adjacentEventArrivals = [...capturedEvents.entries()]
+        .filter(([bucketStart]) => bucketStart !== eventWindowStartMs)
+        .reduce((total, [, counters]) => total + counters.arrivals, 0);
       // QueueEvents sees jobs that arrive and finish between two polls, while
       // the count delta sees work that remains runnable. Prefer the event count
       // when available and retain the delta as a no-event fallback.
@@ -879,6 +901,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         previousSnapshot: lastSnapshot,
         snapshot,
         eventArrivals: capturedForWindow.arrivals,
+        adjacentEventArrivals,
       });
       windowArrivals += arrivalContribution.arrivals;
       sampledArrivalsForRetry = arrivalContribution.sampledArrivals;

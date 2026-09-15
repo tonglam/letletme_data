@@ -247,6 +247,15 @@ describe('GW queue and data governance primitives', () => {
     });
   });
 
+  test('drops observations covered by a durable startup baseline', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    accumulator.record('failures', 2_000);
+
+    expect(accumulator.clear()).toBe(2);
+    expect(accumulator.pendingCount()).toBe(0);
+  });
+
   test('evicts only observations older than the bounded monitor retention', () => {
     const accumulator = new QueueEventAccumulator(60_000, 15 * 60_000);
     accumulator.record('arrivals', 0);
@@ -279,6 +288,22 @@ describe('GW queue and data governance primitives', () => {
     expect(
       resolveQueueArrivalContribution({ previousSnapshot, snapshot, eventArrivals: 2 }),
     ).toEqual({ arrivals: 2, sampledArrivals: 0 });
+    expect(
+      resolveQueueArrivalContribution({
+        previousSnapshot,
+        snapshot,
+        eventArrivals: 0,
+        adjacentEventArrivals: 1,
+      }),
+    ).toEqual({ arrivals: 3, sampledArrivals: 3 });
+    expect(
+      resolveQueueArrivalContribution({
+        previousSnapshot: { waiting: 0, active: 0 },
+        snapshot: { waiting: 1, active: 0 },
+        eventArrivals: 0,
+        adjacentEventArrivals: 1,
+      }),
+    ).toEqual({ arrivals: 0, sampledArrivals: 0 });
   });
 
   test('validates the persisted live-snapshot season and event scope', () => {
