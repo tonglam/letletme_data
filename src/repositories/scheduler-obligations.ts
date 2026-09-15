@@ -13,6 +13,7 @@ import type { SchedulerObligationPlan, SchedulerSource } from '../scheduler/job-
 import {
   contractForSchedulerJob,
   contractHasFreshnessWindow,
+  finalDependencyRetryDelayMs,
   registeredSchedulerJobNames,
 } from '../domain/data-contracts';
 import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
@@ -137,6 +138,27 @@ function dateValue(value: Date | string | null | undefined): Date | null {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error('Invalid scheduler timestamp');
   return date;
+}
+
+function liveDecisionObservedAtMs(evidence: unknown): number | null {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return null;
+  const record = evidence as Record<string, unknown>;
+  const numeric = record.decisionObservedAtMs;
+  if (typeof numeric === 'number' && Number.isSafeInteger(numeric) && numeric >= 0) {
+    const date = new Date(numeric);
+    return Number.isFinite(date.getTime()) ? numeric : null;
+  }
+  if (typeof numeric === 'string' && /^[0-9]+$/.test(numeric)) {
+    const parsed = Number(numeric);
+    const date = new Date(parsed);
+    return Number.isSafeInteger(parsed) && parsed >= 0 && Number.isFinite(date.getTime())
+      ? parsed
+      : null;
+  }
+  const iso = record.decisionObservedAt;
+  if (typeof iso !== 'string') return null;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function freshnessWindowIdsFromEvidence(evidence: unknown): number[] {
@@ -415,6 +437,42 @@ function terminalSchedulerEvidence(evidence?: Record<string, unknown>) {
         ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
       )
     ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'decisionObservedAt'
+      THEN jsonb_build_object(
+        'decisionObservedAt', ${schedulerObligationsInOps.evidence}->'decisionObservedAt'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'decisionObservedAtMs'
+      THEN jsonb_build_object(
+        'decisionObservedAtMs', ${schedulerObligationsInOps.evidence}->'decisionObservedAtMs'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'dependencyWaitCount'
+      THEN jsonb_build_object(
+        'dependencyWaitCount', ${schedulerObligationsInOps.evidence}->'dependencyWaitCount'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'firstDependencyWaitAt'
+      THEN jsonb_build_object(
+        'firstDependencyWaitAt', ${schedulerObligationsInOps.evidence}->'firstDependencyWaitAt'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'lastDependencyReasonCodes'
+      THEN jsonb_build_object(
+        'lastDependencyReasonCodes', ${schedulerObligationsInOps.evidence}->'lastDependencyReasonCodes'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'deferDelayMs'
+      THEN jsonb_build_object(
+        'deferDelayMs', ${schedulerObligationsInOps.evidence}->'deferDelayMs'
+      )
+    ELSE '{}'::jsonb
   END`;
 }
 
@@ -485,6 +543,39 @@ export async function reserveSchedulerObligation(input: {
     .limit(1);
   const row = existing[0];
   if (!row) throw new Error('Scheduler obligation disappeared after conflict');
+  // A live lifecycle decision can be re-evaluated inside the same bucket. Keep
+  // the durable target identity stable, but refresh its observed decision time
+  // and state while it is still waiting so latest-authoritative ordering is
+  // based on the real observation rather than the first poll in the bucket.
+  if (
+    input.definition.name === 'live-snapshot' &&
+    input.plan.evidence &&
+    liveDecisionObservedAtMs(input.plan.evidence) !== null &&
+    ['pending', 'failed'].includes(row.status)
+  ) {
+    const incomingObservedAtMs = liveDecisionObservedAtMs(input.plan.evidence)!;
+    const currentObservedAtMs = liveDecisionObservedAtMs(row.evidence);
+    // A retry/replay can arrive after a newer scheduler decision for the same
+    // period has already been persisted. Keep the newer observation as the
+    // lane waterline; equal observations remain idempotent and may merge
+    // lifecycle metadata.
+    if (currentObservedAtMs === null || incomingObservedAtMs >= currentObservedAtMs) {
+      const refreshed = await db
+        .update(schedulerObligationsInOps)
+        .set({
+          evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify(input.plan.evidence)}::jsonb`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(schedulerObligationsInOps.obligationId, row.obligationId),
+            inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+          ),
+        )
+        .returning();
+      if (refreshed[0]) return mapRow(refreshed[0]);
+    }
+  }
   const eventPriority =
     input.definition.name === 'my-fpl-finalization' ? myFplEventPriorityFromPlan(input.plan) : null;
   if (eventPriority !== null) {
@@ -1226,6 +1317,8 @@ export async function deferSchedulerObligationForWorker(input: {
   generation: number;
   delayMs?: number;
   evidence?: Record<string, unknown>;
+  /** Dependency waits use their own bounded backoff and do not consume attempts. */
+  dependencyWait?: Readonly<{ reasonCodes?: readonly string[] }>;
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
@@ -1234,11 +1327,39 @@ export async function deferSchedulerObligationForWorker(input: {
     throw new Error('Scheduler generation must be a non-negative integer');
   }
   if (!Number.isSafeInteger(delayMs)) throw new Error('Scheduler defer delay must be an integer');
+  const dependencyReasonCodes = (input.dependencyWait?.reasonCodes ?? [])
+    .filter((code): code is string => typeof code === 'string' && code.length > 0)
+    .slice(0, 16)
+    .map((code) => code.slice(0, 160));
+  const dependencyWaitCountSql = sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'dependencyWaitCount' ~ '^[0-9]+$'
+      THEN LEAST((${schedulerObligationsInOps.evidence}->>'dependencyWaitCount')::numeric, 1000000)
+    ELSE 0
+  END`;
+  const nextDependencyWaitCountSql = sql`(${dependencyWaitCountSql} + 1)`;
+  const dependencyDelaySql = sql`(
+    CASE
+      WHEN ${nextDependencyWaitCountSql} = 1 THEN ${finalDependencyRetryDelayMs(0)}
+      WHEN ${nextDependencyWaitCountSql} = 2 THEN ${finalDependencyRetryDelayMs(1)}
+      WHEN ${nextDependencyWaitCountSql} = 3 THEN ${finalDependencyRetryDelayMs(2)}
+      ELSE ${finalDependencyRetryDelayMs(3)}
+    END
+  )::bigint`;
+  const dependencyEvidenceSql = input.dependencyWait
+    ? sql`jsonb_build_object(
+        'dependencyWaitCount', ${nextDependencyWaitCountSql},
+        'firstDependencyWaitAt', COALESCE(${schedulerObligationsInOps.evidence}->>'firstDependencyWaitAt', clock_timestamp()::text),
+        'lastDependencyReasonCodes', ${JSON.stringify(dependencyReasonCodes)}::jsonb,
+        'deferDelayMs', ${dependencyDelaySql}
+      )`
+    : sql`'{}'::jsonb`;
   const result = await db
     .update(schedulerObligationsInOps)
     .set({
       status: 'pending',
-      dueAt: sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
+      dueAt: input.dependencyWait
+        ? sql`clock_timestamp() + ${dependencyDelaySql} * interval '1 millisecond'`
+        : sql`clock_timestamp() + ${delayMs} * interval '1 millisecond'`,
       generation: sql`${schedulerObligationsInOps.generation} + 1`,
       leaseOwner: null,
       leaseExpiresAt: null,
@@ -1250,8 +1371,8 @@ export async function deferSchedulerObligationForWorker(input: {
         ...(input.evidence ?? {}),
         deferredForPrerequisite: true,
         deferredAt: new Date().toISOString(),
-        deferDelayMs: delayMs,
-      })}::jsonb`,
+        ...(input.dependencyWait ? {} : { deferDelayMs: delayMs }),
+      })}::jsonb || ${dependencyEvidenceSql}`,
       updatedAt: sql`clock_timestamp()`,
     })
     .where(

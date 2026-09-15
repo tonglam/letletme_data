@@ -19,6 +19,8 @@ const waitingJobs: Array<{
     source?: string;
     obligationId?: string;
     obligationGeneration?: number;
+    laneId?: string;
+    laneGeneration?: number;
   };
 }> = [];
 const existingJobIds = new Set<string>();
@@ -82,6 +84,25 @@ describe('Live Points V2 snapshot enqueue', () => {
       },
     });
     expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
+  });
+
+  test('carries the scheduler lane identity through the deterministic job payload', async () => {
+    const job = await enqueueLiveSnapshot(TEST_SEASON, 12, 'reconcile', {
+      jobId: 'scheduler-lane-lane-123-g4',
+      obligationId: 'obligation-live',
+      obligationGeneration: 2,
+      laneId: 'lane-123',
+      laneGeneration: 4,
+      reuseExisting: true,
+    });
+
+    expect(job?.id).toBe('2627-scheduler-lane-lane-123-g4');
+    expect(addCalls[0]?.data).toMatchObject({
+      laneId: 'lane-123',
+      laneGeneration: 4,
+      obligationId: 'obligation-live',
+      obligationGeneration: 2,
+    });
   });
 
   test('suppresses a cron duplicate for the same season, event, and finalization level', async () => {

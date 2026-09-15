@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Job, Queue, QueueEvents } from 'bullmq';
+import { sql } from 'drizzle-orm';
 
 import { queueHealthWindowsInOps } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
 import {
   evaluateAutomaticAdmission,
   acquireQueueMonitorLease,
@@ -27,6 +27,7 @@ import { logDebug, logError, logInfo, logWarn } from './logger';
 import { readFplAdmissionTelemetry } from './fpl-admission';
 import { getConfig } from './config';
 import { contractForSchedulerJob, dataContractRegistry } from '../domain/data-contracts';
+import { getDatabaseHandleWithBudget } from './live-snapshot-db-budget';
 
 type QueueCounts = Record<string, number>;
 
@@ -201,6 +202,98 @@ function windowStart(
 
 export const QUEUE_HEALTH_STABLE_PERSIST_INTERVAL_MS = 60 * 60_000;
 
+export const QUEUE_MONITOR_EVENT_RETENTION_MS = 15 * 60_000;
+
+export type QueueEventCounters = {
+  arrivals: number;
+  completions: number;
+  failures: number;
+  stalled: number;
+};
+
+function emptyQueueEventCounters(): QueueEventCounters {
+  return { arrivals: 0, completions: 0, failures: 0, stalled: 0 };
+}
+
+function mergeQueueEventCounters(target: QueueEventCounters, source: QueueEventCounters): void {
+  target.arrivals += source.arrivals;
+  target.completions += source.completions;
+  target.failures += source.failures;
+  target.stalled += source.stalled;
+}
+
+function addQueueEventCounters(
+  left: QueueEventCounters | undefined,
+  right: QueueEventCounters,
+): QueueEventCounters {
+  const result = left ? { ...left } : emptyQueueEventCounters();
+  mergeQueueEventCounters(result, right);
+  return result;
+}
+
+function totalQueueEventCounters(counters: QueueEventCounters): number {
+  return counters.arrivals + counters.completions + counters.failures + counters.stalled;
+}
+
+/**
+ * Receive-time event windows used by the monitor. Capturing a batch removes
+ * only the events that the current poll will acknowledge; events received
+ * while the poll is awaiting Redis or PostgreSQL remain in the next batch.
+ */
+export class QueueEventAccumulator {
+  private readonly buckets = new Map<number, QueueEventCounters>();
+
+  public constructor(
+    private readonly windowIntervalMs: number,
+    private readonly retentionMs = QUEUE_MONITOR_EVENT_RETENTION_MS,
+  ) {}
+
+  public record(kind: keyof QueueEventCounters, receivedAtMs = Date.now()): number {
+    const bucketStart = windowStart(receivedAtMs, this.windowIntervalMs).getTime();
+    const bucket = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
+    bucket[kind] += 1;
+    this.buckets.set(bucketStart, bucket);
+    return this.prune(receivedAtMs);
+  }
+
+  public prune(nowMs = Date.now()): number {
+    const cutoff = nowMs - this.retentionMs;
+    let evicted = 0;
+    for (const [startMs, counters] of this.buckets) {
+      if (startMs < cutoff) {
+        evicted += totalQueueEventCounters(counters);
+        this.buckets.delete(startMs);
+      }
+    }
+    return evicted;
+  }
+
+  public capture(nowMs?: number): Map<number, QueueEventCounters> {
+    if (nowMs !== undefined) this.prune(nowMs);
+    const captured = new Map<number, QueueEventCounters>();
+    for (const [bucketStart, counters] of this.buckets) {
+      captured.set(bucketStart, { ...counters });
+      this.buckets.delete(bucketStart);
+    }
+    return captured;
+  }
+
+  public restore(captured: Map<number, QueueEventCounters>): void {
+    for (const [bucketStart, counters] of captured) {
+      const current = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
+      mergeQueueEventCounters(current, counters);
+      this.buckets.set(bucketStart, current);
+    }
+  }
+
+  public pendingCount(): number {
+    return [...this.buckets.values()].reduce(
+      (total, counters) => total + totalQueueEventCounters(counters),
+      0,
+    );
+  }
+}
+
 /**
  * Persist changes that affect queue control or incident reconstruction, not
  * continuously changing observation timestamps and retained completion
@@ -244,107 +337,131 @@ export function shouldPersistQueueHealthWindow(input: {
   );
 }
 
-async function persistWindow(snapshot: QueueHealthSnapshot, intervalMs: number): Promise<boolean> {
+function queueHealthWindowValues(snapshot: QueueHealthSnapshot, intervalMs: number) {
+  const window = windowStart(Date.parse(snapshot.observedAt), intervalMs);
+  return {
+    windowStart: window,
+    queueName: snapshot.queueName,
+    waiting: snapshot.waiting,
+    active: snapshot.active,
+    delayed: snapshot.delayed,
+    prioritized: snapshot.prioritized,
+    waitingChildren: snapshot.waitingChildren,
+    consumerPaused: snapshot.consumerPaused,
+    pausedCount: snapshot.pausedCount,
+    pauseOwnerState: snapshot.pauseOwnerState,
+    failed: snapshot.failed,
+    completed: snapshot.completed,
+    runnable: snapshot.runnable,
+    oldestRunnableAgeMs: snapshot.oldestRunnableAgeMs,
+    arrivals: snapshot.arrivals,
+    completions: snapshot.completions,
+    failures: snapshot.failures,
+    stalled: snapshot.stalled,
+    waitP50Ms: snapshot.waitP50Ms,
+    waitP95Ms: snapshot.waitP95Ms,
+    executionP50Ms: snapshot.executionP50Ms,
+    executionP95Ms: snapshot.executionP95Ms,
+    providerWaitP95Ms: snapshot.providerWaitP95Ms,
+    provider429Rate: snapshot.provider429Rate?.toFixed(5),
+    netGrowth: snapshot.netGrowth,
+    drainEtaMs: snapshot.drainEtaMs,
+    backlogClass: snapshot.backlogClass,
+    admissionMode: snapshot.admissionMode,
+    consumerHeartbeatAt: snapshot.consumerHeartbeatAt
+      ? new Date(snapshot.consumerHeartbeatAt)
+      : null,
+    releaseSha: snapshot.releaseSha,
+    evidence: {
+      source: 'queue-monitor',
+      admission: {
+        waitP95Ms: snapshot.admissionWaitP95Ms ?? null,
+        deadlineExceeded: snapshot.admissionDeadlineExceeded ?? 0,
+        storeUnavailable: snapshot.admissionStoreUnavailable ?? 0,
+      },
+    },
+  };
+}
+
+function queueHealthWindowConflictSet() {
+  return {
+    waiting: sql`excluded.waiting`,
+    active: sql`excluded.active`,
+    delayed: sql`excluded.delayed`,
+    prioritized: sql`excluded.prioritized`,
+    waitingChildren: sql`excluded.waiting_children`,
+    consumerPaused: sql`excluded.consumer_paused`,
+    pausedCount: sql`excluded.paused_count`,
+    pauseOwnerState: sql`excluded.pause_owner_state`,
+    failed: sql`excluded.failed`,
+    completed: sql`excluded.completed`,
+    runnable: sql`excluded.runnable`,
+    oldestRunnableAgeMs: sql`excluded.oldest_runnable_age_ms`,
+    // Event counters are cumulative for a receive-time window. `greatest`
+    // keeps a process restart or a delayed retry from replacing durable
+    // evidence with the smaller in-memory count it has observed so far.
+    arrivals: sql`greatest(${queueHealthWindowsInOps.arrivals}, excluded.arrivals)`,
+    completions: sql`greatest(${queueHealthWindowsInOps.completions}, excluded.completions)`,
+    failures: sql`greatest(${queueHealthWindowsInOps.failures}, excluded.failures)`,
+    stalled: sql`greatest(${queueHealthWindowsInOps.stalled}, excluded.stalled)`,
+    waitP50Ms: sql`excluded.wait_p50_ms`,
+    waitP95Ms: sql`excluded.wait_p95_ms`,
+    executionP50Ms: sql`excluded.execution_p50_ms`,
+    executionP95Ms: sql`excluded.execution_p95_ms`,
+    providerWaitP95Ms: sql`excluded.provider_wait_p95_ms`,
+    provider429Rate: sql`excluded.provider_429_rate`,
+    netGrowth: sql`excluded.net_growth`,
+    drainEtaMs: sql`excluded.drain_eta_ms`,
+    backlogClass: sql`excluded.backlog_class`,
+    admissionMode: sql`excluded.admission_mode`,
+    consumerHeartbeatAt: sql`excluded.consumer_heartbeat_at`,
+    releaseSha: sql`excluded.release_sha`,
+    evidence: sql`excluded.evidence`,
+    updatedAt: sql`excluded.updated_at`,
+  };
+}
+
+function queueHealthSnapshotForEventWindow(
+  snapshot: QueueHealthSnapshot,
+  windowStartMs: number,
+  intervalMs: number,
+  counters: QueueEventCounters,
+): QueueHealthSnapshot {
+  const windowEndMs = windowStartMs + Math.max(1, intervalMs) - 1;
+  const observedAtMs = Math.max(windowStartMs, Math.min(Date.now(), windowEndMs));
+  return {
+    ...snapshot,
+    observedAt: new Date(observedAtMs).toISOString(),
+    arrivals: counters.arrivals,
+    completions: counters.completions,
+    failures: counters.failures,
+    stalled: counters.stalled,
+  };
+}
+
+async function persistWindows(
+  snapshots: readonly QueueHealthSnapshot[],
+  intervalMs: number,
+): Promise<boolean> {
+  if (snapshots.length === 0) return true;
   try {
-    const db = await getDb();
-    const window = windowStart(Date.parse(snapshot.observedAt), intervalMs);
+    const db = await getDatabaseHandleWithBudget(5_000);
+    const values = snapshots.map((snapshot) => queueHealthWindowValues(snapshot, intervalMs));
     await db
       .insert(queueHealthWindowsInOps)
-      .values({
-        windowStart: window,
-        queueName: snapshot.queueName,
-        waiting: snapshot.waiting,
-        active: snapshot.active,
-        delayed: snapshot.delayed,
-        prioritized: snapshot.prioritized,
-        waitingChildren: snapshot.waitingChildren,
-        consumerPaused: snapshot.consumerPaused,
-        pausedCount: snapshot.pausedCount,
-        pauseOwnerState: snapshot.pauseOwnerState,
-        failed: snapshot.failed,
-        completed: snapshot.completed,
-        runnable: snapshot.runnable,
-        oldestRunnableAgeMs: snapshot.oldestRunnableAgeMs,
-        // The monitor already carries a bounded one-minute event accumulator
-        // in the snapshot. Persist that evidence verbatim so an upsert from a
-        // later poll cannot erase arrivals/completions observed earlier in the
-        // same minute.
-        arrivals: snapshot.arrivals,
-        completions: snapshot.completions,
-        failures: snapshot.failures,
-        stalled: snapshot.stalled,
-        waitP50Ms: snapshot.waitP50Ms,
-        waitP95Ms: snapshot.waitP95Ms,
-        executionP50Ms: snapshot.executionP50Ms,
-        executionP95Ms: snapshot.executionP95Ms,
-        providerWaitP95Ms: snapshot.providerWaitP95Ms,
-        provider429Rate: snapshot.provider429Rate?.toFixed(5),
-        netGrowth: snapshot.netGrowth,
-        drainEtaMs: snapshot.drainEtaMs,
-        backlogClass: snapshot.backlogClass,
-        admissionMode: snapshot.admissionMode,
-        consumerHeartbeatAt: snapshot.consumerHeartbeatAt
-          ? new Date(snapshot.consumerHeartbeatAt)
-          : null,
-        releaseSha: snapshot.releaseSha,
-        evidence: {
-          source: 'queue-monitor',
-          admission: {
-            waitP95Ms: snapshot.admissionWaitP95Ms ?? null,
-            deadlineExceeded: snapshot.admissionDeadlineExceeded ?? 0,
-            storeUnavailable: snapshot.admissionStoreUnavailable ?? 0,
-          },
-        },
-      })
+      .values(values)
       .onConflictDoUpdate({
         target: [queueHealthWindowsInOps.windowStart, queueHealthWindowsInOps.queueName],
-        set: {
-          waiting: snapshot.waiting,
-          active: snapshot.active,
-          delayed: snapshot.delayed,
-          prioritized: snapshot.prioritized,
-          waitingChildren: snapshot.waitingChildren,
-          consumerPaused: snapshot.consumerPaused,
-          pausedCount: snapshot.pausedCount,
-          pauseOwnerState: snapshot.pauseOwnerState,
-          failed: snapshot.failed,
-          completed: snapshot.completed,
-          runnable: snapshot.runnable,
-          oldestRunnableAgeMs: snapshot.oldestRunnableAgeMs,
-          arrivals: snapshot.arrivals,
-          completions: snapshot.completions,
-          failures: snapshot.failures,
-          stalled: snapshot.stalled,
-          waitP50Ms: snapshot.waitP50Ms,
-          waitP95Ms: snapshot.waitP95Ms,
-          executionP50Ms: snapshot.executionP50Ms,
-          executionP95Ms: snapshot.executionP95Ms,
-          providerWaitP95Ms: snapshot.providerWaitP95Ms,
-          provider429Rate: snapshot.provider429Rate?.toFixed(5) ?? null,
-          evidence: {
-            source: 'queue-monitor',
-            admission: {
-              waitP95Ms: snapshot.admissionWaitP95Ms ?? null,
-              deadlineExceeded: snapshot.admissionDeadlineExceeded ?? 0,
-              storeUnavailable: snapshot.admissionStoreUnavailable ?? 0,
-            },
-          },
-          netGrowth: snapshot.netGrowth,
-          drainEtaMs: snapshot.drainEtaMs,
-          consumerHeartbeatAt: snapshot.consumerHeartbeatAt
-            ? new Date(snapshot.consumerHeartbeatAt)
-            : null,
-          backlogClass: snapshot.backlogClass,
-          admissionMode: snapshot.admissionMode,
-          releaseSha: snapshot.releaseSha,
-          updatedAt: window,
-        },
+        set: queueHealthWindowConflictSet(),
       });
     return true;
   } catch (error) {
     // Queue telemetry is an observability side channel. A migration or a
     // transient PG outage must not stop consumers from draining work.
-    logError('Queue health window persistence failed', error, { queue: snapshot.queueName });
+    logError('Queue health window persistence failed', error, {
+      queue: snapshots[0]?.queueName,
+      windows: snapshots.length,
+    });
     return false;
   }
 }
@@ -363,17 +480,87 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   let windowCompletions = 0;
   let windowFailures = 0;
   let windowStalled = 0;
-  let failedEvents = 0;
-  let stalledEvents = 0;
-  let completedEvents = 0;
-  let addedEvents = 0;
+  // QueueEvents can arrive while a poll is waiting on Redis or PostgreSQL.
+  // Keep them in receive-time buckets so a slow poll cannot attribute an old
+  // burst to the next window or lose events when persistence fails.
+  const eventAccumulator = new QueueEventAccumulator(windowIntervalMs);
+  // Keep cumulative event totals for each retained window. The accumulator
+  // only owns unconfirmed batches; this map supplies the absolute value for an
+  // idempotent PostgreSQL upsert when a later poll confirms another batch.
+  const acknowledgedEventTotals = new Map<number, QueueEventCounters>();
   let started = false;
+  let stopped = false;
+  let pollInFlight: Promise<void> | null = null;
   const leaseOwner = randomUUID();
   let lastRetentionAttemptAt = 0;
   let lastPersistedFingerprint: string | null = null;
   let lastPersistedAtMs = 0;
 
-  const logCounts = async (context: string) => {
+  const pruneAcknowledgedEventTotals = (nowMs: number): number => {
+    const cutoff = nowMs - QUEUE_MONITOR_EVENT_RETENTION_MS;
+    let evicted = 0;
+    for (const [bucketStart, counters] of acknowledgedEventTotals) {
+      if (bucketStart < cutoff) {
+        evicted += totalQueueEventCounters(counters);
+        acknowledgedEventTotals.delete(bucketStart);
+      }
+    }
+    return evicted;
+  };
+
+  const recordEvent = (kind: keyof QueueEventCounters, receivedAtMs = Date.now()): void => {
+    if (stopped) return;
+    const evictedAcknowledged = pruneAcknowledgedEventTotals(receivedAtMs);
+    if (evictedAcknowledged > 0) {
+      logDebug('Queue monitor acknowledged event totals expired', {
+        queue: queueName,
+        evicted: evictedAcknowledged,
+        retentionMs: QUEUE_MONITOR_EVENT_RETENTION_MS,
+      });
+    }
+    const evicted = eventAccumulator.record(kind, receivedAtMs);
+    if (evicted > 0) {
+      logWarn('Queue monitor event observation window exceeded', {
+        queue: queueName,
+        evicted,
+        retentionMs: QUEUE_MONITOR_EVENT_RETENTION_MS,
+      });
+    }
+  };
+
+  const logCounts = async (context: string): Promise<void> => {
+    if (stopped) return;
+    const pollStartedAtMs = Date.now();
+    pruneAcknowledgedEventTotals(pollStartedAtMs);
+    const evictedBeforeCapture = eventAccumulator.prune(pollStartedAtMs);
+    if (evictedBeforeCapture > 0) {
+      logWarn('Queue monitor event observation window exceeded', {
+        queue: queueName,
+        evicted: evictedBeforeCapture,
+        retentionMs: QUEUE_MONITOR_EVENT_RETENTION_MS,
+      });
+    }
+    const capturedEvents = eventAccumulator.capture();
+    const capturedEventCount = [...capturedEvents.values()].reduce(
+      (total, counters) => total + totalQueueEventCounters(counters),
+      0,
+    );
+    // A captured event is acknowledged only after the durable window upsert
+    // succeeds. Redis is the point-in-time serving snapshot, but it cannot
+    // replace the PostgreSQL history used to reconstruct a burst or stall.
+    let capturedForWindowForRetry = emptyQueueEventCounters();
+    let capturedEventsRestored = false;
+    const confirmedCapturedWindows = new Set<number>();
+    let snapshotWritten = false;
+    let databasePersisted: boolean | null = null;
+    logDebug('Queue monitor poll started', {
+      queue: queueName,
+      context,
+      capturedEvents: [...capturedEvents.values()].reduce(
+        (total, counters) => total + totalQueueEventCounters(counters),
+        0,
+      ),
+    });
     try {
       const counts = await queue.getJobCounts(
         'waiting',
@@ -439,11 +626,27 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       const observedMs = Date.parse(snapshot.observedAt);
       if (Number.isFinite(observedMs) && observedMs >= eventWindowStartMs + windowIntervalMs) {
         eventWindowStartMs = windowStart(observedMs, windowIntervalMs).getTime();
-        windowArrivals = 0;
-        windowCompletions = 0;
-        windowFailures = 0;
-        windowStalled = 0;
+        const acknowledged = acknowledgedEventTotals.get(eventWindowStartMs);
+        windowArrivals = acknowledged?.arrivals ?? 0;
+        windowCompletions = acknowledged?.completions ?? 0;
+        windowFailures = acknowledged?.failures ?? 0;
+        windowStalled = acknowledged?.stalled ?? 0;
       }
+      const capturedForWindow = emptyQueueEventCounters();
+      const capturedEventTotals = new Map<number, QueueEventCounters>();
+      for (const [bucketStart, counters] of capturedEvents) {
+        if (bucketStart === eventWindowStartMs) {
+          mergeQueueEventCounters(capturedForWindow, counters);
+        }
+        capturedEventTotals.set(
+          bucketStart,
+          addQueueEventCounters(acknowledgedEventTotals.get(bucketStart), counters),
+        );
+      }
+      capturedForWindowForRetry = capturedForWindow;
+      const capturedOutsideWindow = [...capturedEventTotals.entries()].filter(
+        ([bucketStart]) => bucketStart !== eventWindowStartMs,
+      );
       const sampleArrivals = lastSnapshot
         ? Math.max(
             0,
@@ -453,10 +656,11 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       // QueueEvents sees jobs that arrive and finish between two polls, while
       // the count delta sees work that remains runnable. Prefer the event count
       // when available and retain the delta as a no-event fallback.
-      windowArrivals += addedEvents > 0 ? addedEvents : sampleArrivals;
-      windowCompletions += completedEvents;
-      windowFailures += failedEvents;
-      windowStalled += stalledEvents;
+      windowArrivals +=
+        capturedForWindow.arrivals > 0 ? capturedForWindow.arrivals : sampleArrivals;
+      windowCompletions += capturedForWindow.completions;
+      windowFailures += capturedForWindow.failures;
+      windowStalled += capturedForWindow.stalled;
       withEvents = {
         ...withEvents,
         arrivals: windowArrivals,
@@ -492,6 +696,14 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
             : {}),
         }),
       };
+      const outsideWindowSnapshots = capturedOutsideWindow.map(([bucketStart, counters]) =>
+        queueHealthSnapshotForEventWindow(withEvents, bucketStart, windowIntervalMs, counters),
+      );
+      if (stopped) {
+        eventAccumulator.restore(capturedEvents);
+        capturedEventsRestored = true;
+        return;
+      }
       logDebug('Queue job counts', {
         queue: queueName,
         context,
@@ -499,9 +711,24 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         ...deltas,
         backlogClass: withEvents.backlogClass,
       });
-      await writeQueueHealthSnapshot(withEvents).catch((error) =>
-        logError('Queue health snapshot write failed', error, { queue: queueName }),
-      );
+      try {
+        await writeQueueHealthSnapshot(withEvents);
+        snapshotWritten = true;
+      } catch (error) {
+        // PostgreSQL history must not claim a Redis serving snapshot that was
+        // never written. Keep the captured QueueEvents batch for the next
+        // poll and leave the previous point-in-time sample intact.
+        logError('Queue health snapshot write failed', error, { queue: queueName, context });
+        return;
+      }
+      logDebug('Queue monitor Redis snapshot written', {
+        queue: queueName,
+        context,
+        eventWindowStartMs,
+      });
+      lastCounts = counts;
+      lastSnapshot = withEvents;
+      if (stopped) return;
       if (withEvents.backlogClass !== 'HEALTHY') {
         logWarn('Queue backlog classified', {
           queue: queueName,
@@ -511,27 +738,67 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           drainEtaMs: withEvents.drainEtaMs,
         });
       }
+      if (stopped) return;
       const isLeader = await acquireQueueMonitorLease(queueName, leaseOwner).catch((error) => {
         logError('Queue monitor leader lease failed', error, { queue: queueName });
         return false;
       });
       if (isLeader) {
+        if (stopped) {
+          await releaseQueueMonitorLease(queueName, leaseOwner);
+          return;
+        }
         await evaluateAutomaticAdmission(withEvents).catch((error) =>
           logError('Automatic queue admission evaluation failed', error, { queue: queueName }),
         );
-        if (
-          shouldPersistQueueHealthWindow({
-            snapshot: withEvents,
-            lastFingerprint: lastPersistedFingerprint,
-            lastPersistedAtMs,
-          })
-        ) {
-          const persisted = await persistWindow(withEvents, windowIntervalMs);
+        if (stopped) return;
+        const persistCurrentWindow = shouldPersistQueueHealthWindow({
+          snapshot: withEvents,
+          lastFingerprint: lastPersistedFingerprint,
+          lastPersistedAtMs,
+        });
+        const snapshotsToPersist = [
+          ...(persistCurrentWindow ? [withEvents] : []),
+          ...outsideWindowSnapshots,
+        ];
+        if (snapshotsToPersist.length > 0) {
+          const persisted = await persistWindows(snapshotsToPersist, windowIntervalMs);
+          databasePersisted = persisted;
+          logDebug('Queue monitor database window persistence finished', {
+            queue: queueName,
+            context,
+            persisted,
+            windows: snapshotsToPersist.length,
+            eventWindowStartMs,
+          });
           if (persisted) {
-            lastPersistedFingerprint = queueHealthPersistenceFingerprint(withEvents);
-            lastPersistedAtMs = Date.parse(withEvents.observedAt);
+            const persistedWindowStarts = new Set(
+              snapshotsToPersist.map((item) =>
+                windowStart(Date.parse(item.observedAt), windowIntervalMs).getTime(),
+              ),
+            );
+            if (persistCurrentWindow) {
+              lastPersistedFingerprint = queueHealthPersistenceFingerprint(withEvents);
+              lastPersistedAtMs = Date.parse(withEvents.observedAt);
+            }
+            for (const [bucketStart, counters] of capturedEventTotals) {
+              // A batched upsert may contain only an outside receive-time
+              // window when the current snapshot is stable. Confirm each
+              // captured bucket only when that exact window was included in
+              // the durable write; the other buckets must be retried.
+              if (!persistedWindowStarts.has(bucketStart)) continue;
+              acknowledgedEventTotals.set(bucketStart, counters);
+              confirmedCapturedWindows.add(bucketStart);
+            }
           }
+        } else {
+          // A stable snapshot needs no PostgreSQL write when there are no new
+          // event buckets to confirm. The receive-time buckets above force a
+          // write even when the current point-in-time status is unchanged.
+          databasePersisted =
+            capturedEventTotals.size === 0 && totalQueueEventCounters(capturedForWindow) === 0;
         }
+        if (stopped) return;
         // Queue health is sampled frequently, so retain only a bounded
         // 35-day operational history. A global Redis lease ensures one
         // monitor performs the bounded cleanup per hour during rollouts.
@@ -546,28 +813,83 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
             return false;
           });
           if (retentionLeader) {
-            await pruneQueueHealthWindows({
-              batchSize: QUEUE_HEALTH_RETENTION_BATCH_SIZE,
-              maxBatches: QUEUE_HEALTH_RETENTION_MAX_BATCHES,
-            }).catch((error) =>
-              logError('Queue health retention failed', error, { queue: queueName }),
-            );
+            if (stopped) {
+              await releaseQueueMonitorLease(QUEUE_HEALTH_RETENTION_LEASE_QUEUE, leaseOwner);
+              return;
+            }
+            const retentionDb = await getDatabaseHandleWithBudget(5_000).catch((error) => {
+              logError('Queue health retention database budget failed', error, {
+                queue: queueName,
+              });
+              return null;
+            });
+            if (retentionDb) {
+              await pruneQueueHealthWindows({
+                batchSize: QUEUE_HEALTH_RETENTION_BATCH_SIZE,
+                maxBatches: QUEUE_HEALTH_RETENTION_MAX_BATCHES,
+                db: retentionDb,
+              }).catch((error) =>
+                logError('Queue health retention failed', error, { queue: queueName }),
+              );
+            }
           }
         }
       }
-      lastCounts = counts;
-      lastSnapshot = withEvents;
-      failedEvents = 0;
-      stalledEvents = 0;
-      completedEvents = 0;
-      addedEvents = 0;
     } catch (error) {
+      if (!snapshotWritten) eventAccumulator.restore(capturedEvents);
+      capturedEventsRestored = !snapshotWritten;
       logError('Queue job count fetch failed', error, { queue: queueName });
+    } finally {
+      // A non-leader has no durable confirmation. Likewise, Redis success
+      // followed by a failed PostgreSQL upsert must retry the exact captured
+      // batch. Restore only unconfirmed buckets; events received while this
+      // poll was in flight already remain in the accumulator and are never
+      // removed here.
+      const activeCapturedEventCount = totalQueueEventCounters(capturedForWindowForRetry);
+      // `capturedForWindowForRetry` is selected after the point-in-time read,
+      // so it already reflects a window boundary crossed while Redis was
+      // being queried. Roll it back whenever that folded batch was not
+      // durably confirmed; checking the poll's starting window would leave a
+      // new-window batch inflated after a failed cross-boundary retry.
+      const activeCapturedWindow = activeCapturedEventCount > 0;
+      const activeWindowConfirmed =
+        activeCapturedWindow && confirmedCapturedWindows.has(eventWindowStartMs);
+      if (activeCapturedWindow && !activeWindowConfirmed) {
+        // The batch was already folded into the in-memory window before the
+        // Redis/DB outcome became known. Undo that fold before restoring the
+        // events so a retry adds them exactly once instead of inflating the
+        // cumulative upsert on every failed poll.
+        windowArrivals = Math.max(0, windowArrivals - capturedForWindowForRetry.arrivals);
+        windowCompletions = Math.max(0, windowCompletions - capturedForWindowForRetry.completions);
+        windowFailures = Math.max(0, windowFailures - capturedForWindowForRetry.failures);
+        windowStalled = Math.max(0, windowStalled - capturedForWindowForRetry.stalled);
+      }
+      if (!capturedEventsRestored && capturedEventCount > 0) {
+        const unconfirmed = new Map<number, QueueEventCounters>();
+        for (const [bucketStart, counters] of capturedEvents) {
+          if (!confirmedCapturedWindows.has(bucketStart)) {
+            unconfirmed.set(bucketStart, { ...counters });
+          }
+        }
+        if (unconfirmed.size > 0) {
+          eventAccumulator.restore(unconfirmed);
+          capturedEventsRestored = true;
+        }
+      }
+      logDebug('Queue monitor poll finished', {
+        queue: queueName,
+        context,
+        durationMs: Math.max(0, Date.now() - pollStartedAtMs),
+        snapshotWritten,
+        databasePersisted,
+        inFlightEvents: eventAccumulator.pendingCount(),
+      });
     }
   };
 
   queueEvents.on('failed', ({ jobId, failedReason, prev }) => {
-    failedEvents += 1;
+    if (stopped) return;
+    recordEvent('failures');
     void resolveJobName(queue, jobId).then((jobName) => {
       logError('Queue event failed', toError(failedReason), {
         queue: queueName,
@@ -579,18 +901,21 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   });
 
   queueEvents.on('added', () => {
-    addedEvents += 1;
+    if (stopped) return;
+    recordEvent('arrivals');
   });
 
   queueEvents.on('completed', ({ jobId, prev }) => {
-    completedEvents += 1;
+    if (stopped) return;
+    recordEvent('completions');
     void resolveJobName(queue, jobId).then((jobName) => {
       logDebug('Queue event completed', { queue: queueName, jobId, jobName, previous: prev });
     });
   });
 
   queueEvents.on('stalled', ({ jobId }) => {
-    stalledEvents += 1;
+    if (stopped) return;
+    recordEvent('stalled');
     void resolveJobName(queue, jobId).then((jobName) => {
       logError('Queue event stalled', undefined, { queue: queueName, jobId, jobName });
     });
@@ -601,19 +926,36 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   queueEvents
     .waitUntilReady()
     .then(() => {
+      if (stopped) return;
       started = true;
       logInfo('Queue events ready', { queue: queueName, pollIntervalMs });
-      void logCounts('startup');
-      pollInterval = setInterval(() => {
-        void logCounts('interval');
-      }, pollIntervalMs);
+      const scheduleNextPoll = (): void => {
+        if (!started) return;
+        pollInterval = setTimeout(() => {
+          pollInterval = null;
+          if (!started || pollInFlight !== null) return;
+          const poll = logCounts('interval');
+          pollInFlight = poll;
+          void poll.finally(() => {
+            if (pollInFlight === poll) pollInFlight = null;
+            scheduleNextPoll();
+          });
+        }, pollIntervalMs);
+      };
+      const startupPoll = logCounts('startup');
+      pollInFlight = startupPoll;
+      void startupPoll.finally(() => {
+        if (pollInFlight === startupPoll) pollInFlight = null;
+        scheduleNextPoll();
+      });
     })
     .catch((error) => logError('Queue events init failed', error, { queue: queueName }));
 
   return {
     stop() {
+      stopped = true;
       if (pollInterval) {
-        clearInterval(pollInterval);
+        clearTimeout(pollInterval);
         pollInterval = null;
       }
       started = false;

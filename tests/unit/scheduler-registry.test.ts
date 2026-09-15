@@ -27,6 +27,7 @@ import {
   schedulerExecutionLanes,
   schedulerPlanKey,
   schedulerPlanObservationCanBeRemembered,
+  shouldRevisitSchedulerPlan,
 } from '../../src/scheduler/scheduler.service';
 import { mockFixture1 } from '../fixtures/fixtures.fixtures';
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
@@ -36,6 +37,8 @@ import {
   liveFinalRetentionDueAt,
   liveFinalRetentionPeriodKey,
 } from '../../src/domain/live-final-retention-policy';
+import { finalDependencyRetryDelayMs } from '../../src/domain/data-contracts';
+import { schedulerObligationAuthorityAt } from '../../src/repositories/scheduler-lanes';
 
 describe('standalone scheduler registry', () => {
   const registry = createSchedulerRegistry();
@@ -439,6 +442,44 @@ describe('standalone scheduler registry', () => {
       source: 'catchup',
       evidence: { cadence: 'five-minute', offsetMs: 60_000 },
     });
+  });
+
+  test('orders live snapshot targets by the observed scheduler decision time', () => {
+    const obligation = {
+      jobName: 'live-snapshot',
+      dueAt: new Date('2026-08-23T00:00:00.000Z'),
+      evidence: {
+        scheduledDueAtMs: Date.parse('2026-08-23T00:00:00.000Z'),
+        decisionObservedAtMs: Date.parse('2026-08-23T00:04:59.000Z'),
+      },
+    } as never;
+    expect(schedulerObligationAuthorityAt(obligation)).toEqual(
+      new Date('2026-08-23T00:04:59.000Z'),
+    );
+  });
+
+  test('uses an independent bounded FINAL dependency backoff sequence', () => {
+    expect([0, 1, 2, 3, 4].map(finalDependencyRetryDelayMs)).toEqual([
+      60_000, 180_000, 600_000, 900_000, 900_000,
+    ]);
+  });
+
+  test('declares live snapshots as one latest-authoritative lane', () => {
+    const live = registry.find((definition) => definition.name === 'live-snapshot');
+    expect(live?.executionPolicy).toMatchObject({
+      kind: 'single-flight-latest',
+    });
+    expect(
+      live?.executionPolicy?.laneKey({
+        context: { season: TEST_SEASON, now: new Date(), events: [] },
+        plan: {
+          scopeKey: `${TEST_SEASON.seasonCode}:event:3`,
+          periodKey: 'live-3',
+          dueAt: new Date(),
+          source: 'reconcile',
+        },
+      }),
+    ).toBe(`live-snapshot-${TEST_SEASON.seasonCode}:event:3`);
   });
 
   test('opens the dedicated price-change watcher five minutes before deadline', () => {
@@ -1061,6 +1102,24 @@ describe('standalone scheduler registry', () => {
         status: 'succeeded',
         evidence: { eventPriority: 1 },
       }),
+    ).toBe(true);
+  });
+
+  test('revisits a stable My FPL FINAL plan for dependency backoff expiry', () => {
+    expect(shouldRevisitSchedulerPlan({ name: 'my-fpl-finalization' }, true)).toBe(true);
+    expect(shouldRevisitSchedulerPlan({ name: 'entry-results' }, true)).toBe(false);
+    expect(
+      shouldRevisitSchedulerPlan(
+        {
+          name: 'price-change-predictions',
+          executionPolicy: {
+            kind: 'single-flight-latest',
+            laneKey: () => 'test-lane',
+            maxTargetsPerDispatch: 1,
+          },
+        },
+        true,
+      ),
     ).toBe(true);
   });
 

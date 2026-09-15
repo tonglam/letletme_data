@@ -24,6 +24,7 @@ import {
   recordCheckpointFreshnessEvidence,
 } from '../services/scheduler-obligation-lifecycle.service';
 import {
+  acknowledgeSupersededSchedulerLane,
   advanceSchedulerLane,
   claimSchedulerLaneDispatch,
   confirmSchedulerLaneEnqueued,
@@ -100,7 +101,23 @@ const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
   'league-event-results',
   'tournament-event-results',
 ] as const;
+// FINAL readiness is evaluated by the worker, which may defer the same
+// durable obligation while source evidence is still incomplete. Revisit its
+// stable period key on every scheduler pass so the persisted due_at/backoff
+// remains the only admission gate for the next real readiness check.
+const FINAL_DEPENDENCY_REVISIT_JOBS = new Set(['my-fpl-finalization']);
 const observedPlanKeys = new Map<string, true>();
+
+export function shouldRevisitSchedulerPlan(
+  definition: Pick<ScheduledJobDefinition, 'name' | 'executionPolicy'>,
+  planWasObserved: boolean,
+): boolean {
+  return (
+    !planWasObserved ||
+    Boolean(definition.executionPolicy) ||
+    FINAL_DEPENDENCY_REVISIT_JOBS.has(definition.name)
+  );
+}
 
 // A definition resolver may still be unwinding after its bounded caller
 // timeout (for example, a driver socket that has not observed cancellation
@@ -774,7 +791,12 @@ async function reconcileSingleFlightBullState(
       // enqueueFplCriticalPriceChangeJob applies the season prefix through
       // getExplicitDataSyncQueueJobId; mirror that exact Bull identity when
       // recovering an enqueue whose response was lost.
-      const expectedJobId = `${lane.scopeKey}-scheduler-lane-${lane.laneId}-g${lane.dispatchGeneration}`;
+      // Live snapshot scopes include `season:event:<id>` while Bull's
+      // explicit ID is prefixed by the season code. Price lanes keep the
+      // historical season-only scope, so derive the same prefix for both.
+      const bullIdPrefix =
+        lane.jobName === 'live-snapshot' ? lane.scopeKey.split(':')[0] : lane.scopeKey;
+      const expectedJobId = `${bullIdPrefix}-scheduler-lane-${lane.laneId}-g${lane.dispatchGeneration}`;
       const job = await queue.getJob(expectedJobId);
       const state = job ? await job.getState() : 'missing';
       if (['waiting', 'delayed', 'active', 'paused', 'prioritized'].includes(state)) {
@@ -801,7 +823,7 @@ async function reconcileSingleFlightBullState(
           dispatchGeneration: lane.dispatchGeneration,
           bullJobId: expectedJobId,
           bullState: state,
-          obligationId: lane.desiredObligationId,
+          ...(lane.jobName === 'live-snapshot' ? {} : { obligationId: lane.desiredObligationId }),
         });
         if (!recovered) {
           logError('Latest-wins dispatch loss recovery CAS failed', undefined, {
@@ -887,6 +909,14 @@ async function reconcileSingleFlightBullState(
       return;
     }
     if (state === 'completed') {
+      if (lane.jobName === 'live-snapshot') {
+        const settled = await acknowledgeSupersededSchedulerLane({
+          laneId: lane.laneId,
+          dispatchGeneration: lane.dispatchGeneration,
+          bullJobId: lane.bullJobId,
+        });
+        if (settled) return;
+      }
       await notifyTwoBots(
         [
           'Latest-wins lane completed without durable completion',
@@ -1364,9 +1394,11 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       const planKey = schedulerPlanKey(definition, plan);
       // Single-flight lanes must revisit an existing period on every pass so
       // a newly-created desired target can be reconciled after a prior job
-      // completed. All other definitions keep the in-process observation
-      // guard to avoid redundant reservation reads.
-      if (wasPlanObserved(planKey) && !definition.executionPolicy) continue;
+      // completed. FINAL dependency waits use the same stable period key, but
+      // must revisit every pass so a due backoff can trigger a real readiness
+      // check. All other definitions keep the in-process observation guard to
+      // avoid redundant reservation reads.
+      if (!shouldRevisitSchedulerPlan(definition, wasPlanObserved(planKey))) continue;
       try {
         const obligation = await reserveSchedulerObligation({
           definition: { ...definition, queueName: schedulerLaneName(definition) },
@@ -1411,6 +1443,9 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
             scopeKey: plan.scopeKey,
             queueName: definition.queueName,
             desiredObligation: obligation,
+            ...(definition.name === 'live-snapshot'
+              ? { preserveFreshnessHistory: true, supersedeBatchSize: 250 }
+              : {}),
           });
           singleFlightLanes.set(laneKey, {
             definition,

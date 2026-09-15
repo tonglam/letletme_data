@@ -462,6 +462,8 @@ describe('Live Points and Live Matches shared observation', () => {
     expect(restoreCalls).toBe(1);
     expect(finalizeFlags).toEqual([false, false, true]);
     expect(result.state).toBe('FINALIZED');
+    expect(result.stageTimings.totalMs).toBeGreaterThanOrEqual(0);
+    expect(result.stageTimings.providerMs).toEqual(expect.any(Number));
   });
 
   test('rejects a final Live Points publication when provisional Match detail is unavailable', async () => {

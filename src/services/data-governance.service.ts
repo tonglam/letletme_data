@@ -42,6 +42,13 @@ import {
   queueHealthRetentionCutoff,
 } from './queue-governance.service';
 import { readPublicTrendFreshnessEvidenceBySeasonId } from './trends-catalog.service';
+import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
+
+type SchedulerLanePublicationFence = Readonly<{
+  laneId: string;
+  dispatchGeneration: number;
+  activeObligationId: string;
+}>;
 
 export type GovernanceCaseStatus =
   | 'OPEN'
@@ -595,10 +602,18 @@ export async function recordFreshnessObservation(input: {
   invalid?: boolean;
   breachCode?: string | null;
   evidence?: Record<string, unknown>;
+  /** Optional lane fence for latest-authoritative producer callbacks. */
+  schedulerLaneFence?: SchedulerLanePublicationFence;
   db?: DbOrTransaction;
 }): Promise<FreshnessSloStatus | null> {
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
+    if (input.schedulerLaneFence) {
+      // Lock the lane before the SLO row. Scheduler advancement takes the
+      // same lock order, so a late callback cannot mark a superseded window
+      // MET after the lane has moved to a newer target.
+      await assertSchedulerLanePublicationFence(tx, input.schedulerLaneFence);
+    }
     // The status machine is monotonic, but the evidence columns are a
     // read/compute/write operation. Lock the row so overlapping publication
     // and consumer probes cannot derive a status from the same stale snapshot
@@ -1414,6 +1429,7 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
   pgPublishedAt: Date;
   redisSeenAt?: Date;
   revision: string;
+  schedulerLaneFence?: SchedulerLanePublicationFence;
   db?: DbHandle;
 }): Promise<number> {
   const revision = input.revision.trim();
@@ -1433,6 +1449,9 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
   }
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
+    if (input.schedulerLaneFence) {
+      await assertSchedulerLanePublicationFence(tx, input.schedulerLaneFence);
+    }
     // Lock and re-read the durable head. Publication id, generation and the
     // PostgreSQL checkpoint clock are immutable identity. Redis may advance
     // sourceCheckedAt on an unchanged heartbeat, so use the durable source
@@ -1495,6 +1514,7 @@ export async function recordPendingLiveSnapshotCheckpointEvidence(input: {
           liveCheckpointPending: false,
           liveCheckpointRevision: revision,
         },
+        schedulerLaneFence: input.schedulerLaneFence,
         db: tx,
       });
       if (status !== null) updated += 1;

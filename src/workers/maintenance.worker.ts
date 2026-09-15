@@ -585,10 +585,10 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 }`,
               );
             }
-            await deferSchedulerObligationForWorker({
+            const deferred = await deferSchedulerObligationForWorker({
               obligationId: fence.obligationId,
               generation: fence.generation,
-              delayMs: 60_000,
+              dependencyWait: { reasonCodes: finalizationReadiness.reasonCodes },
               evidence: {
                 eventId,
                 readiness: {
@@ -608,6 +608,9 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 },
               },
             });
+            if (!deferred) {
+              throw new Error('Stale scheduler My FPL FINAL dependency wait');
+            }
             return {
               status: 'waiting-dependencies',
               readiness: finalizationReadiness,

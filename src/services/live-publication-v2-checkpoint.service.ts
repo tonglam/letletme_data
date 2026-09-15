@@ -258,8 +258,9 @@ function missingClassicFinalizationInput(seasonCode: string): SQL {
 export async function readLiveFinalizationPrerequisites(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<{ blocked: boolean }> {
-  const db = await getDb();
+  const db = dbInstance ?? (await getDb());
   const [row] = await db
     .select({
       blocked: sql<boolean>`EXISTS (
@@ -526,6 +527,8 @@ export type LivePublicationV2CheckpointRequest = {
    * proves the facts were observed after the current relational authority.
    */
   readonly observationCheckedAt?: Date | string;
+  /** Optional bounded Drizzle handle supplied by the live worker. */
+  readonly db?: DbOrTransaction;
   /**
    * Seed recovery uses an absent durable head as part of its eligibility
    * proof. Enforce that proof only after taking the scope advisory lock so a
@@ -1305,7 +1308,7 @@ export async function checkpointLivePublicationV2(
   ) {
     throw new Error('Live Points V2 checkpoint source timestamp is invalid');
   }
-  const db = await getDb();
+  const db = request.db ?? (await getDb());
   return db
     .transaction(async (tx) => {
       const scopeLock = `${season.seasonCode}:${eventId}`;

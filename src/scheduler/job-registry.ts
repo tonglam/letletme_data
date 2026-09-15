@@ -1140,6 +1140,10 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
     queueName: 'live-data',
+    executionPolicy: {
+      kind: 'single-flight-latest' as const,
+      laneKey: ({ plan }: { plan: SchedulerObligationPlan }) => `live-snapshot-${plan.scopeKey}`,
+    },
     successPredicate:
       'live snapshot checked; Redis publication current and checkpoint obligation reconciled',
     resolve: async (context) => {
@@ -1204,6 +1208,8 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             lifecycleState: decision.state,
             pollIntervalMs,
             expectedNextCheckAt: new Date(context.now.getTime() + pollIntervalMs).toISOString(),
+            decisionObservedAt: context.now.toISOString(),
+            decisionObservedAtMs: context.now.getTime(),
             // Match V3 can warm the fixture desk before Live Points is
             // eligible. Preserve that lane on the durable obligation so the
             // reconciler cannot accidentally run the all-in-one producer.
@@ -1216,14 +1222,27 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         },
       ];
     },
-    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+    enqueue: async ({
+      context,
+      plan,
+      obligationId,
+      generation,
+      freshnessWindowId,
+      laneId,
+      dispatchGeneration,
+    }) => {
       const eventId = plan.eventId ?? context.currentEventId;
       if (!eventId) throw new Error('Live snapshot obligation has no event checkpoint');
+      if (!laneId || dispatchGeneration === undefined) {
+        throw new Error('Live snapshot latest-authoritative enqueue requires a scheduler lane');
+      }
       const job = await enqueueLiveSnapshot(context.season, eventId, 'reconcile', {
-        jobId: `scheduler-${obligationId}-g${generation}`,
+        jobId: `scheduler-lane-${laneId}-g${dispatchGeneration}`,
         reuseExisting: true,
         obligationId,
         obligationGeneration: generation,
+        laneId,
+        laneGeneration: dispatchGeneration,
         freshnessWindowId,
         lifecycleState: normalizeMatchLifecycleState(plan.evidence?.lifecycleState),
         expectedNextCheckAt:

@@ -16,6 +16,8 @@ import {
 } from '../../src/services/queue-governance.service';
 import {
   queueHealthPersistenceFingerprint,
+  QueueEventAccumulator,
+  QUEUE_MONITOR_EVENT_RETENTION_MS,
   resolveJobDispatchBudgetMs,
   resolveQueueDispatchBudgetMs,
   resolveQueueTimingMetrics,
@@ -214,6 +216,36 @@ describe('GW queue and data governance primitives', () => {
         lastPersistedAtMs: Date.parse(snapshot.observedAt),
       }),
     ).toBe(true);
+  });
+
+  test('acknowledges one captured event batch without losing events received during the poll', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    const captured = accumulator.capture();
+    accumulator.record('completions', 2_000);
+
+    // A successful snapshot acknowledges only the captured batch. The event
+    // received while the poll was awaiting Redis/DB remains for the next poll.
+    expect(accumulator.pendingCount()).toBe(1);
+    expect(captured.get(0)).toEqual({ arrivals: 1, completions: 0, failures: 0, stalled: 0 });
+
+    // A failed persistence attempt puts the captured batch back beside the
+    // newer event, so neither observation is silently discarded.
+    accumulator.restore(captured);
+    expect(accumulator.pendingCount()).toBe(2);
+    expect(accumulator.capture().get(0)).toEqual({
+      arrivals: 1,
+      completions: 1,
+      failures: 0,
+      stalled: 0,
+    });
+  });
+
+  test('evicts only observations older than the bounded monitor retention', () => {
+    const accumulator = new QueueEventAccumulator(60_000, 15 * 60_000);
+    accumulator.record('arrivals', 0);
+    expect(accumulator.record('failures', 15 * 60_000 + 1)).toBe(1);
+    expect(accumulator.pendingCount()).toBe(1);
   });
 
   test('distinguishes disabled optional monitors from missing observations', () => {

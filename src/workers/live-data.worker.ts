@@ -30,9 +30,10 @@ import {
 } from '../services/live-league-publication-v2.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
-import { logDebug, logError, logInfo } from '../utils/logger';
+import { logDebug, logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { eventRepository } from '../repositories/events';
+import { createEventRepository, eventRepository } from '../repositories/events';
+import { runtimeReleaseRevision } from '../utils/runtime-heartbeat';
 import {
   recordFreshnessObservation,
   recordPendingLiveSnapshotCheckpointEvidence,
@@ -55,8 +56,57 @@ import {
   inspectSchedulerObligationFence,
   startCurrentSchedulerJob,
 } from '../utils/scheduler-obligation-fence';
+import {
+  acknowledgeSupersededSchedulerLane,
+  completeSchedulerLane,
+  failSchedulerLane,
+  fenceSchedulerLaneTarget,
+  getSchedulerLane,
+  startSchedulerLane,
+} from '../repositories/scheduler-lanes';
+import {
+  createLiveSnapshotDatabaseBudget,
+  getDatabaseHandleWithBudget,
+  type LiveSnapshotDatabaseBudget,
+} from '../utils/live-snapshot-db-budget';
+import {
+  LIVE_SNAPSHOT_DB_CHECKPOINT_WRITE_BUDGET_MS,
+  LIVE_SNAPSHOT_DB_READ_BUDGET_MS,
+} from '../domain/data-contracts';
 
-const LIVE_FINALIZATION_RETRY_DELAY_MS = 60_000;
+function scheduledDueAtMsForLiveObligation(obligation: {
+  dueAt: Date;
+  evidence: Record<string, unknown>;
+}): number {
+  const raw = obligation.evidence.scheduledDueAtMs;
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) {
+    const date = new Date(raw);
+    if (Number.isFinite(date.getTime())) return raw;
+  }
+  if (typeof raw === 'string' && /^[0-9]+$/.test(raw)) {
+    const parsed = Number(raw);
+    const date = new Date(parsed);
+    if (Number.isSafeInteger(parsed) && parsed >= 0 && Number.isFinite(date.getTime())) {
+      return parsed;
+    }
+  }
+  return obligation.dueAt.getTime();
+}
+
+/**
+ * A FINAL dependency wait is a successful Bull hand-off, not a successful
+ * scheduler obligation. Keep the marker in the Bull return value so the
+ * completion listener cannot turn the durable pending generation into a
+ * false success after the worker has already performed its CAS defer.
+ */
+export function liveDataResultDeferredSchedulerObligation(
+  jobName: string,
+  result: unknown,
+): boolean {
+  if (jobName !== LIVE_JOBS.LIVE_SNAPSHOT) return false;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+  return (result as Record<string, unknown>).status === 'waiting-dependencies';
+}
 
 async function enqueueFinalOfficialH2HRefresh(
   season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
@@ -96,16 +146,103 @@ async function enqueueFinalOfficialH2HRefresh(
  * - asynchronous V2 PostgreSQL checkpointing and the final-results cascade
  */
 async function processLiveDataJob(job: Job<LiveDataJobData>) {
-  if (
+  const usesLiveDatabaseBudget =
+    job.name === LIVE_JOBS.LIVE_SNAPSHOT || job.name === LIVE_JOBS.LIVE_MATCH_CHECKPOINT;
+  const databaseBudget: LiveSnapshotDatabaseBudget | null = usesLiveDatabaseBudget
+    ? await createLiveSnapshotDatabaseBudget(
+        job.name === LIVE_JOBS.LIVE_SNAPSHOT && job.data.finalizeEvent === true ? null : undefined,
+      )
+    : null;
+  const hasLaneIdentity = job.data.laneId !== undefined || job.data.laneGeneration !== undefined;
+  let laneIdentity:
+    | {
+        laneId: string;
+        dispatchGeneration: number;
+        activeObligationId: string;
+        obligationGeneration: number;
+        obligationDueAtMs: number;
+      }
+    | undefined;
+  if (hasLaneIdentity) {
+    const laneId = job.data.laneId;
+    const laneGeneration = job.data.laneGeneration;
+    if (!laneId || typeof laneGeneration !== 'number' || !Number.isSafeInteger(laneGeneration)) {
+      throw new Error('Live snapshot job has an incomplete scheduler lane identity');
+    }
+    const startedLane = await startSchedulerLane({
+      laneId,
+      dispatchGeneration: laneGeneration,
+      bullJobId: String(job.id),
+      obligationId: job.data.obligationId,
+      runId: job.data.runId,
+      db: databaseBudget?.controlDb,
+    });
+    if (!startedLane) {
+      logInfo('Skipping stale live snapshot lane before job execution', {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: job.id,
+        laneId,
+        laneGeneration,
+      });
+      return { skipped: true, staleSchedulerGeneration: true };
+    }
+    const fencedLane = await fenceSchedulerLaneTarget({
+      laneId,
+      dispatchGeneration: laneGeneration,
+      activeObligationId: startedLane.obligation.obligationId,
+      bullJobId: String(job.id),
+      runId: job.data.runId,
+      db: databaseBudget?.controlDb,
+    });
+    if (!fencedLane) {
+      logInfo('Skipping live snapshot lane after target fence changed', {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: job.id,
+        laneId,
+        laneGeneration,
+      });
+      return { skipped: true, staleSchedulerGeneration: true };
+    }
+    if (!['pending', 'failed', 'enqueued', 'running'].includes(fencedLane.obligation.status)) {
+      logInfo('Skipping terminal live snapshot lane target before provider execution', {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: job.id,
+        laneId,
+        laneGeneration,
+        obligationId: fencedLane.obligation.obligationId,
+        status: fencedLane.obligation.status,
+      });
+      return { skipped: true, staleSchedulerGeneration: true };
+    }
+    laneIdentity = {
+      laneId,
+      dispatchGeneration: laneGeneration,
+      activeObligationId: fencedLane.obligation.obligationId,
+      obligationGeneration: fencedLane.obligation.generation,
+      // `dueAt` is mutable retry state. Stage evidence must use the original
+      // scheduled boundary so a deferred/retried obligation cannot make its
+      // scheduler delay look artificially short.
+      obligationDueAtMs: scheduledDueAtMsForLiveObligation(fencedLane.obligation),
+    };
+    // The Bull payload can have been queued before a newer target became the
+    // lane winner. Carry the fenced obligation identity into the normal
+    // generation completion path; the event/scope itself remains unchanged.
+    job.data.obligationId = fencedLane.obligation.obligationId;
+    job.data.obligationGeneration = fencedLane.obligation.generation;
+  } else if (
     !(await startCurrentSchedulerJob(job.data, {
       queueName: job.queueName,
       jobName: job.name,
       jobId: job.id,
+      db: databaseBudget?.controlDb,
     }))
   ) {
     return { skipped: true, staleSchedulerGeneration: true };
   }
-  const season = await requireCurrentSeasonForJob(job.data);
+  const season = await requireCurrentSeasonForJob(job.data, databaseBudget?.readDb);
   const { eventId, source } = job.data;
   const context = {
     jobType: 'queue' as const,
@@ -115,11 +252,19 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     eventId,
     source,
     attempt: job.attemptsMade + 1,
+    queueWaitMs:
+      Number.isFinite(Number(job.timestamp)) && Number.isFinite(Number(job.processedOn))
+        ? Math.max(0, Number(job.processedOn) - Number(job.timestamp))
+        : null,
   };
+  const schedulerDelayMs =
+    laneIdentity && Number.isFinite(Number(job.timestamp))
+      ? Math.max(0, Number(job.timestamp) - laneIdentity.obligationDueAtMs)
+      : null;
 
   logJobTriggered(context);
 
-  return runTrackedJob(context, async () => {
+  const result = await runTrackedJob(context, async () => {
     if (job.name === LIVE_JOBS.LIVE_FINAL_RETENTION) {
       const fence = inspectSchedulerObligationFence(job.data);
       if (fence.kind === 'malformed') {
@@ -172,6 +317,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         season,
         eventId,
         kind: job.data.checkpointKind,
+        db: databaseBudget?.writeDb,
       });
       // A failed or coalesced checkpoint leaves the Redis desired marker in
       // place for the periodic reconciler. Re-enqueue only after a successful
@@ -190,6 +336,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       const result = await syncLiveMatchObservationV3(season, eventId, {
         lifecycleState: job.data.lifecycleState,
         expectedNextCheckAt: job.data.expectedNextCheckAt,
+        databaseRead: databaseBudget?.readDb,
         // Preserve the broader scheduler decision explicitly: PICKS_PROBE is
         // normalized to the Match PRE_DEADLINE state for publication schema,
         // but it is post-deadline and may advance the eventless pointer.
@@ -201,7 +348,11 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       return result;
     }
     if (job.data.finalizeEvent === true) {
-      const prerequisite = await readLiveFinalizationPrerequisites(season, eventId);
+      const prerequisite = await readLiveFinalizationPrerequisites(
+        season,
+        eventId,
+        databaseBudget?.readDb,
+      );
       if (prerequisite.blocked) {
         const evidence = {
           finalization: 'waiting-for-entry-input',
@@ -211,25 +362,125 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
           const deferred = await deferSchedulerObligationForWorker({
             obligationId: job.data.obligationId,
             generation: job.data.obligationGeneration,
-            delayMs: LIVE_FINALIZATION_RETRY_DELAY_MS,
+            dependencyWait: {
+              reasonCodes: ['DATA_INCOMPLETE:FINAL_ENTRY_INPUT_REQUIRES_PROVIDER_RECOVERY'],
+            },
             evidence,
+            db: databaseBudget?.writeDb,
           });
           if (!deferred) throw new Error('Stale scheduler finalization preflight');
         } else {
           throw new Error(evidence.reason);
         }
-        return evidence;
+        return { ...evidence, status: 'waiting-dependencies' as const };
       }
     }
-    const snapshot = await syncLiveSnapshotV2(season, eventId, {
-      finalizeEvent: job.data.finalizeEvent === true,
-      lifecycleState: job.data.lifecycleState,
-      expectedNextCheckAt: job.data.expectedNextCheckAt,
-      trigger: source,
-      sourceRunId: job.data.runId,
-    });
+    const liveSnapshotStageStartedAt = Date.now();
+    let snapshot: Awaited<ReturnType<typeof syncLiveSnapshotV2>>;
+    try {
+      snapshot = await syncLiveSnapshotV2(season, eventId, {
+        finalizeEvent: job.data.finalizeEvent === true,
+        lifecycleState: job.data.lifecycleState,
+        expectedNextCheckAt: job.data.expectedNextCheckAt,
+        trigger: source,
+        sourceRunId: job.data.runId,
+        ...(databaseBudget ? { databaseBudget } : {}),
+      });
+    } catch (error) {
+      // A failed stage has no completed snapshot timings, but it still needs
+      // one bounded record so timeout and provider failures are visible in
+      // the same queue-wait/release/obligation vocabulary as successes.
+      logError('Live snapshot stage failed', error, {
+        releaseSha: runtimeReleaseRevision(),
+        obligationId: job.data.obligationId,
+        obligationGeneration: job.data.obligationGeneration,
+        schedulerDelayMs,
+        queueWaitMs: context.queueWaitMs,
+        snapshotTotalMs: Math.max(0, Date.now() - liveSnapshotStageStartedAt),
+        totalMs: Math.max(0, Date.now() - liveSnapshotStageStartedAt),
+        eventId,
+        budgetExceeded: ['stage-failed'],
+      });
+      throw error;
+    }
+    const budgetExceeded = [
+      ...(snapshot.stageTimings.controlReadMs !== null &&
+      snapshot.stageTimings.controlReadMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
+        ? ['database-read']
+        : []),
+      ...(snapshot.stageTimings.redisPublishMs !== null &&
+      snapshot.stageTimings.redisPublishMs > LIVE_SNAPSHOT_DB_READ_BUDGET_MS
+        ? ['redis-publish']
+        : []),
+      ...(snapshot.stageTimings.checkpointMs !== null &&
+      snapshot.stageTimings.checkpointMs > LIVE_SNAPSHOT_DB_CHECKPOINT_WRITE_BUDGET_MS
+        ? ['checkpoint-write']
+        : []),
+      ...(job.data.finalizeEvent !== true && snapshot.stageTimings.totalMs > 90_000
+        ? ['execution-total']
+        : []),
+    ];
+    const stageSummary = {
+      releaseSha: runtimeReleaseRevision(),
+      obligationId: job.data.obligationId,
+      obligationGeneration: job.data.obligationGeneration,
+      schedulerDelayMs,
+      queueWaitMs: context.queueWaitMs,
+      controlReadMs: snapshot.stageTimings.controlReadMs,
+      providerMs: snapshot.stageTimings.providerMs,
+      redisPublishMs: snapshot.stageTimings.redisPublishMs,
+      checkpointMs: snapshot.stageTimings.checkpointMs,
+      snapshotTotalMs: snapshot.stageTimings.totalMs,
+      totalMs: Math.max(0, Date.now() - liveSnapshotStageStartedAt),
+      checkpointed: snapshot.checkpointed,
+      publicationId: snapshot.publicationId,
+      publicationGeneration: snapshot.generation,
+      eventId,
+      state: snapshot.state,
+      budgetExceeded,
+    };
+    if (budgetExceeded.length > 0) {
+      logWarn('Live snapshot stage exceeded budget', stageSummary);
+    } else {
+      logInfo('Live snapshot stage summary', stageSummary);
+    }
     if (snapshot.checkpointObligationFailed) {
       throw new Error(`Live Match checkpoint obligation was not created for event ${eventId}`);
+    }
+    let liveLaneIsCurrent = true;
+    if (laneIdentity) {
+      try {
+        // The execution budget may be exhausted by the provider/checkpoint.
+        // Use a fresh bounded control read for the post-publication fence so a
+        // successful snapshot is never converted into a retry merely because
+        // its original 90-second handle has expired.
+        const fenceDb = await getDatabaseHandleWithBudget(LIVE_SNAPSHOT_DB_READ_BUDGET_MS);
+        const lane = await getSchedulerLane({ laneId: laneIdentity.laneId, db: fenceDb });
+        liveLaneIsCurrent = Boolean(
+          lane?.state === 'running' &&
+            lane.dispatchGeneration === laneIdentity.dispatchGeneration &&
+            lane.activeObligationId === laneIdentity.activeObligationId &&
+            lane.desiredObligationId === laneIdentity.activeObligationId,
+        );
+      } catch (error) {
+        // An unavailable fence is conservative for freshness evidence, but it
+        // must not turn an otherwise successful publication into a Bull retry.
+        liveLaneIsCurrent = false;
+        logWarn('Live snapshot lane fence read failed after publication', {
+          eventId,
+          laneId: laneIdentity.laneId,
+          dispatchGeneration: laneIdentity.dispatchGeneration,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (!liveLaneIsCurrent) {
+      logInfo('Live snapshot publication completed after lane target advanced', {
+        eventId,
+        jobId: job.id,
+        laneId: laneIdentity?.laneId,
+        dispatchGeneration: laneIdentity?.dispatchGeneration,
+      });
     }
     // League boards are a sibling publication. A missing roster input or a
     // transient Redis/DB read must retain the last complete board and must not
@@ -240,6 +491,12 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         season,
         eventId,
         job.data.expectedNextCheckAt,
+        databaseBudget
+          ? {
+              databaseRead: databaseBudget.readDb,
+              databaseReadClient: databaseBudget.readClient,
+            }
+          : undefined,
       );
     } catch (error) {
       logError(
@@ -257,6 +514,12 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         season,
         eventId,
         job.data.expectedNextCheckAt,
+        databaseBudget
+          ? {
+              databaseRead: databaseBudget.readDb,
+              databaseReadClient: databaseBudget.readClient,
+            }
+          : undefined,
       );
     } catch (error) {
       logError('Live H2H league publication pass failed; global publication is retained', error, {
@@ -265,6 +528,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       });
     }
     if (
+      liveLaneIsCurrent &&
       job.data.freshnessWindowId !== undefined &&
       snapshot.publicationId !== null &&
       snapshot.generation !== null
@@ -275,15 +539,17 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       // the exact publication identity. Always read the checkpoint here; the
       // freshness window is scoped to the returned publication, not to the
       // boolean that says whether this invocation performed the checkpoint.
-      const durableCheckpoint = await readLivePublicationV2Checkpoint(season, eventId).catch(
-        (error) => {
-          logError('Live snapshot durable checkpoint read failed for freshness evidence', error, {
-            eventId,
-            windowId: job.data.freshnessWindowId,
-          });
-          return null;
-        },
-      );
+      const durableCheckpoint = await readLivePublicationV2Checkpoint(
+        season,
+        eventId,
+        databaseBudget?.readDb,
+      ).catch((error) => {
+        logError('Live snapshot durable checkpoint read failed for freshness evidence', error, {
+          eventId,
+          windowId: job.data.freshnessWindowId,
+        });
+        return null;
+      });
       const checkpoint = durableCheckpoint;
       const checkpointedAt = checkpoint?.publication.checkpointedAt;
       const pgPublishedAt = checkpointedAt ? new Date(checkpointedAt) : null;
@@ -312,6 +578,8 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             redisRevision: revision,
             completenessStatus: 'COMPLETE',
             evidence: { liveCheckpointPending: !(checkpointMatchesSnapshot && validPgPublishedAt) },
+            schedulerLaneFence: laneIdentity,
+            db: databaseBudget?.writeDb,
           });
         } catch (error) {
           // Freshness telemetry is additive. The Redis publication and the
@@ -333,6 +601,8 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             pgPublishedAt,
             redisSeenAt,
             revision,
+            schedulerLaneFence: laneIdentity,
+            db: databaseBudget?.writeDb,
           });
         } catch (error) {
           logError('Live snapshot pending freshness checkpoint reconciliation failed', error, {
@@ -383,7 +653,9 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       snapshot.state === 'FINALIZED' &&
       (!h2hGlobalIdentityMatches || !h2hLeagueResult?.finalReady)
     ) {
-      const finalizationFreshAfter = await eventRepository.findDataCheckedAtExact(season, eventId);
+      const finalizationFreshAfter = await (
+        databaseBudget?.readDb ? createEventRepository(databaseBudget.readDb) : eventRepository
+      ).findDataCheckedAtExact(season, eventId);
       await enqueueFinalOfficialH2HRefresh(
         season,
         eventId,
@@ -407,15 +679,20 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
           h2hFinalReady: h2hLeagueResult?.finalReady ?? false,
         });
         if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+          const dependencyReasonCodes = [
+            ...(classicLeagueResult?.finalReady === true ? [] : ['CLASSIC_LEAGUE_FINAL_NOT_READY']),
+            ...(h2hLeagueResult?.finalReady === true ? [] : ['H2H_LEAGUE_FINAL_NOT_READY']),
+          ];
           const deferred = await deferSchedulerObligationForWorker({
             obligationId: job.data.obligationId,
             generation: job.data.obligationGeneration,
-            delayMs: LIVE_FINALIZATION_RETRY_DELAY_MS,
+            dependencyWait: { reasonCodes: dependencyReasonCodes },
             evidence: {
               finalization: 'waiting-for-league-evidence',
               classicFinalReady: classicLeagueResult?.finalReady ?? false,
               h2hFinalReady: h2hLeagueResult?.finalReady ?? false,
             },
+            db: databaseBudget?.writeDb,
           });
           if (!deferred) {
             throw new Error(
@@ -423,7 +700,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             );
           }
         }
-        return snapshot;
+        return { ...snapshot, status: 'waiting-dependencies' as const };
       }
       // Final Match obligations are queued for normal recovery, but the final
       // snapshot must not race those jobs on this same two-slot worker before
@@ -431,9 +708,14 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       // desired markers inline once; any duplicate queue jobs then observe an
       // already-cleared marker and become harmless no-ops.
       for (const kind of ['desk', 'detail'] as const) {
-        await checkpointLiveMatchScopeV3({ season, eventId, kind });
+        await checkpointLiveMatchScopeV3({
+          season,
+          eventId,
+          kind,
+          db: databaseBudget?.writeDb,
+        });
       }
-      if (!(await hasFinalLiveMatchCheckpointsV3(season, eventId))) {
+      if (!(await hasFinalLiveMatchCheckpointsV3(season, eventId, databaseBudget?.readDb))) {
         throw new Error(
           `Finalized Live Matches desk/detail are not durably checkpointed for event ${eventId}`,
         );
@@ -442,6 +724,38 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     }
     return snapshot;
   });
+  if (laneIdentity) {
+    if (laneIdentity.activeObligationId) {
+      // The normal live execution budget may be exhausted by a provider or
+      // checkpoint that finished right at its deadline. Lane completion is a
+      // separate control-state transition and needs its own short, cancellable
+      // handle; otherwise a successful snapshot can leave the lane stuck in
+      // running until a later recovery pass notices it.
+      const completionDb = await getDatabaseHandleWithBudget(LIVE_SNAPSHOT_DB_READ_BUDGET_MS);
+      const completed = await completeSchedulerLane({
+        laneId: laneIdentity.laneId,
+        dispatchGeneration: laneIdentity.dispatchGeneration,
+        activeObligationId: laneIdentity.activeObligationId,
+        obligationGeneration: laneIdentity.obligationGeneration,
+        status: 'succeeded',
+        evidence: {
+          queue: job.queueName,
+          jobName: job.name,
+          eventId: job.data.eventId,
+          laneCompletion: 'live-snapshot',
+        },
+        db: completionDb,
+      });
+      if (!completed.ok) {
+        logInfo('Live snapshot lane completion was fenced by a newer target', {
+          laneId: laneIdentity.laneId,
+          dispatchGeneration: laneIdentity.dispatchGeneration,
+          activeObligationId: laneIdentity.activeObligationId,
+        });
+      }
+    }
+  }
+  return result;
 }
 
 export function createLiveDataWorker(): WorkerRuntime {
@@ -465,7 +779,29 @@ export function createLiveDataWorker(): WorkerRuntime {
       jobName: job.name,
       eventId: job.data.eventId,
     });
+    if (liveDataResultDeferredSchedulerObligation(job.name, job.returnvalue)) return;
     if (job.id !== undefined) {
+      // Latest-authoritative live snapshots settle their lane inside the
+      // worker. A stale queued job still needs an explicit lane acknowledgement
+      // so its Bull completion can release an enqueued generation without
+      // acknowledging the skipped obligation as success.
+      if (job.data.laneId !== undefined || job.data.laneGeneration !== undefined) {
+        const laneGeneration = job.data.laneGeneration;
+        if (
+          job.data.laneId &&
+          typeof laneGeneration === 'number' &&
+          Number.isSafeInteger(laneGeneration) &&
+          job.data.obligationId
+        ) {
+          void acknowledgeSupersededSchedulerLane({
+            laneId: job.data.laneId,
+            dispatchGeneration: laneGeneration,
+            bullJobId: job.id,
+            activeObligationId: job.data.obligationId,
+          }).catch(() => false);
+        }
+        return;
+      }
       const fence = inspectSchedulerObligationFence(job.data);
       const evidence = {
         queue: liveDataQueueName,
@@ -503,6 +839,45 @@ export function createLiveDataWorker(): WorkerRuntime {
     });
     if (job) {
       void alertOnFinalFailure(job, err);
+      if (job.data.laneId !== undefined || job.data.laneGeneration !== undefined) {
+        const laneGeneration = job.data.laneGeneration;
+        if (
+          job.data.laneId &&
+          typeof laneGeneration === 'number' &&
+          Number.isSafeInteger(laneGeneration)
+        ) {
+          // Bull emits `failed` for every attempt. A retryable live snapshot
+          // must keep the lane occupied until Bull exhausts its attempts;
+          // releasing it here would let the scheduler dispatch a second
+          // generation beside the retry that is already delayed/active.
+          if (!isTerminalJobFailure(job, err)) return;
+          // Use the identity carried by the failed payload. Reading the lane's
+          // current active target first could select a newer obligation that
+          // advanced while this old Bull callback was in flight; the exact
+          // identity CAS below must reject that callback instead.
+          const activeObligationId = job.data.obligationId;
+          if (!activeObligationId) return;
+          const laneId = job.data.laneId;
+          void failSchedulerLane({
+            laneId,
+            dispatchGeneration: laneGeneration,
+            activeObligationId,
+            error: err,
+          })
+            .then((handled) =>
+              handled
+                ? true
+                : acknowledgeSupersededSchedulerLane({
+                    laneId,
+                    dispatchGeneration: laneGeneration,
+                    bullJobId: job.id ?? '',
+                    activeObligationId,
+                  }),
+            )
+            .catch(() => false);
+        }
+        return;
+      }
       const fence = inspectSchedulerObligationFence(job.data);
       const failureEvidence =
         err instanceof LiveFinalRetentionIncompleteError

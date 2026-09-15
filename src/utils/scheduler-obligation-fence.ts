@@ -1,6 +1,7 @@
 import { UnrecoverableError } from 'bullmq';
 
 import { startSchedulerObligation } from '../repositories/scheduler-obligations';
+import type { DbHandle } from '../db/singleton';
 import { logError, logInfo } from './logger';
 
 type SchedulerObligationJobData = Readonly<{
@@ -12,6 +13,7 @@ type SchedulerObligationJobContext = Readonly<{
   queueName: string;
   jobName: string;
   jobId?: string | number;
+  db?: DbHandle;
 }>;
 
 export type SchedulerObligationFence =
@@ -55,13 +57,14 @@ export async function startCurrentSchedulerJob(
   data: SchedulerObligationJobData,
   context: SchedulerObligationJobContext,
 ): Promise<boolean> {
+  const { db, ...logContext } = context;
   const fence = inspectSchedulerObligationFence(data);
   if (fence.kind === 'none') return true;
 
   if (fence.kind === 'malformed') {
     const error = new UnrecoverableError(`Incomplete scheduler generation fence: ${fence.reason}`);
     logError('Rejecting scheduled job with an incomplete generation fence', error, {
-      ...context,
+      ...logContext,
       obligationId: data.obligationId,
       obligationGeneration: data.obligationGeneration,
     });
@@ -71,10 +74,11 @@ export async function startCurrentSchedulerJob(
   const started = await startSchedulerObligation({
     obligationId: fence.obligationId,
     generation: fence.generation,
+    db,
   });
   if (!started) {
     logInfo('Skipping stale scheduler generation before job execution', {
-      ...context,
+      ...logContext,
       obligationId: fence.obligationId,
       obligationGeneration: fence.generation,
     });

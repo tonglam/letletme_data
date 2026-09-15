@@ -4,7 +4,7 @@ import {
   liveMatchDeskCheckpointsInFpl,
   liveMatchDetailCheckpointsInFpl,
 } from '../db/schemas/index.schema';
-import { getDb, type TransactionHandle } from '../db/singleton';
+import { getDb, type DbOrTransaction, type TransactionHandle } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   clearLiveMatchCheckpointDesiredV3,
@@ -132,6 +132,7 @@ export interface LiveMatchDeskCheckpointRequest {
   readonly eventId: number;
   readonly publication: MatchDeskPublication;
   readonly fixtures: readonly MatchDeskFixture[];
+  readonly db?: DbOrTransaction;
 }
 
 export interface LiveMatchDetailCheckpointRequest {
@@ -140,12 +141,14 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly publication: MatchDetailPublication;
   readonly fixtures: readonly MatchFixtureDetail[];
   readonly finalized?: boolean;
+  readonly db?: DbOrTransaction;
 }
 
 export async function checkpointLiveMatchScopeV3(input: {
   readonly season: FplSeasonRef;
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
+  readonly db?: DbOrTransaction;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
   const desired = await readLiveMatchCheckpointDesiredV3({
     kind: input.kind,
@@ -186,6 +189,7 @@ export async function checkpointLiveMatchScopeV3(input: {
       eventId: input.eventId,
       publication: current.publication,
       fixtures: current.fixtures,
+      db: input.db,
     });
     if (!result.checkpointed || !result.checkpointedAt)
       return { checkpointed: false, skipped: false };
@@ -216,6 +220,7 @@ export async function checkpointLiveMatchScopeV3(input: {
     publication: current.publication,
     fixtures: current.fixtures,
     finalized: desired.final,
+    db: input.db,
   });
   if (!result.checkpointed || !result.checkpointedAt)
     return { checkpointed: false, skipped: false };
@@ -230,8 +235,9 @@ export async function checkpointLiveMatchScopeV3(input: {
 
 async function checkpointClockInTransaction<T>(
   callback: (tx: TransactionHandle) => Promise<T>,
+  dbInstance?: DbOrTransaction,
 ): Promise<T> {
-  const db = await getDb();
+  const db = dbInstance ?? (await getDb());
   return db.transaction(async (tx) => {
     // Checkpointing is asynchronous compensation, never a reason to retain a
     // scarce runtime session behind a blocked statement. The latest desired
@@ -312,7 +318,7 @@ export async function checkpointLiveMatchDeskV3(
       })
       .returning({ eventId: liveMatchDeskCheckpointsInFpl.eventId });
     return result.length > 0 ? clock : null;
-  });
+  }, request.db);
   return { checkpointed: checkpointedAt !== null, checkpointedAt };
 }
 
@@ -399,7 +405,7 @@ export async function checkpointLiveMatchDetailV3(
       })
       .returning({ eventId: liveMatchDetailCheckpointsInFpl.eventId });
     return result.length > 0 ? clock : null;
-  });
+  }, request.db);
   return { checkpointed: checkpointedAt !== null, checkpointedAt };
 }
 
@@ -411,9 +417,10 @@ function sameCheckpointTime(value: string | null, row: Date | null): boolean {
 export async function readLiveMatchDeskCheckpointV3(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<MatchDeskRead | null> {
   if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-  const db = await getDb();
+  const db = dbInstance ?? (await getDb());
   const row = (
     await db
       .select()
@@ -466,9 +473,10 @@ export async function readLiveMatchDeskCheckpointV3(
 export async function readLiveMatchDetailCheckpointV3(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<MatchDetailRead | null> {
   if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-  const db = await getDb();
+  const db = dbInstance ?? (await getDb());
   const row = (
     await db
       .select()
@@ -535,8 +543,9 @@ export async function hasLiveMatchCheckpointV3(
   season: FplSeasonRef,
   eventId: number,
   kind: 'desk' | 'detail',
+  dbInstance?: DbOrTransaction,
 ): Promise<boolean> {
-  const db = await getDb();
+  const db = dbInstance ?? (await getDb());
   const table = kind === 'desk' ? liveMatchDeskCheckpointsInFpl : liveMatchDetailCheckpointsInFpl;
   const row = await db
     .select({ eventId: table.eventId })
@@ -588,10 +597,11 @@ export function isExactFinalLiveMatchCheckpointPair(
 export async function hasFinalLiveMatchCheckpointsV3(
   season: FplSeasonRef,
   eventId: number,
+  dbInstance?: DbOrTransaction,
 ): Promise<boolean> {
   const [desk, detail] = await Promise.all([
-    readLiveMatchDeskCheckpointV3(season, eventId),
-    readLiveMatchDetailCheckpointV3(season, eventId),
+    readLiveMatchDeskCheckpointV3(season, eventId, dbInstance),
+    readLiveMatchDetailCheckpointV3(season, eventId, dbInstance),
   ]);
   if (!desk || !detail) return false;
   return isExactFinalLiveMatchCheckpointPair({

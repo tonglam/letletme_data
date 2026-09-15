@@ -1,5 +1,6 @@
 import type { RawFPLEventLiveResponse, RawFPLFixture } from '../types';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import type { DbOrTransaction } from '../db/singleton';
 import {
   liveMatchActiveEventKey,
   publishLiveMatchDeskV3,
@@ -75,6 +76,8 @@ export interface LiveMatchObservation {
   readonly observedDesk?: MatchDeskActiveFence;
   /** Active detail pointer captured before the provider observation began. */
   readonly observedDetail?: MatchDetailActiveFence;
+  /** Optional bounded database handle for cold checkpoint reads. */
+  readonly databaseRead?: DbOrTransaction;
   /**
    * Desk already published from the fixture-only phase of this exact provider
    * observation. The complete phase may reuse it without another Redis read,
@@ -181,7 +184,11 @@ async function readDeskSafely(input: LiveMatchObservation): Promise<MatchDeskRea
   // durable final is restored into Redis before it is allowed to fence a new
   // provisional observation.
   try {
-    const checkpoint = await readLiveMatchDeskCheckpointV3(input.season, input.eventId);
+    const checkpoint = await readLiveMatchDeskCheckpointV3(
+      input.season,
+      input.eventId,
+      input.databaseRead,
+    );
     if (
       checkpoint &&
       (cached === null ||
@@ -228,7 +235,11 @@ async function readDetailSafely(input: LiveMatchObservation): Promise<MatchDetai
     return cached;
 
   try {
-    const checkpoint = await readLiveMatchDetailCheckpointV3(input.season, input.eventId);
+    const checkpoint = await readLiveMatchDetailCheckpointV3(
+      input.season,
+      input.eventId,
+      input.databaseRead,
+    );
     if (
       checkpoint &&
       (cached === null ||

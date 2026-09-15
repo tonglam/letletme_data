@@ -33,6 +33,9 @@ export interface LiveDataJobData {
   /** Durable scheduler obligation identity carried through worker completion. */
   obligationId?: string;
   obligationGeneration?: number;
+  /** Latest-authoritative live snapshot lane identity. */
+  laneId?: string;
+  laneGeneration?: number;
   /** Exact freshness window being repaired, carried into the publication manifest. */
   freshnessWindowId?: number;
   /** Only the post-match consolidation may publish terminal live authority. */

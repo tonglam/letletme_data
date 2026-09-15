@@ -154,17 +154,108 @@ function terminalEvidence(evidence: Record<string, unknown>) {
     WHEN ${schedulerObligationsInOps.evidence} ? 'scheduledDueAtMs'
       THEN jsonb_build_object('scheduledDueAtMs', ${schedulerObligationsInOps.evidence}->'scheduledDueAtMs')
     ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'freshnessWindowId'
+      THEN jsonb_build_object(
+        'freshnessWindowId', ${schedulerObligationsInOps.evidence}->'freshnessWindowId'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'freshnessWindowIds'
+      THEN jsonb_build_object(
+        'freshnessWindowIds', ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'decisionObservedAt'
+      THEN jsonb_build_object(
+        'decisionObservedAt', ${schedulerObligationsInOps.evidence}->'decisionObservedAt'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'decisionObservedAtMs'
+      THEN jsonb_build_object(
+        'decisionObservedAtMs', ${schedulerObligationsInOps.evidence}->'decisionObservedAtMs'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'dependencyWaitCount'
+      THEN jsonb_build_object(
+        'dependencyWaitCount', ${schedulerObligationsInOps.evidence}->'dependencyWaitCount'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'firstDependencyWaitAt'
+      THEN jsonb_build_object(
+        'firstDependencyWaitAt', ${schedulerObligationsInOps.evidence}->'firstDependencyWaitAt'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'lastDependencyReasonCodes'
+      THEN jsonb_build_object(
+        'lastDependencyReasonCodes', ${schedulerObligationsInOps.evidence}->'lastDependencyReasonCodes'
+      )
+    ELSE '{}'::jsonb
+  END || CASE
+    WHEN ${schedulerObligationsInOps.evidence} ? 'deferDelayMs'
+      THEN jsonb_build_object(
+        'deferDelayMs', ${schedulerObligationsInOps.evidence}->'deferDelayMs'
+      )
+    ELSE '{}'::jsonb
   END`;
 }
 
 function scheduledDueAt(obligation: SchedulerObligation): Date {
   const raw = obligation.evidence.scheduledDueAtMs;
-  if (typeof raw === 'number' && Number.isSafeInteger(raw)) return new Date(raw);
+  if (typeof raw === 'number' && Number.isSafeInteger(raw)) {
+    const parsed = new Date(raw);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
   if (typeof raw === 'string' && /^[0-9]+$/.test(raw)) {
     const parsed = new Date(Number(raw));
     if (Number.isFinite(parsed.getTime())) return parsed;
   }
   return obligation.dueAt;
+}
+
+/**
+ * Live snapshots are latest-authoritative by the time the scheduler made the
+ * decision, rather than by the five-minute bucket that happened to contain
+ * that decision. Keep the immutable scheduled boundary available for SLO
+ * accounting, but use the observed decision timestamp to order concurrent
+ * reservations and supersession.
+ */
+export function schedulerObligationAuthorityAt(obligation: SchedulerObligation): Date {
+  if (obligation.jobName === 'live-snapshot') {
+    const numeric = obligation.evidence.decisionObservedAtMs;
+    if (typeof numeric === 'number' && Number.isSafeInteger(numeric) && numeric >= 0) {
+      const parsed = new Date(numeric);
+      if (Number.isFinite(parsed.getTime())) return parsed;
+    }
+    if (typeof numeric === 'string' && /^[0-9]+$/.test(numeric)) {
+      const parsed = new Date(Number(numeric));
+      if (Number.isFinite(parsed.getTime())) return parsed;
+    }
+    const iso = obligation.evidence.decisionObservedAt;
+    if (typeof iso === 'string') {
+      const parsed = new Date(iso);
+      if (Number.isFinite(parsed.getTime())) return parsed;
+    }
+  }
+  return scheduledDueAt(obligation);
+}
+
+function schedulerObligationAuthorityAtSql(jobName: string) {
+  if (jobName !== 'live-snapshot') return scheduledDueAtSql();
+  return sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'decisionObservedAtMs' ~ '^[0-9]+$'
+      AND (${schedulerObligationsInOps.evidence}->>'decisionObservedAtMs')::numeric BETWEEN 0 AND 8640000000000000
+      THEN to_timestamp((${schedulerObligationsInOps.evidence}->>'decisionObservedAtMs')::double precision / 1000)
+    WHEN ${schedulerObligationsInOps.evidence}->>'decisionObservedAt' ~
+      '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+      THEN (${schedulerObligationsInOps.evidence}->>'decisionObservedAt')::timestamptz
+    ELSE ${scheduledDueAtSql()}
+  END`;
 }
 
 function isLegacyPriceChangeInFlight(obligation: SchedulerObligation): boolean {
@@ -200,10 +291,15 @@ export async function advanceSchedulerLane(input: {
   scopeKey: string;
   queueName: string;
   desiredObligation: SchedulerObligation;
+  /** Keep retired live freshness windows eligible to record a real breach. */
+  preserveFreshnessHistory?: boolean;
+  /** Bound one scheduler pass while a hot lane has a large backlog. */
+  supersedeBatchSize?: number;
   db?: DbHandle;
 }): Promise<{ lane: SchedulerLane; shouldDispatch: boolean }> {
   const db = input.db ?? (await getDb());
   const desiredScheduledDueAt = scheduledDueAt(input.desiredObligation);
+  const desiredAuthorityAt = schedulerObligationAuthorityAt(input.desiredObligation);
   return db.transaction(async (tx) => {
     const nowRows = await tx.execute<{ dbNow: Date | string }>(
       sql`SELECT clock_timestamp() AS "dbNow"`,
@@ -355,10 +451,10 @@ export async function advanceSchedulerLane(input: {
     // The rearm path above may have changed the selected target before the
     // ordinary latest-wins comparison. Read the row's waterline from the
     // selected obligation below rather than relying on the original snapshot.
-    const currentDesiredScheduledDueAt = scheduledDueAt(currentDesired);
+    const currentDesiredScheduledDueAt = schedulerObligationAuthorityAt(currentDesired);
     const desiredIsNewer =
-      desiredScheduledDueAt.getTime() > currentDesiredScheduledDueAt.getTime() ||
-      (desiredScheduledDueAt.getTime() === currentDesiredScheduledDueAt.getTime() &&
+      desiredAuthorityAt.getTime() > currentDesiredScheduledDueAt.getTime() ||
+      (desiredAuthorityAt.getTime() === currentDesiredScheduledDueAt.getTime() &&
         input.desiredObligation.periodKey > currentDesired.periodKey);
     if (desiredIsNewer) {
       const updated = await tx
@@ -384,53 +480,74 @@ export async function advanceSchedulerLane(input: {
       .limit(1);
     if (!selectedDesiredRow) throw new Error('Scheduler lane selected obligation disappeared');
     const selectedDesired = mapObligation(selectedDesiredRow);
-    const selectedScheduledDueAt = scheduledDueAt(selectedDesired);
+    const selectedScheduledDueAt = schedulerObligationAuthorityAt(selectedDesired);
 
     // Waiting generations have no useful work once a newer desired period is
     // known. Keep an active target intact so its publication fence can decide
     // the linearization point; the worker will adopt the newer target before
     // it writes if the desired row changed first. Equal-time peers are ordered
     // by periodKey and the non-selected one is terminalized explicitly.
-    const immutableDueAt = scheduledDueAtSql();
+    const immutableDueAt = schedulerObligationAuthorityAtSql(input.jobName);
     const selectedDueAtIso = selectedScheduledDueAt.toISOString();
-    const supersedable = await tx
-      .update(schedulerObligationsInOps)
-      .set({
-        status: 'skipped',
-        evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
-          terminal: true,
-          reason: LANE_SUPERSEDED_REASON,
-          supersededByObligationId: selectedDesired.obligationId,
-          supersededByPeriodKey: selectedDesired.periodKey,
-        })}::jsonb`,
-        completedAt: dbNow,
-        leaseOwner: null,
-        lastError: null,
-        leaseExpiresAt: null,
-        updatedAt: dbNow,
-      })
-      .where(
-        and(
-          eq(schedulerObligationsInOps.jobName, input.jobName),
-          eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
-          sql`(
-            ${immutableDueAt} < ${selectedDueAtIso}
-            OR (
-              ${immutableDueAt} = ${selectedDueAtIso}
-              AND ${schedulerObligationsInOps.periodKey} < ${selectedDesired.periodKey}
-            )
-          )`,
-          inArray(schedulerObligationsInOps.status, ['pending', 'failed', 'enqueued']),
-          row.activeObligationId
-            ? sql`${schedulerObligationsInOps.obligationId} <> ${row.activeObligationId}`
-            : undefined,
-          sql`${schedulerObligationsInOps.obligationId} <> ${selectedDesired.obligationId}`,
-        ),
-      )
-      .returning({
+    const supersessionPredicate = and(
+      eq(schedulerObligationsInOps.jobName, input.jobName),
+      eq(schedulerObligationsInOps.scopeKey, input.scopeKey),
+      sql`(
+        ${immutableDueAt} < ${selectedDueAtIso}
+        OR (
+          ${immutableDueAt} = ${selectedDueAtIso}
+          AND ${schedulerObligationsInOps.periodKey} < ${selectedDesired.periodKey}
+        )
+      )`,
+      inArray(schedulerObligationsInOps.status, ['pending', 'failed', 'enqueued']),
+      row.activeObligationId
+        ? sql`${schedulerObligationsInOps.obligationId} <> ${row.activeObligationId}`
+        : undefined,
+      sql`${schedulerObligationsInOps.obligationId} <> ${selectedDesired.obligationId}`,
+    );
+    const configuredBatchSize = input.supersedeBatchSize ?? Number.MAX_SAFE_INTEGER;
+    const supersedeBatchSize = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, configuredBatchSize));
+    const supersedableCandidates = await tx
+      .select({
         obligationId: schedulerObligationsInOps.obligationId,
         periodKey: schedulerObligationsInOps.periodKey,
-      });
+      })
+      .from(schedulerObligationsInOps)
+      .where(supersessionPredicate)
+      .orderBy(sql`${immutableDueAt} ASC`, asc(schedulerObligationsInOps.periodKey))
+      .limit(supersedeBatchSize);
+    const supersedable =
+      supersedableCandidates.length === 0
+        ? []
+        : await tx
+            .update(schedulerObligationsInOps)
+            .set({
+              status: 'skipped',
+              evidence: sql`${schedulerObligationsInOps.evidence} || ${JSON.stringify({
+                terminal: true,
+                reason: LANE_SUPERSEDED_REASON,
+                supersededByObligationId: selectedDesired.obligationId,
+                supersededByPeriodKey: selectedDesired.periodKey,
+              })}::jsonb`,
+              completedAt: dbNow,
+              leaseOwner: null,
+              lastError: null,
+              leaseExpiresAt: null,
+              updatedAt: dbNow,
+            })
+            .where(
+              and(
+                inArray(
+                  schedulerObligationsInOps.obligationId,
+                  supersedableCandidates.map((candidate) => candidate.obligationId),
+                ),
+                supersessionPredicate,
+              ),
+            )
+            .returning({
+              obligationId: schedulerObligationsInOps.obligationId,
+              periodKey: schedulerObligationsInOps.periodKey,
+            });
 
     if (supersedable.length > 0) {
       const [counted] = await tx
@@ -473,7 +590,8 @@ export async function advanceSchedulerLane(input: {
     if (
       retiredPeriods.length > 0 &&
       contract &&
-      contractHasFreshnessWindow(contract, input.jobName)
+      contractHasFreshnessWindow(contract, input.jobName) &&
+      !input.preserveFreshnessHistory
     ) {
       const retiredWindows = await tx
         .update(freshnessSloWindowsInOps)
@@ -741,6 +859,8 @@ export async function startSchedulerLane(input: {
   laneId: string;
   dispatchGeneration: number;
   bullJobId: string | number;
+  /** Obligation identity carried by the Bull payload, when available. */
+  obligationId?: string;
   runId?: string;
   db?: DbHandle;
 }): Promise<SchedulerLaneTarget | null> {
@@ -764,18 +884,92 @@ export async function startSchedulerLane(input: {
     );
     const dbNow = asDate(nowRows[0]?.dbNow);
     if (!dbNow) throw new Error('Database clock is unavailable');
+    if (row.bullJobId !== null && row.bullJobId !== String(input.bullJobId)) {
+      return null;
+    }
+    const requestedObligationId =
+      input.obligationId ?? row.activeObligationId ?? row.desiredObligationId;
+    const [requestedObligation] = await tx
+      .select({
+        obligationId: schedulerObligationsInOps.obligationId,
+        jobName: schedulerObligationsInOps.jobName,
+        scopeKey: schedulerObligationsInOps.scopeKey,
+      })
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, requestedObligationId))
+      .limit(1);
+    // Bull payloads are internal, but a stale or malformed payload must not
+    // be allowed to borrow a different lane's obligation identity.  The
+    // foreign keys protect the desired/active columns; this check protects
+    // the worker-provided identity before it can move the lane to `running`.
     if (
-      row.state === 'running' &&
-      row.bullJobId !== null &&
-      row.bullJobId !== String(input.bullJobId)
+      !requestedObligation ||
+      requestedObligation.jobName !== row.jobName ||
+      requestedObligation.scopeKey !== row.scopeKey
     ) {
+      return null;
+    }
+    if (
+      row.jobName === 'live-snapshot' &&
+      requestedObligationId !== row.desiredObligationId &&
+      ['dispatching', 'enqueued'].includes(row.state)
+    ) {
+      // A live Bull job can wait in the queue while a newer observation
+      // advances the lane waterline.  Do not let the old payload borrow the
+      // newer desired identity in this start transaction: retire the exact
+      // queued obligation, release this dispatch generation, and let the
+      // scheduler enqueue the current target.  The provider and checkpoint
+      // stages therefore never start for the stale task.
+      await tx
+        .update(schedulerObligationsInOps)
+        .set({
+          status: 'skipped',
+          evidence: terminalEvidence({
+            terminal: true,
+            reason: LANE_SUPERSEDED_REASON,
+            supersededByObligationId: row.desiredObligationId,
+          }),
+          completedAt: dbNow,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          lastError: null,
+          updatedAt: dbNow,
+        })
+        .where(
+          and(
+            eq(schedulerObligationsInOps.obligationId, requestedObligationId),
+            inArray(schedulerObligationsInOps.status, ['pending', 'failed', 'enqueued', 'running']),
+          ),
+        );
+      await tx
+        .update(schedulerLanesInOps)
+        .set({
+          state: 'idle',
+          activeObligationId: null,
+          bullJobId: null,
+          runId: null,
+          dispatchOwner: null,
+          dispatchLeaseExpiresAt: null,
+          retryNotBefore: null,
+          lastError: null,
+          lastProgressAt: dbNow,
+          supersededCount: sql`${schedulerLanesInOps.supersededCount} + 1`,
+          updatedAt: dbNow,
+        })
+        .where(
+          and(
+            eq(schedulerLanesInOps.laneId, row.laneId),
+            eq(schedulerLanesInOps.dispatchGeneration, input.dispatchGeneration),
+            inArray(schedulerLanesInOps.state, ['dispatching', 'enqueued']),
+          ),
+        );
       return null;
     }
     const updated = await tx
       .update(schedulerLanesInOps)
       .set({
         state: 'running',
-        activeObligationId: row.activeObligationId ?? row.desiredObligationId,
+        activeObligationId: requestedObligationId,
         bullJobId: String(input.bullJobId),
         runId: input.runId ?? row.runId,
         lastError: null,
@@ -798,10 +992,7 @@ export async function startSchedulerLane(input: {
       })
       .where(
         and(
-          eq(
-            schedulerObligationsInOps.obligationId,
-            laneRow.activeObligationId ?? laneRow.desiredObligationId,
-          ),
+          eq(schedulerObligationsInOps.obligationId, requestedObligationId),
           inArray(schedulerObligationsInOps.status, ['pending', 'failed', 'enqueued', 'running']),
         ),
       );
@@ -809,7 +1000,7 @@ export async function startSchedulerLane(input: {
     const [obligationRow] = await tx
       .select()
       .from(schedulerObligationsInOps)
-      .where(eq(schedulerObligationsInOps.obligationId, lane.activeObligationId!))
+      .where(eq(schedulerObligationsInOps.obligationId, requestedObligationId))
       .limit(1);
     return obligationRow ? { lane, obligation: mapObligation(obligationRow) } : null;
   });
@@ -852,6 +1043,62 @@ export async function fenceSchedulerLaneTarget(input: {
     const dbNow = asDate(nowRows[0]?.dbNow);
     if (!dbNow) throw new Error('Database clock is unavailable');
     if (targetChanged) {
+      if (row.jobName === 'live-snapshot') {
+        // A queued live Bull job must never borrow a newer target's identity.
+        // Retire the exact old obligation and let the next scheduler pass
+        // dispatch the current target with a fresh lane generation. An older
+        // callback cannot clear a newer active worker's lane.
+        await tx
+          .update(schedulerObligationsInOps)
+          .set({
+            status: 'skipped',
+            evidence: terminalEvidence({
+              terminal: true,
+              reason: LANE_SUPERSEDED_REASON,
+              supersededByObligationId: row.desiredObligationId,
+            }),
+            completedAt: dbNow,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            lastError: null,
+            updatedAt: dbNow,
+          })
+          .where(
+            and(
+              eq(schedulerObligationsInOps.obligationId, input.activeObligationId),
+              inArray(schedulerObligationsInOps.status, [
+                'running',
+                'enqueued',
+                'pending',
+                'failed',
+              ]),
+            ),
+          );
+        if (row.activeObligationId === input.activeObligationId) {
+          await tx
+            .update(schedulerLanesInOps)
+            .set({
+              state: 'idle',
+              activeObligationId: null,
+              bullJobId: null,
+              runId: null,
+              dispatchOwner: null,
+              dispatchLeaseExpiresAt: null,
+              retryNotBefore: null,
+              lastError: null,
+              lastProgressAt: dbNow,
+              updatedAt: dbNow,
+            })
+            .where(
+              and(
+                eq(schedulerLanesInOps.laneId, row.laneId),
+                eq(schedulerLanesInOps.activeObligationId, input.activeObligationId),
+                eq(schedulerLanesInOps.state, 'running'),
+              ),
+            );
+        }
+        return null;
+      }
       await tx
         .update(schedulerObligationsInOps)
         .set({
@@ -914,6 +1161,31 @@ export async function fenceSchedulerLaneTarget(input: {
       .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
       .limit(1);
     if (!targetRow) return null;
+    if (
+      row.jobName === 'live-snapshot' &&
+      !['pending', 'failed', 'enqueued', 'running'].includes(targetRow.status)
+    ) {
+      // A queued retry can arrive after the desired target was already closed
+      // by a newer scheduler pass. Leave the lane idle and stop before any
+      // provider call; returning a terminal target here would let the worker
+      // accidentally execute an obligation that can no longer publish.
+      await tx
+        .update(schedulerLanesInOps)
+        .set({
+          state: 'idle',
+          activeObligationId: null,
+          bullJobId: null,
+          runId: null,
+          dispatchOwner: null,
+          dispatchLeaseExpiresAt: null,
+          retryNotBefore: null,
+          lastError: null,
+          lastProgressAt: dbNow,
+          updatedAt: dbNow,
+        })
+        .where(eq(schedulerLanesInOps.laneId, row.laneId));
+      return null;
+    }
     return {
       lane: mapLane({ ...row, activeObligationId: row.desiredObligationId }),
       obligation: mapObligation(targetRow),
@@ -960,6 +1232,8 @@ export async function completeSchedulerLane(input: {
   laneId: string;
   dispatchGeneration: number;
   activeObligationId: string;
+  /** Bind completion to the worker generation that actually ran. */
+  obligationGeneration?: number;
   status: Extract<SchedulerObligationStatus, 'succeeded' | 'skipped'>;
   evidence?: Record<string, unknown>;
   db?: DbHandle;
@@ -986,14 +1260,22 @@ export async function completeSchedulerLane(input: {
     const dbNow = asDate(nowRows[0]?.dbNow);
     if (!dbNow) throw new Error('Database clock is unavailable');
     const desiredChanged = row.desiredObligationId !== input.activeObligationId;
-    await tx
+    const liveTargetSuperseded = row.jobName === 'live-snapshot' && desiredChanged;
+    const terminalStatus = liveTargetSuperseded ? 'skipped' : input.status;
+    const completedObligation = await tx
       .update(schedulerObligationsInOps)
       .set({
-        status: input.status,
+        status: terminalStatus,
         evidence: terminalEvidence({
           ...(input.evidence ?? {}),
           laneKey: row.laneKey,
           dispatchGeneration: row.dispatchGeneration,
+          ...(liveTargetSuperseded
+            ? {
+                reason: LANE_SUPERSEDED_REASON,
+                supersededByObligationId: row.desiredObligationId,
+              }
+            : {}),
         }),
         completedAt: dbNow,
         leaseOwner: null,
@@ -1001,7 +1283,70 @@ export async function completeSchedulerLane(input: {
         lastError: null,
         updatedAt: dbNow,
       })
-      .where(eq(schedulerObligationsInOps.obligationId, input.activeObligationId));
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, input.activeObligationId),
+          input.obligationGeneration === undefined
+            ? undefined
+            : eq(schedulerObligationsInOps.generation, input.obligationGeneration),
+          inArray(schedulerObligationsInOps.status, ['enqueued', 'running']),
+        ),
+      )
+      .returning({
+        obligationId: schedulerObligationsInOps.obligationId,
+      });
+    if (completedObligation.length !== 1) {
+      // A dependency wait deliberately increments the obligation generation
+      // and leaves it pending. Release only this still-running lane so the
+      // next scheduler pass can honor the new dueAt/backoff; never turn the
+      // deferred row into a success just because the worker callback returned.
+      if (input.obligationGeneration !== undefined) {
+        const [currentObligation] = await tx
+          .select({
+            generation: schedulerObligationsInOps.generation,
+            status: schedulerObligationsInOps.status,
+          })
+          .from(schedulerObligationsInOps)
+          .where(eq(schedulerObligationsInOps.obligationId, input.activeObligationId))
+          .limit(1);
+        if (
+          currentObligation &&
+          currentObligation.generation !== input.obligationGeneration &&
+          currentObligation.status === 'pending'
+        ) {
+          const released = await tx
+            .update(schedulerLanesInOps)
+            .set({
+              state: 'idle',
+              activeObligationId: null,
+              bullJobId: null,
+              runId: null,
+              dispatchOwner: null,
+              dispatchLeaseExpiresAt: null,
+              blockerJobId: null,
+              retryNotBefore: null,
+              lastError: null,
+              lastProgressAt: dbNow,
+              updatedAt: dbNow,
+            })
+            .where(
+              and(
+                eq(schedulerLanesInOps.laneId, row.laneId),
+                eq(schedulerLanesInOps.dispatchGeneration, input.dispatchGeneration),
+                eq(schedulerLanesInOps.activeObligationId, input.activeObligationId),
+                eq(schedulerLanesInOps.state, 'running'),
+              ),
+            )
+            .returning();
+          return {
+            ok: false,
+            needsDispatch: released.length === 1,
+            lane: released[0] ? mapLane(released[0]) : null,
+          };
+        }
+      }
+      return { ok: false, needsDispatch: false, lane: null };
+    }
     const updated = await tx
       .update(schedulerLanesInOps)
       .set({
@@ -1024,6 +1369,99 @@ export async function completeSchedulerLane(input: {
       needsDispatch: desiredChanged,
       lane: updated[0] ? mapLane(updated[0]) : null,
     };
+  });
+}
+
+/**
+ * A superseded live Bull job may settle after the scheduler has already
+ * skipped its obligation while leaving the lane in `enqueued` or
+ * `dispatching`. A completion/failure callback must release that exact lane
+ * generation without turning the stale obligation into a success or failure.
+ */
+export async function acknowledgeSupersededSchedulerLane(input: {
+  laneId: string;
+  dispatchGeneration: number;
+  bullJobId: string | number;
+  activeObligationId?: string;
+  db?: DbHandle;
+}): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    const bullJobId = String(input.bullJobId);
+    const [lane] = await tx
+      .select()
+      .from(schedulerLanesInOps)
+      .where(
+        and(
+          eq(schedulerLanesInOps.laneId, input.laneId),
+          eq(schedulerLanesInOps.dispatchGeneration, input.dispatchGeneration),
+          inArray(schedulerLanesInOps.state, ['dispatching', 'enqueued']),
+          or(eq(schedulerLanesInOps.bullJobId, bullJobId), isNull(schedulerLanesInOps.bullJobId)),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!lane || lane.jobName !== 'live-snapshot') return false;
+
+    const obligationId = input.activeObligationId;
+    const [obligation] = obligationId
+      ? await tx
+          .select()
+          .from(schedulerObligationsInOps)
+          .where(eq(schedulerObligationsInOps.obligationId, obligationId))
+          .limit(1)
+      : await tx
+          .select()
+          .from(schedulerObligationsInOps)
+          .where(
+            and(
+              eq(schedulerObligationsInOps.bullJobId, bullJobId),
+              eq(schedulerObligationsInOps.status, 'skipped'),
+            ),
+          )
+          .orderBy(sql`${schedulerObligationsInOps.updatedAt} DESC`)
+          .limit(1);
+    const obligationReason = (obligation?.evidence as Record<string, unknown> | null | undefined)
+      ?.reason;
+    if (
+      !obligation ||
+      obligation.jobName !== lane.jobName ||
+      obligation.scopeKey !== lane.scopeKey ||
+      obligation.status !== 'skipped' ||
+      obligationReason !== LANE_SUPERSEDED_REASON ||
+      obligation.obligationId === lane.desiredObligationId
+    ) {
+      return false;
+    }
+    const nowRows = await tx.execute<{ dbNow: Date | string }>(
+      sql`SELECT clock_timestamp() AS "dbNow"`,
+    );
+    const dbNow = asDate(nowRows[0]?.dbNow);
+    if (!dbNow) throw new Error('Database clock is unavailable');
+    const updated = await tx
+      .update(schedulerLanesInOps)
+      .set({
+        state: 'idle',
+        activeObligationId: null,
+        bullJobId: null,
+        runId: null,
+        dispatchOwner: null,
+        dispatchLeaseExpiresAt: null,
+        retryNotBefore: null,
+        lastError: null,
+        lastProgressAt: dbNow,
+        updatedAt: dbNow,
+      })
+      .where(
+        and(
+          eq(schedulerLanesInOps.laneId, lane.laneId),
+          eq(schedulerLanesInOps.dispatchGeneration, input.dispatchGeneration),
+          inArray(schedulerLanesInOps.state, ['dispatching', 'enqueued']),
+          or(eq(schedulerLanesInOps.bullJobId, bullJobId), isNull(schedulerLanesInOps.bullJobId)),
+        ),
+      )
+      .returning({ laneId: schedulerLanesInOps.laneId });
+    return updated.length === 1;
   });
 }
 
@@ -1053,6 +1491,8 @@ export async function failSchedulerLane(input: {
         laneId: schedulerLanesInOps.laneId,
         dispatchGeneration: schedulerLanesInOps.dispatchGeneration,
         activeObligationId: schedulerLanesInOps.activeObligationId,
+        desiredObligationId: schedulerLanesInOps.desiredObligationId,
+        jobName: schedulerLanesInOps.jobName,
         state: schedulerLanesInOps.state,
       })
       .from(schedulerLanesInOps)
@@ -1068,11 +1508,22 @@ export async function failSchedulerLane(input: {
       return false;
     }
 
+    const desiredChanged =
+      laneRow.jobName === 'live-snapshot' &&
+      laneRow.desiredObligationId !== input.activeObligationId;
     const obligation = await tx
       .update(schedulerObligationsInOps)
       .set({
-        status: 'failed',
-        lastError: summary,
+        status: desiredChanged ? 'skipped' : 'failed',
+        evidence: desiredChanged
+          ? terminalEvidence({
+              terminal: true,
+              reason: LANE_SUPERSEDED_REASON,
+              supersededByObligationId: laneRow.desiredObligationId,
+            })
+          : undefined,
+        lastError: desiredChanged ? null : summary,
+        completedAt: desiredChanged ? dbNow : undefined,
         leaseOwner: null,
         leaseExpiresAt: null,
         updatedAt: dbNow,
@@ -1093,8 +1544,8 @@ export async function failSchedulerLane(input: {
         runId: null,
         dispatchOwner: null,
         dispatchLeaseExpiresAt: null,
-        retryNotBefore: new Date(dbNow.getTime() + RETRY_DELAY_MS),
-        lastError: summary,
+        retryNotBefore: desiredChanged ? null : new Date(dbNow.getTime() + RETRY_DELAY_MS),
+        lastError: desiredChanged ? null : summary,
         lastProgressAt: dbNow,
         updatedAt: dbNow,
       })
@@ -1516,13 +1967,39 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         .limit(1);
       if (bullObligation?.obligationId) failedObligationIds.add(bullObligation.obligationId);
     }
+    const supersededObligationIds = new Set<string>();
+    if (lane.jobName === 'live-snapshot') {
+      if (lane.activeObligationId && lane.activeObligationId !== lane.desiredObligationId) {
+        supersededObligationIds.add(lane.activeObligationId);
+      }
+      if (input.obligationId && input.obligationId !== lane.desiredObligationId) {
+        supersededObligationIds.add(input.obligationId);
+      }
+    }
+    const supersededOnly =
+      lane.jobName === 'live-snapshot' &&
+      failedObligationIds.size > 0 &&
+      [...failedObligationIds].every((obligationId) => obligationId !== lane.desiredObligationId);
     for (const failedObligationId of failedObligationIds) {
+      const superseded =
+        supersededObligationIds.has(failedObligationId) ||
+        (lane.jobName === 'live-snapshot' && failedObligationId !== lane.desiredObligationId);
       await tx
         .update(schedulerObligationsInOps)
         .set({
-          status: 'failed',
+          status: superseded ? 'skipped' : 'failed',
+          ...(superseded
+            ? {
+                evidence: terminalEvidence({
+                  terminal: true,
+                  reason: LANE_SUPERSEDED_REASON,
+                  supersededByObligationId: lane.desiredObligationId,
+                }),
+              }
+            : {}),
           bullJobId: input.bullJobId,
-          lastError: `Bull job ${input.bullState} before durable completion`,
+          lastError: superseded ? null : `Bull job ${input.bullState} before durable completion`,
+          completedAt: superseded ? dbNow : undefined,
           leaseOwner: null,
           leaseExpiresAt: null,
           updatedAt: dbNow,
@@ -1544,7 +2021,7 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         dispatchOwner: null,
         dispatchLeaseExpiresAt: null,
         retryNotBefore: null,
-        lastError: `Bull job ${input.bullState} before durable completion`,
+        lastError: supersededOnly ? null : `Bull job ${input.bullState} before durable completion`,
         lastProgressAt: dbNow,
         updatedAt: dbNow,
       })

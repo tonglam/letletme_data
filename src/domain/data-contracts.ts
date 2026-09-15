@@ -29,6 +29,19 @@ export const MY_FPL_FINALIZATION_EXECUTION_BUDGET_MS = 60 * 60_000;
 export const MY_FPL_FINALIZATION_TOTAL_SLA_MS = 4_500_000;
 export const MY_FPL_FINALIZATION_DEPENDENCY_RETRY_MS = 60_000;
 export const MY_FPL_FINALIZATION_BULL_ATTEMPTS = 3;
+/** Dependency-only waits are independent from Bull execution attempts. */
+export const FINAL_DEPENDENCY_RETRY_DELAYS_MS = [60_000, 180_000, 600_000, 900_000] as const;
+
+export function finalDependencyRetryDelayMs(dependencyWaitCount: number): number {
+  const index = Math.max(0, Math.floor(dependencyWaitCount));
+  return FINAL_DEPENDENCY_RETRY_DELAYS_MS[
+    Math.min(index, FINAL_DEPENDENCY_RETRY_DELAYS_MS.length - 1)
+  ]!;
+}
+
+/** Local budgets for live snapshot database stages. */
+export const LIVE_SNAPSHOT_DB_READ_BUDGET_MS = 5_000;
+export const LIVE_SNAPSHOT_DB_CHECKPOINT_WRITE_BUDGET_MS = 30_000;
 export const MY_FPL_SNAPSHOT_OUTBOX_RETRY_DELAYS_MS = [30_000, 120_000, 300_000] as const;
 
 export type ContractVisibility =

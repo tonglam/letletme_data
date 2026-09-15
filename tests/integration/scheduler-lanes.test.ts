@@ -7,6 +7,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 import { getDbClient } from '../../src/db/singleton';
 import {
   advanceSchedulerLane,
+  acknowledgeSupersededSchedulerLane,
   blockSchedulerLane,
   claimSchedulerLaneDispatch,
   completeSchedulerLane,
@@ -18,7 +19,10 @@ import {
   replaceBlockedSchedulerLaneAfterCoreSourceStale,
   startSchedulerLane,
 } from '../../src/repositories/scheduler-lanes';
-import { reserveSchedulerObligation } from '../../src/repositories/scheduler-obligations';
+import {
+  deferSchedulerObligationForWorker,
+  reserveSchedulerObligation,
+} from '../../src/repositories/scheduler-obligations';
 
 const LANE_KEY = 'integration:fpl-price-changes:latest-wins';
 const SCOPE_KEY = 'integration:price-lane';
@@ -26,6 +30,14 @@ const DEFINITION = {
   name: 'price-change-predictions',
   cadence: 'integration five-minute',
   timezone: 'UTC',
+};
+const LIVE_LANE_KEY = 'integration:live-snapshot:2627:event:3';
+const LIVE_SCOPE_KEY = '2627:event:3';
+const LIVE_DEFINITION = {
+  name: 'live-snapshot',
+  cadence: 'integration lifecycle polling',
+  timezone: 'UTC',
+  queueName: 'live-data',
 };
 
 async function cleanup(): Promise<void> {
@@ -36,6 +48,13 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM ops.scheduler_obligations
     WHERE job_name = ${DEFINITION.name} AND scope_key = ${SCOPE_KEY}
+  `;
+  await sql`DELETE FROM ops.data_governance_cases WHERE scope_key = ${LIVE_SCOPE_KEY}`;
+  await sql`DELETE FROM ops.freshness_slo_windows WHERE scope_key = ${LIVE_SCOPE_KEY}`;
+  await sql`DELETE FROM ops.scheduler_lanes WHERE lane_key = ${LIVE_LANE_KEY}`;
+  await sql`
+    DELETE FROM ops.scheduler_obligations
+    WHERE job_name = ${LIVE_DEFINITION.name} AND scope_key = ${LIVE_SCOPE_KEY}
   `;
 }
 
@@ -52,10 +71,448 @@ async function reserve(dueAt: string, periodKey: string) {
   });
 }
 
+async function reserveLive(
+  observedAtMs: number,
+  periodKey: string,
+  dueAt = new Date(observedAtMs - 60_000),
+) {
+  return reserveSchedulerObligation({
+    definition: LIVE_DEFINITION,
+    plan: {
+      scopeKey: LIVE_SCOPE_KEY,
+      periodKey,
+      dueAt,
+      source: 'reconcile',
+      eventId: 3,
+      evidence: {
+        scheduledDueAtMs: dueAt.getTime(),
+        decisionObservedAt: new Date(observedAtMs).toISOString(),
+        decisionObservedAtMs: observedAtMs,
+        lifecycleState: 'LIVE_ACTIVE',
+      },
+    },
+  });
+}
+
 beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler latest-wins lanes', () => {
+  test('supersedes a 500-target live backlog in bounded passes', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations
+        (obligation_id, job_name, scope_key, period_key, cadence, timezone, status, source, due_at, evidence)
+      SELECT gen_random_uuid(),
+             ${LIVE_DEFINITION.name},
+             ${LIVE_SCOPE_KEY},
+             'live-old-' || series.i,
+             ${LIVE_DEFINITION.cadence},
+             ${LIVE_DEFINITION.timezone},
+             'pending',
+             'reconcile',
+             TIMESTAMPTZ '2026-08-25 00:00:00+00' + series.i * interval '1 second',
+             jsonb_build_object(
+               'scheduledDueAtMs', (extract(epoch FROM (TIMESTAMPTZ '2026-08-25 00:00:00+00' + series.i * interval '1 second')) * 1000)::bigint,
+               'decisionObservedAtMs', (extract(epoch FROM (TIMESTAMPTZ '2026-08-25 00:00:00+00' + series.i * interval '1 second')) * 1000)::bigint,
+               'decisionObservedAt', to_char(TIMESTAMPTZ '2026-08-25 00:00:00+00' + series.i * interval '1 second', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             )
+      FROM generate_series(1, 500) AS series(i)
+    `;
+    const newer = await reserveLive(
+      Date.parse('2026-08-25T01:00:00.000Z'),
+      'live-newest',
+      new Date('2026-08-25T00:59:00.000Z'),
+    );
+    const input = {
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: newer,
+      preserveFreshnessHistory: true,
+      supersedeBatchSize: 250,
+    };
+    const first = await advanceSchedulerLane(input);
+    expect(first.shouldDispatch).toBe(true);
+    const [firstCounts] = await sql<Array<{ skipped: number; pending: number }>>`
+      SELECT count(*) FILTER (WHERE status = 'skipped')::int AS skipped,
+             count(*) FILTER (WHERE status = 'pending')::int AS pending
+      FROM ops.scheduler_obligations
+      WHERE job_name = ${LIVE_DEFINITION.name} AND scope_key = ${LIVE_SCOPE_KEY}
+    `;
+    expect(firstCounts).toEqual({ skipped: 250, pending: 251 });
+
+    await advanceSchedulerLane(input);
+    const [secondCounts] = await sql<Array<{ skipped: number; pending: number }>>`
+      SELECT count(*) FILTER (WHERE status = 'skipped')::int AS skipped,
+             count(*) FILTER (WHERE status = 'pending')::int AS pending
+      FROM ops.scheduler_obligations
+      WHERE job_name = ${LIVE_DEFINITION.name} AND scope_key = ${LIVE_SCOPE_KEY}
+    `;
+    expect(secondCounts).toEqual({ skipped: 500, pending: 1 });
+  });
+
+  test('does not let a late same-period live decision overwrite the newer observation', async () => {
+    const newest = await reserveLive(
+      Date.parse('2026-08-25T01:10:00.000Z'),
+      'live-same-period',
+      new Date('2026-08-25T01:09:00.000Z'),
+    );
+    const late = await reserveLive(
+      Date.parse('2026-08-25T01:05:00.000Z'),
+      'live-same-period',
+      new Date('2026-08-25T01:04:00.000Z'),
+    );
+    expect(late.obligationId).toBe(newest.obligationId);
+    expect(late.evidence.decisionObservedAtMs).toBe(Date.parse('2026-08-25T01:10:00.000Z'));
+    const sql = await getDbClient();
+    const [row] = await sql<Array<{ observed: string }>>`
+      SELECT evidence->>'decisionObservedAtMs' AS observed
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${newest.obligationId}::uuid
+    `;
+    expect(Number(row?.observed)).toBe(Date.parse('2026-08-25T01:10:00.000Z'));
+  });
+
+  test('keeps a superseded live freshness breach as historical evidence', async () => {
+    const older = await reserveLive(
+      Date.parse('2026-08-25T02:00:00.000Z'),
+      'live-history-older',
+      new Date('2026-08-25T01:59:00.000Z'),
+    );
+    const newer = await reserveLive(
+      Date.parse('2026-08-25T02:05:00.000Z'),
+      'live-history-newer',
+      new Date('2026-08-25T02:04:00.000Z'),
+    );
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.freshness_slo_windows
+        (slo_key, contract_key, scope_key, period_key, eligible_at, due_at, obligation_due_at, status)
+      VALUES ('live-snapshot', 'live-snapshot', ${LIVE_SCOPE_KEY}, ${older.periodKey}, now(), now(), ${older.dueAt.toISOString()}::timestamptz, 'BREACHED')
+    `;
+    await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: newer,
+      preserveFreshnessHistory: true,
+      supersedeBatchSize: 250,
+    });
+    const [window] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.freshness_slo_windows
+      WHERE slo_key = 'live-snapshot' AND scope_key = ${LIVE_SCOPE_KEY} AND period_key = ${older.periodKey}
+    `;
+    expect(window?.status).toBe('BREACHED');
+  });
+
+  test('terminates a late live task when the desired target is already terminal', async () => {
+    const older = await reserveLive(
+      Date.parse('2026-08-25T03:00:00.000Z'),
+      'live-terminal-older',
+      new Date('2026-08-25T02:59:00.000Z'),
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: older,
+      preserveFreshnessHistory: true,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-live-terminal-job',
+      obligationId: older.obligationId,
+    });
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-live-terminal-job',
+    });
+    expect(started).not.toBeNull();
+    const newer = await reserveLive(
+      Date.parse('2026-08-25T03:05:00.000Z'),
+      'live-terminal-newer',
+      new Date('2026-08-25T03:04:00.000Z'),
+    );
+    await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: newer,
+      preserveFreshnessHistory: true,
+    });
+    const sql = await getDbClient();
+    await sql`UPDATE ops.scheduler_obligations SET status = 'succeeded' WHERE obligation_id = ${newer.obligationId}::uuid`;
+    const fenced = await fenceSchedulerLaneTarget({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      activeObligationId: older.obligationId,
+      bullJobId: 'integration-live-terminal-job',
+    });
+    expect(fenced).toBeNull();
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.lane.activeObligationId).toBeNull();
+    expect(targets?.active).toBeNull();
+  });
+
+  test('does not let a queued live task borrow a newer target before provider execution', async () => {
+    const older = await reserveLive(
+      Date.parse('2026-08-25T03:30:00.000Z'),
+      'live-queued-older',
+      new Date('2026-08-25T03:29:00.000Z'),
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: older,
+      preserveFreshnessHistory: true,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-live-queued-job',
+      obligationId: older.obligationId,
+    });
+    const newer = await reserveLive(
+      Date.parse('2026-08-25T03:35:00.000Z'),
+      'live-queued-newer',
+      new Date('2026-08-25T03:34:00.000Z'),
+    );
+    await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: newer,
+      preserveFreshnessHistory: true,
+    });
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-live-queued-job',
+      obligationId: older.obligationId,
+    });
+    expect(started).toBeNull();
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.lane.activeObligationId).toBeNull();
+    expect(targets?.desired?.obligationId).toBe(newer.obligationId);
+    expect(targets?.active).toBeNull();
+    const sql = await getDbClient();
+    const [row] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.scheduler_obligations
+      WHERE obligation_id = ${older.obligationId}::uuid
+    `;
+    expect(row?.status).toBe('skipped');
+  });
+
+  test('rejects a worker payload whose obligation belongs to another lane', async () => {
+    const live = await reserveLive(
+      Date.parse('2026-08-25T03:40:00.000Z'),
+      'live-lane-identity',
+      new Date('2026-08-25T03:39:00.000Z'),
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: live,
+      preserveFreshnessHistory: true,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-live-wrong-lane-job',
+      obligationId: live.obligationId,
+    });
+    const foreign = await reserve('2026-08-25T03:41:00.000Z', 'foreign-lane-obligation');
+
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-live-wrong-lane-job',
+      obligationId: foreign.obligationId,
+    });
+    expect(started).toBeNull();
+
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('enqueued');
+    expect(targets?.lane.activeObligationId).toBeNull();
+    expect(targets?.active).toBeNull();
+    expect(targets?.desired?.obligationId).toBe(live.obligationId);
+  });
+
+  test('does not revive a superseded live target during Bull loss recovery', async () => {
+    const older = await reserveLive(
+      Date.parse('2026-08-25T03:45:00.000Z'),
+      'live-recovery-older',
+      new Date('2026-08-25T03:44:00.000Z'),
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: older,
+      preserveFreshnessHistory: true,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-live-recovery-job',
+      obligationId: older.obligationId,
+    });
+    const newer = await reserveLive(
+      Date.parse('2026-08-25T03:50:00.000Z'),
+      'live-recovery-newer',
+      new Date('2026-08-25T03:49:00.000Z'),
+    );
+    await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: newer,
+      preserveFreshnessHistory: true,
+    });
+    expect(
+      await recoverSchedulerLaneAfterBullLoss({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId: 'integration-live-recovery-job',
+        bullState: 'failed',
+        obligationId: older.obligationId,
+      }),
+    ).toBe(true);
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.lane.lastError).toBeNull();
+    expect(targets?.desired?.obligationId).toBe(newer.obligationId);
+    const sql = await getDbClient();
+    const [row] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.scheduler_obligations
+      WHERE obligation_id = ${older.obligationId}::uuid
+    `;
+    expect(row?.status).toBe('skipped');
+  });
+
+  test('releases an enqueued lane when a superseded Bull job settles', async () => {
+    const older = await reserveLive(
+      Date.parse('2026-08-25T04:00:00.000Z'),
+      'live-settle-older',
+      new Date('2026-08-25T03:59:00.000Z'),
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: older,
+      preserveFreshnessHistory: true,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-live-settle-job',
+      obligationId: older.obligationId,
+    });
+    const newer = await reserveLive(
+      Date.parse('2026-08-25T04:05:00.000Z'),
+      'live-settle-newer',
+      new Date('2026-08-25T04:04:00.000Z'),
+    );
+    await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: newer,
+      preserveFreshnessHistory: true,
+    });
+    expect(
+      await acknowledgeSupersededSchedulerLane({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId: 'integration-live-settle-job',
+        activeObligationId: older.obligationId,
+      }),
+    ).toBe(true);
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.lane.desiredObligationId).toBe(newer.obligationId);
+  });
+
+  test('releases a live lane after dependency deferral without marking it succeeded', async () => {
+    const older = await reserveLive(
+      Date.parse('2026-08-25T04:20:00.000Z'),
+      'live-deferred-older',
+      new Date('2026-08-25T04:19:00.000Z'),
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: older,
+      preserveFreshnessHistory: true,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-live-deferred-job',
+      obligationId: older.obligationId,
+    });
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-live-deferred-job',
+      obligationId: older.obligationId,
+    });
+    expect(started?.obligation.generation).toBe(0);
+    expect(
+      await deferSchedulerObligationForWorker({
+        obligationId: older.obligationId,
+        generation: 0,
+        dependencyWait: { reasonCodes: ['LEAGUE_FINAL_NOT_READY'] },
+      }),
+    ).toBe(true);
+    const completed = await completeSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      activeObligationId: older.obligationId,
+      obligationGeneration: 0,
+      status: 'succeeded',
+    });
+    expect(completed.ok).toBe(false);
+    expect(completed.needsDispatch).toBe(true);
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.desired?.status).toBe('pending');
+    expect(targets?.desired?.generation).toBe(1);
+  });
+
   test.each(['PENDING', 'BREACHED'])(
     'retires a late %s window and its open case after supersession',
     async (status) => {
