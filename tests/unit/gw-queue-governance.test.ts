@@ -28,7 +28,7 @@ import {
   shouldPersistQueueHealthWindow,
 } from '../../src/utils/queue-monitor';
 import { queueHealthRetentionCutoff } from '../../src/services/queue-governance.service';
-import { summarizeDataError } from '../../src/domain/error-classification';
+import { classifyDataError, summarizeDataError } from '../../src/domain/error-classification';
 import { FPLClientError } from '../../src/utils/errors';
 import { resolveOfficialH2HPagesToFetch } from '../../src/services/tournament-official-h2h.service';
 import { missingLockedPageNumbers } from '../../src/domain/official-h2h-manifest';
@@ -259,9 +259,9 @@ describe('GW queue and data governance primitives', () => {
 
   test('rotates the startup batch while retaining events received during baseline loading', () => {
     const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
-    accumulator.record('arrivals', 1_000);
+    accumulator.record('arrivals', 1_000, '1000-0');
     const startup = accumulator.captureWithWatermarks();
-    accumulator.record('failures', 2_000);
+    accumulator.record('failures', 2_000, '2000-0');
 
     expect(startup.counters.get(0)).toEqual({
       arrivals: 1,
@@ -270,19 +270,20 @@ describe('GW queue and data governance primitives', () => {
       stalled: 0,
     });
     expect(startup.latestReceivedAtMs.get(0)).toBe(1_000);
+    expect(startup.latestEventStreamId.get(0)).toBe('00000000000000001000-00000000000000000000');
     expect(accumulator.pendingCount()).toBe(1);
   });
 
-  test('drops startup events only when a durable receive watermark covers them', () => {
+  test('drops startup events only when a durable stream cursor covers them', () => {
     const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
-    accumulator.record('arrivals', 1_000);
-    accumulator.record('failures', 2_000);
+    accumulator.record('arrivals', 1_000, '1000-0');
+    accumulator.record('failures', 2_000, '2000-0');
     const capture = accumulator.captureWithWatermarks();
 
-    const partiallyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, 1_500]]));
-    // A bucket-level watermark cannot prove which member of a mixed bucket
-    // was persisted. Retain the aggregate conservatively instead of keeping
-    // one object per QueueEvent to split it exactly.
+    const partiallyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, '1500-0']]));
+    // A bucket-level cursor cannot prove which member of a mixed bucket was
+    // persisted. Retain the aggregate conservatively instead of keeping one
+    // object per QueueEvent to split it exactly.
     expect(partiallyCovered.discarded).toBe(0);
     expect(partiallyCovered.capture.counters.get(0)).toEqual({
       arrivals: 1,
@@ -291,7 +292,7 @@ describe('GW queue and data governance primitives', () => {
       stalled: 0,
     });
 
-    const fullyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, 2_000]]));
+    const fullyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, '2000-0']]));
     expect(fullyCovered.discarded).toBe(2);
     expect(fullyCovered.capture.counters.has(0)).toBe(false);
 
@@ -303,6 +304,31 @@ describe('GW queue and data governance primitives', () => {
       failures: 1,
       stalled: 0,
     });
+  });
+
+  test('retains aggregate observations when QueueEvents did not provide a causal ID', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    const capture = accumulator.captureWithWatermarks();
+
+    const retained = retainQueueEventsAfterWatermarks(capture, new Map([[0, '9999-0']]));
+    expect(retained.discarded).toBe(0);
+    expect(retained.capture.latestEventStreamId.get(0)).toBeNull();
+    expect(retained.capture.counters.get(0)?.arrivals).toBe(1);
+  });
+
+  test('keeps receive-time buckets while retaining the causal stream cursor', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    // The first event is delivered after the local minute boundary, while the
+    // second is delivered before it. Health windows stay tied to observation
+    // time; stream IDs remain available for restart deduplication.
+    accumulator.record('arrivals', 60_001, '59999-0');
+    accumulator.record('completions', 59_999, '60001-0');
+    const capture = accumulator.captureWithWatermarks();
+
+    expect(capture.counters.get(60_000)?.arrivals).toBe(1);
+    expect(capture.counters.get(0)?.completions).toBe(1);
+    expect(retainQueueEventsAfterWatermarks(capture, new Map([[0, '59999-0']])).discarded).toBe(0);
   });
 
   test('retains events received after the durable baseline statement snapshot', () => {
@@ -847,5 +873,11 @@ describe('GW queue and data governance primitives', () => {
     );
     expect(summary.errorClass).toBe('TRANSIENT_INFRA');
     expect(summary.errorCode).toBe('FPL_ADMISSION_DEADLINE_EXCEEDED');
+  });
+
+  test('recovers the durable classification prefix from a Bull unrecoverable message', () => {
+    expect(classifyDataError(new Error('CONFIG_AUTH:AUTH_FAILED credentials=[redacted]'))).toBe(
+      'CONFIG_AUTH',
+    );
   });
 });

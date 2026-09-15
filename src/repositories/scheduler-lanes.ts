@@ -672,6 +672,7 @@ export async function advanceSchedulerLane(input: {
       .from(schedulerObligationsInOps)
       .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
       .limit(1);
+    const desiredDueAt = asDate(desiredRow?.dueAt);
     // A terminal desired obligation is authoritative for an idle latest-wins
     // lane. If an older Bull-loss callback left a lane error behind, clear it
     // on the next scheduler observation instead of exposing a false active
@@ -693,7 +694,7 @@ export async function advanceSchedulerLane(input: {
     const shouldDispatch =
       lane.state === 'idle' &&
       (desiredRow?.status === 'pending' || desiredRow?.status === 'failed') &&
-      (desiredRow?.dueAt === undefined || desiredRow.dueAt.getTime() <= dbNow.getTime()) &&
+      (desiredDueAt === null || desiredDueAt.getTime() <= dbNow.getTime()) &&
       (lane.retryNotBefore === null || lane.retryNotBefore.getTime() <= dbNow.getTime());
     return { lane, shouldDispatch };
   });
@@ -736,9 +737,10 @@ export async function claimSchedulerLaneDispatch(input: {
       .from(schedulerObligationsInOps)
       .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
       .limit(1);
+    const desiredDueAt = asDate(desired?.dueAt);
     if (
       (desired?.status !== 'pending' && desired?.status !== 'failed') ||
-      (desired?.dueAt !== undefined && desired.dueAt.getTime() > dbNow.getTime())
+      (desiredDueAt !== null && desiredDueAt.getTime() > dbNow.getTime())
     ) {
       return null;
     }

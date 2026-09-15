@@ -236,12 +236,47 @@ export type QueueEventCounters = {
 export type QueueEventCapture = Readonly<{
   counters: Map<number, QueueEventCounters>;
   /**
-   * Aggregate receive-time watermark for each captured bucket. `null` means
-   * that the counters contain a restored aggregate with no causal timestamp.
-   * Keeping one number per bucket avoids retaining one object per QueueEvent.
+   * Aggregate local receive time for each captured bucket. `null` means that
+   * the counters contain a restored aggregate with no trustworthy local
+   * timestamp. This is useful for baseline statement ordering, but it is not
+   * the restart deduplication proof.
    */
   latestReceivedAtMs: Map<number, number | null>;
+  /**
+   * The greatest Redis QueueEvents stream entry ID represented by each
+   * bucket. `null` means at least one observation has no valid causal ID, so
+   * the aggregate must be retained on restart. One cursor per bucket keeps
+   * monitor metadata bounded without retaining one object per QueueEvent.
+   */
+  latestEventStreamId: Map<number, string | null>;
 }>;
+
+const QUEUE_EVENT_STREAM_ID_COMPONENT_WIDTH = 20;
+const QUEUE_EVENT_STREAM_ID_PATTERN = /^(\d{1,20})-(\d{1,20})$/;
+
+/**
+ * Redis stream IDs are ordered by two unsigned 64-bit components. Normalize
+ * both components to a fixed-width decimal representation so a lexical
+ * comparison is the same as the causal stream order without unsafe Number
+ * coercion.
+ */
+function normalizeQueueEventStreamId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = QUEUE_EVENT_STREAM_ID_PATTERN.exec(value);
+  if (!match) return undefined;
+  const timestamp = match[1].replace(/^0+(?=\d)/, '');
+  const sequence = match[2].replace(/^0+(?=\d)/, '');
+  return `${timestamp.padStart(QUEUE_EVENT_STREAM_ID_COMPONENT_WIDTH, '0')}-${sequence.padStart(QUEUE_EVENT_STREAM_ID_COMPONENT_WIDTH, '0')}`;
+}
+
+function maxQueueEventStreamId(
+  left: string | undefined,
+  right: string | undefined,
+): string | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return left >= right ? left : right;
+}
 
 function emptyQueueEventCounters(): QueueEventCounters {
   return { arrivals: 0, completions: 0, failures: 0, stalled: 0 };
@@ -277,43 +312,60 @@ function queueEventCaptureWatermark(
     : undefined;
 }
 
+function queueEventCaptureStreamId(
+  capture: QueueEventCapture,
+  bucketStart: number,
+): string | undefined {
+  const streamId = capture.latestEventStreamId.get(bucketStart);
+  return streamId ?? undefined;
+}
+
+function queueEventStreamEvidence(
+  capture: QueueEventCapture,
+  bucketStart: number,
+): string | null | undefined {
+  if (!capture.latestEventStreamId.has(bucketStart)) return undefined;
+  return capture.latestEventStreamId.get(bucketStart) ?? null;
+}
+
 /**
- * Retain only events that are not covered by a durable receive-time watermark.
- * Missing or incomplete receive-time watermarks are deliberately retained
- * because aggregate counters alone cannot prove which observations a row
- * contains. A mixed bucket is retained conservatively when its latest event
- * is newer than the durable watermark; this trades a possible duplicate for
- * a guaranteed absence of silent loss without an unbounded event list.
+ * Retain only events that are not covered by a durable Redis stream cursor.
+ * Missing or incomplete causal identities are deliberately retained because
+ * aggregate counters alone cannot prove which observations a row contains.
+ * A mixed bucket is retained conservatively when its greatest event ID is
+ * newer than the durable cursor; this trades a possible duplicate for a
+ * guaranteed absence of silent loss without an unbounded event list.
  */
 export function retainQueueEventsAfterWatermarks(
   capture: QueueEventCapture,
-  watermarks: ReadonlyMap<number, number>,
+  watermarks: ReadonlyMap<number, string | null>,
 ): Readonly<{ capture: QueueEventCapture; discarded: number }> {
   const counters = new Map<number, QueueEventCounters>();
   const latestReceivedAtMs = new Map<number, number | null>();
+  const latestEventStreamId = new Map<number, string | null>();
   let discarded = 0;
   for (const [bucketStart, bucketCounters] of capture.counters) {
-    const watermark = watermarks.get(bucketStart);
-    const latest = capture.latestReceivedAtMs.get(bucketStart);
+    const durableStreamId = watermarks.get(bucketStart);
+    const latestStreamId = queueEventCaptureStreamId(capture, bucketStart);
+    const normalizedDurableStreamId = normalizeQueueEventStreamId(durableStreamId);
+    const normalizedLatestStreamId = normalizeQueueEventStreamId(latestStreamId);
     const covered =
-      watermark !== undefined &&
-      Number.isSafeInteger(watermark) &&
-      watermark >= 0 &&
-      latest !== null &&
-      latest !== undefined &&
-      Number.isSafeInteger(latest) &&
-      latest >= 0 &&
-      latest <= watermark;
+      normalizedDurableStreamId !== undefined &&
+      normalizedLatestStreamId !== undefined &&
+      normalizedLatestStreamId <= normalizedDurableStreamId;
     if (covered) {
       discarded += totalQueueEventCounters(bucketCounters);
       continue;
     }
     counters.set(bucketStart, { ...bucketCounters });
     if (capture.latestReceivedAtMs.has(bucketStart)) {
-      latestReceivedAtMs.set(bucketStart, latest ?? null);
+      latestReceivedAtMs.set(bucketStart, capture.latestReceivedAtMs.get(bucketStart) ?? null);
+    }
+    if (capture.latestEventStreamId.has(bucketStart)) {
+      latestEventStreamId.set(bucketStart, latestStreamId ?? null);
     }
   }
-  return { capture: { counters, latestReceivedAtMs }, discarded };
+  return { capture: { counters, latestReceivedAtMs, latestEventStreamId }, discarded };
 }
 
 /**
@@ -324,13 +376,23 @@ export function retainQueueEventsAfterWatermarks(
 export class QueueEventAccumulator {
   private readonly buckets = new Map<number, QueueEventCounters>();
   private readonly latestReceivedAtMs = new Map<number, number | null>();
+  private readonly latestEventStreamId = new Map<number, string | null>();
 
   public constructor(
     private readonly windowIntervalMs: number,
     private readonly retentionMs = QUEUE_MONITOR_EVENT_RETENTION_MS,
   ) {}
 
-  public record(kind: keyof QueueEventCounters, receivedAtMs = Date.now()): number {
+  public record(
+    kind: keyof QueueEventCounters,
+    receivedAtMs = Date.now(),
+    eventStreamId?: unknown,
+  ): number {
+    const normalizedStreamId = normalizeQueueEventStreamId(eventStreamId);
+    // Queue health windows describe when this subscriber observed an event.
+    // Keep the Redis stream ID as causal deduplication metadata, but never use
+    // its embedded producer timestamp to move an observation into another
+    // receive-time window.
     const bucketStart = windowStart(receivedAtMs, this.windowIntervalMs).getTime();
     const bucket = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
     bucket[kind] += 1;
@@ -344,6 +406,15 @@ export class QueueEventAccumulator {
         latest === undefined ? receivedAtMs : Math.max(latest, receivedAtMs),
       );
     }
+    const latestStreamId = this.latestEventStreamId.get(bucketStart);
+    if (!normalizedStreamId || latestStreamId === null) {
+      this.latestEventStreamId.set(bucketStart, null);
+    } else {
+      this.latestEventStreamId.set(
+        bucketStart,
+        maxQueueEventStreamId(latestStreamId, normalizedStreamId) ?? null,
+      );
+    }
     return this.prune(receivedAtMs);
   }
 
@@ -355,6 +426,7 @@ export class QueueEventAccumulator {
         evicted += totalQueueEventCounters(counters);
         this.buckets.delete(startMs);
         this.latestReceivedAtMs.delete(startMs);
+        this.latestEventStreamId.delete(startMs);
       }
     }
     return evicted;
@@ -368,19 +440,26 @@ export class QueueEventAccumulator {
     if (nowMs !== undefined) this.prune(nowMs);
     const captured = new Map<number, QueueEventCounters>();
     const latestReceivedAtMs = new Map<number, number | null>();
+    const latestEventStreamId = new Map<number, string | null>();
     for (const [bucketStart, counters] of this.buckets) {
       captured.set(bucketStart, { ...counters });
       latestReceivedAtMs.set(bucketStart, this.latestReceivedAtMs.get(bucketStart) ?? null);
+      latestEventStreamId.set(bucketStart, this.latestEventStreamId.get(bucketStart) ?? null);
       this.buckets.delete(bucketStart);
       this.latestReceivedAtMs.delete(bucketStart);
+      this.latestEventStreamId.delete(bucketStart);
     }
-    return { counters: captured, latestReceivedAtMs };
+    return { counters: captured, latestReceivedAtMs, latestEventStreamId };
   }
 
   public restore(captured: Map<number, QueueEventCounters>): void {
     const latestReceivedAtMs = new Map<number, number | null>();
-    for (const bucketStart of captured.keys()) latestReceivedAtMs.set(bucketStart, null);
-    this.restoreWithWatermarks({ counters: captured, latestReceivedAtMs });
+    const latestEventStreamId = new Map<number, string | null>();
+    for (const bucketStart of captured.keys()) {
+      latestReceivedAtMs.set(bucketStart, null);
+      latestEventStreamId.set(bucketStart, null);
+    }
+    this.restoreWithWatermarks({ counters: captured, latestReceivedAtMs, latestEventStreamId });
   }
 
   public restoreWithWatermarks(captured: QueueEventCapture): void {
@@ -399,6 +478,18 @@ export class QueueEventAccumulator {
         );
       } else if (!this.latestReceivedAtMs.has(bucketStart)) {
         this.latestReceivedAtMs.set(bucketStart, null);
+      }
+      const capturedStreamId = captured.latestEventStreamId?.get(bucketStart);
+      const currentStreamId = this.latestEventStreamId.get(bucketStart);
+      if (capturedStreamId === null || currentStreamId === null) {
+        this.latestEventStreamId.set(bucketStart, null);
+      } else if (capturedStreamId !== undefined) {
+        this.latestEventStreamId.set(
+          bucketStart,
+          maxQueueEventStreamId(currentStreamId, capturedStreamId) ?? null,
+        );
+      } else if (!this.latestEventStreamId.has(bucketStart)) {
+        this.latestEventStreamId.set(bucketStart, null);
       }
     }
   }
@@ -424,6 +515,7 @@ export class QueueEventAccumulator {
         discarded += totalQueueEventCounters(counters);
         this.buckets.delete(bucketStart);
         this.latestReceivedAtMs.delete(bucketStart);
+        this.latestEventStreamId.delete(bucketStart);
       }
     }
     return discarded;
@@ -445,6 +537,7 @@ export class QueueEventAccumulator {
     const pending = this.pendingCount();
     this.buckets.clear();
     this.latestReceivedAtMs.clear();
+    this.latestEventStreamId.clear();
     return pending;
   }
 }
@@ -478,8 +571,10 @@ export function resolveQueueArrivalContribution(input: {
 type QueueHealthPersistenceSnapshot = QueueHealthSnapshot & {
   /** Historical retries carry event counters only; keep the original sample fields intact. */
   readonly eventCountersOnly?: boolean;
-  /** Latest receive time represented by the persisted event counters. */
+  /** Latest local receive time represented by the persisted event counters. */
   readonly eventWatermarkAtMs?: number;
+  /** Greatest Redis QueueEvents stream entry represented by the counters. */
+  readonly eventStreamId?: string | null;
 };
 
 function queueHealthSnapshotForRedis(
@@ -487,6 +582,7 @@ function queueHealthSnapshotForRedis(
 ): QueueHealthSnapshot {
   const redisSnapshot = { ...snapshot };
   delete redisSnapshot.eventWatermarkAtMs;
+  delete redisSnapshot.eventStreamId;
   return redisSnapshot;
 }
 
@@ -578,11 +674,66 @@ function queueHealthWindowValues(snapshot: QueueHealthPersistenceSnapshot, inter
       ...(snapshot.eventWatermarkAtMs === undefined
         ? {}
         : { eventWatermarkAtMs: snapshot.eventWatermarkAtMs }),
+      ...(snapshot.eventStreamId === undefined ? {} : { eventStreamId: snapshot.eventStreamId }),
     },
   };
 }
 
 function queueHealthWindowConflictSet() {
+  const mergeEventReceiveWatermark = sql`
+    CASE
+      WHEN excluded.evidence ? 'eventWatermarkAtMs' THEN
+        jsonb_set(
+          ${queueHealthWindowsInOps.evidence} || excluded.evidence,
+          '{eventWatermarkAtMs}',
+          to_jsonb(greatest(
+            coalesce(
+              CASE
+                WHEN ${queueHealthWindowsInOps.evidence}->>'eventWatermarkAtMs' ~ '^[0-9]+$'
+                  THEN (${queueHealthWindowsInOps.evidence}->>'eventWatermarkAtMs')::bigint
+              END,
+              0::bigint
+            ),
+            coalesce(
+              CASE
+                WHEN excluded.evidence->>'eventWatermarkAtMs' ~ '^[0-9]+$'
+                  THEN (excluded.evidence->>'eventWatermarkAtMs')::bigint
+              END,
+              0::bigint
+            )
+          )),
+          true
+        )
+      ELSE ${queueHealthWindowsInOps.evidence} || excluded.evidence
+    END`;
+  const mergedEvidence = sql`
+    CASE
+      WHEN excluded.evidence ? 'eventStreamId'
+        AND excluded.evidence->>'eventStreamId' IS NULL THEN
+        jsonb_set(
+          ${mergeEventReceiveWatermark},
+          '{eventStreamId}',
+          'null'::jsonb,
+          true
+        )
+      WHEN excluded.evidence->>'eventStreamId' ~ '^[0-9]{20}-[0-9]{20}$' THEN
+        jsonb_set(
+          ${mergeEventReceiveWatermark},
+          '{eventStreamId}',
+          to_jsonb(
+            CASE
+              WHEN ${queueHealthWindowsInOps.evidence}->>'eventStreamId' ~ '^[0-9]{20}-[0-9]{20}$'
+                THEN greatest(
+                  ${queueHealthWindowsInOps.evidence}->>'eventStreamId',
+                  excluded.evidence->>'eventStreamId'
+                )
+              ELSE excluded.evidence->>'eventStreamId'
+            END
+          ),
+          true
+        )
+      ELSE ${mergeEventReceiveWatermark}
+    END`;
   return {
     waiting: sql`excluded.waiting`,
     active: sql`excluded.active`,
@@ -615,35 +766,10 @@ function queueHealthWindowConflictSet() {
     admissionMode: sql`excluded.admission_mode`,
     consumerHeartbeatAt: sql`excluded.consumer_heartbeat_at`,
     releaseSha: sql`excluded.release_sha`,
-    // Preserve a receive-time watermark when a stable snapshot is persisted
-    // without a newly captured event batch, and never let a concurrent
-    // monitor regress the durable proof.
-    evidence: sql`
-      CASE
-        WHEN excluded.evidence ? 'eventWatermarkAtMs' THEN
-          jsonb_set(
-            ${queueHealthWindowsInOps.evidence} || excluded.evidence,
-            '{eventWatermarkAtMs}',
-            to_jsonb(greatest(
-              coalesce(
-                CASE
-                  WHEN ${queueHealthWindowsInOps.evidence}->>'eventWatermarkAtMs' ~ '^[0-9]+$'
-                    THEN (${queueHealthWindowsInOps.evidence}->>'eventWatermarkAtMs')::bigint
-                END,
-                0::bigint
-              ),
-              coalesce(
-                CASE
-                  WHEN excluded.evidence->>'eventWatermarkAtMs' ~ '^[0-9]+$'
-                    THEN (excluded.evidence->>'eventWatermarkAtMs')::bigint
-                END,
-                0::bigint
-              )
-            )),
-            true
-          )
-        ELSE ${queueHealthWindowsInOps.evidence} || excluded.evidence
-      END`,
+    // Preserve both the diagnostic receive-time watermark and the causal
+    // Redis stream cursor when a stable snapshot is persisted without a
+    // newly captured event batch. Never regress either durable proof.
+    evidence: mergedEvidence,
     updatedAt: sql`excluded.updated_at`,
   };
 }
@@ -654,6 +780,7 @@ function queueHealthSnapshotForEventWindow(
   intervalMs: number,
   counters: QueueEventCounters,
   eventWatermarkAtMs?: number,
+  eventStreamId?: string | null,
 ): QueueHealthPersistenceSnapshot {
   const windowEndMs = windowStartMs + Math.max(1, intervalMs) - 1;
   const observedAtMs = Math.max(windowStartMs, Math.min(Date.now(), windowEndMs));
@@ -666,6 +793,7 @@ function queueHealthSnapshotForEventWindow(
     stalled: counters.stalled,
     eventCountersOnly: true,
     eventWatermarkAtMs,
+    eventStreamId,
   };
 }
 
@@ -682,6 +810,7 @@ function queueHealthEventWindowValues(
     failures: snapshot.failures,
     stalled: snapshot.stalled,
     eventWatermarkAtMs: snapshot.eventWatermarkAtMs ?? null,
+    eventStreamId: snapshot.eventStreamId ?? null,
   };
 }
 
@@ -699,12 +828,15 @@ type PersistWindowsResult = {
   ok: boolean;
   eventTotals: Map<number, QueueEventCounters>;
   eventWatermarks: Map<number, number>;
+  eventStreamIds: Map<number, string | null>;
 };
 
 type LoadedQueueEventTotals = {
   totals: Map<number, QueueEventCounters>;
-  /** Last receive time proven durable for each event bucket. */
+  /** Last local receive time proven durable for each event bucket. */
   eventWatermarks: Map<number, number>;
+  /** Greatest Redis QueueEvents stream entry proven durable for each bucket; null means unproven. */
+  eventStreamIds: Map<number, string | null>;
 };
 
 function queueEventWindowStartMs(value: Date | string): number {
@@ -727,6 +859,13 @@ function queueEventWatermarkFromEvidence(evidence: unknown): number | undefined 
   const raw = (evidence as Record<string, unknown>).eventWatermarkAtMs;
   const watermark = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
   return Number.isSafeInteger(watermark) && watermark >= 0 ? watermark : undefined;
+}
+
+function queueEventStreamIdFromEvidence(evidence: unknown): string | null | undefined {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return undefined;
+  const values = evidence as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(values, 'eventStreamId')) return undefined;
+  return normalizeQueueEventStreamId(values.eventStreamId) ?? null;
 }
 
 async function loadQueueHealthEventTotals(
@@ -771,6 +910,14 @@ async function loadQueueHealthEventTotals(
           : [[queueEventWindowStartMs(row.windowStart), watermark] as const];
       }),
     ),
+    eventStreamIds: new Map(
+      rows.flatMap((row) => {
+        const streamId = queueEventStreamIdFromEvidence(row.evidence);
+        return streamId === undefined
+          ? []
+          : [[queueEventWindowStartMs(row.windowStart), streamId] as const];
+      }),
+    ),
   };
 }
 
@@ -780,7 +927,8 @@ async function persistWindows(
 ): Promise<PersistWindowsResult> {
   const eventTotals = new Map<number, QueueEventCounters>();
   const eventWatermarks = new Map<number, number>();
-  if (snapshots.length === 0) return { ok: true, eventTotals, eventWatermarks };
+  const eventStreamIds = new Map<number, string | null>();
+  if (snapshots.length === 0) return { ok: true, eventTotals, eventWatermarks, eventStreamIds };
   try {
     const db = await getDatabaseHandleWithBudget(5_000);
     const currentSnapshots = snapshots.filter((snapshot) => !snapshot.eventCountersOnly);
@@ -806,6 +954,8 @@ async function persistWindows(
         eventTotals.set(bucketStart, queueEventTotalsFromRow(row));
         const watermark = queueEventWatermarkFromEvidence(row.evidence);
         if (watermark !== undefined) eventWatermarks.set(bucketStart, watermark);
+        const streamId = queueEventStreamIdFromEvidence(row.evidence);
+        if (streamId !== undefined) eventStreamIds.set(bucketStart, streamId);
       }
     }
     if (historicalSnapshots.length > 0) {
@@ -828,9 +978,29 @@ async function persistWindows(
             failures: values.failures,
             stalled: values.stalled,
             event_watermark_at_ms: values.eventWatermarkAtMs,
+            event_stream_id: values.eventStreamId,
           };
         }),
       );
+      const mergeEventReceiveWatermark = sql`
+        CASE
+          WHEN incoming.event_watermark_at_ms IS NULL THEN health.evidence
+          ELSE jsonb_set(
+            health.evidence,
+            '{eventWatermarkAtMs}',
+            to_jsonb(greatest(
+              coalesce(
+                CASE
+                  WHEN health.evidence->>'eventWatermarkAtMs' ~ '^[0-9]+$'
+                    THEN (health.evidence->>'eventWatermarkAtMs')::bigint
+                END,
+                0::bigint
+              ),
+              incoming.event_watermark_at_ms
+            )),
+            true
+          )
+        END`;
       const rows = (await db.execute(sql`
         UPDATE ${queueHealthWindowsInOps} AS health
         SET arrivals = greatest(health.arrivals, incoming.arrivals),
@@ -838,22 +1008,28 @@ async function persistWindows(
             failures = greatest(health.failures, incoming.failures),
             stalled = greatest(health.stalled, incoming.stalled),
             evidence = CASE
-              WHEN incoming.event_watermark_at_ms IS NULL THEN health.evidence
-              ELSE jsonb_set(
-                health.evidence,
-                '{eventWatermarkAtMs}',
-                to_jsonb(greatest(
-                  coalesce(
+              WHEN incoming.event_stream_id IS NULL
+                OR incoming.event_stream_id !~ '^[0-9]{20}-[0-9]{20}$' THEN
+                jsonb_set(
+                  ${mergeEventReceiveWatermark},
+                  '{eventStreamId}',
+                  'null'::jsonb,
+                  true
+                )
+              WHEN incoming.event_stream_id ~ '^[0-9]{20}-[0-9]{20}$' THEN
+                jsonb_set(
+                  ${mergeEventReceiveWatermark},
+                  '{eventStreamId}',
+                  to_jsonb(
                     CASE
-                      WHEN health.evidence->>'eventWatermarkAtMs' ~ '^[0-9]+$'
-                        THEN (health.evidence->>'eventWatermarkAtMs')::bigint
-                    END,
-                    0::bigint
+                      WHEN health.evidence->>'eventStreamId' ~ '^[0-9]{20}-[0-9]{20}$'
+                        THEN greatest(health.evidence->>'eventStreamId', incoming.event_stream_id)
+                      ELSE incoming.event_stream_id
+                    END
                   ),
-                  incoming.event_watermark_at_ms
-                )),
-                true
-              )
+                  true
+                )
+              ELSE ${mergeEventReceiveWatermark}
             END,
             updated_at = clock_timestamp()
         FROM jsonb_to_recordset(${payload}::jsonb) AS incoming(
@@ -863,7 +1039,8 @@ async function persistWindows(
           completions integer,
           failures integer,
           stalled integer,
-          event_watermark_at_ms bigint
+          event_watermark_at_ms bigint,
+          event_stream_id text
         )
         WHERE health.window_start = incoming.window_start
           AND health.queue_name = incoming.queue_name
@@ -879,9 +1056,11 @@ async function persistWindows(
         eventTotals.set(bucketStart, queueEventTotalsFromRow(row));
         const watermark = queueEventWatermarkFromEvidence(row.evidence);
         if (watermark !== undefined) eventWatermarks.set(bucketStart, watermark);
+        const streamId = queueEventStreamIdFromEvidence(row.evidence);
+        if (streamId !== undefined) eventStreamIds.set(bucketStart, streamId);
       }
     }
-    return { ok: true, eventTotals, eventWatermarks };
+    return { ok: true, eventTotals, eventWatermarks, eventStreamIds };
   } catch (error) {
     // Queue telemetry is an observability side channel. A migration or a
     // transient PG outage must not stop consumers from draining work.
@@ -889,7 +1068,7 @@ async function persistWindows(
       queue: snapshots[0]?.queueName,
       windows: snapshots.length,
     });
-    return { ok: false, eventTotals, eventWatermarks };
+    return { ok: false, eventTotals, eventWatermarks, eventStreamIds };
   }
 }
 
@@ -919,9 +1098,12 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   // only owns unconfirmed batches; this map supplies the absolute value for an
   // idempotent PostgreSQL upsert when a later poll confirms another batch.
   const acknowledgedEventTotals = new Map<number, QueueEventCounters>();
-  // A row is safe to use as a restart baseline only through the receive-time
-  // watermark persisted alongside its cumulative event counters.
+  // A row is safe to use as a restart baseline only through the causal Redis
+  // stream cursor persisted alongside its cumulative event counters. The
+  // receive-time watermark remains diagnostic/baseline ordering evidence and
+  // is never used to discard restart observations.
   const acknowledgedEventWatermarks = new Map<number, number>();
+  const acknowledgedEventStreamIds = new Map<number, string | null>();
   let started = false;
   let stopped = false;
   let pollInFlight: Promise<void> | null = null;
@@ -939,13 +1121,15 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         evicted += totalQueueEventCounters(counters);
         acknowledgedEventTotals.delete(bucketStart);
         acknowledgedEventWatermarks.delete(bucketStart);
+        acknowledgedEventStreamIds.delete(bucketStart);
       }
     }
     return evicted;
   };
 
-  const recordEvent = (kind: keyof QueueEventCounters, receivedAtMs = Date.now()): void => {
+  const recordEvent = (kind: keyof QueueEventCounters, eventStreamId?: string): void => {
     if (stopped) return;
+    const receivedAtMs = Date.now();
     const evictedAcknowledged = pruneAcknowledgedEventTotals(receivedAtMs);
     if (evictedAcknowledged > 0) {
       logDebug('Queue monitor acknowledged event totals expired', {
@@ -954,7 +1138,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         retentionMs: eventRetentionMs,
       });
     }
-    const evicted = eventAccumulator.record(kind, receivedAtMs);
+    const evicted = eventAccumulator.record(kind, receivedAtMs, eventStreamId);
     if (evicted > 0) {
       logWarn('Queue monitor event observation window exceeded', {
         queue: queueName,
@@ -991,17 +1175,17 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           eventRetentionMs,
         );
         const persisted = loaded.totals;
-        // Discard only event records explicitly covered by the durable
-        // receive-time watermark. A row's existence or updated_at cannot prove
-        // that this process's captured events are represented in its totals.
+        // Discard only aggregate observations explicitly covered by the
+        // durable Redis stream cursor. A row's existence, updated_at, or a
+        // process-local receive time cannot prove causal coverage.
         const retainedStartup = retainQueueEventsAfterWatermarks(
           startupCapture,
-          loaded.eventWatermarks,
+          loaded.eventStreamIds,
         );
         const inFlightCapture = eventAccumulator.captureWithWatermarks();
         const retainedInFlight = retainQueueEventsAfterWatermarks(
           inFlightCapture,
-          loaded.eventWatermarks,
+          loaded.eventStreamIds,
         );
         eventAccumulator.restoreWithWatermarks(retainedStartup.capture);
         eventAccumulator.restoreWithWatermarks(retainedInFlight.capture);
@@ -1010,6 +1194,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         }
         for (const [bucketStart, watermark] of loaded.eventWatermarks) {
           acknowledgedEventWatermarks.set(bucketStart, watermark);
+        }
+        for (const [bucketStart, streamId] of loaded.eventStreamIds) {
+          acknowledgedEventStreamIds.set(bucketStart, streamId);
         }
         const current = persisted.get(eventWindowStartMs);
         if (current) {
@@ -1047,16 +1234,28 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     const capturedCapture = eventAccumulator.captureWithWatermarks();
     const capturedEvents = capturedCapture.counters;
     const capturedEventWatermarks = new Map<number, number>();
+    const capturedEventStreamIds = new Map<number, string | null>();
     for (const bucketStart of capturedEvents.keys()) {
       const watermark = queueEventCaptureWatermark(capturedCapture, bucketStart);
-      if (watermark === undefined) continue;
-      const acknowledgedWatermark = acknowledgedEventWatermarks.get(bucketStart);
-      capturedEventWatermarks.set(
-        bucketStart,
-        acknowledgedWatermark === undefined
-          ? watermark
-          : Math.max(acknowledgedWatermark, watermark),
-      );
+      if (watermark !== undefined) {
+        const acknowledgedWatermark = acknowledgedEventWatermarks.get(bucketStart);
+        capturedEventWatermarks.set(
+          bucketStart,
+          acknowledgedWatermark === undefined
+            ? watermark
+            : Math.max(acknowledgedWatermark, watermark),
+        );
+      }
+      const streamId = queueEventStreamEvidence(capturedCapture, bucketStart);
+      if (streamId !== undefined) {
+        const acknowledgedStreamId = acknowledgedEventStreamIds.get(bucketStart);
+        capturedEventStreamIds.set(
+          bucketStart,
+          streamId === null || acknowledgedStreamId === null
+            ? null
+            : (maxQueueEventStreamId(acknowledgedStreamId, streamId) ?? streamId),
+        );
+      }
     }
     const capturedEventCount = [...capturedEvents.values()].reduce(
       (total, counters) => total + totalQueueEventCounters(counters),
@@ -1165,6 +1364,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       const currentEventWatermark =
         capturedEventWatermarks.get(eventWindowStartMs) ??
         acknowledgedEventWatermarks.get(eventWindowStartMs);
+      const currentEventStreamId = capturedEvents.has(eventWindowStartMs)
+        ? capturedEventStreamIds.get(eventWindowStartMs)
+        : acknowledgedEventStreamIds.get(eventWindowStartMs);
       const capturedOutsideWindow = [...capturedEventTotals.entries()].filter(
         ([bucketStart]) => bucketStart !== eventWindowStartMs,
       );
@@ -1190,6 +1392,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         ...(currentEventWatermark === undefined
           ? {}
           : { eventWatermarkAtMs: currentEventWatermark }),
+        ...(currentEventStreamId === undefined ? {} : { eventStreamId: currentEventStreamId }),
         arrivals: windowArrivals,
         completions: windowCompletions,
         failures: windowFailures,
@@ -1230,6 +1433,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           windowIntervalMs,
           counters,
           capturedEventWatermarks.get(bucketStart) ?? acknowledgedEventWatermarks.get(bucketStart),
+          capturedEvents.has(bucketStart)
+            ? capturedEventStreamIds.get(bucketStart)
+            : acknowledgedEventStreamIds.get(bucketStart),
         ),
       );
       if (stopped) {
@@ -1305,6 +1511,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
                 ok: false,
                 eventTotals: new Map<number, QueueEventCounters>(),
                 eventWatermarks: new Map<number, number>(),
+                eventStreamIds: new Map<number, string | null>(),
               };
           databasePersisted = persisted.ok;
           logDebug('Queue monitor database window persistence finished', {
@@ -1327,6 +1534,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
             }
             for (const [bucketStart, watermark] of persisted.eventWatermarks) {
               acknowledgedEventWatermarks.set(bucketStart, watermark);
+            }
+            for (const [bucketStart, streamId] of persisted.eventStreamIds) {
+              acknowledgedEventStreamIds.set(bucketStart, streamId);
             }
             for (const [bucketStart] of capturedEventTotals) {
               // A batched upsert may contain only an outside receive-time
@@ -1354,6 +1564,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
                   ? {
                       eventWatermarkAtMs: persisted.eventWatermarks.get(eventWindowStartMs),
                     }
+                  : {}),
+                ...(persisted.eventStreamIds.has(eventWindowStartMs)
+                  ? { eventStreamId: persisted.eventStreamIds.get(eventWindowStartMs) }
                   : {}),
                 arrivals: windowArrivals,
                 completions: windowCompletions,
@@ -1453,17 +1666,21 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       if (!capturedEventsRestored && capturedEventCount > 0) {
         const unconfirmed = new Map<number, QueueEventCounters>();
         const unconfirmedLatestReceivedAtMs = new Map<number, number | null>();
+        const unconfirmedLatestEventStreamId = new Map<number, string | null>();
         for (const [bucketStart, counters] of capturedEvents) {
           if (!confirmedCapturedWindows.has(bucketStart)) {
             unconfirmed.set(bucketStart, { ...counters });
             const latest = capturedCapture.latestReceivedAtMs.get(bucketStart);
             unconfirmedLatestReceivedAtMs.set(bucketStart, latest ?? null);
+            const streamId = capturedCapture.latestEventStreamId.get(bucketStart);
+            unconfirmedLatestEventStreamId.set(bucketStart, streamId ?? null);
           }
         }
         if (unconfirmed.size > 0) {
           eventAccumulator.restoreWithWatermarks({
             counters: unconfirmed,
             latestReceivedAtMs: unconfirmedLatestReceivedAtMs,
+            latestEventStreamId: unconfirmedLatestEventStreamId,
           });
           capturedEventsRestored = true;
         }
@@ -1479,9 +1696,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     }
   };
 
-  queueEvents.on('failed', ({ jobId, failedReason, prev }) => {
+  queueEvents.on('failed', ({ jobId, failedReason, prev }, eventStreamId) => {
     if (stopped) return;
-    recordEvent('failures');
+    recordEvent('failures', eventStreamId);
     void resolveJobName(queue, jobId).then((jobName) => {
       logError('Queue event failed', toError(failedReason), {
         queue: queueName,
@@ -1492,22 +1709,22 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     });
   });
 
-  queueEvents.on('added', () => {
+  queueEvents.on('added', (_args, eventStreamId) => {
     if (stopped) return;
-    recordEvent('arrivals');
+    recordEvent('arrivals', eventStreamId);
   });
 
-  queueEvents.on('completed', ({ jobId, prev }) => {
+  queueEvents.on('completed', ({ jobId, prev }, eventStreamId) => {
     if (stopped) return;
-    recordEvent('completions');
+    recordEvent('completions', eventStreamId);
     void resolveJobName(queue, jobId).then((jobName) => {
       logDebug('Queue event completed', { queue: queueName, jobId, jobName, previous: prev });
     });
   });
 
-  queueEvents.on('stalled', ({ jobId }) => {
+  queueEvents.on('stalled', ({ jobId }, eventStreamId) => {
     if (stopped) return;
-    recordEvent('stalled');
+    recordEvent('stalled', eventStreamId);
     void resolveJobName(queue, jobId).then((jobName) => {
       logError('Queue event stalled', undefined, { queue: queueName, jobId, jobName });
     });
