@@ -238,6 +238,20 @@ type QueueEventRecord = {
   receivedAtMs: number;
 };
 
+type QueueEventCapture = Readonly<{
+  counters: Map<number, QueueEventCounters>;
+  records: Map<number, readonly QueueEventRecord[]>;
+}>;
+
+function latestQueueEventReceivedAtMs(records: readonly QueueEventRecord[]): number | null {
+  let latest: number | null = null;
+  for (const record of records) {
+    if (!Number.isFinite(record.receivedAtMs)) continue;
+    latest = latest === null ? record.receivedAtMs : Math.max(latest, record.receivedAtMs);
+  }
+  return latest;
+}
+
 function emptyQueueEventCounters(): QueueEventCounters {
   return { arrivals: 0, completions: 0, failures: 0, stalled: 0 };
 }
@@ -301,24 +315,36 @@ export class QueueEventAccumulator {
   }
 
   public capture(nowMs?: number): Map<number, QueueEventCounters> {
+    return this.captureWithRecords(nowMs).counters;
+  }
+
+  public captureWithRecords(nowMs?: number): QueueEventCapture {
     if (nowMs !== undefined) this.prune(nowMs);
     const captured = new Map<number, QueueEventCounters>();
+    const records = new Map<number, readonly QueueEventRecord[]>();
     for (const [bucketStart, counters] of this.buckets) {
       captured.set(bucketStart, { ...counters });
+      records.set(bucketStart, [...(this.eventRecords.get(bucketStart) ?? [])]);
       this.buckets.delete(bucketStart);
       this.eventRecords.delete(bucketStart);
     }
-    return captured;
+    return { counters: captured, records };
   }
 
   public restore(captured: Map<number, QueueEventCounters>): void {
-    for (const [bucketStart, counters] of captured) {
+    this.restoreWithRecords({ counters: captured, records: new Map() });
+  }
+
+  public restoreWithRecords(captured: QueueEventCapture): void {
+    for (const [bucketStart, counters] of captured.counters) {
       const current = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
       mergeQueueEventCounters(current, counters);
       this.buckets.set(bucketStart, current);
-      // Restored batches are aggregate counters without per-event receive
-      // times. Keep them compact; `discardReceivedAtOrBefore` treats their
-      // bucket start as the conservative cutoff fallback.
+      const capturedRecords = captured.records.get(bucketStart);
+      if (capturedRecords && capturedRecords.length > 0) {
+        const records = this.eventRecords.get(bucketStart) ?? [];
+        this.eventRecords.set(bucketStart, [...records, ...capturedRecords]);
+      }
     }
   }
 
@@ -590,6 +616,7 @@ type PersistedQueueEventTotals = {
   completions: number;
   failures: number;
   stalled: number;
+  updatedAt?: Date | string;
 };
 
 type PersistWindowsResult = {
@@ -599,6 +626,8 @@ type PersistWindowsResult = {
 
 type LoadedQueueEventTotals = {
   totals: Map<number, QueueEventCounters>;
+  /** Last durable write for each receive-time bucket. */
+  updatedAtByBucket: Map<number, number>;
   /** PostgreSQL statement snapshot used to split overlapping QueueEvents. */
   snapshotAtMs: number;
 };
@@ -631,6 +660,7 @@ async function loadQueueHealthEventTotals(
       completions: queueHealthWindowsInOps.completions,
       failures: queueHealthWindowsInOps.failures,
       stalled: queueHealthWindowsInOps.stalled,
+      updatedAt: queueHealthWindowsInOps.updatedAt,
       // This expression is evaluated at the start of the same SELECT
       // statement whose rows form the restart baseline. Events received after
       // it are therefore not represented by the returned durable totals.
@@ -654,6 +684,9 @@ async function loadQueueHealthEventTotals(
           stalled: Number(row.stalled ?? 0),
         },
       ]),
+    ),
+    updatedAtByBucket: new Map(
+      rows.map((row) => [queueEventWindowStartMs(row.windowStart), row.updatedAt.getTime()]),
     ),
     // With no retained rows there is no durable counter that can overlap the
     // in-memory events, so retain the whole accumulator rather than inventing
@@ -839,7 +872,8 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       // rather than being unconditionally cleared with the pre-read batch.
       const startupAccumulator = eventAccumulator;
       eventAccumulator = new QueueEventAccumulator(windowIntervalMs, eventRetentionMs);
-      const startupEvents = startupAccumulator.capture(pollStartedAtMs);
+      const startupCapture = startupAccumulator.captureWithRecords(pollStartedAtMs);
+      const startupEvents = startupCapture.counters;
       try {
         const loaded = await loadQueueHealthEventTotals(
           queueName,
@@ -849,15 +883,26 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         const persisted = loaded.totals;
         let discardedStartupEvents = 0;
         const uncoveredStartupEvents = new Map<number, QueueEventCounters>();
+        const uncoveredStartupRecords = new Map<number, readonly QueueEventRecord[]>();
         for (const [bucketStart, counters] of startupEvents) {
-          if (persisted.has(bucketStart)) {
+          const latestReceivedAtMs = latestQueueEventReceivedAtMs(
+            startupCapture.records.get(bucketStart) ?? [],
+          );
+          const durableUpdatedAtMs = loaded.updatedAtByBucket.get(bucketStart);
+          const provenCovered =
+            persisted.has(bucketStart) &&
+            latestReceivedAtMs !== null &&
+            durableUpdatedAtMs !== undefined &&
+            durableUpdatedAtMs >= latestReceivedAtMs;
+          if (provenCovered) {
             discardedStartupEvents += totalQueueEventCounters(counters);
           } else {
-            // An event-only retry cannot create a missing point-in-time row,
-            // so keep observations whose bucket has no durable baseline. The
-            // normal retention path will keep retrying them without inventing
-            // a synthetic queue sample.
+            // A row alone is not proof that it contains this process's
+            // pre-read events. Keep the batch unless the row's durable write
+            // is newer than the latest receive time represented by it. This
+            // preserves an event if the outgoing leader dies before its write.
             uncoveredStartupEvents.set(bucketStart, counters);
+            uncoveredStartupRecords.set(bucketStart, startupCapture.records.get(bucketStart) ?? []);
           }
         }
         const discardedEventsOverlappingBaseline = eventAccumulator.discardReceivedAtOrBefore(
@@ -865,7 +910,10 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           new Set(persisted.keys()),
         );
         if (uncoveredStartupEvents.size > 0) {
-          eventAccumulator.restore(uncoveredStartupEvents);
+          eventAccumulator.restoreWithRecords({
+            counters: uncoveredStartupEvents,
+            records: uncoveredStartupRecords,
+          });
         }
         for (const [bucketStart, counters] of persisted) {
           acknowledgedEventTotals.set(bucketStart, counters);
@@ -893,7 +941,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         // The baseline is still unknown. Put the rotated batch back beside
         // events received while the read was in flight so the next attempt
         // cannot silently lose observations.
-        eventAccumulator.restore(startupEvents);
+        eventAccumulator.restoreWithRecords(startupCapture);
         // Do not acknowledge QueueEvents while the durable baseline is
         // unknown. Redis telemetry can still be sampled, but the event batch
         // must be retried after the database becomes readable.

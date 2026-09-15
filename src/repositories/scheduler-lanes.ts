@@ -11,6 +11,7 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
+import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
 import { isFplSeasonCode } from '../domain/fpl-season';
 import {
   reserveSchedulerObligation,
@@ -1496,9 +1497,11 @@ export async function failSchedulerLane(input: {
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  const summary = (input.error instanceof Error ? input.error.message : String(input.error)).slice(
+  const classified = summarizeDataError(input.error);
+  const retryPolicy = retryPolicyForError(classified.errorClass);
+  const summary = `${classified.errorClass}:${classified.errorCode} ${classified.summary}`.slice(
     0,
-    4_000,
+    1_000,
   );
   const updated = await db.transaction(async (tx) => {
     const nowRows = await tx.execute<{ dbNow: Date | string }>(
@@ -1534,10 +1537,36 @@ export async function failSchedulerLane(input: {
     const desiredChanged =
       laneRow.jobName === 'live-snapshot' &&
       laneRow.desiredObligationId !== input.activeObligationId;
+    const [obligationRow] = await tx
+      .select({
+        obligationId: schedulerObligationsInOps.obligationId,
+        attempts: schedulerObligationsInOps.attempts,
+        generation: schedulerObligationsInOps.generation,
+        evidence: schedulerObligationsInOps.evidence,
+      })
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, input.activeObligationId))
+      .for('update')
+      .limit(1);
+    if (!obligationRow) return false;
+    const evidence =
+      obligationRow.evidence && typeof obligationRow.evidence === 'object'
+        ? (obligationRow.evidence as Record<string, unknown>)
+        : {};
+    const evidenceGeneration = Number(evidence.executionAttemptGeneration);
+    const evidenceAttempts = Number(evidence.executionAttemptCount);
+    const executionAttempts =
+      Number.isSafeInteger(evidenceGeneration) &&
+      evidenceGeneration === obligationRow.generation &&
+      Number.isSafeInteger(evidenceAttempts)
+        ? evidenceAttempts
+        : obligationRow.attempts;
+    const terminalFailure = !retryPolicy.retryable || executionAttempts >= retryPolicy.maxAttempts;
+    const terminal = desiredChanged || terminalFailure;
     const obligation = await tx
       .update(schedulerObligationsInOps)
       .set({
-        status: desiredChanged ? 'skipped' : 'failed',
+        status: desiredChanged ? 'skipped' : terminalFailure ? 'irrecoverable' : 'failed',
         evidence: desiredChanged
           ? terminalEvidence({
               terminal: true,
@@ -1546,7 +1575,7 @@ export async function failSchedulerLane(input: {
             })
           : undefined,
         lastError: desiredChanged ? null : summary,
-        completedAt: desiredChanged ? dbNow : undefined,
+        completedAt: terminal ? dbNow : undefined,
         leaseOwner: null,
         leaseExpiresAt: null,
         updatedAt: dbNow,
@@ -1567,7 +1596,7 @@ export async function failSchedulerLane(input: {
         runId: null,
         dispatchOwner: null,
         dispatchLeaseExpiresAt: null,
-        retryNotBefore: desiredChanged ? null : new Date(dbNow.getTime() + RETRY_DELAY_MS),
+        retryNotBefore: terminal ? null : new Date(dbNow.getTime() + RETRY_DELAY_MS),
         lastError: desiredChanged ? null : summary,
         lastProgressAt: dbNow,
         updatedAt: dbNow,

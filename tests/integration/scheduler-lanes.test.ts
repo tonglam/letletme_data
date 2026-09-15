@@ -622,6 +622,66 @@ describe('scheduler latest-wins lanes', () => {
     expect(targets?.desired?.generation).toBe(1);
   });
 
+  test('terminalizes a live lane after its scheduler retry budget is exhausted', async () => {
+    const desired = await reserveLive(
+      Date.parse('2026-08-25T04:30:00.000Z'),
+      'live-retry-budget',
+      new Date('2026-08-25T04:29:00.000Z'),
+    );
+    const laneInput = {
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: desired,
+      preserveFreshnessHistory: true,
+    } as const;
+    const sql = await getDbClient();
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const advanced = await advanceSchedulerLane(laneInput);
+      expect(advanced.shouldDispatch).toBe(true);
+      const dispatch = await claimSchedulerLaneDispatch({ laneId: advanced.lane.laneId });
+      expect(dispatch).not.toBeNull();
+      const bullJobId = `integration-live-retry-budget-${attempt}`;
+      await confirmSchedulerLaneEnqueued({
+        laneId: advanced.lane.laneId,
+        owner: dispatch!.owner,
+        bullJobId,
+        obligationId: desired.obligationId,
+      });
+      const started = await startSchedulerLane({
+        laneId: advanced.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId,
+        obligationId: desired.obligationId,
+      });
+      expect(started?.obligation.obligationId).toBe(desired.obligationId);
+      expect(
+        await failSchedulerLane({
+          laneId: advanced.lane.laneId,
+          dispatchGeneration: dispatch!.lane.dispatchGeneration,
+          activeObligationId: desired.obligationId,
+          error: new Error('postgres timeout while publishing live snapshot'),
+        }),
+      ).toBe(true);
+
+      const targets = await getSchedulerLaneTargets({ laneId: advanced.lane.laneId });
+      expect(targets?.desired?.status).toBe(attempt === 3 ? 'irrecoverable' : 'failed');
+      if (attempt < 3) {
+        // Keep the test deterministic without waiting for the one-minute lane
+        // retry delay used by production scheduler passes.
+        await sql`
+          UPDATE ops.scheduler_lanes
+          SET retry_not_before = clock_timestamp() - interval '1 second'
+          WHERE lane_id = ${advanced.lane.laneId}::uuid
+        `;
+      }
+    }
+
+    expect(await listLiveSnapshotRecoveryLanes({ limit: 10 })).toHaveLength(0);
+  });
+
   test.each(['PENDING', 'BREACHED'])(
     'retires a late %s window and its open case after supersession',
     async (status) => {

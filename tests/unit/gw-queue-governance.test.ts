@@ -256,6 +256,22 @@ describe('GW queue and data governance primitives', () => {
     expect(accumulator.pendingCount()).toBe(0);
   });
 
+  test('rotates the startup batch while retaining events received during baseline loading', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    const startup = accumulator.captureWithRecords();
+    accumulator.record('failures', 2_000);
+
+    expect(startup.counters.get(0)).toEqual({
+      arrivals: 1,
+      completions: 0,
+      failures: 0,
+      stalled: 0,
+    });
+    expect(startup.records.get(0)).toEqual([{ kind: 'arrivals', receivedAtMs: 1_000 }]);
+    expect(accumulator.pendingCount()).toBe(1);
+  });
+
   test('retains events received after the durable baseline statement snapshot', () => {
     const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
     accumulator.record('arrivals', 1_000);
