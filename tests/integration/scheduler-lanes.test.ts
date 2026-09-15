@@ -1291,6 +1291,60 @@ describe('scheduler latest-wins lanes', () => {
     expect(targets?.desired?.status).toBe('failed');
   });
 
+  test('terminalizes Bull-loss recovery after the execution retry budget is exhausted', async () => {
+    const first = await reserve('2026-08-25T05:20:00.000Z', 'price-bull-loss-retry-budget');
+    const initial = await advanceSchedulerLane({
+      laneKey: LANE_KEY,
+      jobName: DEFINITION.name,
+      scopeKey: SCOPE_KEY,
+      queueName: 'fpl-critical-sync',
+      desiredObligation: first,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    const bullJobId = 'integration-price-job-bull-loss-retry-budget';
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId,
+      obligationId: first.obligationId,
+    });
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId,
+      obligationId: first.obligationId,
+    });
+    expect(started?.obligation.generation).toBe(0);
+
+    const sql = await getDbClient();
+    // Model a worker that has already consumed all three transient execution
+    // attempts before Bull loses the final delivery record.
+    await sql`
+      UPDATE ops.scheduler_obligations
+      SET evidence = evidence || jsonb_build_object(
+        'executionAttemptCount', 3,
+        'executionAttemptGeneration', generation
+      )
+      WHERE obligation_id = ${first.obligationId}::uuid
+    `;
+    expect(
+      await recoverSchedulerLaneAfterBullLoss({
+        laneId: initial.lane.laneId,
+        dispatchGeneration: dispatch!.lane.dispatchGeneration,
+        bullJobId,
+        bullState: 'failed',
+        obligationId: first.obligationId,
+      }),
+    ).toBe(true);
+
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.lane.retryNotBefore).toBeNull();
+    expect(targets?.desired?.status).toBe('irrecoverable');
+    expect(await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId })).toBeNull();
+  });
+
   test('does not recover when Bull loss was observed for a stale generation', async () => {
     const first = await reserve('2026-08-25T05:30:00.000Z', 'price-stale-recovery');
     const initial = await advanceSchedulerLane({

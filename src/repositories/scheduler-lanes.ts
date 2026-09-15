@@ -2039,14 +2039,45 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
       lane.jobName === 'live-snapshot' &&
       failedObligationIds.size > 0 &&
       [...failedObligationIds].every((obligationId) => obligationId !== lane.desiredObligationId);
+    const bullLossError = `Bull job ${input.bullState} before durable completion`.slice(0, 1_000);
+    const retryPolicy = retryPolicyForError('TRANSIENT_INFRA');
     for (const failedObligationId of failedObligationIds) {
       const superseded =
         supersededObligationIds.has(failedObligationId) ||
         (lane.jobName === 'live-snapshot' && failedObligationId !== lane.desiredObligationId);
+      const [obligationRow] = await tx
+        .select({
+          status: schedulerObligationsInOps.status,
+          attempts: schedulerObligationsInOps.attempts,
+          generation: schedulerObligationsInOps.generation,
+          evidence: schedulerObligationsInOps.evidence,
+        })
+        .from(schedulerObligationsInOps)
+        .where(eq(schedulerObligationsInOps.obligationId, failedObligationId))
+        .for('update')
+        .limit(1);
+      if (!obligationRow || !['pending', 'enqueued', 'running'].includes(obligationRow.status)) {
+        continue;
+      }
+      const evidence =
+        obligationRow.evidence && typeof obligationRow.evidence === 'object'
+          ? (obligationRow.evidence as Record<string, unknown>)
+          : {};
+      const evidenceGeneration = Number(evidence.executionAttemptGeneration);
+      const evidenceAttempts = Number(evidence.executionAttemptCount);
+      const executionAttempts =
+        Number.isSafeInteger(evidenceGeneration) &&
+        evidenceGeneration === obligationRow.generation &&
+        Number.isSafeInteger(evidenceAttempts) &&
+        evidenceAttempts >= 0
+          ? evidenceAttempts
+          : obligationRow.attempts;
+      const terminalFailure =
+        !superseded && (!retryPolicy.retryable || executionAttempts >= retryPolicy.maxAttempts);
       await tx
         .update(schedulerObligationsInOps)
         .set({
-          status: superseded ? 'skipped' : 'failed',
+          status: superseded ? 'skipped' : terminalFailure ? 'irrecoverable' : 'failed',
           ...(superseded
             ? {
                 evidence: terminalEvidence({
@@ -2057,8 +2088,8 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
               }
             : {}),
           bullJobId: input.bullJobId,
-          lastError: superseded ? null : `Bull job ${input.bullState} before durable completion`,
-          completedAt: superseded ? dbNow : undefined,
+          lastError: superseded ? null : bullLossError,
+          completedAt: superseded || terminalFailure ? dbNow : undefined,
           leaseOwner: null,
           leaseExpiresAt: null,
           updatedAt: dbNow,
@@ -2079,8 +2110,12 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         runId: null,
         dispatchOwner: null,
         dispatchLeaseExpiresAt: null,
+        // Bull-loss recovery is an explicit missing-delivery signal, so a
+        // still-budgeted obligation remains immediately claimable. The
+        // execution counter above is the bound; adding a delay here would
+        // change the established recovery behavior without preventing loops.
         retryNotBefore: null,
-        lastError: supersededOnly ? null : `Bull job ${input.bullState} before durable completion`,
+        lastError: supersededOnly ? null : bullLossError,
         lastProgressAt: dbNow,
         updatedAt: dbNow,
       })

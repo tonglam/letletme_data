@@ -938,6 +938,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       if (bucketStart < cutoff) {
         evicted += totalQueueEventCounters(counters);
         acknowledgedEventTotals.delete(bucketStart);
+        acknowledgedEventWatermarks.delete(bucketStart);
       }
     }
     return evicted;

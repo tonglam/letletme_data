@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Worker, Job, QueueEvents } from 'bullmq';
+import { UnrecoverableError, Worker, Job, QueueEvents } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
@@ -77,6 +77,43 @@ import {
   LIVE_SNAPSHOT_DB_READ_BUDGET_MS,
 } from '../domain/data-contracts';
 import { ConflictError } from '../utils/errors';
+import { retryPolicyForError, summarizeDataError } from '../domain/error-classification';
+
+/**
+ * Keep Bull delivery aligned with the durable scheduler retry policy. Bull's
+ * queue-level `attempts` is a delivery safeguard; it must not turn a data or
+ * contract failure into extra provider calls before the scheduler can record
+ * the terminal classification.
+ */
+async function runLiveDataTrackedJob<T>(
+  job: Job<LiveDataJobData>,
+  laneScoped: boolean,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (laneScoped && !(error instanceof UnrecoverableError)) {
+      const classified = summarizeDataError(error);
+      const policy = retryPolicyForError(classified.errorClass);
+      const deliveryAttempt = job.attemptsMade + 1;
+      if (!policy.retryable || deliveryAttempt >= policy.maxAttempts) {
+        // Keep the original typed error so scheduler failure handling retains
+        // its DATA_INCOMPLETE/CONTRACT_DRIFT/provider classification. Bull
+        // only needs the marker name to stop delivery retries; replacing the
+        // error with a generic message would downgrade it to TRANSIENT_INFRA.
+        if (error instanceof Error) {
+          error.name = 'UnrecoverableError';
+          throw error;
+        }
+        throw new UnrecoverableError(
+          `${classified.errorClass}:${classified.errorCode} ${classified.summary}`,
+        );
+      }
+    }
+    throw error;
+  }
+}
 
 function scheduledDueAtMsForLiveObligation(obligation: {
   dueAt: Date;
@@ -172,6 +209,11 @@ async function enqueueFinalOfficialH2HRefresh(
  * - asynchronous V2 PostgreSQL checkpointing and the final-results cascade
  */
 async function processLiveDataJob(job: Job<LiveDataJobData>) {
+  const laneScoped = job.data.laneId !== undefined || job.data.laneGeneration !== undefined;
+  return runLiveDataTrackedJob(job, laneScoped, () => processLiveDataJobInternal(job));
+}
+
+async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
   const usesLiveDatabaseBudget =
     job.name === LIVE_JOBS.LIVE_SNAPSHOT || job.name === LIVE_JOBS.LIVE_MATCH_CHECKPOINT;
   const databaseBudget: LiveSnapshotDatabaseBudget | null = usesLiveDatabaseBudget
