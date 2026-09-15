@@ -465,7 +465,8 @@ function queueHealthEventWindowValues(snapshot: QueueHealthSnapshot, intervalMs:
 }
 
 type PersistedQueueEventTotals = {
-  windowStart: Date;
+  /** Drizzle returns Date values; the raw update path may return a string. */
+  windowStart: Date | string;
   arrivals: number;
   completions: number;
   failures: number;
@@ -476,6 +477,21 @@ type PersistWindowsResult = {
   ok: boolean;
   eventTotals: Map<number, QueueEventCounters>;
 };
+
+function queueEventWindowStartMs(value: Date | string): number {
+  const result = value instanceof Date ? value.getTime() : Date.parse(value);
+  if (!Number.isFinite(result)) throw new Error('Invalid persisted queue health window timestamp');
+  return result;
+}
+
+function queueEventTotalsFromRow(row: PersistedQueueEventTotals): QueueEventCounters {
+  return {
+    arrivals: Number(row.arrivals ?? 0),
+    completions: Number(row.completions ?? 0),
+    failures: Number(row.failures ?? 0),
+    stalled: Number(row.stalled ?? 0),
+  };
+}
 
 async function loadQueueHealthEventTotals(
   queueName: string,
@@ -500,7 +516,7 @@ async function loadQueueHealthEventTotals(
     );
   return new Map(
     rows.map((row) => [
-      row.windowStart.getTime(),
+      queueEventWindowStartMs(row.windowStart),
       {
         arrivals: Number(row.arrivals ?? 0),
         completions: Number(row.completions ?? 0),
@@ -537,46 +553,56 @@ async function persistWindows(
           stalled: queueHealthWindowsInOps.stalled,
         });
       for (const row of rows as PersistedQueueEventTotals[]) {
-        eventTotals.set(row.windowStart.getTime(), {
-          arrivals: Number(row.arrivals ?? 0),
-          completions: Number(row.completions ?? 0),
-          failures: Number(row.failures ?? 0),
-          stalled: Number(row.stalled ?? 0),
-        });
+        eventTotals.set(queueEventWindowStartMs(row.windowStart), queueEventTotalsFromRow(row));
       }
     }
     if (historicalSnapshots.length > 0) {
-      const rows = await db
-        .insert(queueHealthWindowsInOps)
-        .values(
-          historicalSnapshots.map((snapshot) => queueHealthEventWindowValues(snapshot, intervalMs)),
+      // A delayed event-bucket retry must not create a point-in-time sample.
+      // Update only a window that was observed by a normal poll; otherwise a
+      // PostgreSQL outage covering the original window would be reconstructed
+      // with schema defaults that falsely claim a healthy zero-backlog sample.
+      // Keep the whole bounded batch in one statement so a backlog of event
+      // windows cannot turn the monitor's five-second DB budget into one
+      // round trip per bucket. The returned rows are the durable confirmation
+      // set; a missing row remains an observation gap and is not acknowledged.
+      const payload = JSON.stringify(
+        historicalSnapshots.map((snapshot) => {
+          const values = queueHealthEventWindowValues(snapshot, intervalMs);
+          return {
+            window_start: values.windowStart,
+            queue_name: values.queueName,
+            arrivals: values.arrivals,
+            completions: values.completions,
+            failures: values.failures,
+            stalled: values.stalled,
+          };
+        }),
+      );
+      const rows = (await db.execute(sql`
+        UPDATE ${queueHealthWindowsInOps} AS health
+        SET arrivals = greatest(health.arrivals, incoming.arrivals),
+            completions = greatest(health.completions, incoming.completions),
+            failures = greatest(health.failures, incoming.failures),
+            stalled = greatest(health.stalled, incoming.stalled),
+            updated_at = clock_timestamp()
+        FROM jsonb_to_recordset(${payload}::jsonb) AS incoming(
+          window_start timestamptz,
+          queue_name text,
+          arrivals integer,
+          completions integer,
+          failures integer,
+          stalled integer
         )
-        .onConflictDoUpdate({
-          target: [queueHealthWindowsInOps.windowStart, queueHealthWindowsInOps.queueName],
-          // A delayed event-bucket retry must not rewrite the historical
-          // point-in-time queue fields with today's sample.
-          set: {
-            arrivals: sql`greatest(${queueHealthWindowsInOps.arrivals}, excluded.arrivals)`,
-            completions: sql`greatest(${queueHealthWindowsInOps.completions}, excluded.completions)`,
-            failures: sql`greatest(${queueHealthWindowsInOps.failures}, excluded.failures)`,
-            stalled: sql`greatest(${queueHealthWindowsInOps.stalled}, excluded.stalled)`,
-            updatedAt: sql`excluded.updated_at`,
-          },
-        })
-        .returning({
-          windowStart: queueHealthWindowsInOps.windowStart,
-          arrivals: queueHealthWindowsInOps.arrivals,
-          completions: queueHealthWindowsInOps.completions,
-          failures: queueHealthWindowsInOps.failures,
-          stalled: queueHealthWindowsInOps.stalled,
-        });
-      for (const row of rows as PersistedQueueEventTotals[]) {
-        eventTotals.set(row.windowStart.getTime(), {
-          arrivals: Number(row.arrivals ?? 0),
-          completions: Number(row.completions ?? 0),
-          failures: Number(row.failures ?? 0),
-          stalled: Number(row.stalled ?? 0),
-        });
+        WHERE health.window_start = incoming.window_start
+          AND health.queue_name = incoming.queue_name
+        RETURNING health.window_start AS "windowStart",
+                  health.arrivals AS arrivals,
+                  health.completions AS completions,
+                  health.failures AS failures,
+                  health.stalled AS stalled
+      `)) as unknown as PersistedQueueEventTotals[];
+      for (const row of rows) {
+        eventTotals.set(queueEventWindowStartMs(row.windowStart), queueEventTotalsFromRow(row));
       }
     }
     return { ok: true, eventTotals };
@@ -942,22 +968,23 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
             eventWindowStartMs,
           });
           if (persisted.ok) {
-            const persistedWindowStarts = new Set(
-              snapshotsToPersist.map((item) =>
-                windowStart(Date.parse(item.observedAt), windowIntervalMs).getTime(),
-              ),
-            );
+            // Historical event-only writes are update-only. A requested
+            // window with no returned row had no original point-in-time
+            // sample; do not acknowledge it with the in-memory counters or
+            // imply that a synthetic queue snapshot was persisted.
+            const persistedWindowStarts = new Set(persisted.eventTotals.keys());
             if (persistCurrentWindow) {
               lastPersistedFingerprint = queueHealthPersistenceFingerprint(withEvents);
               lastPersistedAtMs = Date.parse(withEvents.observedAt);
             }
-            for (const [bucketStart, counters] of capturedEventTotals) {
+            for (const [bucketStart] of capturedEventTotals) {
               // A batched upsert may contain only an outside receive-time
               // window when the current snapshot is stable. Confirm each
               // captured bucket only when that exact window was included in
               // the durable write; the other buckets must be retried.
               if (!persistedWindowStarts.has(bucketStart)) continue;
-              const actual = persisted.eventTotals.get(bucketStart) ?? counters;
+              const actual = persisted.eventTotals.get(bucketStart);
+              if (!actual) continue;
               acknowledgedEventTotals.set(bucketStart, actual);
               confirmedCapturedWindows.add(bucketStart);
             }

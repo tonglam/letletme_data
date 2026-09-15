@@ -45,6 +45,7 @@ import {
   type SchedulerContext,
   type SchedulerObligationPlan,
 } from './job-registry';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { QueueDrainOnlyError, readQueueAdmission } from '../services/queue-governance.service';
@@ -694,6 +695,7 @@ export async function triggerLiveSnapshotLane(input: {
   eventId: number;
   freshnessWindowId?: number;
   repairKey: string;
+  season: FplSeasonRef;
 }): Promise<{
   bullJobId?: string | number;
   runId?: string;
@@ -703,12 +705,16 @@ export async function triggerLiveSnapshotLane(input: {
   if (!definition?.executionPolicy) {
     throw new Error('Live-snapshot latest-authoritative lane is disabled');
   }
-  const season = await seasonRepository.findCurrent();
+  const season = input.season;
   const context = await resolveSchedulerContext(season, new Date());
   const resolution = await resolveSchedulerDefinition(definition, context);
   if (!resolution.ok) throw resolution.error;
+  const expectedScopeKey = `${season.seasonCode}:event:${input.eventId}`;
   const sourcePlan = resolution.plans.find(
-    (candidate) => candidate.eventId === input.eventId && candidate.terminalStatus === undefined,
+    (candidate) =>
+      candidate.eventId === input.eventId &&
+      candidate.scopeKey === expectedScopeKey &&
+      candidate.terminalStatus === undefined,
   );
   if (!sourcePlan) {
     throw new Error(
@@ -809,7 +815,7 @@ export async function triggerLiveSnapshotLane(input: {
     if (!confirmed) throw new Error('Live freshness lane enqueue confirmation CAS failed');
     return { ...result, state: 'enqueued' };
   } catch (error) {
-    await reconcileSingleFlightBullState(dispatch.lane, season).catch((reconcileError) => {
+    await reconcileSingleFlightBullState(dispatch.lane).catch((reconcileError) => {
       logError('Live freshness enqueue ambiguity reconciliation failed', reconcileError, {
         laneId: dispatch.lane.laneId,
         dispatchGeneration: dispatch.lane.dispatchGeneration,
@@ -1006,26 +1012,9 @@ async function reconcileSingleFlightBullState(
   if (!['enqueued', 'running'].includes(lane.state) || !lane.bullJobId) return;
   const queue = new Queue(lane.queueName, { connection: getQueueConnection() });
   try {
-    const runnableJobs = await queue.getJobs(
-      ['waiting', 'delayed', 'active', 'prioritized', 'paused'],
-      0,
-      -1,
-    );
-    const laneRunnableJobs = runnableJobs.filter(
-      (job) => job.name === lane.jobName && job.data?.laneId === lane.laneId,
-    );
-    if (laneRunnableJobs.length > 1) {
-      await notifyTwoBots(
-        [
-          'Critical: more than one runnable latest-wins price job',
-          `Lane: ${lane.laneKey}`,
-          `Runnable jobs: ${laneRunnableJobs.map((job) => job.id).join(', ')}`,
-        ].join('\n'),
-        {
-          idempotencyKey: `scheduler-lane-runnable-duplicate:${lane.laneId}:${lane.dispatchGeneration}`,
-        },
-      ).catch(() => undefined);
-    }
+    // The deterministic lane Bull ID is the authoritative bounded lookup.
+    // Duplicate runnable jobs are prevented by the lane CAS and must not be
+    // diagnosed by materializing every runnable job in the queue.
     const job = await queue.getJob(lane.bullJobId);
     const state = job ? await job.getState() : 'missing';
     if (lane.state === 'running' && Date.now() - lane.lastProgressAt.getTime() >= 2 * 60_000) {
@@ -1086,8 +1075,9 @@ async function reconcileSingleFlightBullState(
 /**
  * A live lane can outlive the lifecycle plan that created it (for example
  * when an event becomes FINALIZED while its Bull job is lost). Reconcile
- * every persisted in-flight live lane independently of the plans selected by
- * the current resolver so a vanished Bull record cannot strand durable work.
+ * every persisted live lane independently of the plans selected by the
+ * current resolver so a vanished Bull record or a bounded supersession batch
+ * cannot strand durable work.
  */
 async function reconcileOutstandingLiveSnapshotLanes(
   selectedLaneKeys: ReadonlySet<string>,
@@ -1096,12 +1086,38 @@ async function reconcileOutstandingLiveSnapshotLanes(
   let failed = 0;
   const lanes = await listSchedulerLanes({
     jobName: 'live-snapshot',
-    states: ['dispatching', 'enqueued', 'running'],
+    states: ['idle', 'dispatching', 'enqueued', 'running'],
   });
+  const drainSupersededLiveBatch = async (lane: SchedulerLane): Promise<void> => {
+    const target = await getSchedulerLaneTarget({ laneId: lane.laneId });
+    if (!target) {
+      throw new Error(`Persisted live lane target disappeared: ${lane.laneId}`);
+    }
+    // Use the persisted target and lane identity after any Bull recovery. The
+    // same bounded transition can therefore be repeated on every scheduler
+    // pass until all stale pending/failed siblings are terminalized, even if
+    // the lifecycle resolver no longer returns this event.
+    await advanceSchedulerLane({
+      laneKey: lane.laneKey,
+      jobName: lane.jobName,
+      scopeKey: lane.scopeKey,
+      queueName: lane.queueName,
+      desiredObligation: target.obligation,
+      preserveFreshnessHistory: true,
+      supersedeBatchSize: 250,
+    });
+  };
   for (const lane of lanes) {
     if (selectedLaneKeys.has(lane.laneKey)) continue;
     try {
-      await reconcileSingleFlightBullState(lane, season);
+      if (lane.state !== 'idle') {
+        await reconcileSingleFlightBullState(lane, season);
+      }
+      // An idle lane may be left behind after its lifecycle plan becomes
+      // terminal. Re-run the same bounded latest-wins transition against
+      // its persisted target so the next scheduler pass drains the next
+      // batch of stale pending/failed siblings without dispatching it.
+      await drainSupersededLiveBatch(lane);
     } catch (error) {
       failed += 1;
       logError('Persisted live lane reconciliation failed', error, {

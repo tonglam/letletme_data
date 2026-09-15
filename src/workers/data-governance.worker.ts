@@ -116,6 +116,7 @@ async function enqueueFreshnessCaseRepair(input: {
         eventId,
         freshnessWindowId: window.windowId,
         repairKey: `governance-case-${item.caseId}-attempt-${item.attempts}`,
+        season,
       });
       return;
     case 'live-picks':
