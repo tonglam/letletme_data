@@ -1036,6 +1036,7 @@ type SummaryTotalsV2 = {
   estimated_timeout_count: string | number;
   estimated_auth_error_count: string | number;
   estimated_ordinary_error_count: string | number;
+  estimated_ok_count: string | number;
 };
 
 type SummaryAccumulatorV2 = {
@@ -1111,11 +1112,15 @@ async function getClientSignalV2Summary(
   const client = await getDbClient();
   const sinceTimestamp = clientSignalSqlTimestamp(since, 'v2 summary start');
   const untilTimestamp = clientSignalSqlTimestamp(until, 'v2 summary end');
-  const rows = await client<SummaryRowV2[]>`
+  const { rows, totalsRows } = await client.begin(
+    'isolation level repeatable read',
+    async (transaction) => {
+      const rows = await transaction<SummaryRowV2[]>`
     WITH grouped AS (
       SELECT client, client_release, ingest_release, surface, metric, device_group,
              sample_source, result, reason_code, measurement_kind,
-             metric_name, navigation_id, interaction_id, cache_status, error_class,
+             metric_name, NULL::text AS navigation_id, NULL::text AS interaction_id,
+             cache_status, error_class,
              fingerprint, bucket, SUM(observed_count)::bigint AS observed_count,
              SUM(occurrence_count)::bigint AS occurrence_count,
              SUM(estimated_count)::double precision AS estimated_count,
@@ -1127,23 +1132,22 @@ async function getClientSignalV2Summary(
         AND window_start < ${untilTimestamp}::timestamptz
       GROUP BY client, client_release, ingest_release, surface, metric, device_group,
                sample_source, result, reason_code, measurement_kind,
-               metric_name, navigation_id, interaction_id, cache_status, error_class,
+               metric_name, cache_status, error_class,
                fingerprint, bucket
     ), top_groups AS (
       SELECT client, client_release, ingest_release, surface, metric, device_group,
              sample_source, result, reason_code, measurement_kind,
-             metric_name, navigation_id, interaction_id, cache_status, error_class,
+             metric_name, cache_status, error_class,
              fingerprint, COUNT(*) OVER () AS total_group_count
       FROM grouped
       GROUP BY client, client_release, ingest_release, surface, metric, device_group,
                sample_source, result, reason_code, measurement_kind,
-               metric_name, navigation_id, interaction_id, cache_status, error_class,
+               metric_name, cache_status, error_class,
                fingerprint
       ORDER BY SUM(estimated_count) DESC,
                client, client_release, ingest_release, surface, metric, device_group,
                sample_source, result, reason_code, measurement_kind,
-               metric_name NULLS FIRST, navigation_id NULLS FIRST,
-               interaction_id NULLS FIRST, cache_status NULLS FIRST,
+               metric_name NULLS FIRST, cache_status NULLS FIRST,
                error_class NULLS FIRST, fingerprint NULLS FIRST
       LIMIT ${CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT}
     )
@@ -1161,14 +1165,12 @@ async function getClientSignalV2Summary(
      AND grouped.reason_code IS NOT DISTINCT FROM top_groups.reason_code
      AND grouped.measurement_kind IS NOT DISTINCT FROM top_groups.measurement_kind
      AND grouped.metric_name IS NOT DISTINCT FROM top_groups.metric_name
-     AND grouped.navigation_id IS NOT DISTINCT FROM top_groups.navigation_id
-     AND grouped.interaction_id IS NOT DISTINCT FROM top_groups.interaction_id
      AND grouped.cache_status IS NOT DISTINCT FROM top_groups.cache_status
      AND grouped.error_class IS NOT DISTINCT FROM top_groups.error_class
      AND grouped.fingerprint IS NOT DISTINCT FROM top_groups.fingerprint
     ORDER BY top_groups.total_group_count, grouped.estimated_count DESC
-  `;
-  const totalsRows = await client<SummaryTotalsV2[]>`
+      `;
+      const totalsRows = await transaction<SummaryTotalsV2[]>`
     SELECT
       COALESCE(SUM(observed_count), 0)::bigint AS observed_count,
       COALESCE(SUM(occurrence_count), 0)::bigint AS occurrence_count,
@@ -1179,11 +1181,15 @@ async function getClientSignalV2Summary(
       COALESCE(SUM(estimated_count) FILTER (WHERE result = 'unavailable'), 0)::double precision AS estimated_unavailable_count,
       COALESCE(SUM(estimated_count) FILTER (WHERE result = 'timeout'), 0)::double precision AS estimated_timeout_count,
       COALESCE(SUM(estimated_count) FILTER (WHERE result = 'auth_error'), 0)::double precision AS estimated_auth_error_count,
-      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'error'), 0)::double precision AS estimated_ordinary_error_count
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'error'), 0)::double precision AS estimated_ordinary_error_count,
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'ok'), 0)::double precision AS estimated_ok_count
     FROM ops.client_signal_v2_windows
     WHERE window_start >= ${sinceTimestamp}::timestamptz
       AND window_start < ${untilTimestamp}::timestamptz
-  `;
+      `;
+      return { rows, totalsRows };
+    },
+  );
   const grouped = new Map<string, SummaryAccumulatorV2>();
   for (const row of rows) {
     const key = [
@@ -1305,6 +1311,7 @@ async function getClientSignalV2Summary(
     estimated_timeout_count: 0,
     estimated_auth_error_count: 0,
     estimated_ordinary_error_count: 0,
+    estimated_ok_count: 0,
   };
   const asFiniteNumber = (value: string | number): number => {
     const parsed = Number(value);
@@ -1317,6 +1324,7 @@ async function getClientSignalV2Summary(
     auth_error: asFiniteNumber(totals.estimated_auth_error_count),
     stale: asFiniteNumber(totals.estimated_stale_count),
     unavailable: asFiniteNumber(totals.estimated_unavailable_count),
+    ok: asFiniteNumber(totals.estimated_ok_count),
   };
   const rateForResult = (result: keyof typeof resultEstimatedCounts): number =>
     estimatedTotal > 0 ? resultEstimatedCounts[result] / estimatedTotal : 0;
