@@ -143,7 +143,10 @@ function evidenceString(evidence: Readonly<Record<string, unknown>> | undefined,
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function liveSnapshotScopeIdentity(scopeKey: string): { seasonCode: string; eventId: number } {
+export function liveSnapshotScopeIdentity(scopeKey: string): {
+  seasonCode: string;
+  eventId: number;
+} {
   const match = /^(\d{4}):event:([1-9][0-9]*)$/.exec(scopeKey);
   if (!match || !isFplSeasonCode(match[1])) {
     throw new Error(`Invalid persisted live-snapshot lane scope: ${scopeKey}`);
