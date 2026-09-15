@@ -217,6 +217,8 @@ export async function enqueueLiveSnapshot(
     laneId?: string;
     laneGeneration?: number;
     freshnessWindowId?: number;
+    /** All freshness windows joined to one latest-wins publication. */
+    freshnessWindowIds?: readonly number[];
     /** Scheduler reconciliation may join an already-enqueued deterministic job. */
     reuseExisting?: boolean;
     lifecycleState?: MatchLifecycleState;
@@ -308,6 +310,9 @@ export async function enqueueLiveSnapshot(
       ...(options.freshnessWindowId === undefined
         ? {}
         : { freshnessWindowId: options.freshnessWindowId }),
+      ...(options.freshnessWindowIds === undefined
+        ? {}
+        : { freshnessWindowIds: [...new Set(options.freshnessWindowIds)] }),
       ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
       ...(options.lifecycleState !== undefined ? { lifecycleState: options.lifecycleState } : {}),
       ...(options.expectedNextCheckAt === undefined

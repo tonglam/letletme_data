@@ -256,6 +256,21 @@ describe('GW queue and data governance primitives', () => {
     expect(accumulator.pendingCount()).toBe(0);
   });
 
+  test('retains events received after the durable baseline statement snapshot', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    accumulator.record('failures', 2_000);
+    accumulator.record('stalled', 3_000);
+
+    expect(accumulator.discardReceivedAtOrBefore(2_000)).toBe(2);
+    expect(accumulator.capture().get(0)).toEqual({
+      arrivals: 0,
+      completions: 0,
+      failures: 0,
+      stalled: 1,
+    });
+  });
+
   test('evicts only observations older than the bounded monitor retention', () => {
     const accumulator = new QueueEventAccumulator(60_000, 15 * 60_000);
     accumulator.record('arrivals', 0);

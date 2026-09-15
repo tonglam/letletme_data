@@ -38,6 +38,8 @@ export interface LiveDataJobData {
   laneGeneration?: number;
   /** Exact freshness window being repaired, carried into the publication manifest. */
   freshnessWindowId?: number;
+  /** All freshness windows joined to one latest-wins publication. */
+  freshnessWindowIds?: readonly number[];
   /** Only the post-match consolidation may publish terminal live authority. */
   finalizeEvent?: boolean;
   /** Lifecycle state captured by the scheduler for the sibling Match desk. */

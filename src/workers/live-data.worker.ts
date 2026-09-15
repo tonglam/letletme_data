@@ -62,7 +62,7 @@ import {
   completeSchedulerLane,
   failSchedulerLane,
   fenceSchedulerLaneTarget,
-  getSchedulerLane,
+  getSchedulerLaneTargets,
   retireSchedulerLaneForStaleSeason,
   startSchedulerLane,
 } from '../repositories/scheduler-lanes';
@@ -94,6 +94,28 @@ function scheduledDueAtMsForLiveObligation(obligation: {
     }
   }
   return obligation.dueAt.getTime();
+}
+
+function liveFreshnessWindowIdsForJob(
+  jobData: Pick<LiveDataJobData, 'freshnessWindowId' | 'freshnessWindowIds'>,
+  evidence?: unknown,
+): number[] {
+  const evidenceRecord =
+    evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+      ? (evidence as Record<string, unknown>)
+      : undefined;
+  return [
+    ...(Array.isArray(jobData.freshnessWindowIds) ? jobData.freshnessWindowIds : []),
+    ...(Array.isArray(evidenceRecord?.freshnessWindowIds) ? evidenceRecord.freshnessWindowIds : []),
+    jobData.freshnessWindowId,
+    evidenceRecord?.freshnessWindowId,
+  ].filter(
+    (value, index, values): value is number =>
+      typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      values.indexOf(value) === index,
+  );
 }
 
 /**
@@ -156,6 +178,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         job.name === LIVE_JOBS.LIVE_SNAPSHOT && job.data.finalizeEvent === true ? null : undefined,
       )
     : null;
+  let freshnessWindowIds = liveFreshnessWindowIdsForJob(job.data);
   const hasLaneIdentity = job.data.laneId !== undefined || job.data.laneGeneration !== undefined;
   let laneIdentity:
     | {
@@ -221,6 +244,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       });
       return { skipped: true, staleSchedulerGeneration: true };
     }
+    freshnessWindowIds = liveFreshnessWindowIdsForJob(job.data, fencedLane.obligation.evidence);
     laneIdentity = {
       laneId,
       dispatchGeneration: laneGeneration,
@@ -513,7 +537,14 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         // successful snapshot is never converted into a retry merely because
         // its original 90-second handle has expired.
         const fenceDb = await getDatabaseHandleWithBudget(LIVE_SNAPSHOT_DB_READ_BUDGET_MS);
-        const lane = await getSchedulerLane({ laneId: laneIdentity.laneId, db: fenceDb });
+        const targets = await getSchedulerLaneTargets({ laneId: laneIdentity.laneId, db: fenceDb });
+        if (targets) {
+          freshnessWindowIds = [
+            ...liveFreshnessWindowIdsForJob(job.data, targets.active?.evidence),
+            ...liveFreshnessWindowIdsForJob(job.data, targets.desired?.evidence),
+          ].filter((value, index, values) => values.indexOf(value) === index);
+        }
+        const lane = targets?.lane;
         liveLaneIsCurrent = Boolean(
           lane?.state === 'running' &&
             lane.dispatchGeneration === laneIdentity.dispatchGeneration &&
@@ -587,7 +618,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     }
     if (
       liveLaneIsCurrent &&
-      job.data.freshnessWindowId !== undefined &&
+      freshnessWindowIds.length > 0 &&
       snapshot.publicationId !== null &&
       snapshot.generation !== null
     ) {
@@ -604,7 +635,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       ).catch((error) => {
         logError('Live snapshot durable checkpoint read failed for freshness evidence', error, {
           eventId,
-          windowId: job.data.freshnessWindowId,
+          windowIds: freshnessWindowIds,
         });
         return null;
       });
@@ -626,28 +657,32 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
       const revision = `${snapshot.publicationId}:${snapshot.generation}`;
       const redisSeenAt = new Date();
       if (validSourceCheckedAt) {
-        try {
-          await recordFreshnessObservation({
-            windowId: job.data.freshnessWindowId,
-            sourceCheckedAt,
-            ...(checkpointMatchesSnapshot && validPgPublishedAt ? { pgPublishedAt } : {}),
-            redisSeenAt,
-            producerRevision: revision,
-            redisRevision: revision,
-            completenessStatus: 'COMPLETE',
-            evidence: { liveCheckpointPending: !(checkpointMatchesSnapshot && validPgPublishedAt) },
-            schedulerLaneFence: laneIdentity,
-            db: databaseBudget?.writeDb,
-          });
-        } catch (error) {
-          // Freshness telemetry is additive. The Redis publication and the
-          // scheduler completion remain authoritative when the governance DB
-          // is temporarily unavailable.
-          logError('Live snapshot freshness evidence update failed', error, {
-            eventId,
-            windowId: job.data.freshnessWindowId,
-            publicationId: snapshot.publicationId,
-          });
+        for (const windowId of freshnessWindowIds) {
+          try {
+            await recordFreshnessObservation({
+              windowId,
+              sourceCheckedAt,
+              ...(checkpointMatchesSnapshot && validPgPublishedAt ? { pgPublishedAt } : {}),
+              redisSeenAt,
+              producerRevision: revision,
+              redisRevision: revision,
+              completenessStatus: 'COMPLETE',
+              evidence: {
+                liveCheckpointPending: !(checkpointMatchesSnapshot && validPgPublishedAt),
+              },
+              schedulerLaneFence: laneIdentity,
+              db: databaseBudget?.writeDb,
+            });
+          } catch (error) {
+            // Freshness telemetry is additive. The Redis publication and the
+            // scheduler completion remain authoritative when the governance DB
+            // is temporarily unavailable.
+            logError('Live snapshot freshness evidence update failed', error, {
+              eventId,
+              windowId,
+              publicationId: snapshot.publicationId,
+            });
+          }
         }
       }
       if (checkpointMatchesSnapshot && validSourceCheckedAt && validPgPublishedAt) {
@@ -665,14 +700,14 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         } catch (error) {
           logError('Live snapshot pending freshness checkpoint reconciliation failed', error, {
             eventId,
-            windowId: job.data.freshnessWindowId,
+            windowIds: freshnessWindowIds,
             publicationId: snapshot.publicationId,
           });
         }
       } else if (checkpoint && !checkpointMatchesSnapshot) {
         const context = {
           eventId,
-          windowId: job.data.freshnessWindowId,
+          windowIds: freshnessWindowIds,
           snapshotPublicationId: snapshot.publicationId,
           snapshotGeneration: snapshot.generation,
           checkpointPublicationId: checkpoint.publication.publicationId,
@@ -861,6 +896,7 @@ export function createLiveDataWorker(): WorkerRuntime {
         return;
       }
       const fence = inspectSchedulerObligationFence(job.data);
+      const freshnessWindowIds = liveFreshnessWindowIdsForJob(job.data);
       const evidence = {
         queue: liveDataQueueName,
         jobName: job.name,
@@ -871,9 +907,12 @@ export function createLiveDataWorker(): WorkerRuntime {
               retention: liveFinalRetentionCompletionEvidence(job.returnvalue),
             }
           : {}),
-        ...(job.data.freshnessWindowId === undefined
+        ...(freshnessWindowIds.length === 0
           ? {}
-          : { freshnessWindowId: job.data.freshnessWindowId }),
+          : {
+              freshnessWindowId: freshnessWindowIds[0],
+              freshnessWindowIds,
+            }),
       };
       const completion =
         fence.kind === 'complete'

@@ -233,6 +233,11 @@ export type QueueEventCounters = {
   stalled: number;
 };
 
+type QueueEventRecord = {
+  kind: keyof QueueEventCounters;
+  receivedAtMs: number;
+};
+
 function emptyQueueEventCounters(): QueueEventCounters {
   return { arrivals: 0, completions: 0, failures: 0, stalled: 0 };
 }
@@ -264,6 +269,7 @@ function totalQueueEventCounters(counters: QueueEventCounters): number {
  */
 export class QueueEventAccumulator {
   private readonly buckets = new Map<number, QueueEventCounters>();
+  private readonly eventRecords = new Map<number, QueueEventRecord[]>();
 
   public constructor(
     private readonly windowIntervalMs: number,
@@ -275,6 +281,9 @@ export class QueueEventAccumulator {
     const bucket = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
     bucket[kind] += 1;
     this.buckets.set(bucketStart, bucket);
+    const records = this.eventRecords.get(bucketStart) ?? [];
+    records.push({ kind, receivedAtMs });
+    this.eventRecords.set(bucketStart, records);
     return this.prune(receivedAtMs);
   }
 
@@ -285,6 +294,7 @@ export class QueueEventAccumulator {
       if (startMs < cutoff) {
         evicted += totalQueueEventCounters(counters);
         this.buckets.delete(startMs);
+        this.eventRecords.delete(startMs);
       }
     }
     return evicted;
@@ -296,6 +306,7 @@ export class QueueEventAccumulator {
     for (const [bucketStart, counters] of this.buckets) {
       captured.set(bucketStart, { ...counters });
       this.buckets.delete(bucketStart);
+      this.eventRecords.delete(bucketStart);
     }
     return captured;
   }
@@ -305,7 +316,62 @@ export class QueueEventAccumulator {
       const current = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
       mergeQueueEventCounters(current, counters);
       this.buckets.set(bucketStart, current);
+      // Restored batches are aggregate counters without per-event receive
+      // times. Keep them compact; `discardReceivedAtOrBefore` treats their
+      // bucket start as the conservative cutoff fallback.
     }
+  }
+
+  /**
+   * Remove observations included by a durable baseline statement while
+   * retaining events received after that statement's snapshot. QueueEvents
+   * can deliver the latter before the awaited database promise resumes.
+   */
+  public discardReceivedAtOrBefore(
+    snapshotAtMs: number,
+    baselineBuckets?: ReadonlySet<number>,
+  ): number {
+    let discarded = 0;
+    for (const [bucketStart, counters] of this.buckets) {
+      if (baselineBuckets && !baselineBuckets.has(bucketStart)) continue;
+      const records = this.eventRecords.get(bucketStart);
+      if (!records) {
+        if (bucketStart <= snapshotAtMs) {
+          discarded += totalQueueEventCounters(counters);
+          this.buckets.delete(bucketStart);
+          this.eventRecords.delete(bucketStart);
+        }
+        continue;
+      }
+      const retained: QueueEventRecord[] = [];
+      const indexedCounters = emptyQueueEventCounters();
+      const retainedCounters = emptyQueueEventCounters();
+      for (const record of records) {
+        indexedCounters[record.kind] += 1;
+        if (record.receivedAtMs <= snapshotAtMs) {
+          discarded += 1;
+        } else {
+          retained.push(record);
+          retainedCounters[record.kind] += 1;
+        }
+      }
+      for (const kind of Object.keys(counters) as (keyof QueueEventCounters)[]) {
+        const restoredCount = Math.max(0, counters[kind] - indexedCounters[kind]);
+        if (bucketStart <= snapshotAtMs) {
+          discarded += restoredCount;
+        } else {
+          retainedCounters[kind] += restoredCount;
+        }
+      }
+      if (retained.length === 0 && totalQueueEventCounters(retainedCounters) === 0) {
+        this.buckets.delete(bucketStart);
+        this.eventRecords.delete(bucketStart);
+      } else {
+        this.buckets.set(bucketStart, retainedCounters);
+        this.eventRecords.set(bucketStart, retained);
+      }
+    }
+    return discarded;
   }
 
   public pendingCount(): number {
@@ -323,6 +389,7 @@ export class QueueEventAccumulator {
   public clear(): number {
     const pending = this.pendingCount();
     this.buckets.clear();
+    this.eventRecords.clear();
     return pending;
   }
 }
@@ -530,6 +597,12 @@ type PersistWindowsResult = {
   eventTotals: Map<number, QueueEventCounters>;
 };
 
+type LoadedQueueEventTotals = {
+  totals: Map<number, QueueEventCounters>;
+  /** PostgreSQL statement snapshot used to split overlapping QueueEvents. */
+  snapshotAtMs: number;
+};
+
 function queueEventWindowStartMs(value: Date | string): number {
   const result = value instanceof Date ? value.getTime() : Date.parse(value);
   if (!Number.isFinite(result)) throw new Error('Invalid persisted queue health window timestamp');
@@ -549,7 +622,7 @@ async function loadQueueHealthEventTotals(
   queueName: string,
   nowMs: number,
   retentionMs: number,
-): Promise<Map<number, QueueEventCounters>> {
+): Promise<LoadedQueueEventTotals> {
   const db = await getDatabaseHandleWithBudget(5_000);
   const rows = await db
     .select({
@@ -558,6 +631,10 @@ async function loadQueueHealthEventTotals(
       completions: queueHealthWindowsInOps.completions,
       failures: queueHealthWindowsInOps.failures,
       stalled: queueHealthWindowsInOps.stalled,
+      // This expression is evaluated at the start of the same SELECT
+      // statement whose rows form the restart baseline. Events received after
+      // it are therefore not represented by the returned durable totals.
+      baselineAt: sql<Date>`statement_timestamp()`,
     })
     .from(queueHealthWindowsInOps)
     .where(
@@ -566,17 +643,24 @@ async function loadQueueHealthEventTotals(
         gte(queueHealthWindowsInOps.windowStart, new Date(nowMs - retentionMs)),
       ),
     );
-  return new Map(
-    rows.map((row) => [
-      queueEventWindowStartMs(row.windowStart),
-      {
-        arrivals: Number(row.arrivals ?? 0),
-        completions: Number(row.completions ?? 0),
-        failures: Number(row.failures ?? 0),
-        stalled: Number(row.stalled ?? 0),
-      },
-    ]),
-  );
+  return {
+    totals: new Map(
+      rows.map((row) => [
+        queueEventWindowStartMs(row.windowStart),
+        {
+          arrivals: Number(row.arrivals ?? 0),
+          completions: Number(row.completions ?? 0),
+          failures: Number(row.failures ?? 0),
+          stalled: Number(row.stalled ?? 0),
+        },
+      ]),
+    ),
+    // With no retained rows there is no durable counter that can overlap the
+    // in-memory events, so retain the whole accumulator rather than inventing
+    // a cutoff that could discard the first post-restart burst.
+    snapshotAtMs:
+      rows.length > 0 ? queueEventWindowStartMs(rows[0].baselineAt) : Number.NEGATIVE_INFINITY,
+  };
 }
 
 async function persistWindows(
@@ -690,7 +774,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   // QueueEvents can arrive while a poll is waiting on Redis or PostgreSQL.
   // Keep them in receive-time buckets so a slow poll cannot attribute an old
   // burst to the next window or lose events when persistence fails.
-  const eventAccumulator = new QueueEventAccumulator(windowIntervalMs, eventRetentionMs);
+  let eventAccumulator = new QueueEventAccumulator(windowIntervalMs, eventRetentionMs);
   // Keep cumulative event totals for each retained window. The accumulator
   // only owns unconfirmed batches; this map supplies the absolute value for an
   // idempotent PostgreSQL upsert when a later poll confirms another batch.
@@ -750,17 +834,19 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     }
     if (!eventBaselineLoaded) {
       // QueueEvents remains subscribed while the durable baseline is read.
-      // Rotate the events already observed before that read so they cannot be
-      // replayed on top of rows the baseline already contains. Events that
-      // arrive after this capture stay in the accumulator and are folded by
-      // the first poll after the baseline succeeds.
-      const startupEvents = eventAccumulator.capture(pollStartedAtMs);
+      // Rotate the accumulator before awaiting PostgreSQL so events delivered
+      // during the read can be split by the database statement snapshot
+      // rather than being unconditionally cleared with the pre-read batch.
+      const startupAccumulator = eventAccumulator;
+      eventAccumulator = new QueueEventAccumulator(windowIntervalMs, eventRetentionMs);
+      const startupEvents = startupAccumulator.capture(pollStartedAtMs);
       try {
-        const persisted = await loadQueueHealthEventTotals(
+        const loaded = await loadQueueHealthEventTotals(
           queueName,
           pollStartedAtMs,
           eventRetentionMs,
         );
+        const persisted = loaded.totals;
         let discardedStartupEvents = 0;
         const uncoveredStartupEvents = new Map<number, QueueEventCounters>();
         for (const [bucketStart, counters] of startupEvents) {
@@ -774,6 +860,10 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
             uncoveredStartupEvents.set(bucketStart, counters);
           }
         }
+        const discardedEventsOverlappingBaseline = eventAccumulator.discardReceivedAtOrBefore(
+          loaded.snapshotAtMs,
+          new Set(persisted.keys()),
+        );
         if (uncoveredStartupEvents.size > 0) {
           eventAccumulator.restore(uncoveredStartupEvents);
         }
@@ -792,6 +882,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           queue: queueName,
           windows: persisted.size,
           discardedStartupEvents,
+          discardedEventsOverlappingBaseline,
           retainedStartupEvents: [...uncoveredStartupEvents.values()].reduce(
             (total, counters) => total + totalQueueEventCounters(counters),
             0,

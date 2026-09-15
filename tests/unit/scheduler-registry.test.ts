@@ -737,7 +737,7 @@ describe('standalone scheduler registry', () => {
     release?.([]);
   });
 
-  test('does not reuse a hung resolver across distinct scheduler contexts', async () => {
+  test('reuses a hung resolver across scheduler contexts with unchanged inputs', async () => {
     let release: ((plans: readonly never[]) => void) | undefined;
     let calls = 0;
     const pending = new Promise<readonly never[]>((resolve) => {
@@ -770,8 +770,47 @@ describe('standalone scheduler registry', () => {
     await resolveSchedulerDefinition(definition, firstContext, { timeoutMs: 10 });
     await resolveSchedulerDefinition(definition, secondContext, { timeoutMs: 10 });
 
-    // A new scheduler pass has a new context and must start its own resolver;
-    // only repeated calls for one exact context are single-flight coalesced.
+    // A new scheduler pass has a new object and clock, but unchanged season
+    // and event inputs must still reuse the in-flight provider/DB operation.
+    expect(calls).toBe(1);
+    release?.([]);
+  });
+
+  test('invalidates a hung resolver when scheduler inputs change', async () => {
+    let release: ((plans: readonly never[]) => void) | undefined;
+    let calls = 0;
+    const pending = new Promise<readonly never[]>((resolve) => {
+      release = resolve;
+    });
+    const definition: ScheduledJobDefinition = {
+      name: 'input-bound-resolution',
+      cadence: 'test-only',
+      timezone: 'UTC',
+      catchUpPolicy: 'none',
+      criticality: 'normal',
+      queueName: 'test-only',
+      successPredicate: 'never reached',
+      resolve: async () => {
+        calls += 1;
+        return pending;
+      },
+      enqueue: async () => undefined,
+    };
+    const firstContext = {
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T01:00:00.000Z'),
+      currentEventId: 1,
+      events: [],
+    };
+    const secondContext = {
+      ...firstContext,
+      now: new Date('2026-08-23T01:00:30.000Z'),
+      currentEventId: 2,
+    };
+
+    await resolveSchedulerDefinition(definition, firstContext, { timeoutMs: 10 });
+    await resolveSchedulerDefinition(definition, secondContext, { timeoutMs: 10 });
+
     expect(calls).toBe(2);
     release?.([]);
   });

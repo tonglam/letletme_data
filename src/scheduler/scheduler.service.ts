@@ -125,15 +125,43 @@ export function shouldRevisitSchedulerPlan(
 
 // A definition resolver may still be unwinding after its bounded caller
 // timeout (for example, a driver socket that has not observed cancellation
-// yet). Coalesce that underlying operation only for the exact scheduler
-// context that created it. A later pass can have a different season, clock,
-// or event snapshot; reusing the old promise there would feed stale plans into
-// the new pass. The entry is removed only after the actual resolver settles;
-// each caller still gets its own bounded timeout around that promise.
+// yet). Coalesce that underlying operation across scheduler contexts while
+// the season/event inputs are unchanged. `now` intentionally is not part of
+// the key: a new 30-second pass must not start a duplicate provider/DB
+// operation merely because the previous one has not observed cancellation.
+// A changed semantic input replaces the old entry, while the identity check
+// in `finally` prevents the old promise from deleting the newer one.
+type DefinitionResolutionInFlight = Readonly<{
+  contextKey: string;
+  promise: Promise<readonly SchedulerObligationPlan[]>;
+}>;
+
 const definitionResolutionInFlight = new WeakMap<
   ScheduledJobDefinition,
-  WeakMap<SchedulerContext, Promise<readonly SchedulerObligationPlan[]>>
+  DefinitionResolutionInFlight
 >();
+
+function schedulerResolutionContextKey(context: SchedulerContext): string {
+  return JSON.stringify({
+    season: {
+      seasonId: context.season.seasonId,
+      seasonCode: context.season.seasonCode,
+    },
+    currentEventId: context.currentEventId ?? null,
+    currentEventDeadline: context.currentEventDeadline?.getTime() ?? null,
+    latestFinalizedEventId: context.latestFinalizedEventId ?? null,
+    events: [...context.events]
+      .sort((left, right) => left.id - right.id)
+      .map((event) => ({
+        id: event.id,
+        deadlineTime: event.deadlineTime?.getTime() ?? null,
+        finished: event.finished ?? null,
+        dataChecked: event.dataChecked ?? null,
+        dataCheckedAt: event.dataCheckedAt?.getTime() ?? null,
+        updatedAt: event.updatedAt?.getTime() ?? null,
+      })),
+  });
+}
 
 function evidenceNumber(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
   const value = evidence?.[key];
@@ -439,31 +467,27 @@ export async function resolveSchedulerDefinition(
 > {
   try {
     const timeoutMs = options.timeoutMs ?? getConfig().SCHEDULER_RESOLVE_TIMEOUT_MS;
-    let byContext = definitionResolutionInFlight.get(definition);
-    if (!byContext) {
-      byContext = new WeakMap();
-      definitionResolutionInFlight.set(definition, byContext);
-    }
-    let underlying = byContext.get(context);
-    if (!underlying) {
+    const contextKey = schedulerResolutionContextKey(context);
+    let entry = definitionResolutionInFlight.get(definition);
+    if (!entry || entry.contextKey !== contextKey) {
       const resolution = Promise.resolve().then(() => definition.resolve(context));
       const tracked = resolution.finally(() => {
-        if (byContext?.get(context) === tracked) {
-          byContext.delete(context);
+        if (definitionResolutionInFlight.get(definition)?.promise === tracked) {
+          definitionResolutionInFlight.delete(definition);
         }
       });
-      underlying = tracked;
-      byContext.set(context, tracked);
+      entry = { contextKey, promise: tracked };
+      definitionResolutionInFlight.set(definition, entry);
     }
     const plans = await withTimeout(
-      underlying,
+      entry.promise,
       timeoutMs,
       `Scheduler definition ${definition.name} resolution exceeded ${timeoutMs}ms`,
     );
     return { ok: true, plans };
   } catch (error) {
     if (error instanceof TimeoutError) {
-      const underlying = definitionResolutionInFlight.get(definition)?.get(context);
+      const underlying = definitionResolutionInFlight.get(definition)?.promise;
       if (underlying) {
         // A resolver may be backed by a driver operation that cannot be
         // cancelled by Promise.race. Keep the single-flight promise in the

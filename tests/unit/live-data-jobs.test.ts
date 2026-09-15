@@ -105,6 +105,18 @@ describe('Live Points V2 snapshot enqueue', () => {
     });
   });
 
+  test('carries every coalesced freshness window through the live job payload', async () => {
+    await enqueueLiveSnapshot(TEST_SEASON, 12, 'reconcile', {
+      freshnessWindowId: 11,
+      freshnessWindowIds: [11, 12, 11],
+    });
+
+    expect(addCalls[0]?.data).toMatchObject({
+      freshnessWindowId: 11,
+      freshnessWindowIds: [11, 12],
+    });
+  });
+
   test('suppresses a cron duplicate for the same season, event, and finalization level', async () => {
     waitingJobs.push({
       name: 'live-snapshot',

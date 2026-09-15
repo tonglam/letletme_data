@@ -1228,6 +1228,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       obligationId,
       generation,
       freshnessWindowId,
+      freshnessWindowIds,
       laneId,
       dispatchGeneration,
     }) => {
@@ -1244,6 +1245,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         laneId,
         laneGeneration: dispatchGeneration,
         freshnessWindowId,
+        freshnessWindowIds,
         lifecycleState: normalizeMatchLifecycleState(plan.evidence?.lifecycleState),
         expectedNextCheckAt:
           typeof plan.evidence?.expectedNextCheckAt === 'string'
