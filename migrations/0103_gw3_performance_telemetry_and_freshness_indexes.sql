@@ -45,6 +45,10 @@ CREATE TABLE ops.client_signal_v2_windows (
   result text NOT NULL,
   reason_code text NOT NULL,
   measurement_kind text NOT NULL,
+  metric_name text,
+  navigation_id text,
+  interaction_id text,
+  cache_status text,
   error_class text,
   fingerprint text,
   bucket text NOT NULL,
@@ -65,6 +69,12 @@ CREATE TABLE ops.client_signal_v2_windows (
     CHECK (reason_code IN ('none', 'auth', 'validation', 'rate_limit', 'client_abort', 'upstream_timeout', 'connection', 'unavailable', 'unknown')),
   CONSTRAINT client_signal_v2_windows_measurement_check
     CHECK (measurement_kind IN ('initial_navigation', 'in_page_navigation', 'interaction', 'background_resume', 'missing_start', 'request')),
+  CONSTRAINT client_signal_v2_windows_cache_check
+    CHECK (cache_status IS NULL OR cache_status IN ('hit', 'miss', 'stale', 'bypass', 'unknown')),
+  CONSTRAINT client_signal_v2_windows_correlation_check
+    CHECK ((navigation_id IS NULL OR navigation_id ~ '^(nav|interaction|desk|metric)-[A-Za-z0-9_-]{8,52}$') AND (interaction_id IS NULL OR interaction_id ~ '^(nav|interaction|desk|metric)-[A-Za-z0-9_-]{8,52}$')),
+  CONSTRAINT client_signal_v2_windows_metric_name_check
+    CHECK (metric_name IS NULL OR metric_name ~ '^[A-Za-z0-9._:-]{1,64}$'),
   CONSTRAINT client_signal_v2_windows_count_check
     CHECK (observed_count > 0 AND occurrence_count > 0 AND estimated_count > 0),
   CONSTRAINT client_signal_v2_windows_value_check
@@ -78,6 +88,7 @@ CREATE TABLE ops.client_signal_v2_windows (
   CONSTRAINT client_signal_v2_windows_identity UNIQUE NULLS NOT DISTINCT (
     window_start, client, client_release, ingest_release, surface, metric,
     device_group, sample_source, result, reason_code, measurement_kind,
+    metric_name, navigation_id, interaction_id, cache_status,
     error_class, fingerprint, bucket
   )
 );

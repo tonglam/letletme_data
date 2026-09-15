@@ -749,6 +749,10 @@ export const clientSignalV2WindowsInOps = ops.table(
     result: text().notNull(),
     reasonCode: text('reason_code').notNull(),
     measurementKind: text('measurement_kind').notNull(),
+    metricName: text('metric_name'),
+    navigationId: text('navigation_id'),
+    interactionId: text('interaction_id'),
+    cacheStatus: text('cache_status'),
     errorClass: text('error_class'),
     fingerprint: text(),
     bucket: text().notNull(),
@@ -779,6 +783,10 @@ export const clientSignalV2WindowsInOps = ops.table(
         table.result,
         table.reasonCode,
         table.measurementKind,
+        table.metricName,
+        table.navigationId,
+        table.interactionId,
+        table.cacheStatus,
         table.errorClass,
         table.fingerprint,
         table.bucket,
@@ -803,6 +811,18 @@ export const clientSignalV2WindowsInOps = ops.table(
     check(
       'client_signal_v2_windows_measurement_check',
       sql`measurement_kind IN ('initial_navigation','in_page_navigation','interaction','background_resume','missing_start','request')`,
+    ),
+    check(
+      'client_signal_v2_windows_cache_check',
+      sql`cache_status IS NULL OR cache_status IN ('hit','miss','stale','bypass','unknown')`,
+    ),
+    check(
+      'client_signal_v2_windows_correlation_check',
+      sql`(navigation_id IS NULL OR navigation_id ~ '^(nav|interaction|desk|metric)-[A-Za-z0-9_-]{8,52}$') AND (interaction_id IS NULL OR interaction_id ~ '^(nav|interaction|desk|metric)-[A-Za-z0-9_-]{8,52}$')`,
+    ),
+    check(
+      'client_signal_v2_windows_metric_name_check',
+      sql`metric_name IS NULL OR metric_name ~ '^[A-Za-z0-9._:-]{1,64}$'`,
     ),
     check(
       'client_signal_v2_windows_count_check',

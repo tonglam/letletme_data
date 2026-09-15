@@ -7,6 +7,7 @@ import {
   clientSignalBucketFor,
   clientSignalRetentionCutoffs,
   aggregateClientSignalBatchV2,
+  CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT,
   parseClientSignalBatch,
   parseClientSignalBatchV2,
 } from '../../src/services/client-signals.service';
@@ -50,6 +51,9 @@ const validBatchV2 = () => ({
       reasonCode: 'none',
       measurementKind: 'initial_navigation',
       samplingProbability: 0.25,
+      metricName: 'HOME_TEAM_DESK_READY',
+      navigationId: 'nav-12345678',
+      cacheStatus: 'miss',
       value: 249,
     },
   ],
@@ -148,6 +152,30 @@ describe('anonymous client signal contract', () => {
 
   test('keeps the body budget explicit', () => {
     expect(CLIENT_SIGNAL_MAX_BYTES).toBe(16 * 1024);
+    expect(CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT).toBe(512);
+  });
+
+  test('keeps bounded marker and correlation dimensions in v2 aggregation', () => {
+    const parsed = parseClientSignalBatchV2(validBatchV2(), now);
+    expect(parsed.samples[0]).toMatchObject({
+      metricName: 'HOME_TEAM_DESK_READY',
+      navigationId: 'nav-12345678',
+      cacheStatus: 'miss',
+    });
+    expect(aggregateClientSignalBatchV2(parsed)[0]).toMatchObject({
+      metricName: 'HOME_TEAM_DESK_READY',
+      navigationId: 'nav-12345678',
+      cacheStatus: 'miss',
+    });
+    expect(() =>
+      parseClientSignalBatchV2(
+        {
+          ...validBatchV2(),
+          samples: [{ ...validBatchV2().samples[0], navigationId: 'nav-short' }],
+        },
+        now,
+      ),
+    ).toThrow(ClientSignalValidationError);
   });
 
   test('weights v2 success samples by their actual sampling probability', () => {
@@ -181,6 +209,59 @@ describe('anonymous client signal contract', () => {
       occurrenceCount: 2,
       estimatedCount: 2,
     });
+  });
+
+  test('preserves bounded marker and performance correlation dimensions', () => {
+    const sample = validBatchV2().samples[0];
+    const batch = {
+      ...validBatchV2(),
+      samples: [
+        {
+          ...sample,
+          metricName: 'PLAYER_DESK_RESPONSE',
+          navigationId: 'nav-12345678',
+          interactionId: 'interaction-12345678',
+          cacheStatus: 'stale',
+        },
+        {
+          ...sample,
+          metricName: 'HOME_TEAM_DESK_READY',
+          navigationId: 'nav-12345678',
+          interactionId: 'interaction-12345678',
+          cacheStatus: 'stale',
+        },
+      ],
+    };
+
+    const parsed = parseClientSignalBatchV2(batch, now);
+    expect(parsed.samples[0]).toMatchObject({
+      metricName: 'PLAYER_DESK_RESPONSE',
+      navigationId: 'nav-12345678',
+      interactionId: 'interaction-12345678',
+      cacheStatus: 'stale',
+    });
+    expect(aggregateClientSignalBatchV2(parsed)).toHaveLength(2);
+  });
+
+  test('rejects unsafe performance correlation dimensions', () => {
+    expect(() =>
+      parseClientSignalBatchV2(
+        {
+          ...validBatchV2(),
+          samples: [{ ...validBatchV2().samples[0], navigationId: 'nav-short' }],
+        },
+        now,
+      ),
+    ).toThrow(ClientSignalValidationError);
+    expect(() =>
+      parseClientSignalBatchV2(
+        {
+          ...validBatchV2(),
+          samples: [{ ...validBatchV2().samples[0], cacheStatus: 'origin' }],
+        },
+        now,
+      ),
+    ).toThrow(ClientSignalValidationError);
   });
 
   test('keeps v1 parsing separate and rejects forged ingest or sensitive v2 fields', () => {

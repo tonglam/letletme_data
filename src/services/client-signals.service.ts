@@ -6,6 +6,7 @@ export const CLIENT_SIGNAL_MAX_SAMPLES = 50;
 export const CLIENT_SIGNAL_WINDOW_MS = 5 * 60 * 1000;
 export const CLIENT_SIGNAL_BATCH_RETENTION_MS = 48 * 60 * 60 * 1000;
 export const CLIENT_SIGNAL_WINDOW_RETENTION_MS = 28 * 24 * 60 * 60 * 1000;
+export const CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT = 512;
 
 export function clientSignalRetentionCutoffs(now: Date): {
   windowBefore: string;
@@ -123,6 +124,10 @@ export const CLIENT_SIGNAL_MEASUREMENT_KINDS = [
   'request',
 ] as const;
 export type ClientSignalMeasurementKind = ValueOf<typeof CLIENT_SIGNAL_MEASUREMENT_KINDS>;
+export const CLIENT_SIGNAL_CACHE_STATUSES = ['hit', 'miss', 'stale', 'bypass', 'unknown'] as const;
+export type ClientSignalCacheStatus = ValueOf<typeof CLIENT_SIGNAL_CACHE_STATUSES>;
+
+const PERFORMANCE_CORRELATION_ID_PATTERN = /^(?:nav|interaction|desk|metric)-[A-Za-z0-9_-]{8,52}$/;
 
 export type ClientSignalBatchV1 = {
   schemaVersion: 1;
@@ -158,6 +163,10 @@ export type ClientSignalBatchV2 = {
     reasonCode: ClientSignalReasonCode;
     measurementKind: ClientSignalMeasurementKind;
     samplingProbability: number;
+    metricName?: string;
+    navigationId?: string;
+    interactionId?: string;
+    cacheStatus?: ClientSignalCacheStatus;
     errorClass?: string;
     fingerprint?: string;
     occurrenceCount?: number;
@@ -200,6 +209,10 @@ export type AggregatedSignalV2 = {
   result: ClientSignalResult;
   reasonCode: ClientSignalReasonCode;
   measurementKind: ClientSignalMeasurementKind;
+  metricName: string | null;
+  navigationId: string | null;
+  interactionId: string | null;
+  cacheStatus: ClientSignalCacheStatus | null;
   errorClass: string | null;
   fingerprint: string | null;
   bucket: string;
@@ -416,6 +429,10 @@ export function parseClientSignalBatchV2(value: unknown, now = Date.now()): Clie
         'reasonCode',
         'measurementKind',
         'samplingProbability',
+        'metricName',
+        'navigationId',
+        'interactionId',
+        'cacheStatus',
         'errorClass',
         'fingerprint',
         'occurrenceCount',
@@ -440,6 +457,25 @@ export function parseClientSignalBatchV2(value: unknown, now = Date.now()): Clie
       throw new ClientSignalValidationError('reasonCode is invalid');
     if (!isOneOf(sample.measurementKind, CLIENT_SIGNAL_MEASUREMENT_KINDS))
       throw new ClientSignalValidationError('measurementKind is invalid');
+    if (sample.metricName !== undefined && !isSafeDiagnosticDimension(sample.metricName, 64)) {
+      throw new ClientSignalValidationError('metricName is invalid');
+    }
+    if (
+      (sample.navigationId !== undefined &&
+        (typeof sample.navigationId !== 'string' ||
+          !PERFORMANCE_CORRELATION_ID_PATTERN.test(sample.navigationId))) ||
+      (sample.interactionId !== undefined &&
+        (typeof sample.interactionId !== 'string' ||
+          !PERFORMANCE_CORRELATION_ID_PATTERN.test(sample.interactionId)))
+    ) {
+      throw new ClientSignalValidationError('performance correlation id is invalid');
+    }
+    if (
+      sample.cacheStatus !== undefined &&
+      !isOneOf(sample.cacheStatus, CLIENT_SIGNAL_CACHE_STATUSES)
+    ) {
+      throw new ClientSignalValidationError('cacheStatus is invalid');
+    }
     if (
       typeof sample.samplingProbability !== 'number' ||
       !Number.isFinite(sample.samplingProbability) ||
@@ -503,6 +539,10 @@ export function parseClientSignalBatchV2(value: unknown, now = Date.now()): Clie
       reasonCode: sample.reasonCode,
       measurementKind: sample.measurementKind,
       samplingProbability: sample.samplingProbability,
+      ...(sample.metricName === undefined ? {} : { metricName: sample.metricName }),
+      ...(sample.navigationId === undefined ? {} : { navigationId: sample.navigationId }),
+      ...(sample.interactionId === undefined ? {} : { interactionId: sample.interactionId }),
+      ...(sample.cacheStatus === undefined ? {} : { cacheStatus: sample.cacheStatus }),
       ...(sample.errorClass === undefined ? {} : { errorClass: sample.errorClass }),
       ...(sample.fingerprint === undefined ? {} : { fingerprint: sample.fingerprint }),
       occurrenceCount,
@@ -609,6 +649,10 @@ export function aggregateClientSignalBatchV2(batch: ClientSignalBatchV2): Aggreg
       sample.result,
       sample.reasonCode,
       sample.measurementKind,
+      sample.metricName ?? '',
+      sample.navigationId ?? '',
+      sample.interactionId ?? '',
+      sample.cacheStatus ?? '',
       sample.errorClass ?? '',
       sample.fingerprint ?? '',
       bucket,
@@ -639,6 +683,10 @@ export function aggregateClientSignalBatchV2(batch: ClientSignalBatchV2): Aggreg
       result: sample.result,
       reasonCode: sample.reasonCode,
       measurementKind: sample.measurementKind,
+      metricName: sample.metricName ?? null,
+      navigationId: sample.navigationId ?? null,
+      interactionId: sample.interactionId ?? null,
+      cacheStatus: sample.cacheStatus ?? null,
       errorClass: sample.errorClass ?? null,
       fingerprint: sample.fingerprint ?? null,
       bucket,
@@ -754,6 +802,10 @@ export async function ingestClientSignalBatchV2(
             row.result,
             row.reasonCode,
             row.measurementKind,
+            row.metricName,
+            row.navigationId,
+            row.interactionId,
+            row.cacheStatus,
             row.errorClass,
             row.fingerprint,
             row.bucket,
@@ -764,19 +816,21 @@ export async function ingestClientSignalBatchV2(
             row.firstObservedAt.toISOString(),
             row.lastObservedAt.toISOString(),
           );
-          return `(${Array.from({ length: 20 }, (_, index) => `$${start + index}`).join(', ')}, clock_timestamp())`;
+          return `(${Array.from({ length: 24 }, (_, index) => `$${start + index}`).join(', ')}, clock_timestamp())`;
         })
         .join(', ');
       await transaction.unsafe(
         `INSERT INTO ops.client_signal_v2_windows (
           window_start, client, client_release, ingest_release, surface, metric,
           device_group, sample_source, result, reason_code, measurement_kind,
+          metric_name, navigation_id, interaction_id, cache_status,
           error_class, fingerprint, bucket, observed_count, occurrence_count, estimated_count,
           value_sum, first_observed_at, last_observed_at, updated_at
         ) VALUES ${values}
         ON CONFLICT (
           window_start, client, client_release, ingest_release, surface, metric,
           device_group, sample_source, result, reason_code, measurement_kind,
+          metric_name, navigation_id, interaction_id, cache_status,
           error_class, fingerprint, bucket
         ) DO UPDATE SET
           observed_count = ops.client_signal_v2_windows.observed_count + EXCLUDED.observed_count,
@@ -955,6 +1009,10 @@ type SummaryRowV2 = {
   result: string;
   reason_code: string;
   measurement_kind: string;
+  metric_name: string | null;
+  navigation_id: string | null;
+  interaction_id: string | null;
+  cache_status: string | null;
   error_class: string | null;
   fingerprint: string | null;
   bucket: string;
@@ -964,6 +1022,20 @@ type SummaryRowV2 = {
   value_sum: string | number;
   first_observed_at: Date | string;
   last_observed_at: Date | string;
+  total_group_count: string | number;
+};
+
+type SummaryTotalsV2 = {
+  observed_count: string | number;
+  occurrence_count: string | number;
+  estimated_count: string | number;
+  value_sum: string | number;
+  estimated_error_count: string | number;
+  estimated_stale_count: string | number;
+  estimated_unavailable_count: string | number;
+  estimated_timeout_count: string | number;
+  estimated_auth_error_count: string | number;
+  estimated_ordinary_error_count: string | number;
 };
 
 type SummaryAccumulatorV2 = {
@@ -977,6 +1049,10 @@ type SummaryAccumulatorV2 = {
   result: string;
   reasonCode: string;
   measurementKind: string;
+  metricName: string | null;
+  navigationId: string | null;
+  interactionId: string | null;
+  cacheStatus: ClientSignalCacheStatus | null;
   errorClass: string | null;
   fingerprint: string | null;
   observedCount: number;
@@ -1036,20 +1112,77 @@ async function getClientSignalV2Summary(
   const sinceTimestamp = clientSignalSqlTimestamp(since, 'v2 summary start');
   const untilTimestamp = clientSignalSqlTimestamp(until, 'v2 summary end');
   const rows = await client<SummaryRowV2[]>`
-    SELECT client, client_release, ingest_release, surface, metric, device_group,
-           sample_source, result, reason_code, measurement_kind, error_class,
-           fingerprint, bucket, SUM(observed_count)::bigint AS observed_count,
-           SUM(occurrence_count)::bigint AS occurrence_count,
-           SUM(estimated_count)::double precision AS estimated_count,
-           SUM(value_sum)::double precision AS value_sum,
-           MIN(first_observed_at) AS first_observed_at,
-           MAX(last_observed_at) AS last_observed_at
+    WITH grouped AS (
+      SELECT client, client_release, ingest_release, surface, metric, device_group,
+             sample_source, result, reason_code, measurement_kind,
+             metric_name, navigation_id, interaction_id, cache_status, error_class,
+             fingerprint, bucket, SUM(observed_count)::bigint AS observed_count,
+             SUM(occurrence_count)::bigint AS occurrence_count,
+             SUM(estimated_count)::double precision AS estimated_count,
+             SUM(value_sum)::double precision AS value_sum,
+             MIN(first_observed_at) AS first_observed_at,
+             MAX(last_observed_at) AS last_observed_at
+      FROM ops.client_signal_v2_windows
+      WHERE window_start >= ${sinceTimestamp}::timestamptz
+        AND window_start < ${untilTimestamp}::timestamptz
+      GROUP BY client, client_release, ingest_release, surface, metric, device_group,
+               sample_source, result, reason_code, measurement_kind,
+               metric_name, navigation_id, interaction_id, cache_status, error_class,
+               fingerprint, bucket
+    ), top_groups AS (
+      SELECT client, client_release, ingest_release, surface, metric, device_group,
+             sample_source, result, reason_code, measurement_kind,
+             metric_name, navigation_id, interaction_id, cache_status, error_class,
+             fingerprint, COUNT(*) OVER () AS total_group_count
+      FROM grouped
+      GROUP BY client, client_release, ingest_release, surface, metric, device_group,
+               sample_source, result, reason_code, measurement_kind,
+               metric_name, navigation_id, interaction_id, cache_status, error_class,
+               fingerprint
+      ORDER BY SUM(estimated_count) DESC,
+               client, client_release, ingest_release, surface, metric, device_group,
+               sample_source, result, reason_code, measurement_kind,
+               metric_name NULLS FIRST, navigation_id NULLS FIRST,
+               interaction_id NULLS FIRST, cache_status NULLS FIRST,
+               error_class NULLS FIRST, fingerprint NULLS FIRST
+      LIMIT ${CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT}
+    )
+    SELECT grouped.*, top_groups.total_group_count
+    FROM grouped
+    JOIN top_groups
+      ON grouped.client IS NOT DISTINCT FROM top_groups.client
+     AND grouped.client_release IS NOT DISTINCT FROM top_groups.client_release
+     AND grouped.ingest_release IS NOT DISTINCT FROM top_groups.ingest_release
+     AND grouped.surface IS NOT DISTINCT FROM top_groups.surface
+     AND grouped.metric IS NOT DISTINCT FROM top_groups.metric
+     AND grouped.device_group IS NOT DISTINCT FROM top_groups.device_group
+     AND grouped.sample_source IS NOT DISTINCT FROM top_groups.sample_source
+     AND grouped.result IS NOT DISTINCT FROM top_groups.result
+     AND grouped.reason_code IS NOT DISTINCT FROM top_groups.reason_code
+     AND grouped.measurement_kind IS NOT DISTINCT FROM top_groups.measurement_kind
+     AND grouped.metric_name IS NOT DISTINCT FROM top_groups.metric_name
+     AND grouped.navigation_id IS NOT DISTINCT FROM top_groups.navigation_id
+     AND grouped.interaction_id IS NOT DISTINCT FROM top_groups.interaction_id
+     AND grouped.cache_status IS NOT DISTINCT FROM top_groups.cache_status
+     AND grouped.error_class IS NOT DISTINCT FROM top_groups.error_class
+     AND grouped.fingerprint IS NOT DISTINCT FROM top_groups.fingerprint
+    ORDER BY top_groups.total_group_count, grouped.estimated_count DESC
+  `;
+  const totalsRows = await client<SummaryTotalsV2[]>`
+    SELECT
+      COALESCE(SUM(observed_count), 0)::bigint AS observed_count,
+      COALESCE(SUM(occurrence_count), 0)::bigint AS occurrence_count,
+      COALESCE(SUM(estimated_count), 0)::double precision AS estimated_count,
+      COALESCE(SUM(value_sum), 0)::double precision AS value_sum,
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'error' OR result = 'timeout' OR result = 'auth_error'), 0)::double precision AS estimated_error_count,
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'stale'), 0)::double precision AS estimated_stale_count,
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'unavailable'), 0)::double precision AS estimated_unavailable_count,
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'timeout'), 0)::double precision AS estimated_timeout_count,
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'auth_error'), 0)::double precision AS estimated_auth_error_count,
+      COALESCE(SUM(estimated_count) FILTER (WHERE result = 'error'), 0)::double precision AS estimated_ordinary_error_count
     FROM ops.client_signal_v2_windows
     WHERE window_start >= ${sinceTimestamp}::timestamptz
       AND window_start < ${untilTimestamp}::timestamptz
-    GROUP BY client, client_release, ingest_release, surface, metric, device_group,
-             sample_source, result, reason_code, measurement_kind, error_class,
-             fingerprint, bucket
   `;
   const grouped = new Map<string, SummaryAccumulatorV2>();
   for (const row of rows) {
@@ -1064,6 +1197,10 @@ async function getClientSignalV2Summary(
       row.result,
       row.reason_code,
       row.measurement_kind,
+      row.metric_name ?? '',
+      row.navigation_id ?? '',
+      row.interaction_id ?? '',
+      row.cache_status ?? '',
       row.error_class ?? '',
       row.fingerprint ?? '',
     ].join('\u0000');
@@ -1082,6 +1219,10 @@ async function getClientSignalV2Summary(
       result: row.result,
       reasonCode: row.reason_code,
       measurementKind: row.measurement_kind,
+      metricName: row.metric_name,
+      navigationId: row.navigation_id,
+      interactionId: row.interaction_id,
+      cacheStatus: row.cache_status as ClientSignalCacheStatus | null,
       errorClass: row.error_class,
       fingerprint: row.fingerprint,
       observedCount: 0,
@@ -1126,6 +1267,10 @@ async function getClientSignalV2Summary(
     result: item.result,
     reasonCode: item.reasonCode,
     measurementKind: item.measurementKind,
+    metricName: item.metricName,
+    navigationId: item.navigationId,
+    interactionId: item.interactionId,
+    cacheStatus: item.cacheStatus,
     errorClass: item.errorClass,
     fingerprint: item.fingerprint,
     observedCount: item.observedCount,
@@ -1149,21 +1294,33 @@ async function getClientSignalV2Summary(
     approximateP75Overflow: v2QuantileOverflow(item, 0.75),
     approximateP95Overflow: v2QuantileOverflow(item, 0.95),
   }));
-  const estimatedTotal = groups.reduce((total, item) => total + item.estimatedCount, 0);
-  const estimatedErrors = groups.reduce(
-    (total, item) =>
-      total +
-      (item.result === 'error' || item.result === 'timeout' || item.result === 'auth_error'
-        ? item.estimatedCount
-        : 0),
-    0,
-  );
-  const resultEstimatedCounts = groups.reduce<Record<string, number>>((counts, item) => {
-    counts[item.result] = (counts[item.result] ?? 0) + item.estimatedCount;
-    return counts;
-  }, {});
-  const rateForResult = (result: string): number =>
-    estimatedTotal > 0 ? (resultEstimatedCounts[result] ?? 0) / estimatedTotal : 0;
+  const totals = totalsRows[0] ?? {
+    observed_count: 0,
+    occurrence_count: 0,
+    estimated_count: 0,
+    value_sum: 0,
+    estimated_error_count: 0,
+    estimated_stale_count: 0,
+    estimated_unavailable_count: 0,
+    estimated_timeout_count: 0,
+    estimated_auth_error_count: 0,
+    estimated_ordinary_error_count: 0,
+  };
+  const asFiniteNumber = (value: string | number): number => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const estimatedTotal = asFiniteNumber(totals.estimated_count);
+  const resultEstimatedCounts = {
+    error: asFiniteNumber(totals.estimated_ordinary_error_count),
+    timeout: asFiniteNumber(totals.estimated_timeout_count),
+    auth_error: asFiniteNumber(totals.estimated_auth_error_count),
+    stale: asFiniteNumber(totals.estimated_stale_count),
+    unavailable: asFiniteNumber(totals.estimated_unavailable_count),
+  };
+  const rateForResult = (result: keyof typeof resultEstimatedCounts): number =>
+    estimatedTotal > 0 ? resultEstimatedCounts[result] / estimatedTotal : 0;
+  const totalGroupCount = rows.length > 0 ? Number(rows[0].total_group_count) : 0;
   return {
     schemaVersion: 2,
     legacy: false,
@@ -1171,9 +1328,14 @@ async function getClientSignalV2Summary(
     rateSemantics: 'estimated_weighted',
     windowStart: since.toISOString(),
     windowEnd: until.toISOString(),
-    observedCount: groups.reduce((total, item) => total + item.observedCount, 0),
+    observedCount: asFiniteNumber(totals.observed_count),
+    occurrenceCount: asFiniteNumber(totals.occurrence_count),
     estimatedCount: estimatedTotal,
-    errorRate: estimatedTotal > 0 ? estimatedErrors / estimatedTotal : 0,
+    detailGroupLimit: CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT,
+    detailGroupCount: totalGroupCount,
+    detailGroupsTruncated: totalGroupCount > CLIENT_SIGNAL_V2_SUMMARY_GROUP_LIMIT,
+    errorRate:
+      estimatedTotal > 0 ? asFiniteNumber(totals.estimated_error_count) / estimatedTotal : 0,
     staleRate: rateForResult('stale'),
     unavailableRate: rateForResult('unavailable'),
     timeoutRate: rateForResult('timeout'),
