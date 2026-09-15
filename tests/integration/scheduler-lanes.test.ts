@@ -17,6 +17,7 @@ import {
   getSchedulerLaneTargets,
   listLiveSnapshotRecoveryLanes,
   recoverSchedulerLaneAfterBullLoss,
+  retireSchedulerLaneForStaleSeason,
   replaceBlockedSchedulerLaneAfterCoreSourceStale,
   startSchedulerLane,
 } from '../../src/repositories/scheduler-lanes';
@@ -34,6 +35,8 @@ const DEFINITION = {
 };
 const LIVE_LANE_KEY = 'integration:live-snapshot:2627:event:3';
 const LIVE_SCOPE_KEY = '2627:event:3';
+const HISTORICAL_LIVE_LANE_KEY = 'integration:live-snapshot:2526:event:3';
+const HISTORICAL_LIVE_SCOPE_KEY = '2526:event:3';
 const LIVE_DEFINITION = {
   name: 'live-snapshot',
   cadence: 'integration lifecycle polling',
@@ -56,6 +59,13 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM ops.scheduler_obligations
     WHERE job_name = ${LIVE_DEFINITION.name} AND scope_key = ${LIVE_SCOPE_KEY}
+  `;
+  await sql`DELETE FROM ops.data_governance_cases WHERE scope_key = ${HISTORICAL_LIVE_SCOPE_KEY}`;
+  await sql`DELETE FROM ops.freshness_slo_windows WHERE scope_key = ${HISTORICAL_LIVE_SCOPE_KEY}`;
+  await sql`DELETE FROM ops.scheduler_lanes WHERE lane_key = ${HISTORICAL_LIVE_LANE_KEY}`;
+  await sql`
+    DELETE FROM ops.scheduler_obligations
+    WHERE job_name = ${LIVE_DEFINITION.name} AND scope_key = ${HISTORICAL_LIVE_SCOPE_KEY}
   `;
 }
 
@@ -95,10 +105,99 @@ async function reserveLive(
   });
 }
 
+async function reserveHistoricalLive(observedAtMs: number, periodKey: string) {
+  const dueAt = new Date(observedAtMs - 60_000);
+  return reserveSchedulerObligation({
+    definition: LIVE_DEFINITION,
+    plan: {
+      scopeKey: HISTORICAL_LIVE_SCOPE_KEY,
+      periodKey,
+      dueAt,
+      source: 'reconcile',
+      eventId: 3,
+      evidence: {
+        scheduledDueAtMs: dueAt.getTime(),
+        decisionObservedAt: new Date(observedAtMs).toISOString(),
+        decisionObservedAtMs: observedAtMs,
+        lifecycleState: 'LIVE_ACTIVE',
+      },
+    },
+  });
+}
+
 beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('scheduler latest-wins lanes', () => {
+  test('terminalizes prior-season live lanes before recovery can call the provider', async () => {
+    const historical = await reserveHistoricalLive(
+      Date.parse('2026-08-25T00:10:00.000Z'),
+      'historical-live-pending',
+    );
+    const initial = await advanceSchedulerLane({
+      laneKey: HISTORICAL_LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: HISTORICAL_LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: historical,
+      preserveFreshnessHistory: true,
+    });
+    const dispatch = await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId });
+    expect(dispatch).not.toBeNull();
+    await confirmSchedulerLaneEnqueued({
+      laneId: initial.lane.laneId,
+      owner: dispatch!.owner,
+      bullJobId: 'integration-historical-live-job',
+      obligationId: historical.obligationId,
+    });
+    const started = await startSchedulerLane({
+      laneId: initial.lane.laneId,
+      dispatchGeneration: dispatch!.lane.dispatchGeneration,
+      bullJobId: 'integration-historical-live-job',
+      obligationId: historical.obligationId,
+    });
+    expect(started?.obligation.obligationId).toBe(historical.obligationId);
+
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.freshness_slo_windows
+        (slo_key, contract_key, scope_key, period_key, eligible_at, due_at, obligation_due_at, status)
+      VALUES ('live-snapshot', 'live-snapshot', ${HISTORICAL_LIVE_SCOPE_KEY}, ${historical.periodKey}, now(), now(), ${historical.dueAt.toISOString()}::timestamptz, 'BREACHED')
+    `;
+
+    expect(
+      await retireSchedulerLaneForStaleSeason({
+        laneId: initial.lane.laneId,
+        currentSeasonCode: '2627',
+      }),
+    ).toBe(true);
+    const targets = await getSchedulerLaneTargets({ laneId: initial.lane.laneId });
+    expect(targets?.lane.state).toBe('idle');
+    expect(targets?.lane.activeObligationId).toBeNull();
+    expect(targets?.desired?.status).toBe('skipped');
+    expect(targets?.desired?.evidence).toMatchObject({
+      reason: 'stale-job-season',
+      staleSeason: '2526',
+      currentSeason: '2627',
+      scheduledDueAtMs: historical.dueAt.getTime(),
+    });
+    const [window] = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.freshness_slo_windows
+      WHERE slo_key = 'live-snapshot'
+        AND scope_key = ${HISTORICAL_LIVE_SCOPE_KEY}
+        AND period_key = ${historical.periodKey}
+    `;
+    expect(window?.status).toBe('BREACHED');
+    expect(await listLiveSnapshotRecoveryLanes({ limit: 10 })).toHaveLength(0);
+    expect(
+      await retireSchedulerLaneForStaleSeason({
+        laneId: initial.lane.laneId,
+        currentSeasonCode: '2627',
+      }),
+    ).toBe(false);
+  });
+
   test('supersedes a 500-target live backlog in bounded passes', async () => {
     const sql = await getDbClient();
     await sql`

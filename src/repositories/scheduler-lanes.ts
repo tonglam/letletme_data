@@ -11,6 +11,7 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import { contractForSchedulerJob, contractHasFreshnessWindow } from '../domain/data-contracts';
+import { isFplSeasonCode } from '../domain/fpl-season';
 import {
   reserveSchedulerObligation,
   type SchedulerObligation,
@@ -58,6 +59,7 @@ const BLOCKED_RETRY_DELAY_MS = 5 * 60_000;
 const LANE_SUPERSEDED_REASON = 'superseded-by-latest-authoritative';
 const CUTOVER_SUPERSEDED_REASON = 'cutover-superseded';
 const CORE_SOURCE_SUPERSEDED_REASON = 'core-source-superseded';
+const STALE_SEASON_REASON = 'stale-job-season';
 
 /**
  * Evidence copied from a provisional price watcher is only valid for the
@@ -2177,6 +2179,118 @@ export async function listLiveSnapshotRecoveryLanes(
       Number.isFinite(input.limit) ? Math.max(1, Math.min(250, Math.floor(input.limit!))) : 250,
     );
   return rows.map(mapLane);
+}
+
+/**
+ * Retire a live lane whose season is no longer current before a worker can
+ * call the current-season FPL endpoint. Historical live obligations retain
+ * their original due/freshness evidence; only the runnable identity and lane
+ * state are terminalized. Locking the lane and every non-terminal obligation
+ * in one transaction also fences a worker that is already between start and
+ * its publication check.
+ */
+export async function retireSchedulerLaneForStaleSeason(input: {
+  laneId: string;
+  currentSeasonCode: string;
+  db?: DbHandle;
+}): Promise<boolean> {
+  if (!isFplSeasonCode(input.currentSeasonCode)) {
+    throw new Error(`Invalid current FPL season code: ${input.currentSeasonCode}`);
+  }
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    const nowRows = await tx.execute<{ dbNow: Date | string }>(
+      sql`SELECT clock_timestamp() AS "dbNow"`,
+    );
+    const dbNow = asDate(nowRows[0]?.dbNow);
+    if (!dbNow) throw new Error('Database clock is unavailable');
+
+    const [laneRow] = await tx
+      .select()
+      .from(schedulerLanesInOps)
+      .where(
+        and(
+          eq(schedulerLanesInOps.laneId, input.laneId),
+          eq(schedulerLanesInOps.jobName, 'live-snapshot'),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!laneRow) return false;
+
+    const scopeMatch = /^(\d{4}):event:([1-9][0-9]*)$/.exec(laneRow.scopeKey);
+    if (!scopeMatch || !isFplSeasonCode(scopeMatch[1])) {
+      throw new Error(`Invalid persisted live-snapshot lane scope: ${laneRow.scopeKey}`);
+    }
+    const persistedSeasonCode = scopeMatch[1];
+    if (persistedSeasonCode === input.currentSeasonCode) return false;
+
+    // Retire every non-terminal obligation in this scope. A bounded scheduler
+    // supersession pass may have left older siblings behind, and leaving one
+    // pending would make the next recovery query look runnable again.
+    const retiredObligations = await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        status: 'skipped',
+        evidence: terminalEvidence({
+          terminal: true,
+          reason: STALE_SEASON_REASON,
+          staleSeason: persistedSeasonCode,
+          currentSeason: input.currentSeasonCode,
+        }),
+        completedAt: dbNow,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastError: null,
+        nextAttemptAt: null,
+        updatedAt: dbNow,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.jobName, 'live-snapshot'),
+          eq(schedulerObligationsInOps.scopeKey, laneRow.scopeKey),
+          inArray(schedulerObligationsInOps.status, [
+            'pending',
+            'failed',
+            'enqueued',
+            'running',
+            'retrying',
+          ]),
+        ),
+      )
+      .returning({ obligationId: schedulerObligationsInOps.obligationId });
+
+    const laneNeedsReset =
+      laneRow.state !== 'idle' ||
+      laneRow.activeObligationId !== null ||
+      laneRow.dispatchOwner !== null ||
+      laneRow.dispatchLeaseExpiresAt !== null ||
+      laneRow.bullJobId !== null ||
+      laneRow.runId !== null ||
+      laneRow.blockerJobId !== null ||
+      laneRow.retryNotBefore !== null ||
+      laneRow.lastError !== null;
+    if (retiredObligations.length === 0 && !laneNeedsReset) return false;
+
+    const updated = await tx
+      .update(schedulerLanesInOps)
+      .set({
+        state: 'idle',
+        activeObligationId: null,
+        dispatchOwner: null,
+        dispatchLeaseExpiresAt: null,
+        bullJobId: null,
+        runId: null,
+        blockerJobId: null,
+        retryNotBefore: null,
+        lastError: null,
+        lastProgressAt: dbNow,
+        updatedAt: dbNow,
+      })
+      .where(eq(schedulerLanesInOps.laneId, laneRow.laneId))
+      .returning({ laneId: schedulerLanesInOps.laneId });
+    return updated.length === 1;
+  });
 }
 
 export async function getSchedulerLaneTarget(input: {

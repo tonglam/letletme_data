@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Worker, Job, QueueEvents } from 'bullmq';
 
-import { seasonRefFromJobData } from '../domain/season-scoped-job';
-import type { DbOrTransaction } from '../db/singleton';
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
 import {
   LIVE_JOBS,
@@ -65,6 +63,7 @@ import {
   failSchedulerLane,
   fenceSchedulerLaneTarget,
   getSchedulerLane,
+  retireSchedulerLaneForStaleSeason,
   startSchedulerLane,
 } from '../repositories/scheduler-lanes';
 import {
@@ -76,6 +75,7 @@ import {
   LIVE_SNAPSHOT_DB_CHECKPOINT_WRITE_BUDGET_MS,
   LIVE_SNAPSHOT_DB_READ_BUDGET_MS,
 } from '../domain/data-contracts';
+import { ConflictError } from '../utils/errors';
 
 function scheduledDueAtMsForLiveObligation(obligation: {
   dueAt: Date;
@@ -94,34 +94,6 @@ function scheduledDueAtMsForLiveObligation(obligation: {
     }
   }
   return obligation.dueAt.getTime();
-}
-
-/**
- * Scheduler-owned live lanes may be recovered after an FPL season rollover.
- * The lane scope is the durable authority for that exception; ordinary and
- * manual live jobs must still pass the current-season fence.
- */
-async function requireLiveSnapshotSeason(
-  data: LiveDataJobData,
-  laneScopeKey: string | undefined,
-  db?: DbOrTransaction,
-) {
-  if (laneScopeKey === undefined) return requireCurrentSeasonForJob(data, db);
-
-  const requested = seasonRefFromJobData(data);
-  if (!Number.isSafeInteger(data.eventId) || data.eventId <= 0) {
-    throw new Error('Fenced live snapshot job has an invalid event ID');
-  }
-  const expectedScopeKey = `${requested.seasonCode}:event:${data.eventId}`;
-  if (laneScopeKey !== expectedScopeKey) {
-    throw new Error(
-      `Fenced live snapshot job scope ${laneScopeKey} does not match ${expectedScopeKey}`,
-    );
-  }
-
-  // Require the season row to exist, but do not require it to remain current:
-  // this is the explicit, lane-fenced historical recovery path.
-  return createSeasonRepository(db).requireByCode(requested.seasonCode);
 }
 
 /**
@@ -277,11 +249,42 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
   ) {
     return { skipped: true, staleSchedulerGeneration: true };
   }
-  const season = await requireLiveSnapshotSeason(
-    job.data,
-    job.name === LIVE_JOBS.LIVE_SNAPSHOT ? liveLaneScopeKey : undefined,
-    databaseBudget?.readDb,
-  );
+  let season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>;
+  try {
+    season = await requireCurrentSeasonForJob(job.data, databaseBudget?.readDb);
+  } catch (error) {
+    // A scheduler lane can survive a season rollover while its Bull record is
+    // still waiting. Terminalize that exact durable lane before the provider
+    // stage; allowing the old-season FPL request would read current event IDs
+    // under a historical publication scope. The scheduler performs the same
+    // reconciliation on its next pass, while this worker closes the race when
+    // it starts first.
+    if (
+      job.name === LIVE_JOBS.LIVE_SNAPSHOT &&
+      laneIdentity &&
+      liveLaneScopeKey === `${job.data.seasonCode}:event:${job.data.eventId}` &&
+      error instanceof ConflictError &&
+      error.code === 'STALE_JOB_SEASON'
+    ) {
+      const currentSeason = await createSeasonRepository(databaseBudget?.readDb).findCurrent();
+      await retireSchedulerLaneForStaleSeason({
+        laneId: laneIdentity.laneId,
+        currentSeasonCode: currentSeason.seasonCode,
+        db: databaseBudget?.controlDb,
+      });
+      logInfo('Skipped stale-season live snapshot lane before provider execution', {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: job.id,
+        laneId: laneIdentity.laneId,
+        laneGeneration: laneIdentity.dispatchGeneration,
+        staleSeason: job.data.seasonCode,
+        currentSeason: currentSeason.seasonCode,
+      });
+      return { skipped: true, staleSchedulerGeneration: true };
+    }
+    throw error;
+  }
   const { eventId, source } = job.data;
   const context = {
     jobType: 'queue' as const,
