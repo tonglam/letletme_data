@@ -600,6 +600,16 @@ export async function reserveSchedulerObligation(input: {
         .returning();
       if (refreshed[0]) return mapRow(refreshed[0]);
     }
+    // Another scheduler replica may have won the compare-and-set after this
+    // caller read `row`. Return the committed row rather than stale lifecycle
+    // evidence that could be dispatched by the caller.
+    const current = await db
+      .select()
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, row.obligationId))
+      .limit(1);
+    if (!current[0]) throw new Error('Scheduler obligation disappeared during live refresh');
+    return mapRow(current[0]);
   }
   const eventPriority =
     input.definition.name === 'my-fpl-finalization' ? myFplEventPriorityFromPlan(input.plan) : null;

@@ -21,6 +21,7 @@ import {
   queueMonitorEventRetentionMs,
   rollbackQueueSampleArrivals,
   resolveJobDispatchBudgetMs,
+  resolveQueueArrivalContribution,
   resolveQueueDispatchBudgetMs,
   resolveQueueTimingMetrics,
   shouldPersistQueueHealthWindow,
@@ -47,7 +48,10 @@ import {
   freshnessRepairLaneForWindow,
   selectFreshnessRecoveryRevision,
 } from '../../src/services/data-governance.service';
-import { shouldCreateFreshnessWindowForObligation } from '../../src/scheduler/scheduler.service';
+import {
+  liveSnapshotScopeIdentity,
+  shouldCreateFreshnessWindowForObligation,
+} from '../../src/scheduler/scheduler.service';
 
 describe('GW queue and data governance primitives', () => {
   test('uses one late-entry denominator rule across GW1-GW4', () => {
@@ -264,6 +268,27 @@ describe('GW queue and data governance primitives', () => {
     expect(rollbackQueueSampleArrivals(8, 3, false)).toBe(5);
     expect(rollbackQueueSampleArrivals(8, 3, true)).toBe(8);
     expect(rollbackQueueSampleArrivals(8, 0, false)).toBe(8);
+  });
+
+  test('prefers event arrivals and marks count deltas as retryable samples', () => {
+    const previousSnapshot = { waiting: 2, active: 1 };
+    const snapshot = { waiting: 5, active: 2 };
+    expect(
+      resolveQueueArrivalContribution({ previousSnapshot, snapshot, eventArrivals: 0 }),
+    ).toEqual({ arrivals: 4, sampledArrivals: 4 });
+    expect(
+      resolveQueueArrivalContribution({ previousSnapshot, snapshot, eventArrivals: 2 }),
+    ).toEqual({ arrivals: 2, sampledArrivals: 0 });
+  });
+
+  test('validates the persisted live-snapshot season and event scope', () => {
+    expect(liveSnapshotScopeIdentity('2526:event:9')).toEqual({ seasonCode: '2526', eventId: 9 });
+    expect(() => liveSnapshotScopeIdentity('2527:event:9')).toThrow(
+      'Invalid persisted live-snapshot lane scope',
+    );
+    expect(() => liveSnapshotScopeIdentity('2526:event:0')).toThrow(
+      'Invalid persisted live-snapshot lane scope',
+    );
   });
 
   test('distinguishes disabled optional monitors from missing observations', () => {
