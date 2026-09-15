@@ -764,23 +764,26 @@ export const clientSignalV2WindowsInOps = ops.table(
   },
   (table) => [
     // Migration 0103 uses NULLS NOT DISTINCT so null error dimensions still
-    // form one idempotent identity. Drizzle cannot express that index option.
-    uniqueIndex('client_signal_v2_windows_identity').on(
-      table.windowStart,
-      table.client,
-      table.clientRelease,
-      table.ingestRelease,
-      table.surface,
-      table.metric,
-      table.deviceGroup,
-      table.sampleSource,
-      table.result,
-      table.reasonCode,
-      table.measurementKind,
-      table.errorClass,
-      table.fingerprint,
-      table.bucket,
-    ),
+    // form one idempotent identity. Keep the table constraint and migration
+    // catalog in the same shape so schema declaration parity can verify it.
+    unique('client_signal_v2_windows_identity')
+      .on(
+        table.windowStart,
+        table.client,
+        table.clientRelease,
+        table.ingestRelease,
+        table.surface,
+        table.metric,
+        table.deviceGroup,
+        table.sampleSource,
+        table.result,
+        table.reasonCode,
+        table.measurementKind,
+        table.errorClass,
+        table.fingerprint,
+        table.bucket,
+      )
+      .nullsNotDistinct(),
     index('client_signal_v2_windows_client_metric_time_idx').on(
       table.client,
       table.metric,

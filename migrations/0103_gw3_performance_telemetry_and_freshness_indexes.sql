@@ -74,17 +74,14 @@ CREATE TABLE ops.client_signal_v2_windows (
   CONSTRAINT client_signal_v2_windows_error_dimensions_check
     CHECK (metric = 'runtime_error' OR (error_class IS NULL AND fingerprint IS NULL)),
   CONSTRAINT client_signal_v2_windows_error_time_check
-    CHECK (first_observed_at <= last_observed_at)
-);
-
--- NULLS NOT DISTINCT keeps samples without error dimensions in one row and
--- makes retries idempotent without inventing a sentinel dimension.
-CREATE UNIQUE INDEX client_signal_v2_windows_identity
-  ON ops.client_signal_v2_windows (
+    CHECK (first_observed_at <= last_observed_at),
+  CONSTRAINT client_signal_v2_windows_identity UNIQUE NULLS NOT DISTINCT (
     window_start, client, client_release, ingest_release, surface, metric,
     device_group, sample_source, result, reason_code, measurement_kind,
     error_class, fingerprint, bucket
-  ) NULLS NOT DISTINCT;
+  )
+);
+
 CREATE INDEX client_signal_v2_windows_client_metric_time_idx
   ON ops.client_signal_v2_windows (client, metric, window_start DESC NULLS LAST);
 CREATE INDEX client_signal_v2_windows_retention_idx
