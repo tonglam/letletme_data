@@ -749,13 +749,34 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       });
     }
     if (!eventBaselineLoaded) {
+      // QueueEvents remains subscribed while the durable baseline is read.
+      // Rotate the events already observed before that read so they cannot be
+      // replayed on top of rows the baseline already contains. Events that
+      // arrive after this capture stay in the accumulator and are folded by
+      // the first poll after the baseline succeeds.
+      const startupEvents = eventAccumulator.capture(pollStartedAtMs);
       try {
         const persisted = await loadQueueHealthEventTotals(
           queueName,
           pollStartedAtMs,
           eventRetentionMs,
         );
-        const discardedStartupEvents = eventAccumulator.clear();
+        let discardedStartupEvents = 0;
+        const uncoveredStartupEvents = new Map<number, QueueEventCounters>();
+        for (const [bucketStart, counters] of startupEvents) {
+          if (persisted.has(bucketStart)) {
+            discardedStartupEvents += totalQueueEventCounters(counters);
+          } else {
+            // An event-only retry cannot create a missing point-in-time row,
+            // so keep observations whose bucket has no durable baseline. The
+            // normal retention path will keep retrying them without inventing
+            // a synthetic queue sample.
+            uncoveredStartupEvents.set(bucketStart, counters);
+          }
+        }
+        if (uncoveredStartupEvents.size > 0) {
+          eventAccumulator.restore(uncoveredStartupEvents);
+        }
         for (const [bucketStart, counters] of persisted) {
           acknowledgedEventTotals.set(bucketStart, counters);
         }
@@ -771,9 +792,17 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           queue: queueName,
           windows: persisted.size,
           discardedStartupEvents,
+          retainedStartupEvents: [...uncoveredStartupEvents.values()].reduce(
+            (total, counters) => total + totalQueueEventCounters(counters),
+            0,
+          ),
           retentionMs: eventRetentionMs,
         });
       } catch (error) {
+        // The baseline is still unknown. Put the rotated batch back beside
+        // events received while the read was in flight so the next attempt
+        // cannot silently lose observations.
+        eventAccumulator.restore(startupEvents);
         // Do not acknowledge QueueEvents while the durable baseline is
         // unknown. Redis telemetry can still be sampled, but the event batch
         // must be retried after the database becomes readable.
