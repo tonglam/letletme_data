@@ -19,6 +19,7 @@ import {
   QueueEventAccumulator,
   QUEUE_MONITOR_EVENT_RETENTION_MS,
   queueMonitorEventRetentionMs,
+  retainQueueEventsAfterWatermarks,
   rollbackQueueSampleArrivals,
   resolveJobDispatchBudgetMs,
   resolveQueueArrivalContribution,
@@ -270,6 +271,31 @@ describe('GW queue and data governance primitives', () => {
     });
     expect(startup.records.get(0)).toEqual([{ kind: 'arrivals', receivedAtMs: 1_000 }]);
     expect(accumulator.pendingCount()).toBe(1);
+  });
+
+  test('drops startup events only when a durable receive watermark covers them', () => {
+    const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
+    accumulator.record('arrivals', 1_000);
+    accumulator.record('failures', 2_000);
+    const capture = accumulator.captureWithRecords();
+
+    const partiallyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, 1_500]]));
+    expect(partiallyCovered.discarded).toBe(1);
+    expect(partiallyCovered.capture.counters.get(0)).toEqual({
+      arrivals: 0,
+      completions: 0,
+      failures: 1,
+      stalled: 0,
+    });
+
+    const unproven = retainQueueEventsAfterWatermarks(capture, new Map());
+    expect(unproven.discarded).toBe(0);
+    expect(unproven.capture.counters.get(0)).toEqual({
+      arrivals: 1,
+      completions: 0,
+      failures: 1,
+      stalled: 0,
+    });
   });
 
   test('retains events received after the durable baseline statement snapshot', () => {

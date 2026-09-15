@@ -238,19 +238,10 @@ type QueueEventRecord = {
   receivedAtMs: number;
 };
 
-type QueueEventCapture = Readonly<{
+export type QueueEventCapture = Readonly<{
   counters: Map<number, QueueEventCounters>;
   records: Map<number, readonly QueueEventRecord[]>;
 }>;
-
-function latestQueueEventReceivedAtMs(records: readonly QueueEventRecord[]): number | null {
-  let latest: number | null = null;
-  for (const record of records) {
-    if (!Number.isFinite(record.receivedAtMs)) continue;
-    latest = latest === null ? record.receivedAtMs : Math.max(latest, record.receivedAtMs);
-  }
-  return latest;
-}
 
 function emptyQueueEventCounters(): QueueEventCounters {
   return { arrivals: 0, completions: 0, failures: 0, stalled: 0 };
@@ -274,6 +265,80 @@ function addQueueEventCounters(
 
 function totalQueueEventCounters(counters: QueueEventCounters): number {
   return counters.arrivals + counters.completions + counters.failures + counters.stalled;
+}
+
+function queueEventCountersFromRecords(records: readonly QueueEventRecord[]): QueueEventCounters {
+  const counters = emptyQueueEventCounters();
+  for (const record of records) counters[record.kind] += 1;
+  return counters;
+}
+
+function queueEventCaptureWatermark(
+  capture: QueueEventCapture,
+  bucketStart: number,
+): number | undefined {
+  const counters = capture.counters.get(bucketStart);
+  const records = capture.records.get(bucketStart);
+  if (!counters || !records) return undefined;
+  const indexedCounters = queueEventCountersFromRecords(records);
+  for (const kind of Object.keys(counters) as (keyof QueueEventCounters)[]) {
+    if (indexedCounters[kind] !== counters[kind]) return undefined;
+  }
+  let latest: number | undefined;
+  for (const record of records) {
+    if (!Number.isSafeInteger(record.receivedAtMs) || record.receivedAtMs < 0) return undefined;
+    latest = latest === undefined ? record.receivedAtMs : Math.max(latest, record.receivedAtMs);
+  }
+  return latest;
+}
+
+/**
+ * Retain only events that are not covered by a durable receive-time watermark.
+ * Missing or incomplete per-event records are deliberately retained because
+ * aggregate counters alone cannot prove which observations a row contains.
+ */
+export function retainQueueEventsAfterWatermarks(
+  capture: QueueEventCapture,
+  watermarks: ReadonlyMap<number, number>,
+): Readonly<{ capture: QueueEventCapture; discarded: number }> {
+  const counters = new Map<number, QueueEventCounters>();
+  const records = new Map<number, readonly QueueEventRecord[]>();
+  let discarded = 0;
+  for (const [bucketStart, bucketCounters] of capture.counters) {
+    const watermark = watermarks.get(bucketStart);
+    const bucketRecords = capture.records.get(bucketStart) ?? [];
+    if (watermark === undefined || !Number.isSafeInteger(watermark) || watermark < 0) {
+      counters.set(bucketStart, { ...bucketCounters });
+      if (bucketRecords.length > 0) records.set(bucketStart, [...bucketRecords]);
+      continue;
+    }
+
+    const indexedCounters = emptyQueueEventCounters();
+    const retainedCounters = emptyQueueEventCounters();
+    const retainedRecords: QueueEventRecord[] = [];
+    for (const record of bucketRecords) {
+      indexedCounters[record.kind] += 1;
+      if (Number.isSafeInteger(record.receivedAtMs) && record.receivedAtMs >= 0) {
+        if (record.receivedAtMs <= watermark) {
+          discarded += 1;
+          continue;
+        }
+      }
+      retainedRecords.push(record);
+      retainedCounters[record.kind] += 1;
+    }
+    for (const kind of Object.keys(bucketCounters) as (keyof QueueEventCounters)[]) {
+      // Restored aggregate counters have no receive-time identity. Retain them
+      // conservatively even when the row has a durable watermark.
+      const unknownCount = Math.max(0, bucketCounters[kind] - indexedCounters[kind]);
+      retainedCounters[kind] += unknownCount;
+    }
+    if (totalQueueEventCounters(retainedCounters) > 0) {
+      counters.set(bucketStart, retainedCounters);
+      if (retainedRecords.length > 0) records.set(bucketStart, retainedRecords);
+    }
+  }
+  return { capture: { counters, records }, discarded };
 }
 
 /**
@@ -449,7 +514,17 @@ export function resolveQueueArrivalContribution(input: {
 type QueueHealthPersistenceSnapshot = QueueHealthSnapshot & {
   /** Historical retries carry event counters only; keep the original sample fields intact. */
   readonly eventCountersOnly?: boolean;
+  /** Latest receive time represented by the persisted event counters. */
+  readonly eventWatermarkAtMs?: number;
 };
+
+function queueHealthSnapshotForRedis(
+  snapshot: QueueHealthPersistenceSnapshot,
+): QueueHealthSnapshot {
+  const redisSnapshot = { ...snapshot };
+  delete redisSnapshot.eventWatermarkAtMs;
+  return redisSnapshot;
+}
 
 /**
  * Persist changes that affect queue control or incident reconstruction, not
@@ -494,7 +569,7 @@ export function shouldPersistQueueHealthWindow(input: {
   );
 }
 
-function queueHealthWindowValues(snapshot: QueueHealthSnapshot, intervalMs: number) {
+function queueHealthWindowValues(snapshot: QueueHealthPersistenceSnapshot, intervalMs: number) {
   const window = windowStart(Date.parse(snapshot.observedAt), intervalMs);
   return {
     windowStart: window,
@@ -536,6 +611,9 @@ function queueHealthWindowValues(snapshot: QueueHealthSnapshot, intervalMs: numb
         deadlineExceeded: snapshot.admissionDeadlineExceeded ?? 0,
         storeUnavailable: snapshot.admissionStoreUnavailable ?? 0,
       },
+      ...(snapshot.eventWatermarkAtMs === undefined
+        ? {}
+        : { eventWatermarkAtMs: snapshot.eventWatermarkAtMs }),
     },
   };
 }
@@ -573,7 +651,35 @@ function queueHealthWindowConflictSet() {
     admissionMode: sql`excluded.admission_mode`,
     consumerHeartbeatAt: sql`excluded.consumer_heartbeat_at`,
     releaseSha: sql`excluded.release_sha`,
-    evidence: sql`excluded.evidence`,
+    // Preserve a receive-time watermark when a stable snapshot is persisted
+    // without a newly captured event batch, and never let a concurrent
+    // monitor regress the durable proof.
+    evidence: sql`
+      CASE
+        WHEN excluded.evidence ? 'eventWatermarkAtMs' THEN
+          jsonb_set(
+            ${queueHealthWindowsInOps.evidence} || excluded.evidence,
+            '{eventWatermarkAtMs}',
+            to_jsonb(greatest(
+              coalesce(
+                CASE
+                  WHEN ${queueHealthWindowsInOps.evidence}->>'eventWatermarkAtMs' ~ '^[0-9]+$'
+                    THEN (${queueHealthWindowsInOps.evidence}->>'eventWatermarkAtMs')::bigint
+                END,
+                0::bigint
+              ),
+              coalesce(
+                CASE
+                  WHEN excluded.evidence->>'eventWatermarkAtMs' ~ '^[0-9]+$'
+                    THEN (excluded.evidence->>'eventWatermarkAtMs')::bigint
+                END,
+                0::bigint
+              )
+            )),
+            true
+          )
+        ELSE ${queueHealthWindowsInOps.evidence} || excluded.evidence
+      END`,
     updatedAt: sql`excluded.updated_at`,
   };
 }
@@ -583,6 +689,7 @@ function queueHealthSnapshotForEventWindow(
   windowStartMs: number,
   intervalMs: number,
   counters: QueueEventCounters,
+  eventWatermarkAtMs?: number,
 ): QueueHealthPersistenceSnapshot {
   const windowEndMs = windowStartMs + Math.max(1, intervalMs) - 1;
   const observedAtMs = Math.max(windowStartMs, Math.min(Date.now(), windowEndMs));
@@ -594,10 +701,14 @@ function queueHealthSnapshotForEventWindow(
     failures: counters.failures,
     stalled: counters.stalled,
     eventCountersOnly: true,
+    eventWatermarkAtMs,
   };
 }
 
-function queueHealthEventWindowValues(snapshot: QueueHealthSnapshot, intervalMs: number) {
+function queueHealthEventWindowValues(
+  snapshot: QueueHealthPersistenceSnapshot,
+  intervalMs: number,
+) {
   const window = windowStart(Date.parse(snapshot.observedAt), intervalMs);
   return {
     windowStart: window,
@@ -606,6 +717,7 @@ function queueHealthEventWindowValues(snapshot: QueueHealthSnapshot, intervalMs:
     completions: snapshot.completions,
     failures: snapshot.failures,
     stalled: snapshot.stalled,
+    eventWatermarkAtMs: snapshot.eventWatermarkAtMs ?? null,
   };
 }
 
@@ -616,20 +728,19 @@ type PersistedQueueEventTotals = {
   completions: number;
   failures: number;
   stalled: number;
-  updatedAt?: Date | string;
+  evidence?: unknown;
 };
 
 type PersistWindowsResult = {
   ok: boolean;
   eventTotals: Map<number, QueueEventCounters>;
+  eventWatermarks: Map<number, number>;
 };
 
 type LoadedQueueEventTotals = {
   totals: Map<number, QueueEventCounters>;
-  /** Last durable write for each receive-time bucket. */
-  updatedAtByBucket: Map<number, number>;
-  /** PostgreSQL statement snapshot used to split overlapping QueueEvents. */
-  snapshotAtMs: number;
+  /** Last receive time proven durable for each event bucket. */
+  eventWatermarks: Map<number, number>;
 };
 
 function queueEventWindowStartMs(value: Date | string): number {
@@ -647,6 +758,13 @@ function queueEventTotalsFromRow(row: PersistedQueueEventTotals): QueueEventCoun
   };
 }
 
+function queueEventWatermarkFromEvidence(evidence: unknown): number | undefined {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return undefined;
+  const raw = (evidence as Record<string, unknown>).eventWatermarkAtMs;
+  const watermark = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  return Number.isSafeInteger(watermark) && watermark >= 0 ? watermark : undefined;
+}
+
 async function loadQueueHealthEventTotals(
   queueName: string,
   nowMs: number,
@@ -660,11 +778,7 @@ async function loadQueueHealthEventTotals(
       completions: queueHealthWindowsInOps.completions,
       failures: queueHealthWindowsInOps.failures,
       stalled: queueHealthWindowsInOps.stalled,
-      updatedAt: queueHealthWindowsInOps.updatedAt,
-      // This expression is evaluated at the start of the same SELECT
-      // statement whose rows form the restart baseline. Events received after
-      // it are therefore not represented by the returned durable totals.
-      baselineAt: sql<Date>`statement_timestamp()`,
+      evidence: queueHealthWindowsInOps.evidence,
     })
     .from(queueHealthWindowsInOps)
     .where(
@@ -685,14 +799,14 @@ async function loadQueueHealthEventTotals(
         },
       ]),
     ),
-    updatedAtByBucket: new Map(
-      rows.map((row) => [queueEventWindowStartMs(row.windowStart), row.updatedAt.getTime()]),
+    eventWatermarks: new Map(
+      rows.flatMap((row) => {
+        const watermark = queueEventWatermarkFromEvidence(row.evidence);
+        return watermark === undefined
+          ? []
+          : [[queueEventWindowStartMs(row.windowStart), watermark] as const];
+      }),
     ),
-    // With no retained rows there is no durable counter that can overlap the
-    // in-memory events, so retain the whole accumulator rather than inventing
-    // a cutoff that could discard the first post-restart burst.
-    snapshotAtMs:
-      rows.length > 0 ? queueEventWindowStartMs(rows[0].baselineAt) : Number.NEGATIVE_INFINITY,
   };
 }
 
@@ -701,7 +815,8 @@ async function persistWindows(
   intervalMs: number,
 ): Promise<PersistWindowsResult> {
   const eventTotals = new Map<number, QueueEventCounters>();
-  if (snapshots.length === 0) return { ok: true, eventTotals };
+  const eventWatermarks = new Map<number, number>();
+  if (snapshots.length === 0) return { ok: true, eventTotals, eventWatermarks };
   try {
     const db = await getDatabaseHandleWithBudget(5_000);
     const currentSnapshots = snapshots.filter((snapshot) => !snapshot.eventCountersOnly);
@@ -720,9 +835,13 @@ async function persistWindows(
           completions: queueHealthWindowsInOps.completions,
           failures: queueHealthWindowsInOps.failures,
           stalled: queueHealthWindowsInOps.stalled,
+          evidence: queueHealthWindowsInOps.evidence,
         });
       for (const row of rows as PersistedQueueEventTotals[]) {
-        eventTotals.set(queueEventWindowStartMs(row.windowStart), queueEventTotalsFromRow(row));
+        const bucketStart = queueEventWindowStartMs(row.windowStart);
+        eventTotals.set(bucketStart, queueEventTotalsFromRow(row));
+        const watermark = queueEventWatermarkFromEvidence(row.evidence);
+        if (watermark !== undefined) eventWatermarks.set(bucketStart, watermark);
       }
     }
     if (historicalSnapshots.length > 0) {
@@ -744,6 +863,7 @@ async function persistWindows(
             completions: values.completions,
             failures: values.failures,
             stalled: values.stalled,
+            event_watermark_at_ms: values.eventWatermarkAtMs,
           };
         }),
       );
@@ -753,6 +873,24 @@ async function persistWindows(
             completions = greatest(health.completions, incoming.completions),
             failures = greatest(health.failures, incoming.failures),
             stalled = greatest(health.stalled, incoming.stalled),
+            evidence = CASE
+              WHEN incoming.event_watermark_at_ms IS NULL THEN health.evidence
+              ELSE jsonb_set(
+                health.evidence,
+                '{eventWatermarkAtMs}',
+                to_jsonb(greatest(
+                  coalesce(
+                    CASE
+                      WHEN health.evidence->>'eventWatermarkAtMs' ~ '^[0-9]+$'
+                        THEN (health.evidence->>'eventWatermarkAtMs')::bigint
+                    END,
+                    0::bigint
+                  ),
+                  incoming.event_watermark_at_ms
+                )),
+                true
+              )
+            END,
             updated_at = clock_timestamp()
         FROM jsonb_to_recordset(${payload}::jsonb) AS incoming(
           window_start timestamptz,
@@ -760,7 +898,8 @@ async function persistWindows(
           arrivals integer,
           completions integer,
           failures integer,
-          stalled integer
+          stalled integer,
+          event_watermark_at_ms bigint
         )
         WHERE health.window_start = incoming.window_start
           AND health.queue_name = incoming.queue_name
@@ -768,13 +907,17 @@ async function persistWindows(
                   health.arrivals AS arrivals,
                   health.completions AS completions,
                   health.failures AS failures,
-                  health.stalled AS stalled
+                  health.stalled AS stalled,
+                  health.evidence AS evidence
       `)) as unknown as PersistedQueueEventTotals[];
       for (const row of rows) {
-        eventTotals.set(queueEventWindowStartMs(row.windowStart), queueEventTotalsFromRow(row));
+        const bucketStart = queueEventWindowStartMs(row.windowStart);
+        eventTotals.set(bucketStart, queueEventTotalsFromRow(row));
+        const watermark = queueEventWatermarkFromEvidence(row.evidence);
+        if (watermark !== undefined) eventWatermarks.set(bucketStart, watermark);
       }
     }
-    return { ok: true, eventTotals };
+    return { ok: true, eventTotals, eventWatermarks };
   } catch (error) {
     // Queue telemetry is an observability side channel. A migration or a
     // transient PG outage must not stop consumers from draining work.
@@ -782,7 +925,7 @@ async function persistWindows(
       queue: snapshots[0]?.queueName,
       windows: snapshots.length,
     });
-    return { ok: false, eventTotals };
+    return { ok: false, eventTotals, eventWatermarks };
   }
 }
 
@@ -812,6 +955,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
   // only owns unconfirmed batches; this map supplies the absolute value for an
   // idempotent PostgreSQL upsert when a later poll confirms another batch.
   const acknowledgedEventTotals = new Map<number, QueueEventCounters>();
+  // A row is safe to use as a restart baseline only through the receive-time
+  // watermark persisted alongside its cumulative event counters.
+  const acknowledgedEventWatermarks = new Map<number, number>();
   let started = false;
   let stopped = false;
   let pollInFlight: Promise<void> | null = null;
@@ -873,7 +1019,6 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       const startupAccumulator = eventAccumulator;
       eventAccumulator = new QueueEventAccumulator(windowIntervalMs, eventRetentionMs);
       const startupCapture = startupAccumulator.captureWithRecords(pollStartedAtMs);
-      const startupEvents = startupCapture.counters;
       try {
         const loaded = await loadQueueHealthEventTotals(
           queueName,
@@ -881,42 +1026,25 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           eventRetentionMs,
         );
         const persisted = loaded.totals;
-        let discardedStartupEvents = 0;
-        const uncoveredStartupEvents = new Map<number, QueueEventCounters>();
-        const uncoveredStartupRecords = new Map<number, readonly QueueEventRecord[]>();
-        for (const [bucketStart, counters] of startupEvents) {
-          const latestReceivedAtMs = latestQueueEventReceivedAtMs(
-            startupCapture.records.get(bucketStart) ?? [],
-          );
-          const durableUpdatedAtMs = loaded.updatedAtByBucket.get(bucketStart);
-          const provenCovered =
-            persisted.has(bucketStart) &&
-            latestReceivedAtMs !== null &&
-            durableUpdatedAtMs !== undefined &&
-            durableUpdatedAtMs >= latestReceivedAtMs;
-          if (provenCovered) {
-            discardedStartupEvents += totalQueueEventCounters(counters);
-          } else {
-            // A row alone is not proof that it contains this process's
-            // pre-read events. Keep the batch unless the row's durable write
-            // is newer than the latest receive time represented by it. This
-            // preserves an event if the outgoing leader dies before its write.
-            uncoveredStartupEvents.set(bucketStart, counters);
-            uncoveredStartupRecords.set(bucketStart, startupCapture.records.get(bucketStart) ?? []);
-          }
-        }
-        const discardedEventsOverlappingBaseline = eventAccumulator.discardReceivedAtOrBefore(
-          loaded.snapshotAtMs,
-          new Set(persisted.keys()),
+        // Discard only event records explicitly covered by the durable
+        // receive-time watermark. A row's existence or updated_at cannot prove
+        // that this process's captured events are represented in its totals.
+        const retainedStartup = retainQueueEventsAfterWatermarks(
+          startupCapture,
+          loaded.eventWatermarks,
         );
-        if (uncoveredStartupEvents.size > 0) {
-          eventAccumulator.restoreWithRecords({
-            counters: uncoveredStartupEvents,
-            records: uncoveredStartupRecords,
-          });
-        }
+        const inFlightCapture = eventAccumulator.captureWithRecords();
+        const retainedInFlight = retainQueueEventsAfterWatermarks(
+          inFlightCapture,
+          loaded.eventWatermarks,
+        );
+        eventAccumulator.restoreWithRecords(retainedStartup.capture);
+        eventAccumulator.restoreWithRecords(retainedInFlight.capture);
         for (const [bucketStart, counters] of persisted) {
           acknowledgedEventTotals.set(bucketStart, counters);
+        }
+        for (const [bucketStart, watermark] of loaded.eventWatermarks) {
+          acknowledgedEventWatermarks.set(bucketStart, watermark);
         }
         const current = persisted.get(eventWindowStartMs);
         if (current) {
@@ -929,9 +1057,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         logDebug('Queue monitor event baseline loaded', {
           queue: queueName,
           windows: persisted.size,
-          discardedStartupEvents,
-          discardedEventsOverlappingBaseline,
-          retainedStartupEvents: [...uncoveredStartupEvents.values()].reduce(
+          discardedStartupEvents: retainedStartup.discarded,
+          discardedEventsOverlappingBaseline: retainedInFlight.discarded,
+          retainedStartupEvents: [...retainedStartup.capture.counters.values()].reduce(
             (total, counters) => total + totalQueueEventCounters(counters),
             0,
           ),
@@ -951,7 +1079,20 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         });
       }
     }
-    const capturedEvents = eventAccumulator.capture();
+    const capturedCapture = eventAccumulator.captureWithRecords();
+    const capturedEvents = capturedCapture.counters;
+    const capturedEventWatermarks = new Map<number, number>();
+    for (const bucketStart of capturedEvents.keys()) {
+      const watermark = queueEventCaptureWatermark(capturedCapture, bucketStart);
+      if (watermark === undefined) continue;
+      const acknowledgedWatermark = acknowledgedEventWatermarks.get(bucketStart);
+      capturedEventWatermarks.set(
+        bucketStart,
+        acknowledgedWatermark === undefined
+          ? watermark
+          : Math.max(acknowledgedWatermark, watermark),
+      );
+    }
     const capturedEventCount = [...capturedEvents.values()].reduce(
       (total, counters) => total + totalQueueEventCounters(counters),
       0,
@@ -1022,7 +1163,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
             failedDelta: (counts.failed ?? 0) - (lastCounts.failed ?? 0),
           }
         : {};
-      let withEvents: QueueHealthSnapshot = {
+      let withEvents: QueueHealthPersistenceSnapshot = {
         ...snapshot,
         arrivals: 0,
         completions: 0,
@@ -1056,6 +1197,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         );
       }
       capturedForWindowForRetry = capturedForWindow;
+      const currentEventWatermark =
+        capturedEventWatermarks.get(eventWindowStartMs) ??
+        acknowledgedEventWatermarks.get(eventWindowStartMs);
       const capturedOutsideWindow = [...capturedEventTotals.entries()].filter(
         ([bucketStart]) => bucketStart !== eventWindowStartMs,
       );
@@ -1078,6 +1222,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       windowStalled += capturedForWindow.stalled;
       withEvents = {
         ...withEvents,
+        ...(currentEventWatermark === undefined
+          ? {}
+          : { eventWatermarkAtMs: currentEventWatermark }),
         arrivals: windowArrivals,
         completions: windowCompletions,
         failures: windowFailures,
@@ -1112,10 +1259,16 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         }),
       };
       const outsideWindowSnapshots = capturedOutsideWindow.map(([bucketStart, counters]) =>
-        queueHealthSnapshotForEventWindow(withEvents, bucketStart, windowIntervalMs, counters),
+        queueHealthSnapshotForEventWindow(
+          withEvents,
+          bucketStart,
+          windowIntervalMs,
+          counters,
+          capturedEventWatermarks.get(bucketStart) ?? acknowledgedEventWatermarks.get(bucketStart),
+        ),
       );
       if (stopped) {
-        eventAccumulator.restore(capturedEvents);
+        eventAccumulator.restoreWithRecords(capturedCapture);
         capturedEventsRestored = true;
         return;
       }
@@ -1127,7 +1280,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         backlogClass: withEvents.backlogClass,
       });
       try {
-        await writeQueueHealthSnapshot(withEvents);
+        await writeQueueHealthSnapshot(queueHealthSnapshotForRedis(withEvents));
         snapshotWritten = true;
       } catch (error) {
         // PostgreSQL history must not claim a Redis serving snapshot that was
@@ -1183,7 +1336,11 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           const canPersistEvents = eventBaselineLoaded || capturedEventTotals.size === 0;
           const persisted = canPersistEvents
             ? await persistWindows(snapshotsToPersist, windowIntervalMs)
-            : { ok: false, eventTotals: new Map<number, QueueEventCounters>() };
+            : {
+                ok: false,
+                eventTotals: new Map<number, QueueEventCounters>(),
+                eventWatermarks: new Map<number, number>(),
+              };
           databasePersisted = persisted.ok;
           logDebug('Queue monitor database window persistence finished', {
             queue: queueName,
@@ -1202,6 +1359,9 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
             if (persistCurrentWindow) {
               lastPersistedFingerprint = queueHealthPersistenceFingerprint(withEvents);
               lastPersistedAtMs = Date.parse(withEvents.observedAt);
+            }
+            for (const [bucketStart, watermark] of persisted.eventWatermarks) {
+              acknowledgedEventWatermarks.set(bucketStart, watermark);
             }
             for (const [bucketStart] of capturedEventTotals) {
               // A batched upsert may contain only an outside receive-time
@@ -1225,6 +1385,11 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
               windowStalled = actualCurrent.stalled;
               withEvents = {
                 ...withEvents,
+                ...(persisted.eventWatermarks.has(eventWindowStartMs)
+                  ? {
+                      eventWatermarkAtMs: persisted.eventWatermarks.get(eventWindowStartMs),
+                    }
+                  : {}),
                 arrivals: windowArrivals,
                 completions: windowCompletions,
                 failures: windowFailures,
@@ -1283,7 +1448,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         }
       }
     } catch (error) {
-      if (!snapshotWritten) eventAccumulator.restore(capturedEvents);
+      if (!snapshotWritten) eventAccumulator.restoreWithRecords(capturedCapture);
       capturedEventsRestored = !snapshotWritten;
       logError('Queue job count fetch failed', error, { queue: queueName });
     } finally {
@@ -1322,13 +1487,19 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       }
       if (!capturedEventsRestored && capturedEventCount > 0) {
         const unconfirmed = new Map<number, QueueEventCounters>();
+        const unconfirmedRecords = new Map<number, readonly QueueEventRecord[]>();
         for (const [bucketStart, counters] of capturedEvents) {
           if (!confirmedCapturedWindows.has(bucketStart)) {
             unconfirmed.set(bucketStart, { ...counters });
+            const records = capturedCapture.records.get(bucketStart);
+            if (records && records.length > 0) unconfirmedRecords.set(bucketStart, records);
           }
         }
         if (unconfirmed.size > 0) {
-          eventAccumulator.restore(unconfirmed);
+          eventAccumulator.restoreWithRecords({
+            counters: unconfirmed,
+            records: unconfirmedRecords,
+          });
           capturedEventsRestored = true;
         }
       }
