@@ -2131,12 +2131,7 @@ export async function recoverSchedulerLaneAfterBullLoss(input: {
         .where(
           and(
             eq(schedulerObligationsInOps.obligationId, failedObligationId),
-            inArray(schedulerObligationsInOps.status, [
-              'pending',
-              'enqueued',
-              'running',
-              'failed',
-            ]),
+            inArray(schedulerObligationsInOps.status, ['pending', 'enqueued', 'running', 'failed']),
           ),
         );
     }
