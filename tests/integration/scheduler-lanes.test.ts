@@ -620,6 +620,20 @@ describe('scheduler latest-wins lanes', () => {
     expect(targets?.lane.state).toBe('idle');
     expect(targets?.desired?.status).toBe('pending');
     expect(targets?.desired?.generation).toBe(1);
+
+    // Dependency backoff is stored on the obligation's mutable dueAt. Both
+    // scheduler observation and the claim transaction must honor it; an idle
+    // lane must not immediately call the provider again.
+    const deferredObservation = await advanceSchedulerLane({
+      laneKey: LIVE_LANE_KEY,
+      jobName: LIVE_DEFINITION.name,
+      scopeKey: LIVE_SCOPE_KEY,
+      queueName: LIVE_DEFINITION.queueName,
+      desiredObligation: older,
+      preserveFreshnessHistory: true,
+    });
+    expect(deferredObservation.shouldDispatch).toBe(false);
+    expect(await claimSchedulerLaneDispatch({ laneId: initial.lane.laneId })).toBeNull();
   });
 
   test('terminalizes a live lane after its scheduler retry budget is exhausted', async () => {

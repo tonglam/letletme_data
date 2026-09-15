@@ -665,7 +665,10 @@ export async function advanceSchedulerLane(input: {
     }
 
     const [desiredRow] = await tx
-      .select({ status: schedulerObligationsInOps.status })
+      .select({
+        status: schedulerObligationsInOps.status,
+        dueAt: schedulerObligationsInOps.dueAt,
+      })
       .from(schedulerObligationsInOps)
       .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
       .limit(1);
@@ -690,6 +693,7 @@ export async function advanceSchedulerLane(input: {
     const shouldDispatch =
       lane.state === 'idle' &&
       (desiredRow?.status === 'pending' || desiredRow?.status === 'failed') &&
+      (desiredRow?.dueAt === undefined || desiredRow.dueAt.getTime() <= dbNow.getTime()) &&
       (lane.retryNotBefore === null || lane.retryNotBefore.getTime() <= dbNow.getTime());
     return { lane, shouldDispatch };
   });
@@ -725,11 +729,19 @@ export async function claimSchedulerLaneDispatch(input: {
       return null;
     }
     const [desired] = await tx
-      .select({ status: schedulerObligationsInOps.status })
+      .select({
+        status: schedulerObligationsInOps.status,
+        dueAt: schedulerObligationsInOps.dueAt,
+      })
       .from(schedulerObligationsInOps)
       .where(eq(schedulerObligationsInOps.obligationId, row.desiredObligationId))
       .limit(1);
-    if (desired?.status !== 'pending' && desired?.status !== 'failed') return null;
+    if (
+      (desired?.status !== 'pending' && desired?.status !== 'failed') ||
+      (desired?.dueAt !== undefined && desired.dueAt.getTime() > dbNow.getTime())
+    ) {
+      return null;
+    }
     const owner = randomUUID();
     const updated = await tx
       .update(schedulerLanesInOps)
