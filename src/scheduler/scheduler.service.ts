@@ -32,6 +32,7 @@ import {
   getSchedulerLane,
   getSchedulerLaneTarget,
   getSchedulerLaneTargets,
+  listSchedulerLanes,
   recoverSchedulerLaneAfterBullLoss,
   unblockSchedulerLane,
   type SchedulerLane,
@@ -683,6 +684,151 @@ export async function triggerPriceChangeLane(
   }
 }
 
+/**
+ * Route an automatic live freshness repair through the event-scoped
+ * latest-authoritative lane. Historical windows whose lifecycle no longer
+ * resolves to an active live plan remain evidence for review and are not
+ * allowed to launch a parallel direct provider job.
+ */
+export async function triggerLiveSnapshotLane(input: {
+  eventId: number;
+  freshnessWindowId?: number;
+  repairKey: string;
+}): Promise<{
+  bullJobId?: string | number;
+  runId?: string;
+  state: 'enqueued' | 'pending';
+}> {
+  const definition = definitionByName('live-snapshot');
+  if (!definition?.executionPolicy) {
+    throw new Error('Live-snapshot latest-authoritative lane is disabled');
+  }
+  const season = await seasonRepository.findCurrent();
+  const context = await resolveSchedulerContext(season, new Date());
+  const resolution = await resolveSchedulerDefinition(definition, context);
+  if (!resolution.ok) throw resolution.error;
+  const sourcePlan = resolution.plans.find(
+    (candidate) => candidate.eventId === input.eventId && candidate.terminalStatus === undefined,
+  );
+  if (!sourcePlan) {
+    throw new Error(
+      `Live freshness repair is historical or no longer active for event ${input.eventId}`,
+    );
+  }
+  const observedAt = new Date();
+  const plan: SchedulerObligationPlan = {
+    ...sourcePlan,
+    periodKey: `live-repair-${input.eventId}-${input.repairKey}`,
+    dueAt: observedAt,
+    source: 'reconcile',
+    evidence: {
+      ...(sourcePlan.evidence ?? {}),
+      repair: 'freshness-governance',
+      freshnessWindowId: input.freshnessWindowId ?? null,
+      decisionObservedAt: observedAt.toISOString(),
+      decisionObservedAtMs: observedAt.getTime(),
+      scheduledDueAtMs: observedAt.getTime(),
+    },
+  };
+  const obligation = await reserveSchedulerObligation({
+    definition: { ...definition, queueName: schedulerLaneName(definition) },
+    plan,
+  });
+  const laneKey = definition.executionPolicy.laneKey({ context, plan });
+  const advanced = await advanceSchedulerLane({
+    laneKey,
+    jobName: definition.name,
+    scopeKey: plan.scopeKey,
+    queueName: definition.queueName,
+    desiredObligation: obligation,
+    preserveFreshnessHistory: true,
+    supersedeBatchSize: 250,
+  });
+  if (input.freshnessWindowId !== undefined) {
+    await attachFreshnessWindowToSchedulerObligation({
+      obligationId: advanced.lane.desiredObligationId,
+      freshnessWindowId: input.freshnessWindowId,
+    });
+    if (!advanced.shouldDispatch && advanced.lane.activeObligationId) {
+      await attachFreshnessWindowToSchedulerObligation({
+        obligationId: advanced.lane.activeObligationId,
+        freshnessWindowId: input.freshnessWindowId,
+      });
+    }
+  }
+  if (!advanced.shouldDispatch) {
+    return {
+      ...(advanced.lane.bullJobId
+        ? { bullJobId: advanced.lane.bullJobId }
+        : advanced.lane.blockerJobId
+          ? { bullJobId: advanced.lane.blockerJobId }
+          : {}),
+      ...(advanced.lane.runId ? { runId: advanced.lane.runId } : {}),
+      state: 'pending',
+    };
+  }
+  const dispatch = await claimSchedulerLaneDispatch({ laneId: advanced.lane.laneId });
+  if (!dispatch) {
+    const current = await getSchedulerLane({ laneId: advanced.lane.laneId });
+    return {
+      ...(current?.bullJobId ? { bullJobId: current.bullJobId } : {}),
+      ...(current?.runId ? { runId: current.runId } : {}),
+      state: 'pending',
+    };
+  }
+  const target = await getSchedulerLaneTarget({ laneId: dispatch.lane.laneId });
+  if (!target) throw new Error('Live freshness repair target disappeared before enqueue');
+  try {
+    const result = await definition.enqueue({
+      context,
+      plan: {
+        scopeKey: target.obligation.scopeKey,
+        periodKey: target.obligation.periodKey,
+        dueAt: target.obligation.dueAt,
+        source: target.obligation.source,
+        eventId: input.eventId,
+        evidence: target.obligation.evidence,
+      },
+      obligationId: target.obligation.obligationId,
+      generation: target.obligation.generation,
+      freshnessWindowId: input.freshnessWindowId,
+      freshnessWindowIds: freshnessWindowIdsFromEvidence(target.obligation.evidence),
+      laneId: dispatch.lane.laneId,
+      dispatchGeneration: dispatch.lane.dispatchGeneration,
+    });
+    if (result?.bullJobId === undefined)
+      throw new Error('Live freshness repair returned no Bull ID');
+    const confirmed = await confirmSchedulerLaneEnqueued({
+      laneId: dispatch.lane.laneId,
+      owner: dispatch.owner,
+      bullJobId: result.bullJobId,
+      runId: result.runId,
+      obligationId: target.obligation.obligationId,
+      queueName: dispatch.lane.queueName,
+    });
+    if (!confirmed) throw new Error('Live freshness lane enqueue confirmation CAS failed');
+    return { ...result, state: 'enqueued' };
+  } catch (error) {
+    await reconcileSingleFlightBullState(dispatch.lane, season).catch((reconcileError) => {
+      logError('Live freshness enqueue ambiguity reconciliation failed', reconcileError, {
+        laneId: dispatch.lane.laneId,
+        dispatchGeneration: dispatch.lane.dispatchGeneration,
+      });
+    });
+    const current = await getSchedulerLane({ laneId: dispatch.lane.laneId });
+    if (current?.state === 'enqueued' || current?.state === 'running') {
+      return {
+        ...(current.bullJobId ? { bullJobId: current.bullJobId } : {}),
+        ...(current.runId ? { runId: current.runId } : {}),
+        state: 'pending',
+      };
+    }
+    if (current?.state === 'dispatching') return { state: 'pending' };
+    await failSchedulerLaneDispatch({ laneId: dispatch.lane.laneId, owner: dispatch.owner, error });
+    throw error;
+  }
+}
+
 let compatibilityPassInFlight: Promise<void> | null = null;
 
 function definitionByName(name: string): ScheduledJobDefinition | undefined {
@@ -935,6 +1081,37 @@ async function reconcileSingleFlightBullState(
   } finally {
     await queue.close();
   }
+}
+
+/**
+ * A live lane can outlive the lifecycle plan that created it (for example
+ * when an event becomes FINALIZED while its Bull job is lost). Reconcile
+ * every persisted in-flight live lane independently of the plans selected by
+ * the current resolver so a vanished Bull record cannot strand durable work.
+ */
+async function reconcileOutstandingLiveSnapshotLanes(
+  selectedLaneKeys: ReadonlySet<string>,
+  season: Awaited<ReturnType<typeof seasonRepository.findCurrent>>,
+): Promise<number> {
+  let failed = 0;
+  const lanes = await listSchedulerLanes({
+    jobName: 'live-snapshot',
+    states: ['dispatching', 'enqueued', 'running'],
+  });
+  for (const lane of lanes) {
+    if (selectedLaneKeys.has(lane.laneKey)) continue;
+    try {
+      await reconcileSingleFlightBullState(lane, season);
+    } catch (error) {
+      failed += 1;
+      logError('Persisted live lane reconciliation failed', error, {
+        laneId: lane.laneId,
+        laneKey: lane.laneKey,
+        state: lane.state,
+      });
+    }
+  }
+  return failed;
 }
 
 async function alertPriceLaneFreshness(
@@ -1645,6 +1822,15 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
       }
     }),
   );
+  try {
+    failed += await reconcileOutstandingLiveSnapshotLanes(
+      new Set(singleFlightLanes.keys()),
+      season,
+    );
+  } catch (error) {
+    failed += 1;
+    logError('Persisted live lane listing failed', error);
+  }
   for (const [laneKey, entry] of singleFlightLanes) {
     if (singleFlightReconciled.get(entry.lane.laneId) !== true) continue;
     const dispatch = await claimSchedulerLaneDispatch({ laneId: entry.lane.laneId });

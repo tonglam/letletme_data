@@ -2070,6 +2070,49 @@ describe('scheduler obligation generation fencing', () => {
     });
   });
 
+  test('removes a provisional execution attempt while retaining claim history', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, bull_job_id, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'live-finalization',
+        'integration:event:dependency-attempt-budget',
+        'case-c',
+        '30-second post-match finalization reconciliation',
+        'UTC',
+        'running',
+        'catchup',
+        clock_timestamp(),
+        0,
+        4,
+        'live-finalization-dependency-attempt',
+        jsonb_build_object('executionAttemptCount', 1, 'executionAttemptGeneration', 0)
+      )
+    `;
+
+    expect(
+      await deferSchedulerObligationForWorker({
+        obligationId: OBLIGATION_ID,
+        generation: 0,
+        dependencyWait: { reasonCodes: ['CLASSIC_LEAGUE_FINAL_NOT_READY'] },
+      }),
+    ).toBe(true);
+    const [row] = await sql<Array<{ attempts: number; evidence: Record<string, unknown> }>>`
+      SELECT attempts, evidence
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${OBLIGATION_ID}::uuid
+    `;
+    expect(row?.attempts).toBe(4);
+    expect(row?.evidence).toMatchObject({
+      executionAttemptCount: 0,
+      executionAttemptGeneration: null,
+    });
+  });
+
   test('uses an independent dependency backoff sequence and preserves it across generations', async () => {
     const sql = await getDbClient();
     const obligationId = OBLIGATION_ID;

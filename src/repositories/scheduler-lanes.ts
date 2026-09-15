@@ -894,6 +894,7 @@ export async function startSchedulerLane(input: {
         obligationId: schedulerObligationsInOps.obligationId,
         jobName: schedulerObligationsInOps.jobName,
         scopeKey: schedulerObligationsInOps.scopeKey,
+        generation: schedulerObligationsInOps.generation,
       })
       .from(schedulerObligationsInOps)
       .where(eq(schedulerObligationsInOps.obligationId, requestedObligationId))
@@ -920,7 +921,7 @@ export async function startSchedulerLane(input: {
       // queued obligation, release this dispatch generation, and let the
       // scheduler enqueue the current target.  The provider and checkpoint
       // stages therefore never start for the stale task.
-      await tx
+      const retired = await tx
         .update(schedulerObligationsInOps)
         .set({
           status: 'skipped',
@@ -940,7 +941,8 @@ export async function startSchedulerLane(input: {
             eq(schedulerObligationsInOps.obligationId, requestedObligationId),
             inArray(schedulerObligationsInOps.status, ['pending', 'failed', 'enqueued', 'running']),
           ),
-        );
+        )
+        .returning({ obligationId: schedulerObligationsInOps.obligationId });
       await tx
         .update(schedulerLanesInOps)
         .set({
@@ -953,7 +955,9 @@ export async function startSchedulerLane(input: {
           retryNotBefore: null,
           lastError: null,
           lastProgressAt: dbNow,
-          supersededCount: sql`${schedulerLanesInOps.supersededCount} + 1`,
+          ...(retired.length === 1
+            ? { supersededCount: sql`${schedulerLanesInOps.supersededCount} + 1` }
+            : {}),
           updatedAt: dbNow,
         })
         .where(
@@ -987,6 +991,14 @@ export async function startSchedulerLane(input: {
         bullJobId: String(input.bullJobId),
         runId: input.runId,
         attempts: sql`${schedulerObligationsInOps.attempts} + 1`,
+        evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
+          'executionAttemptCount', CASE
+            WHEN ${schedulerObligationsInOps.evidence}->>'executionAttemptCount' ~ '^[0-9]+$'
+              THEN (${schedulerObligationsInOps.evidence}->>'executionAttemptCount')::numeric + 1
+            ELSE 1
+          END,
+          'executionAttemptGeneration', ${requestedObligation.generation}::integer
+        )`,
         lastError: null,
         updatedAt: dbNow,
       })
@@ -2050,11 +2062,23 @@ export async function getSchedulerLane(input: {
   return row ? mapLane(row) : null;
 }
 
-export async function listSchedulerLanes(input: { db?: DbHandle } = {}): Promise<SchedulerLane[]> {
+export async function listSchedulerLanes(
+  input: {
+    jobName?: string;
+    states?: readonly SchedulerLaneState[];
+    db?: DbHandle;
+  } = {},
+): Promise<SchedulerLane[]> {
   const db = input.db ?? (await getDb());
+  const stateFilter = input.states?.length
+    ? inArray(schedulerLanesInOps.state, [...input.states])
+    : undefined;
   const rows = await db
     .select()
     .from(schedulerLanesInOps)
+    .where(
+      and(input.jobName ? eq(schedulerLanesInOps.jobName, input.jobName) : undefined, stateFilter),
+    )
     .orderBy(asc(schedulerLanesInOps.jobName), asc(schedulerLanesInOps.scopeKey));
   return rows.map(mapLane);
 }

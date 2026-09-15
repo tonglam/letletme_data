@@ -18,6 +18,7 @@ import {
   queueHealthPersistenceFingerprint,
   QueueEventAccumulator,
   QUEUE_MONITOR_EVENT_RETENTION_MS,
+  queueMonitorEventRetentionMs,
   resolveJobDispatchBudgetMs,
   resolveQueueDispatchBudgetMs,
   resolveQueueTimingMetrics,
@@ -246,6 +247,14 @@ describe('GW queue and data governance primitives', () => {
     accumulator.record('arrivals', 0);
     expect(accumulator.record('failures', 15 * 60_000 + 1)).toBe(1);
     expect(accumulator.pendingCount()).toBe(1);
+  });
+
+  test('keeps a full configured health window plus one poll interval', () => {
+    expect(queueMonitorEventRetentionMs(60 * 60_000, 15 * 60_000)).toBe(75 * 60_000);
+    const accumulator = new QueueEventAccumulator(60 * 60_000, 75 * 60_000);
+    accumulator.record('arrivals', 0);
+    accumulator.record('completions', 60 * 60_000 - 1);
+    expect(accumulator.pendingCount()).toBe(2);
   });
 
   test('distinguishes disabled optional monitors from missing observations', () => {

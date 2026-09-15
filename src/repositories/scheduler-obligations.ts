@@ -1345,12 +1345,27 @@ export async function deferSchedulerObligationForWorker(input: {
       ELSE ${finalDependencyRetryDelayMs(3)}
     END
   )::bigint`;
+  const executionAttemptCountSql = sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'executionAttemptCount' ~ '^[0-9]+$'
+      THEN (${schedulerObligationsInOps.evidence}->>'executionAttemptCount')::numeric
+    ELSE NULL
+  END`;
+  const executionAttemptGenerationIsCurrentSql = sql`(
+    ${schedulerObligationsInOps.evidence}->>'executionAttemptGeneration' = ${String(input.generation)}
+  )`;
   const dependencyEvidenceSql = input.dependencyWait
     ? sql`jsonb_build_object(
         'dependencyWaitCount', ${nextDependencyWaitCountSql},
         'firstDependencyWaitAt', COALESCE(${schedulerObligationsInOps.evidence}->>'firstDependencyWaitAt', clock_timestamp()::text),
         'lastDependencyReasonCodes', ${JSON.stringify(dependencyReasonCodes)}::jsonb,
-        'deferDelayMs', ${dependencyDelaySql}
+        'deferDelayMs', ${dependencyDelaySql},
+        'executionAttemptCount', CASE
+          WHEN ${executionAttemptGenerationIsCurrentSql}
+            AND ${executionAttemptCountSql} IS NOT NULL
+            THEN GREATEST(${executionAttemptCountSql} - 1, 0)
+          ELSE ${executionAttemptCountSql}
+        END,
+        'executionAttemptGeneration', NULL
       )`
     : sql`'{}'::jsonb`;
   const result = await db
@@ -1570,6 +1585,17 @@ export async function claimSchedulerObligations(
           status: 'enqueued',
           generation: nextGeneration,
           attempts: sql`${schedulerObligationsInOps.attempts} + 1`,
+          // `attempts` remains the durable claim history. Track execution
+          // attempts separately so a prerequisite-only claim can be removed
+          // from the retry budget when the worker defers it before doing work.
+          evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
+            'executionAttemptCount', CASE
+              WHEN ${schedulerObligationsInOps.evidence}->>'executionAttemptCount' ~ '^[0-9]+$'
+                THEN (${schedulerObligationsInOps.evidence}->>'executionAttemptCount')::numeric + 1
+              ELSE 1
+            END,
+            'executionAttemptGeneration', ${nextGeneration}::integer
+          )`,
           leaseOwner: owner,
           leaseExpiresAt,
           // Correlation belongs to one generation. A failed generation must
@@ -2219,7 +2245,12 @@ export async function failSchedulerObligation(input: {
   // generation.  Keep transient/provider retries bounded at the scheduler
   // layer as well as at Bull's per-job attempt layer; otherwise a source that
   // stays unavailable would create an unbounded stream of new generations.
-  const terminalAfterThisAttempt = sql`${schedulerObligationsInOps.attempts} >= ${retryPolicy.maxAttempts}`;
+  const executionAttempts = sql`CASE
+    WHEN ${schedulerObligationsInOps.evidence}->>'executionAttemptCount' ~ '^[0-9]+$'
+      THEN (${schedulerObligationsInOps.evidence}->>'executionAttemptCount')::numeric
+    ELSE ${schedulerObligationsInOps.attempts}
+  END`;
+  const terminalAfterThisAttempt = sql`${executionAttempts} >= ${retryPolicy.maxAttempts}`;
   const updated = await db
     .update(schedulerObligationsInOps)
     .set({

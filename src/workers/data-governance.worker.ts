@@ -36,7 +36,6 @@ import {
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
 } from '../jobs/data-sync-enqueue';
-import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { enqueueLivePicksRefresh } from '../jobs/live-picks.jobs';
 import {
   enqueueMyFplSnapshot,
@@ -55,7 +54,7 @@ import { persistLiveLifecycleStatus } from '../services/live-lifecycle-orchestra
 import { reconcileCoreAndMarketPublications } from '../services/data-publication-reconciler';
 import { reconcileLiveMatchCheckpointObligationsV3 } from '../services/live-match-v3-reconciler.service';
 import { reconcileLiveLeagueCheckpointObligationsV2 } from '../services/live-league-checkpoint-v2.service';
-import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
+import { triggerLiveSnapshotLane, triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import { seasonRepository } from '../repositories/seasons';
 import { publicationOutboxQueueName } from '../queues/names';
 import type { WorkerRuntime } from './worker-runtime';
@@ -113,9 +112,10 @@ async function enqueueFreshnessCaseRepair(input: {
       return;
     case 'live-snapshot':
       if (!eventId) throw new Error('Live freshness repair has no event id');
-      await enqueueLiveSnapshot(season, eventId, 'reconcile', {
-        jobId,
+      await triggerLiveSnapshotLane({
+        eventId,
         freshnessWindowId: window.windowId,
+        repairKey: `governance-case-${item.caseId}-attempt-${item.attempts}`,
       });
       return;
     case 'live-picks':
