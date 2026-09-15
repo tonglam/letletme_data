@@ -211,6 +211,21 @@ export function queueMonitorEventRetentionMs(
   return Math.max(QUEUE_MONITOR_EVENT_RETENTION_MS, windowIntervalMs + pollIntervalMs);
 }
 
+/**
+ * A no-event arrival delta is derived from the last successful Redis sample.
+ * If that sample write fails, the next poll must be allowed to derive the same
+ * delta again exactly once; otherwise a transient Redis error double-counts the
+ * burst. Event-backed arrivals are handled separately by the accumulator.
+ */
+export function rollbackQueueSampleArrivals(
+  windowArrivals: number,
+  sampledArrivals: number,
+  snapshotWritten: boolean,
+): number {
+  if (snapshotWritten || sampledArrivals <= 0) return windowArrivals;
+  return Math.max(0, windowArrivals - sampledArrivals);
+}
+
 export type QueueEventCounters = {
   arrivals: number;
   completions: number;
@@ -299,6 +314,26 @@ export class QueueEventAccumulator {
       0,
     );
   }
+}
+
+export function resolveQueueArrivalContribution(input: {
+  previousSnapshot?: Pick<QueueHealthSnapshot, 'waiting' | 'active'>;
+  snapshot: Pick<QueueHealthSnapshot, 'waiting' | 'active'>;
+  eventArrivals: number;
+}): Readonly<{ arrivals: number; sampledArrivals: number }> {
+  const sampledArrivals = input.previousSnapshot
+    ? Math.max(
+        0,
+        input.snapshot.waiting +
+          input.snapshot.active -
+          input.previousSnapshot.waiting -
+          input.previousSnapshot.active,
+      )
+    : 0;
+  if (input.eventArrivals > 0) {
+    return { arrivals: input.eventArrivals, sampledArrivals: 0 };
+  }
+  return { arrivals: sampledArrivals, sampledArrivals };
 }
 
 type QueueHealthPersistenceSnapshot = QueueHealthSnapshot & {
@@ -738,6 +773,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     // succeeds. Redis is the point-in-time serving snapshot, but it cannot
     // replace the PostgreSQL history used to reconstruct a burst or stall.
     let capturedForWindowForRetry = emptyQueueEventCounters();
+    let sampledArrivalsForRetry = 0;
     let capturedEventsRestored = false;
     const confirmedCapturedWindows = new Set<number>();
     let snapshotWritten = false;
@@ -836,17 +872,16 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       const capturedOutsideWindow = [...capturedEventTotals.entries()].filter(
         ([bucketStart]) => bucketStart !== eventWindowStartMs,
       );
-      const sampleArrivals = lastSnapshot
-        ? Math.max(
-            0,
-            snapshot.waiting + snapshot.active - lastSnapshot.waiting - lastSnapshot.active,
-          )
-        : 0;
       // QueueEvents sees jobs that arrive and finish between two polls, while
       // the count delta sees work that remains runnable. Prefer the event count
       // when available and retain the delta as a no-event fallback.
-      windowArrivals +=
-        capturedForWindow.arrivals > 0 ? capturedForWindow.arrivals : sampleArrivals;
+      const arrivalContribution = resolveQueueArrivalContribution({
+        previousSnapshot: lastSnapshot,
+        snapshot,
+        eventArrivals: capturedForWindow.arrivals,
+      });
+      windowArrivals += arrivalContribution.arrivals;
+      sampledArrivalsForRetry = arrivalContribution.sampledArrivals;
       windowCompletions += capturedForWindow.completions;
       windowFailures += capturedForWindow.failures;
       windowStalled += capturedForWindow.stalled;
@@ -1072,6 +1107,15 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       // being queried. Roll it back whenever that folded batch was not
       // durably confirmed; checking the poll's starting window would leave a
       // new-window batch inflated after a failed cross-boundary retry.
+      // The point-in-time count delta is only a fallback observation. If the
+      // Redis snapshot was not accepted, lastSnapshot remains unchanged and
+      // the same delta will be sampled again on the next poll; undo this fold
+      // so one transient write failure cannot double-count the burst.
+      windowArrivals = rollbackQueueSampleArrivals(
+        windowArrivals,
+        sampledArrivalsForRetry,
+        snapshotWritten,
+      );
       const activeCapturedWindow = activeCapturedEventCount > 0;
       const activeWindowConfirmed =
         activeCapturedWindow && confirmedCapturedWindows.has(eventWindowStartMs);

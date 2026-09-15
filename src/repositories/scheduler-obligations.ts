@@ -1,7 +1,18 @@
 import { validLiveFinalRetentionRecovery } from '../domain/live-final-retention-policy';
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, lte, notInArray, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  lte,
+  notInArray,
+  sql,
+  type SQL,
+  type SQLWrapper,
+} from 'drizzle-orm';
 
 import {
   dataGovernanceCasesInOps,
@@ -348,6 +359,18 @@ function postMatchScheduleAnchorForSql(evidence: SQL) {
   END`;
 }
 
+function liveDecisionObservedAtSql(evidence: SQLWrapper) {
+  return sql`CASE
+    WHEN ${evidence}->>'decisionObservedAtMs' ~ '^[0-9]+$'
+      AND (${evidence}->>'decisionObservedAtMs')::numeric BETWEEN 0 AND 8640000000000000
+      THEN to_timestamp((${evidence}->>'decisionObservedAtMs')::double precision / 1000)
+    WHEN ${evidence}->>'decisionObservedAt' ~
+      '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+      THEN (${evidence}->>'decisionObservedAt')::timestamptz
+    ELSE NULL
+  END`;
+}
+
 // Slot indexes are relative to the last fixture's expected end and can move
 // when that fixture is rescheduled. Rank schedule versions by their persisted
 // fixture update timestamp, then slots within one version by their immutable
@@ -560,6 +583,7 @@ export async function reserveSchedulerObligation(input: {
     // lane waterline; equal observations remain idempotent and may merge
     // lifecycle metadata.
     if (currentObservedAtMs === null || incomingObservedAtMs >= currentObservedAtMs) {
+      const persistedObservedAt = liveDecisionObservedAtSql(schedulerObligationsInOps.evidence);
       const refreshed = await db
         .update(schedulerObligationsInOps)
         .set({
@@ -570,6 +594,7 @@ export async function reserveSchedulerObligation(input: {
           and(
             eq(schedulerObligationsInOps.obligationId, row.obligationId),
             inArray(schedulerObligationsInOps.status, ['pending', 'failed']),
+            sql`${persistedObservedAt} IS NULL OR ${persistedObservedAt} <= to_timestamp(${incomingObservedAtMs}::double precision / 1000)`,
           ),
         )
         .returning();

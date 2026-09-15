@@ -19,6 +19,7 @@ import {
   QueueEventAccumulator,
   QUEUE_MONITOR_EVENT_RETENTION_MS,
   queueMonitorEventRetentionMs,
+  rollbackQueueSampleArrivals,
   resolveJobDispatchBudgetMs,
   resolveQueueDispatchBudgetMs,
   resolveQueueTimingMetrics,
@@ -255,6 +256,14 @@ describe('GW queue and data governance primitives', () => {
     accumulator.record('arrivals', 0);
     accumulator.record('completions', 60 * 60_000 - 1);
     expect(accumulator.pendingCount()).toBe(2);
+  });
+
+  test('does not double-count a sampled arrival after Redis snapshot failure', () => {
+    // The failed write leaves lastSnapshot unchanged, so the next poll must
+    // sample the same count delta again. Roll back only the uncommitted fold.
+    expect(rollbackQueueSampleArrivals(8, 3, false)).toBe(5);
+    expect(rollbackQueueSampleArrivals(8, 3, true)).toBe(8);
+    expect(rollbackQueueSampleArrivals(8, 0, false)).toBe(8);
   });
 
   test('distinguishes disabled optional monitors from missing observations', () => {

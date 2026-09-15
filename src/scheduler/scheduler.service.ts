@@ -46,7 +46,7 @@ import {
   type SchedulerContext,
   type SchedulerObligationPlan,
 } from './job-registry';
-import type { FplSeasonRef } from '../domain/fpl-season';
+import { isFplSeasonCode, type FplSeasonRef } from '../domain/fpl-season';
 import { latestActiveSchedulerPlansByScope } from './plan-coalescing';
 import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { QueueDrainOnlyError, readQueueAdmission } from '../services/queue-governance.service';
@@ -141,6 +141,28 @@ function evidenceNumber(evidence: Readonly<Record<string, unknown>> | undefined,
 function evidenceString(evidence: Readonly<Record<string, unknown>> | undefined, key: string) {
   const value = evidence?.[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function liveSnapshotScopeIdentity(scopeKey: string): { seasonCode: string; eventId: number } {
+  const match = /^(\d{4}):event:([1-9][0-9]*)$/.exec(scopeKey);
+  if (!match || !isFplSeasonCode(match[1])) {
+    throw new Error(`Invalid persisted live-snapshot lane scope: ${scopeKey}`);
+  }
+  const eventId = Number(match[2]);
+  if (!Number.isSafeInteger(eventId) || eventId <= 0) {
+    throw new Error(`Invalid persisted live-snapshot lane event scope: ${scopeKey}`);
+  }
+  return { seasonCode: match[1], eventId };
+}
+
+async function contextForPersistedLiveSnapshotLane(
+  lane: Pick<SchedulerLane, 'scopeKey'>,
+  currentContext: SchedulerContext,
+): Promise<SchedulerContext> {
+  const seasonCode = liveSnapshotScopeIdentity(lane.scopeKey).seasonCode;
+  if (seasonCode === currentContext.season.seasonCode) return currentContext;
+  const laneSeason = await seasonRepository.requireByCode(seasonCode);
+  return resolveSchedulerContext(laneSeason, currentContext.now);
 }
 
 function hotSourcePeriodIdentity(options: {
@@ -1460,6 +1482,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     string,
     Readonly<{
       definition: ScheduledJobDefinition;
+      context: SchedulerContext;
       plan: SchedulerObligationPlan;
       lane: SchedulerLane;
     }>
@@ -1656,6 +1679,7 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
           });
           singleFlightLanes.set(laneKey, {
             definition,
+            context,
             plan,
             lane: advanced.lane,
           });
@@ -1869,17 +1893,29 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         );
         continue;
       }
+      const laneContext = await contextForPersistedLiveSnapshotLane(target.lane, context);
+      const scopeIdentity = liveSnapshotScopeIdentity(target.obligation.scopeKey);
       const targetEventId = evidenceNumber(target.obligation.evidence, 'targetEventId');
+      if (targetEventId !== undefined && targetEventId !== scopeIdentity.eventId) {
+        failed += 1;
+        logError(
+          'Persisted live lane target event does not match its scope',
+          new Error(`Expected event ${scopeIdentity.eventId}, found ${targetEventId}`),
+          { laneId: target.lane.laneId, laneKey: target.lane.laneKey },
+        );
+        continue;
+      }
       const plan: SchedulerObligationPlan = {
         scopeKey: target.obligation.scopeKey,
         periodKey: target.obligation.periodKey,
         dueAt: target.obligation.dueAt,
         source: target.obligation.source,
-        ...(targetEventId !== undefined ? { eventId: targetEventId } : {}),
+        eventId: scopeIdentity.eventId,
         evidence: target.obligation.evidence,
       };
       singleFlightLanes.set(target.lane.laneKey, {
         definition,
+        context: laneContext,
         plan,
         lane: target.lane,
       });
@@ -1899,16 +1935,22 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
     try {
       const target = await getSchedulerLaneTarget({ laneId: dispatch.lane.laneId });
       if (!target) throw new Error(`Scheduler lane target disappeared: ${laneKey}`);
+      const liveScopeIdentity =
+        entry.definition.name === 'live-snapshot'
+          ? liveSnapshotScopeIdentity(target.obligation.scopeKey)
+          : undefined;
       const result = await entry.definition.enqueue({
-        context,
+        context: entry.context,
         plan: {
           scopeKey: target.obligation.scopeKey,
           periodKey: target.obligation.periodKey,
           dueAt: target.obligation.dueAt,
           source: target.obligation.source,
-          ...(typeof target.obligation.evidence.targetEventId === 'number'
-            ? { eventId: target.obligation.evidence.targetEventId }
-            : {}),
+          ...(liveScopeIdentity
+            ? { eventId: liveScopeIdentity.eventId }
+            : typeof target.obligation.evidence.targetEventId === 'number'
+              ? { eventId: target.obligation.evidence.targetEventId }
+              : {}),
           evidence: target.obligation.evidence,
         },
         obligationId: target.obligation.obligationId,
