@@ -49,6 +49,13 @@ export type SchedulerLaneTarget = Readonly<{
   obligation: SchedulerObligation;
 }>;
 
+/** Identity checked while a latest-authoritative worker activates a publication. */
+export type SchedulerLanePublicationFence = Readonly<{
+  laneId: string;
+  dispatchGeneration: number;
+  activeObligationId: string;
+}>;
+
 export type SchedulerLaneDispatch = Readonly<{
   lane: SchedulerLane;
   owner: string;

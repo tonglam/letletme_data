@@ -42,13 +42,10 @@ import {
   queueHealthRetentionCutoff,
 } from './queue-governance.service';
 import { readPublicTrendFreshnessEvidenceBySeasonId } from './trends-catalog.service';
-import { assertSchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
-
-type SchedulerLanePublicationFence = Readonly<{
-  laneId: string;
-  dispatchGeneration: number;
-  activeObligationId: string;
-}>;
+import {
+  assertSchedulerLanePublicationFence,
+  type SchedulerLanePublicationFence,
+} from '../repositories/scheduler-lanes';
 
 export type GovernanceCaseStatus =
   | 'OPEN'

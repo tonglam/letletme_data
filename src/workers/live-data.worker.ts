@@ -59,6 +59,7 @@ import {
 } from '../utils/scheduler-obligation-fence';
 import {
   acknowledgeSupersededSchedulerLane,
+  assertSchedulerLanePublicationFence,
   completeSchedulerLane,
   failSchedulerLane,
   fenceSchedulerLaneTarget,
@@ -444,6 +445,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     const liveSnapshotStageStartedAt = Date.now();
     let snapshot: Awaited<ReturnType<typeof syncLiveSnapshotV2>>;
     try {
+      const publicationLaneFence = laneIdentity;
       snapshot = await syncLiveSnapshotV2(season, eventId, {
         finalizeEvent: job.data.finalizeEvent === true,
         lifecycleState: job.data.lifecycleState,
@@ -451,6 +453,24 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         trigger: source,
         sourceRunId: job.data.runId,
         ...(databaseBudget ? { databaseBudget } : {}),
+        ...(publicationLaneFence
+          ? {
+              schedulerLaneFence: publicationLaneFence,
+              // Keep the durable lane row locked through Redis staging and
+              // the active-pointer switch. Scheduler advancement therefore
+              // cannot supersede this target in the gap between the provider
+              // preflight and publication activation.
+              withPublicationActivationFence: async <T>(activate: () => Promise<T>) => {
+                const activationDb =
+                  databaseBudget?.controlDb ??
+                  (await getDatabaseHandleWithBudget(LIVE_SNAPSHOT_DB_READ_BUDGET_MS));
+                return activationDb.transaction(async (tx) => {
+                  await assertSchedulerLanePublicationFence(tx, publicationLaneFence);
+                  return activate();
+                });
+              },
+            }
+          : {}),
       });
     } catch (error) {
       // A failed stage has no completed snapshot timings, but it still needs

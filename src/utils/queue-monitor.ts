@@ -233,14 +233,14 @@ export type QueueEventCounters = {
   stalled: number;
 };
 
-type QueueEventRecord = {
-  kind: keyof QueueEventCounters;
-  receivedAtMs: number;
-};
-
 export type QueueEventCapture = Readonly<{
   counters: Map<number, QueueEventCounters>;
-  records: Map<number, readonly QueueEventRecord[]>;
+  /**
+   * Aggregate receive-time watermark for each captured bucket. `null` means
+   * that the counters contain a restored aggregate with no causal timestamp.
+   * Keeping one number per bucket avoids retaining one object per QueueEvent.
+   */
+  latestReceivedAtMs: Map<number, number | null>;
 }>;
 
 function emptyQueueEventCounters(): QueueEventCounters {
@@ -267,78 +267,53 @@ function totalQueueEventCounters(counters: QueueEventCounters): number {
   return counters.arrivals + counters.completions + counters.failures + counters.stalled;
 }
 
-function queueEventCountersFromRecords(records: readonly QueueEventRecord[]): QueueEventCounters {
-  const counters = emptyQueueEventCounters();
-  for (const record of records) counters[record.kind] += 1;
-  return counters;
-}
-
 function queueEventCaptureWatermark(
   capture: QueueEventCapture,
   bucketStart: number,
 ): number | undefined {
-  const counters = capture.counters.get(bucketStart);
-  const records = capture.records.get(bucketStart);
-  if (!counters || !records) return undefined;
-  const indexedCounters = queueEventCountersFromRecords(records);
-  for (const kind of Object.keys(counters) as (keyof QueueEventCounters)[]) {
-    if (indexedCounters[kind] !== counters[kind]) return undefined;
-  }
-  let latest: number | undefined;
-  for (const record of records) {
-    if (!Number.isSafeInteger(record.receivedAtMs) || record.receivedAtMs < 0) return undefined;
-    latest = latest === undefined ? record.receivedAtMs : Math.max(latest, record.receivedAtMs);
-  }
-  return latest;
+  const latest = capture.latestReceivedAtMs.get(bucketStart);
+  return latest !== null && latest !== undefined && Number.isSafeInteger(latest) && latest >= 0
+    ? latest
+    : undefined;
 }
 
 /**
  * Retain only events that are not covered by a durable receive-time watermark.
- * Missing or incomplete per-event records are deliberately retained because
- * aggregate counters alone cannot prove which observations a row contains.
+ * Missing or incomplete receive-time watermarks are deliberately retained
+ * because aggregate counters alone cannot prove which observations a row
+ * contains. A mixed bucket is retained conservatively when its latest event
+ * is newer than the durable watermark; this trades a possible duplicate for
+ * a guaranteed absence of silent loss without an unbounded event list.
  */
 export function retainQueueEventsAfterWatermarks(
   capture: QueueEventCapture,
   watermarks: ReadonlyMap<number, number>,
 ): Readonly<{ capture: QueueEventCapture; discarded: number }> {
   const counters = new Map<number, QueueEventCounters>();
-  const records = new Map<number, readonly QueueEventRecord[]>();
+  const latestReceivedAtMs = new Map<number, number | null>();
   let discarded = 0;
   for (const [bucketStart, bucketCounters] of capture.counters) {
     const watermark = watermarks.get(bucketStart);
-    const bucketRecords = capture.records.get(bucketStart) ?? [];
-    if (watermark === undefined || !Number.isSafeInteger(watermark) || watermark < 0) {
-      counters.set(bucketStart, { ...bucketCounters });
-      if (bucketRecords.length > 0) records.set(bucketStart, [...bucketRecords]);
+    const latest = capture.latestReceivedAtMs.get(bucketStart);
+    const covered =
+      watermark !== undefined &&
+      Number.isSafeInteger(watermark) &&
+      watermark >= 0 &&
+      latest !== null &&
+      latest !== undefined &&
+      Number.isSafeInteger(latest) &&
+      latest >= 0 &&
+      latest <= watermark;
+    if (covered) {
+      discarded += totalQueueEventCounters(bucketCounters);
       continue;
     }
-
-    const indexedCounters = emptyQueueEventCounters();
-    const retainedCounters = emptyQueueEventCounters();
-    const retainedRecords: QueueEventRecord[] = [];
-    for (const record of bucketRecords) {
-      indexedCounters[record.kind] += 1;
-      if (Number.isSafeInteger(record.receivedAtMs) && record.receivedAtMs >= 0) {
-        if (record.receivedAtMs <= watermark) {
-          discarded += 1;
-          continue;
-        }
-      }
-      retainedRecords.push(record);
-      retainedCounters[record.kind] += 1;
-    }
-    for (const kind of Object.keys(bucketCounters) as (keyof QueueEventCounters)[]) {
-      // Restored aggregate counters have no receive-time identity. Retain them
-      // conservatively even when the row has a durable watermark.
-      const unknownCount = Math.max(0, bucketCounters[kind] - indexedCounters[kind]);
-      retainedCounters[kind] += unknownCount;
-    }
-    if (totalQueueEventCounters(retainedCounters) > 0) {
-      counters.set(bucketStart, retainedCounters);
-      if (retainedRecords.length > 0) records.set(bucketStart, retainedRecords);
+    counters.set(bucketStart, { ...bucketCounters });
+    if (capture.latestReceivedAtMs.has(bucketStart)) {
+      latestReceivedAtMs.set(bucketStart, latest ?? null);
     }
   }
-  return { capture: { counters, records }, discarded };
+  return { capture: { counters, latestReceivedAtMs }, discarded };
 }
 
 /**
@@ -348,7 +323,7 @@ export function retainQueueEventsAfterWatermarks(
  */
 export class QueueEventAccumulator {
   private readonly buckets = new Map<number, QueueEventCounters>();
-  private readonly eventRecords = new Map<number, QueueEventRecord[]>();
+  private readonly latestReceivedAtMs = new Map<number, number | null>();
 
   public constructor(
     private readonly windowIntervalMs: number,
@@ -360,9 +335,15 @@ export class QueueEventAccumulator {
     const bucket = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
     bucket[kind] += 1;
     this.buckets.set(bucketStart, bucket);
-    const records = this.eventRecords.get(bucketStart) ?? [];
-    records.push({ kind, receivedAtMs });
-    this.eventRecords.set(bucketStart, records);
+    const latest = this.latestReceivedAtMs.get(bucketStart);
+    if (!Number.isSafeInteger(receivedAtMs) || receivedAtMs < 0 || latest === null) {
+      this.latestReceivedAtMs.set(bucketStart, null);
+    } else {
+      this.latestReceivedAtMs.set(
+        bucketStart,
+        latest === undefined ? receivedAtMs : Math.max(latest, receivedAtMs),
+      );
+    }
     return this.prune(receivedAtMs);
   }
 
@@ -373,42 +354,51 @@ export class QueueEventAccumulator {
       if (startMs < cutoff) {
         evicted += totalQueueEventCounters(counters);
         this.buckets.delete(startMs);
-        this.eventRecords.delete(startMs);
+        this.latestReceivedAtMs.delete(startMs);
       }
     }
     return evicted;
   }
 
   public capture(nowMs?: number): Map<number, QueueEventCounters> {
-    return this.captureWithRecords(nowMs).counters;
+    return this.captureWithWatermarks(nowMs).counters;
   }
 
-  public captureWithRecords(nowMs?: number): QueueEventCapture {
+  public captureWithWatermarks(nowMs?: number): QueueEventCapture {
     if (nowMs !== undefined) this.prune(nowMs);
     const captured = new Map<number, QueueEventCounters>();
-    const records = new Map<number, readonly QueueEventRecord[]>();
+    const latestReceivedAtMs = new Map<number, number | null>();
     for (const [bucketStart, counters] of this.buckets) {
       captured.set(bucketStart, { ...counters });
-      records.set(bucketStart, [...(this.eventRecords.get(bucketStart) ?? [])]);
+      latestReceivedAtMs.set(bucketStart, this.latestReceivedAtMs.get(bucketStart) ?? null);
       this.buckets.delete(bucketStart);
-      this.eventRecords.delete(bucketStart);
+      this.latestReceivedAtMs.delete(bucketStart);
     }
-    return { counters: captured, records };
+    return { counters: captured, latestReceivedAtMs };
   }
 
   public restore(captured: Map<number, QueueEventCounters>): void {
-    this.restoreWithRecords({ counters: captured, records: new Map() });
+    const latestReceivedAtMs = new Map<number, number | null>();
+    for (const bucketStart of captured.keys()) latestReceivedAtMs.set(bucketStart, null);
+    this.restoreWithWatermarks({ counters: captured, latestReceivedAtMs });
   }
 
-  public restoreWithRecords(captured: QueueEventCapture): void {
+  public restoreWithWatermarks(captured: QueueEventCapture): void {
     for (const [bucketStart, counters] of captured.counters) {
       const current = this.buckets.get(bucketStart) ?? emptyQueueEventCounters();
       mergeQueueEventCounters(current, counters);
       this.buckets.set(bucketStart, current);
-      const capturedRecords = captured.records.get(bucketStart);
-      if (capturedRecords && capturedRecords.length > 0) {
-        const records = this.eventRecords.get(bucketStart) ?? [];
-        this.eventRecords.set(bucketStart, [...records, ...capturedRecords]);
+      const capturedLatest = captured.latestReceivedAtMs.get(bucketStart);
+      const currentLatest = this.latestReceivedAtMs.get(bucketStart);
+      if (capturedLatest === null || currentLatest === null) {
+        this.latestReceivedAtMs.set(bucketStart, null);
+      } else if (capturedLatest !== undefined) {
+        this.latestReceivedAtMs.set(
+          bucketStart,
+          currentLatest === undefined ? capturedLatest : Math.max(currentLatest, capturedLatest),
+        );
+      } else if (!this.latestReceivedAtMs.has(bucketStart)) {
+        this.latestReceivedAtMs.set(bucketStart, null);
       }
     }
   }
@@ -425,41 +415,15 @@ export class QueueEventAccumulator {
     let discarded = 0;
     for (const [bucketStart, counters] of this.buckets) {
       if (baselineBuckets && !baselineBuckets.has(bucketStart)) continue;
-      const records = this.eventRecords.get(bucketStart);
-      if (!records) {
-        if (bucketStart <= snapshotAtMs) {
-          discarded += totalQueueEventCounters(counters);
-          this.buckets.delete(bucketStart);
-          this.eventRecords.delete(bucketStart);
-        }
-        continue;
-      }
-      const retained: QueueEventRecord[] = [];
-      const indexedCounters = emptyQueueEventCounters();
-      const retainedCounters = emptyQueueEventCounters();
-      for (const record of records) {
-        indexedCounters[record.kind] += 1;
-        if (record.receivedAtMs <= snapshotAtMs) {
-          discarded += 1;
-        } else {
-          retained.push(record);
-          retainedCounters[record.kind] += 1;
-        }
-      }
-      for (const kind of Object.keys(counters) as (keyof QueueEventCounters)[]) {
-        const restoredCount = Math.max(0, counters[kind] - indexedCounters[kind]);
-        if (bucketStart <= snapshotAtMs) {
-          discarded += restoredCount;
-        } else {
-          retainedCounters[kind] += restoredCount;
-        }
-      }
-      if (retained.length === 0 && totalQueueEventCounters(retainedCounters) === 0) {
+      const latest = this.latestReceivedAtMs.get(bucketStart);
+      const covered =
+        latest !== null && latest !== undefined && Number.isSafeInteger(latest) && latest >= 0
+          ? latest <= snapshotAtMs
+          : bucketStart <= snapshotAtMs;
+      if (covered) {
+        discarded += totalQueueEventCounters(counters);
         this.buckets.delete(bucketStart);
-        this.eventRecords.delete(bucketStart);
-      } else {
-        this.buckets.set(bucketStart, retainedCounters);
-        this.eventRecords.set(bucketStart, retained);
+        this.latestReceivedAtMs.delete(bucketStart);
       }
     }
     return discarded;
@@ -480,7 +444,7 @@ export class QueueEventAccumulator {
   public clear(): number {
     const pending = this.pendingCount();
     this.buckets.clear();
-    this.eventRecords.clear();
+    this.latestReceivedAtMs.clear();
     return pending;
   }
 }
@@ -1018,7 +982,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       // rather than being unconditionally cleared with the pre-read batch.
       const startupAccumulator = eventAccumulator;
       eventAccumulator = new QueueEventAccumulator(windowIntervalMs, eventRetentionMs);
-      const startupCapture = startupAccumulator.captureWithRecords(pollStartedAtMs);
+      const startupCapture = startupAccumulator.captureWithWatermarks(pollStartedAtMs);
       try {
         const loaded = await loadQueueHealthEventTotals(
           queueName,
@@ -1033,13 +997,13 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
           startupCapture,
           loaded.eventWatermarks,
         );
-        const inFlightCapture = eventAccumulator.captureWithRecords();
+        const inFlightCapture = eventAccumulator.captureWithWatermarks();
         const retainedInFlight = retainQueueEventsAfterWatermarks(
           inFlightCapture,
           loaded.eventWatermarks,
         );
-        eventAccumulator.restoreWithRecords(retainedStartup.capture);
-        eventAccumulator.restoreWithRecords(retainedInFlight.capture);
+        eventAccumulator.restoreWithWatermarks(retainedStartup.capture);
+        eventAccumulator.restoreWithWatermarks(retainedInFlight.capture);
         for (const [bucketStart, counters] of persisted) {
           acknowledgedEventTotals.set(bucketStart, counters);
         }
@@ -1069,7 +1033,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         // The baseline is still unknown. Put the rotated batch back beside
         // events received while the read was in flight so the next attempt
         // cannot silently lose observations.
-        eventAccumulator.restoreWithRecords(startupCapture);
+        eventAccumulator.restoreWithWatermarks(startupCapture);
         // Do not acknowledge QueueEvents while the durable baseline is
         // unknown. Redis telemetry can still be sampled, but the event batch
         // must be retried after the database becomes readable.
@@ -1079,7 +1043,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         });
       }
     }
-    const capturedCapture = eventAccumulator.captureWithRecords();
+    const capturedCapture = eventAccumulator.captureWithWatermarks();
     const capturedEvents = capturedCapture.counters;
     const capturedEventWatermarks = new Map<number, number>();
     for (const bucketStart of capturedEvents.keys()) {
@@ -1268,7 +1232,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         ),
       );
       if (stopped) {
-        eventAccumulator.restoreWithRecords(capturedCapture);
+        eventAccumulator.restoreWithWatermarks(capturedCapture);
         capturedEventsRestored = true;
         return;
       }
@@ -1448,7 +1412,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         }
       }
     } catch (error) {
-      if (!snapshotWritten) eventAccumulator.restoreWithRecords(capturedCapture);
+      if (!snapshotWritten) eventAccumulator.restoreWithWatermarks(capturedCapture);
       capturedEventsRestored = !snapshotWritten;
       logError('Queue job count fetch failed', error, { queue: queueName });
     } finally {
@@ -1487,18 +1451,18 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       }
       if (!capturedEventsRestored && capturedEventCount > 0) {
         const unconfirmed = new Map<number, QueueEventCounters>();
-        const unconfirmedRecords = new Map<number, readonly QueueEventRecord[]>();
+        const unconfirmedLatestReceivedAtMs = new Map<number, number | null>();
         for (const [bucketStart, counters] of capturedEvents) {
           if (!confirmedCapturedWindows.has(bucketStart)) {
             unconfirmed.set(bucketStart, { ...counters });
-            const records = capturedCapture.records.get(bucketStart);
-            if (records && records.length > 0) unconfirmedRecords.set(bucketStart, records);
+            const latest = capturedCapture.latestReceivedAtMs.get(bucketStart);
+            unconfirmedLatestReceivedAtMs.set(bucketStart, latest ?? null);
           }
         }
         if (unconfirmed.size > 0) {
-          eventAccumulator.restoreWithRecords({
+          eventAccumulator.restoreWithWatermarks({
             counters: unconfirmed,
-            records: unconfirmedRecords,
+            latestReceivedAtMs: unconfirmedLatestReceivedAtMs,
           });
           capturedEventsRestored = true;
         }

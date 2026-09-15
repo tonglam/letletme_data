@@ -260,7 +260,7 @@ describe('GW queue and data governance primitives', () => {
   test('rotates the startup batch while retaining events received during baseline loading', () => {
     const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
     accumulator.record('arrivals', 1_000);
-    const startup = accumulator.captureWithRecords();
+    const startup = accumulator.captureWithWatermarks();
     accumulator.record('failures', 2_000);
 
     expect(startup.counters.get(0)).toEqual({
@@ -269,7 +269,7 @@ describe('GW queue and data governance primitives', () => {
       failures: 0,
       stalled: 0,
     });
-    expect(startup.records.get(0)).toEqual([{ kind: 'arrivals', receivedAtMs: 1_000 }]);
+    expect(startup.latestReceivedAtMs.get(0)).toBe(1_000);
     expect(accumulator.pendingCount()).toBe(1);
   });
 
@@ -277,16 +277,23 @@ describe('GW queue and data governance primitives', () => {
     const accumulator = new QueueEventAccumulator(60_000, QUEUE_MONITOR_EVENT_RETENTION_MS);
     accumulator.record('arrivals', 1_000);
     accumulator.record('failures', 2_000);
-    const capture = accumulator.captureWithRecords();
+    const capture = accumulator.captureWithWatermarks();
 
     const partiallyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, 1_500]]));
-    expect(partiallyCovered.discarded).toBe(1);
+    // A bucket-level watermark cannot prove which member of a mixed bucket
+    // was persisted. Retain the aggregate conservatively instead of keeping
+    // one object per QueueEvent to split it exactly.
+    expect(partiallyCovered.discarded).toBe(0);
     expect(partiallyCovered.capture.counters.get(0)).toEqual({
-      arrivals: 0,
+      arrivals: 1,
       completions: 0,
       failures: 1,
       stalled: 0,
     });
+
+    const fullyCovered = retainQueueEventsAfterWatermarks(capture, new Map([[0, 2_000]]));
+    expect(fullyCovered.discarded).toBe(2);
+    expect(fullyCovered.capture.counters.has(0)).toBe(false);
 
     const unproven = retainQueueEventsAfterWatermarks(capture, new Map());
     expect(unproven.discarded).toBe(0);
@@ -304,11 +311,14 @@ describe('GW queue and data governance primitives', () => {
     accumulator.record('failures', 2_000);
     accumulator.record('stalled', 3_000);
 
-    expect(accumulator.discardReceivedAtOrBefore(2_000)).toBe(2);
+    // The aggregate cutoff is intentionally conservative for a mixed bucket:
+    // the latest event is newer than the statement snapshot, so all counters
+    // remain pending and can be persisted without per-event history.
+    expect(accumulator.discardReceivedAtOrBefore(2_000)).toBe(0);
     expect(accumulator.capture().get(0)).toEqual({
-      arrivals: 0,
+      arrivals: 1,
       completions: 0,
-      failures: 0,
+      failures: 1,
       stalled: 1,
     });
   });

@@ -44,6 +44,15 @@ import {
   createLiveSnapshotDatabaseBudget,
   type LiveSnapshotDatabaseBudget,
 } from '../utils/live-snapshot-db-budget';
+import type { SchedulerLanePublicationFence } from '../repositories/scheduler-lanes';
+
+/**
+ * Run a Redis publication activation while the caller holds its durable
+ * latest-authoritative lane fence. The generic callback keeps the cache
+ * service independent of scheduler transactions while allowing the worker to
+ * hold its row lock across the activation command.
+ */
+export type LiveSnapshotPublicationActivation = <T>(activate: () => Promise<T>) => Promise<T>;
 
 export interface LiveSnapshotV2SyncOptions {
   /**
@@ -61,6 +70,10 @@ export interface LiveSnapshotV2SyncOptions {
   readonly dependencies?: LiveSnapshotV2Dependencies;
   /** Worker-owned local database budget; omitted by hermetic unit callers. */
   readonly databaseBudget?: LiveSnapshotDatabaseBudget;
+  /** Exact latest-authoritative lane identity for durable checkpoints. */
+  readonly schedulerLaneFence?: SchedulerLanePublicationFence;
+  /** Hold the lane fence through the Redis publication activation command. */
+  readonly withPublicationActivationFence?: LiveSnapshotPublicationActivation;
 }
 
 export interface LiveSnapshotV2Dependencies {
@@ -248,6 +261,7 @@ async function checkpoint(
   desired: Awaited<ReturnType<typeof setLiveCheckpointDesiredV2>> | null,
   observationCheckedAt?: Date | string,
   databaseBudget?: LiveSnapshotDatabaseBudget | null,
+  schedulerLaneFence?: SchedulerLanePublicationFence,
 ): Promise<boolean> {
   try {
     const checkpointed = await dependencies.checkpointPublication({
@@ -260,6 +274,7 @@ async function checkpoint(
       fixtureEvidence: payload.fixtureEvidence,
       observationCheckedAt,
       ...(databaseBudget ? { db: databaseBudget.writeDb } : {}),
+      ...(schedulerLaneFence ? { schedulerLaneFence } : {}),
     });
     if (!checkpointed) return false;
     const marked = await markLivePublicationCheckpointedV2(publication, new Date());
@@ -414,6 +429,8 @@ export async function syncLiveSnapshotV2(
     totalMs: Math.max(0, Date.now() - totalStartedAt),
   });
   const dependencies = options.dependencies ?? defaultDependencies;
+  const activatePublication: LiveSnapshotPublicationActivation =
+    options.withPublicationActivationFence ?? (async <T>(activate: () => Promise<T>) => activate());
   const databaseBudget =
     options.databaseBudget ??
     (dependencies === defaultDependencies
@@ -736,11 +753,11 @@ export async function syncLiveSnapshotV2(
     // checkpoint before considering any newly fetched provisional candidate;
     // otherwise a fresh generation could supersede final data.
     const redisStartedAt = Date.now();
-    const restored = await (
-      dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint
-    )({
-      checkpoint: durableFloor,
-    });
+    const restored = await activatePublication(() =>
+      (dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint)({
+        checkpoint: durableFloor,
+      }),
+    );
     redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
     // A stale response is not proof that the durable FINAL is serving. Even
     // an equal identity must be rejected here: the active pointer or its
@@ -916,6 +933,7 @@ export async function syncLiveSnapshotV2(
       desired,
       observationCheckedAt,
       databaseBudget,
+      options.schedulerLaneFence,
     );
     checkpointMs = Math.max(0, Date.now() - checkpointStartedAt);
     if (acceptedMatchObservation) await finalizeAcceptedMatch(acceptedMatchObservation);
@@ -958,10 +976,12 @@ export async function syncLiveSnapshotV2(
     !durableGenerationConflict
   ) {
     const redisStartedAt = Date.now();
-    const touched = await touchLivePublicationV2(
-      current.publication,
-      sourceCheckedAt,
-      options.expectedNextCheckAt ?? null,
+    const touched = await activatePublication(() =>
+      touchLivePublicationV2(
+        current.publication,
+        sourceCheckedAt,
+        options.expectedNextCheckAt ?? null,
+      ),
     );
     redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
     const publication = touched ?? current.publication;
@@ -1004,6 +1024,7 @@ export async function syncLiveSnapshotV2(
           desired,
           undefined,
           databaseBudget,
+          options.schedulerLaneFence,
         )
       : false;
     checkpointMs =
@@ -1033,17 +1054,19 @@ export async function syncLiveSnapshotV2(
   await requireProvisionalMatchDetail();
 
   const redisStartedAt = Date.now();
-  const promoted = await publishLivePublicationV2({
-    season: season.seasonCode,
-    eventId,
-    state,
-    sourceCheckedAt,
-    expectedNextCheckAt: options.expectedNextCheckAt ?? null,
-    eventLives: prepared.eventLives.eventLives,
-    fixtures: prepared.fixtures,
-    previous: current?.publication ?? null,
-    generationFloor,
-  });
+  const promoted = await activatePublication(() =>
+    publishLivePublicationV2({
+      season: season.seasonCode,
+      eventId,
+      state,
+      sourceCheckedAt,
+      expectedNextCheckAt: options.expectedNextCheckAt ?? null,
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
+      previous: current?.publication ?? null,
+      generationFloor,
+    }),
+  );
   redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
   if (!promoted.published) {
     // A stale result is an ordering/finalization fence, not a publication
@@ -1124,6 +1147,7 @@ export async function syncLiveSnapshotV2(
     desired,
     undefined,
     databaseBudget,
+    options.schedulerLaneFence,
   );
   checkpointMs = Math.max(0, Date.now() - checkpointStartedAt);
   logInfo('Live Points V2 publication complete', {
