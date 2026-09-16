@@ -201,7 +201,7 @@ export async function preparePlayerValuesSync(
   season: FplSeasonRef,
   changeDate: string,
   dependencies: PlayerValuesSyncDependencies = defaultDependencies,
-  options?: { onTargetEventResolved?: (eventId: number) => void },
+  options?: { onTargetEventResolved?: (eventId: number) => unknown | Promise<unknown> },
 ): Promise<PreparedPlayerValuesSync | null> {
   assertChangeDate(changeDate);
 
@@ -214,7 +214,7 @@ export async function preparePlayerValuesSync(
     if (changeDate === currentChangeDate && !currentSyncEvent) {
       throw new Error('No current or next event found for player values');
     }
-    if (currentSyncEvent) options?.onTargetEventResolved?.(currentSyncEvent.event.id);
+    if (currentSyncEvent) await options?.onTargetEventResolved?.(currentSyncEvent.event.id);
 
     const resolvedArtifact = await measurePhase(timings, 'bootstrap', () =>
       dependencies.resolveBootstrapSourceArtifact(season, changeDate),
@@ -234,7 +234,7 @@ export async function preparePlayerValuesSync(
       );
     }
     const eventId = currentSyncEvent?.event.id ?? resolveArchivedMarketEventId(bootstrap);
-    if (!currentSyncEvent) options?.onTargetEventResolved?.(eventId);
+    if (!currentSyncEvent) await options?.onTargetEventResolved?.(eventId);
     const snapshots = transformPlayerMarketSnapshots(bootstrap, capturedAt);
     return {
       season,
@@ -390,7 +390,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
     season: FplSeasonRef,
     changeDate: string = dependencies.getCurrentChangeDate(),
     options?: {
-      onTargetEventResolved?: (eventId: number) => void;
+      onTargetEventResolved?: (eventId: number) => unknown | Promise<unknown>;
       deferPriceSyncEnqueue?: boolean;
       /** Publish only after the caller's canonical mutation transaction commits. */
       deferMarketPublication?: boolean;

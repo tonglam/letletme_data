@@ -471,8 +471,9 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     targetEventId: job.data?.eventId,
     queueWaitMs: context.queueWaitMs,
   };
-  const recordResolvedTarget = (eventId: number) => {
+  const recordResolvedTarget = async (eventId: number) => {
     attemptContext.targetEventId = eventId;
+    await attemptContext.onTargetEventResolved?.(eventId);
   };
 
   logJobTriggered(context);

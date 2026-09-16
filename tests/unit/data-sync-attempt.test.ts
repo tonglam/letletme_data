@@ -216,7 +216,45 @@ describe('data sync attempt reporting', () => {
       batchId: 'batch-2',
       parentRunId: 'root-2',
       executionIntent: 'force',
+      batchCost: {
+        executionId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ),
+      },
     });
+  });
+
+  test('gives concurrent physical deliveries distinct cost identities', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await Promise.all([
+      runDataSyncAttempt(
+        {
+          queue: 'data-sync',
+          jobName: 'core-snapshot',
+          runId: 'stalled-redelivery',
+          batchId: 'logical-batch',
+          attempt: 1,
+        },
+        async () => ({ outcome: 'ready' as const }),
+      ),
+      runDataSyncAttempt(
+        {
+          queue: 'data-sync',
+          jobName: 'core-snapshot',
+          runId: 'stalled-redelivery',
+          batchId: 'logical-batch',
+          attempt: 1,
+        },
+        async () => ({ outcome: 'ready' as const }),
+      ),
+    ]);
+
+    const reports = reportsFrom(infoSpy);
+    expect(reports).toHaveLength(2);
+    expect(new Set(reports.map((report) => report.batchCost.executionId)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.batchCost.attemptKey)).size).toBe(2);
+    expect(reports.every((report) => report.outcome === 'ready')).toBe(true);
   });
 
   test('emits once on failure and rethrows the original error', async () => {

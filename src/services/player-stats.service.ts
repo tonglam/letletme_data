@@ -191,7 +191,7 @@ async function resolveGw1Baseline(
 export async function syncCurrentPlayerStats(
   season: FplSeasonRef,
   options?: {
-    onTargetEventResolved?: (eventId: EventId) => void;
+    onTargetEventResolved?: (eventId: EventId) => unknown | Promise<unknown>;
   },
   dependencies: PlayerStatsSyncDependencyOverrides = {},
 ): Promise<{
@@ -217,7 +217,7 @@ export async function syncCurrentPlayerStats(
   if (!syncEvent) {
     throw new Error('No current or next event found for player stats');
   }
-  options?.onTargetEventResolved?.(syncEvent.event.id);
+  await options?.onTargetEventResolved?.(syncEvent.event.id);
 
   const sourceCheckedAt = new Date();
   const fplData = await runtimeDependencies.getBootstrap();

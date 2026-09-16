@@ -869,6 +869,66 @@ describe('ops sync state machine', () => {
     });
   });
 
+  test('records an in-flight target event and the settled outcome', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[2], season);
+    const attemptKey = 'data-sync|player-stats|target-marker|1|none|execution-1';
+
+    expect(
+      await syncOperationsRepository.recordBatchCostStart(RUN_IDS[2], {
+        attemptKey,
+        batchId: 'target-marker',
+        parentRunId: null,
+        releaseSha: 'test-release',
+        attempt: 1,
+        payload: {
+          startedAt: '2026-08-09T00:00:00.000Z',
+          executionId: 'execution-1',
+          outcome: 'pending',
+        },
+      }),
+    ).toBe('recorded');
+    expect(
+      await syncOperationsRepository.updateBatchCostTargetEvent(RUN_IDS[2], attemptKey, 12),
+    ).toBe(true);
+    const [running] = await sql<Array<{ phase: string; eventId: number; outcome: string }>>`
+      SELECT normalized_payload->>'phase' AS phase,
+             (normalized_payload->>'eventId')::integer AS "eventId",
+             normalized_payload->>'outcome' AS outcome
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+        AND resource_type = 'batch-cost'
+        AND resource_id = ${attemptKey}
+    `;
+    expect(running).toEqual({ phase: 'started', eventId: 12, outcome: 'pending' });
+
+    expect(
+      await syncOperationsRepository.recordBatchCost(RUN_IDS[2], {
+        attemptKey,
+        batchId: 'target-marker',
+        parentRunId: null,
+        releaseSha: 'test-release',
+        attempt: 1,
+        complete: true,
+        payload: { eventId: 12, outcome: 'ready', logicalRequests: 1 },
+      }),
+    ).toBe('recorded');
+    const [settled] = await sql<Array<{ phase: string; eventId: number; outcome: string }>>`
+      SELECT normalized_payload->>'phase' AS phase,
+             (normalized_payload->>'eventId')::integer AS "eventId",
+             normalized_payload->>'outcome' AS outcome
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+        AND resource_type = 'batch-cost'
+        AND resource_id = ${attemptKey}
+    `;
+    expect(settled).toEqual({ phase: 'settled', eventId: 12, outcome: 'ready' });
+    expect(
+      await syncOperationsRepository.updateBatchCostTargetEvent(RUN_IDS[2], attemptKey, 13),
+    ).toBe(false);
+  });
+
   test('fences a late failure behind a newer batch attempt', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

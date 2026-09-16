@@ -673,6 +673,9 @@ export function createEntrySyncWorker(
             };
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
+      if (targetEventId !== undefined) {
+        await attemptContext.onTargetEventResolved?.(targetEventId);
+      }
       const runMutation = async (): Promise<EntrySyncMutationResult> => {
         switch (job.name) {
           case 'entry-info': {
