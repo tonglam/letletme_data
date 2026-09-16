@@ -22,6 +22,7 @@ import {
   contentQueueNames,
   contentXScanQueueName,
   entrySyncQueueName,
+  tournamentRepairQueueName,
 } from '../src/queues/names';
 import {
   beginQueueConsumerPauseRelease,
@@ -61,7 +62,11 @@ const DEPLOYMENT_PREPARE_PAUSED_CONTENT_RUNS = '--prepare-paused-content-runs';
 
 export const CONTENT_X_SCAN_QUEUE = contentXScanQueueName;
 export const CONTENT_CONSUMER_QUEUE_NAMES = contentQueueNames;
-export const DEPLOYMENT_CONSUMER_QUEUE_NAMES = [entrySyncQueueName, ...contentQueueNames] as const;
+export const DEPLOYMENT_CONSUMER_QUEUE_NAMES = [
+  entrySyncQueueName,
+  tournamentRepairQueueName,
+  ...contentQueueNames,
+] as const;
 export const CONTENT_CONSUMER_CONTRACT_VERSION = 'content-worker-consumer-v1' as const;
 export const DEPLOY_QUEUE_ADMISSION_TTL_SECONDS = 900;
 export const DEPLOY_QUEUE_ADMISSION_REASON = 'DEPLOY_QUEUE_QUIESCENCE';

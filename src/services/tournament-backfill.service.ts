@@ -37,7 +37,7 @@ import { logError, logInfo, logWarn } from '../utils/logger';
 import type { TournamentRepairState } from '../repositories/tournament-setup-issues';
 import { withTournamentRepairPhase } from '../utils/tournament-repair-phase';
 import { withMutationScopes } from '../utils/mutation-scopes';
-import { ValidationError } from '../utils/errors';
+import { ConflictError, IncompleteDataSyncError, ValidationError } from '../utils/errors';
 
 import { syncEntryInfo } from './entry-info.service';
 import { syncTournamentBattleRaceResultsForTournament } from './tournament-battle-race-results.service';
@@ -434,6 +434,7 @@ export async function ensureTournamentCoreResults(
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       skipTransfers: true,
       perEntryMutationScopes: true,
+      finalizationRecoveryEntryIds: new Set(missingEntryIds),
     });
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);
@@ -735,31 +736,61 @@ export async function runTournamentEventBackfill(
   repair?: { issueId: number; owner: TournamentRepairState },
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
-  const eventResults = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
-    concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-    perEntryMutationScopes: true,
-  });
-  logInfo('Tournament event results sync completed for tournament', {
-    tournamentId,
-    eventId,
-    totalEntries: eventResults.totalEntries,
-    synced: eventResults.synced,
-    errors: eventResults.errors,
-  });
-  if (eventResults.errors > 0 || eventResults.synced < eventResults.totalEntries) {
-    const message = `Tournament event results incomplete for event ${eventId}: ${eventResults.synced}/${eventResults.totalEntries}`;
-    issues.push({
-      scope: 'event-results',
+  const event = await eventRepository.findById(season, eventId);
+  const finalCutoff =
+    event?.finished && event.dataChecked && event.dataCheckedAt
+      ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ??
+        event.dataCheckedAt.toISOString())
+      : null;
+  if (finalCutoff) {
+    // Derived standings repair must reuse complete FINAL inputs. Requiring a
+    // new wall-clock source observation on every retry refetches the entire
+    // tournament, even when only a handful of entries or derived rows are missing.
+    await ensureTournamentCoreResults(
+      season,
+      entryIds,
+      { startEventId: eventId, endEventId: eventId },
+      undefined,
+      undefined,
+      { requirePicksForEvents: [eventId] },
+    );
+    const missingTransfers = await entryEventTransfersRepository.findEntryIdsNeedingSync(
+      season,
+      entryIds,
       eventId,
-      message,
-      failedEntries: entryIds,
-    });
-    logWarn('Tournament event backfill completed with warnings', {
-      tournamentId,
-      eventId,
-      totalEntries: eventResults.totalEntries,
-      synced: eventResults.synced,
-      errors: eventResults.errors,
+    );
+    if (missingTransfers.length > 0) {
+      const transfers = await syncEntryTransferHistories(season, missingTransfers, eventId, {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        perEntryMutationScopes: true,
+      });
+      if (transfers.failedUnits > 0) {
+        throw new IncompleteDataSyncError(
+          'Tournament repair transfer inputs remain incomplete',
+          transfers.requiredUnits,
+          transfers.reusedUnits,
+          transfers.succeededUnits,
+          transfers.failedUnits,
+        );
+      }
+    }
+    const afterEvent = await eventRepository.findById(season, eventId);
+    const afterCutoff =
+      afterEvent?.finished && afterEvent.dataChecked && afterEvent.dataCheckedAt
+        ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ??
+          afterEvent.dataCheckedAt.toISOString())
+        : null;
+    if (afterCutoff !== finalCutoff) {
+      throw new ConflictError(
+        'Event finalization changed during tournament repair.',
+        'TOURNAMENT_REPAIR_STALE',
+      );
+    }
+  } else {
+    // Provisional rounds still require a fresh provider observation.
+    await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
+      concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      perEntryMutationScopes: true,
     });
   }
 

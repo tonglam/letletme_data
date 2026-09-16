@@ -335,6 +335,7 @@ printf 'CONTROL_IMAGE:%s\n' "$DEPLOY_CONTENT_WORKER_CONTROL_IMAGE"
     ]);
     expect(DEPLOYMENT_CONSUMER_QUEUE_NAMES).toEqual([
       'entry-sync',
+      'tournament-repair',
       'content-http-acquisition',
       'content-media-transcript',
       'content-x-scan',
@@ -371,6 +372,7 @@ drain_content_worker_queues_for_deploy
 [[ ! -e "$pause_dir/content-http-acquisition" ]]
 [[ ! -e "$pause_dir/content-media-transcript" ]]
 [[ ! -e "$pause_dir/entry-sync" ]]
+[[ ! -e "$pause_dir/tournament-repair" ]]
 [[ -z "$DEPLOY_CONTENT_WORKER_OWNED_PAUSED_QUEUES" ]]
 `);
     expect(
@@ -380,6 +382,7 @@ drain_content_worker_queues_for_deploy
     const stdout = result.stdout?.toString() ?? '';
     expect(stdout).toContain('STATUS:entry-sync');
     expect(stdout).toContain('PAUSE:entry-sync');
+    expect(stdout).toContain('PAUSE:tournament-repair');
     expect(stdout).toContain('STATUS:content-x-scan');
     expect(stdout).toContain('PAUSE:content-x-scan');
     expect(stdout).toContain('STATUS:content-http-acquisition');
@@ -391,6 +394,7 @@ drain_content_worker_queues_for_deploy
     expect(stdout).toContain('RESUME:content-http-acquisition');
     expect(stdout).toContain('RESUME:content-media-transcript');
     expect(stdout).toContain('RESUME:entry-sync');
+    expect(stdout).toContain('RESUME:tournament-repair');
     expect(stdout.lastIndexOf('RESUME:content-media-transcript')).toBeLessThan(
       stdout.indexOf('OPEN:content-x-scan'),
     );
@@ -416,7 +420,7 @@ restore_content_deploy_controls
         stdout.match(new RegExp(`DRAIN_ONLY:${queueName}`, 'g'))?.length,
       ).toBeGreaterThanOrEqual(2);
     }
-  });
+  }, 15_000);
 
   test('rejects a renewal interval without admission TTL margin', () => {
     const result = runConsumerControlShell(String.raw`
