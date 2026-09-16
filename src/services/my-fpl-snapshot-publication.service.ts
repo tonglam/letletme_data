@@ -430,6 +430,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
       JOIN fpl.seasons season ON season.season_id = publication.season_id
       WHERE publication.active = false
         AND publication.updated_at < ${candidateBeforeIso}::timestamptz
+        AND publication.idempotency_key IS NULL
         ${seasonFilter}
         ${eventFilter}
         AND (
@@ -517,6 +518,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
           AND publication.revision = ${candidate.revision}
           AND publication.active = false
           AND publication.updated_at < ${candidateBeforeIso}::timestamptz
+          AND publication.idempotency_key IS NULL
           AND NOT EXISTS (
             SELECT 1
             FROM competition.my_fpl_snapshot_publication_outbox outbox
@@ -591,6 +593,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
           AND event_id = ${lockedCandidate.event_id}
           AND revision = ${lockedCandidate.revision}
           AND active = false
+          AND idempotency_key IS NULL
           AND updated_at < ${supersededBeforeIso}::timestamptz
         RETURNING revision
       `;
