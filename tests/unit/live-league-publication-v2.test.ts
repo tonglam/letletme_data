@@ -26,6 +26,7 @@ import { canonicalJson, contentHash } from '../../src/utils/content-hash';
 import {
   isH2HTournamentPhaseActive,
   isLiveLeagueCheckpointGenerationCompatible,
+  isSafeFinalizedClassicRosterExpansion,
   liveLeagueCheckpointIsDue,
 } from '../../src/services/live-league-checkpoint-v2.service';
 import {
@@ -727,6 +728,8 @@ describe('Live League V2 checkpoint transaction contract', () => {
     expect(checkpointServiceSource).toContain('generationCompatible');
     expect(checkpointServiceSource).toContain('isLiveLeagueCheckpointGenerationCompatible');
     expect(checkpointServiceSource).toContain('sameFinalizedPublicationContent');
+    expect(checkpointServiceSource).toContain('isSafeFinalizedClassicRosterExpansion');
+    expect(checkpointServiceSource).toContain('allowFinalizedRosterExpansion');
     expect(checkpointServiceSource).toContain(
       'current.publicationId === read.publication.publicationId',
     );
@@ -764,6 +767,78 @@ describe('Live League V2 checkpoint generation fence', () => {
         candidate,
       ),
     ).toBe(true);
+  });
+});
+
+describe('Live League V2 Classic finalized roster successor fence', () => {
+  function successorFixture() {
+    const base = completeClassicCheckpointFixture();
+    const oldRow = base.index[0];
+    const newRow = { ...oldRow, entryId: 202, entryName: 'Entry 202' };
+    const successorPublication: LeagueLiveManifest = {
+      ...base.checkpointManifest,
+      publicationId: '00000000-0000-4000-8000-000000000202',
+      generation: base.checkpointManifest.generation + 1,
+      revisions: { ...base.checkpointManifest.revisions, roster: 'b'.repeat(64) },
+      counts: { expected: 2, published: 2, ready: 2, noPicks: 0 },
+      items: {
+        index: { ...base.checkpointManifest.items.index, count: 2 },
+        payload: { ...base.checkpointManifest.items.payload, count: 2 },
+      },
+    };
+    return {
+      persisted: {
+        state: 'FINALIZED',
+        manifest: base.checkpointManifest,
+        rowCount: base.index.length,
+        indexPayload: base.index,
+        payload: base.payload,
+      },
+      read: {
+        publication: successorPublication,
+        index: [oldRow, newRow],
+        payload: { ...base.payload, '202': { entryId: 202 } },
+        servedFrom: 'REDIS_CURRENT' as const,
+      } as LeagueLiveRead,
+    };
+  }
+
+  test('allows a complete append-only successor with the same old prefix', () => {
+    const fixture = successorFixture();
+    expect(isSafeFinalizedClassicRosterExpansion(fixture.read, fixture.persisted)).toBe(true);
+  });
+
+  test('rejects changed, removed, or reordered persisted rows', () => {
+    const changed = successorFixture();
+    const changedRead: LeagueLiveRead = {
+      ...changed.read,
+      index: [{ ...changed.read.index[0], entryName: 'changed' }, changed.read.index[1]],
+    };
+    expect(isSafeFinalizedClassicRosterExpansion(changedRead, changed.persisted)).toBe(false);
+
+    const removed = successorFixture();
+    const removedRead: LeagueLiveRead = { ...removed.read, index: [removed.read.index[0]] };
+    expect(isSafeFinalizedClassicRosterExpansion(removedRead, removed.persisted)).toBe(false);
+
+    const reordered = successorFixture();
+    const reorderedRead: LeagueLiveRead = {
+      ...reordered.read,
+      index: [reordered.read.index[1], reordered.read.index[0]],
+    };
+    expect(isSafeFinalizedClassicRosterExpansion(reorderedRead, reordered.persisted)).toBe(false);
+  });
+
+  test('rejects a successor from a different global publication', () => {
+    const fixture = successorFixture();
+    const changedPublication: LeagueLiveManifest = {
+      ...fixture.read.publication,
+      globalRef: {
+        ...fixture.read.publication.globalRef,
+        generation: fixture.read.publication.globalRef.generation + 1,
+      },
+    };
+    const changedRead: LeagueLiveRead = { ...fixture.read, publication: changedPublication };
+    expect(isSafeFinalizedClassicRosterExpansion(changedRead, fixture.persisted)).toBe(false);
   });
 });
 
