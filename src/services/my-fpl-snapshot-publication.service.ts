@@ -404,7 +404,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
   let deleted = 0;
   let scanned = 0;
   let cursor: {
-    updatedAt: Date | string;
+    updatedAt: string;
     seasonId: number;
     eventId: number;
     revision: number | string;
@@ -419,18 +419,18 @@ async function deleteExpiredMyFplSnapshotRevisions(
       event_id: number;
       revision: number | string;
       season_code: string;
-      updated_at: Date | string;
+      updated_at: string;
     }[] = await tx<
       {
         season_id: number;
         event_id: number;
         revision: number | string;
         season_code: string;
-        updated_at: Date | string;
+        updated_at: string;
       }[]
     >`
       SELECT publication.season_id, publication.event_id, publication.revision,
-             season.season_code, publication.updated_at
+             season.season_code, publication.updated_at::text AS updated_at
       FROM competition.my_fpl_snapshot_publications publication
       JOIN fpl.seasons season ON season.season_id = publication.season_id
       WHERE publication.active = false
@@ -474,15 +474,6 @@ async function deleteExpiredMyFplSnapshotRevisions(
             AND scope_state.event_id = publication.event_id
             AND scope_state.verified_revision = publication.revision
         )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM competition.my_fpl_snapshot_invalidation_outbox invalidation
-          WHERE invalidation.season_id = publication.season_id
-            AND invalidation.event_id = publication.event_id
-            AND invalidation.revision = publication.revision
-            AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
-            AND invalidation.delivered_at IS NULL
-        )
       ORDER BY publication.updated_at, publication.season_id, publication.event_id, publication.revision
       LIMIT ${Math.min(options.limit, MY_FPL_SNAPSHOT_RETENTION_MAX_SCAN)}
     `;
@@ -520,11 +511,21 @@ async function deleteExpiredMyFplSnapshotRevisions(
           event_id: number;
           revision: number | string;
           season_code: string;
-          updated_at: Date | string;
+          updated_at: string;
+          has_pending_invalidation: boolean;
         }[]
       >`
         SELECT publication.season_id, publication.event_id, publication.revision,
-               season.season_code, publication.updated_at
+               season.season_code, publication.updated_at::text AS updated_at,
+               EXISTS (
+                 SELECT 1
+                 FROM competition.my_fpl_snapshot_invalidation_outbox invalidation
+                 WHERE invalidation.season_id = publication.season_id
+                   AND invalidation.event_id = publication.event_id
+                   AND invalidation.revision = publication.revision
+                   AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
+                   AND invalidation.delivered_at IS NULL
+               ) AS has_pending_invalidation
         FROM competition.my_fpl_snapshot_publications publication
         JOIN fpl.seasons season ON season.season_id = publication.season_id
         WHERE publication.season_id = ${candidate.season_id}
@@ -548,15 +549,6 @@ async function deleteExpiredMyFplSnapshotRevisions(
             WHERE scope_state.season_id = publication.season_id
               AND scope_state.event_id = publication.event_id
               AND scope_state.verified_revision = publication.revision
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM competition.my_fpl_snapshot_invalidation_outbox invalidation
-            WHERE invalidation.season_id = publication.season_id
-              AND invalidation.event_id = publication.event_id
-              AND invalidation.revision = publication.revision
-              AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
-              AND invalidation.delivered_at IS NULL
           )
         FOR UPDATE SKIP LOCKED
       `;
@@ -605,19 +597,32 @@ async function deleteExpiredMyFplSnapshotRevisions(
         `;
         continue;
       }
+      // A pending or failed invalidation protects this durable revision from
+      // deletion, but it must not prevent the Redis-named row from being
+      // renewed above. Keep scanning later candidates in this pass.
+      if (lockedCandidate.has_pending_invalidation) continue;
       if (
         new Date(lockedCandidate.updated_at).getTime() >= new Date(supersededBeforeIso).getTime()
       ) {
         continue;
       }
       const result = await tx<{ revision: number }[]>`
-        DELETE FROM competition.my_fpl_snapshot_publications
-        WHERE season_id = ${lockedCandidate.season_id}
-          AND event_id = ${lockedCandidate.event_id}
-          AND revision = ${lockedRevision}
-          AND active = false
-          AND idempotency_key IS NULL
-          AND updated_at < ${supersededBeforeIso}::timestamptz
+        DELETE FROM competition.my_fpl_snapshot_publications AS publication
+        WHERE publication.season_id = ${lockedCandidate.season_id}
+          AND publication.event_id = ${lockedCandidate.event_id}
+          AND publication.revision = ${lockedRevision}
+          AND publication.active = false
+          AND publication.idempotency_key IS NULL
+          AND publication.updated_at < ${supersededBeforeIso}::timestamptz
+          AND NOT EXISTS (
+            SELECT 1
+            FROM competition.my_fpl_snapshot_invalidation_outbox invalidation
+            WHERE invalidation.season_id = publication.season_id
+              AND invalidation.event_id = publication.event_id
+              AND invalidation.revision = publication.revision
+              AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
+              AND invalidation.delivered_at IS NULL
+          )
         RETURNING revision
       `;
       deleted += result.length;

@@ -780,7 +780,12 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain(
       'WHERE publication.active = false\n        AND publication.updated_at < ${candidateBeforeIso}::timestamptz',
     );
-    expect(publicationService).toContain('AND updated_at < ${supersededBeforeIso}::timestamptz');
+    expect(publicationService).toContain(
+      'AND publication.updated_at < ${supersededBeforeIso}::timestamptz',
+    );
+    expect(publicationService).toContain('publication.updated_at::text AS updated_at');
+    expect(publicationService).toContain('has_pending_invalidation');
+    expect(publicationService).toContain('if (lockedCandidate.has_pending_invalidation) continue;');
     expect(publicationService).not.toContain('${sourceCheckedAt}, ${now},');
     expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
   });
