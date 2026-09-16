@@ -412,6 +412,37 @@ async function detailFenceForFinalization(
 }
 
 /**
+ * A durable Match FINAL is not enough for consumers: both active Redis
+ * pointers must still expose the same validated final pair. The checkpoint
+ * probe proves PostgreSQL durability; this serving probe proves the current
+ * read model was not lost or corrupted after that checkpoint.
+ */
+function isServingFinalMatchPair(
+  deskFence: MatchDeskActiveFence | undefined,
+  detailFence: MatchDetailActiveFence | undefined,
+  season: FplSeasonRef,
+  eventId: number,
+): boolean {
+  const desk = deskFence?.read;
+  const detail = detailFence?.read;
+  return Boolean(
+    desk?.servedFrom === 'REDIS_CURRENT' &&
+      detail?.servedFrom === 'REDIS_CURRENT' &&
+      desk.publication.season === season.seasonCode &&
+      desk.publication.eventId === eventId &&
+      detail.publication.season === season.seasonCode &&
+      detail.publication.eventId === eventId &&
+      desk.publication.state === 'FINALIZED' &&
+      desk.publication.checkpointedAt !== null &&
+      detail.publication.finalized === true &&
+      detail.publication.checkpointedAt !== null &&
+      detail.publication.observedDeskGeneration === desk.publication.generation &&
+      detail.publication.fixtureIdentityRevision ===
+        desk.publication.revisions.fixtureIdentity.revision,
+  );
+}
+
+/**
  * A Redis FINAL without a durable row is a recovery obligation, not a reason
  * to checkpoint the two Redis payloads on their own.  Keep one merged desired
  * marker while the coherent upstream read below reconstructs the relational
@@ -530,7 +561,7 @@ export async function syncLiveSnapshotV2(
   redisReadMs = currentReadMs;
   const hasFinalMatchCheckpoints =
     dependencies.hasFinalMatchCheckpoints ?? hasFinalLiveMatchCheckpointsV3;
-  const repairMatchForReusedFinal = async (): Promise<void> => {
+  const repairMatchForReusedFinal = async (durableFinal: LivePublicationRead): Promise<void> => {
     let matchFinalized = false;
     try {
       matchFinalized = await hasFinalMatchCheckpoints(season, eventId, databaseBudget?.readDb);
@@ -540,7 +571,60 @@ export async function syncLiveSnapshotV2(
         eventId,
       });
     }
-    if (matchFinalized) return;
+
+    // Production dependencies expose both active-pointer readers. A custom
+    // hermetic caller may omit them; its durable checkpoint seam remains the
+    // only available serving proof and keeps the existing unit contract.
+    let observedMatchDesk: MatchDeskActiveFence | undefined;
+    let observedMatchDetail: MatchDetailActiveFence | undefined;
+    const canProbeServingPair =
+      dependencies.readObservedMatchDesk !== undefined &&
+      dependencies.readObservedMatchDetail !== undefined;
+    if (canProbeServingPair) {
+      try {
+        [observedMatchDesk, observedMatchDetail] = await Promise.all([
+          dependencies.readObservedMatchDesk!({
+            season: season.seasonCode,
+            eventId,
+          }),
+          dependencies.readObservedMatchDetail!({
+            season: season.seasonCode,
+            eventId,
+          }),
+        ]);
+        if (
+          matchFinalized &&
+          isServingFinalMatchPair(observedMatchDesk, observedMatchDetail, season, eventId)
+        ) {
+          return;
+        }
+      } catch (error) {
+        // A failed serving read cannot prove that the final pair is available;
+        // continue through the bounded repair path and let its CAS fence fail
+        // closed if Redis remains unavailable.
+        logError('Live Match serving FINAL probe failed during Live Points reuse', error, {
+          season: season.seasonCode,
+          eventId,
+        });
+        observedMatchDesk = undefined;
+        observedMatchDetail = undefined;
+        matchFinalized = false;
+      }
+    } else if (matchFinalized) {
+      return;
+    }
+
+    // The active Match pointers above are the exact bytes that must fence this
+    // recovery. They are captured before any provider request starts.
+    if (
+      canProbeServingPair &&
+      (observedMatchDesk === undefined || observedMatchDetail === undefined)
+    ) {
+      [observedMatchDesk, observedMatchDetail] = await Promise.all([
+        dependencies.readObservedMatchDesk!({ season: season.seasonCode, eventId }),
+        dependencies.readObservedMatchDetail!({ season: season.seasonCode, eventId }),
+      ]);
+    }
 
     // Live Points is already immutable here. Rebuild only the missing Match
     // sibling from a fresh observation; this preserves the final publication
@@ -549,10 +633,10 @@ export async function syncLiveSnapshotV2(
       .getExpectedFixtureIds(season, eventId)
       .catch((error) => {
         if (
-          current?.publication.season === season.seasonCode &&
-          current.publication.eventId === eventId
+          durableFinal.publication.season === season.seasonCode &&
+          durableFinal.publication.eventId === eventId
         ) {
-          return current.fixtures.map((fixture) => fixture.id);
+          return durableFinal.fixtures.map((fixture) => fixture.id);
         }
         throw error;
       });
@@ -580,10 +664,12 @@ export async function syncLiveSnapshotV2(
       rawFixtures: fixturesResult.value,
       expectedFixtureIds: expectedFixtureIdsResult.value,
       referenceData: referenceDataResult.value,
-      publishedLiveElementIds: current?.eventLives.map((row) => row.elementId),
+      publishedLiveElementIds: durableFinal.eventLives.map((row) => row.elementId),
       finalizeEvent: true,
       lifecycleState: 'FINALIZED',
       expectedNextCheckAt: options.expectedNextCheckAt,
+      observedDesk: observedMatchDesk,
+      observedDetail: observedMatchDetail,
       databaseRead: databaseBudget?.readDb,
     });
     if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {
@@ -667,7 +753,7 @@ export async function syncLiveSnapshotV2(
       });
     }
 
-    if (options.finalizeEvent === true) await repairMatchForReusedFinal();
+    if (options.finalizeEvent === true) await repairMatchForReusedFinal(durableFinal);
     try {
       const readDesired = dependencies.readCheckpointDesired ?? readLiveCheckpointDesiredV2;
       const clearDesired = dependencies.clearCheckpointDesired ?? clearLiveCheckpointDesiredV2;
