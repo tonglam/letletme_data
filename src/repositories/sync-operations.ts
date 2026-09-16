@@ -504,7 +504,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         const sourceRevision = stringValue(payload.sourceRevision);
         if (!sourceRevision) return false;
         const parsed = new Date(sourceRevision);
-        return !Number.isNaN(parsed.getTime()) && parsed.getTime() === currentFinalizationRevision;
+        return !Number.isNaN(parsed.getTime()) && parsed.getTime() >= currentFinalizationRevision;
       };
       const finalCompletions = allRows.filter(
         (row) =>
