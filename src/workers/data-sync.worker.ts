@@ -563,6 +563,17 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             requiredUnits: result.requiredUnits,
             succeededUnits: result.succeededUnits,
             failedUnits: result.failedUnits,
+            // The canonical snapshot and market publication have already
+            // committed before the window deliberately yields. Preserve those
+            // write facts on the pending error so batch-cost settlement does
+            // not report a successful database transaction as zero work.
+            submittedRows: result.submittedRows,
+            publicationsCreated:
+              marketPublication?.status === 'published'
+                ? 1
+                : (result.publicationsCreated ?? 0),
+            publicationsReused:
+              marketPublication?.status === 'unchanged' ? 1 : (result.publicationsReused ?? 0),
             timings: result.timings,
           });
         }
