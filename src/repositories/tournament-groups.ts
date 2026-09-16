@@ -119,13 +119,14 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
     findGroupSlots: async (
       season: FplSeasonRef,
       tournamentId: number,
-    ): Promise<Array<{ groupId: number; groupIndex: number }>> => {
+    ): Promise<Array<{ groupId: number; groupIndex: number; entryId: number }>> => {
       try {
         const db = await getDbInstance();
         const rows = await db
           .select({
             groupId: tournamentGroupsInCompetition.groupId,
             groupIndex: tournamentGroupsInCompetition.groupIndex,
+            entryId: tournamentGroupsInCompetition.entryId,
           })
           .from(tournamentGroupsInCompetition)
           .where(

@@ -4089,7 +4089,7 @@ async function renewReviewObligationLease(
   return rows.length === 1;
 }
 
-function reviewRepairIssue(
+export function reviewRepairIssue(
   obligation: ClaimedReviewObligation,
   error: TournamentReviewSourceNotReadyError,
   nextRepairAt: Date,
@@ -4102,7 +4102,13 @@ function reviewRepairIssue(
   // publication.  Only roster/group/bracket topology failures use the
   // structure repair path; broad "match"/"winner" matching caused stale
   // source rows to be misrouted and deleted accepted result evidence.
+  // A points projection can be absent or disagree with valid canonical groups.
+  // Rebuilding the canonical structure here deletes results for every event.
+  const derivedPointsGroupFailure = /^(historical )?points group assignment is stale$/i.test(
+    error.message,
+  );
   const structureFailure =
+    !derivedPointsGroupFailure &&
     /roster|group assignment|entry changed groups|bracket|participant.*(outside|coverage|invalid)|side contract|structure/i.test(
       error.message,
     );
