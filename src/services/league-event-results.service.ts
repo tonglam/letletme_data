@@ -411,6 +411,8 @@ export async function syncLeagueEventResultsByTournament(
   options?: {
     concurrency?: number;
     freshAfter?: Date | string;
+    /** Repair derived rows from the current core snapshot, even at an unchanged FINAL cutoff. */
+    rebuildFromCurrentInputs?: boolean;
     entryIds?: number[];
     mutationJobId?: string;
     /** Exact freshness window being repaired by the coordinator. */
@@ -438,6 +440,12 @@ export async function syncLeagueEventResultsByTournament(
   const finalizationCutoff = finalizationDate
     ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? finalizationDate)
     : null;
+  if (options?.rebuildFromCurrentInputs && typeof finalizationCutoff !== 'string') {
+    throw new ConflictError(
+      'FINAL league derivation boundary is unavailable',
+      'LEAGUE_ENTRY_SOURCE_STALE',
+    );
+  }
   const requiredRichFreshAfter = latestFreshnessTimestamp(freshAfter, finalizationCutoff);
 
   const resolvedEntryIds = await resolveTournamentEntryIds(season, tournament);
@@ -522,7 +530,7 @@ export async function syncLeagueEventResultsByTournament(
   // every scheduled attempt; the guarded upsert will retain a concurrently
   // published row backed by newer source evidence.
   const reusedEntryIds =
-    finalizationCutoff && requiredRichFreshAfter
+    finalizationCutoff && requiredRichFreshAfter && !options?.rebuildFromCurrentInputs
       ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
           season,
           tournament.leagueId,
@@ -718,7 +726,11 @@ export async function syncLeagueEventResultsByTournament(
       highestScoreElementId: data.highestScoreElementId,
       highestScorePoints: data.highestScorePoints,
       highestScoreBlank: data.highestScoreBlank,
-      sourceCheckedAt: requiredRichFreshAfter,
+      // Keep source freshness at FINAL while ordering a fresh derivation after
+      // older rows whose source cutoff is identical but core revisions differ.
+      sourceCheckedAt: options?.rebuildFromCurrentInputs
+        ? sourceOrdering.exact
+        : requiredRichFreshAfter,
       sourceLiveCheckedAt,
       sourcePicksCheckedAt,
     });
@@ -799,7 +811,13 @@ export async function syncLeagueEventResultsByTournament(
             );
           }
         }
-        return leagueEventResultsRepository.upsertBatch(season, batch);
+        return leagueEventResultsRepository.upsertBatch(
+          season,
+          batch,
+          options?.rebuildFromCurrentInputs && typeof finalizationCutoff === 'string'
+            ? { eventId, cutoff: finalizationCutoff }
+            : undefined,
+        );
       },
     );
   }
@@ -819,6 +837,7 @@ export async function syncLeagueEventResultsByTournament(
                 eventId,
                 builtEntryIdList,
                 requiredRichFreshAfter,
+                options?.rebuildFromCurrentInputs ? sourceOrdering.exact : undefined,
               )
             : [],
         ),

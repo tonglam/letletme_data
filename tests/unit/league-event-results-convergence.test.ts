@@ -398,3 +398,116 @@ describe('league event result convergence', () => {
     ).toEqual([1, 3, 4]);
   });
 });
+
+test('FINAL repair rebuilds corrected core inputs without requesting fresh provider picks', async () => {
+  const { spyOn, mock } = await import('bun:test');
+  const { TEST_SEASON } = await import('../fixtures/seasons.fixtures');
+  const ordering = await import('../../src/db/ordering-timestamp');
+  const singleton = await import('../../src/db/singleton');
+  const scopes = await import('../../src/utils/mutation-scopes');
+  const fences = await import('../../src/repositories/entry-event-transfers');
+  const resolver = await import('../../src/services/tournament-entry-resolver.service');
+  const checkpoint = await import('../../src/services/live-publication-v2-checkpoint.service');
+  const { tournamentInfoRepository } = await import('../../src/repositories/tournament-infos');
+  const { eventRepository } = await import('../../src/repositories/events');
+  const { entryInfoRepository } = await import('../../src/repositories/entry-infos');
+  const { entryEventResultsRepository } = await import(
+    '../../src/repositories/entry-event-results'
+  );
+  const { leagueEventResultsRepository } = await import(
+    '../../src/repositories/league-event-results'
+  );
+  const { playerRepository } = await import('../../src/repositories/players');
+  const { fplClient } = await import('../../src/clients/fpl');
+  const { syncLeagueEventResultsByTournament } = await import(
+    '../../src/services/league-event-results.service'
+  );
+  const cutoff = '2026-09-01T10:00:00.000Z';
+  const attempt = '2026-09-16T06:00:00.000Z';
+  const picks = Array.from({ length: 15 }, (_, index) => ({
+    element: index + 1,
+    position: index + 1,
+    multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+    is_captain: index === 0,
+    is_vice_captain: index === 1,
+  }));
+  try {
+    spyOn(ordering, 'readDatabaseOrderingTimestamp').mockResolvedValue({
+      exact: attempt,
+      date: new Date(attempt),
+    } as never);
+    spyOn(tournamentInfoRepository, 'findById').mockResolvedValue({
+      leagueId: 1,
+      leagueType: 'classic',
+    } as never);
+    spyOn(eventRepository, 'findById').mockResolvedValue({
+      finished: true,
+      dataChecked: true,
+      dataCheckedAt: new Date(cutoff),
+    } as never);
+    spyOn(eventRepository, 'findDataCheckedAtExact').mockResolvedValue(cutoff);
+    spyOn(resolver, 'resolveTournamentEntryIds').mockResolvedValue([1]);
+    spyOn(entryEventResultsRepository, 'findLeagueInputRevisions').mockResolvedValue([
+      { entryId: 1, profileRevision: 'corrected', resultRevision: 'corrected' },
+    ] as never);
+    spyOn(entryInfoRepository, 'findByIds').mockResolvedValue([
+      { id: 1, startedEvent: 1, entryName: 'Corrected name', playerName: 'Manager' },
+    ] as never);
+    spyOn(checkpoint, 'readLivePublicationV2Checkpoint').mockResolvedValue({
+      publication: { state: 'FINALIZED' },
+      eventLives: picks.map((p) => ({ elementId: p.element, totalPoints: 2, minutes: 90 })),
+    } as never);
+    const audit = spyOn(
+      leagueEventResultsRepository,
+      'findEntryIdsByLeagueEvent',
+    ).mockResolvedValue([1]);
+    spyOn(playerRepository, 'findByIds').mockResolvedValue([]);
+    spyOn(entryEventResultsRepository, 'findByEventAndEntryIds').mockResolvedValue([
+      {
+        entryId: 1,
+        eventPicks: picks,
+        eventAutoSub: [],
+        richSyncedAt: new Date(cutoff),
+        eventPoints: 24,
+        eventNetPoints: 24,
+        eventTransfersCost: 0,
+      },
+    ] as never);
+    const richAudit = spyOn(
+      entryEventResultsRepository,
+      'findEntryIdsNeedingRichSync',
+    ).mockResolvedValue([]);
+    spyOn(scopes, 'withMutationScopes').mockImplementation(async (_request, operation) =>
+      singleton.databaseTransactionStorage.run({ db: {} } as never, operation),
+    );
+    spyOn(fences, 'acquireEntrySeasonWriteFence').mockResolvedValue(undefined);
+    const write = spyOn(leagueEventResultsRepository, 'upsertBatch').mockResolvedValue(1);
+    const provider = spyOn(fplClient, 'getEntryEventPicks').mockRejectedValue(
+      new Error('unexpected provider call'),
+    );
+    const result = await syncLeagueEventResultsByTournament(TEST_SEASON, 4, 3, {
+      freshAfter: cutoff,
+      rebuildFromCurrentInputs: true,
+    });
+    expect(result).toMatchObject({ reusedUnits: 0, succeededUnits: 1 });
+    expect(write).toHaveBeenCalledWith(
+      TEST_SEASON,
+      [
+        expect.objectContaining({
+          entryName: 'Corrected name',
+          eventPoints: 24,
+          sourceCheckedAt: attempt,
+          sourceLiveCheckedAt: cutoff,
+          sourcePicksCheckedAt: cutoff,
+        }),
+      ],
+      { eventId: 3, cutoff },
+    );
+    expect(audit).toHaveBeenCalledTimes(1);
+    expect(audit).toHaveBeenCalledWith(TEST_SEASON, 1, 'classic', 3, [1], cutoff, attempt);
+    expect(richAudit).toHaveBeenCalledWith(TEST_SEASON, [1], 3, cutoff);
+    expect(provider).not.toHaveBeenCalled();
+  } finally {
+    mock.restore();
+  }
+});

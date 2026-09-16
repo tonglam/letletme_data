@@ -160,6 +160,7 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
     findDataCheckedAtExact: async (
       season: FplSeasonRef,
       eventId: number,
+      options?: { lock: 'share' },
     ): Promise<string | null> => {
       try {
         const db = await getDbInstance();
@@ -173,6 +174,7 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
             AND ${eventsInFpl.eventId} = ${eventId}
             AND ${eventsInFpl.finished} = true
             AND ${eventsInFpl.dataChecked} = true
+          ${options?.lock === 'share' ? sql`FOR SHARE` : sql``}
         `);
         return rows[0]?.exactDataCheckedAt ? String(rows[0].exactDataCheckedAt) : null;
       } catch (error) {

@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 
 import { entriesInCompetition, leagueEventResultsInCompetition } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
@@ -6,6 +6,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { acquireEntrySeasonWriteFence } from './entry-event-transfers';
+import { createEventRepository } from './events';
 
 type LeagueEventResultInsert = typeof leagueEventResultsInCompetition.$inferInsert;
 
@@ -33,6 +34,7 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
     db: DbOrTransaction,
     season: FplSeasonRef,
     values: readonly LeagueEventResultEvidenceInsert[],
+    rebuildFinal = false,
   ): Promise<number> => {
     if (values.length === 0) return 0;
     await db
@@ -59,7 +61,12 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
           OR ${leagueEventResultsInCompetition.sourceLiveCheckedAt} IS NULL
           OR ${leagueEventResultsInCompetition.sourcePicksCheckedAt} IS NULL
           OR (
-            excluded.source_live_checked_at >= ${leagueEventResultsInCompetition.sourceLiveCheckedAt}
+            ${rebuildFinal}
+            AND excluded.source_checked_at > ${leagueEventResultsInCompetition.sourceCheckedAt}
+          )
+          OR (
+            NOT ${rebuildFinal}
+            AND excluded.source_live_checked_at >= ${leagueEventResultsInCompetition.sourceLiveCheckedAt}
             AND excluded.source_picks_checked_at >= ${leagueEventResultsInCompetition.sourcePicksCheckedAt}
             AND (
               excluded.source_live_checked_at > ${leagueEventResultsInCompetition.sourceLiveCheckedAt}
@@ -110,6 +117,7 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
       eventId: number,
       entryIds: number[],
       freshAfter?: Date | string,
+      derivedAfter?: Date | string,
     ): Promise<number[]> => {
       if (entryIds.length === 0) return [];
 
@@ -130,6 +138,20 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
                 eq(leagueEventResultsInCompetition.leagueType, leagueType),
                 eq(leagueEventResultsInCompetition.eventId, eventId),
                 inArray(leagueEventResultsInCompetition.entryId, chunk),
+                derivedAfter
+                  ? gte(
+                      leagueEventResultsInCompetition.sourceCheckedAt,
+                      sourceTimestamp(derivedAfter),
+                    )
+                  : undefined,
+                isNotNull(leagueEventResultsInCompetition.sourceLiveCheckedAt),
+                isNotNull(leagueEventResultsInCompetition.sourcePicksCheckedAt),
+                threshold
+                  ? gte(leagueEventResultsInCompetition.sourceLiveCheckedAt, threshold)
+                  : undefined,
+                threshold
+                  ? gte(leagueEventResultsInCompetition.sourcePicksCheckedAt, threshold)
+                  : undefined,
                 threshold
                   ? gte(leagueEventResultsInCompetition.sourceCheckedAt, threshold)
                   : undefined,
@@ -215,6 +237,7 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
     upsertBatch: async (
       season: FplSeasonRef,
       results: readonly LeagueEventResultEvidenceInsert[],
+      finalRebuild?: { eventId: number; cutoff: string },
     ): Promise<number> => {
       if (results.length === 0) return 0;
 
@@ -223,6 +246,18 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
         const persisted = await db.transaction(async (tx) => {
           const entryIds = [...new Set(results.map((result) => result.entryId))];
           await acquireEntrySeasonWriteFence(tx, season, entryIds);
+          if (finalRebuild) {
+            if (
+              results.some((row) => row.eventId !== finalRebuild.eventId) ||
+              (await createEventRepository(tx).findDataCheckedAtExact(
+                season,
+                finalRebuild.eventId,
+                { lock: 'share' },
+              )) !== finalRebuild.cutoff
+            ) {
+              throw new Error('FINAL league derivation boundary changed');
+            }
+          }
           const eligibleEntries = await tx
             .select({ entryId: entriesInCompetition.entryId })
             .from(entriesInCompetition)
@@ -238,6 +273,7 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
             tx,
             season,
             results.filter((result) => eligibleIds.has(result.entryId)),
+            Boolean(finalRebuild),
           );
         });
 
