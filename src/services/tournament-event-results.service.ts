@@ -45,12 +45,14 @@ import {
 } from '../repositories/sync-operations';
 import { classifyDataError, safeDataErrorCode } from '../domain/error-classification';
 import { withTournamentEntrySyncLease } from '../utils/tournament-entry-sync-lease';
+import { redisSingleton } from '../cache/singleton';
 
 const DEFAULT_CONCURRENCY = 5;
 const runtimeConfig = getConfig();
 const EVENT_LIVE_FETCH_TIMEOUT_MS = runtimeConfig.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS;
 const ENTRY_FETCH_TIMEOUT_MS = runtimeConfig.TOURNAMENT_ENTRY_FETCH_TIMEOUT_MS;
 const ENTRY_PERSIST_TIMEOUT_MS = runtimeConfig.TOURNAMENT_ENTRY_PERSIST_TIMEOUT_MS;
+const SHARED_EVENT_LIVE_RESULT_TTL_SECONDS = 30;
 
 type EntrySyncOutcome = {
   entryId: number;
@@ -304,6 +306,29 @@ async function resolveEventPointsPayload(
     }
   }
 
+  // The provider response is not a publication, but a short-lived Redis
+  // handoff lets the next lease holder reuse a completed request across
+  // workers. The finalization check above deliberately runs first so this
+  // provisional fallback cannot satisfy a newly finalized event.
+  const sharedResultKey = `llm:data:v2:fpl:live:${season.seasonCode}:${eventId}:sync-source`;
+  try {
+    const redis = await redisSingleton.getClient();
+    const serialized = await redis.get(sharedResultKey);
+    if (serialized) {
+      const shared = JSON.parse(serialized) as { elements?: EventPointsPayload['elements'] };
+      if (Array.isArray(shared.elements)) {
+        return {
+          payload: { elements: shared.elements },
+          providerRequested: false,
+        };
+      }
+    }
+  } catch (error) {
+    logError('Shared event-live result cache read failed; continuing to provider', error, {
+      eventId,
+    });
+  }
+
   onProviderRequestStart?.();
   const live = await withTimeout(
     fplClient.getEventLive(eventId),
@@ -312,6 +337,24 @@ async function resolveEventPointsPayload(
   );
   if (!live.elements || !Array.isArray(live.elements)) {
     throw new Error('Invalid event live data from FPL API');
+  }
+
+  try {
+    const redis = await redisSingleton.getClient();
+    await redis.set(
+      sharedResultKey,
+      JSON.stringify({ elements: live.elements }),
+      'EX',
+      String(SHARED_EVENT_LIVE_RESULT_TTL_SECONDS),
+    );
+  } catch (error) {
+    logError(
+      'Shared event-live result cache write failed; continuing with fetched payload',
+      error,
+      {
+        eventId,
+      },
+    );
   }
 
   // This is a calculation fallback, not a live-snapshot publisher. Persisting
@@ -759,7 +802,7 @@ export async function syncTournamentEventResultsForEntryIds(
             } else {
               await persistEntry();
             }
-            if (finalizationDate && finalizationCutoff && picks && live) {
+            if (finalizationDate && finalizationCutoff && picks && live && accepted) {
               // Keep the entry lease until the durable FINAL head/checkpoint is
               // complete. Otherwise a concurrent tournament can observe the
               // relational write without its final evidence and fetch the same
@@ -956,6 +999,28 @@ export async function syncTournamentEventResultsForEntryIds(
   } catch (error) {
     if (options?.auditInitialize !== false) {
       await syncOperationsRepository
+        .upsertItems(
+          auditRunId,
+          uniqueEntryIds.map((entryId) => ({
+            resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+            resourceId: entryEventAuditResourceId(season, eventId, entryId),
+            status: 'failed' as const,
+            attempts: auditAttempt,
+            normalizedPayload: {
+              phase: 'entry-event-results',
+              setupFailure: true,
+              unknownRequests: 0,
+            },
+            lastError: safeDataErrorCode(error),
+          })),
+        )
+        .catch((auditError) =>
+          logError('Failed to close entry sync audit items after setup error', auditError, {
+            eventId,
+            runId: auditRunId,
+          }),
+        );
+      await syncOperationsRepository
         .failRun(auditRunId, new Error(safeDataErrorCode(error)))
         .catch((auditError) =>
           logError('Failed to fail entry event audit run after setup error', auditError, {
@@ -1084,14 +1149,11 @@ export async function syncEntryTransferHistories(
               entryId,
               (tx) =>
                 (async () => {
-                  await createEntryEventTransfersRepository(tx).replaceForEvent(
-                    season,
-                    entryId,
-                    endEventId,
-                    transfers,
-                    undefined,
-                    { sourceCheckedAt },
-                  );
+                  const acceptedTransfer = await createEntryEventTransfersRepository(
+                    tx,
+                  ).replaceForEvent(season, entryId, endEventId, transfers, undefined, {
+                    sourceCheckedAt,
+                  });
                   await createSyncOperationsRepository(tx).upsertItems(auditRunId, [
                     {
                       resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -1107,9 +1169,10 @@ export async function syncEntryTransferHistories(
                         phase: 'entry-transfer-history',
                         sourceRevision: orderingTimestampString(sourceCheckedAt),
                         transferRequests: transferRequest.started ? 1 : 0,
-                        factCommit: 'committed',
+                        factCommit: acceptedTransfer ? 'committed' : 'reused',
                         finalCompletion: false,
-                        reused: false,
+                        reused: !acceptedTransfer,
+                        ...(acceptedTransfer ? {} : { reuseReason: 'newer-source-won' }),
                       },
                       completedAt: new Date(),
                     },
@@ -1501,7 +1564,10 @@ export async function syncTournamentEventResults(
       isFreshnessBoundaryNewer(postWorkFinalizationCutoff, finalizationCutoff));
   if (postWorkBoundaryChanged || isFreshnessBoundaryNewer(freshAfter, postWorkFinalizationCutoff)) {
     const retryUnits = Math.max(entryIds.length, requiredUnits);
-    await syncOperationsRepository.failRun(auditRunId, new Error('SOURCE_CHANGED_DURING_SYNC'));
+    const finalizationErrorCode = postWorkBoundaryChanged
+      ? 'SOURCE_CHANGED_DURING_SYNC'
+      : 'SOURCE_NOT_READY';
+    await syncOperationsRepository.failRun(auditRunId, new Error(finalizationErrorCode));
     throw new IncompleteDataSyncError(
       postWorkBoundaryChanged
         ? 'Tournament event finalized during result sync; finalization boundary changed, retrying with final evidence'
@@ -1510,7 +1576,7 @@ export async function syncTournamentEventResults(
       0,
       0,
       retryUnits,
-      'SOURCE_CHANGED_DURING_SYNC',
+      finalizationErrorCode,
     );
   }
 
