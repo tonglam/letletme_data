@@ -444,7 +444,11 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .orderBy(desc(syncItemsInOps.updatedAt), desc(syncItemsInOps.runId))
           .limit(limit + 1),
         db
-          .select({ finished: eventsInFpl.finished, dataChecked: eventsInFpl.dataChecked })
+          .select({
+            finished: eventsInFpl.finished,
+            dataChecked: eventsInFpl.dataChecked,
+            dataCheckedAt: eventsInFpl.dataCheckedAt,
+          })
           .from(eventsInFpl)
           .where(
             and(eq(eventsInFpl.seasonId, input.seasonId), eq(eventsInFpl.eventId, input.eventId)),
@@ -492,25 +496,36 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const factCommits = allRows.filter(
         (row) => stringValue(payloadFor(row.normalizedPayload).factCommit) === 'committed',
       ).length;
+      const eventFinalized = eventRows[0]?.finished === true && eventRows[0]?.dataChecked === true;
+      const currentFinalizationRevision = eventRows[0]?.dataCheckedAt?.getTime() ?? null;
+      const matchesCurrentFinalization = (payload: Record<string, unknown>): boolean => {
+        if (!eventFinalized) return true;
+        if (currentFinalizationRevision === null) return false;
+        const sourceRevision = stringValue(payload.sourceRevision);
+        if (!sourceRevision) return false;
+        const parsed = new Date(sourceRevision);
+        return !Number.isNaN(parsed.getTime()) && parsed.getTime() === currentFinalizationRevision;
+      };
       const finalCompletions = allRows.filter(
         (row) =>
           componentFor(row.resourceId) === 'final' &&
           (row.itemStatus === 'completed' || row.itemStatus === 'skipped') &&
-          boolValue(payloadFor(row.normalizedPayload).finalCompletion),
+          boolValue(payloadFor(row.normalizedPayload).finalCompletion) &&
+          matchesCurrentFinalization(payloadFor(row.normalizedPayload)),
       ).length;
       const reusedSkips = allRows.filter(
         (row) =>
           row.itemStatus === 'skipped' || boolValue(payloadFor(row.normalizedPayload).reused),
       ).length;
       const failedItems = allRows.filter((row) => row.itemStatus === 'failed').length;
-      const eventFinalized = eventRows[0]?.finished === true && eventRows[0]?.dataChecked === true;
       const finalEvidenceComplete =
         !eventFinalized ||
         allRows.some(
           (row) =>
             componentFor(row.resourceId) === 'final' &&
             (row.itemStatus === 'completed' || row.itemStatus === 'skipped') &&
-            boolValue(payloadFor(row.normalizedPayload).finalCompletion),
+            boolValue(payloadFor(row.normalizedPayload).finalCompletion) &&
+            matchesCurrentFinalization(payloadFor(row.normalizedPayload)),
         );
       const evidenceComplete =
         allRows.length > 0 &&

@@ -398,7 +398,11 @@ describe('ops sync state machine', () => {
         resourceId: `${TEST_SEASON_ID}:1:123:final`,
         status: 'skipped',
         attempts: 1,
-        normalizedPayload: { finalCompletion: true, reused: true },
+        normalizedPayload: {
+          finalCompletion: true,
+          reused: true,
+          sourceRevision: '2026-08-09T00:00:00.000Z',
+        },
       },
     ]);
 
@@ -411,6 +415,41 @@ describe('ops sync state machine', () => {
     expect(audit.executions).toBe(1);
     expect(audit.evidenceComplete).toBe(true);
     expect(audit.coverageStartAt).not.toBeNull();
+
+    await sql`
+      UPDATE fpl.events
+      SET data_checked_at = '2026-08-10T00:00:00.000Z'::timestamptz
+      WHERE season_id = ${TEST_SEASON_ID}
+        AND event_id = 1
+    `;
+    const reopenedAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(reopenedAudit.finalCompletions).toBe(0);
+    expect(reopenedAudit.evidenceComplete).toBe(false);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:final`,
+        status: 'skipped',
+        attempts: 2,
+        normalizedPayload: {
+          finalCompletion: true,
+          reused: true,
+          sourceRevision: '2026-08-10T00:00:00.000Z',
+        },
+      },
+    ]);
+    const refinalizedAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(refinalizedAudit.finalCompletions).toBe(1);
+    expect(refinalizedAudit.evidenceComplete).toBe(true);
   });
 
   test('keeps terminal run transitions idempotent and rejects a different terminal state', async () => {
