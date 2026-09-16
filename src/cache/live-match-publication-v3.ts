@@ -137,6 +137,9 @@ export type MatchCheckpointDesired = Readonly<{
   force: boolean;
   /** Recovery-only permission to replace an incoherent durable FINAL row. */
   allowFinalReplacement?: boolean;
+  /** Durable FINAL identity observed before a fenced recovery write. */
+  expectedFinalPublicationId?: string;
+  expectedFinalGeneration?: number;
 }>;
 
 type MatchScope = Readonly<{ season: string; eventId: number }>;
@@ -801,6 +804,24 @@ if currentRaw then
       -- only exception is the destructive cutover seed, which must prove both
       -- the exact marker it observed and a finalized, forced candidate. This
       -- fenced CAS prevents a concurrent final marker from being overwritten.
+      -- A recovery of the same publication may upgrade the replacement
+      -- permission without changing its identity. This is needed when a
+      -- normal checkpoint marker was created before the durable FINAL conflict
+      -- was discovered; the marker must not remain stuck until its TTL expires.
+      if candidate.final == true and candidate.force == true and
+         candidate.allowFinalReplacement == true and
+         current.publicationId == candidate.publicationId and
+         current.generation == candidate.generation then
+        current.force = true
+        current.allowFinalReplacement = true
+        if candidate.expectedFinalPublicationId ~= nil and candidate.expectedFinalGeneration ~= nil then
+          current.expectedFinalPublicationId = candidate.expectedFinalPublicationId
+          current.expectedFinalGeneration = candidate.expectedFinalGeneration
+        end
+        local encoded = cjson.encode(current)
+        redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
+        return {'set', encoded}
+      end
       local allowReplacement = ARGV[3] == '1'
       local expectedGeneration = tonumber(ARGV[5])
       if allowReplacement and candidate.final == true and candidate.force == true and
@@ -819,7 +840,6 @@ if currentRaw then
         -- simply because a newer score publication won the desired-pointer race.
         if candidate.force == true and current.force ~= true then
           current.force = true
-          current.allowFinalReplacement = current.allowFinalReplacement == true or candidate.allowFinalReplacement == true
           local encoded = cjson.encode(current)
           redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
           return {'set', encoded}
@@ -830,6 +850,10 @@ if currentRaw then
       if current.generation == candidate.generation and current.publicationId == candidate.publicationId then
         candidate.force = current.force == true or candidate.force == true
         candidate.allowFinalReplacement = current.allowFinalReplacement == true or candidate.allowFinalReplacement == true
+        if candidate.expectedFinalPublicationId == nil and current.expectedFinalPublicationId ~= nil then
+          candidate.expectedFinalPublicationId = current.expectedFinalPublicationId
+          candidate.expectedFinalGeneration = current.expectedFinalGeneration
+        end
         if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
         local encoded = cjson.encode(candidate)
         redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
@@ -2482,12 +2506,26 @@ function desiredFromRaw(
     !validIso(value.requestedAt) ||
     typeof value.final !== 'boolean' ||
     typeof value.force !== 'boolean' ||
-    (value.allowFinalReplacement !== undefined && typeof value.allowFinalReplacement !== 'boolean')
+    (value.allowFinalReplacement !== undefined &&
+      typeof value.allowFinalReplacement !== 'boolean') ||
+    (value.expectedFinalPublicationId === undefined) !==
+      (value.expectedFinalGeneration === undefined) ||
+    (value.expectedFinalPublicationId !== undefined &&
+      (typeof value.expectedFinalPublicationId !== 'string' ||
+        value.expectedFinalPublicationId.length === 0 ||
+        !Number.isSafeInteger(value.expectedFinalGeneration) ||
+        (value.expectedFinalGeneration as number) <= 0))
   )
     return null;
   return {
     ...(value as unknown as MatchCheckpointDesired),
     allowFinalReplacement: value.allowFinalReplacement === true,
+    ...(value.expectedFinalPublicationId !== undefined
+      ? {
+          expectedFinalPublicationId: value.expectedFinalPublicationId,
+          expectedFinalGeneration: value.expectedFinalGeneration as number,
+        }
+      : {}),
   };
 }
 
@@ -2499,6 +2537,11 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
   readonly force?: boolean;
   /** Recovery-only permission to replace an incoherent durable FINAL row. */
   readonly allowFinalReplacement?: boolean;
+  /** Exact durable FINAL identity observed before a recovery checkpoint. */
+  readonly expectedFinalIdentity?: Readonly<{
+    readonly publicationId: string;
+    readonly generation: number;
+  }>;
   /**
    * Seed-only fenced CAS for replacing a stale finalized desired marker. The
    * candidate must itself be finalized and forced; normal workers never pass
@@ -2529,7 +2572,24 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
         input.publication.state === 'FINALIZED'),
     force: input.force === true,
     allowFinalReplacement: input.allowFinalReplacement === true,
+    ...(input.expectedFinalIdentity
+      ? {
+          expectedFinalPublicationId: input.expectedFinalIdentity.publicationId,
+          expectedFinalGeneration: input.expectedFinalIdentity.generation,
+        }
+      : {}),
   };
+  if (
+    input.expectedFinalIdentity !== undefined &&
+    (input.expectedFinalIdentity.publicationId.length === 0 ||
+      !Number.isSafeInteger(input.expectedFinalIdentity.generation) ||
+      input.expectedFinalIdentity.generation <= 0)
+  ) {
+    throw new CacheError(
+      'Invalid durable FINAL recovery identity',
+      'LIVE_MATCH_CHECKPOINT_DESIRED_INVALID',
+    );
+  }
   const replacement = input.replaceFinalizedForCutover;
   if (replacement !== undefined) {
     if (

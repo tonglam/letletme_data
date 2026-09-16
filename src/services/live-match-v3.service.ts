@@ -68,6 +68,11 @@ export interface LiveMatchObservation {
   readonly finalizeEvent?: boolean;
   /** Recreate a durable checkpoint even when a stale Redis marker remains. */
   readonly forceCheckpointRecovery?: boolean;
+  /** Durable FINAL identities observed before a fenced recovery checkpoint. */
+  readonly expectedFinalCheckpointIdentities?: Readonly<{
+    readonly desk?: Readonly<{ publicationId: string; generation: number }> | null;
+    readonly detail?: Readonly<{ publicationId: string; generation: number }> | null;
+  }>;
   /** Scheduler state captured with the same observation; never fetched again. */
   readonly lifecycleState?: MatchLifecycleState;
   readonly expectedNextCheckAt?: Date | string | null;
@@ -305,6 +310,7 @@ async function scheduleCheckpoint(
   finalized = false,
   boundary = false,
   forceRecovery = false,
+  expectedFinalIdentity?: Readonly<{ publicationId: string; generation: number }> | null,
   enqueueCheckpoint: LiveMatchObservation['enqueueCheckpoint'] = enqueueLiveMatchCheckpoint,
 ): Promise<{ scheduled: boolean; failed: boolean }> {
   if (publication.checkpointedAt !== null && !forceRecovery) {
@@ -331,6 +337,7 @@ async function scheduleCheckpoint(
       finalized,
       force: boundary || forceRecovery,
       allowFinalReplacement: forceRecovery,
+      ...(expectedFinalIdentity ? { expectedFinalIdentity } : {}),
       redis,
     });
     const lastMs = lastCheckpointedAt === null ? Number.NaN : Date.parse(lastCheckpointedAt);
@@ -490,6 +497,7 @@ export async function syncLiveMatchesV3FromObservation(
           currentDesk.publication.revisions.fixtureIdentity.revision !==
             desk.revisions.fixtureIdentity.revision,
         input.forceCheckpointRecovery === true,
+        input.expectedFinalCheckpointIdentities?.desk,
         input.enqueueCheckpoint,
       );
   const deskCheckpointScheduled = deskCheckpoint.scheduled;
@@ -664,6 +672,7 @@ export async function syncLiveMatchesV3FromObservation(
           !currentDetail ||
             currentDetail.publication.fixtureIdentityRevision !== detail.fixtureIdentityRevision,
           input.forceCheckpointRecovery === true,
+          input.expectedFinalCheckpointIdentities?.detail,
           input.enqueueCheckpoint,
         );
         detailCheckpointScheduled = detailCheckpoint.scheduled;
