@@ -569,7 +569,7 @@ function matchPlayerFactsEqual(left: MatchPlayerFacts, right: MatchPlayerFacts):
 
 /** Compare the overlapping canonical facts before accepting a durable Match FINAL. */
 function durableMatchFactsAgreeWithLiveFinal(
-  pair: FinalLiveMatchCheckpointPair,
+  pair: Pick<FinalLiveMatchCheckpointPair, 'desk' | 'detail'>,
   final: LivePublicationRead,
 ): boolean {
   const finalFixtures = new Map(final.fixtures.map((fixture) => [fixture.id, fixture]));
@@ -897,6 +897,38 @@ export async function syncLiveSnapshotV2(
       return;
     }
 
+    const observedDeskRead = observedMatchDesk?.read;
+    const observedDetailRead = observedMatchDetail?.read;
+    if (canProbeServingPair) {
+      const observedFinalPair = Boolean(
+        observedDeskRead &&
+          observedDetailRead &&
+          observedDeskRead.publication.state === 'FINALIZED' &&
+          observedDetailRead.publication.finalized === true &&
+          observedDetailRead.publication.observedDeskGeneration ===
+            observedDeskRead.publication.generation &&
+          observedDetailRead.publication.fixtureIdentityRevision ===
+            observedDeskRead.publication.revisions.fixtureIdentity.revision,
+      );
+      // A complete Redis FINAL without a durable Match pair is still only a
+      // candidate. Validate it before the synchronizer can create forced
+      // checkpoint markers; a conflicting candidate must not leave
+      // obligations behind after this call fails.
+      if (
+        !durableMatchPair &&
+        observedFinalPair &&
+        !durableMatchFactsAgreeWithLiveFinal(
+          { desk: observedDeskRead!, detail: observedDetailRead! },
+          durableFinal,
+        )
+      ) {
+        throw new CacheError(
+          `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
+          'LIVE_MATCH_FINAL_REDIS_CONFLICT',
+        );
+      }
+    }
+
     if (durableMatchPair && canProbeServingPair) {
       // A valid Redis pair with a different identity is not automatically a
       // recoverable cache miss.  The durable pair is immutable authority, but
@@ -904,9 +936,25 @@ export async function syncLiveSnapshotV2(
       // facts readable during a later active-pointer fault.  Only restore when
       // at least one serving sibling is missing/corrupt, or when both siblings
       // are semantically the same facts under a different publication id.
-      const observedDeskRead = observedMatchDesk?.read;
-      const observedDetailRead = observedMatchDetail?.read;
       const servingPairIsComplete = Boolean(observedDeskRead && observedDetailRead);
+      const survivingDeskIsVerified =
+        !observedDeskRead ||
+        (observedDeskRead.publication.state === 'FINALIZED' &&
+          canonicalJson(observedDeskRead.fixtures) ===
+            canonicalJson(durableMatchPair.desk.fixtures));
+      const survivingDetailIsVerified =
+        !observedDetailRead ||
+        (observedDetailRead.publication.finalized === true &&
+          observedDetailRead.publication.fixtureIdentityRevision ===
+            durableMatchPair.detail.publication.fixtureIdentityRevision &&
+          canonicalJson(observedDetailRead.fixtures) ===
+            canonicalJson(durableMatchPair.detail.fixtures));
+      if (!survivingDeskIsVerified || !survivingDetailIsVerified) {
+        throw new CacheError(
+          `Live Match Redis sibling conflicts with durable facts for event ${eventId}`,
+          'LIVE_MATCH_FINAL_REDIS_CONFLICT',
+        );
+      }
       const servingPairIsEquivalent =
         servingPairIsComplete &&
         canonicalJson(observedDeskRead!.fixtures) ===

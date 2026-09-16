@@ -352,7 +352,6 @@ export async function checkpointLiveMatchDeskV3(
           )
           OR (
             ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
-            AND ${liveMatchDeskCheckpointsInFpl.state} = 'FINALIZED'
             AND excluded.state = 'FINALIZED'
             AND ${liveMatchDeskCheckpointsInFpl.publicationId} = ${request.expectedFinalIdentity?.publicationId ?? ''}
             AND ${liveMatchDeskCheckpointsInFpl.generation} = ${request.expectedFinalIdentity?.generation ?? 0}
@@ -446,7 +445,6 @@ export async function checkpointLiveMatchDetailV3(
           )
           OR (
             ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
-            AND ${liveMatchDetailCheckpointsInFpl.state} = 'FINALIZED'
             AND excluded.state = 'FINALIZED'
             AND ${liveMatchDetailCheckpointsInFpl.publicationId} = ${request.expectedFinalIdentity?.publicationId ?? ''}
             AND ${liveMatchDetailCheckpointsInFpl.generation} = ${request.expectedFinalIdentity?.generation ?? 0}
@@ -631,10 +629,10 @@ export async function readFinalLiveMatchCheckpointPairV3(
 }
 
 /**
- * Read only the identities of any existing durable FINAL rows. A recovery
- * candidate may replace one incoherent sibling, but only when the row still
- * has the exact identity observed here. Missing/non-final rows intentionally
- * return null because they do not need a destructive replacement fence.
+ * Read only the identities of any existing durable rows. A recovery candidate
+ * may replace one incoherent sibling, including a provisional row, but only
+ * when the row still has the exact identity observed here. The caller's
+ * explicit FINAL recovery permission remains the destructive-write fence.
  */
 export async function readLiveMatchFinalCheckpointIdentitiesV3(
   season: FplSeasonRef,
@@ -680,7 +678,8 @@ export async function readLiveMatchFinalCheckpointIdentitiesV3(
     generation: number;
     state: string;
   }): LiveMatchFinalCheckpointIdentity | null =>
-    row.state === 'FINALIZED' &&
+    typeof row.state === 'string' &&
+    row.state.length > 0 &&
     typeof row.publicationId === 'string' &&
     row.publicationId.length > 0 &&
     Number.isSafeInteger(row.generation) &&
