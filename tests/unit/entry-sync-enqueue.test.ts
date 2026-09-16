@@ -476,10 +476,14 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(rootData.removeOnSettle).toBe(false);
     expect(rootData.freshAfter).toBe(freshAfter);
     expect(rootData.freshnessWindowId).toBe(314);
+    // The worker captures a PostgreSQL ordering watermark before a forced or
+    // retry freshness audit; enqueue must not stamp an app-host timestamp.
+    expect(rootData.requestWatermark).toBeUndefined();
     expect(addCalls[0].opts.removeOnComplete).toBeUndefined();
     expect(addCalls[0].opts.removeOnFail).toBeUndefined();
     expect(addCalls[1].data.removeOnSettle).toBe(false);
     expect(addCalls[1].data.freshAfter).toBe(freshAfter);
+    expect(addCalls[1].data.requestWatermark).toBe(rootData.requestWatermark);
     expect(addCalls[1].data.freshnessWindowId).toBe(314);
     expect(addCalls[1].opts.removeOnComplete).toBeUndefined();
     expect(addCalls[1].opts.removeOnFail).toBeUndefined();

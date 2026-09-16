@@ -18,6 +18,7 @@ import {
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
+  supersedeMyFplFinalizationObligations,
   type SchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import {
@@ -54,7 +55,7 @@ import { MAINTENANCE_JOB_LANES } from '../jobs/maintenance.jobs';
 import { QueueDrainOnlyError, readQueueAdmission } from '../services/queue-governance.service';
 import {
   attachFreshnessWindowToSchedulerObligation,
-  upsertFreshnessWindow,
+  createAndAttachFreshnessWindowToSchedulerObligation,
 } from '../services/data-governance.service';
 import { getConfig } from '../utils/config';
 import { mapWithConcurrency, TimeoutError, withTimeout } from '../utils/async';
@@ -313,7 +314,10 @@ async function recordFreshnessWindowForPlan(
   definition: ScheduledJobDefinition,
   plan: SchedulerObligationPlan,
   seasonId: number,
-  obligation?: Pick<SchedulerObligation, 'status' | 'evidence' | 'runId' | 'completedAt'>,
+  obligation?: Pick<
+    SchedulerObligation,
+    'obligationId' | 'status' | 'evidence' | 'runId' | 'completedAt'
+  >,
 ): Promise<number | null> {
   // The price watcher is an observation obligation. It may publish a hot
   // board, or legitimately observe that the official provider did not change
@@ -350,7 +354,7 @@ async function recordFreshnessWindowForPlan(
     (definition.name === 'market-daily' && /^\d{8}$/.test(plan.periodKey)
       ? `${plan.periodKey.slice(0, 4)}-${plan.periodKey.slice(4, 6)}-${plan.periodKey.slice(6, 8)}`
       : undefined);
-  const windowId = await upsertFreshnessWindow({
+  const window = {
     sloKey: contract.contractKey,
     contractKey: contract.contractKey,
     seasonId,
@@ -374,6 +378,11 @@ async function recordFreshnessWindowForPlan(
       freshnessPublicationMustFollowEligibility:
         contract.freshnessPublicationMustFollowEligibility === true,
     },
+  } as const;
+  if (!obligation) return null;
+  const windowId = await createAndAttachFreshnessWindowToSchedulerObligation({
+    obligationId: obligation.obligationId,
+    window,
   }).catch((error) => {
     logError('Freshness window reservation evidence failed', error, {
       contractKey: contract.contractKey,
@@ -1770,6 +1779,33 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
           definition: { ...definition, queueName: schedulerLaneName(definition) },
           plan,
         });
+        if (definition.name === 'my-fpl-finalization' && plan.terminalStatus === undefined) {
+          const entryScopeGeneration = evidenceNumber(plan.evidence, 'entryScopeGeneration');
+          const tournamentScopeGeneration = evidenceNumber(
+            plan.evidence,
+            'tournamentScopeGeneration',
+          );
+          const dataCheckedAt = evidenceString(plan.evidence, 'dataCheckedAt');
+          if (
+            dataCheckedAt &&
+            Number.isFinite(Date.parse(dataCheckedAt)) &&
+            typeof entryScopeGeneration === 'number' &&
+            Number.isSafeInteger(entryScopeGeneration) &&
+            entryScopeGeneration >= 0 &&
+            typeof tournamentScopeGeneration === 'number' &&
+            Number.isSafeInteger(tournamentScopeGeneration) &&
+            tournamentScopeGeneration >= 0
+          ) {
+            await supersedeMyFplFinalizationObligations({
+              scopeKey: plan.scopeKey,
+              periodKey: plan.periodKey,
+              successorObligationId: obligation.obligationId,
+              dataCheckedAt,
+              entryScopeGeneration: entryScopeGeneration as number,
+              tournamentScopeGeneration: tournamentScopeGeneration as number,
+            });
+          }
+        }
         if (!plan.terminalStatus) {
           const freshnessWindowId = await recordFreshnessWindowForPlan(
             definition,

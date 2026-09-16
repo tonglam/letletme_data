@@ -249,6 +249,55 @@ async function retireAcceptedLivePicksBackoffWindows(
     );
 }
 
+async function retireSupersededFreshnessWindows(
+  db: DbOrTransaction,
+  obligationId: string,
+  evidence: unknown,
+): Promise<void> {
+  const windowIds = freshnessWindowIdsFromEvidence(evidence);
+  if (windowIds.length === 0) return;
+  const retirementEvidence = JSON.stringify({
+    reason: 'superseded-by-scope-generation',
+    notApplicableReason: 'superseded-by-scope-generation',
+    schedulerObligationId: obligationId,
+  });
+  await db
+    .update(freshnessSloWindowsInOps)
+    .set({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
+      breachCode: null,
+      evidence: sql`${freshnessSloWindowsInOps.evidence} || ${retirementEvidence}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        inArray(freshnessSloWindowsInOps.windowId, windowIds),
+        // A stale scope may already have crossed the SLO boundary. Retire the
+        // exact attached window even when it is BREACHED; the newer scope is
+        // the authoritative obligation and the breach must not keep its case
+        // open after supersession.
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID', 'BREACHED']),
+      ),
+    );
+  await db
+    .update(dataGovernanceCasesInOps)
+    .set({
+      status: 'DISMISSED',
+      lastError: null,
+      repairJobId: null,
+      repairDeadlineAt: null,
+      evidence: sql`${dataGovernanceCasesInOps.evidence} || ${retirementEvidence}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        inArray(dataGovernanceCasesInOps.sloWindowId, windowIds),
+        inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
+      ),
+    );
+}
+
 function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerObligation {
   return {
     obligationId: row.obligationId,
@@ -995,6 +1044,138 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
         ),
       );
   }
+  return updated.length;
+}
+
+/**
+ * Retire pending My FPL FINAL obligations whose source scope is older than the
+ * newly observed generation.  Scope generations are numeric authority, so the
+ * comparison deliberately does not use period-key string ordering.  Enqueued
+ * or running rows are left intact; retrying rows are terminally retired so
+ * their backoff cannot hold the lane, and every worker still rechecks the
+ * same fence before provider work, canonical writes, and completion.
+ */
+export async function supersedeMyFplFinalizationObligations(input: {
+  scopeKey: string;
+  periodKey: string;
+  successorObligationId: string;
+  dataCheckedAt: Date | string;
+  entryScopeGeneration: number;
+  tournamentScopeGeneration: number;
+  db?: DbHandle;
+}): Promise<number> {
+  if (
+    input.scopeKey.length === 0 ||
+    input.periodKey.length === 0 ||
+    input.successorObligationId.length === 0 ||
+    !Number.isSafeInteger(input.entryScopeGeneration) ||
+    input.entryScopeGeneration < 0 ||
+    !Number.isSafeInteger(input.tournamentScopeGeneration) ||
+    input.tournamentScopeGeneration < 0
+  ) {
+    throw new Error('My FPL finalization supersession input is invalid');
+  }
+  const dataCheckedAtExact =
+    typeof input.dataCheckedAt === 'string'
+      ? input.dataCheckedAt.trim()
+      : input.dataCheckedAt.toISOString();
+  if (!Number.isFinite(new Date(dataCheckedAtExact).getTime())) {
+    throw new Error('My FPL finalization supersession fence must be a valid timestamp');
+  }
+  const db = input.db ?? (await getDb());
+  const updated = await db.execute<{ obligation_id: string }>(sql`
+    WITH candidates AS (
+      SELECT
+        obligation_id,
+        (regexp_match(
+          period_key,
+          '^final-[0-9]+-([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)-scope-e([0-9]{1,16})-t([0-9]{1,16})$'
+        ))[1] AS source_checked_at,
+        ((regexp_match(
+          period_key,
+          '^final-[0-9]+-([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)-scope-e([0-9]{1,16})-t([0-9]{1,16})$'
+        ))[2])::bigint AS entry_scope_generation,
+        ((regexp_match(
+          period_key,
+          '^final-[0-9]+-([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)-scope-e([0-9]{1,16})-t([0-9]{1,16})$'
+        ))[3])::bigint AS tournament_scope_generation
+      FROM ops.scheduler_obligations
+      WHERE job_name = 'my-fpl-finalization'
+        AND scope_key = ${input.scopeKey}
+        AND period_key <> ${input.periodKey}
+        AND status IN ('pending', 'failed', 'retrying')
+    ), retired AS (
+      UPDATE ops.scheduler_obligations AS obligation
+      SET status = 'skipped',
+          evidence = obligation.evidence || jsonb_build_object(
+            'provider', 'fpl',
+            'terminal', true,
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', ${input.periodKey}::text,
+            'supersededByObligationId', ${input.successorObligationId}::text,
+            'supersededByEntryScopeGeneration', ${input.entryScopeGeneration}::bigint,
+            'supersededByTournamentScopeGeneration', ${input.tournamentScopeGeneration}::bigint
+          ),
+          completed_at = clock_timestamp(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          last_error = NULL,
+          updated_at = clock_timestamp()
+      FROM candidates
+      WHERE obligation.obligation_id = candidates.obligation_id
+        AND (
+          candidates.entry_scope_generation IS NULL
+          OR candidates.tournament_scope_generation IS NULL
+          OR candidates.entry_scope_generation < ${input.entryScopeGeneration}::bigint
+          OR (
+            candidates.entry_scope_generation = ${input.entryScopeGeneration}::bigint
+            AND candidates.tournament_scope_generation < ${input.tournamentScopeGeneration}::bigint
+          )
+          OR (
+            candidates.entry_scope_generation = ${input.entryScopeGeneration}::bigint
+            AND candidates.tournament_scope_generation = ${input.tournamentScopeGeneration}::bigint
+            AND (
+              candidates.source_checked_at IS NULL
+              OR candidates.source_checked_at::timestamptz < ${dataCheckedAtExact}::timestamptz
+            )
+          )
+        )
+      RETURNING obligation.obligation_id, obligation.period_key
+    ), retired_windows AS (
+      UPDATE ops.freshness_slo_windows AS slo_window
+      SET status = 'NOT_APPLICABLE',
+          completeness_status = 'NOT_APPLICABLE',
+          breach_code = NULL,
+          evidence = slo_window.evidence || jsonb_build_object(
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', ${input.periodKey}::text,
+            'supersededByObligationId', ${input.successorObligationId}::text
+          ),
+          updated_at = clock_timestamp()
+      FROM retired
+      WHERE slo_window.contract_key = 'my-fpl'
+        AND slo_window.scope_key = ${input.scopeKey}
+        AND slo_window.period_key = retired.period_key
+        AND slo_window.status IN ('PENDING', 'INVALID', 'BREACHED')
+      RETURNING slo_window.window_id
+    ), dismissed_cases AS (
+      UPDATE ops.data_governance_cases AS governance_case
+      SET status = 'DISMISSED',
+          last_error = NULL,
+          repair_job_id = NULL,
+          repair_deadline_at = NULL,
+          evidence = governance_case.evidence || jsonb_build_object(
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', ${input.periodKey}::text,
+            'supersededByObligationId', ${input.successorObligationId}::text
+          ),
+          updated_at = clock_timestamp()
+      WHERE governance_case.slo_window_id IN (SELECT window_id FROM retired_windows)
+        AND governance_case.status IN ('OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW')
+      RETURNING governance_case.case_id
+    )
+    SELECT obligation_id FROM retired
+  `);
   return updated.length;
 }
 
@@ -2174,32 +2355,41 @@ export async function markSchedulerObligationIrrecoverable(input: {
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  const closeableStatuses: SchedulerObligationStatus[] = input.includeInFlight
-    ? ['pending', 'failed', 'enqueued', 'running']
-    : ['pending', 'failed'];
-  const updated = await db
-    .update(schedulerObligationsInOps)
-    .set({
-      status: input.status ?? 'irrecoverable',
-      evidence: terminalSchedulerEvidence(input.evidence),
-      completedAt: sql`clock_timestamp()`,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      lastError:
-        (input.status ?? 'irrecoverable') === 'irrecoverable' ? (input.lastError ?? null) : null,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(schedulerObligationsInOps.obligationId, input.obligationId),
-        input.generation === undefined
-          ? undefined
-          : eq(schedulerObligationsInOps.generation, input.generation),
-        inArray(schedulerObligationsInOps.status, closeableStatuses),
-      ),
-    )
-    .returning({ obligationId: schedulerObligationsInOps.obligationId });
-  return updated.length === 1;
+  return db.transaction(async (tx) => {
+    const closeableStatuses: SchedulerObligationStatus[] = input.includeInFlight
+      ? ['pending', 'failed', 'retrying', 'enqueued', 'running']
+      : ['pending', 'failed'];
+    const status = input.status ?? 'irrecoverable';
+    const updated = await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        status,
+        evidence: terminalSchedulerEvidence(input.evidence),
+        completedAt: sql`clock_timestamp()`,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastError: status === 'irrecoverable' ? (input.lastError ?? null) : null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, input.obligationId),
+          input.generation === undefined
+            ? undefined
+            : eq(schedulerObligationsInOps.generation, input.generation),
+          inArray(schedulerObligationsInOps.status, closeableStatuses),
+        ),
+      )
+      .returning({ obligationId: schedulerObligationsInOps.obligationId });
+    if (
+      updated.length === 1 &&
+      status === 'skipped' &&
+      input.evidence?.reason === 'superseded-by-scope-generation'
+    ) {
+      await retireSupersededFreshnessWindows(tx, input.obligationId, input.evidence);
+    }
+    return updated.length === 1;
+  });
 }
 
 export async function completeSchedulerObligationByBullJobId(input: {

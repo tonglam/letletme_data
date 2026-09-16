@@ -12,6 +12,7 @@ export type EntrySyncJobName = 'entry-info' | 'entry-picks' | 'entry-transfers' 
 
 export type EntrySyncJobSource = 'cron' | 'manual' | 'api' | 'catchup' | 'reconcile';
 export type EntrySyncLane = 'entry-sync' | 'live-picks';
+export type EntrySyncExecutionIntent = 'refresh' | 'retry' | 'force' | 'reconcile' | 'unknown';
 
 const runtimeConfig = getConfig();
 export const ENTRY_SYNC_DEFAULT_CHUNK_SIZE = runtimeConfig.ENTRY_SYNC_CHUNK_SIZE;
@@ -22,6 +23,8 @@ export interface EntrySyncJobData {
   seasonId: number;
   seasonCode: string;
   source?: EntrySyncJobSource;
+  /** Internal intent used to keep user force-refreshes distinct from retries. */
+  executionIntent?: EntrySyncExecutionIntent;
   /** The live-picks lane is an isolated Bull queue; old payloads default to entry-sync. */
   lane?: EntrySyncLane;
   triggeredAt: string;
@@ -42,6 +45,8 @@ export interface EntrySyncJobData {
   freshnessWindowId?: number;
   /** Stable source checkpoint retained across scan chunks and retries. */
   freshAfter?: string;
+  /** Original caller watermark used to audit retries of forced refreshes. */
+  requestWatermark?: string;
   queueKey?: string;
   /** Stable BullMQ single-flight identity for restart-sensitive fan-out jobs. */
   deduplicationId?: string;

@@ -187,6 +187,28 @@ describe('data sync attempt reporting', () => {
     expect(JSON.stringify(reports[0])).not.toContain('/entry/123/');
   });
 
+  test('emits batch correlation and execution intent fields', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await runDataSyncAttempt(
+      {
+        queue: 'entry-sync',
+        jobName: 'entry-results',
+        runId: 'run-2',
+        batchId: 'batch-2',
+        parentRunId: 'root-2',
+        executionIntent: 'force',
+      },
+      async () => ({ requiredUnits: 1, succeededUnits: 1 }),
+    );
+
+    expect(reportsFrom(infoSpy)[0]).toMatchObject({
+      batchId: 'batch-2',
+      parentRunId: 'root-2',
+      executionIntent: 'force',
+    });
+  });
+
   test('emits once on failure and rethrows the original error', async () => {
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
 

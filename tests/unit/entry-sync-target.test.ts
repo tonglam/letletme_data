@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   isExplicitEntryRepairRequest,
+  isReusableEntryPicksHeadForRetry,
   planEventEligibleEntrySyncWork,
+  resolveEntrySyncExecutionIntent,
   resolveFinalizationFreshAfter,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
@@ -11,6 +13,59 @@ import {
 } from '../../src/domain/entry-sync';
 
 describe('explicit entry repair selection', () => {
+  test('restores the source intent after a retry continuation', () => {
+    expect(resolveEntrySyncExecutionIntent('manual')).toBe('force');
+    expect(resolveEntrySyncExecutionIntent('api')).toBe('force');
+    expect(resolveEntrySyncExecutionIntent('reconcile')).toBe('reconcile');
+    expect(resolveEntrySyncExecutionIntent('catchup')).toBe('reconcile');
+    expect(resolveEntrySyncExecutionIntent('cron')).toBe('refresh');
+  });
+
+  test('reuses only complete durable picks heads at or after the retry watermark', () => {
+    const head = {
+      state: 'COMPLETE',
+      rowCount: 15,
+      sourceCheckedAt: new Date('2026-09-16T10:00:00.000Z'),
+      sourceCheckedAtExact: '2026-09-16T10:00:00.123456Z',
+    };
+    expect(isReusableEntryPicksHeadForRetry(head, '2026-09-16T10:00:00.123000Z')).toBe(true);
+    expect(isReusableEntryPicksHeadForRetry(head, '2026-09-16T10:00:01.000Z')).toBe(false);
+    expect(
+      isReusableEntryPicksHeadForRetry({ ...head, rowCount: 14 }, head.sourceCheckedAtExact),
+    ).toBe(false);
+    expect(isReusableEntryPicksHeadForRetry(head, undefined)).toBe(false);
+  });
+
+  test('reuses a verified immutable FINAL head even when its frozen watermark is older', () => {
+    const finalHead = {
+      state: 'COMPLETE',
+      rowCount: 15,
+      sourceCheckedAt: new Date('2026-09-16T10:00:00.000Z'),
+      sourceCheckedAtExact: '2026-09-16T10:00:00.123456Z',
+      inputPayload: {
+        finalResult: {
+          revision: 'a'.repeat(64),
+          score: { eventPoints: 42, totalPoints: 142 },
+          picks: Array.from({ length: 15 }, (_, index) => ({
+            element: index + 1,
+            position: index + 1,
+            multiplier: 1,
+            isCaptain: index === 0,
+            isViceCaptain: index === 1,
+          })),
+          automaticSubs: [],
+        },
+      },
+    };
+    expect(isReusableEntryPicksHeadForRetry(finalHead, '2026-09-17T10:00:00.000000Z')).toBe(true);
+    expect(
+      isReusableEntryPicksHeadForRetry(
+        { ...finalHead, inputPayload: { ...finalHead.inputPayload, finalResult: null } },
+        '2026-09-17T10:00:00.000000Z',
+      ),
+    ).toBe(false);
+  });
+
   test('skips entries that started after the target event without hiding unknown metadata', () => {
     expect(
       planEventEligibleEntrySyncWork(
@@ -31,6 +86,10 @@ describe('explicit entry repair selection', () => {
   test('distinguishes targeted repair lists from scheduled scans', () => {
     expect(isExplicitEntryRepairRequest({ entryIds: [1, 2] })).toBe(true);
     expect(isExplicitEntryRepairRequest({ entryIds: [] })).toBe(true);
+    expect(isExplicitEntryRepairRequest({ entryIds: [1, 2], retryCount: 1 })).toBe(false);
+    expect(isExplicitEntryRepairRequest({ entryIds: [1, 2], executionIntent: 'retry' })).toBe(
+      false,
+    );
     expect(isExplicitEntryRepairRequest({})).toBe(false);
     expect(isExplicitEntryRepairRequest(undefined)).toBe(false);
   });
@@ -57,7 +116,7 @@ describe('explicit entry repair selection', () => {
         retryCount: 1,
         obligationId: 'daily-1',
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test('refreshes picks for every cron run and explicit repair', () => {
@@ -65,6 +124,9 @@ describe('explicit entry repair selection', () => {
     expect(shouldRefreshEntryPicks({ source: 'cron', entryIds: [42] })).toBe(true);
     expect(shouldRefreshEntryPicks({ source: 'api', entryIds: [42] })).toBe(true);
     expect(shouldRefreshEntryPicks({ source: 'manual' })).toBe(false);
+    expect(
+      shouldRefreshEntryPicks({ source: 'api', entryIds: [42], executionIntent: 'retry' }),
+    ).toBe(false);
   });
 });
 

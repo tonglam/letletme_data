@@ -7,6 +7,7 @@ import {
   type EntrySyncLane,
   type EntrySyncJobName,
   type EntrySyncJobSource,
+  type EntrySyncExecutionIntent,
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
@@ -37,6 +38,8 @@ export interface EntrySyncJobOptions {
   freshnessWindowId?: number;
   /** Stable source checkpoint shared by a post-match pipeline. */
   freshAfter?: string;
+  /** Original caller watermark used to audit retries of forced refreshes. */
+  requestWatermark?: string;
   /** Stable deduplication key for every table-scan chunk in one trigger lane. */
   queueKey?: string;
   /** Optional Redis-backed deduplication identity that survives process restarts. */
@@ -45,6 +48,8 @@ export interface EntrySyncJobOptions {
   deduplicationCadenceMs?: number;
   removeOnSettle?: boolean;
   lane?: EntrySyncLane;
+  /** Internal intent; retries must re-audit instead of force-refreshing warm rows. */
+  executionIntent?: EntrySyncExecutionIntent;
 }
 
 export function retainEntrySyncChainOptions(
@@ -58,7 +63,9 @@ export function retainEntrySyncChainOptions(
         | 'obligationGeneration'
         | 'freshnessWindowId'
         | 'freshAfter'
+        | 'requestWatermark'
         | 'lane'
+        | 'executionIntent'
       >
     | undefined,
 ): Pick<
@@ -70,7 +77,9 @@ export function retainEntrySyncChainOptions(
   | 'obligationGeneration'
   | 'freshnessWindowId'
   | 'freshAfter'
+  | 'requestWatermark'
   | 'lane'
+  | 'executionIntent'
 > {
   return {
     runId: options?.runId,
@@ -80,7 +89,9 @@ export function retainEntrySyncChainOptions(
     queueKey: options?.queueKey,
     removeOnSettle: options?.removeOnSettle,
     freshAfter: options?.freshAfter,
+    requestWatermark: options?.requestWatermark,
     lane: options?.lane,
+    executionIntent: options?.executionIntent,
   };
 }
 
@@ -304,12 +315,21 @@ async function enqueueEntrySyncJobWithOutcome(
     // entry-list/API scans. Manual one-shots may still clean up on settle.
     const removeOnSettle = source === 'manual' && options.removeOnSettle !== false;
 
+    const triggeredAt = new Date().toISOString();
+    // A request watermark is a PostgreSQL ordering boundary, not an
+    // application-host timestamp.  Force/retry jobs without an inherited
+    // watermark capture the boundary in the worker immediately before their
+    // freshness audit; continuations and explicit callers retain the exact
+    // value here.
+    const requestWatermark = options.requestWatermark;
     const jobData = {
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
       source,
+      executionIntent: options.executionIntent,
       lane,
-      triggeredAt: new Date().toISOString(),
+      triggeredAt,
+      requestWatermark,
       entryIds: options.entryIds,
       retryCount: options.retryCount,
       afterEntryId,

@@ -718,9 +718,12 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
           return priorityForEvent(left.id) - priorityForEvent(right.id) || right.id - left.id;
         });
       for (const event of finalizationEvents) {
-        const checkedAt = event.dataCheckedAt?.toISOString() ?? 'unknown';
-        const eventPriority = priorityForEvent(event.id);
         const control = statusByEventId.get(event.id);
+        // The control reader preserves PostgreSQL microseconds. The mapped
+        // event Date is only millisecond precision and would let a FINAL
+        // payload lose the exact fence used by the worker.
+        const checkedAt = control?.dataCheckedAt ?? event.dataCheckedAt?.toISOString() ?? 'unknown';
+        const eventPriority = priorityForEvent(event.id);
         const finalPublished = Boolean(
           control?.activeKind === 'FINAL' &&
             control.activeRevision !== null &&
@@ -775,6 +778,14 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
           evidence: {
             snapshotKind: 'FINAL',
             dataCheckedAt: checkedAt,
+            ...(control?.entryScopeGeneration === null ||
+            control?.entryScopeGeneration === undefined
+              ? {}
+              : { entryScopeGeneration: control.entryScopeGeneration }),
+            ...(control?.tournamentScopeGeneration === null ||
+            control?.tournamentScopeGeneration === undefined
+              ? {}
+              : { tournamentScopeGeneration: control.tournamentScopeGeneration }),
             expectedEntryCount: control?.expectedEntryCount,
             expectedEntryScopeSha256: control?.entryScopeSha256,
             expectedNotApplicableEntryCount: control?.notApplicableEntryCount,
@@ -793,6 +804,16 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
         eventId,
         snapshotKind: 'FINAL',
         freshAfter: plan.dueAt.toISOString(),
+        ...(typeof plan.evidence?.entryScopeGeneration === 'number'
+          ? { entryScopeGeneration: plan.evidence.entryScopeGeneration }
+          : {}),
+        ...(typeof plan.evidence?.tournamentScopeGeneration === 'number'
+          ? { tournamentScopeGeneration: plan.evidence.tournamentScopeGeneration }
+          : {}),
+        ...(typeof plan.evidence?.dataCheckedAt === 'string' &&
+        Number.isFinite(Date.parse(plan.evidence.dataCheckedAt))
+          ? { finalDataCheckedAt: plan.evidence.dataCheckedAt }
+          : {}),
         jobId: `scheduler-${obligationId}-g${generation}`,
         obligationId,
         obligationGeneration: generation,
