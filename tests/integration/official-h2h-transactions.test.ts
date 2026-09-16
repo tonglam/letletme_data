@@ -15,6 +15,8 @@ const id = 995_901;
 const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
 const contexts: boolean[] = [];
 async function cleanup() {
+  await sql`DELETE FROM competition.tournament_battle_group_results WHERE season_id=${season.seasonId}`;
+  await sql`DELETE FROM competition.tournament_knockout_results WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournament_groups WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournament_entries WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId}`;
@@ -177,3 +179,61 @@ test('local battle-race strategy retains its database-only mutation scope', asyn
   await battle.syncTournamentBattleRaceResults(season, 1);
   expect(local).toHaveBeenCalledTimes(1);
 });
+
+test.each(['battle', 'knockout'] as const)(
+  'official %s rows use partial conflict targets and preserve unfetched observations',
+  async (kind) => {
+    await sql`INSERT INTO competition.entries (season_id,entry_id,entry_name,player_name) VALUES (${season.seasonId},${id + 1},'Opponent','Fixture')`;
+    const checkedAt = new Date('2026-09-01T12:00:00Z');
+    const table =
+      kind === 'battle'
+        ? 'competition.tournament_battle_group_results'
+        : 'competition.tournament_knockout_results';
+    async function publish(at: Date, fetched: number[], score = 20) {
+      const common = {
+        tournamentId: id,
+        eventId: 1,
+        officialMatchId: id,
+        sourceOrder: 1,
+        homeEntryId: id,
+        awayEntryId: id + 1,
+        homeNetPoints: score,
+        awayNetPoints: 10,
+        sourceCheckedAt: at,
+      };
+      const config = (await tournamentInfoRepository.findSetupConfig(season, id))!;
+      return tournamentOfficialH2HRepository.publish(season, id, {
+        expectedRevision: await tournamentOfficialH2HRepository.captureRevision(season, config),
+        checkedAt: at,
+        scheduleHash: 'predicate-fixture',
+        lockSchedule: false,
+        fetchedOfficialMatchIds: fetched,
+        groupRows: [],
+        bracketRows: [],
+        battleRows:
+          kind === 'battle' ? [{ ...common, groupId: 1, homeIndex: 1, awayIndex: 2 }] : [],
+        knockoutRows: kind === 'knockout' ? [{ ...common, matchId: 1, playAgainstId: 1 }] : [],
+      });
+    }
+    async function stored() {
+      const [row] =
+        await sql`SELECT home_net_points,source_checked_at,updated_at,xmin::text AS revision
+        FROM ${sql(table)} WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
+      return row!;
+    }
+    await publish(checkedAt, [id]);
+    const first = await stored();
+    expect(first.home_net_points).toBe(20);
+    expect(first.source_checked_at).toEqual(checkedAt);
+    await publish(new Date('2026-09-01T12:01:00Z'), []);
+    expect(await stored()).toEqual(first);
+    const refreshedAt = new Date('2026-09-01T12:02:00Z');
+    await publish(refreshedAt, [id]);
+    const refreshed = await stored();
+    expect(refreshed.source_checked_at).toEqual(refreshedAt);
+    expect(refreshed.updated_at).toEqual(refreshedAt);
+    expect(refreshed.revision).not.toBe(first.revision);
+    await publish(new Date('2026-09-01T12:03:00Z'), [], 21);
+    expect((await stored()).home_net_points).toBe(21);
+  },
+);
