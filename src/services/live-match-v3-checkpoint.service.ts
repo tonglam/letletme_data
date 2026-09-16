@@ -538,6 +538,38 @@ export async function readLiveMatchDetailCheckpointV3(
   return { publication, fixtures, servedFrom: 'POSTGRES_CHECKPOINT' };
 }
 
+/**
+ * Read the two durable FINAL Match checkpoints together. Callers that need
+ * to repair Redis must retain these exact publication identities; a boolean
+ * joined-row fence cannot prove that the serving pair is the same generation.
+ */
+export type FinalLiveMatchCheckpointPair = Readonly<{
+  desk: MatchDeskRead;
+  detail: MatchDetailRead;
+}>;
+
+export async function readFinalLiveMatchCheckpointPairV3(
+  season: FplSeasonRef,
+  eventId: number,
+  dbInstance?: DbOrTransaction,
+): Promise<FinalLiveMatchCheckpointPair | null> {
+  const [desk, detail] = await Promise.all([
+    readLiveMatchDeskCheckpointV3(season, eventId, dbInstance),
+    readLiveMatchDetailCheckpointV3(season, eventId, dbInstance),
+  ]);
+  if (!desk || !detail) return null;
+  return isExactFinalLiveMatchCheckpointPair({
+    deskState: desk.publication.state,
+    deskGeneration: desk.publication.generation,
+    deskRevisions: desk.publication.revisions,
+    detailState: detail.publication.finalized ? 'FINALIZED' : 'PROVISIONAL',
+    detailObservedDeskGeneration: detail.publication.observedDeskGeneration,
+    detailFixtureIdentityRevision: detail.publication.fixtureIdentityRevision,
+  })
+    ? { desk, detail }
+    : null;
+}
+
 /** Lightweight existence read for the reconciler; the serving GraphQL reader owns cold payload reads. */
 export async function hasLiveMatchCheckpointV3(
   season: FplSeasonRef,
@@ -599,17 +631,5 @@ export async function hasFinalLiveMatchCheckpointsV3(
   eventId: number,
   dbInstance?: DbOrTransaction,
 ): Promise<boolean> {
-  const [desk, detail] = await Promise.all([
-    readLiveMatchDeskCheckpointV3(season, eventId, dbInstance),
-    readLiveMatchDetailCheckpointV3(season, eventId, dbInstance),
-  ]);
-  if (!desk || !detail) return false;
-  return isExactFinalLiveMatchCheckpointPair({
-    deskState: desk.publication.state,
-    deskGeneration: desk.publication.generation,
-    deskRevisions: desk.publication.revisions,
-    detailState: detail.publication.finalized ? 'FINALIZED' : 'PROVISIONAL',
-    detailObservedDeskGeneration: detail.publication.observedDeskGeneration,
-    detailFixtureIdentityRevision: detail.publication.fixtureIdentityRevision,
-  });
+  return (await readFinalLiveMatchCheckpointPairV3(season, eventId, dbInstance)) !== null;
 }
