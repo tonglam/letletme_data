@@ -1139,10 +1139,12 @@ export async function syncTournamentEventResultsForEntryIds(
                     phase: 'entry-event-results',
                     eventLiveRequests: eventLiveProviderRequestStarted ? 1 : 0,
                     picksRequests: picksRequest.started ? 1 : 0,
-                    transferRequests: transferRequest.started ? 1 : 0,
-                    unknownRequests:
-                      (picksRequest.started && !picksRequest.completed ? 1 : 0) +
-                      (transferRequest.started && !transferRequest.completed ? 1 : 0),
+                    // Transfer request accounting belongs to the separate
+                    // :transfers item below. Keeping it out of this result
+                    // item prevents entrySyncAudit from counting one request
+                    // twice when both components fail in the same attempt.
+                    transferRequests: 0,
+                    unknownRequests: picksRequest.started && !picksRequest.completed ? 1 : 0,
                   },
                   lastError: safeDataErrorCode(error),
                 },

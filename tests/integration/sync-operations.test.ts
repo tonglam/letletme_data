@@ -549,6 +549,50 @@ describe('ops sync state machine', () => {
     expect(recoveredAudit.reasonCodes).toEqual([]);
   });
 
+  test('counts a combined transfer failure only on the transfer component', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[2], season, 'entry', 1);
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:results`,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          picksRequests: 1,
+          transferRequests: 0,
+          unknownRequests: 0,
+        },
+        lastError: 'transfer provider timeout',
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-transfer-history',
+          transferRequests: 1,
+          unknownRequests: 1,
+        },
+        lastError: 'transfer provider timeout',
+      },
+    ]);
+
+    const audit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(audit.providerRequests).toEqual({
+      eventLive: 0,
+      picks: 1,
+      transfers: 1,
+      unknown: 1,
+    });
+  });
+
   test('counts only the final audit component as a durable FINAL completion', async () => {
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await syncOperationsRepository.startRun({
