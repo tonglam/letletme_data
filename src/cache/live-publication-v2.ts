@@ -1324,7 +1324,7 @@ function sourceDate(value: string | Date): string {
   return date.toISOString();
 }
 
-/** Preserve PostgreSQL microseconds for the correction fence sent to Redis. */
+/** Preserve PostgreSQL microseconds for source and correction fences sent to Redis. */
 export function exactTimestamp(value: string | Date): string {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime()))
@@ -2859,7 +2859,7 @@ export function entryLiveInputFromFplPicks(
     eventId,
     entryId,
     picks,
-    sourceDate(sourceCheckedAt),
+    exactTimestamp(sourceCheckedAt),
     assistantManagerPoints,
   );
 }
