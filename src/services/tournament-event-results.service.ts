@@ -44,6 +44,7 @@ import {
   syncOperationsRepository,
 } from '../repositories/sync-operations';
 import { classifyDataError, safeDataErrorCode } from '../domain/error-classification';
+import { withTournamentEntrySyncLease } from '../utils/tournament-entry-sync-lease';
 
 const DEFAULT_CONCURRENCY = 5;
 const runtimeConfig = getConfig();
@@ -119,6 +120,44 @@ function orderingTimestampString(value: Date | string): string {
 function freshEntryIds(entryIds: number[], staleEntryIds: number[]): Set<number> {
   const staleEntryIdSet = new Set(staleEntryIds);
   return new Set(entryIds.filter((entryId) => !staleEntryIdSet.has(entryId)));
+}
+
+async function readEntrySyncDurableState(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+  freshAfter: Date | string,
+  finalizationCutoff: Date | string | null,
+  checkTransfers: boolean,
+): Promise<{
+  resultFresh: boolean;
+  picksPresent: boolean;
+  finalComplete: boolean;
+  transfersMissing: boolean;
+}> {
+  const [staleResults, persistedPickEntryIds, missingTransferEntryIds] = await Promise.all([
+    entryEventResultsRepository.findEntryIdsNeedingRichSync(season, [entryId], eventId, freshAfter),
+    entryEventPicksRepository.findEntryIdsByEvent(season, eventId, [entryId]),
+    checkTransfers
+      ? entryEventTransfersRepository.findEntryIdsNeedingSync(season, [entryId], eventId)
+      : Promise.resolve([]),
+  ]);
+
+  let finalComplete = true;
+  if (finalizationCutoff !== null) {
+    const heads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, [
+      entryId,
+    ]);
+    const completed = await completedFinalEntryIds(season, eventId, heads, finalizationCutoff);
+    finalComplete = completed.has(entryId);
+  }
+
+  return {
+    resultFresh: staleResults.length === 0,
+    picksPresent: persistedPickEntryIds.includes(entryId),
+    finalComplete,
+    transfersMissing: missingTransferEntryIds.includes(entryId),
+  };
 }
 
 const ENTRY_EVENT_AUDIT_RESOURCE_TYPE = 'entry-event';
@@ -493,7 +532,16 @@ export async function syncTournamentEventResultsForEntryIds(
   try {
     liveResolution =
       providerEntryIds.length > 0
-        ? await resolveEventPointsPayload(season, eventId, options?.live)
+        ? await withTournamentEntrySyncLease(
+            // entryId=0 is the event-scoped shared live-source unit. Real FPL
+            // entry ids are positive, so it cannot collide with an entry lock.
+            { seasonId: season.seasonId, eventId, entryId: 0 },
+            () => resolveEventPointsPayload(season, eventId, options?.live),
+            {
+              leaseMs: Math.max(120_000, EVENT_LIVE_FETCH_TIMEOUT_MS + 15_000),
+              waitMs: Math.max(60_000, EVENT_LIVE_FETCH_TIMEOUT_MS + 15_000),
+            },
+          )
         : null;
   } catch (error) {
     const errorClass = classifyDataError(error);
@@ -530,9 +578,11 @@ export async function syncTournamentEventResultsForEntryIds(
   }
   const acceptedEntryIds = new Set<number>();
   const persistedEntryIds = new Set<number>();
+  const coordinatedReuseEntryIds = new Set<number>();
   const picksByEntry = new Map<number, RawFPLEntryEventPicksResponse>();
   await mapWithConcurrency(providerEntryIds, concurrency, async (entryId) => {
     let accepted = false;
+    let resultFactsCommitted = false;
     const picksRequest = { started: false, completed: false };
     const transferRequest = { started: false, completed: false };
     const trackedRequest = async <T>(
@@ -545,95 +595,170 @@ export async function syncTournamentEventResultsForEntryIds(
       return response;
     };
     try {
-      const [picks, transfers] = await withTimeout(
-        Promise.all([
-          trackedRequest(picksRequest, () => fplClient.getEntryEventPicks(entryId, eventId)),
-          options?.skipTransfers || !transferEntryIds.has(entryId)
-            ? Promise.resolve(null)
-            : options?.transfersByEntry
-              ? options.transfersByEntry.has(entryId)
-                ? Promise.resolve(options.transfersByEntry.get(entryId)!)
-                : Promise.reject(new Error('Transfer payload is missing for requested entry'))
-              : trackedRequest(transferRequest, () => fplClient.getEntryTransfers(entryId)),
-        ]),
-        ENTRY_FETCH_TIMEOUT_MS,
-        `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
-      );
-      picksByEntry.set(entryId, picks);
-      const persistEntry = async () => {
-        await withEntrySeasonSyncTransaction(
-          season,
-          entryId,
-          async (tx) => {
-            accepted = await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
-              season,
-              entryId,
-              eventId,
-              picks,
-              live!,
-              sourceOrdering.exact,
-            );
-            await createEntryEventPicksRepository(tx).upsertFromPicks(
-              season,
-              entryId,
-              eventId,
-              picks,
-              sourceOrdering.exact,
-              undefined,
-              { preserveCheckpointedInput: true },
-            );
-            if (transfers) {
-              await createEntryEventTransfersRepository(tx).replaceForEvent(
-                season,
-                entryId,
-                eventId,
-                transfers,
-                pointsByElement,
-                // The endpoint returned the entrant's complete transfer history.
-                // Persist and checkpoint that same scope so the following audit
-                // cannot reject a successful backfill repair.
-                { sourceCheckedAt: transferSourceCheckedAt! },
-              );
-            }
-            await createSyncOperationsRepository(tx).upsertItems(auditRunId, [
+      return await withTournamentEntrySyncLease(
+        { seasonId: season.seasonId, eventId, entryId },
+        async () => {
+          // A different tournament or retry may have completed this entry
+          // while the batch was planning. Recheck after the cross-worker lease,
+          // immediately before any provider request, so the loser reuses the
+          // durable facts instead of issuing the same FPL calls again.
+          const durable = await readEntrySyncDurableState(
+            season,
+            entryId,
+            eventId,
+            freshAfter,
+            finalizationCutoff,
+            !options?.skipTransfers && transferEntryIds.has(entryId),
+          );
+          const needsResult =
+            !durable.resultFresh ||
+            !durable.picksPresent ||
+            (finalizationDate !== null && !durable.finalComplete);
+          const needsTransfer =
+            !options?.skipTransfers && transferEntryIds.has(entryId) && durable.transfersMissing;
+
+          if (!needsResult && !needsTransfer) {
+            coordinatedReuseEntryIds.add(entryId);
+            await syncOperationsRepository.upsertItems(auditRunId, [
               {
                 resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
                 resourceId: entryEventAuditResourceId(season, eventId, entryId),
-                status: 'completed',
+                status: 'skipped',
                 attempts: auditAttempt,
                 normalizedPayload: {
                   phase: 'entry-event-results',
                   sourceRevision: orderingTimestampString(sourceOrdering.exact),
-                  eventLiveRequests: eventLiveProviderRequests,
-                  picksRequests: picksRequest.started ? 1 : 0,
-                  transferRequests: transferRequest.started ? 1 : 0,
-                  factCommit: 'committed',
-                  finalCompletion: false,
-                  reused: false,
+                  reuseReason: 'coordinated-durable-complete',
+                  finalCompletion: finalizationDate !== null,
+                  reused: true,
                 },
                 completedAt: new Date(),
               },
             ]);
-          },
-          { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
-        );
-      };
-      if (options?.perEntryMutationScopes) {
-        await withMutationScopes(
-          {
-            queueName: 'tournament-sync',
-            jobName: 'tournament-event-results',
-            eventId,
-            scopes: tournamentEntryCoreScopes(season.seasonId, [entryId]),
-          },
-          persistEntry,
-        );
-      } else {
-        await persistEntry();
-      }
-      persistedEntryIds.add(entryId);
-      if (accepted) acceptedEntryIds.add(entryId);
-      return { entryId, success: true } satisfies EntrySyncOutcome;
+            return { entryId, success: true } satisfies EntrySyncOutcome;
+          }
+
+          const [picks, transfers] = await withTimeout(
+            Promise.all([
+              needsResult
+                ? trackedRequest(picksRequest, () => fplClient.getEntryEventPicks(entryId, eventId))
+                : Promise.resolve(null),
+              !needsTransfer
+                ? Promise.resolve(null)
+                : options?.transfersByEntry
+                  ? options.transfersByEntry.has(entryId)
+                    ? Promise.resolve(options.transfersByEntry.get(entryId)!)
+                    : Promise.reject(new Error('Transfer payload is missing for requested entry'))
+                  : trackedRequest(transferRequest, () => fplClient.getEntryTransfers(entryId)),
+            ]),
+            ENTRY_FETCH_TIMEOUT_MS,
+            `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
+          );
+          if (picks) picksByEntry.set(entryId, picks);
+          if (!picks && !transfers) {
+            throw new Error('Entry sync planner requested no provider component');
+          }
+
+          const persistEntry = async () => {
+            await withEntrySeasonSyncTransaction(
+              season,
+              entryId,
+              async (tx) => {
+                const auditItems = [];
+                if (picks) {
+                  accepted = await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+                    season,
+                    entryId,
+                    eventId,
+                    picks,
+                    live!,
+                    sourceOrdering.exact,
+                  );
+                  await createEntryEventPicksRepository(tx).upsertFromPicks(
+                    season,
+                    entryId,
+                    eventId,
+                    picks,
+                    sourceOrdering.exact,
+                    undefined,
+                    { preserveCheckpointedInput: true },
+                  );
+                  auditItems.push({
+                    resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                    resourceId: entryEventAuditResourceId(season, eventId, entryId),
+                    status: 'completed' as const,
+                    attempts: auditAttempt,
+                    normalizedPayload: {
+                      phase: 'entry-event-results',
+                      sourceRevision: orderingTimestampString(sourceOrdering.exact),
+                      eventLiveRequests: eventLiveProviderRequests,
+                      picksRequests: picksRequest.started ? 1 : 0,
+                      transferRequests: 0,
+                      factCommit: 'committed',
+                      finalCompletion: false,
+                      reused: false,
+                    },
+                    completedAt: new Date(),
+                  });
+                }
+                if (transfers) {
+                  await createEntryEventTransfersRepository(tx).replaceForEvent(
+                    season,
+                    entryId,
+                    eventId,
+                    transfers,
+                    pointsByElement,
+                    // The endpoint returned the entrant's complete transfer history.
+                    // Persist and checkpoint that same scope so the following audit
+                    // cannot reject a successful backfill repair.
+                    { sourceCheckedAt: transferSourceCheckedAt! },
+                  );
+                  auditItems.push({
+                    resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                    resourceId: entryEventAuditResourceId(season, eventId, entryId, 'transfers'),
+                    status: 'completed' as const,
+                    attempts: auditAttempt,
+                    normalizedPayload: {
+                      phase: 'entry-transfer-history',
+                      sourceRevision: orderingTimestampString(transferSourceCheckedAt!),
+                      eventLiveRequests: 0,
+                      picksRequests: 0,
+                      transferRequests: transferRequest.started ? 1 : 0,
+                      factCommit: 'committed',
+                      finalCompletion: false,
+                      reused: false,
+                    },
+                    completedAt: new Date(),
+                  });
+                }
+                await createSyncOperationsRepository(tx).upsertItems(auditRunId, auditItems);
+              },
+              { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
+            );
+          };
+          if (options?.perEntryMutationScopes) {
+            await withMutationScopes(
+              {
+                queueName: 'tournament-sync',
+                jobName: 'tournament-event-results',
+                eventId,
+                scopes: tournamentEntryCoreScopes(season.seasonId, [entryId]),
+              },
+              persistEntry,
+            );
+          } else {
+            await persistEntry();
+          }
+          resultFactsCommitted = Boolean(picks);
+          if (resultFactsCommitted) persistedEntryIds.add(entryId);
+          if (accepted) acceptedEntryIds.add(entryId);
+          return { entryId, success: true } satisfies EntrySyncOutcome;
+        },
+        {
+          leaseMs: Math.max(120_000, ENTRY_FETCH_TIMEOUT_MS + ENTRY_PERSIST_TIMEOUT_MS + 30_000),
+          waitMs: Math.max(60_000, ENTRY_FETCH_TIMEOUT_MS + ENTRY_PERSIST_TIMEOUT_MS + 30_000),
+        },
+      );
     } catch (error) {
       await syncOperationsRepository
         .upsertItems(auditRunId, [
@@ -713,9 +838,10 @@ export async function syncTournamentEventResultsForEntryIds(
   if (finalizationDate && finalizationCutoff) {
     const finalizationEntryIds = providerEntryIds.filter(
       (entryId) =>
-        acceptedEntryIds.has(entryId) ||
-        persistedEntryIds.has(entryId) ||
-        requestedRecoveryEntryIds.has(entryId),
+        !coordinatedReuseEntryIds.has(entryId) &&
+        (acceptedEntryIds.has(entryId) ||
+          persistedEntryIds.has(entryId) ||
+          requestedRecoveryEntryIds.has(entryId)),
     );
     await mapWithConcurrency(finalizationEntryIds, concurrency, async (entryId) => {
       const picks = picksByEntry.get(entryId);
@@ -896,65 +1022,108 @@ export async function syncEntryTransferHistories(
     );
   }
 
+  const reusedTransferEntryIds = new Set<number>();
   await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
     const transferRequest = { started: false, completed: false };
     try {
-      transferRequest.started = true;
-      const transfers = await withTimeout(
-        fplClient.getEntryTransfers(entryId).then((response) => {
-          transferRequest.completed = true;
-          return response;
-        }),
-        ENTRY_FETCH_TIMEOUT_MS,
-        `Timed out fetching transfer history for entry ${entryId}`,
-      );
-      const persistTransfers = () =>
-        withEntrySeasonSyncTransaction(
-          season,
-          entryId,
-          (tx) =>
-            (async () => {
-              await createEntryEventTransfersRepository(tx).replaceForEvent(
-                season,
-                entryId,
-                endEventId,
-                transfers,
-                undefined,
-                { sourceCheckedAt },
-              );
-              await createSyncOperationsRepository(tx).upsertItems(auditRunId, [
-                {
-                  resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
-                  resourceId: entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
-                  status: 'completed',
-                  attempts: auditAttempt,
-                  normalizedPayload: {
-                    phase: 'entry-transfer-history',
-                    sourceRevision: orderingTimestampString(sourceCheckedAt),
-                    transferRequests: transferRequest.started ? 1 : 0,
-                    factCommit: 'committed',
-                    finalCompletion: false,
-                    reused: false,
-                  },
-                  completedAt: new Date(),
+      await withTournamentEntrySyncLease(
+        { seasonId: season.seasonId, eventId: endEventId, entryId },
+        async () => {
+          // Re-plan after the lease: a result repair in another tournament may
+          // already have advanced the shared transfer checkpoint.
+          const missing = await entryEventTransfersRepository.findEntryIdsNeedingSync(
+            season,
+            [entryId],
+            endEventId,
+          );
+          if (missing.length === 0) {
+            reusedTransferEntryIds.add(entryId);
+            await syncOperationsRepository.upsertItems(auditRunId, [
+              {
+                resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                resourceId: entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
+                status: 'skipped',
+                attempts: auditAttempt,
+                normalizedPayload: {
+                  phase: 'entry-transfer-history',
+                  sourceRevision: orderingTimestampString(sourceCheckedAt),
+                  reuseReason: 'coordinated-durable-complete',
+                  finalCompletion: false,
+                  reused: true,
                 },
-              ]);
-            })(),
-          { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
-        );
-      if (options?.perEntryMutationScopes) {
-        await withMutationScopes(
-          {
-            queueName: 'tournament-sync',
-            jobName: 'tournament-event-results',
-            eventId: endEventId,
-            scopes: tournamentEntryCoreScopes(season.seasonId, [entryId]),
-          },
-          persistTransfers,
-        );
-      } else {
-        await persistTransfers();
-      }
+                completedAt: new Date(),
+              },
+            ]);
+            return;
+          }
+
+          transferRequest.started = true;
+          const transfers = await withTimeout(
+            fplClient.getEntryTransfers(entryId).then((response) => {
+              transferRequest.completed = true;
+              return response;
+            }),
+            ENTRY_FETCH_TIMEOUT_MS,
+            `Timed out fetching transfer history for entry ${entryId}`,
+          );
+          const persistTransfers = () =>
+            withEntrySeasonSyncTransaction(
+              season,
+              entryId,
+              (tx) =>
+                (async () => {
+                  await createEntryEventTransfersRepository(tx).replaceForEvent(
+                    season,
+                    entryId,
+                    endEventId,
+                    transfers,
+                    undefined,
+                    { sourceCheckedAt },
+                  );
+                  await createSyncOperationsRepository(tx).upsertItems(auditRunId, [
+                    {
+                      resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                      resourceId: entryEventAuditResourceId(
+                        season,
+                        endEventId,
+                        entryId,
+                        'transfers',
+                      ),
+                      status: 'completed',
+                      attempts: auditAttempt,
+                      normalizedPayload: {
+                        phase: 'entry-transfer-history',
+                        sourceRevision: orderingTimestampString(sourceCheckedAt),
+                        transferRequests: transferRequest.started ? 1 : 0,
+                        factCommit: 'committed',
+                        finalCompletion: false,
+                        reused: false,
+                      },
+                      completedAt: new Date(),
+                    },
+                  ]);
+                })(),
+              { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
+            );
+          if (options?.perEntryMutationScopes) {
+            await withMutationScopes(
+              {
+                queueName: 'tournament-sync',
+                jobName: 'tournament-event-results',
+                eventId: endEventId,
+                scopes: tournamentEntryCoreScopes(season.seasonId, [entryId]),
+              },
+              persistTransfers,
+            );
+          } else {
+            await persistTransfers();
+          }
+        },
+        {
+          leaseMs: Math.max(120_000, ENTRY_FETCH_TIMEOUT_MS + ENTRY_PERSIST_TIMEOUT_MS + 30_000),
+          waitMs: Math.max(60_000, ENTRY_FETCH_TIMEOUT_MS + ENTRY_PERSIST_TIMEOUT_MS + 30_000),
+        },
+      );
       return true;
     } catch (error) {
       await syncOperationsRepository
@@ -997,8 +1166,8 @@ export async function syncEntryTransferHistories(
       await syncOperationsRepository.finishRun(auditRunId, {
         status: 'completed',
         completedItems: synced,
-        skippedItems: 0,
-        dataChanged: uniqueEntryIds.length > 0,
+        skippedItems: reusedTransferEntryIds.size,
+        dataChanged: uniqueEntryIds.length > reusedTransferEntryIds.size,
         metadata: {
           ...auditRunMetadata(options, auditRunId, auditAttempt),
           phase: 'entry-transfer-history',
@@ -1012,7 +1181,7 @@ export async function syncEntryTransferHistories(
     errors: failedEntryIds.length,
     failedEntryIds,
     requiredUnits: uniqueEntryIds.length,
-    reusedUnits: 0,
+    reusedUnits: reusedTransferEntryIds.size,
     succeededUnits: synced,
     failedUnits: failedEntryIds.length,
   };
