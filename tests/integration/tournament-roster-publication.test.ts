@@ -34,6 +34,11 @@ async function cleanup(): Promise<void> {
     DELETE FROM competition.entries
     WHERE season_id = ${SEASON_ID} AND entry_id = ANY(${[...ENTRY_IDS]}::integer[])
   `;
+  await sql`
+    DELETE FROM ops.sync_items
+    WHERE run_id IN (SELECT run_id FROM ops.sync_runs WHERE season_id = ${SEASON_ID})
+  `;
+  await sql`DELETE FROM ops.sync_runs WHERE season_id = ${SEASON_ID}`;
   await sql`DELETE FROM fpl.seasons WHERE season_id = ${SEASON_ID}`;
 }
 

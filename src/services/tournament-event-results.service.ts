@@ -997,6 +997,12 @@ export async function syncEntryTransferHistories(
       ? options.auditRunId
       : randomUUID();
   const auditAttempt = Math.max(1, Math.floor(options?.auditAttempt ?? 1));
+  // A zero end-event is the pre-GW sentinel used by roster reconciliation.
+  // It is a valid transfer checkpoint, but it is not a valid sync_runs.event_id
+  // (the audit table intentionally accepts only real FPL gameweeks). Keep the
+  // audit run season-scoped in that case so provider failure/success is still
+  // observed without violating the durable event constraint.
+  const auditEventId = endEventId > 0 ? endEventId : undefined;
   if (options?.auditInitialize !== false) {
     await syncOperationsRepository.startRun({
       runId: auditRunId,
@@ -1004,7 +1010,7 @@ export async function syncEntryTransferHistories(
       lane: 'tournament-sync',
       scope: 'entry-event',
       season,
-      eventId: endEventId,
+      eventId: auditEventId,
       mode: 'entry-transfer-history',
       trigger: options?.auditTrigger ?? 'tournament-event-transfers',
       expectedItems: uniqueEntryIds.length,
