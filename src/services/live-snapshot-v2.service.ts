@@ -896,6 +896,17 @@ export async function syncLiveSnapshotV2(
     : null;
   if (earlyDurableFinalRead) controlReadMs = durableReadMs;
 
+  // A FINAL request must fail closed when its durable authority cannot be
+  // read.  Proceeding with provider work in this state could create a new
+  // Redis publication while an older PostgreSQL FINAL is still authoritative,
+  // and would turn a transient database outage into an identity conflict.
+  if (options.finalizeEvent === true && earlyDurableFinalRead?.failed) {
+    throw new CacheError(
+      `Live Points V2 durable FINAL read failed during finalization for ${season.seasonCode}:${eventId}`,
+      'LIVE_V2_DURABLE_FINAL_READ_FAILED',
+    );
+  }
+
   if (current?.publication.state === 'FINALIZED' && earlyDurableFinalRead?.failed) {
     // Keep the Redis FINAL serving while making the durable uncertainty visible
     // to the caller. The worker retains the scheduler obligation for retry.

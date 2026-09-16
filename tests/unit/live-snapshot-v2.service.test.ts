@@ -160,6 +160,41 @@ describe('Live Points and Live Matches shared observation', () => {
     await expect(sync).rejects.toThrow('event-live unavailable');
   });
 
+  test('fails closed before provider work when FINAL durable authority is unavailable', async () => {
+    let providerCalls = 0;
+    const sync = syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        getFixtures: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        getExpectedFixtureIds: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        getReferenceData: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => {
+          throw new Error('durable database unavailable');
+        },
+        checkpointPublication: async () => true,
+      },
+    });
+
+    await expect(sync).rejects.toMatchObject({
+      code: 'LIVE_V2_DURABLE_FINAL_READ_FAILED',
+    });
+    expect(providerCalls).toBe(0);
+  });
+
   test('reuses an identity-matched durable FINAL without provider or checkpoint work', async () => {
     const publication: LivePublicationV2 = {
       contractVersion: 'live-points-v2',
