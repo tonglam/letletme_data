@@ -25,6 +25,7 @@ import { enqueueTournamentRosterSync } from '../jobs/tournament-sync.jobs';
 import {
   captureMyFplSnapshot,
   assessMyFplFinalizationReadiness,
+  cleanupMyFplSnapshotRevisions,
   dispatchMyFplSnapshotPublicationOutbox,
   getActiveMyFplSnapshotRedisManifest,
   getActiveMyFplPublication,
@@ -906,6 +907,10 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
           return result;
         }
         case MAINTENANCE_JOBS.MY_FPL_SNAPSHOT_OUTBOX: {
+          // Keep retention on the same bounded maintenance cadence as outbox
+          // delivery. Pending/processing/failed receipts and verified scope
+          // references are protected by the service query itself.
+          const retention = await cleanupMyFplSnapshotRevisions({ limit: 100 });
           // Invalidation receipts are intentionally delivered before normal
           // publication receipts during the shared five-minute maintenance
           // cadence. A newer publication remains protected by the CAS.
@@ -943,7 +948,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               `My FPL snapshot outbox left ${result.failed} delivery receipt(s) for retry`,
             );
           }
-          return { ...result, invalidation };
+          return { ...result, invalidation, retention };
         }
         case MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX: {
           const result = await dispatchDataPublicationOutbox({ limit: 20 });
