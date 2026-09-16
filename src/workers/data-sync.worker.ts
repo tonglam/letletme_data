@@ -569,9 +569,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             // not report a successful database transaction as zero work.
             submittedRows: result.submittedRows,
             publicationsCreated:
-              marketPublication?.status === 'published'
-                ? 1
-                : (result.publicationsCreated ?? 0),
+              marketPublication?.status === 'published' ? 1 : (result.publicationsCreated ?? 0),
             publicationsReused:
               marketPublication?.status === 'unchanged' ? 1 : (result.publicationsReused ?? 0),
             timings: result.timings,
