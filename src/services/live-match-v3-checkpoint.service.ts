@@ -135,6 +135,11 @@ export interface LiveMatchDeskCheckpointRequest {
   readonly db?: DbOrTransaction;
   /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
   readonly allowFinalReplacement?: boolean;
+  /** Existing durable FINAL identity observed before this replacement. */
+  readonly expectedFinalIdentity?: Readonly<{
+    readonly publicationId: string;
+    readonly generation: number;
+  }>;
 }
 
 export interface LiveMatchDetailCheckpointRequest {
@@ -146,6 +151,11 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly db?: DbOrTransaction;
   /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
   readonly allowFinalReplacement?: boolean;
+  /** Existing durable FINAL identity observed before this replacement. */
+  readonly expectedFinalIdentity?: Readonly<{
+    readonly publicationId: string;
+    readonly generation: number;
+  }>;
 }
 
 export async function checkpointLiveMatchScopeV3(input: {
@@ -198,6 +208,14 @@ export async function checkpointLiveMatchScopeV3(input: {
       db: input.db,
       allowFinalReplacement:
         input.allowFinalReplacement === true || desired.allowFinalReplacement === true,
+      ...(desired.expectedFinalPublicationId && desired.expectedFinalGeneration
+        ? {
+            expectedFinalIdentity: {
+              publicationId: desired.expectedFinalPublicationId,
+              generation: desired.expectedFinalGeneration,
+            },
+          }
+        : {}),
     });
     if (!result.checkpointed || !result.checkpointedAt)
       return { checkpointed: false, skipped: false };
@@ -231,6 +249,14 @@ export async function checkpointLiveMatchScopeV3(input: {
     db: input.db,
     allowFinalReplacement:
       input.allowFinalReplacement === true || desired.allowFinalReplacement === true,
+    ...(desired.expectedFinalPublicationId && desired.expectedFinalGeneration
+      ? {
+          expectedFinalIdentity: {
+            publicationId: desired.expectedFinalPublicationId,
+            generation: desired.expectedFinalGeneration,
+          },
+        }
+      : {}),
   });
   if (!result.checkpointed || !result.checkpointedAt)
     return { checkpointed: false, skipped: false };
@@ -328,6 +354,8 @@ export async function checkpointLiveMatchDeskV3(
             ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
             AND ${liveMatchDeskCheckpointsInFpl.state} = 'FINALIZED'
             AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDeskCheckpointsInFpl.publicationId} = ${request.expectedFinalIdentity?.publicationId ?? ''}
+            AND ${liveMatchDeskCheckpointsInFpl.generation} = ${request.expectedFinalIdentity?.generation ?? 0}
           )
         `,
       })
@@ -420,6 +448,8 @@ export async function checkpointLiveMatchDetailV3(
             ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
             AND ${liveMatchDetailCheckpointsInFpl.state} = 'FINALIZED'
             AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDetailCheckpointsInFpl.publicationId} = ${request.expectedFinalIdentity?.publicationId ?? ''}
+            AND ${liveMatchDetailCheckpointsInFpl.generation} = ${request.expectedFinalIdentity?.generation ?? 0}
           )
         `,
       })
@@ -568,6 +598,16 @@ export type FinalLiveMatchCheckpointPair = Readonly<{
   detail: MatchDetailRead;
 }>;
 
+export type LiveMatchFinalCheckpointIdentity = Readonly<{
+  publicationId: string;
+  generation: number;
+}>;
+
+export type LiveMatchCheckpointIdentities = Readonly<{
+  desk: LiveMatchFinalCheckpointIdentity | null;
+  detail: LiveMatchFinalCheckpointIdentity | null;
+}>;
+
 export async function readFinalLiveMatchCheckpointPairV3(
   season: FplSeasonRef,
   eventId: number,
@@ -588,6 +628,69 @@ export async function readFinalLiveMatchCheckpointPairV3(
   })
     ? { desk, detail }
     : null;
+}
+
+/**
+ * Read only the identities of any existing durable FINAL rows. A recovery
+ * candidate may replace one incoherent sibling, but only when the row still
+ * has the exact identity observed here. Missing/non-final rows intentionally
+ * return null because they do not need a destructive replacement fence.
+ */
+export async function readLiveMatchFinalCheckpointIdentitiesV3(
+  season: FplSeasonRef,
+  eventId: number,
+  dbInstance?: DbOrTransaction,
+): Promise<LiveMatchCheckpointIdentities> {
+  if (!Number.isSafeInteger(eventId) || eventId <= 0) {
+    return { desk: null, detail: null };
+  }
+  const db = dbInstance ?? (await getDb());
+  const [deskRows, detailRows] = await Promise.all([
+    db
+      .select({
+        publicationId: liveMatchDeskCheckpointsInFpl.publicationId,
+        generation: liveMatchDeskCheckpointsInFpl.generation,
+        state: liveMatchDeskCheckpointsInFpl.state,
+      })
+      .from(liveMatchDeskCheckpointsInFpl)
+      .where(
+        and(
+          eq(liveMatchDeskCheckpointsInFpl.seasonId, season.seasonId),
+          eq(liveMatchDeskCheckpointsInFpl.eventId, eventId),
+        ),
+      )
+      .limit(1),
+    db
+      .select({
+        publicationId: liveMatchDetailCheckpointsInFpl.publicationId,
+        generation: liveMatchDetailCheckpointsInFpl.generation,
+        state: liveMatchDetailCheckpointsInFpl.state,
+      })
+      .from(liveMatchDetailCheckpointsInFpl)
+      .where(
+        and(
+          eq(liveMatchDetailCheckpointsInFpl.seasonId, season.seasonId),
+          eq(liveMatchDetailCheckpointsInFpl.eventId, eventId),
+        ),
+      )
+      .limit(1),
+  ]);
+  const identity = (row: {
+    publicationId: string;
+    generation: number;
+    state: string;
+  }): LiveMatchFinalCheckpointIdentity | null =>
+    row.state === 'FINALIZED' &&
+    typeof row.publicationId === 'string' &&
+    row.publicationId.length > 0 &&
+    Number.isSafeInteger(row.generation) &&
+    row.generation > 0
+      ? { publicationId: row.publicationId, generation: row.generation }
+      : null;
+  return {
+    desk: deskRows[0] ? identity(deskRows[0]) : null,
+    detail: detailRows[0] ? identity(detailRows[0]) : null,
+  };
 }
 
 /** Lightweight existence read for the reconciler; the serving GraphQL reader owns cold payload reads. */

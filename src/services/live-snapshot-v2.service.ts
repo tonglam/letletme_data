@@ -2,6 +2,7 @@ import { fplClient } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../domain/job-schedules';
 import type { RawFPLEventLiveResponse, RawFPLFixture } from '../types';
+import type { EventLive } from '../domain/event-lives';
 import {
   markLivePublicationCheckpointedV2,
   publishLivePublicationV2,
@@ -18,6 +19,7 @@ import {
   readLiveMatchDeskFenceV3,
   readLiveMatchDetailFenceV3,
   restoreLiveMatchEquivalentFinalPairV3,
+  setLiveMatchActiveEventV3,
   type MatchDeskActiveFence,
   type MatchDetailActiveFence,
 } from '../cache/live-match-publication-v3';
@@ -39,11 +41,14 @@ import {
 import {
   hasFinalLiveMatchCheckpointsV3,
   readFinalLiveMatchCheckpointPairV3,
+  readLiveMatchFinalCheckpointIdentitiesV3,
+  type LiveMatchCheckpointIdentities,
   type FinalLiveMatchCheckpointPair,
 } from './live-match-v3-checkpoint.service';
 import {
   prepareLiveMatchDesk,
   prepareLiveMatchDetail,
+  type MatchDeskFixture,
   type MatchLifecycleState,
 } from './live-match-v3';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
@@ -113,6 +118,8 @@ export interface LiveSnapshotV2Dependencies {
   readonly readCheckpointDesired?: typeof readLiveCheckpointDesiredV2;
   readonly clearCheckpointDesired?: typeof clearLiveCheckpointDesiredV2;
   readonly readFinalMatchCheckpoints?: typeof readFinalLiveMatchCheckpointPairV3;
+  readonly readMatchCheckpointIdentities?: typeof readLiveMatchFinalCheckpointIdentitiesV3;
+  readonly setActiveMatchEvent?: typeof setLiveMatchActiveEventV3;
   readonly restoreFinalMatchPair?: typeof restoreLiveMatchEquivalentFinalPairV3;
   readonly hasFinalMatchCheckpoints?: typeof hasFinalLiveMatchCheckpointsV3;
   readonly checkpointPublication: (request: {
@@ -188,6 +195,8 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
   readCheckpointed: (season, eventId, dbInstance) =>
     readLivePublicationV2Checkpoint(season, eventId, dbInstance),
   readFinalMatchCheckpoints: readFinalLiveMatchCheckpointPairV3,
+  readMatchCheckpointIdentities: readLiveMatchFinalCheckpointIdentitiesV3,
+  setActiveMatchEvent: setLiveMatchActiveEventV3,
   checkpointPublication: checkpointLivePublicationV2,
 };
 
@@ -463,6 +472,176 @@ function isServingFinalMatchPair(
   );
 }
 
+type MatchPlayerFacts = Readonly<{
+  totalPoints: number;
+  stats: ReadonlyMap<string, Readonly<{ value: number; awardedPoints: number }>>;
+}>;
+
+type MatchDetailFacts = ReadonlyMap<number, ReadonlyMap<number, MatchPlayerFacts>>;
+
+function matchStatAwardedPoints(stat: {
+  readonly points: number;
+  readonly pointsModification: number | null;
+}): number {
+  return stat.points + (stat.pointsModification ?? 0);
+}
+
+function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailFacts | null {
+  const byFixture = new Map<
+    number,
+    Map<
+      number,
+      { totalPoints: number; stats: Map<string, { value: number; awardedPoints: number }> }
+    >
+  >();
+  for (const row of final.eventLives as readonly EventLive[]) {
+    if (!row.fixtureBreakdown) return null;
+    let rowTotalPoints = 0;
+    for (const breakdown of row.fixtureBreakdown) {
+      let players = byFixture.get(breakdown.fixtureId);
+      if (!players) {
+        players = new Map();
+        byFixture.set(breakdown.fixtureId, players);
+      }
+      const stats = new Map<string, { value: number; awardedPoints: number }>(
+        breakdown.stats.map((stat): [string, { value: number; awardedPoints: number }] => [
+          stat.identifier,
+          {
+            value: stat.value,
+            awardedPoints: matchStatAwardedPoints(stat),
+          },
+        ]),
+      );
+      const totalPoints = [...stats.values()].reduce((sum, stat) => sum + stat.awardedPoints, 0);
+      rowTotalPoints += totalPoints;
+      players.set(row.elementId, { totalPoints, stats });
+    }
+    if (rowTotalPoints !== row.totalPoints) return null;
+  }
+  for (const fixture of final.fixtures) {
+    const bps = fixture.stats.find((stat) => stat.identifier === 'bps');
+    if (!bps) continue;
+    let players = byFixture.get(fixture.id);
+    if (!players) {
+      players = new Map();
+      byFixture.set(fixture.id, players);
+    }
+    for (const bpsRow of [...bps.h, ...bps.a]) {
+      const existing = players.get(bpsRow.element);
+      if (existing) {
+        if (!existing.stats.has('bps')) {
+          existing.stats.set('bps', { value: bpsRow.value, awardedPoints: 0 });
+        }
+      } else {
+        players.set(bpsRow.element, {
+          totalPoints: 0,
+          stats: new Map([['bps', { value: bpsRow.value, awardedPoints: 0 }]]),
+        });
+      }
+    }
+  }
+  for (const [fixtureId, players] of byFixture) {
+    for (const [playerId, player] of players) {
+      const visible = [...player.stats.values()].some(
+        (stat) => stat.value !== 0 || stat.awardedPoints !== 0,
+      );
+      if (!visible) players.delete(playerId);
+    }
+    if (players.size === 0) byFixture.delete(fixtureId);
+  }
+  return byFixture;
+}
+
+function matchPlayerFactsEqual(left: MatchPlayerFacts, right: MatchPlayerFacts): boolean {
+  if (left.totalPoints !== right.totalPoints || left.stats.size !== right.stats.size) return false;
+  for (const [identifier, stat] of left.stats) {
+    const candidate = right.stats.get(identifier);
+    if (
+      !candidate ||
+      candidate.value !== stat.value ||
+      candidate.awardedPoints !== stat.awardedPoints
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Compare the overlapping canonical facts before accepting a durable Match FINAL. */
+function durableMatchFactsAgreeWithLiveFinal(
+  pair: FinalLiveMatchCheckpointPair,
+  final: LivePublicationRead,
+): boolean {
+  const finalFixtures = new Map(final.fixtures.map((fixture) => [fixture.id, fixture]));
+  if (
+    finalFixtures.size !== final.fixtures.length ||
+    pair.desk.fixtures.length !== final.fixtures.length
+  )
+    return false;
+  for (const fixture of pair.desk.fixtures as readonly MatchDeskFixture[]) {
+    const source = finalFixtures.get(fixture.fixtureId);
+    if (
+      !source ||
+      fixture.eventId !== (source.event ?? fixture.eventId) ||
+      fixture.homeTeamId !== source.teamH ||
+      fixture.awayTeamId !== source.teamA ||
+      fixture.homeScore !== source.teamHScore ||
+      fixture.awayScore !== source.teamAScore ||
+      fixture.kickoffTime !== (source.kickoffTime?.toISOString() ?? null) ||
+      fixture.minutes !== source.minutes ||
+      fixture.started !== (source.started === true) ||
+      fixture.finished !== source.finished ||
+      fixture.finishedProvisional !== source.finishedProvisional
+    ) {
+      return false;
+    }
+  }
+
+  const expectedDetail = matchDetailFactsFromLiveFinal(final);
+  if (!expectedDetail) return false;
+  const actualDetail = new Map(
+    pair.detail.fixtures.map((fixture) => [
+      fixture.fixtureId,
+      new Map(
+        fixture.players.map((player) => [
+          player.id,
+          {
+            totalPoints: player.totalPoints,
+            stats: new Map(
+              player.stats.map((stat) => [
+                stat.identifier,
+                { value: stat.value, awardedPoints: stat.awardedPoints },
+              ]),
+            ),
+          },
+        ]),
+      ),
+    ]),
+  );
+  const expectedFixtureIds = new Set(final.fixtures.map((fixture) => fixture.id));
+  const actualFixtureIds = new Set(pair.detail.fixtures.map((fixture) => fixture.fixtureId));
+  if (
+    actualFixtureIds.size !== pair.detail.fixtures.length ||
+    actualFixtureIds.size !== expectedFixtureIds.size
+  )
+    return false;
+  for (const fixtureId of expectedFixtureIds) {
+    if (!actualFixtureIds.has(fixtureId)) return false;
+  }
+  for (const [fixtureId, expectedPlayers] of expectedDetail) {
+    const actualPlayers = actualDetail.get(fixtureId);
+    if (!actualPlayers || actualPlayers.size !== expectedPlayers.size) return false;
+    for (const [playerId, expected] of expectedPlayers) {
+      const actual = actualPlayers.get(playerId);
+      if (!actual || !matchPlayerFactsEqual(expected, actual)) return false;
+    }
+  }
+  for (const [fixtureId, actualPlayers] of actualDetail) {
+    if (!expectedDetail.has(fixtureId) && actualPlayers.size > 0) return false;
+  }
+  return true;
+}
+
 /**
  * A Redis FINAL without a durable row is a recovery obligation, not a reason
  * to checkpoint the two Redis payloads on their own.  Keep one merged desired
@@ -586,6 +765,7 @@ export async function syncLiveSnapshotV2(
   const repairMatchForReusedFinal = async (durableFinal: LivePublicationRead): Promise<void> => {
     let matchFinalized = false;
     let durableMatchPair: FinalLiveMatchCheckpointPair | null = null;
+    let expectedFinalCheckpointIdentities: LiveMatchCheckpointIdentities | undefined;
     try {
       if (readFinalMatchCheckpoints) {
         durableMatchPair = await readFinalMatchCheckpoints(season, eventId, databaseBudget?.readDb);
@@ -609,6 +789,44 @@ export async function syncLiveSnapshotV2(
         `Live Match FINAL checkpoints unavailable for event ${eventId}`,
         'LIVE_MATCH_FINAL_CHECKPOINT_PROBE_FAILED',
         error instanceof Error ? error : undefined,
+      );
+    }
+
+    if (durableMatchPair) {
+      expectedFinalCheckpointIdentities = {
+        desk: {
+          publicationId: durableMatchPair.desk.publication.publicationId,
+          generation: durableMatchPair.desk.publication.generation,
+        },
+        detail: {
+          publicationId: durableMatchPair.detail.publication.publicationId,
+          generation: durableMatchPair.detail.publication.generation,
+        },
+      };
+    } else if (dependencies.readMatchCheckpointIdentities) {
+      try {
+        expectedFinalCheckpointIdentities = await dependencies.readMatchCheckpointIdentities(
+          season,
+          eventId,
+          databaseBudget?.readDb,
+        );
+      } catch (error) {
+        logError('Live Match FINAL identity probe failed during Live Points reuse', error, {
+          season: season.seasonCode,
+          eventId,
+        });
+        throw new CacheError(
+          `Live Match FINAL identities unavailable for event ${eventId}`,
+          'LIVE_MATCH_FINAL_CHECKPOINT_PROBE_FAILED',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    }
+
+    if (durableMatchPair && !durableMatchFactsAgreeWithLiveFinal(durableMatchPair, durableFinal)) {
+      throw new CacheError(
+        `Live Match durable FINAL conflicts with Live Points facts for event ${eventId}`,
+        'LIVE_MATCH_FINAL_FACTS_MISMATCH',
       );
     }
 
@@ -669,6 +887,10 @@ export async function syncLiveSnapshotV2(
           durableMatchPair,
         )
       ) {
+        await dependencies.setActiveMatchEvent?.({
+          season: season.seasonCode,
+          eventId,
+        });
         return;
       }
     } else if (matchFinalized) {
@@ -832,6 +1054,7 @@ export async function syncLiveSnapshotV2(
       observedDesk: observedMatchDesk,
       observedDetail: observedMatchDetail,
       forceCheckpointRecovery: true,
+      expectedFinalCheckpointIdentities,
       databaseRead: databaseBudget?.readDb,
     });
     if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {
