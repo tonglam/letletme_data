@@ -717,7 +717,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               overallRank: insert.overallRank,
               teamValue: insert.teamValue,
               bank: insert.bank,
-          richSyncedAt: richSyncedAtValue,
+              richSyncedAt: richSyncedAtValue,
               updatedAt: new Date(),
             },
           })
