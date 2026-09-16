@@ -353,7 +353,18 @@ describe('ops sync state machine', () => {
         NULL
       )
     `;
-    await startRun(RUN_IDS[1], season);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[1],
+      provider: 'fpl',
+      lane: 'entry',
+      scope: 'entry-event',
+      season,
+      eventId: 1,
+      mode: 'entry-event-results',
+      trigger: 'test',
+      expectedItems: 1,
+      startedAt: new Date('2026-08-08T00:00:00.000Z'),
+    });
     const resultResourceId = `${TEST_SEASON_ID}:1:123:results`;
     await syncOperationsRepository.upsertItems(RUN_IDS[1], [
       {
