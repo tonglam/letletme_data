@@ -328,6 +328,55 @@ describe('ops sync state machine', () => {
     ]);
   });
 
+  test('counts only the final audit component as a durable FINAL completion', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[2],
+      provider: 'fpl',
+      lane: 'entry',
+      scope: 'entry-event',
+      season,
+      eventId: 1,
+      mode: 'final',
+      trigger: 'repair',
+      expectedItems: 3,
+      startedAt: new Date('2026-08-08T00:00:00.000Z'),
+    });
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:results`,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { finalCompletion: true, factCommit: 'committed' },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:final`,
+        status: 'skipped',
+        attempts: 1,
+        normalizedPayload: { finalCompletion: true, reused: true },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'skipped',
+        attempts: 1,
+        normalizedPayload: { reused: true },
+      },
+    ]);
+
+    const audit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(audit.finalCompletions).toBe(1);
+    expect(audit.executions).toBe(1);
+    expect(audit.coverageStartAt).not.toBeNull();
+  });
+
   test('keeps terminal run transitions idempotent and rejects a different terminal state', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

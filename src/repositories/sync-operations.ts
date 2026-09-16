@@ -484,8 +484,10 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const factCommits = allRows.filter(
         (row) => stringValue(payloadFor(row.normalizedPayload).factCommit) === 'committed',
       ).length;
-      const finalCompletions = allRows.filter((row) =>
-        boolValue(payloadFor(row.normalizedPayload).finalCompletion),
+      const finalCompletions = allRows.filter(
+        (row) =>
+          componentFor(row.resourceId) === 'final' &&
+          boolValue(payloadFor(row.normalizedPayload).finalCompletion),
       ).length;
       const reusedSkips = allRows.filter(
         (row) =>

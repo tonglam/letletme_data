@@ -3,7 +3,7 @@ import type {
   DbTournamentKnockoutInsert,
   DbTournamentKnockoutResultInsert,
 } from '../db/schemas/index.schema';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import {
   tournamentBattleGroupResultsInCompetition,
   tournamentGroupsInCompetition,
@@ -55,6 +55,39 @@ function groupInsert(row: Record<string, number | string | null>): DbTournamentG
     qualified: Number(row.qualified),
     overallRank: row.overall_rank === null ? null : Number(row.overall_rank),
   };
+}
+
+async function rehomeLocalKnockoutResultsToCandidateRows(
+  tx: Parameters<Parameters<Awaited<ReturnType<typeof getDb>>['transaction']>[0]>[0],
+  season: FplSeasonRef,
+  tournamentId: number,
+  candidateRows: ReadonlyArray<DbTournamentKnockoutResultInsert>,
+): Promise<void> {
+  for (const row of candidateRows) {
+    await tx
+      .update(tournamentKnockoutResultsInCompetition)
+      .set({
+        // Keep the accepted score/source watermark intact. The event backfill
+        // will replace those facts after it has proved both candidate entrants.
+        homeEntryId: row.homeEntryId,
+        awayEntryId: row.awayEntryId,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(tournamentKnockoutResultsInCompetition.seasonId, season.seasonId),
+          eq(tournamentKnockoutResultsInCompetition.tournamentId, tournamentId),
+          eq(tournamentKnockoutResultsInCompetition.eventId, row.eventId),
+          eq(tournamentKnockoutResultsInCompetition.matchId, row.matchId),
+          eq(tournamentKnockoutResultsInCompetition.playAgainstId, row.playAgainstId),
+          sql`${tournamentKnockoutResultsInCompetition.officialMatchId} IS NULL`,
+          sql`(
+            ${tournamentKnockoutResultsInCompetition.homeEntryId} IS DISTINCT FROM ${row.homeEntryId}
+            OR ${tournamentKnockoutResultsInCompetition.awayEntryId} IS DISTINCT FROM ${row.awayEntryId}
+          )`,
+        ),
+      );
+  }
 }
 
 export async function rebuildTournamentStructure(
@@ -122,6 +155,14 @@ export async function rebuildTournamentStructure(
     await groups.upsertBatch(season, groupRows);
     await knockouts.upsertBatch(season, knockoutMatches);
     await knockoutResultsRepository.upsertBatch(season, publishedKnockoutResults);
+    if (options.preserveDerivedResults) {
+      await rehomeLocalKnockoutResultsToCandidateRows(
+        tx,
+        season,
+        tournament.id,
+        publishedKnockoutResults,
+      );
+    }
   });
   return groupRows;
 }
