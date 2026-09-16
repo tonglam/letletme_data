@@ -624,6 +624,14 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(retainedRevisionMigration).not.toMatch(
       /published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
     );
+    expect(publicationService).toContain('function normalizedSnapshotRevision');
+    expect(publicationService).toContain(
+      'const lockedRevision = normalizedSnapshotRevision(lockedCandidate.revision)',
+    );
+    expect(publicationService).toContain('redisManifest?.revision === lockedRevision');
+    expect(worker).toContain(
+      'const retention = await cleanupMyFplSnapshotRevisions({ limit: 100 });',
+    );
   });
 
   test('captures official auto substitutions without inferring Bench Boost', () => {
@@ -770,8 +778,20 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('${nowIso}::timestamptz');
     expect(publicationService).toContain('${supersededBeforeIso}::timestamptz');
     expect(publicationService).toContain(
-      'active = false AND updated_at < ${supersededBeforeIso}::timestamptz',
+      'WHERE publication.active = false\n        AND publication.updated_at < ${candidateBeforeIso}::timestamptz',
     );
+    expect(publicationService).toContain(
+      'AND publication.updated_at < ${supersededBeforeIso}::timestamptz',
+    );
+    expect(publicationService).toContain('publication.updated_at::text AS updated_at');
+    expect(publicationService).toContain('has_pending_invalidation');
+    expect(publicationService).toContain(
+      'lockedCandidate.has_pending_invalidation || lockedCandidate.idempotency_key !== null',
+    );
+    const quote = String.fromCharCode(39);
+    expect(publicationService).toContain(`if (kind === ${quote}FINAL${quote})`);
+    expect(publicationService).toContain('pg_try_advisory_xact_lock');
+    expect(publicationService).toContain('lockedCandidate.idempotency_key !== null');
     expect(publicationService).not.toContain('${sourceCheckedAt}, ${now},');
     expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
   });

@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
+import { and, asc, desc, eq, exists, gt, inArray, isNull, like, lte, or, sql } from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
   datasetPublicationsInOps,
   dataPublicationOutboxInOps,
+  eventsInFpl,
   syncItemsInOps,
   syncRunsInOps,
 } from '../db/schemas/index.schema';
@@ -54,6 +56,44 @@ export interface SyncItemInput {
   readonly lastError?: string | null;
   readonly completedAt?: Date | null;
 }
+
+export type EntrySyncAuditStatus = Readonly<{
+  schemaVersion: 'entry-sync-audit-v1';
+  seasonId: number;
+  eventId: number;
+  entryId: number;
+  available: boolean;
+  reasonCodes: readonly string[];
+  coverageStartAt: string | null;
+  observedAt: string;
+  executions: number;
+  providerRequests: Readonly<{
+    eventLive: number;
+    picks: number;
+    transfers: number;
+    unknown: number;
+  }>;
+  factCommits: number;
+  finalCompletions: number;
+  reusedSkips: number;
+  failedItems: number;
+  evidenceComplete: boolean;
+  triggers: readonly string[];
+  recent: readonly Readonly<{
+    runId: string;
+    trigger: string;
+    component: string;
+    status: SyncItemStatus;
+    attempts: number;
+    sourceRevision: string | null;
+    reuseReason: string | null;
+    factCommit: string | null;
+    finalCompletion: boolean;
+    unknownRequests: number;
+    observedAt: string;
+  }>[];
+  truncated: boolean;
+}>;
 
 export interface PreparePublicationInput {
   readonly publicationId?: string;
@@ -236,6 +276,19 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const db = await getDbInstance();
       for (let offset = 0; offset < items.length; offset += 500) {
         const chunk = items.slice(offset, offset + 500);
+        const preserveExistingItem = sql`
+          excluded.attempts < ${syncItemsInOps.attempts}
+          OR (
+            excluded.attempts = ${syncItemsInOps.attempts}
+            AND (
+              ${syncItemsInOps.status} IN ('completed', 'skipped')
+              OR (
+                ${syncItemsInOps.status} = 'failed'
+                AND excluded.status NOT IN ('completed', 'skipped')
+              )
+            )
+          )
+        `;
         await db
           .insert(syncItemsInOps)
           .values(
@@ -256,74 +309,368 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             set: {
               status: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
-                    )
-                  THEN ${syncItemsInOps.status}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.status}
                   ELSE excluded.status
                 END
               `,
               attempts: sql`greatest(${syncItemsInOps.attempts}, excluded.attempts)`,
               sourceHash: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
-                    )
-                  THEN ${syncItemsInOps.sourceHash}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.sourceHash}
                   ELSE excluded.source_hash
                 END
               `,
               normalizedPayload: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
-                    )
-                  THEN ${syncItemsInOps.normalizedPayload}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.normalizedPayload}
                   ELSE excluded.normalized_payload
                 END
               `,
               lastError: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
-                    )
-                  THEN ${syncItemsInOps.lastError}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.lastError}
                   ELSE excluded.last_error
                 END
               `,
               completedAt: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
-                    )
-                  THEN ${syncItemsInOps.completedAt}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.completedAt}
                   ELSE excluded.completed_at
                 END
               `,
               updatedAt: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
-                    )
-                  THEN ${syncItemsInOps.updatedAt}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.updatedAt}
                   ELSE clock_timestamp()
                 END
               `,
             },
           });
       }
+    },
+
+    failPendingItems: async (
+      runId: string,
+      error: unknown,
+      resourceIds?: readonly string[],
+    ): Promise<void> => {
+      const db = await getDbInstance();
+      const summary = (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
+      const resourceScope =
+        resourceIds === undefined
+          ? undefined
+          : resourceIds.length > 0
+            ? inArray(syncItemsInOps.resourceId, [...new Set(resourceIds)])
+            : sql`false`;
+      await db
+        .update(syncItemsInOps)
+        .set({
+          status: 'failed',
+          normalizedPayload: sql`
+            coalesce(${syncItemsInOps.normalizedPayload}, '{}'::jsonb)
+            || jsonb_build_object(
+              'setupFailure', true,
+              'unknownRequests',
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests') ~ '^[0-9]+$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests')::integer
+                ELSE 0
+              END
+            )
+          `,
+          lastError: summary,
+          completedAt: sql`clock_timestamp()`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(syncItemsInOps.runId, runId),
+            inArray(syncItemsInOps.status, ['pending', 'running']),
+            ...(resourceScope === undefined ? [] : [resourceScope]),
+          ),
+        );
+    },
+
+    entrySyncAudit: async (input: {
+      seasonId: number;
+      eventId: number;
+      entryId: number;
+      limit?: number;
+    }): Promise<EntrySyncAuditStatus> => {
+      const db = await getDbInstance();
+      const limit = Math.min(Math.max(Math.floor(input.limit ?? 200), 1), 500);
+      const resourcePrefix = `${input.seasonId}:${input.eventId}:${input.entryId}:`;
+      const auditWhere = and(
+        eq(syncRunsInOps.seasonId, input.seasonId),
+        eq(syncRunsInOps.eventId, input.eventId),
+        eq(syncItemsInOps.resourceType, 'entry-event'),
+        like(syncItemsInOps.resourceId, `${resourcePrefix}%`),
+      );
+      const newerAuditItems = alias(syncItemsInOps, 'entry_audit_newer_items');
+      const newerAuditRuns = alias(syncRunsInOps, 'entry_audit_newer_runs');
+      const supersededByLaterAttempt = exists(
+        db
+          .select({ one: sql`1` })
+          .from(newerAuditItems)
+          .innerJoin(newerAuditRuns, eq(newerAuditRuns.runId, newerAuditItems.runId))
+          .where(
+            and(
+              eq(newerAuditRuns.seasonId, syncRunsInOps.seasonId),
+              eq(newerAuditRuns.eventId, syncRunsInOps.eventId),
+              eq(newerAuditItems.resourceType, syncItemsInOps.resourceType),
+              eq(newerAuditItems.resourceId, syncItemsInOps.resourceId),
+              or(
+                gt(newerAuditRuns.createdAt, syncRunsInOps.createdAt),
+                and(
+                  eq(newerAuditRuns.createdAt, syncRunsInOps.createdAt),
+                  gt(newerAuditRuns.runId, syncRunsInOps.runId),
+                ),
+              ),
+            ),
+          ),
+      );
+      const selectAuditRows = () =>
+        db
+          .select({
+            runId: syncItemsInOps.runId,
+            resourceId: syncItemsInOps.resourceId,
+            trigger: syncRunsInOps.trigger,
+            itemStatus: syncItemsInOps.status,
+            attempts: syncItemsInOps.attempts,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+            itemCreatedAt: syncItemsInOps.createdAt,
+            itemUpdatedAt: syncItemsInOps.updatedAt,
+            runCreatedAt: syncRunsInOps.createdAt,
+          })
+          .from(syncItemsInOps)
+          .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
+          .where(auditWhere);
+      const eventRows = await db
+        .select({
+          finished: eventsInFpl.finished,
+          dataChecked: eventsInFpl.dataChecked,
+          dataCheckedAt: eventsInFpl.dataCheckedAt,
+        })
+        .from(eventsInFpl)
+        .where(
+          and(eq(eventsInFpl.seasonId, input.seasonId), eq(eventsInFpl.eventId, input.eventId)),
+        )
+        .limit(1);
+      const eventFinalized = eventRows[0]?.finished === true && eventRows[0]?.dataChecked === true;
+      const currentFinalizationRevision = eventRows[0]?.dataCheckedAt?.toISOString() ?? null;
+      const finalResourceId = `${resourcePrefix}final`;
+      const resultResourceId = `${resourcePrefix}results`;
+      const transferResourceId = `${resourcePrefix}transfers`;
+      const sourceRevisionAt = sql`
+        CASE
+          WHEN (${syncItemsInOps.normalizedPayload}->>'sourceRevision') ~
+            '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+          THEN (${syncItemsInOps.normalizedPayload}->>'sourceRevision')::timestamptz
+          ELSE NULL
+        END
+      `;
+      const finalEvidencePredicate = sql`
+        ${syncItemsInOps.resourceId} = ${finalResourceId}
+        AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+        AND (${syncItemsInOps.normalizedPayload}->>'finalCompletion') = 'true'
+        AND ${
+          !eventFinalized
+            ? sql`true`
+            : currentFinalizationRevision === null
+              ? sql`false`
+              : sql`${sourceRevisionAt} >= ${currentFinalizationRevision}::timestamptz`
+        }
+      `;
+      const resultEvidencePredicate = sql`
+        ${syncItemsInOps.resourceId} = ${resultResourceId}
+        AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+        AND (
+          (${syncItemsInOps.normalizedPayload}->>'factCommit') IN ('committed', 'reused')
+          OR (${syncItemsInOps.normalizedPayload}->>'reused') = 'true'
+        )
+      `;
+      const resultEvidenceComplete = sql<boolean>`coalesce(
+        bool_or(${resultEvidencePredicate}),
+        false
+      )`;
+      const transferEvidencePredicate = sql`
+        ${syncItemsInOps.resourceId} = ${transferResourceId}
+        AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+        AND (
+          (${syncItemsInOps.normalizedPayload}->>'factCommit') IN ('committed', 'reused')
+          OR (${syncItemsInOps.normalizedPayload}->>'reused') = 'true'
+        )
+      `;
+      const transferComponentPresent = sql<boolean>`coalesce(
+        bool_or(${syncItemsInOps.resourceId} = ${transferResourceId}),
+        false
+      )`;
+      const transferEvidenceComplete = sql<boolean>`coalesce(
+        bool_or(${transferEvidencePredicate}),
+        false
+      )`;
+      const finalEvidenceComplete = !eventFinalized
+        ? sql<boolean>`true`
+        : currentFinalizationRevision === null
+          ? sql<boolean>`false`
+          : sql<boolean>`coalesce(bool_or(${finalEvidencePredicate}), false)`;
+      const [aggregateRows, recentRows] = await Promise.all([
+        db
+          .select({
+            totalRows: sql<number>`count(*)::int`,
+            executions: sql<number>`count(distinct ${syncRunsInOps.runId})::int`,
+            eventLiveRequests: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'eventLiveRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'eventLiveRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            picksRequests: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'picksRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'picksRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            transfers: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'transferRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'transferRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            unknownRequests: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            factCommits: sql<number>`count(*) FILTER (
+              WHERE (${syncItemsInOps.normalizedPayload}->>'factCommit') = 'committed'
+            )::int`,
+            finalCompletions: sql<number>`count(*) FILTER (WHERE ${finalEvidencePredicate})::int`,
+            resultEvidenceComplete,
+            reusedSkips: sql<number>`count(*) FILTER (
+              WHERE ${syncItemsInOps.status} = 'skipped'
+                OR (${syncItemsInOps.normalizedPayload}->>'reused') = 'true'
+            )::int`,
+            failedItems: sql<number>`count(*) FILTER (
+              WHERE ${syncItemsInOps.status} = 'failed'
+            )::int`,
+            unaccountedItems: sql<number>`count(*) FILTER (
+              WHERE NOT (
+                ${syncItemsInOps.status} IN ('completed', 'skipped')
+                OR (${syncItemsInOps.normalizedPayload}->>'unknownRequests') ~ '^-?[0-9]+([.][0-9]+)?$'
+                OR ${supersededByLaterAttempt}
+              )
+            )::int`,
+            finalEvidenceComplete,
+            transferComponentPresent,
+            transferEvidenceComplete,
+            coverageStartAt: sql<string | Date | null>`min(
+              coalesce(${syncItemsInOps.createdAt}, ${syncRunsInOps.createdAt})
+            )`,
+            triggers: sql<string[]>`coalesce(
+              array_agg(distinct ${syncRunsInOps.trigger}) FILTER (WHERE ${syncRunsInOps.trigger} IS NOT NULL),
+              ARRAY[]::text[]
+            )`,
+          })
+          .from(syncItemsInOps)
+          .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
+          .where(auditWhere),
+        selectAuditRows()
+          .orderBy(desc(syncItemsInOps.updatedAt), desc(syncItemsInOps.runId))
+          .limit(limit + 1),
+      ]);
+      const truncated = recentRows.length > limit;
+      const observedRows = recentRows.slice(0, limit);
+      const payloadFor = (value: unknown): Record<string, unknown> =>
+        isRecord(value) ? value : {};
+      const numberValue = (value: unknown): number =>
+        typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+      const stringValue = (value: unknown): string | null =>
+        typeof value === 'string' && value.length > 0 ? value : null;
+      const boolValue = (value: unknown): boolean => value === true;
+      const componentFor = (resourceId: string): string =>
+        resourceId.startsWith(resourcePrefix) ? resourceId.slice(resourcePrefix.length) : 'unknown';
+      const recent = observedRows.map((row) => {
+        const payload = payloadFor(row.normalizedPayload);
+        return {
+          runId: row.runId,
+          trigger: row.trigger,
+          component: componentFor(row.resourceId),
+          status: row.itemStatus as SyncItemStatus,
+          attempts: row.attempts,
+          sourceRevision: stringValue(payload.sourceRevision),
+          reuseReason: stringValue(payload.reuseReason),
+          factCommit: stringValue(payload.factCommit),
+          finalCompletion: boolValue(payload.finalCompletion),
+          unknownRequests: numberValue(payload.unknownRequests),
+          observedAt: (row.itemUpdatedAt ?? row.itemCreatedAt ?? row.runCreatedAt).toISOString(),
+        };
+      });
+      const aggregate = aggregateRows[0];
+      const totalRows = Number(aggregate?.totalRows ?? 0);
+      const coverageStartAtValue = aggregate?.coverageStartAt;
+      const coverageStartAt =
+        coverageStartAtValue instanceof Date
+          ? coverageStartAtValue.toISOString()
+          : typeof coverageStartAtValue === 'string' &&
+              !Number.isNaN(Date.parse(coverageStartAtValue))
+            ? new Date(coverageStartAtValue).toISOString()
+            : null;
+      const evidenceComplete =
+        totalRows > 0 &&
+        aggregate?.resultEvidenceComplete === true &&
+        aggregate?.finalEvidenceComplete === true &&
+        (aggregate?.transferComponentPresent !== true ||
+          aggregate?.transferEvidenceComplete === true) &&
+        Number(aggregate?.unaccountedItems ?? 0) === 0;
+      const reasonCodes =
+        totalRows === 0
+          ? ['SYNC_AUDIT_EVIDENCE_MISSING']
+          : [
+              ...(aggregate?.resultEvidenceComplete === true
+                ? []
+                : ['SYNC_AUDIT_RESULT_EVIDENCE_MISSING']),
+              ...(aggregate?.finalEvidenceComplete === true
+                ? []
+                : ['SYNC_AUDIT_FINAL_EVIDENCE_MISSING']),
+              ...(aggregate?.transferComponentPresent !== true ||
+              aggregate?.transferEvidenceComplete === true
+                ? []
+                : ['SYNC_AUDIT_TRANSFER_EVIDENCE_MISSING']),
+              ...(Number(aggregate?.unaccountedItems ?? 0) === 0
+                ? []
+                : ['SYNC_AUDIT_ITEMS_UNACCOUNTED']),
+            ];
+      return {
+        schemaVersion: 'entry-sync-audit-v1',
+        seasonId: input.seasonId,
+        eventId: input.eventId,
+        entryId: input.entryId,
+        coverageStartAt,
+        observedAt: new Date().toISOString(),
+        available: totalRows > 0,
+        reasonCodes,
+        executions: Number(aggregate?.executions ?? 0),
+        providerRequests: {
+          eventLive: Number(aggregate?.eventLiveRequests ?? 0),
+          picks: Number(aggregate?.picksRequests ?? 0),
+          transfers: Number(aggregate?.transfers ?? 0),
+          unknown: Number(aggregate?.unknownRequests ?? 0),
+        },
+        factCommits: Number(aggregate?.factCommits ?? 0),
+        finalCompletions: Number(aggregate?.finalCompletions ?? 0),
+        reusedSkips: Number(aggregate?.reusedSkips ?? 0),
+        failedItems: Number(aggregate?.failedItems ?? 0),
+        evidenceComplete,
+        triggers: aggregate?.triggers ?? [],
+        recent,
+        truncated,
+      };
     },
 
     finishRun: async (

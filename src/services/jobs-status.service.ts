@@ -14,6 +14,7 @@ import {
 } from './price-change-predictions.service';
 import { seasonRepository } from '../repositories/seasons';
 import { eventRepository } from '../repositories/events';
+import { fixtureRepository } from '../repositories/fixtures';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { allQueueNames } from '../queues/names';
 import { getQueueConnection } from '../utils/queue';
@@ -341,7 +342,10 @@ export async function getLiveFinalRetentionOperationalStatus(
 ): Promise<Record<string, unknown>> {
   const now = new Date();
   const checkedAt = now.toISOString();
-  const finalizedEvents = (await eventRepository.findAll(season)).filter(
+  const allEvents = (await eventRepository.findAll(season)).sort(
+    (left, right) => left.id - right.id,
+  );
+  const finalizedEvents = allEvents.filter(
     (event) =>
       event.finished &&
       event.dataChecked &&
@@ -549,6 +553,67 @@ export async function getLiveFinalRetentionOperationalStatus(
   const missingEventIds = eventStatuses
     .filter((event) => !event.certified)
     .map((event) => event.eventId);
+  const currentFinalizedEvent = finalizedEvents[finalizedEvents.length - 1] ?? null;
+  const nextEvent = currentFinalizedEvent
+    ? (allEvents.find((event) => event.id > currentFinalizedEvent.id) ?? null)
+    : null;
+  const readFixtureEvidence = async (eventId: number | null) => {
+    if (eventId === null) return { fixtures: [], errorType: null as string | null };
+    try {
+      return { fixtures: await fixtureRepository.findByEvent(season, eventId), errorType: null };
+    } catch (error) {
+      return {
+        fixtures: [],
+        errorType: error instanceof Error ? error.name : 'UnknownError',
+      };
+    }
+  };
+  const [currentFixtureEvidence, nextFixtureEvidence] = await Promise.all([
+    readFixtureEvidence(currentFinalizedEvent?.id ?? null),
+    readFixtureEvidence(nextEvent?.id ?? null),
+  ]);
+  const currentFixtures = currentFixtureEvidence.fixtures;
+  const nextFixtures = nextFixtureEvidence.fixtures;
+  const fixtureStatusUnavailable =
+    currentFixtureEvidence.errorType !== null || nextFixtureEvidence.errorType !== null;
+  const currentEventAllFixturesFinished =
+    currentFixtures.length > 0 && currentFixtures.every((fixture) => fixture.finished);
+  const nextEventStarted = nextFixtures.some((fixture) => fixture.started || fixture.finished);
+  const alertContext = fixtureStatusUnavailable
+    ? {
+        source: 'canonical-events-and-fixtures',
+        phase: 'UNKNOWN',
+        fixtureStatusAvailable: false,
+        reasonCodes: ['FIXTURE_STATUS_UNAVAILABLE'],
+        currentEventId: currentFinalizedEvent?.id ?? null,
+        nextEventId: nextEvent?.id ?? null,
+        currentFixtureCount: currentFixtures.length,
+        nextFixtureCount: nextFixtures.length,
+        currentEventAllFixturesFinished: false,
+        nextEventStarted: false,
+      }
+    : {
+        source: 'canonical-events-and-fixtures',
+        phase:
+          currentFinalizedEvent && nextEvent
+            ? currentEventAllFixturesFinished && !nextEventStarted
+              ? 'POST_EVENT_PRE_NEXT'
+              : !currentEventAllFixturesFinished
+                ? 'CURRENT_EVENT_INCOMPLETE'
+                : 'NEXT_EVENT_ACTIVE'
+            : currentFinalizedEvent
+              ? 'SEASON_FINALIZED'
+              : nextEventStarted
+                ? 'NEXT_EVENT_ACTIVE'
+                : 'UNKNOWN',
+        fixtureStatusAvailable: true,
+        currentEventId: currentFinalizedEvent?.id ?? null,
+        nextEventId: nextEvent?.id ?? null,
+        currentFixtureCount: currentFixtures.length,
+        nextFixtureCount: nextFixtures.length,
+        currentEventAllFixturesFinished,
+        nextEventStarted,
+      };
   return {
     schemaVersion: LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
     seasonCode: season.seasonCode,
@@ -576,6 +641,7 @@ export async function getLiveFinalRetentionOperationalStatus(
       )?.criticality,
     },
     reasonCodes: [...new Set(eventStatuses.flatMap((event) => event.reasonCodes))],
+    alertContext,
   };
 }
 
@@ -720,6 +786,9 @@ export async function getJobsStatus(
         readyWithIncompleteChunks: 0,
       },
       oldestActiveEligibleAt: null,
+      oldestPendingAt: null,
+      oldestWaitingSourceAt: null,
+      oldestProcessingAt: null,
       oldestDegradedAt: null,
       latestUpdatedAt: null,
       watch: null,

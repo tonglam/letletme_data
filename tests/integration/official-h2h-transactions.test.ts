@@ -16,6 +16,7 @@ const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
 const contexts: boolean[] = [];
 async function cleanup() {
   await sql`DELETE FROM competition.tournament_battle_group_results WHERE season_id=${season.seasonId}`;
+  await sql`DELETE FROM competition.tournament_knockouts WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournament_knockout_results WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournament_groups WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournament_entries WHERE season_id=${season.seasonId}`;
@@ -90,6 +91,106 @@ test('H2H worker fetches without a transaction and commits a complete group publ
   const [row] =
     await sql`SELECT official_schedule_synced_at FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
   expect(row!.official_schedule_synced_at).not.toBeNull();
+});
+
+test('full H2H reconciliation atomically replaces stale rows and bracket topology', async () => {
+  await sql`INSERT INTO competition.tournament_battle_group_results(
+      source_result_id,tournament_id,season_id,group_id,event_id,home_index,home_entry_id,
+      away_index,away_entry_id,official_match_id,source_order,is_bye)
+    VALUES
+      (995901,${id},${season.seasonId},1,1,1,${id},2,NULL,995901,0,true),
+      (995902,${id},${season.seasonId},1,1,3,${id},4,NULL,995902,1,true)`;
+  await sql`INSERT INTO competition.tournament_knockout_results(
+      source_result_id,tournament_id,season_id,event_id,match_id,play_against_id,
+      home_entry_id,away_entry_id,match_winner,official_match_id,source_order)
+    VALUES
+      (995901,${id},${season.seasonId},1,1,1,${id},NULL,${id},995903,2),
+      (995902,${id},${season.seasonId},1,2,1,${id},NULL,${id},995904,3)`;
+  await sql`INSERT INTO competition.tournament_knockouts(
+      source_knockout_id,tournament_id,season_id,round,started_event_id,ended_event_id,
+      match_id,next_match_id,home_entry_id,round_winner)
+    VALUES
+      (995901,${id},${season.seasonId},1,1,1,1,NULL,${id},${id}),
+      (995902,${id},${season.seasonId},9,1,1,2,99,${id},${id})`;
+
+  await tournamentOfficialH2HRepository.publish(season, id, {
+    checkedAt: new Date('2026-09-16T07:00:00.000Z'),
+    scheduleHash: 'full-reconcile-test',
+    lockSchedule: false,
+    fullReconcile: true,
+    battleRows: [
+      {
+        tournamentId: id,
+        groupId: 1,
+        eventId: 1,
+        homeIndex: 1,
+        homeEntryId: id,
+        homeNetPoints: 20,
+        homeRank: null,
+        homeMatchPoints: 3,
+        awayIndex: 2,
+        awayEntryId: null,
+        awayNetPoints: null,
+        awayRank: null,
+        awayMatchPoints: 0,
+        officialMatchId: 996001,
+        sourceOrder: 0,
+        homeIsAverage: false,
+        awayIsAverage: true,
+        isBye: true,
+        sourceCheckedAt: new Date('2026-09-16T07:00:00.000Z'),
+      },
+    ],
+    knockoutRows: [
+      {
+        tournamentId: id,
+        eventId: 1,
+        matchId: 1,
+        playAgainstId: 1,
+        homeEntryId: id,
+        homeNetPoints: 20,
+        awayEntryId: null,
+        awayNetPoints: null,
+        matchWinner: id,
+        officialMatchId: 996002,
+        sourceOrder: 1,
+        knockoutName: 'Final',
+        tiebreak: null,
+        sourceCheckedAt: new Date('2026-09-16T07:00:00.000Z'),
+      },
+    ],
+    bracketRows: [
+      {
+        tournamentId: id,
+        round: 1,
+        startedEventId: 1,
+        endedEventId: 1,
+        matchId: 1,
+        nextMatchId: null,
+        homeEntryId: id,
+        awayEntryId: null,
+        roundWinner: id,
+      },
+    ],
+    groupRows: [],
+  });
+
+  const battleRows = await sql`
+    SELECT official_match_id FROM competition.tournament_battle_group_results
+    WHERE season_id=${season.seasonId} AND tournament_id=${id}
+    ORDER BY official_match_id`;
+  const knockoutRows = await sql`
+    SELECT official_match_id FROM competition.tournament_knockout_results
+    WHERE season_id=${season.seasonId} AND tournament_id=${id}
+    ORDER BY official_match_id`;
+  const brackets = await sql`
+    SELECT match_id, round, next_match_id
+    FROM competition.tournament_knockouts
+    WHERE season_id=${season.seasonId} AND tournament_id=${id}
+    ORDER BY match_id`;
+  expect(battleRows.map((row) => row.official_match_id)).toEqual([996001]);
+  expect(knockoutRows.map((row) => row.official_match_id)).toEqual([996002]);
+  expect(Array.from(brackets)).toEqual([{ match_id: 1, round: 1, next_match_id: null }]);
 });
 test('changed tournament configuration during fetch rejects the entire old publication', async () => {
   spyOn(fplClient, 'getLeagueH2HStandings').mockImplementation(async () => {

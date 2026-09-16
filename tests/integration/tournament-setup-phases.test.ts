@@ -493,7 +493,7 @@ async function prepareSetupPublicationTest() {
   spyOn(backfill, 'ensureTournamentCoreResults').mockResolvedValue(undefined);
   spyOn(backfill, 'calculateTournamentHistoryFromStoredResults').mockResolvedValue(undefined);
   spyOn(backfill, 'enrichTournamentHistory').mockResolvedValue([]);
-  spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue(undefined);
+  spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue([]);
   spyOn(audit, 'auditTournamentSetup').mockResolvedValue({ issues: [] } as never);
   spyOn(tournamentEntryRepository, 'findEntryIdsByTournamentId').mockResolvedValue([tournamentId]);
   spyOn(tournamentEntryRepository, 'findEntrySeedsByTournamentId').mockResolvedValue([]);

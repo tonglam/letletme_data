@@ -1,11 +1,13 @@
 import { describe, expect, mock, test } from 'bun:test';
 
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
+import { FPLClientError, IncompleteDataSyncError } from '../../src/utils/errors';
 
 process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
 
 const {
   enqueueTournamentCascade,
+  isTournamentFinalCheckpointWait,
   maybeEnqueueCascadeMaterializedRefresh,
   persistTournamentTerminalFailureBeforeSettlement,
   shouldCompleteTournamentJobOnSettlement,
@@ -174,5 +176,34 @@ describe('tournament cascade recovery contract', () => {
       generation: 4,
       error,
     });
+  });
+
+  test('defers only explicit finalized-checkpoint dependency waits', () => {
+    expect(
+      isTournamentFinalCheckpointWait(
+        new IncompleteDataSyncError(
+          'Final event-live V2 checkpoint is missing for event 12; wait for final repair',
+          1,
+          0,
+          0,
+          1,
+          'SOURCE_NOT_READY',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isTournamentFinalCheckpointWait(
+        new IncompleteDataSyncError(
+          'Tournament cascade is waiting for finalized V2 checkpoint in event 12',
+          1,
+          0,
+          0,
+          1,
+          'SOURCE_NOT_READY',
+        ),
+      ),
+    ).toBe(true);
+    expect(isTournamentFinalCheckpointWait(new FPLClientError('not found', 404))).toBe(false);
+    expect(isTournamentFinalCheckpointWait(new Error('SOURCE_NOT_READY:HTTP_ERROR'))).toBe(false);
   });
 });

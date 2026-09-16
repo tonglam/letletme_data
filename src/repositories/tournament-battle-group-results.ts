@@ -187,9 +187,11 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
               tournamentBattleGroupResultsInCompetition.awayIndex,
             ],
             set: {
+              homeEntryId: sql`excluded.home_entry_id`,
               homeNetPoints: sql`excluded.home_net_points`,
               homeRank: sql`excluded.home_rank`,
               homeMatchPoints: sql`excluded.home_match_points`,
+              awayEntryId: sql`excluded.away_entry_id`,
               awayNetPoints: sql`excluded.away_net_points`,
               awayRank: sql`excluded.away_rank`,
               awayMatchPoints: sql`excluded.away_match_points`,
@@ -220,6 +222,8 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTr
                     OR excluded.source_checked_at > ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt}
                   )
                 )
+                OR ${tournamentBattleGroupResultsInCompetition.homeEntryId} IS DISTINCT FROM excluded.home_entry_id
+                OR ${tournamentBattleGroupResultsInCompetition.awayEntryId} IS DISTINCT FROM excluded.away_entry_id
               )
               AND (
                 ${tournamentBattleGroupResultsInCompetition.sourceCheckedAt} IS NULL

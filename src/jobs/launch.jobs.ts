@@ -206,11 +206,17 @@ function result(
 export async function evaluateLaunchMonitor(
   dependencies: LaunchMonitorDependencies = defaultDependencies,
 ): Promise<LaunchMonitorResult> {
-  const bootstrap = await dependencies.getBootstrap();
   const now = dependencies.now();
+  // The provider bootstrap is the discovery authority. Do not consult a
+  // previous season's canonical marker before deriving the published season;
+  // doing so can suppress the first notification for a newly published one.
+  // Redis is acquired only after the provider classifies the tick, so an
+  // ordinary no-op does not spend a cache connection or marker lookup.
+  let redis: LaunchRedisClient | null = null;
+  const bootstrap = await dependencies.getBootstrap();
 
   if (bootstrap.events.length === 0) {
-    const redis = await dependencies.getRedis();
+    redis = await dependencies.getRedis();
     const delivery = await sendLaunchNotificationOnce(
       redis,
       `llm:queue:coordination:launch-notification:warning:${now.getFullYear()}`,
@@ -229,10 +235,14 @@ export async function evaluateLaunchMonitor(
     return result('none', 'not_applicable');
   }
 
-  const redis = await dependencies.getRedis();
+  redis = await dependencies.getRedis();
+  const markerKey = `llm:queue:coordination:launch-notification:happening:${publishedSeason}`;
+  if (await redis.get(markerKey)) {
+    return result('happening', 'already_sent');
+  }
   const delivery = await sendLaunchNotificationOnce(
     redis,
-    `llm:queue:coordination:launch-notification:happening:${publishedSeason}`,
+    markerKey,
     '【NEW SEASON】ITS HAPPENING!!!',
     dependencies,
   );

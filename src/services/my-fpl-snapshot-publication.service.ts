@@ -354,6 +354,14 @@ const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
 // still rolls back the complete candidate instead of exposing a partial
 // publication.
 const MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE = 100;
+const MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE = 100;
+// Renew a Redis-named retained revision before the 24-hour reader lease can
+// expire. The maintenance cadence is hourly, so keep a small lead window.
+const MY_FPL_SNAPSHOT_RETENTION_RENEWAL_LEAD_MS = 10 * 60_000;
+// Retention may have to walk past revisions that are still named by the
+// serving Redis pointer. Keep that walk bounded so a large protected history
+// cannot turn maintenance into an unbounded transaction.
+const MY_FPL_SNAPSHOT_RETENTION_MAX_SCAN = 1_000;
 const myFplCaptureTails = new Map<string, Promise<void>>();
 
 function batches<T>(rows: readonly T[], size: number): T[][] {
@@ -362,6 +370,301 @@ function batches<T>(rows: readonly T[], size: number): T[][] {
     result.push(rows.slice(offset, offset + size));
   }
   return result;
+}
+
+type MyFplSnapshotRetentionOptions = Readonly<{
+  supersededBeforeIso: string;
+  candidateBeforeIso?: string;
+  limit: number;
+  seasonId?: number;
+  eventId?: number;
+}>;
+
+function normalizedSnapshotRevision(value: number | string): number | null {
+  const revision = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+}
+
+/**
+ * Remove only old, superseded immutable revisions whose durable references
+ * have settled. The candidate CTE keeps the transaction bounded and protects
+ * the active pointer, an outbox that still needs delivery, and the revision
+ * currently recorded by the scope verification fence.
+ */
+async function deleteExpiredMyFplSnapshotRevisions(
+  tx: postgres.TransactionSql,
+  options: MyFplSnapshotRetentionOptions,
+): Promise<number> {
+  const supersededBeforeIso = options.supersededBeforeIso;
+  const candidateBeforeIso = options.candidateBeforeIso ?? supersededBeforeIso;
+  const seasonFilter =
+    options.seasonId === undefined ? tx`` : tx`AND publication.season_id = ${options.seasonId}`;
+  const eventFilter =
+    options.eventId === undefined ? tx`` : tx`AND publication.event_id = ${options.eventId}`;
+  let deleted = 0;
+  let scanned = 0;
+  let cursor: {
+    updatedAt: string;
+    seasonId: number;
+    eventId: number;
+    revision: number | string;
+  } | null = null;
+  while (deleted < options.limit && scanned < MY_FPL_SNAPSHOT_RETENTION_MAX_SCAN) {
+    const cursorUpdatedAt: Date | string | null = cursor?.updatedAt ?? null;
+    const cursorSeasonId: number | null = cursor?.seasonId ?? null;
+    const cursorEventId: number | null = cursor?.eventId ?? null;
+    const cursorRevision: number | string | null = cursor?.revision ?? null;
+    const candidates: {
+      season_id: number;
+      event_id: number;
+      revision: number | string;
+      season_code: string;
+      updated_at: string;
+    }[] = await tx<
+      {
+        season_id: number;
+        event_id: number;
+        revision: number | string;
+        season_code: string;
+        updated_at: string;
+      }[]
+    >`
+      SELECT publication.season_id, publication.event_id, publication.revision,
+             season.season_code, publication.updated_at::text AS updated_at
+      FROM competition.my_fpl_snapshot_publications publication
+      JOIN fpl.seasons season ON season.season_id = publication.season_id
+      WHERE publication.active = false
+        AND publication.updated_at < ${candidateBeforeIso}::timestamptz
+        ${seasonFilter}
+        ${eventFilter}
+        AND (
+          ${cursorUpdatedAt}::timestamptz IS NULL
+          OR publication.updated_at > ${cursorUpdatedAt}::timestamptz
+          OR (
+            publication.updated_at = ${cursorUpdatedAt}::timestamptz
+            AND (
+              publication.season_id > ${cursorSeasonId}
+              OR (
+                publication.season_id = ${cursorSeasonId}
+                AND (
+                  publication.event_id > ${cursorEventId}
+                  OR (
+                    publication.event_id = ${cursorEventId}
+                    AND publication.revision > ${cursorRevision}
+                  )
+                )
+              )
+            )
+          )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_publication_outbox outbox
+          WHERE outbox.season_id = publication.season_id
+            AND outbox.event_id = publication.event_id
+            AND outbox.revision = publication.revision
+            AND outbox.status IN ('PENDING', 'PROCESSING', 'FAILED')
+            AND outbox.delivered_at IS NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_scope_state scope_state
+          WHERE scope_state.season_id = publication.season_id
+            AND scope_state.event_id = publication.event_id
+            AND scope_state.verified_revision = publication.revision
+        )
+      ORDER BY publication.updated_at, publication.season_id, publication.event_id, publication.revision
+      LIMIT ${Math.min(options.limit, MY_FPL_SNAPSHOT_RETENTION_MAX_SCAN)}
+    `;
+    if (candidates.length === 0) break;
+    for (const candidate of candidates) {
+      if (scanned >= MY_FPL_SNAPSHOT_RETENTION_MAX_SCAN || deleted >= options.limit) break;
+      scanned += 1;
+      const candidateRevision = normalizedSnapshotRevision(candidate.revision);
+      if (candidateRevision === null) {
+        logWarn('My FPL snapshot retention found an invalid publication revision', {
+          seasonCode: candidate.season_code,
+          eventId: candidate.event_id,
+          revision: String(candidate.revision),
+        });
+        return deleted;
+      }
+      cursor = {
+        updatedAt: candidate.updated_at,
+        seasonId: candidate.season_id,
+        eventId: candidate.event_id,
+        revision: candidateRevision,
+      };
+
+      // Publication activation and Redis delivery hold the same event advisory
+      // lock. Acquire it before taking the publication row lock so cleanup
+      // cannot deadlock with an outbox delivery that uses the reverse path.
+      await tx`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${myFplSnapshotEventLockScope(candidate.season_id, candidate.event_id)}, 0)
+        )
+      `;
+      const lockedCandidates = await tx<
+        {
+          season_id: number;
+          event_id: number;
+          revision: number | string;
+          season_code: string;
+          updated_at: string;
+          has_pending_invalidation: boolean;
+          idempotency_key: string | null;
+        }[]
+      >`
+        SELECT publication.season_id, publication.event_id, publication.revision,
+               season.season_code, publication.updated_at::text AS updated_at,
+               EXISTS (
+                 SELECT 1
+                 FROM competition.my_fpl_snapshot_invalidation_outbox invalidation
+                 WHERE invalidation.season_id = publication.season_id
+                   AND invalidation.event_id = publication.event_id
+                   AND invalidation.revision = publication.revision
+                   AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
+                   AND invalidation.delivered_at IS NULL
+               ) AS has_pending_invalidation
+               , publication.idempotency_key
+        FROM competition.my_fpl_snapshot_publications publication
+        JOIN fpl.seasons season ON season.season_id = publication.season_id
+        WHERE publication.season_id = ${candidate.season_id}
+          AND publication.event_id = ${candidate.event_id}
+          AND publication.revision = ${candidateRevision}
+          AND publication.active = false
+          AND publication.updated_at < ${candidateBeforeIso}::timestamptz
+          AND NOT EXISTS (
+            SELECT 1
+            FROM competition.my_fpl_snapshot_publication_outbox outbox
+            WHERE outbox.season_id = publication.season_id
+              AND outbox.event_id = publication.event_id
+              AND outbox.revision = publication.revision
+              AND outbox.status IN ('PENDING', 'PROCESSING', 'FAILED')
+              AND outbox.delivered_at IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM competition.my_fpl_snapshot_scope_state scope_state
+            WHERE scope_state.season_id = publication.season_id
+              AND scope_state.event_id = publication.event_id
+              AND scope_state.verified_revision = publication.revision
+          )
+        FOR UPDATE SKIP LOCKED
+      `;
+      const lockedCandidate = lockedCandidates[0];
+      if (!lockedCandidate) continue;
+      const lockedRevision = normalizedSnapshotRevision(lockedCandidate.revision);
+      if (lockedRevision === null) {
+        logWarn('My FPL snapshot retention found an invalid locked revision', {
+          seasonCode: lockedCandidate.season_code,
+          eventId: lockedCandidate.event_id,
+          revision: String(lockedCandidate.revision),
+        });
+        return deleted;
+      }
+
+      let redisManifest: MyFplSnapshotRedisManifest | null;
+      try {
+        redisManifest = await getActiveMyFplSnapshotRedisManifest(
+          lockedCandidate.season_code,
+          lockedCandidate.event_id,
+        );
+      } catch (error) {
+        // A Redis read outage cannot prove that any later candidate is
+        // unreferenced. Stop this pass and retain the remaining revisions.
+        logWarn('My FPL snapshot retention could not verify Redis pointer', {
+          seasonCode: lockedCandidate.season_code,
+          eventId: lockedCandidate.event_id,
+          revision: lockedCandidate.revision,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return deleted;
+      }
+      if (redisManifest?.revision === lockedRevision) {
+        // Redis can continue serving a previously delivered revision while a
+        // newer publication is waiting in the outbox. Keep the durable row
+        // within the GraphQL reader's 24-hour retained-revision RLS window as
+        // long as that pointer is still authoritative; once Redis advances or
+        // disappears, the normal age cutoff can collect it on a later pass.
+        await tx`
+          UPDATE competition.my_fpl_snapshot_publications
+          SET updated_at = clock_timestamp()
+          WHERE season_id = ${lockedCandidate.season_id}
+            AND event_id = ${lockedCandidate.event_id}
+            AND revision = ${lockedRevision}
+            AND active = false
+        `;
+        continue;
+      }
+      // A pending or failed invalidation protects this durable revision from
+      // deletion, but it must not prevent the Redis-named row from being
+      // renewed above. Keep scanning later candidates in this pass.
+      if (lockedCandidate.has_pending_invalidation || lockedCandidate.idempotency_key !== null) {
+        continue;
+      }
+      if (
+        new Date(lockedCandidate.updated_at).getTime() >= new Date(supersededBeforeIso).getTime()
+      ) {
+        continue;
+      }
+      const result = await tx<{ revision: number }[]>`
+        DELETE FROM competition.my_fpl_snapshot_publications AS publication
+        WHERE publication.season_id = ${lockedCandidate.season_id}
+          AND publication.event_id = ${lockedCandidate.event_id}
+          AND publication.revision = ${lockedRevision}
+          AND publication.active = false
+          AND publication.idempotency_key IS NULL
+          AND publication.updated_at < ${supersededBeforeIso}::timestamptz
+          AND NOT EXISTS (
+            SELECT 1
+            FROM competition.my_fpl_snapshot_invalidation_outbox invalidation
+            WHERE invalidation.season_id = publication.season_id
+              AND invalidation.event_id = publication.event_id
+              AND invalidation.revision = publication.revision
+              AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
+              AND invalidation.delivered_at IS NULL
+          )
+        RETURNING revision
+      `;
+      deleted += result.length;
+    }
+  }
+  return deleted;
+}
+
+/** Run one bounded retention pass from the periodic maintenance lane. */
+export async function cleanupMyFplSnapshotRevisions(
+  options: {
+    limit?: number;
+    now?: Date;
+  } = {},
+): Promise<{ deleted: number; cutoff: string }> {
+  const limit = options.limit ?? MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE) {
+    throw new Error(
+      `My FPL snapshot retention limit must be between 1 and ${MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE}`,
+    );
+  }
+  const now = options.now ?? new Date();
+  const supersededBeforeIso = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
+  const candidateBeforeIso = new Date(
+    now.getTime() - 24 * 60 * 60_000 + MY_FPL_SNAPSHOT_RETENTION_RENEWAL_LEAD_MS,
+  ).toISOString();
+  const db = await getDbClient();
+  const deleted = await db.begin((tx) =>
+    deleteExpiredMyFplSnapshotRevisions(tx, {
+      supersededBeforeIso,
+      candidateBeforeIso,
+      limit,
+    }),
+  );
+  logInfo('My FPL snapshot retention pass completed', {
+    deleted,
+    cutoff: supersededBeforeIso,
+    limit,
+  });
+  return { deleted, cutoff: supersededBeforeIso };
 }
 
 export function serializeMyFplSnapshotCapture(
@@ -5040,6 +5343,18 @@ async function captureMyFplSnapshotOnce(
     // rolls back every child/outbox row it prepared.
     await verifyScopeGeneration(revision);
 
+    if (kind === 'FINAL') {
+      // FINAL builds intentionally avoid holding the event lock while they
+      // inspect the full canonical scope. Acquire it before touching any
+      // publication rows so outbox delivery cannot take the advisory lock and
+      // then wait on rows already locked by this transaction.
+      const lockRows = await tx<{ acquired: boolean }[]>`
+        SELECT pg_try_advisory_xact_lock(
+          hashtextextended(${myFplSnapshotEventLockScope(season.seasonId, eventId)}, 0)
+        ) AS acquired
+      `;
+      if (!lockRows[0]?.acquired) throw new MyFplCaptureLockBusyError();
+    }
     await tx`
       UPDATE competition.my_fpl_snapshot_publications
       SET active = false, updated_at = ${nowIso}::timestamptz
@@ -5050,11 +5365,12 @@ async function captureMyFplSnapshotOnce(
       SET active = true, updated_at = ${nowIso}::timestamptz
       WHERE season_id = ${season.seasonId} AND event_id = ${eventId} AND revision = ${revision}
     `;
-    await tx`
-      DELETE FROM competition.my_fpl_snapshot_publications
-      WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
-        AND active = false AND updated_at < ${supersededBeforeIso}::timestamptz
-    `;
+    await deleteExpiredMyFplSnapshotRevisions(tx, {
+      supersededBeforeIso,
+      limit: MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE,
+      seasonId: season.seasonId,
+      eventId,
+    });
 
     const publication: MyFplSnapshotPublication = {
       seasonId: season.seasonId,

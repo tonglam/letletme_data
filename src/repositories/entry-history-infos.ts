@@ -52,6 +52,10 @@ export const createEntryHistoryInfoRepository = (dbInstance?: DbOrTransaction) =
             overallRank,
           };
         });
+        // FPL does not promise an ordering for `past`; store and compare a
+        // canonical source-season order so a harmless provider reorder cannot
+        // turn into a delete/reinsert cycle.
+        rows.sort((left, right) => left.sourceSeasonId - right.sourceSeasonId);
         const seasonIds = rows.map((row) => row.sourceSeasonId);
         if (new Set(seasonIds).size !== seasonIds.length) {
           throw new Error('Entry history contains duplicate source seasons');
@@ -91,17 +95,47 @@ export const createEntryHistoryInfoRepository = (dbInstance?: DbOrTransaction) =
           throw new Error('Entry history parent entry was not found');
         }
 
-        await db
-          .delete(entryPastSeasonsInCompetition)
+        const existingRows = await db
+          .select({
+            sourceSeasonId: entryPastSeasonsInCompetition.sourceSeasonId,
+            sourceSeasonLabel: entryPastSeasonsInCompetition.sourceSeasonLabel,
+            totalPoints: entryPastSeasonsInCompetition.totalPoints,
+            overallRank: entryPastSeasonsInCompetition.overallRank,
+          })
+          .from(entryPastSeasonsInCompetition)
           .where(
             and(
               eq(entryPastSeasonsInCompetition.entrySeasonId, requestSeason.seasonId),
               eq(entryPastSeasonsInCompetition.entryId, entryId),
             ),
-          );
+          )
+          .orderBy(entryPastSeasonsInCompetition.sourceSeasonId);
+        const historyChanged =
+          existingRows.length !== rows.length ||
+          existingRows.some((existing, index) => {
+            const next = rows[index];
+            return (
+              !next ||
+              existing.sourceSeasonId !== next.sourceSeasonId ||
+              existing.sourceSeasonLabel !== next.sourceSeasonLabel ||
+              existing.totalPoints !== next.totalPoints ||
+              existing.overallRank !== next.overallRank
+            );
+          });
 
-        if (rows.length > 0) {
-          await db.insert(entryPastSeasonsInCompetition).values(rows);
+        if (historyChanged) {
+          await db
+            .delete(entryPastSeasonsInCompetition)
+            .where(
+              and(
+                eq(entryPastSeasonsInCompetition.entrySeasonId, requestSeason.seasonId),
+                eq(entryPastSeasonsInCompetition.entryId, entryId),
+              ),
+            );
+
+          if (rows.length > 0) {
+            await db.insert(entryPastSeasonsInCompetition).values(rows);
+          }
         }
 
         const updatedEntries = await db
@@ -109,7 +143,7 @@ export const createEntryHistoryInfoRepository = (dbInstance?: DbOrTransaction) =
           .set({
             pastSeasonsCheckedAt: new Date(),
             pastSeasonsCount: rows.length,
-            updatedAt: new Date(),
+            ...(historyChanged ? { updatedAt: new Date() } : {}),
           })
           .where(
             and(
@@ -126,6 +160,7 @@ export const createEntryHistoryInfoRepository = (dbInstance?: DbOrTransaction) =
           requestSeason: requestSeason.seasonCode,
           entryId,
           count: rows.length,
+          changed: historyChanged,
         });
       } catch (error) {
         logError('Failed to upsert entry history info', error, {

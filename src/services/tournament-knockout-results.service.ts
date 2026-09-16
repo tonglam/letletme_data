@@ -1,5 +1,10 @@
 import { sql } from 'drizzle-orm';
-import type { DbEventLive } from '../db/schemas/index.schema';
+import type {
+  DbEventLive,
+  DbTournamentKnockout,
+  DbTournamentKnockoutResult,
+  DbTournamentKnockoutResultInsert,
+} from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/tournament';
@@ -11,12 +16,16 @@ import {
   createTournamentKnockoutResultsRepository,
   tournamentKnockoutResultsRepository,
 } from '../repositories/tournament-knockout-results';
-import { createTournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
+import {
+  createTournamentKnockoutsRepository,
+  tournamentKnockoutsRepository,
+} from '../repositories/tournament-knockouts';
 import { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
+import { resolveKnockoutLegEntrants } from './tournament-structure.service';
 
 type KnockoutRoundSummary = {
   matchId: number;
@@ -27,6 +36,132 @@ type KnockoutRoundSummary = {
   nextHomeEntryId: number | null;
   nextAwayEntryId: number | null;
 };
+
+type KnockoutSyncOptions = Readonly<{
+  candidateResults?: ReadonlyArray<DbTournamentKnockoutResultInsert>;
+}>;
+
+function knockoutResultBusinessKey(result: {
+  eventId: number;
+  matchId: number;
+  playAgainstId: number;
+}): string {
+  return `${result.eventId}:${result.matchId}:${result.playAgainstId}`;
+}
+
+function hasAcceptedKnockoutFacts(
+  result: Pick<
+    DbTournamentKnockoutResult,
+    | 'sourceCheckedAt'
+    | 'homeNetPoints'
+    | 'homeGoalsScored'
+    | 'homeGoalsConceded'
+    | 'awayNetPoints'
+    | 'awayGoalsScored'
+    | 'awayGoalsConceded'
+    | 'matchWinner'
+  >,
+): boolean {
+  return (
+    result.sourceCheckedAt !== null ||
+    result.homeNetPoints !== null ||
+    result.homeGoalsScored !== null ||
+    result.homeGoalsConceded !== null ||
+    result.awayNetPoints !== null ||
+    result.awayGoalsScored !== null ||
+    result.awayGoalsConceded !== null ||
+    result.matchWinner !== null
+  );
+}
+
+/**
+ * A structure repair may discover a new winner before the following round has
+ * been recalculated. Never reattribute an already accepted result row in that
+ * gap. The next event sync reads the repaired bracket seed and replaces the
+ * row with newly calculated facts in its own transaction.
+ */
+export function shouldDeferNextRoundResultRehome(
+  persistedResults: ReadonlyArray<DbTournamentKnockoutResult>,
+  desiredHomeEntryId: number | null,
+  desiredAwayEntryId: number | null,
+): boolean {
+  if (desiredHomeEntryId === null || desiredAwayEntryId === null) {
+    return false;
+  }
+  return persistedResults.some(
+    (result) =>
+      hasAcceptedKnockoutFacts(result) &&
+      (result.homeEntryId !== desiredHomeEntryId || result.awayEntryId !== desiredAwayEntryId),
+  );
+}
+
+/**
+ * Apply a structure-repair candidate's entrants to the persisted result rows
+ * used for scoring. The repair intentionally keeps old scored rows in place
+ * until this calculation succeeds; the scored upsert below then replaces the
+ * same business key and the bracket update in one transaction.
+ */
+export function applyCandidateKnockoutResults(
+  persistedResults: ReadonlyArray<DbTournamentKnockoutResult>,
+  candidateResults: ReadonlyArray<DbTournamentKnockoutResultInsert>,
+  eventId: number,
+  bracketEntriesByMatchId: ReadonlyMap<
+    number,
+    Pick<DbTournamentKnockout, 'homeEntryId' | 'awayEntryId'>
+  > = new Map(),
+): DbTournamentKnockoutResult[] {
+  const candidates = candidateResults.filter((result) => result.eventId === eventId);
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const persistedKeys = new Set(persistedResults.map(knockoutResultBusinessKey));
+  const missingCandidateKeys = candidates
+    .map(knockoutResultBusinessKey)
+    .filter((key) => !persistedKeys.has(key));
+  if (missingCandidateKeys.length > 0) {
+    throw new Error(
+      `KNOCKOUT_CANDIDATE_RESULT_SHELL_MISSING:${eventId}:${missingCandidateKeys
+        .slice(0, 5)
+        .join(',')}`,
+    );
+  }
+
+  const candidateByKey = new Map(
+    candidates.map((candidate) => [knockoutResultBusinessKey(candidate), candidate]),
+  );
+  return persistedResults
+    .filter((result) => candidateByKey.has(knockoutResultBusinessKey(result)))
+    .map((result) => {
+      const candidate = candidateByKey.get(knockoutResultBusinessKey(result));
+      // Later-round shells are intentionally unseeded. Their entrants are
+      // produced by the preceding round inside the same backfill. If a repair
+      // has already advanced the bracket but has deliberately left accepted
+      // result facts in place, use that bracket seed for this event's fresh
+      // calculation; never copy the null candidate over it.
+      if (!candidate || (candidate.homeEntryId === null && candidate.awayEntryId === null)) {
+        const bracket = bracketEntriesByMatchId.get(result.matchId);
+        if (candidate && bracket) {
+          const bracketEntrants = resolveKnockoutLegEntrants(
+            bracket.homeEntryId,
+            bracket.awayEntryId,
+            candidate.playAgainstId,
+          );
+          return {
+            ...result,
+            homeEntryId: bracketEntrants.homeEntryId,
+            awayEntryId: bracketEntrants.awayEntryId,
+          };
+        }
+        return result;
+      }
+      return {
+        ...result,
+        homeEntryId: candidate.homeEntryId ?? null,
+        awayEntryId: candidate.awayEntryId ?? null,
+      };
+    });
+}
 
 function normalizePicks(raw: unknown): RawFPLEntryEventPickItem[] {
   if (!Array.isArray(raw)) {
@@ -271,6 +406,7 @@ export async function syncKnockoutForTournament(
   season: FplSeasonRef,
   tournament: TournamentSyncContext,
   eventId: number,
+  options: KnockoutSyncOptions = {},
 ): Promise<{ updatedResults: number; updatedKnockouts: number; skipped: number }> {
   if (!tournament.knockoutStartedEventId || !tournament.knockoutEndedEventId) {
     logInfo('Skipping knockout tournament without knockout window', {
@@ -296,11 +432,37 @@ export async function syncKnockoutForTournament(
   }
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
 
-  const knockoutResults = await tournamentKnockoutResultsRepository.findByTournamentAndEvent(
-    season,
-    tournament.id,
-    eventId,
-  );
+  const persistedKnockoutResults =
+    await tournamentKnockoutResultsRepository.findByTournamentAndEvent(
+      season,
+      tournament.id,
+      eventId,
+    );
+  const candidateBracketEntries =
+    options.candidateResults === undefined
+      ? new Map<number, Pick<DbTournamentKnockout, 'homeEntryId' | 'awayEntryId'>>()
+      : new Map(
+          (
+            await tournamentKnockoutsRepository.findByTournamentAndMatchIds(
+              season,
+              tournament.id,
+              uniqueNumbers(options.candidateResults.map((result) => result.matchId)),
+            )
+          ).map((knockout) => [knockout.matchId, knockout]),
+        );
+  const candidateResultKeys =
+    options.candidateResults === undefined
+      ? null
+      : new Set(options.candidateResults.map(knockoutResultBusinessKey));
+  const knockoutResults =
+    options.candidateResults === undefined
+      ? persistedKnockoutResults
+      : applyCandidateKnockoutResults(
+          persistedKnockoutResults,
+          options.candidateResults,
+          eventId,
+          candidateBracketEntries,
+        );
   if (knockoutResults.length === 0) {
     logInfo('No knockout fixtures found for event', { tournamentId: tournament.id, eventId });
     return { updatedResults: 0, updatedKnockouts: 0, skipped: entryIds.length };
@@ -394,11 +556,16 @@ export async function syncKnockoutForTournament(
     const updatedResultsCount = await txKnockoutResults.upsertBatch(season, updatedResults);
 
     const matchIds = Array.from(new Set(updatedResults.map((result) => result.matchId)));
-    const allMatchResults = await txKnockoutResults.findByTournamentAndMatchIds(
+    const persistedMatchResults = await txKnockoutResults.findByTournamentAndMatchIds(
       season,
       tournament.id,
       matchIds,
     );
+    const allMatchResults = candidateResultKeys
+      ? persistedMatchResults.filter((result) =>
+          candidateResultKeys.has(knockoutResultBusinessKey(result)),
+        )
+      : persistedMatchResults;
 
     const matchResultsByMatch = new Map<number, typeof allMatchResults>();
     for (const result of allMatchResults) {
@@ -510,11 +677,46 @@ export async function syncKnockoutForTournament(
         await txKnockouts.upsertBatch(season, updatedNextKnockouts);
 
         const nextMatchIds = [...nextRoundMap.keys()];
-        const nextResults = await txKnockoutResults.findByTournamentAndMatchIds(
+        const persistedNextResults = await txKnockoutResults.findByTournamentAndMatchIds(
           season,
           tournament.id,
           nextMatchIds,
         );
+        const allNextResults = candidateResultKeys
+          ? persistedNextResults.filter((result) =>
+              candidateResultKeys.has(knockoutResultBusinessKey(result)),
+            )
+          : persistedNextResults;
+        const nextResultsByMatch = new Map<number, DbTournamentKnockoutResult[]>();
+        for (const result of allNextResults) {
+          const rows = nextResultsByMatch.get(result.matchId) ?? [];
+          rows.push(result);
+          nextResultsByMatch.set(result.matchId, rows);
+        }
+        const deferredNextMatchIds = new Set(
+          candidateResultKeys === null
+            ? []
+            : [...nextResultsByMatch].flatMap(([matchId, results]) => {
+                const nextData = nextRoundMap.get(matchId);
+                return nextData &&
+                  shouldDeferNextRoundResultRehome(
+                    results,
+                    nextData.nextHomeEntryId,
+                    nextData.nextAwayEntryId,
+                  )
+                  ? [matchId]
+                  : [];
+              }),
+        );
+        // In candidate mode, accepted rows are never part of the rehome
+        // upsert. They stay attributed to their original entrants until the
+        // next event's fresh score calculation replaces them.
+        const nextResults = candidateResultKeys
+          ? allNextResults.filter(
+              (result) =>
+                !deferredNextMatchIds.has(result.matchId) && !hasAcceptedKnockoutFacts(result),
+            )
+          : allNextResults;
         const updatedNextResults = nextResults.map((result) => {
           const nextData = nextRoundMap.get(result.matchId);
           if (!nextData) {

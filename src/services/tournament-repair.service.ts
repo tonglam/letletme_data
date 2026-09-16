@@ -5,7 +5,7 @@ import {
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
-import { getTournamentBackfillWindow } from '../domain/tournament';
+import { getTournamentBackfillWindow, isOfficialH2HTournament } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
@@ -21,6 +21,7 @@ import { registerDatabasePostCommit } from '../db/singleton';
 import { syncEntryTransferHistories } from './tournament-event-results.service';
 import {
   normalizeTournamentSetupIssue,
+  backfillTournamentHistory,
   runTournamentEventBackfill,
   syncTournamentEntryDetails,
   tournamentSetupIssueFromAuditMessage,
@@ -29,11 +30,18 @@ import {
 import { auditTournamentSetup } from './tournament-audit.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
-import { rebuildTournamentStructure } from './tournament-structure.service';
+import {
+  pruneTournamentDerivedResultsOutsideStructure,
+  rebuildTournamentStructure,
+  snapshotDerivedResultsInvalidBeforeStructureRepair,
+  type DerivedResultRepairSnapshot,
+  type TournamentStructureRepairCandidate,
+} from './tournament-structure.service';
 import {
   requestTournamentReviewCorrection,
   requestTournamentReviewTournamentCorrection,
 } from './tournament-review-publication.service';
+import { syncOfficialH2HTournament } from './tournament-official-h2h.service';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -217,7 +225,13 @@ async function repairTournamentSetupIssuePrepared(
         season,
         issue.tournamentId,
       );
-      const rebuilt = await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), async () => {
+      const rebuilt = await runPhase<
+        | false
+        | {
+            staleDerivedResults: DerivedResultRepairSnapshot;
+            candidate: TournamentStructureRepairCandidate;
+          }
+      >(tournamentSetupRebuildScopes(issue.tournamentId), async () => {
         // Old review diagnostics may describe missing points projections rather
         // than damaged canonical groups. Recheck under the same structure lock
         // before a tournament-wide rebuild can delete accepted event results.
@@ -225,19 +239,93 @@ async function repairTournamentSetupIssuePrepared(
           const currentAudit = await auditTournamentSetup(season, tournament, null);
           if (!currentAudit.requiresStructureRebuild) return false;
         }
-        await rebuildTournamentStructure(season, tournament, entrySeeds);
-        return true;
+        const staleDerivedResults = await snapshotDerivedResultsInvalidBeforeStructureRepair(
+          season,
+          issue.tournamentId,
+        );
+        let candidate: TournamentStructureRepairCandidate | null = null;
+        await rebuildTournamentStructure(season, tournament, entrySeeds, {
+          preserveDerivedResults: true,
+          onCandidate: (value) => {
+            candidate = value;
+          },
+        });
+        const capturedCandidate = candidate;
+        if (!capturedCandidate) {
+          throw new Error('TOURNAMENT_STRUCTURE_CANDIDATE_MISSING');
+        }
+        return { staleDerivedResults, candidate: capturedCandidate };
       });
-      if (!rebuilt) break;
-      // A topology rebuild can change group membership, phase boundaries, or
-      // bracket edges for every settled event. Defer the correction reset
-      // until the post-repair audit succeeds, then fence the earliest head
-      // and enqueue every affected scope with durable provenance.
-      reviewCorrection = {
-        kind: 'tournament',
-        reason: `Tournament structure repair issue ${issue.issueId}`,
-        changeId: repairCorrectionChangeId(season, issue),
-      };
+      if (rebuilt === false) break;
+      // Rebuild every finalized event from the same canonical inputs before
+      // requesting a review correction. Existing derived rows remain present
+      // while this phase runs; a failed event backfill therefore cannot leave
+      // an empty history or publish a half-repaired tournament.
+      const historyIssues = await backfillTournamentHistory(
+        season,
+        issue.tournamentId,
+        tournament,
+        allEntryIds,
+        window,
+        {
+          auditRepairIssueId: issueId,
+          repair: { issueId, owner },
+          candidateGroupSlots:
+            rebuilt.candidate.battleMatchupKeys.length > 0
+              ? rebuilt.candidate.groupRows
+              : undefined,
+          candidateBattleMatchupKeys:
+            rebuilt.candidate.battleMatchupKeys.length > 0
+              ? rebuilt.candidate.battleMatchupKeys
+              : undefined,
+          candidateKnockoutResults: rebuilt.candidate.knockoutResults,
+        },
+      );
+      repairIssues.push(...historyIssues);
+      if (historyIssues.length === 0) {
+        if (isOfficialH2HTournament(tournament)) {
+          try {
+            // Provider-owned official brackets are preserved during the local
+            // structure candidate swap. Reconcile them from the authoritative
+            // full FPL feed before the issue can be resolved; otherwise a
+            // preserved corrupt bracket would immediately recreate the review
+            // failure on the next publication attempt.
+            await syncOfficialH2HTournament(season, tournament, undefined, {
+              finalizedThroughEventId: finalizedEvent?.id ?? null,
+              forceFull: true,
+            });
+          } catch {
+            repairIssues.push({
+              issueKey: issue.issueKey,
+              scope: 'event-results',
+              code: 'STRUCTURE_INTEGRITY_FAILED',
+              category: 'results',
+              severity: 'blocking',
+              eventId: issue.eventId ?? undefined,
+              failedEntries: allEntryIds,
+              diagnosticCode: 'TOURNAMENT_OFFICIAL_H2H_RECONCILIATION_FAILED',
+              message: 'Official H2H full reconciliation remains incomplete',
+            });
+          }
+        }
+        if (!repairIssues.some((candidate) => candidate.issueKey === issue.issueKey)) {
+          await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
+            pruneTournamentDerivedResultsOutsideStructure(season, issue.tournamentId, {
+              ...rebuilt.staleDerivedResults,
+              battleMatchupKeys: [...rebuilt.candidate.battleMatchupKeys],
+            }),
+          );
+          // A topology rebuild can change group membership, phase boundaries, or
+          // bracket edges for every settled event. Defer the correction reset
+          // until the post-repair audit succeeds, then fence the earliest head
+          // and enqueue every affected scope with durable provenance.
+          reviewCorrection = {
+            kind: 'tournament',
+            reason: `Tournament structure repair issue ${issue.issueId}`,
+            changeId: repairCorrectionChangeId(season, issue),
+          };
+        }
+      }
       break;
     }
 

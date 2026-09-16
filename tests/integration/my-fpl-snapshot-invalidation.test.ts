@@ -18,6 +18,7 @@ import {
 } from '../../src/services/my-fpl-snapshot-invalidation.service';
 import {
   auditMyFplSnapshotIntegrity,
+  cleanupMyFplSnapshotRevisions,
   myFplSnapshotRedisManifestKey,
 } from '../../src/services/my-fpl-snapshot-publication.service';
 
@@ -318,5 +319,155 @@ describe('My FPL snapshot invalidation outbox', () => {
     expect(concurrent.reduce((sum, item) => sum + item.delivered, 0)).toBe(1);
     expect((await readOutbox(concurrentId)).status).toBe('DELIVERED');
     expect((await readOutbox(concurrentId)).attempts).toBe(1);
+  });
+
+  test('renews a Redis-served revision while its invalidation remains pending', async () => {
+    const revision = REVISION + 10;
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO competition.my_fpl_snapshot_publications (
+        season_id, event_id, revision, snapshot_date, source_checked_at, published_at,
+        kind, active, expected_entry_count, ready_entry_count, empty_entry_count,
+        expected_tournament_count, ready_tournament_count, content_sha256,
+        entry_scope_sha256, tournament_scope_sha256, score_source,
+        source_min_checked_at, source_max_checked_at
+      ) VALUES (
+        ${SEASON.seasonId}, ${EVENT_ID}, ${revision}, '2026-07-31',
+        '2026-07-31T00:00:00.123456Z', '2026-07-31T00:00:00.123456Z',
+        'FINAL', false, 0, 0, 0, 0, 0,
+        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+        'FPL_FINAL_RESULT', '2026-07-31T00:00:00.123456Z',
+        '2026-07-31T00:00:00.123456Z'
+      )
+    `;
+    await sql`
+      UPDATE competition.my_fpl_snapshot_publications
+      SET updated_at = '2026-07-31T00:00:00.123456Z'::timestamptz
+      WHERE season_id = ${SEASON.seasonId}
+        AND event_id = ${EVENT_ID}
+        AND revision = ${revision}
+    `;
+    await insertReceipt(revision);
+    const redis = await redisSingleton.getClient();
+    await redis.set(
+      KEY,
+      JSON.stringify({
+        dataset: 'fpl:my-fpl',
+        seasonCode: SEASON_CODE,
+        eventId: EVENT_ID,
+        revision,
+        snapshotDate: '2026-07-31',
+        sourceCheckedAt: '2026-07-31T00:00:00.123Z',
+        publishedAt: '2026-07-31T00:00:00.123Z',
+        kind: 'FINAL',
+        contentSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        expectedEntryCount: 0,
+        observedEntryCount: 0,
+        expectedTournamentCount: 0,
+        observedTournamentCount: 0,
+        entryScopeSha256: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        tournamentScopeSha256: 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+        scoreSource: 'FPL_FINAL_RESULT',
+        livePublicationId: null,
+        liveRevision: null,
+        algorithmVersion: null,
+        sourceMinCheckedAt: '2026-07-31T00:00:00.123Z',
+        sourceMaxCheckedAt: '2026-07-31T00:00:00.123Z',
+      }),
+    );
+
+    const result = await cleanupMyFplSnapshotRevisions({
+      limit: 1,
+      now: new Date('2026-08-02T00:00:00.000Z'),
+    });
+    expect(result.deleted).toBe(0);
+
+    const rows = await sql<{ updated_at: string }[]>`
+      SELECT updated_at::text AS updated_at
+      FROM competition.my_fpl_snapshot_publications
+      WHERE season_id = ${SEASON.seasonId}
+        AND event_id = ${EVENT_ID}
+        AND revision = ${revision}
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.updated_at).not.toBe('2026-07-31 00:00:00.123456+00');
+  });
+
+  test('renews a Redis-served manual override without making it deletable', async () => {
+    const revision = REVISION + 11;
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO competition.my_fpl_snapshot_publications (
+        season_id, event_id, revision, snapshot_date, source_checked_at, published_at,
+        kind, active, expected_entry_count, ready_entry_count, empty_entry_count,
+        expected_tournament_count, ready_tournament_count, content_sha256,
+        entry_scope_sha256, tournament_scope_sha256, score_source,
+        source_min_checked_at, source_max_checked_at,
+        override_actor, override_reason, idempotency_key
+      ) VALUES (
+        ${SEASON.seasonId}, ${EVENT_ID}, ${revision}, '2026-07-31',
+        '2026-07-31T00:00:00.123456Z', '2026-07-31T00:00:00.123456Z',
+        'FINAL', false, 0, 0, 0, 0, 0,
+        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        '1111111111111111111111111111111111111111111111111111111111111111',
+        'FPL_FINAL_RESULT', '2026-07-31T00:00:00.123456Z',
+        '2026-07-31T00:00:00.123456Z', 'integration', 'manual retention test',
+        ${'manual-retention-' + revision}
+      )
+    `;
+    await sql`
+      UPDATE competition.my_fpl_snapshot_publications
+      SET updated_at = '2026-07-31T00:00:00.123456Z'::timestamptz
+      WHERE season_id = ${SEASON.seasonId}
+        AND event_id = ${EVENT_ID}
+        AND revision = ${revision}
+    `;
+    const redis = await redisSingleton.getClient();
+    await redis.set(
+      KEY,
+      JSON.stringify({
+        dataset: 'fpl:my-fpl',
+        seasonCode: SEASON_CODE,
+        eventId: EVENT_ID,
+        revision,
+        snapshotDate: '2026-07-31',
+        sourceCheckedAt: '2026-07-31T00:00:00.123Z',
+        publishedAt: '2026-07-31T00:00:00.123Z',
+        kind: 'FINAL',
+        contentSha256: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+        expectedEntryCount: 0,
+        observedEntryCount: 0,
+        expectedTournamentCount: 0,
+        observedTournamentCount: 0,
+        entryScopeSha256: 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        tournamentScopeSha256: '1111111111111111111111111111111111111111111111111111111111111111',
+        scoreSource: 'FPL_FINAL_RESULT',
+        livePublicationId: null,
+        liveRevision: null,
+        algorithmVersion: null,
+        sourceMinCheckedAt: '2026-07-31T00:00:00.123Z',
+        sourceMaxCheckedAt: '2026-07-31T00:00:00.123Z',
+      }),
+    );
+
+    const result = await cleanupMyFplSnapshotRevisions({
+      limit: 1,
+      now: new Date('2026-08-02T00:00:00.000Z'),
+    });
+    expect(result.deleted).toBe(0);
+
+    const rows = await sql<{ updated_at: string; idempotency_key: string | null }[]>`
+      SELECT updated_at::text AS updated_at, idempotency_key
+      FROM competition.my_fpl_snapshot_publications
+      WHERE season_id = ${SEASON.seasonId}
+        AND event_id = ${EVENT_ID}
+        AND revision = ${revision}
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.idempotency_key).toBe(`manual-retention-${revision}`);
+    expect(rows[0]?.updated_at).not.toBe('2026-07-31 00:00:00.123456+00');
   });
 });
