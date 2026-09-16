@@ -133,6 +133,13 @@ export interface LiveMatchDeskCheckpointRequest {
   readonly publication: MatchDeskPublication;
   readonly fixtures: readonly MatchDeskFixture[];
   readonly db?: DbOrTransaction;
+  /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
+  readonly allowFinalReplacement?: boolean;
+  /** Existing durable FINAL identity observed before this replacement. */
+  readonly expectedFinalIdentity?: Readonly<{
+    readonly publicationId: string;
+    readonly generation: number;
+  }>;
 }
 
 export interface LiveMatchDetailCheckpointRequest {
@@ -142,6 +149,13 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly fixtures: readonly MatchFixtureDetail[];
   readonly finalized?: boolean;
   readonly db?: DbOrTransaction;
+  /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
+  readonly allowFinalReplacement?: boolean;
+  /** Existing durable FINAL identity observed before this replacement. */
+  readonly expectedFinalIdentity?: Readonly<{
+    readonly publicationId: string;
+    readonly generation: number;
+  }>;
 }
 
 export async function checkpointLiveMatchScopeV3(input: {
@@ -149,6 +163,8 @@ export async function checkpointLiveMatchScopeV3(input: {
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
   readonly db?: DbOrTransaction;
+  /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
+  readonly allowFinalReplacement?: boolean;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
   const desired = await readLiveMatchCheckpointDesiredV3({
     kind: input.kind,
@@ -190,6 +206,16 @@ export async function checkpointLiveMatchScopeV3(input: {
       publication: current.publication,
       fixtures: current.fixtures,
       db: input.db,
+      allowFinalReplacement:
+        input.allowFinalReplacement === true || desired.allowFinalReplacement === true,
+      ...(desired.expectedFinalPublicationId && desired.expectedFinalGeneration
+        ? {
+            expectedFinalIdentity: {
+              publicationId: desired.expectedFinalPublicationId,
+              generation: desired.expectedFinalGeneration,
+            },
+          }
+        : {}),
     });
     if (!result.checkpointed || !result.checkpointedAt)
       return { checkpointed: false, skipped: false };
@@ -221,6 +247,16 @@ export async function checkpointLiveMatchScopeV3(input: {
     fixtures: current.fixtures,
     finalized: desired.final,
     db: input.db,
+    allowFinalReplacement:
+      input.allowFinalReplacement === true || desired.allowFinalReplacement === true,
+    ...(desired.expectedFinalPublicationId && desired.expectedFinalGeneration
+      ? {
+          expectedFinalIdentity: {
+            publicationId: desired.expectedFinalPublicationId,
+            generation: desired.expectedFinalGeneration,
+          },
+        }
+      : {}),
   });
   if (!result.checkpointed || !result.checkpointedAt)
     return { checkpointed: false, skipped: false };
@@ -314,6 +350,12 @@ export async function checkpointLiveMatchDeskV3(
             ${liveMatchDeskCheckpointsInFpl.state} <> 'FINALIZED'
             AND ${liveMatchDeskCheckpointsInFpl.generation} < excluded.generation
           )
+          OR (
+            ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
+            AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDeskCheckpointsInFpl.publicationId} = ${request.expectedFinalIdentity?.publicationId ?? ''}
+            AND ${liveMatchDeskCheckpointsInFpl.generation} = ${request.expectedFinalIdentity?.generation ?? 0}
+          )
         `,
       })
       .returning({ eventId: liveMatchDeskCheckpointsInFpl.eventId });
@@ -400,6 +442,12 @@ export async function checkpointLiveMatchDetailV3(
           OR (
             ${liveMatchDetailCheckpointsInFpl.state} <> 'FINALIZED'
             AND ${liveMatchDetailCheckpointsInFpl.generation} < excluded.generation
+          )
+          OR (
+            ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
+            AND excluded.state = 'FINALIZED'
+            AND ${liveMatchDetailCheckpointsInFpl.publicationId} = ${request.expectedFinalIdentity?.publicationId ?? ''}
+            AND ${liveMatchDetailCheckpointsInFpl.generation} = ${request.expectedFinalIdentity?.generation ?? 0}
           )
         `,
       })
@@ -538,6 +586,112 @@ export async function readLiveMatchDetailCheckpointV3(
   return { publication, fixtures, servedFrom: 'POSTGRES_CHECKPOINT' };
 }
 
+/**
+ * Read the two durable FINAL Match checkpoints together. Callers that need
+ * to repair Redis must retain these exact publication identities; a boolean
+ * joined-row fence cannot prove that the serving pair is the same generation.
+ */
+export type FinalLiveMatchCheckpointPair = Readonly<{
+  desk: MatchDeskRead;
+  detail: MatchDetailRead;
+}>;
+
+export type LiveMatchFinalCheckpointIdentity = Readonly<{
+  publicationId: string;
+  generation: number;
+}>;
+
+export type LiveMatchCheckpointIdentities = Readonly<{
+  desk: LiveMatchFinalCheckpointIdentity | null;
+  detail: LiveMatchFinalCheckpointIdentity | null;
+}>;
+
+export async function readFinalLiveMatchCheckpointPairV3(
+  season: FplSeasonRef,
+  eventId: number,
+  dbInstance?: DbOrTransaction,
+): Promise<FinalLiveMatchCheckpointPair | null> {
+  const [desk, detail] = await Promise.all([
+    readLiveMatchDeskCheckpointV3(season, eventId, dbInstance),
+    readLiveMatchDetailCheckpointV3(season, eventId, dbInstance),
+  ]);
+  if (!desk || !detail) return null;
+  return isExactFinalLiveMatchCheckpointPair({
+    deskState: desk.publication.state,
+    deskGeneration: desk.publication.generation,
+    deskRevisions: desk.publication.revisions,
+    detailState: detail.publication.finalized ? 'FINALIZED' : 'PROVISIONAL',
+    detailObservedDeskGeneration: detail.publication.observedDeskGeneration,
+    detailFixtureIdentityRevision: detail.publication.fixtureIdentityRevision,
+  })
+    ? { desk, detail }
+    : null;
+}
+
+/**
+ * Read only the identities of any existing durable rows. A recovery candidate
+ * may replace one incoherent sibling, including a provisional row, but only
+ * when the row still has the exact identity observed here. The caller's
+ * explicit FINAL recovery permission remains the destructive-write fence.
+ */
+export async function readLiveMatchFinalCheckpointIdentitiesV3(
+  season: FplSeasonRef,
+  eventId: number,
+  dbInstance?: DbOrTransaction,
+): Promise<LiveMatchCheckpointIdentities> {
+  if (!Number.isSafeInteger(eventId) || eventId <= 0) {
+    return { desk: null, detail: null };
+  }
+  const db = dbInstance ?? (await getDb());
+  const [deskRows, detailRows] = await Promise.all([
+    db
+      .select({
+        publicationId: liveMatchDeskCheckpointsInFpl.publicationId,
+        generation: liveMatchDeskCheckpointsInFpl.generation,
+        state: liveMatchDeskCheckpointsInFpl.state,
+      })
+      .from(liveMatchDeskCheckpointsInFpl)
+      .where(
+        and(
+          eq(liveMatchDeskCheckpointsInFpl.seasonId, season.seasonId),
+          eq(liveMatchDeskCheckpointsInFpl.eventId, eventId),
+        ),
+      )
+      .limit(1),
+    db
+      .select({
+        publicationId: liveMatchDetailCheckpointsInFpl.publicationId,
+        generation: liveMatchDetailCheckpointsInFpl.generation,
+        state: liveMatchDetailCheckpointsInFpl.state,
+      })
+      .from(liveMatchDetailCheckpointsInFpl)
+      .where(
+        and(
+          eq(liveMatchDetailCheckpointsInFpl.seasonId, season.seasonId),
+          eq(liveMatchDetailCheckpointsInFpl.eventId, eventId),
+        ),
+      )
+      .limit(1),
+  ]);
+  const identity = (row: {
+    publicationId: string;
+    generation: number;
+    state: string;
+  }): LiveMatchFinalCheckpointIdentity | null =>
+    typeof row.state === 'string' &&
+    row.state.length > 0 &&
+    typeof row.publicationId === 'string' &&
+    row.publicationId.length > 0 &&
+    Number.isSafeInteger(row.generation) &&
+    row.generation > 0
+      ? { publicationId: row.publicationId, generation: row.generation }
+      : null;
+  return {
+    desk: deskRows[0] ? identity(deskRows[0]) : null,
+    detail: detailRows[0] ? identity(detailRows[0]) : null,
+  };
+}
+
 /** Lightweight existence read for the reconciler; the serving GraphQL reader owns cold payload reads. */
 export async function hasLiveMatchCheckpointV3(
   season: FplSeasonRef,
@@ -599,17 +753,5 @@ export async function hasFinalLiveMatchCheckpointsV3(
   eventId: number,
   dbInstance?: DbOrTransaction,
 ): Promise<boolean> {
-  const [desk, detail] = await Promise.all([
-    readLiveMatchDeskCheckpointV3(season, eventId, dbInstance),
-    readLiveMatchDetailCheckpointV3(season, eventId, dbInstance),
-  ]);
-  if (!desk || !detail) return false;
-  return isExactFinalLiveMatchCheckpointPair({
-    deskState: desk.publication.state,
-    deskGeneration: desk.publication.generation,
-    deskRevisions: desk.publication.revisions,
-    detailState: detail.publication.finalized ? 'FINALIZED' : 'PROVISIONAL',
-    detailObservedDeskGeneration: detail.publication.observedDeskGeneration,
-    detailFixtureIdentityRevision: detail.publication.fixtureIdentityRevision,
-  });
+  return (await readFinalLiveMatchCheckpointPairV3(season, eventId, dbInstance)) !== null;
 }

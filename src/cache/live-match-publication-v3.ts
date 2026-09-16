@@ -135,6 +135,11 @@ export type MatchCheckpointDesired = Readonly<{
   final: boolean;
   /** Boundary publications bypass the normal ten-minute DB coalescing window. */
   force: boolean;
+  /** Recovery-only permission to replace an incoherent durable FINAL row. */
+  allowFinalReplacement?: boolean;
+  /** Durable FINAL identity observed before a fenced recovery write. */
+  expectedFinalPublicationId?: string;
+  expectedFinalGeneration?: number;
 }>;
 
 type MatchScope = Readonly<{ season: string; eventId: number }>;
@@ -543,6 +548,7 @@ local observedDeskRaw = ARGV[3] or ''
 local observedDetailRaw = ARGV[4] or ''
 local previousTtl = ARGV[5]
 local finalTtl = ARGV[6]
+local preservePrevious = ARGV[7] == '1'
 local currentDeskRaw = redis.call('GET', KEYS[1]) or ''
 local currentDetailRaw = redis.call('GET', KEYS[4]) or ''
 if currentDeskRaw ~= observedDeskRaw or currentDetailRaw ~= observedDetailRaw then return {'changed'} end
@@ -586,12 +592,96 @@ for _, item in ipairs(detail.fixtures) do
   end
 end
 
--- A byte-for-byte candidate is already canonical.  Returning before any
--- writes makes the action idempotent and avoids rotating a healthy previous.
+local function validGeneration(value)
+  return type(value) == 'number' and value > 0 and value <= 9007199254740991 and value == math.floor(value)
+end
+
+local function hasCandidateDetailKey(key)
+  for _, item in ipairs(detail.fixtures) do
+    if type(item) == 'table' and item.key == key then return true end
+  end
+  return false
+end
+
+local function validDetailItemKey(key, fixtureId, sha256)
+  if type(key) ~= 'string' or type(fixtureId) ~= 'number' or
+     fixtureId <= 0 or fixtureId ~= math.floor(fixtureId) or
+     type(sha256) ~= 'string' or string.len(sha256) ~= 64 or
+     not string.match(sha256, '^[0-9a-f]+$') then return false end
+  local prefix = 'llm:data:v3:fpl:live-match:detail:' .. detail.season .. ':' .. tostring(detail.eventId) .. ':'
+  local suffix = ':' .. tostring(fixtureId) .. ':' .. sha256
+  if string.sub(key, 1, string.len(prefix)) ~= prefix or
+     string.sub(key, -string.len(suffix)) ~= suffix then return false end
+  local itemGeneration = string.sub(key, string.len(prefix) + 1, string.len(key) - string.len(suffix))
+  local generation = tonumber(itemGeneration)
+  return string.match(itemGeneration, '^[1-9][0-9]*$') ~= nil and
+    validGeneration(generation)
+end
+
+-- Delete only immutable siblings whose complete publication descriptor names
+-- the exact generation/item shape for this event.  Prefix checks alone would
+-- let a corrupt pointer delete a control key such as sequence.
+local function clearDeskSiblings(raw)
+  local ok, publication = pcall(cjson.decode, raw or '')
+  if not ok or type(publication) ~= 'table' or
+     publication.contractVersion ~= 'live-matches-v3' or
+     publication.season ~= desk.season or publication.eventId ~= desk.eventId or
+     not validGeneration(publication.generation) or type(publication.desk) ~= 'table' or
+     publication.desk.name ~= 'desk' or publication.desk.type ~= 'string' or
+     type(publication.desk.key) ~= 'string' then return end
+  local prefix = 'llm:data:v3:fpl:live-match:desk:' .. desk.season .. ':' .. tostring(desk.eventId) .. ':'
+  local expectedKey = prefix .. tostring(publication.generation) .. ':desk'
+  if publication.desk.key == expectedKey and publication.desk.key ~= deskItem.key then
+    redis.call('DEL', publication.desk.key, publication.desk.key .. ':meta')
+  end
+end
+
+local function clearDetailSiblings(raw)
+  local ok, publication = pcall(cjson.decode, raw or '')
+  if not ok or type(publication) ~= 'table' or
+     publication.contractVersion ~= 'live-matches-v3' or
+     publication.season ~= detail.season or publication.eventId ~= detail.eventId or
+     not validGeneration(publication.generation) or type(publication.fixtures) ~= 'table' then return end
+  local prefix = 'llm:data:v3:fpl:live-match:detail:' .. detail.season .. ':' .. tostring(detail.eventId) .. ':'
+  local oldManifest = prefix .. tostring(publication.generation) .. ':manifest'
+  local candidateManifest = prefix .. tostring(detail.generation) .. ':manifest'
+  if oldManifest ~= candidateManifest then redis.call('DEL', oldManifest) end
+  for _, oldItem in ipairs(publication.fixtures) do
+    if type(oldItem) == 'table' and oldItem.type == 'string' and
+       type(oldItem.fixtureId) == 'number' and oldItem.fixtureId > 0 and
+       oldItem.fixtureId == math.floor(oldItem.fixtureId) and
+       type(oldItem.sha256) == 'string' and string.len(oldItem.sha256) == 64 and
+       string.match(oldItem.sha256, '^[0-9a-f]+$') and type(oldItem.key) == 'string' then
+      if validDetailItemKey(oldItem.key, oldItem.fixtureId, oldItem.sha256) and
+         not hasCandidateDetailKey(oldItem.key) then
+        redis.call('DEL', oldItem.key, oldItem.key .. ':meta')
+      end
+    end
+  end
+end
+
+-- A recovery that must not retain a provisional fallback also has to remove
+-- discarded active siblings and any pointer left by an earlier attempt.  The
+-- whole cleanup stays inside this Lua CAS, candidate content-addressed items
+-- are protected, and malformed pointers are removed without touching
+-- unrelated Redis keys.
+local function clearDiscardedFallbacks()
+  clearDeskSiblings(currentDeskRaw)
+  clearDetailSiblings(currentDetailRaw)
+  clearDeskSiblings(redis.call('GET', KEYS[2]) or '')
+  clearDetailSiblings(redis.call('GET', KEYS[5]) or '')
+  redis.call('DEL', KEYS[2], KEYS[5])
+end
+
+if not preservePrevious then clearDiscardedFallbacks() end
+
+-- A byte-for-byte candidate is already canonical.  Returning after the
+-- cleanup above keeps this path idempotent while still removing stale
+-- pointers and unreachable active siblings when fallback retention is off.
 if currentDeskRaw == deskRaw and currentDetailRaw == detailRaw then return {'already-canonical', currentDeskRaw, currentDetailRaw} end
 
 local currentDeskOk, currentDesk = pcall(cjson.decode, currentDeskRaw)
-if currentDeskRaw ~= '' and currentDeskOk and type(currentDesk) == 'table' and type(currentDesk.desk) == 'table' then
+if preservePrevious and currentDeskRaw ~= '' and currentDeskOk and type(currentDesk) == 'table' and type(currentDesk.desk) == 'table' then
   redis.call('SET', KEYS[2], currentDeskRaw, 'PX', previousTtl)
   if currentDesk.desk.key then
     redis.call('PEXPIRE', currentDesk.desk.key, previousTtl)
@@ -599,7 +689,7 @@ if currentDeskRaw ~= '' and currentDeskOk and type(currentDesk) == 'table' and t
   end
 end
 local currentDetailOk, currentDetail = pcall(cjson.decode, currentDetailRaw)
-if currentDetailRaw ~= '' and currentDetailOk and type(currentDetail) == 'table' then
+if preservePrevious and currentDetailRaw ~= '' and currentDetailOk and type(currentDetail) == 'table' then
   redis.call('SET', KEYS[5], currentDetailRaw, 'PX', previousTtl)
   local oldManifest = 'llm:data:v3:fpl:live-match:detail:' .. currentDetail.season .. ':' .. tostring(currentDetail.eventId) .. ':' .. tostring(currentDetail.generation) .. ':manifest'
   redis.call('PEXPIRE', oldManifest, previousTtl)
@@ -790,6 +880,10 @@ return {'checkpointed', encoded}
 const SET_DESIRED_LUA = `
 local currentRaw = redis.call('GET', KEYS[1])
 local candidate = cjson.decode(ARGV[1])
+local activeRaw = redis.call('GET', KEYS[2]) or ''
+local activeOk, active = pcall(cjson.decode, activeRaw)
+local activeMatchesCandidate = activeOk and type(active) == 'table' and
+  active.publicationId == candidate.publicationId and active.generation == candidate.generation
 local replacingFinalized = false
 if currentRaw then
   local ok, current = pcall(cjson.decode, currentRaw)
@@ -799,11 +893,30 @@ if currentRaw then
       -- only exception is the destructive cutover seed, which must prove both
       -- the exact marker it observed and a finalized, forced candidate. This
       -- fenced CAS prevents a concurrent final marker from being overwritten.
+      -- A recovery of the same publication may upgrade the replacement
+      -- permission without changing its identity. This is needed when a
+      -- normal checkpoint marker was created before the durable FINAL conflict
+      -- was discovered; the marker must not remain stuck until its TTL expires.
+      if candidate.final == true and candidate.force == true and
+         candidate.allowFinalReplacement == true and
+         current.publicationId == candidate.publicationId and
+         current.generation == candidate.generation then
+        current.force = true
+        current.allowFinalReplacement = true
+        if candidate.expectedFinalPublicationId ~= nil and candidate.expectedFinalGeneration ~= nil then
+          current.expectedFinalPublicationId = candidate.expectedFinalPublicationId
+          current.expectedFinalGeneration = candidate.expectedFinalGeneration
+        end
+        local encoded = cjson.encode(current)
+        redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
+        return {'set', encoded}
+      end
       local allowReplacement = ARGV[3] == '1'
       local expectedGeneration = tonumber(ARGV[5])
       if allowReplacement and candidate.final == true and candidate.force == true and
          current.publicationId == ARGV[4] and current.generation == expectedGeneration and
-         candidate.generation >= current.generation then
+         activeMatchesCandidate and
+         (current.publicationId ~= candidate.publicationId or current.generation ~= candidate.generation) then
         replacingFinalized = true
       else
         return {'kept', currentRaw}
@@ -826,6 +939,11 @@ if currentRaw then
       if current.generation == candidate.generation and current.publicationId ~= candidate.publicationId then return {'kept', currentRaw} end
       if current.generation == candidate.generation and current.publicationId == candidate.publicationId then
         candidate.force = current.force == true or candidate.force == true
+        candidate.allowFinalReplacement = current.allowFinalReplacement == true or candidate.allowFinalReplacement == true
+        if candidate.expectedFinalPublicationId == nil and current.expectedFinalPublicationId ~= nil then
+          candidate.expectedFinalPublicationId = current.expectedFinalPublicationId
+          candidate.expectedFinalGeneration = current.expectedFinalGeneration
+        end
         if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
         local encoded = cjson.encode(candidate)
         redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
@@ -1982,6 +2100,12 @@ export async function restoreLiveMatchEquivalentFinalPairV3(input: {
   readonly detailCheckpoint: MatchDetailRead;
   readonly observedDesk: MatchDeskActiveFence;
   readonly observedDetail: MatchDetailActiveFence;
+  /**
+   * Keep the currently serving pair as a previous fallback only when that
+   * pair is itself FINAL.  Recovery callers can disable rotation when a
+   * payload-equivalent provisional pair must not remain readable on fallback.
+   */
+  readonly preservePrevious?: boolean;
   readonly promoteActiveEvent?: boolean;
   readonly redis?: Redis;
 }): Promise<{
@@ -2101,6 +2225,7 @@ export async function restoreLiveMatchEquivalentFinalPairV3(input: {
       input.observedDetail.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
       String(LIVE_MATCH_FINAL_TTL_MS),
+      input.preservePrevious === false ? '0' : '1',
     ),
   );
   const status = result[0];
@@ -2131,8 +2256,10 @@ export async function restoreLiveMatchEquivalentFinalPairV3(input: {
     status: status as 'restored' | 'already-canonical',
     desk: currentDesk.publication,
     detail: currentDetail.publication,
-    previousDesk: input.observedDesk.read?.publication ?? null,
-    previousDetail: input.observedDetail.read?.publication ?? null,
+    previousDesk:
+      input.preservePrevious === false ? null : (input.observedDesk.read?.publication ?? null),
+    previousDetail:
+      input.preservePrevious === false ? null : (input.observedDetail.read?.publication ?? null),
   };
 }
 
@@ -2477,10 +2604,28 @@ function desiredFromRaw(
     generation <= 0 ||
     !validIso(value.requestedAt) ||
     typeof value.final !== 'boolean' ||
-    typeof value.force !== 'boolean'
+    typeof value.force !== 'boolean' ||
+    (value.allowFinalReplacement !== undefined &&
+      typeof value.allowFinalReplacement !== 'boolean') ||
+    (value.expectedFinalPublicationId === undefined) !==
+      (value.expectedFinalGeneration === undefined) ||
+    (value.expectedFinalPublicationId !== undefined &&
+      (typeof value.expectedFinalPublicationId !== 'string' ||
+        value.expectedFinalPublicationId.length === 0 ||
+        !Number.isSafeInteger(value.expectedFinalGeneration) ||
+        (value.expectedFinalGeneration as number) <= 0))
   )
     return null;
-  return value as unknown as MatchCheckpointDesired;
+  return {
+    ...(value as unknown as MatchCheckpointDesired),
+    allowFinalReplacement: value.allowFinalReplacement === true,
+    ...(value.expectedFinalPublicationId !== undefined
+      ? {
+          expectedFinalPublicationId: value.expectedFinalPublicationId,
+          expectedFinalGeneration: value.expectedFinalGeneration as number,
+        }
+      : {}),
+  };
 }
 
 export async function setLiveMatchCheckpointDesiredV3(input: {
@@ -2489,6 +2634,13 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
   readonly requestedAt?: Date | string;
   readonly finalized?: boolean;
   readonly force?: boolean;
+  /** Recovery-only permission to replace an incoherent durable FINAL row. */
+  readonly allowFinalReplacement?: boolean;
+  /** Exact durable FINAL identity observed before a recovery checkpoint. */
+  readonly expectedFinalIdentity?: Readonly<{
+    readonly publicationId: string;
+    readonly generation: number;
+  }>;
   /**
    * Seed-only fenced CAS for replacing a stale finalized desired marker. The
    * candidate must itself be finalized and forced; normal workers never pass
@@ -2518,7 +2670,25 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
         'state' in input.publication &&
         input.publication.state === 'FINALIZED'),
     force: input.force === true,
+    allowFinalReplacement: input.allowFinalReplacement === true,
+    ...(input.expectedFinalIdentity
+      ? {
+          expectedFinalPublicationId: input.expectedFinalIdentity.publicationId,
+          expectedFinalGeneration: input.expectedFinalIdentity.generation,
+        }
+      : {}),
   };
+  if (
+    input.expectedFinalIdentity !== undefined &&
+    (input.expectedFinalIdentity.publicationId.length === 0 ||
+      !Number.isSafeInteger(input.expectedFinalIdentity.generation) ||
+      input.expectedFinalIdentity.generation <= 0)
+  ) {
+    throw new CacheError(
+      'Invalid durable FINAL recovery identity',
+      'LIVE_MATCH_CHECKPOINT_DESIRED_INVALID',
+    );
+  }
   const replacement = input.replaceFinalizedForCutover;
   if (replacement !== undefined) {
     if (
@@ -2538,8 +2708,11 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
   const [status, raw] = promotionResult(
     await redis.eval(
       SET_DESIRED_LUA,
-      1,
+      2,
       liveMatchCheckpointKey(scope, input.kind),
+      input.kind === 'desk'
+        ? liveMatchDeskKey(scope, 'active')
+        : liveMatchDetailKey(scope, 'active'),
       JSON.stringify(desired),
       '86400',
       replacement === undefined ? '0' : '1',

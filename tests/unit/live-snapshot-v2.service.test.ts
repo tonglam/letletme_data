@@ -1,8 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
 import { rawExplainElementsFixture } from '../fixtures/event-live-explains.fixtures';
-import type { LivePublicationRead } from '../../src/cache/live-publication-v2';
-import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
+import type { LivePublicationRead, LivePublicationV2 } from '../../src/cache/live-publication-v2';
+import {
+  prepareCoherentLiveSnapshot,
+  type LiveSnapshotReferenceData,
+} from '../../src/services/live-coherent-fetch';
+import { prepareLiveMatchDesk, prepareLiveMatchDetail } from '../../src/services/live-match-v3';
 import { syncLiveSnapshotV2 } from '../../src/services/live-snapshot-v2.service';
 import type { RawFPLFixture } from '../../src/types';
 
@@ -154,6 +158,379 @@ describe('Live Points and Live Matches shared observation', () => {
 
     resolveDurable(null);
     await expect(sync).rejects.toThrow('event-live unavailable');
+  });
+
+  test('fails closed before provider work when FINAL durable authority is unavailable', async () => {
+    let providerCalls = 0;
+    const sync = syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        getFixtures: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        getExpectedFixtureIds: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        getReferenceData: async () => {
+          providerCalls += 1;
+          throw new Error('FINAL provider work must not start');
+        },
+        readPublished: async () => null,
+        readCheckpointed: async () => {
+          throw new Error('durable database unavailable');
+        },
+        checkpointPublication: async () => true,
+      },
+    });
+
+    await expect(sync).rejects.toMatchObject({
+      code: 'LIVE_V2_DURABLE_FINAL_READ_FAILED',
+    });
+    expect(providerCalls).toBe(0);
+  });
+
+  test('reuses an identity-matched durable FINAL without provider or checkpoint work', async () => {
+    const publication: LivePublicationV2 = {
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000042',
+      generation: 42,
+      season: season.seasonCode,
+      eventId: 2,
+      state: 'FINALIZED' as const,
+      sourceCheckedAt: '2026-08-30T00:00:00.000Z',
+      publishedAt: '2026-08-30T00:00:01.000Z',
+      checkpointedAt: '2026-08-30T00:00:02.000Z',
+      expectedNextCheckAt: null,
+      revisions: {} as never,
+      items: {} as never,
+    };
+    const current = {
+      publication,
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'REDIS_CURRENT' as const,
+    } satisfies LivePublicationRead;
+    const durable = {
+      publication: { ...publication },
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'POSTGRES_CHECKPOINT' as const,
+    } satisfies LivePublicationRead;
+    let providerCalls = 0;
+    let checkpointCalls = 0;
+
+    const result = await syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => {
+          providerCalls += 1;
+          throw new Error('complete FINAL must not fetch event-live');
+        },
+        getFixtures: async () => {
+          providerCalls += 1;
+          throw new Error('complete FINAL must not fetch fixtures');
+        },
+        getExpectedFixtureIds: async () => {
+          providerCalls += 1;
+          throw new Error('complete FINAL must not read fixture identity');
+        },
+        getReferenceData: async () => {
+          providerCalls += 1;
+          throw new Error('complete FINAL must not read reference data');
+        },
+        readPublished: async () => current,
+        readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => true,
+        readCheckpointDesired: async () => null,
+        clearCheckpointDesired: async () => true,
+        checkpointPublication: async () => {
+          checkpointCalls += 1;
+          return true;
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      changed: false,
+      published: false,
+      state: 'FINALIZED',
+      checkpointScheduled: false,
+      checkpointed: true,
+      publicationId: publication.publicationId,
+      generation: publication.generation,
+    });
+    expect(providerCalls).toBe(0);
+    expect(checkpointCalls).toBe(0);
+    expect(result.stageTimings.providerMs).toBeNull();
+  });
+
+  test('reuses Live Points FINAL but repairs a missing Match sibling', async () => {
+    const rawFixture: RawFPLFixture = {
+      code: 10401,
+      event: 2,
+      finished: false,
+      finished_provisional: false,
+      id: 401,
+      kickoff_time: '2026-08-29T10:00:00.000Z',
+      minutes: 45,
+      provisional_start_time: false,
+      started: true,
+      team_a: 20,
+      team_a_score: 0,
+      team_h: 10,
+      team_h_score: 1,
+      stats: [{ identifier: 'bps', h: [{ element: 101, value: 30 }], a: [] }],
+      team_h_difficulty: 3,
+      team_a_difficulty: 3,
+      pulse_id: 401,
+    };
+    const sourceElement = rawExplainElementsFixture[0];
+    if (!sourceElement) throw new Error('live snapshot fixture is missing');
+    const finalElement = {
+      ...sourceElement,
+      // The filtered fixture's awarded points sum to 12; keep the provider
+      // fixture internally coherent for FINAL identity validation.
+      stats: { ...sourceElement.stats, total_points: 12 },
+      explain: sourceElement.explain
+        ? sourceElement.explain.filter(
+            (fixture) =>
+              typeof fixture === 'object' &&
+              fixture !== null &&
+              'fixture' in fixture &&
+              (fixture as { fixture?: unknown }).fixture === 401,
+          )
+        : null,
+    };
+    const referenceData: LiveSnapshotReferenceData = {
+      season: season.seasonCode,
+      nameById: new Map([
+        [10, 'Home FC'],
+        [20, 'Away FC'],
+      ]),
+      shortNameById: new Map([
+        [10, 'HOM'],
+        [20, 'AWA'],
+      ]),
+      positionById: new Map(),
+      playerTeamById: new Map([[101, 10]]),
+      playerById: new Map([
+        [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+      ]),
+      playerByFixtureAndId: new Map([
+        ['401:101', { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+      ]),
+    };
+    const prepared = prepareCoherentLiveSnapshot(
+      2,
+      { elements: [structuredClone(finalElement)] },
+      [rawFixture],
+      referenceData,
+      [401],
+      [101],
+    );
+    const publication: LivePublicationV2 = {
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000043',
+      generation: 43,
+      season: season.seasonCode,
+      eventId: 2,
+      state: 'FINALIZED' as const,
+      sourceCheckedAt: '2026-08-30T00:00:00.000Z',
+      publishedAt: '2026-08-30T00:00:01.000Z',
+      checkpointedAt: '2026-08-30T00:00:02.000Z',
+      expectedNextCheckAt: null,
+      revisions: {} as never,
+      items: {} as never,
+    };
+    const current = {
+      publication,
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
+      servedFrom: 'REDIS_CURRENT' as const,
+    } satisfies LivePublicationRead;
+    const durable = {
+      publication: { ...publication },
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
+      servedFrom: 'POSTGRES_CHECKPOINT' as const,
+    } satisfies LivePublicationRead;
+    let providerCalls = 0;
+    let matchFinalizeCalls = 0;
+    const expectedDesk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: [rawFixture],
+      referenceData,
+      expectedFixtureIds: [401],
+      finalized: true,
+      lifecycleState: 'FINALIZED',
+    });
+    const expectedDetail = prepareLiveMatchDetail({
+      eventId: 2,
+      rawElements: [finalElement],
+      rawFixtures: [rawFixture],
+      deskFixtures: expectedDesk.fixtures,
+      publishedLiveElementIds: [101],
+      referenceData,
+      requireEventPinnedIdentity: true,
+    });
+    let repaired = false;
+
+    const result = await syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => {
+          providerCalls += 1;
+          return { elements: [structuredClone(finalElement)] };
+        },
+        getFixtures: async () => {
+          providerCalls += 1;
+          return [rawFixture];
+        },
+        getExpectedFixtureIds: async () => {
+          providerCalls += 1;
+          return [401];
+        },
+        getReferenceData: async () => {
+          providerCalls += 1;
+          return referenceData;
+        },
+        readPublished: async () => current,
+        readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => true,
+        readObservedMatchDesk: async () => ({
+          observed: repaired ? 'repaired-desk' : '',
+          read: repaired
+            ? ({
+                fixtures: expectedDesk.fixtures,
+              } as never)
+            : null,
+        }),
+        readObservedMatchDetail: async () => ({
+          observed: repaired ? 'repaired-detail' : '',
+          read: repaired
+            ? ({
+                fixtures: expectedDetail.fixtures,
+              } as never)
+            : null,
+        }),
+        readCheckpointDesired: async () => null,
+        clearCheckpointDesired: async () => true,
+        syncLiveMatches: async (observation) => {
+          matchFinalizeCalls += 1;
+          expect(observation.finalizeEvent).toBe(true);
+          expect(observation.publishedLiveElementIds).toEqual([101]);
+          expect(observation.observedDesk?.read).toBeNull();
+          expect(observation.observedDetail?.read).toBeNull();
+          repaired = true;
+          return {
+            desk: { state: 'FINALIZED' },
+            detail: { finalized: true },
+            deskFixtures: expectedDesk.fixtures,
+            detailFixtures: expectedDetail.fixtures,
+          } as never;
+        },
+        checkpointPublication: async () => {
+          throw new Error('reused Live Points FINAL must not checkpoint again');
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      changed: false,
+      published: false,
+      state: 'FINALIZED',
+      checkpointScheduled: false,
+      checkpointed: true,
+      publicationId: publication.publicationId,
+      generation: publication.generation,
+    });
+    expect(matchFinalizeCalls).toBe(1);
+    expect(providerCalls).toBe(4);
+  });
+
+  test('restores a durable FINAL before provider work when Redis is provisional', async () => {
+    const durablePublication: LivePublicationV2 = {
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000044',
+      generation: 44,
+      season: season.seasonCode,
+      eventId: 2,
+      state: 'FINALIZED' as const,
+      sourceCheckedAt: '2026-08-30T00:00:00.000Z',
+      publishedAt: '2026-08-30T00:00:01.000Z',
+      checkpointedAt: '2026-08-30T00:00:02.000Z',
+      expectedNextCheckAt: null,
+      revisions: {} as never,
+      items: {} as never,
+    };
+    const current = {
+      publication: { ...durablePublication, state: 'LIVE_ACTIVE' as const },
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'REDIS_CURRENT' as const,
+    } satisfies LivePublicationRead;
+    const durable = {
+      publication: durablePublication,
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'POSTGRES_CHECKPOINT' as const,
+    } satisfies LivePublicationRead;
+    let restoreCalls = 0;
+    let providerCalls = 0;
+
+    const result = await syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid event-live');
+        },
+        getFixtures: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid fixtures');
+        },
+        getExpectedFixtureIds: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid fixture identity');
+        },
+        getReferenceData: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid reference data');
+        },
+        readPublished: async () => current,
+        readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => true,
+        readCheckpointDesired: async () => null,
+        clearCheckpointDesired: async () => true,
+        restoreLivePublicationCheckpoint: async () => {
+          restoreCalls += 1;
+          return {
+            publication: durablePublication,
+            previous: current.publication,
+            published: true,
+          };
+        },
+        checkpointPublication: async () => {
+          throw new Error('durable FINAL restore must not checkpoint again');
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      state: 'FINALIZED',
+      stale: true,
+      checkpointed: true,
+      publicationId: durablePublication.publicationId,
+      generation: durablePublication.generation,
+    });
+    expect(restoreCalls).toBe(1);
+    expect(providerCalls).toBe(0);
   });
 
   test('publishes the score desk before event-live detail or identity fallback settles', async () => {
@@ -397,6 +774,56 @@ describe('Live Points and Live Matches shared observation', () => {
   });
 
   test('finalizes Match after restoring a durable Live Points FINAL during cutover seed', async () => {
+    const rawFixture: RawFPLFixture = {
+      code: 10401,
+      event: 2,
+      finished: false,
+      finished_provisional: false,
+      id: 401,
+      kickoff_time: '2026-08-29T10:00:00.000Z',
+      minutes: 45,
+      provisional_start_time: false,
+      started: true,
+      team_a: 20,
+      team_a_score: 0,
+      team_h: 10,
+      team_h_score: 1,
+      stats: [{ identifier: 'bps', h: [{ element: 101, value: 30 }], a: [] }],
+      team_h_difficulty: 3,
+      team_a_difficulty: 3,
+      pulse_id: 401,
+    };
+    const sourceElement = rawExplainElementsFixture[0];
+    if (!sourceElement) throw new Error('live snapshot fixture is missing');
+    const coherentSourceElement = {
+      ...sourceElement,
+      // Both fixture breakdowns together award 16 points in this fixture.
+      stats: { ...sourceElement.stats, total_points: 16 },
+    };
+    const referenceData: LiveSnapshotReferenceData = {
+      season: season.seasonCode,
+      nameById: new Map([
+        [10, 'Home FC'],
+        [20, 'Away FC'],
+      ]),
+      shortNameById: new Map([
+        [10, 'HOM'],
+        [20, 'AWA'],
+      ]),
+      positionById: new Map(),
+      playerTeamById: new Map([[101, 10]]),
+      playerById: new Map([
+        [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+      ]),
+    };
+    const prepared = prepareCoherentLiveSnapshot(
+      2,
+      { elements: [structuredClone(coherentSourceElement)] },
+      [rawFixture],
+      referenceData,
+      [401],
+      [101],
+    );
     const finalPublication = {
       contractVersion: 'live-points-v2',
       publicationId: '00000000-0000-4000-8000-000000000001',
@@ -407,8 +834,8 @@ describe('Live Points and Live Matches shared observation', () => {
     } as unknown as LivePublicationRead['publication'];
     const durable = {
       publication: finalPublication,
-      eventLives: [],
-      fixtures: [],
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
       servedFrom: 'POSTGRES_CHECKPOINT',
     } as LivePublicationRead;
     const finalizeFlags: boolean[] = [];
@@ -428,16 +855,16 @@ describe('Live Points and Live Matches shared observation', () => {
       detailUnavailableReason: null,
     };
     const sync = syncLiveSnapshotV2(season, 2, {
-      observedFixtures: [],
+      observedFixtures: [rawFixture],
       finalizeEvent: true,
       lifecycleState: 'FINALIZED',
       dependencies: {
-        getEventLive: async () => ({ elements: [] }),
+        getEventLive: async () => ({ elements: [structuredClone(coherentSourceElement)] }),
         getFixtures: async () => {
           throw new Error('cutover seed must reuse observed fixtures');
         },
-        getExpectedFixtureIds: async () => [],
-        getReferenceData: async () => ({ playerById: new Map() }) as never,
+        getExpectedFixtureIds: async () => [401],
+        getReferenceData: async () => referenceData,
         syncLiveMatches: async (observation) => {
           finalizeFlags.push(observation.finalizeEvent === true);
           return observation.finalizeEvent
@@ -455,6 +882,9 @@ describe('Live Points and Live Matches shared observation', () => {
         },
         readPublished: async () => null,
         readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => false,
+        readCheckpointDesired: async () => null,
+        clearCheckpointDesired: async () => true,
         checkpointPublication: async () => false,
       },
       withPublicationActivationFence: async (activate) => {
@@ -466,7 +896,7 @@ describe('Live Points and Live Matches shared observation', () => {
     const result = await sync;
     expect(restoreCalls).toBe(1);
     expect(activationCalls).toBe(1);
-    expect(finalizeFlags).toEqual([false, false, true]);
+    expect(finalizeFlags).toEqual([true]);
     expect(result.state).toBe('FINALIZED');
     expect(result.stageTimings.totalMs).toBeGreaterThanOrEqual(0);
     expect(result.stageTimings.providerMs).toEqual(expect.any(Number));

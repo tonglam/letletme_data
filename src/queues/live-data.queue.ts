@@ -54,6 +54,8 @@ export interface LiveDataJobData {
   checkpointKind?: 'desk' | 'detail';
   checkpointPublicationId?: string;
   checkpointGeneration?: number;
+  /** Recovery-only permission to replace an incoherent durable FINAL row. */
+  checkpointAllowFinalReplacement?: boolean;
 }
 
 export const liveDataQueue = new Queue<LiveDataJobData>(liveDataQueueName, {
