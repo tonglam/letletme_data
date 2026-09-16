@@ -34,7 +34,11 @@ import {
   syncLiveMatchesV3FromObservation,
   type LiveMatchObservationResult,
 } from './live-match-v3.service';
-import { hasFinalLiveMatchCheckpointsV3 } from './live-match-v3-checkpoint.service';
+import {
+  hasFinalLiveMatchCheckpointsV3,
+  readFinalLiveMatchCheckpointPairV3,
+  type FinalLiveMatchCheckpointPair,
+} from './live-match-v3-checkpoint.service';
 import type { MatchLifecycleState } from './live-match-v3';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
@@ -102,6 +106,7 @@ export interface LiveSnapshotV2Dependencies {
   ) => Promise<LivePublicationRead | null>;
   readonly readCheckpointDesired?: typeof readLiveCheckpointDesiredV2;
   readonly clearCheckpointDesired?: typeof clearLiveCheckpointDesiredV2;
+  readonly readFinalMatchCheckpoints?: typeof readFinalLiveMatchCheckpointPairV3;
   readonly hasFinalMatchCheckpoints?: typeof hasFinalLiveMatchCheckpointsV3;
   readonly checkpointPublication: (request: {
     readonly season: FplSeasonRef;
@@ -175,6 +180,7 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
   readPublished: (season, eventId) => readLivePublicationV2({ season, eventId }),
   readCheckpointed: (season, eventId, dbInstance) =>
     readLivePublicationV2Checkpoint(season, eventId, dbInstance),
+  readFinalMatchCheckpoints: readFinalLiveMatchCheckpointPairV3,
   checkpointPublication: checkpointLivePublicationV2,
 };
 
@@ -422,9 +428,16 @@ function isServingFinalMatchPair(
   detailFence: MatchDetailActiveFence | undefined,
   season: FplSeasonRef,
   eventId: number,
+  expectedPair?: FinalLiveMatchCheckpointPair | null,
 ): boolean {
   const desk = deskFence?.read;
   const detail = detailFence?.read;
+  const canonicalIdentityMatches =
+    expectedPair == null ||
+    (desk?.publication.publicationId === expectedPair?.desk.publication.publicationId &&
+      desk?.publication.generation === expectedPair?.desk.publication.generation &&
+      detail?.publication.publicationId === expectedPair?.detail.publication.publicationId &&
+      detail?.publication.generation === expectedPair?.detail.publication.generation);
   return Boolean(
     desk?.servedFrom === 'REDIS_CURRENT' &&
       detail?.servedFrom === 'REDIS_CURRENT' &&
@@ -438,7 +451,8 @@ function isServingFinalMatchPair(
       detail.publication.checkpointedAt !== null &&
       detail.publication.observedDeskGeneration === desk.publication.generation &&
       detail.publication.fixtureIdentityRevision ===
-        desk.publication.revisions.fixtureIdentity.revision,
+        desk.publication.revisions.fixtureIdentity.revision &&
+      canonicalIdentityMatches,
   );
 }
 
@@ -559,12 +573,22 @@ export async function syncLiveSnapshotV2(
   const current = await currentReadPromise;
   currentReadMs = Math.max(0, Date.now() - currentReadStartedAt);
   redisReadMs = currentReadMs;
+  const readFinalMatchCheckpoints = dependencies.readFinalMatchCheckpoints;
   const hasFinalMatchCheckpoints =
     dependencies.hasFinalMatchCheckpoints ?? hasFinalLiveMatchCheckpointsV3;
   const repairMatchForReusedFinal = async (durableFinal: LivePublicationRead): Promise<void> => {
     let matchFinalized = false;
+    let durableMatchPair: FinalLiveMatchCheckpointPair | null = null;
     try {
-      matchFinalized = await hasFinalMatchCheckpoints(season, eventId, databaseBudget?.readDb);
+      if (readFinalMatchCheckpoints) {
+        durableMatchPair = await readFinalMatchCheckpoints(season, eventId, databaseBudget?.readDb);
+        matchFinalized = durableMatchPair !== null;
+      } else {
+        // Keep the boolean seam for older hermetic callers; production uses
+        // the identity-bearing reader above so Redis cannot satisfy a
+        // different finalized generation.
+        matchFinalized = await hasFinalMatchCheckpoints(season, eventId, databaseBudget?.readDb);
+      }
     } catch (error) {
       logError('Live Match FINAL checkpoint probe failed during Live Points reuse', error, {
         season: season.seasonCode,
@@ -592,43 +616,53 @@ export async function syncLiveSnapshotV2(
             eventId,
           }),
         ]);
-        if (
-          matchFinalized &&
-          isServingFinalMatchPair(observedMatchDesk, observedMatchDetail, season, eventId)
-        ) {
-          return;
-        }
       } catch (error) {
-        // A failed serving read cannot prove that the final pair is available;
-        // continue through the bounded repair path and let its CAS fence fail
-        // closed if Redis remains unavailable.
         logError('Live Match serving FINAL probe failed during Live Points reuse', error, {
           season: season.seasonCode,
           eventId,
         });
-        observedMatchDesk = undefined;
-        observedMatchDetail = undefined;
-        matchFinalized = false;
+        // Retry the two active pointers before any provider/support request is
+        // created. A missing fence is unsafe for recovery, so a second read
+        // failure remains a bounded cache error and the scheduler retries.
+        try {
+          [observedMatchDesk, observedMatchDetail] = await Promise.all([
+            dependencies.readObservedMatchDesk!({
+              season: season.seasonCode,
+              eventId,
+            }),
+            dependencies.readObservedMatchDetail!({
+              season: season.seasonCode,
+              eventId,
+            }),
+          ]);
+        } catch (retryError) {
+          throw new CacheError(
+            `Live Match serving fence unavailable for event ${eventId}`,
+            'LIVE_MATCH_SERVING_FENCE_UNAVAILABLE',
+            retryError instanceof Error ? retryError : undefined,
+          );
+        }
+      }
+      if (
+        matchFinalized &&
+        isServingFinalMatchPair(
+          observedMatchDesk,
+          observedMatchDetail,
+          season,
+          eventId,
+          durableMatchPair,
+        )
+      ) {
+        return;
       }
     } else if (matchFinalized) {
       return;
     }
 
-    // The active Match pointers above are the exact bytes that must fence this
-    // recovery. They are captured before any provider request starts.
-    if (
-      canProbeServingPair &&
-      (observedMatchDesk === undefined || observedMatchDetail === undefined)
-    ) {
-      [observedMatchDesk, observedMatchDetail] = await Promise.all([
-        dependencies.readObservedMatchDesk!({ season: season.seasonCode, eventId }),
-        dependencies.readObservedMatchDetail!({ season: season.seasonCode, eventId }),
-      ]);
-    }
-
     // Live Points is already immutable here. Rebuild only the missing Match
     // sibling from a fresh observation; this preserves the final publication
     // without repeating its global fact preparation or checkpoint write.
+    const fixtureIdentityStartedAt = Date.now();
     const expectedFixtureIdsPromise = dependencies
       .getExpectedFixtureIds(season, eventId)
       .catch((error) => {
@@ -639,19 +673,36 @@ export async function syncLiveSnapshotV2(
           return durableFinal.fixtures.map((fixture) => fixture.id);
         }
         throw error;
+      })
+      .finally(() => {
+        fixtureIdentityReadMs = Math.max(0, Date.now() - fixtureIdentityStartedAt);
+      });
+    const referenceStartedAt = Date.now();
+    const referenceDataPromise = dependencies
+      .getReferenceData(season, eventId, databaseBudget?.readDb)
+      .finally(() => {
+        referenceReadMs = Math.max(0, Date.now() - referenceStartedAt);
       });
     const fixturesPromise = options.observedFixtures
       ? Promise.resolve([...options.observedFixtures])
       : dependencies.getFixtures(eventId);
     const matchProviderStartedAt = Date.now();
-    const observation = await Promise.allSettled([
+    const providerObservationPromise = Promise.allSettled([
       dependencies.getEventLive(eventId),
       fixturesPromise,
+    ] as const).finally(() => {
+      providerMs = Math.max(0, Date.now() - matchProviderStartedAt);
+    });
+    const supportObservationPromise = Promise.allSettled([
       expectedFixtureIdsPromise,
-      dependencies.getReferenceData(season, eventId, databaseBudget?.readDb),
+      referenceDataPromise,
     ] as const);
-    providerMs = Math.max(0, Date.now() - matchProviderStartedAt);
-    const [liveResult, fixturesResult, expectedFixtureIdsResult, referenceDataResult] = observation;
+    const [providerObservation, supportObservation] = await Promise.all([
+      providerObservationPromise,
+      supportObservationPromise,
+    ]);
+    const [liveResult, fixturesResult] = providerObservation;
+    const [expectedFixtureIdsResult, referenceDataResult] = supportObservation;
     if (liveResult.status === 'rejected') throw liveResult.reason;
     if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
     if (expectedFixtureIdsResult.status === 'rejected') throw expectedFixtureIdsResult.reason;
@@ -670,6 +721,7 @@ export async function syncLiveSnapshotV2(
       expectedNextCheckAt: options.expectedNextCheckAt,
       observedDesk: observedMatchDesk,
       observedDetail: observedMatchDetail,
+      forceCheckpointRecovery: true,
       databaseRead: databaseBudget?.readDb,
     });
     if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {

@@ -66,6 +66,8 @@ export interface LiveMatchObservation {
   readonly expectedFixtureIds?: readonly number[];
   readonly publishedLiveElementIds?: readonly number[];
   readonly finalizeEvent?: boolean;
+  /** Recreate a durable checkpoint even when a stale Redis marker remains. */
+  readonly forceCheckpointRecovery?: boolean;
   /** Scheduler state captured with the same observation; never fetched again. */
   readonly lifecycleState?: MatchLifecycleState;
   readonly expectedNextCheckAt?: Date | string | null;
@@ -300,9 +302,12 @@ async function scheduleCheckpoint(
   season: FplSeasonRef,
   finalized = false,
   boundary = false,
+  forceRecovery = false,
   enqueueCheckpoint: LiveMatchObservation['enqueueCheckpoint'] = enqueueLiveMatchCheckpoint,
 ): Promise<{ scheduled: boolean; failed: boolean }> {
-  if (publication.checkpointedAt !== null) return { scheduled: false, failed: false };
+  if (publication.checkpointedAt !== null && !forceRecovery) {
+    return { scheduled: false, failed: false };
+  }
   try {
     const [lastCheckpointedAt, existingDesired] = await Promise.all([
       readLiveMatchCheckpointLastAtV3({
@@ -322,13 +327,14 @@ async function scheduleCheckpoint(
       kind,
       publication,
       finalized,
-      force: boundary,
+      force: boundary || forceRecovery,
       redis,
     });
     const lastMs = lastCheckpointedAt === null ? Number.NaN : Date.parse(lastCheckpointedAt);
     const due =
       finalized ||
       boundary ||
+      forceRecovery ||
       desired.force ||
       !Number.isFinite(lastMs) ||
       Date.now() - lastMs >= CHECKPOINT_INTERVAL_MS ||
@@ -479,6 +485,7 @@ export async function syncLiveMatchesV3FromObservation(
           currentDesk.publication.state !== desk.state ||
           currentDesk.publication.revisions.fixtureIdentity.revision !==
             desk.revisions.fixtureIdentity.revision,
+        input.forceCheckpointRecovery === true,
         input.enqueueCheckpoint,
       );
   const deskCheckpointScheduled = deskCheckpoint.scheduled;
@@ -647,6 +654,7 @@ export async function syncLiveMatchesV3FromObservation(
           detail.finalized,
           !currentDetail ||
             currentDetail.publication.fixtureIdentityRevision !== detail.fixtureIdentityRevision,
+          input.forceCheckpointRecovery === true,
           input.enqueueCheckpoint,
         );
         detailCheckpointScheduled = detailCheckpoint.scheduled;
