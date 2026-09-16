@@ -68,6 +68,10 @@ beforeEach(() => {
     totalEntries: ids.length,
     updated: ids.length,
     skipped: 0,
+    requiredUnits: ids.length,
+    reusedUnits: 0,
+    succeededUnits: ids.length,
+    failedUnits: 0,
   } as never);
 });
 afterEach(() => mock.restore());
@@ -85,6 +89,23 @@ describe('FINAL tournament repair convergence', () => {
       3,
       expect.objectContaining({ freshAfter: cutoff }),
     );
+  });
+  test('accepts fully reused or concurrently completed league units without new writes', async () => {
+    for (const reusedUnits of [ids.length, 0]) {
+      spyOn(leagueResults, 'syncLeagueEventResultsByTournament').mockResolvedValue({
+        tournamentId: 4,
+        eventId: 3,
+        totalEntries: ids.length,
+        updated: 0,
+        skipped: 0,
+        errors: 0,
+        requiredUnits: ids.length - reusedUnits,
+        reusedUnits,
+        succeededUnits: ids.length - reusedUnits,
+        failedUnits: 0,
+      });
+      expect(await run()).toEqual([]);
+    }
   });
   test('retries only missing FINAL inputs and allows durable recovery first', async () => {
     complete.delete(7);

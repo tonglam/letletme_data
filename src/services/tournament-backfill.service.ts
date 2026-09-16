@@ -808,11 +808,12 @@ export async function runTournamentEventBackfill(
       freshAfter: finalCutoff ?? undefined,
     },
   );
+  const completedLeagueUnits = leagueEventResults.reusedUnits + leagueEventResults.succeededUnits;
   if (
-    leagueEventResults.skipped > 0 ||
-    leagueEventResults.updated < leagueEventResults.totalEntries
+    leagueEventResults.failedUnits > 0 ||
+    completedLeagueUnits < leagueEventResults.totalEntries
   ) {
-    const message = `League event results incomplete for event ${eventId}: ${leagueEventResults.updated}/${leagueEventResults.totalEntries}`;
+    const message = `League event results incomplete for event ${eventId}: ${completedLeagueUnits}/${leagueEventResults.totalEntries}`;
     issues.push({
       scope: 'league-event-results',
       eventId,
