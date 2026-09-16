@@ -841,6 +841,18 @@ describe('Live League V2 Classic finalized roster successor fence', () => {
     expect(isSafeFinalizedClassicRosterExpansion(insertedBeforeRead, fixture.persisted)).toBe(true);
   });
 
+  test('allows cohort-derived rank changes for existing rows', () => {
+    const fixture = successorFixture();
+    const rankedSuccessor: LeagueLiveRead = {
+      ...fixture.read,
+      index: [
+        { ...fixture.read.index[0], overallRank: 9, lastOverallRank: 10 },
+        fixture.read.index[1],
+      ],
+    };
+    expect(isSafeFinalizedClassicRosterExpansion(rankedSuccessor, fixture.persisted)).toBe(true);
+  });
+
   test('rejects changed, removed, or duplicate persisted rows', () => {
     const changed = successorFixture();
     const changedRead: LeagueLiveRead = {
