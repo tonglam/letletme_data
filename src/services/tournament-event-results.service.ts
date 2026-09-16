@@ -7,7 +7,7 @@ import {
   rebuildFinalEntryLiveInputsV2,
 } from './entries.service';
 import { readEntryLiveInputV2, readLivePublicationV2 } from '../cache/live-publication-v2';
-import { fplClient } from '../clients/fpl';
+import { EventLiveResponseSchema, fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { tournamentEntryCoreScopes } from '../domain/mutation-scope';
 import {
@@ -96,6 +96,8 @@ type TournamentResultWorkSummary = {
   reusedUnits: number;
   succeededUnits: number;
   failedUnits: number;
+  /** The source watermark actually used for result persistence and audit. */
+  effectiveFreshAfter?: Date | string;
 };
 
 type EntrySyncAuditComponent = 'results' | 'transfers' | 'final';
@@ -321,16 +323,22 @@ async function resolveEventPointsPayload(
     const serialized = await redis.get(sharedResultKey);
     if (serialized) {
       const shared = JSON.parse(serialized) as {
-        elements?: EventPointsPayload['elements'];
+        elements?: unknown;
         sourceCheckedAt?: unknown;
       };
       const sharedSourceCheckedAt =
         typeof shared.sourceCheckedAt === 'string'
           ? validateOrderingTimestamp(shared.sourceCheckedAt)
           : null;
-      if (Array.isArray(shared.elements) && sharedSourceCheckedAt !== null) {
+      const validated = EventLiveResponseSchema.safeParse({ elements: shared.elements });
+      if (validated.success && sharedSourceCheckedAt !== null) {
         return {
-          payload: { elements: shared.elements },
+          payload: {
+            elements: validated.data.elements.map((element) => ({
+              id: element.id,
+              stats: { total_points: element.stats.total_points },
+            })),
+          },
           providerRequested: false,
           sourceCheckedAt: sharedSourceCheckedAt,
         };
@@ -453,6 +461,22 @@ export async function syncTournamentEventResultsForEntryIds(
     const finalizationCutoff = finalizationDate
       ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? finalizationDate)
       : null;
+    if (finalizationCutoff !== null) {
+      // A FINAL run has a separate durable audit component. Keeping it
+      // pending until the checkpoint commits means a crash or checkpoint
+      // failure cannot be reported as a complete entry merely because the
+      // relational result transaction succeeded.
+      await syncOperationsRepository.upsertItems(
+        auditRunId,
+        uniqueEntryIds.map((entryId) => ({
+          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+          resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+          status: 'pending' as const,
+          attempts: auditAttempt,
+          normalizedPayload: { phase: 'final-head' },
+        })),
+      );
+    }
     const freshAfter = latestFreshnessTimestamp(sourceFreshAfter, finalizationCutoff);
     const transferSourceCheckedAt = options?.skipTransfers
       ? null
@@ -559,42 +583,21 @@ export async function syncTournamentEventResultsForEntryIds(
         )
       : new Set<number>();
     for (const entryId of recoveredFinalEntryIds) plannedFreshResultEntryIds.add(entryId);
-    const requiredResultEntryIds = uniqueEntryIds.filter(
+    let requiredResultEntryIds = uniqueEntryIds.filter(
       (entryId) =>
         !recoveredFinalEntryIds.has(entryId) &&
         (!plannedFreshResultEntryIds.has(entryId) ||
           !plannedPersistedPickSet.has(entryId) ||
           (finalizationDate !== null && !plannedFinalEntryIds.has(entryId))),
     );
-    const transferOnlyEntryIds = plannedMissingTransferEntryIds.filter(
+    let transferOnlyEntryIds = plannedMissingTransferEntryIds.filter(
       (entryId) => !requiredResultEntryIds.includes(entryId),
     );
     const transferEntryIds = new Set(plannedMissingTransferEntryIds);
-    const providerEntryIds = requiredResultEntryIds;
-    const reusableEntryIds = uniqueEntryIds.filter(
+    let providerEntryIds = requiredResultEntryIds;
+    let reusableEntryIds = uniqueEntryIds.filter(
       (entryId) => !requiredResultEntryIds.includes(entryId),
     );
-    if (reusableEntryIds.length > 0) {
-      await syncOperationsRepository.upsertItems(
-        auditRunId,
-        reusableEntryIds.map((entryId) => ({
-          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
-          resourceId: entryEventAuditResourceId(season, eventId, entryId),
-          status: 'skipped' as const,
-          attempts: auditAttempt,
-          normalizedPayload: {
-            phase: 'entry-event-results',
-            reused: true,
-            reuseReason: recoveredFinalEntryIds.has(entryId)
-              ? 'durable-final-recovery'
-              : 'durable-fresh',
-            sourceRevision: orderingTimestampString(sourceOrdering.exact),
-            finalCompletion: finalizationDate !== null,
-          },
-          completedAt: new Date(),
-        })),
-      );
-    }
     let liveResolution: Awaited<ReturnType<typeof resolveEventPointsPayload>> | null = null;
     let eventLiveProviderRequestStarted = false;
     try {
@@ -648,6 +651,95 @@ export async function syncTournamentEventResultsForEntryIds(
     const live = liveResolution?.payload ?? null;
     const eventLiveProviderRequests = liveResolution?.providerRequested ? 1 : 0;
     const eventLiveSourceCheckedAt = liveResolution?.sourceCheckedAt ?? sourceOrdering.exact;
+    // A shared handoff may have been fetched by an earlier worker. Re-plan
+    // against that handoff's stable source watermark before issuing per-entry
+    // requests; otherwise every worker would treat the current wall clock as a
+    // newer source and refetch the same roster.
+    const resultFreshAfter = latestFreshnessTimestamp(eventLiveSourceCheckedAt, finalizationCutoff);
+    if (providerEntryIds.length > 0) {
+      const [effectiveStaleResultEntryIds, effectivePersistedPickEntryIds] = await Promise.all([
+        entryEventResultsRepository.findEntryIdsNeedingRichSync(
+          season,
+          uniqueEntryIds,
+          eventId,
+          resultFreshAfter,
+        ),
+        entryEventPicksRepository.findEntryIdsByEvent(season, eventId, uniqueEntryIds),
+      ]);
+      const effectiveFreshResultEntryIds = freshEntryIds(
+        uniqueEntryIds,
+        effectiveStaleResultEntryIds,
+      );
+      const effectiveFinalHeads = finalizationDate
+        ? await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+            season,
+            eventId,
+            uniqueEntryIds,
+          )
+        : [];
+      const effectiveFinalEntryIds = finalizationDate
+        ? await completedFinalEntryIds(
+            season,
+            eventId,
+            effectiveFinalHeads,
+            finalizationCutoff ?? finalizationDate,
+          )
+        : new Set<number>();
+      for (const entryId of recoveredFinalEntryIds) effectiveFreshResultEntryIds.add(entryId);
+      requiredResultEntryIds = uniqueEntryIds.filter(
+        (entryId) =>
+          !recoveredFinalEntryIds.has(entryId) &&
+          (!effectiveFreshResultEntryIds.has(entryId) ||
+            !effectivePersistedPickEntryIds.includes(entryId) ||
+            (finalizationDate !== null && !effectiveFinalEntryIds.has(entryId))),
+      );
+      transferOnlyEntryIds = plannedMissingTransferEntryIds.filter(
+        (entryId) => !requiredResultEntryIds.includes(entryId),
+      );
+      providerEntryIds = requiredResultEntryIds;
+      reusableEntryIds = uniqueEntryIds.filter(
+        (entryId) => !requiredResultEntryIds.includes(entryId),
+      );
+    }
+    if (reusableEntryIds.length > 0) {
+      const completedAt = new Date();
+      await syncOperationsRepository.upsertItems(auditRunId, [
+        ...reusableEntryIds.map((entryId) => ({
+          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+          resourceId: entryEventAuditResourceId(season, eventId, entryId),
+          status: 'skipped' as const,
+          attempts: auditAttempt,
+          normalizedPayload: {
+            phase: 'entry-event-results',
+            reused: true,
+            reuseReason: recoveredFinalEntryIds.has(entryId)
+              ? 'durable-final-recovery'
+              : 'durable-fresh',
+            sourceRevision: orderingTimestampString(resultFreshAfter),
+            finalCompletion: finalizationDate !== null,
+          },
+          completedAt,
+        })),
+        ...(finalizationDate === null
+          ? []
+          : reusableEntryIds.map((entryId) => ({
+              resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+              resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+              status: 'skipped' as const,
+              attempts: auditAttempt,
+              normalizedPayload: {
+                phase: 'final-head',
+                sourceRevision: orderingTimestampString(resultFreshAfter),
+                finalCompletion: true,
+                reused: true,
+                reuseReason: recoveredFinalEntryIds.has(entryId)
+                  ? 'durable-final-recovery'
+                  : 'durable-final-complete',
+              },
+              completedAt,
+            }))),
+      ]);
+    }
     const pointsByElement = new Map<number, number>();
     if (live) {
       for (const element of live.elements) {
@@ -679,7 +771,7 @@ export async function syncTournamentEventResultsForEntryIds(
               season,
               entryId,
               eventId,
-              freshAfter,
+              resultFreshAfter,
               finalizationCutoff,
               !options?.skipTransfers && transferEntryIds.has(entryId),
             );
@@ -863,24 +955,41 @@ export async function syncTournamentEventResultsForEntryIds(
           },
         );
       } catch (error) {
-        await syncOperationsRepository
-          .upsertItems(auditRunId, [
-            {
-              resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
-              resourceId: entryEventAuditResourceId(season, eventId, entryId),
-              status: 'failed',
-              attempts: auditAttempt,
-              normalizedPayload: {
-                phase: 'entry-event-results',
-                picksRequests: picksRequest.started ? 1 : 0,
-                transferRequests: transferRequest.started ? 1 : 0,
-                unknownRequests:
-                  (picksRequest.started && !picksRequest.completed ? 1 : 0) +
-                  (transferRequest.started && !transferRequest.completed ? 1 : 0),
-              },
-              lastError: safeDataErrorCode(error),
+        const auditFailureItems = [
+          {
+            resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+            resourceId: entryEventAuditResourceId(season, eventId, entryId),
+            status: 'failed' as const,
+            attempts: auditAttempt,
+            normalizedPayload: {
+              phase: 'entry-event-results',
+              picksRequests: picksRequest.started ? 1 : 0,
+              transferRequests: transferRequest.started ? 1 : 0,
+              unknownRequests:
+                (picksRequest.started && !picksRequest.completed ? 1 : 0) +
+                (transferRequest.started && !transferRequest.completed ? 1 : 0),
             },
-          ])
+            lastError: safeDataErrorCode(error),
+          },
+          ...(finalizationDate !== null && finalizationCutoff !== null && accepted
+            ? [
+                {
+                  resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                  resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+                  status: 'failed' as const,
+                  attempts: auditAttempt,
+                  normalizedPayload: {
+                    phase: 'final-head',
+                    finalCompletion: false,
+                    unknownRequests: 0,
+                  },
+                  lastError: safeDataErrorCode(error),
+                },
+              ]
+            : []),
+        ];
+        await syncOperationsRepository
+          .upsertItems(auditRunId, auditFailureItems)
           .catch((auditError) =>
             logError('Failed to persist entry sync audit failure', auditError, {
               eventId,
@@ -947,7 +1056,7 @@ export async function syncTournamentEventResultsForEntryIds(
           season,
           uniqueEntryIds,
           eventId,
-          freshAfter,
+          resultFreshAfter,
         ),
         entryEventPicksRepository.findEntryIdsByEvent(season, eventId, uniqueEntryIds),
         options?.skipTransfers
@@ -1018,6 +1127,7 @@ export async function syncTournamentEventResultsForEntryIds(
       reusedUnits: Math.max(0, totalEntries - requiredResultEntryIds.length),
       succeededUnits: synced,
       failedUnits,
+      effectiveFreshAfter: resultFreshAfter,
     };
   } catch (error) {
     if (options?.auditInitialize !== false) {
@@ -1234,11 +1344,35 @@ export async function syncEntryTransferHistories(
     }
   });
 
-  const failedEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
-    season,
-    uniqueEntryIds,
-    endEventId,
-  );
+  let failedEntryIds: number[];
+  try {
+    failedEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
+      season,
+      uniqueEntryIds,
+      endEventId,
+    );
+  } catch (error) {
+    // The per-entry work may have committed successfully before this final
+    // convergence read failed. Close the durable audit instead of leaving the
+    // run running/pending and falsely reporting zero failed items.
+    await syncOperationsRepository.failPendingItems(auditRunId, error).catch((auditError) =>
+      logError('Failed to close transfer audit items after convergence read failure', auditError, {
+        endEventId,
+        runId: auditRunId,
+      }),
+    );
+    if (options?.auditInitialize !== false) {
+      await syncOperationsRepository
+        .failRun(auditRunId, new Error(safeDataErrorCode(error)))
+        .catch((auditError) =>
+          logError('Failed to fail transfer audit run after convergence read failure', auditError, {
+            endEventId,
+            runId: auditRunId,
+          }),
+        );
+    }
+    throw error;
+  }
   const synced = uniqueEntryIds.length - failedEntryIds.length;
 
   if (options?.auditFinalizeRun !== false) {
@@ -1407,9 +1541,22 @@ export async function syncTournamentEventResults(
     const finalizationCutoff = finalizationDate
       ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? finalizationDate)
       : null;
+    if (finalizationCutoff !== null) {
+      await syncOperationsRepository.upsertItems(
+        auditRunId,
+        entryIds.map((entryId) => ({
+          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+          resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+          status: 'pending' as const,
+          attempts: auditAttempt,
+          normalizedPayload: { phase: 'final-head' },
+        })),
+      );
+    }
     const freshAfter = latestFreshnessTimestamp(sourceFreshAfter, finalizationCutoff);
     const resultsFreshAfter = freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter;
-    const finalizationTargets = finalizationTargetSeeds.map((target) => ({
+    let effectiveResultsFreshAfter: Date | string = freshAfter;
+    let finalizationTargets = finalizationTargetSeeds.map((target) => ({
       ...target,
       resultsFreshAfter,
     }));
@@ -1465,15 +1612,29 @@ export async function syncTournamentEventResults(
     // failure so a missing FINAL checkpoint cannot be reported as success.
     if (requiredResultEntryIds.length > 0) {
       try {
-        await syncTournamentEventResultsForEntryIds(season, requiredResultEntryIds, eventId, {
-          ...auditOptions,
-          skipTransfers: true,
-          freshAfter,
-          sourceCheckedAt: sourceOrdering.exact,
-          finalizationRecoveryEntryIds,
-          auditInitialize: false,
-          auditFinalizeRun: false,
-        });
+        const resultSummary = await syncTournamentEventResultsForEntryIds(
+          season,
+          requiredResultEntryIds,
+          eventId,
+          {
+            ...auditOptions,
+            skipTransfers: true,
+            freshAfter,
+            sourceCheckedAt: sourceOrdering.exact,
+            finalizationRecoveryEntryIds,
+            auditInitialize: false,
+            auditFinalizeRun: false,
+          },
+        );
+        effectiveResultsFreshAfter =
+          resultSummary.effectiveFreshAfter ?? effectiveResultsFreshAfter;
+        finalizationTargets = finalizationTargetSeeds.map((target) => ({
+          ...target,
+          resultsFreshAfter:
+            effectiveResultsFreshAfter instanceof Date
+              ? effectiveResultsFreshAfter.toISOString()
+              : effectiveResultsFreshAfter,
+        }));
       } catch (error) {
         logError('Tournament result phase did not converge', error, { eventId });
         throw error;
@@ -1502,7 +1663,7 @@ export async function syncTournamentEventResults(
           season,
           entryIds,
           eventId,
-          freshAfter,
+          effectiveResultsFreshAfter,
         ),
         entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds),
         options?.skipTransfers
@@ -1512,13 +1673,14 @@ export async function syncTournamentEventResults(
     const auditedFreshResultIds = freshEntryIds(entryIds, auditedStaleResultEntryIds);
     const auditedPickSet = new Set(auditedPickEntryIds);
     const auditedMissingFinalEntryIds = new Set<number>();
+    let auditedCompletedFinalIds = new Set<number>();
     if (finalizationDate && finalizationCutoff) {
       const auditedFinalHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
         season,
         eventId,
         entryIds,
       );
-      const auditedCompletedFinalIds = await completedFinalEntryIds(
+      auditedCompletedFinalIds = await completedFinalEntryIds(
         season,
         eventId,
         auditedFinalHeads,
@@ -1579,7 +1741,7 @@ export async function syncTournamentEventResults(
         isFreshnessBoundaryNewer(postWorkFinalizationCutoff, finalizationCutoff));
     if (
       postWorkBoundaryChanged ||
-      isFreshnessBoundaryNewer(freshAfter, postWorkFinalizationCutoff)
+      isFreshnessBoundaryNewer(effectiveResultsFreshAfter, postWorkFinalizationCutoff)
     ) {
       const retryUnits = Math.max(entryIds.length, requiredUnits);
       const finalizationErrorCode = postWorkBoundaryChanged
@@ -1602,9 +1764,8 @@ export async function syncTournamentEventResults(
     const synced = requiredResultEntryIds.length;
     const errors = 0;
 
-    await syncOperationsRepository.upsertItems(
-      auditRunId,
-      entryIds.map((entryId) => ({
+    await syncOperationsRepository.upsertItems(auditRunId, [
+      ...entryIds.map((entryId) => ({
         resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
         resourceId: entryEventAuditResourceId(season, eventId, entryId),
         status: 'skipped' as const,
@@ -1617,7 +1778,23 @@ export async function syncTournamentEventResults(
         },
         completedAt: new Date(),
       })),
-    );
+      ...(finalizationDate === null
+        ? []
+        : [...auditedCompletedFinalIds].map((entryId) => ({
+            resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+            resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+            status: 'skipped' as const,
+            attempts: auditAttempt,
+            normalizedPayload: {
+              phase: 'final-head',
+              sourceRevision: orderingTimestampString(effectiveResultsFreshAfter),
+              finalCompletion: true,
+              reused: true,
+              reuseReason: 'outer-convergence-audit',
+            },
+            completedAt: new Date(),
+          }))),
+    ]);
     const changedEntryIds = new Set([...requiredResultEntryIds, ...plan.requiredTransferEntryIds]);
     const reusedAuditUnits = Math.max(0, entryIds.length - changedEntryIds.size);
     await syncOperationsRepository.finishRun(auditRunId, {

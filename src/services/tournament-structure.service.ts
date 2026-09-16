@@ -3,7 +3,7 @@ import type {
   DbTournamentKnockoutInsert,
   DbTournamentKnockoutResultInsert,
 } from '../db/schemas/index.schema';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import {
   tournamentBattleGroupResultsInCompetition,
   tournamentGroupsInCompetition,
@@ -33,6 +33,93 @@ export type DerivedResultRepairSnapshot = {
   battle: Array<{ sourceResultId: number; updatedAt: string }>;
   knockout: Array<{ sourceResultId: number; updatedAt: string }>;
 };
+
+async function rebindLocalBattleFixturesToCandidateGroups(
+  tx: Parameters<Parameters<Awaited<ReturnType<typeof getDb>>['transaction']>[0]>[0],
+  season: FplSeasonRef,
+  tournamentId: number,
+  groupRows: ReadonlyArray<
+    Pick<
+      DbTournamentGroupInsert,
+      'groupId' | 'groupIndex' | 'entryId' | 'startedEventId' | 'endedEventId'
+    >
+  >,
+): Promise<void> {
+  const candidateSlots = new Map<
+    string,
+    { entryId: number; startedEventId: number; endedEventId: number }
+  >();
+  for (const row of groupRows) {
+    const groupId = Number(row.groupId);
+    const groupIndex = Number(row.groupIndex);
+    const entryId = Number(row.entryId);
+    const startedEventId = Number(row.startedEventId);
+    const endedEventId = Number(row.endedEventId);
+    if (
+      !Number.isInteger(groupId) ||
+      !Number.isInteger(groupIndex) ||
+      !Number.isInteger(entryId) ||
+      !Number.isInteger(startedEventId) ||
+      !Number.isInteger(endedEventId)
+    ) {
+      continue;
+    }
+    candidateSlots.set(`${groupId}:${groupIndex}`, { entryId, startedEventId, endedEventId });
+  }
+  const rows = await tx
+    .select({
+      sourceResultId: tournamentBattleGroupResultsInCompetition.sourceResultId,
+      groupId: tournamentBattleGroupResultsInCompetition.groupId,
+      eventId: tournamentBattleGroupResultsInCompetition.eventId,
+      homeIndex: tournamentBattleGroupResultsInCompetition.homeIndex,
+      homeEntryId: tournamentBattleGroupResultsInCompetition.homeEntryId,
+      awayIndex: tournamentBattleGroupResultsInCompetition.awayIndex,
+      awayEntryId: tournamentBattleGroupResultsInCompetition.awayEntryId,
+    })
+    .from(tournamentBattleGroupResultsInCompetition)
+    .where(
+      sql`${tournamentBattleGroupResultsInCompetition.seasonId} = ${season.seasonId}
+        AND ${tournamentBattleGroupResultsInCompetition.tournamentId} = ${tournamentId}
+        AND ${tournamentBattleGroupResultsInCompetition.officialMatchId} IS NULL`,
+    );
+
+  for (const row of rows) {
+    const home = candidateSlots.get(`${row.groupId}:${row.homeIndex}`);
+    const away = candidateSlots.get(`${row.groupId}:${row.awayIndex}`);
+    if (
+      !home ||
+      !away ||
+      row.eventId < home.startedEventId ||
+      row.eventId > home.endedEventId ||
+      row.eventId < away.startedEventId ||
+      row.eventId > away.endedEventId ||
+      (row.homeEntryId === home.entryId && row.awayEntryId === away.entryId)
+    ) {
+      continue;
+    }
+    await tx
+      .update(tournamentBattleGroupResultsInCompetition)
+      .set({
+        homeEntryId: home.entryId,
+        awayEntryId: away.entryId,
+        homeNetPoints: null,
+        homeRank: null,
+        homeMatchPoints: null,
+        awayNetPoints: null,
+        awayRank: null,
+        awayMatchPoints: null,
+        sourceCheckedAt: null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
+          eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
+          eq(tournamentBattleGroupResultsInCompetition.sourceResultId, row.sourceResultId),
+        ),
+      );
+  }
+}
 
 function groupInsert(row: Record<string, number | string | null>): DbTournamentGroupInsert {
   return {
@@ -120,6 +207,13 @@ export async function rebuildTournamentStructure(
     await groups.deleteByTournament(season, tournament.id);
 
     await groups.upsertBatch(season, groupRows);
+    if (options.preserveDerivedResults && tournament.groupMode === 'battle_races') {
+      // Local battle rows are keyed by group/slot/event, so a roster reseed
+      // can leave the old entrants under the same fixture identity. Rebind
+      // those fixtures to the candidate slots before the result backfill; the
+      // score fields are cleared only when the matchup actually changes.
+      await rebindLocalBattleFixturesToCandidateGroups(tx, season, tournament.id, groupRows);
+    }
     await knockouts.upsertBatch(season, knockoutMatches);
     await knockoutResultsRepository.upsertBatch(season, publishedKnockoutResults);
   });
@@ -140,6 +234,7 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
     db
       .select({
         groupId: tournamentGroupsInCompetition.groupId,
+        groupIndex: tournamentGroupsInCompetition.groupIndex,
         entryId: tournamentGroupsInCompetition.entryId,
         startedEventId: tournamentGroupsInCompetition.startedEventId,
         endedEventId: tournamentGroupsInCompetition.endedEventId,
@@ -167,8 +262,11 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         sourceResultId: tournamentBattleGroupResultsInCompetition.sourceResultId,
         groupId: tournamentBattleGroupResultsInCompetition.groupId,
         eventId: tournamentBattleGroupResultsInCompetition.eventId,
+        homeIndex: tournamentBattleGroupResultsInCompetition.homeIndex,
         homeEntryId: tournamentBattleGroupResultsInCompetition.homeEntryId,
+        awayIndex: tournamentBattleGroupResultsInCompetition.awayIndex,
         awayEntryId: tournamentBattleGroupResultsInCompetition.awayEntryId,
+        officialMatchId: tournamentBattleGroupResultsInCompetition.officialMatchId,
         updatedAt: sql<string>`${tournamentBattleGroupResultsInCompetition.updatedAt}::text`,
       })
       .from(tournamentBattleGroupResultsInCompetition)
@@ -182,6 +280,8 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         eventId: tournamentKnockoutResultsInCompetition.eventId,
         matchId: tournamentKnockoutResultsInCompetition.matchId,
         playAgainstId: tournamentKnockoutResultsInCompetition.playAgainstId,
+        homeEntryId: tournamentKnockoutResultsInCompetition.homeEntryId,
+        awayEntryId: tournamentKnockoutResultsInCompetition.awayEntryId,
         updatedAt: sql<string>`${tournamentKnockoutResultsInCompetition.updatedAt}::text`,
       })
       .from(tournamentKnockoutResultsInCompetition)
@@ -194,6 +294,8 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         matchId: tournamentKnockoutsInCompetition.matchId,
         startedEventId: tournamentKnockoutsInCompetition.startedEventId,
         endedEventId: tournamentKnockoutsInCompetition.endedEventId,
+        homeEntryId: tournamentKnockoutsInCompetition.homeEntryId,
+        awayEntryId: tournamentKnockoutsInCompetition.awayEntryId,
       })
       .from(tournamentKnockoutsInCompetition)
       .where(
@@ -221,6 +323,22 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         eventId >= group.startedEventId &&
         eventId <= group.endedEventId,
     );
+  const ownsLocalSlot = (
+    groupId: number,
+    slot: number,
+    entryId: number | null,
+    eventId: number,
+  ): boolean =>
+    groups.some(
+      (group) =>
+        group.groupId === groupId &&
+        group.groupIndex === slot &&
+        group.entryId === entryId &&
+        group.startedEventId !== null &&
+        group.endedEventId !== null &&
+        eventId >= group.startedEventId &&
+        eventId <= group.endedEventId,
+    );
 
   return {
     points: points
@@ -230,10 +348,10 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
       .filter(
         (result) =>
           !ownsGroup(result.groupId, result.eventId) ||
-          (result.homeEntryId !== null &&
-            !ownsGroupEntry(result.groupId, result.homeEntryId, result.eventId)) ||
-          (result.awayEntryId !== null &&
-            !ownsGroupEntry(result.groupId, result.awayEntryId, result.eventId)),
+          (result.officialMatchId === null &&
+            !ownsLocalSlot(result.groupId, result.homeIndex, result.homeEntryId, result.eventId)) ||
+          (result.officialMatchId === null &&
+            !ownsLocalSlot(result.groupId, result.awayIndex, result.awayEntryId, result.eventId)),
       )
       .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
     knockout: knockoutResults
@@ -244,7 +362,9 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
           match.startedEventId === null ||
           result.eventId < match.startedEventId ||
           (match.endedEventId !== null && result.eventId > match.endedEventId) ||
-          result.playAgainstId !== result.eventId - match.startedEventId + 1
+          result.playAgainstId !== result.eventId - match.startedEventId + 1 ||
+          result.homeEntryId !== match.homeEntryId ||
+          result.awayEntryId !== match.awayEntryId
         );
       })
       .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
@@ -312,7 +432,33 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
                   AND group_row.tournament_id = result.tournament_id
                   AND group_row.group_id = result.group_id
                   AND group_row.entry_id = result.away_entry_id
-                  AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
+                AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
+            )
+          )
+          OR (
+            result.official_match_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM ${tournamentGroupsInCompetition} AS group_row
+              WHERE group_row.season_id = result.season_id
+                AND group_row.tournament_id = result.tournament_id
+                AND group_row.group_id = result.group_id
+                AND group_row.group_index = result.home_index
+                AND group_row.entry_id = result.home_entry_id
+                AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
+            )
+          )
+          OR (
+            result.official_match_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM ${tournamentGroupsInCompetition} AS group_row
+              WHERE group_row.season_id = result.season_id
+                AND group_row.tournament_id = result.tournament_id
+                AND group_row.group_id = result.group_id
+                AND group_row.group_index = result.away_index
+                AND group_row.entry_id = result.away_entry_id
+                AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
             )
           )
         )
@@ -331,6 +477,8 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
               AND result.event_id >= knockout.started_event_id
               AND (knockout.ended_event_id IS NULL OR result.event_id <= knockout.ended_event_id)
               AND result.play_against_id = result.event_id - knockout.started_event_id + 1
+              AND result.home_entry_id IS NOT DISTINCT FROM knockout.home_entry_id
+              AND result.away_entry_id IS NOT DISTINCT FROM knockout.away_entry_id
         )
     `);
 

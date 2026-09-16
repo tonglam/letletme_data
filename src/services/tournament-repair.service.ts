@@ -250,7 +250,7 @@ async function repairTournamentSetupIssuePrepared(
         tournament,
         allEntryIds,
         window,
-        { auditRepairIssueId: issueId },
+        { auditRepairIssueId: issueId, repair: { issueId, owner } },
       );
       repairIssues.push(...historyIssues);
       if (historyIssues.length === 0) {

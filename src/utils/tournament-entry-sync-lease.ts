@@ -18,6 +18,11 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('DEL', KEYS[1])
 `;
 
+const RENEW_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+`;
+
 export type TournamentEntrySyncLeaseScope = Readonly<{
   seasonId: number;
   eventId: number;
@@ -61,9 +66,32 @@ export async function withTournamentEntrySyncLease<T>(
   while (Date.now() < deadline) {
     const acquired = await redis.set(key, token, 'PX', leaseMs, 'NX');
     if (acquired === 'OK') {
+      let renewalInFlight = false;
+      const renew = async () => {
+        if (renewalInFlight) return;
+        renewalInFlight = true;
+        try {
+          // Token fencing makes a late renewal harmless after this owner has
+          // lost the lease to another worker.
+          await redis.eval(RENEW_SCRIPT, 1, key, token, String(leaseMs));
+        } catch {
+          // The bounded TTL remains the crash/Redis-outage safety net. The
+          // operation still owns the token and release remains fenced.
+        } finally {
+          renewalInFlight = false;
+        }
+      };
+      const renewalTimer = setInterval(
+        () => {
+          void renew();
+        },
+        Math.max(250, Math.floor(leaseMs / 3)),
+      );
+      renewalTimer.unref?.();
       try {
         return await operation();
       } finally {
+        clearInterval(renewalTimer);
         // A Redis outage during cleanup cannot strand the work permanently;
         // the bounded TTL remains the safety net.
         await redis.eval(RELEASE_SCRIPT, 1, key, token).catch(() => undefined);

@@ -1000,7 +1000,10 @@ export async function backfillTournamentHistory(
   tournament: TournamentConfig,
   entryIds: number[],
   window: TournamentBackfillWindow | null,
-  options?: { auditRepairIssueId?: number },
+  options?: {
+    auditRepairIssueId?: number;
+    repair?: { issueId: number; owner: TournamentRepairState };
+  },
 ): Promise<TournamentSetupIssue[]> {
   if (!window) {
     return [];
@@ -1016,7 +1019,7 @@ export async function backfillTournamentHistory(
       tournament,
       entryIds,
       eventId,
-      undefined,
+      options?.repair,
       options?.auditRepairIssueId === undefined
         ? undefined
         : { repairIssueId: options.auditRepairIssueId },

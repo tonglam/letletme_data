@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 
 const values = new Map<string, string>();
+let renewals = 0;
 
 const fakeRedis = {
   getClient: async () => ({
@@ -14,12 +15,17 @@ const fakeRedis = {
       return 'OK';
     },
     eval: async (
-      _script: string,
+      script: string,
       _keyCount: number,
       key: string,
       token: string,
+      _leaseMs?: string,
     ): Promise<number> => {
       if (values.get(key) !== token) return 0;
+      if (script.includes('PEXPIRE')) {
+        renewals += 1;
+        return 1;
+      }
       values.delete(key);
       return 1;
     },
@@ -35,6 +41,7 @@ const { tournamentEntrySyncLeaseKey, withTournamentEntrySyncLease } = await impo
 describe('tournament entry/GW coordination lease', () => {
   afterEach(() => {
     values.clear();
+    renewals = 0;
   });
 
   test('uses one queue-coordination identity per season/event/entry', () => {
@@ -69,6 +76,20 @@ describe('tournament entry/GW coordination lease', () => {
     expect(new Set([first, second])).toEqual(new Set(['first', 'second']));
     expect(maximumActive).toBe(1);
     expect(order).toEqual(['first:start', 'first:end', 'second:start', 'second:end']);
+    expect(values.size).toBe(0);
+  });
+
+  test('renews a long-running lease with the same token', async () => {
+    const scope = { seasonId: 2627, eventId: 4, entryId: 12345 };
+    await withTournamentEntrySyncLease(
+      scope,
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+      },
+      { leaseMs: 1_000, waitMs: 2_000, pollMs: 5 },
+    );
+
+    expect(renewals).toBeGreaterThan(0);
     expect(values.size).toBe(0);
   });
 });

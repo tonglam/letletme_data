@@ -297,7 +297,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                   WHEN excluded.attempts < ${syncItemsInOps.attempts}
                     OR (
                       excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
                     )
                   THEN ${syncItemsInOps.status}
                   ELSE excluded.status
@@ -309,7 +309,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                   WHEN excluded.attempts < ${syncItemsInOps.attempts}
                     OR (
                       excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
                     )
                   THEN ${syncItemsInOps.sourceHash}
                   ELSE excluded.source_hash
@@ -320,7 +320,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                   WHEN excluded.attempts < ${syncItemsInOps.attempts}
                     OR (
                       excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
                     )
                   THEN ${syncItemsInOps.normalizedPayload}
                   ELSE excluded.normalized_payload
@@ -331,7 +331,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                   WHEN excluded.attempts < ${syncItemsInOps.attempts}
                     OR (
                       excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
                     )
                   THEN ${syncItemsInOps.lastError}
                   ELSE excluded.last_error
@@ -342,7 +342,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                   WHEN excluded.attempts < ${syncItemsInOps.attempts}
                     OR (
                       excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
                     )
                   THEN ${syncItemsInOps.completedAt}
                   ELSE excluded.completed_at
@@ -353,7 +353,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                   WHEN excluded.attempts < ${syncItemsInOps.attempts}
                     OR (
                       excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
                     )
                   THEN ${syncItemsInOps.updatedAt}
                   ELSE clock_timestamp()

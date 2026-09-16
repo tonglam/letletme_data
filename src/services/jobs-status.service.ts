@@ -576,6 +576,9 @@ export async function getLiveFinalRetentionOperationalStatus(
   const nextFixtures = nextFixtureEvidence.fixtures;
   const fixtureStatusUnavailable =
     currentFixtureEvidence.errorType !== null || nextFixtureEvidence.errorType !== null;
+  const currentEventAllFixturesFinished =
+    currentFixtures.length > 0 && currentFixtures.every((fixture) => fixture.finished);
+  const nextEventStarted = nextFixtures.some((fixture) => fixture.started || fixture.finished);
   const alertContext = fixtureStatusUnavailable
     ? {
         source: 'canonical-events-and-fixtures',
@@ -589,30 +592,28 @@ export async function getLiveFinalRetentionOperationalStatus(
         currentEventAllFixturesFinished: false,
         nextEventStarted: false,
       }
-    : currentFinalizedEvent && nextEvent
-      ? {
-          source: 'canonical-events-and-fixtures',
-          phase: 'POST_EVENT_PRE_NEXT',
-          fixtureStatusAvailable: true,
-          currentEventId: currentFinalizedEvent.id,
-          nextEventId: nextEvent.id,
-          currentFixtureCount: currentFixtures.length,
-          nextFixtureCount: nextFixtures.length,
-          currentEventAllFixturesFinished:
-            currentFixtures.length > 0 && currentFixtures.every((fixture) => fixture.finished),
-          nextEventStarted: nextFixtures.some((fixture) => fixture.started || fixture.finished),
-        }
-      : {
-          source: 'canonical-events-and-fixtures',
-          phase: 'UNKNOWN',
-          fixtureStatusAvailable: true,
-          currentEventId: currentFinalizedEvent?.id ?? null,
-          nextEventId: nextEvent?.id ?? null,
-          currentFixtureCount: currentFixtures.length,
-          nextFixtureCount: nextFixtures.length,
-          currentEventAllFixturesFinished: false,
-          nextEventStarted: false,
-        };
+    : {
+        source: 'canonical-events-and-fixtures',
+        phase:
+          currentFinalizedEvent && nextEvent
+            ? currentEventAllFixturesFinished && !nextEventStarted
+              ? 'POST_EVENT_PRE_NEXT'
+              : !currentEventAllFixturesFinished
+                ? 'CURRENT_EVENT_INCOMPLETE'
+                : 'NEXT_EVENT_ACTIVE'
+            : currentFinalizedEvent
+              ? 'SEASON_FINALIZED'
+              : nextEventStarted
+                ? 'NEXT_EVENT_ACTIVE'
+                : 'UNKNOWN',
+        fixtureStatusAvailable: true,
+        currentEventId: currentFinalizedEvent?.id ?? null,
+        nextEventId: nextEvent?.id ?? null,
+        currentFixtureCount: currentFixtures.length,
+        nextFixtureCount: nextFixtures.length,
+        currentEventAllFixturesFinished,
+        nextEventStarted,
+      };
   return {
     schemaVersion: LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
     seasonCode: season.seasonCode,
