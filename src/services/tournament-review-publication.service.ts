@@ -93,7 +93,10 @@ type EventRow = {
 export class TournamentReviewSourceNotReadyError extends Error {
   readonly code = 'TOURNAMENT_REVIEW_SOURCE_NOT_READY';
 
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly repairEventIds?: readonly number[],
+  ) {
     super(message);
     this.name = 'TournamentReviewSourceNotReadyError';
   }
@@ -942,6 +945,15 @@ async function buildPointsPayload(
       AND tournament_id = ${tournament.tournament_id}
     ORDER BY entry_id, group_id
   `;
+  if (
+    !hasCanonicalTournamentReviewGroupAssignment({
+      entryIds: new Set(rows.map((row) => row.entry_id)),
+      observedEntryGroupIds: new Map(canonicalGroupRows.map((row) => [row.entry_id, row.group_id])),
+      canonicalRows: canonicalGroupRows,
+    })
+  ) {
+    throw new TournamentReviewSourceNotReadyError('points canonical group roster is incomplete');
+  }
   const observedEntryGroupIds = new Map<number, number>();
   for (const row of rows) {
     if (row.group_id !== null) observedEntryGroupIds.set(row.entry_id, row.group_id);
@@ -958,8 +970,10 @@ async function buildPointsPayload(
   const canonicalGroupByEntry = new Map(
     canonicalGroupRows.map((row) => [row.entry_id, row.group_id]),
   );
-  const historicalGroupRows = await tx<Array<{ entry_id: number; group_id: number | null }>>`
-    SELECT history.entry_id, history.group_id
+  const historicalGroupRows = await tx<
+    Array<{ event_id: number; entry_id: number; group_id: number | null }>
+  >`
+    SELECT history.event_id, history.entry_id, history.group_id
     FROM competition.tournament_points_group_results history
     JOIN competition.tournament_entries roster
       ON roster.season_id = history.season_id
@@ -985,12 +999,21 @@ async function buildPointsPayload(
       AND history_event.data_checked = true
       AND history_event.data_checked_at IS NOT NULL
   `;
-  if (
-    historicalGroupRows.some(
-      (row) => row.group_id === null || canonicalGroupByEntry.get(row.entry_id) !== row.group_id,
-    )
-  ) {
-    throw new TournamentReviewSourceNotReadyError('historical points group assignment is stale');
+  const staleGroupEventIds = [
+    ...new Set(
+      historicalGroupRows
+        .filter(
+          (row) =>
+            row.group_id === null || canonicalGroupByEntry.get(row.entry_id) !== row.group_id,
+        )
+        .map((row) => row.event_id),
+    ),
+  ].sort((left, right) => left - right);
+  if (staleGroupEventIds.length > 0) {
+    throw new TournamentReviewSourceNotReadyError(
+      'historical points group assignment is stale',
+      staleGroupEventIds,
+    );
   }
   const notApplicable = rows.filter(
     (row) => !isTournamentReviewEntryApplicable(row.started_event, event.event_id),
@@ -4131,7 +4154,7 @@ export function reviewRepairIssue(
 /** Persist one deduplicated issue in the existing repair system and attach its
  * identity to the review obligation. A queue outage never hides the original
  * source failure; the issue remains durable for the watchdog to enqueue. */
-async function enqueueTournamentReviewRepair(
+export async function enqueueTournamentReviewRepair(
   season: FplSeasonRef,
   obligation: ClaimedReviewObligation,
   error: TournamentReviewSourceNotReadyError,
@@ -4152,32 +4175,35 @@ async function enqueueTournamentReviewRepair(
     // The issue is still actionable without an entry list: the existing
     // structure/results repair paths resolve the roster from the tournament.
   }
-  const issue = {
-    ...reviewRepairIssue(obligation, error, nextRepairAt),
-    affectedEntryIds,
-  } satisfies TournamentSetupIssueInput;
+  const issues = (error.repairEventIds ?? [obligation.event_id]).map(
+    (eventId) =>
+      ({
+        ...reviewRepairIssue({ ...obligation, event_id: eventId }, error, nextRepairAt),
+        affectedEntryIds,
+      }) satisfies TournamentSetupIssueInput,
+  );
   try {
     const existing = await tournamentSetupIssueRepository.listUnresolved(
       season,
       obligation.tournament_id,
     );
-    await tournamentSetupIssueRepository.sync(season, obligation.tournament_id, [issue], {
+    await tournamentSetupIssueRepository.sync(season, obligation.tournament_id, issues, {
       preserveUnresolvedIssueKeys: existing.map((candidate) => candidate.issueKey),
     });
     const persisted = (
       await tournamentSetupIssueRepository.listUnresolved(season, obligation.tournament_id)
-    ).find((candidate) => candidate.issueKey === issue.issueKey);
-    if (!persisted) return null;
+    ).filter((candidate) => issues.some((issue) => candidate.issueKey === issue.issueKey));
+    if (persisted.length === 0) return null;
     try {
       // Load the queue adapter only on the failure path. Jobs/status and the
       // normal publication reader remain free of BullMQ connection setup.
       const { enqueueTournamentRepair } = await import('../jobs/tournament-repair.jobs');
-      await enqueueTournamentRepair(season, persisted, 'reconciliation');
+      for (const issue of persisted) await enqueueTournamentRepair(season, issue, 'reconciliation');
     } catch {
       // The persisted issue is the retry source of truth; the repair watchdog
       // will enqueue it when the queue is available again.
     }
-    return persisted.issueId;
+    return persisted[0]!.issueId;
   } catch {
     return null;
   }

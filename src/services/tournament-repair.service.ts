@@ -221,7 +221,7 @@ async function repairTournamentSetupIssuePrepared(
         // Old review diagnostics may describe missing points projections rather
         // than damaged canonical groups. Recheck under the same structure lock
         // before a tournament-wide rebuild can delete accepted event results.
-        if (tournament.groupMode === 'points_races') {
+        if (tournament.groupMode === 'points_races' && tournament.knockoutMode === 'no_knockout') {
           const currentAudit = await auditTournamentSetup(season, tournament, null);
           if (!currentAudit.requiresStructureRebuild) return false;
         }

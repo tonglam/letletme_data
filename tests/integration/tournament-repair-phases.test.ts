@@ -584,3 +584,87 @@ for (const topology of ['valid', 'missing', 'wrong-member'] as const) {
     expect(await tournamentSetupIssueRepository.findUnresolvedById(season, issueId)).toBeNull();
   });
 }
+
+test('mixed points and knockout tournaments retain the existing structural repair path', async () => {
+  const { repairTournamentSetupIssue } = await import(
+    '../../src/services/tournament-repair.service'
+  );
+  const structure = await import('../../src/services/tournament-structure.service');
+  const review = await import('../../src/services/tournament-review-publication.service');
+  await sql`UPDATE competition.tournaments SET group_mode='points_races',knockout_mode='single_elimination'
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  await tournamentSetupIssueRepository.sync(season, tournamentId, [
+    {
+      ...input,
+      issueKey: 'STRUCTURE_INTEGRITY_FAILED:all',
+      code: 'STRUCTURE_INTEGRITY_FAILED',
+      category: 'results',
+    },
+  ]);
+  issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
+  await mockAudit([]);
+  const rebuild = spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue(undefined);
+  spyOn(review, 'requestTournamentReviewTournamentCorrection').mockResolvedValue([]);
+  await repairTournamentSetupIssue(season, issueId);
+  expect(rebuild).toHaveBeenCalledTimes(1);
+});
+
+test('historical points assignment failures enqueue the affected historical event scopes', async () => {
+  const review = await import('../../src/services/tournament-review-publication.service');
+  const jobs = await import('../../src/jobs/tournament-repair.jobs');
+  const queued: number[] = [];
+  spyOn(jobs, 'enqueueTournamentRepair').mockImplementation(async (_season, issue) => {
+    queued.push(issue.eventId!);
+    return {} as never;
+  });
+  for (const eventId of [1, 2, 3])
+    await sql`INSERT INTO fpl.events(season_id,event_id,name) VALUES (${season.seasonId},${eventId},'Historical guard fixture')`;
+  const attached = await review.enqueueTournamentReviewRepair(
+    season,
+    {
+      tournament_id: tournamentId,
+      event_id: 3,
+    } as Parameters<typeof review.enqueueTournamentReviewRepair>[1],
+    new review.TournamentReviewSourceNotReadyError(
+      'historical points group assignment is stale',
+      [1, 2],
+    ),
+    new Date(),
+  );
+  expect(attached).not.toBeNull();
+  expect(queued.sort()).toEqual([1, 2]);
+  const issues = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)).filter(
+    (i) => i.code === 'TOURNAMENT_RESULTS_INCOMPLETE',
+  );
+  expect(issues.map((i) => i.eventId).sort()).toEqual([1, 2]);
+  expect(issues.some((i) => i.issueId === attached)).toBe(true);
+});
+
+test('points upsert corrects group-only changes without accepting an older source', async () => {
+  const { tournamentPointsGroupResultsRepository } = await import(
+    '../../src/repositories/tournament-points-group-results'
+  );
+  await sql`INSERT INTO fpl.events(season_id,event_id,name) VALUES (${season.seasonId},1,'Group update fixture')`;
+  const sourceUpdatedAt = new Date('2026-09-01T12:00:00Z');
+  const row = {
+    tournamentId,
+    entryId: tournamentId,
+    eventId: 1,
+    groupId: 2,
+    eventPoints: 42,
+    eventNetPoints: 42,
+    sourceUpdatedAt,
+  };
+  expect(await tournamentPointsGroupResultsRepository.upsertBatch(season, [row])).toBe(1);
+  expect(
+    await tournamentPointsGroupResultsRepository.upsertBatch(season, [{ ...row, groupId: 1 }]),
+  ).toBe(1);
+  expect(
+    await tournamentPointsGroupResultsRepository.upsertBatch(season, [
+      { ...row, groupId: 3, sourceUpdatedAt: new Date('2026-08-31T12:00:00Z') },
+    ]),
+  ).toBe(0);
+  const [stored] =
+    await sql`SELECT group_id,event_points FROM competition.tournament_points_group_results WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  expect(stored).toMatchObject({ group_id: 1, event_points: 42 });
+});
