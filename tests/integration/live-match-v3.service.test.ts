@@ -11,6 +11,7 @@ import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent
 import {
   liveMatchDeskKey,
   liveMatchDetailKey,
+  readLiveMatchCheckpointDesiredV3,
   readLiveMatchDeskFenceV3,
   readLiveMatchDeskV3,
   readLiveMatchDetailFenceV3,
@@ -746,5 +747,47 @@ describe('Live Matches V3 observation publication', () => {
       (await readLiveMatchDetailV3({ season: season.seasonCode, eventId, redis }))?.publication
         .finalized,
     ).toBe(false);
+  });
+
+  test('defers forced final checkpoint markers until recovery facts are approved', async () => {
+    let approvals = 0;
+    await expect(
+      syncLiveMatchesV3FromObservation({
+        season,
+        eventId,
+        rawFixtures: [fixture(30)],
+        rawEventLive: { elements: eventLive() },
+        referenceData: referenceData(),
+        expectedFixtureIds: [401],
+        finalizeEvent: true,
+        lifecycleState: 'FINALIZED',
+        forceCheckpointRecovery: true,
+        approveCheckpointRecovery: async () => {
+          approvals += 1;
+          throw new Error('recovery facts rejected');
+        },
+        observedAt: '2026-08-29T10:01:00.000Z',
+        redis,
+        enqueueCheckpoint,
+      }),
+    ).rejects.toThrow('recovery facts rejected');
+
+    expect(approvals).toBe(1);
+    expect(
+      await readLiveMatchCheckpointDesiredV3({
+        kind: 'desk',
+        season: season.seasonCode,
+        eventId,
+        redis,
+      }),
+    ).toBeNull();
+    expect(
+      await readLiveMatchCheckpointDesiredV3({
+        kind: 'detail',
+        season: season.seasonCode,
+        eventId,
+        redis,
+      }),
+    ).toBeNull();
   });
 });

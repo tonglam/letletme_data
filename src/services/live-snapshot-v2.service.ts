@@ -604,9 +604,13 @@ function durableMatchDeskFactsAgreeWithLiveFinal(
 function durableMatchDetailFactsAgreeWithLiveFinal(
   detail: MatchDetailFactsRead,
   final: LivePublicationRead,
-): boolean {
+): boolean | null {
   const expectedDetail = matchDetailFactsFromLiveFinal(final);
-  if (!expectedDetail) return false;
+  // Older durable Live Points FINALs may legitimately omit fixture-level
+  // explain breakdowns. That is unavailable comparison evidence, not a facts
+  // contradiction; callers must use the desk/identity proof or fetch a fresh
+  // compatible observation instead of rejecting the retained FINAL.
+  if (!expectedDetail) return null;
   const actualDetail = new Map(
     detail.fixtures.map((fixture) => [
       fixture.fixtureId,
@@ -654,11 +658,10 @@ function durableMatchDetailFactsAgreeWithLiveFinal(
 function durableMatchFactsAgreeWithLiveFinal(
   pair: Pick<FinalLiveMatchCheckpointPair, 'desk' | 'detail'>,
   final: LivePublicationRead,
-): boolean {
-  return (
-    durableMatchDeskFactsAgreeWithLiveFinal(pair.desk, final) &&
-    durableMatchDetailFactsAgreeWithLiveFinal(pair.detail, final)
-  );
+): boolean | null {
+  if (!durableMatchDeskFactsAgreeWithLiveFinal(pair.desk, final)) return false;
+  const detailFactsAgree = durableMatchDetailFactsAgreeWithLiveFinal(pair.detail, final);
+  return detailFactsAgree === false ? false : detailFactsAgree;
 }
 
 /**
@@ -842,7 +845,10 @@ export async function syncLiveSnapshotV2(
       }
     }
 
-    if (durableMatchPair && !durableMatchFactsAgreeWithLiveFinal(durableMatchPair, durableFinal)) {
+    if (
+      durableMatchPair &&
+      durableMatchFactsAgreeWithLiveFinal(durableMatchPair, durableFinal) === false
+    ) {
       throw new CacheError(
         `Live Match durable FINAL conflicts with Live Points facts for event ${eventId}`,
         'LIVE_MATCH_FINAL_FACTS_MISMATCH',
@@ -937,7 +943,7 @@ export async function syncLiveSnapshotV2(
       }
       if (
         observedDetailIsFinal &&
-        !durableMatchDetailFactsAgreeWithLiveFinal(observedDetailRead!, durableFinal)
+        durableMatchDetailFactsAgreeWithLiveFinal(observedDetailRead!, durableFinal) === false
       ) {
         throw new CacheError(
           `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
@@ -1111,32 +1117,18 @@ export async function syncLiveSnapshotV2(
       );
     }
 
-    const match = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
-      season,
-      eventId,
-      rawEventLive: liveResult.value,
-      rawFixtures: fixturesResult.value,
-      expectedFixtureIds: expectedFixtureIdsResult.value,
-      referenceData: referenceDataResult.value,
-      publishedLiveElementIds: durableFinal.eventLives.map((row) => row.elementId),
-      finalizeEvent: true,
-      lifecycleState: 'FINALIZED',
-      expectedNextCheckAt: options.expectedNextCheckAt,
-      observedDesk: observedMatchDesk,
-      observedDetail: observedMatchDetail,
-      forceCheckpointRecovery: true,
-      expectedFinalCheckpointIdentities,
-      databaseRead: databaseBudget?.readDb,
-    });
-    if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {
-      throw new Error(
-        `Live Match final publication was not complete for event ${eventId}; desk=${match.desk.state}; detail=${match.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
-      );
-    }
-    // The synchronizer is allowed to reuse an existing FINAL desk/detail.
-    // Re-read both active pointers after that call and prove that the winning
-    // payloads are the facts checked against the durable Live Points FINAL.
-    if (canProbeServingPair) {
+    const validateAcceptedMatch = async (match: LiveMatchObservationResult): Promise<void> => {
+      if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {
+        throw new Error(
+          `Live Match final publication was not complete for event ${eventId}; desk=${match.desk.state}; detail=${match.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
+        );
+      }
+      // The synchronizer is allowed to reuse an existing FINAL desk/detail.
+      // Re-read both active pointers after that call and prove that the winning
+      // payloads are the facts checked against the durable Live Points FINAL.
+      // Production invokes this callback before forced checkpoint markers are
+      // created, so a rejected winner leaves no recovery obligation behind.
+      if (!canProbeServingPair) return;
       const expectedDesk = prepareLiveMatchDesk({
         eventId,
         rawFixtures: fixturesResult.value,
@@ -1163,9 +1155,20 @@ export async function syncLiveSnapshotV2(
         dependencies.readObservedMatchDesk!({ season: season.seasonCode, eventId }),
         dependencies.readObservedMatchDetail!({ season: season.seasonCode, eventId }),
       ]);
+      const deskIdentityAgrees =
+        !afterDesk.read?.publication ||
+        (afterDesk.read.publication.publicationId === match.desk.publicationId &&
+          afterDesk.read.publication.generation === match.desk.generation);
+      const detailIdentityAgrees =
+        !afterDetail.read?.publication ||
+        !match.detail ||
+        (afterDetail.read.publication.publicationId === match.detail.publicationId &&
+          afterDetail.read.publication.generation === match.detail.generation);
       if (
         !afterDesk.read ||
         !afterDetail.read ||
+        !deskIdentityAgrees ||
+        !detailIdentityAgrees ||
         canonicalJson(afterDesk.read.fixtures) !== canonicalJson(expectedDesk.fixtures) ||
         canonicalJson(afterDetail.read.fixtures) !==
           canonicalJson(expectedDetail?.fixtures ?? []) ||
@@ -1177,7 +1180,31 @@ export async function syncLiveSnapshotV2(
           'LIVE_MATCH_FINAL_FACTS_MISMATCH',
         );
       }
-    }
+    };
+    const syncLiveMatches = dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation;
+    const usesDefaultSynchronizer = syncLiveMatches === syncLiveMatchesV3FromObservation;
+    const match = await syncLiveMatches({
+      season,
+      eventId,
+      rawEventLive: liveResult.value,
+      rawFixtures: fixturesResult.value,
+      expectedFixtureIds: expectedFixtureIdsResult.value,
+      referenceData: referenceDataResult.value,
+      publishedLiveElementIds: durableFinal.eventLives.map((row) => row.elementId),
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      expectedNextCheckAt: options.expectedNextCheckAt,
+      observedDesk: observedMatchDesk,
+      observedDetail: observedMatchDetail,
+      forceCheckpointRecovery: true,
+      expectedFinalCheckpointIdentities,
+      databaseRead: databaseBudget?.readDb,
+      ...(usesDefaultSynchronizer ? { approveCheckpointRecovery: validateAcceptedMatch } : {}),
+    });
+    // Hermetic synchronizer seams do not implement the approval callback; keep
+    // their existing post-call contract while production defers forced markers
+    // until validateAcceptedMatch has completed.
+    if (!usesDefaultSynchronizer) await validateAcceptedMatch(match);
   };
   // A FINAL must be reconciled with its durable checkpoint before provider
   // work. Provisional heartbeats keep their provider observation independent of

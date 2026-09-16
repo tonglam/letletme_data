@@ -68,6 +68,12 @@ export interface LiveMatchObservation {
   readonly finalizeEvent?: boolean;
   /** Recreate a durable checkpoint even when a stale Redis marker remains. */
   readonly forceCheckpointRecovery?: boolean;
+  /**
+   * Final recovery callers can defer forced checkpoint markers until they
+   * have validated the complete desk/detail pair returned by this call.
+   * Ordinary observations keep the existing eager checkpoint behaviour.
+   */
+  readonly approveCheckpointRecovery?: (result: LiveMatchObservationResult) => Promise<void>;
   /** Durable FINAL identities observed before a fenced recovery checkpoint. */
   readonly expectedFinalCheckpointIdentities?: Readonly<{
     readonly desk?: Readonly<{ publicationId: string; generation: number }> | null;
@@ -481,26 +487,30 @@ export async function syncLiveMatchesV3FromObservation(
     });
   }
 
-  const deskCheckpoint = reusesPublishedDesk
-    ? {
-        scheduled: input.publishedDesk?.checkpointScheduled ?? false,
-        failed: input.publishedDesk?.checkpointObligationFailed === true,
-      }
-    : await scheduleCheckpoint(
-        'desk',
-        desk,
-        input.redis,
-        input.season,
-        desk.state === 'FINALIZED',
-        !currentDesk ||
-          currentDesk.publication.state !== desk.state ||
-          currentDesk.publication.revisions.fixtureIdentity.revision !==
-            desk.revisions.fixtureIdentity.revision,
-        input.forceCheckpointRecovery === true,
-        input.expectedFinalCheckpointIdentities?.desk,
-        input.enqueueCheckpoint,
-      );
-  const deskCheckpointScheduled = deskCheckpoint.scheduled;
+  const deferCheckpointRecovery =
+    input.forceCheckpointRecovery === true && input.approveCheckpointRecovery !== undefined;
+  const deskCheckpoint = deferCheckpointRecovery
+    ? { scheduled: false, failed: false }
+    : reusesPublishedDesk
+      ? {
+          scheduled: input.publishedDesk?.checkpointScheduled ?? false,
+          failed: input.publishedDesk?.checkpointObligationFailed === true,
+        }
+      : await scheduleCheckpoint(
+          'desk',
+          desk,
+          input.redis,
+          input.season,
+          desk.state === 'FINALIZED',
+          !currentDesk ||
+            currentDesk.publication.state !== desk.state ||
+            currentDesk.publication.revisions.fixtureIdentity.revision !==
+              desk.revisions.fixtureIdentity.revision,
+          input.forceCheckpointRecovery === true,
+          input.expectedFinalCheckpointIdentities?.desk,
+          input.enqueueCheckpoint,
+        );
+  let deskCheckpointScheduled = deskCheckpoint.scheduled;
   let checkpointObligationFailed = deskCheckpoint.failed;
   let detail: MatchDetailPublication | null = null;
   let detailFixtures: readonly MatchFixtureDetail[] | null = null;
@@ -663,18 +673,21 @@ export async function syncLiveMatchesV3FromObservation(
       if (!detail && detailUnavailableReason === null)
         detailUnavailableReason = 'DETAIL_NOT_PUBLISHED';
       if (detail) {
-        const detailCheckpoint = await scheduleCheckpoint(
-          'detail',
-          detail,
-          input.redis,
-          input.season,
-          detail.finalized,
-          !currentDetail ||
-            currentDetail.publication.fixtureIdentityRevision !== detail.fixtureIdentityRevision,
-          input.forceCheckpointRecovery === true,
-          input.expectedFinalCheckpointIdentities?.detail,
-          input.enqueueCheckpoint,
-        );
+        const detailCheckpoint = deferCheckpointRecovery
+          ? { scheduled: false, failed: false }
+          : await scheduleCheckpoint(
+              'detail',
+              detail,
+              input.redis,
+              input.season,
+              detail.finalized,
+              !currentDetail ||
+                currentDetail.publication.fixtureIdentityRevision !==
+                  detail.fixtureIdentityRevision,
+              input.forceCheckpointRecovery === true,
+              input.expectedFinalCheckpointIdentities?.detail,
+              input.enqueueCheckpoint,
+            );
         detailCheckpointScheduled = detailCheckpoint.scheduled;
         checkpointObligationFailed ||= detailCheckpoint.failed;
       }
@@ -701,17 +714,7 @@ export async function syncLiveMatchesV3FromObservation(
     }
   }
 
-  logInfo('Live Matches V3 observation published', {
-    season: input.season.seasonCode,
-    eventId: input.eventId,
-    state: desk.state,
-    deskGeneration: desk.generation,
-    deskChanged,
-    detailGeneration: detail?.generation ?? null,
-    detailChanged,
-    detailUnavailableReason,
-  });
-  return {
+  const result: LiveMatchObservationResult = {
     season: input.season.seasonCode,
     eventId: input.eventId,
     state: desk.state,
@@ -725,6 +728,58 @@ export async function syncLiveMatchesV3FromObservation(
     detailCheckpointScheduled,
     checkpointObligationFailed,
     detailUnavailableReason,
+  };
+
+  if (deferCheckpointRecovery) {
+    // The caller owns the final-facts authority check. Do not leave a forced
+    // marker behind when a concurrent publication wins with incompatible
+    // facts and the caller rejects this result.
+    await input.approveCheckpointRecovery!(result);
+    const approvedDeskCheckpoint = await scheduleCheckpoint(
+      'desk',
+      desk,
+      input.redis,
+      input.season,
+      desk.state === 'FINALIZED',
+      false,
+      true,
+      input.expectedFinalCheckpointIdentities?.desk,
+      input.enqueueCheckpoint,
+    );
+    deskCheckpointScheduled = approvedDeskCheckpoint.scheduled;
+    checkpointObligationFailed ||= approvedDeskCheckpoint.failed;
+    if (detail) {
+      const approvedDetailCheckpoint = await scheduleCheckpoint(
+        'detail',
+        detail,
+        input.redis,
+        input.season,
+        detail.finalized,
+        false,
+        true,
+        input.expectedFinalCheckpointIdentities?.detail,
+        input.enqueueCheckpoint,
+      );
+      detailCheckpointScheduled = approvedDetailCheckpoint.scheduled;
+      checkpointObligationFailed ||= approvedDetailCheckpoint.failed;
+    }
+  }
+
+  logInfo('Live Matches V3 observation published', {
+    season: input.season.seasonCode,
+    eventId: input.eventId,
+    state: desk.state,
+    deskGeneration: desk.generation,
+    deskChanged,
+    detailGeneration: detail?.generation ?? null,
+    detailChanged,
+    detailUnavailableReason,
+  });
+  return {
+    ...result,
+    deskCheckpointScheduled,
+    detailCheckpointScheduled,
+    checkpointObligationFailed,
   };
 }
 
