@@ -129,6 +129,16 @@ describe('data sync attempt reporting', () => {
       failedUnits: 0,
       timings: { bootstrap: 120, snapshotWrite: 81, derivedView: 15 },
     });
+    expect(
+      inferDataSyncWorkSummary({
+        persistence: { events: 2, teams: 3, players: 5, phases: 1, fixtures: 4 },
+        marketSnapshotCount: 7,
+        publicationId: 'publication-1',
+      }),
+    ).toMatchObject({
+      submittedRows: 7,
+      publicationsCreated: 1,
+    });
   });
 
   test('emits one bounded report with inferred work and FPL metrics', async () => {
@@ -206,7 +216,45 @@ describe('data sync attempt reporting', () => {
       batchId: 'batch-2',
       parentRunId: 'root-2',
       executionIntent: 'force',
+      batchCost: {
+        executionId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ),
+      },
     });
+  });
+
+  test('gives concurrent physical deliveries distinct cost identities', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await Promise.all([
+      runDataSyncAttempt(
+        {
+          queue: 'data-sync',
+          jobName: 'core-snapshot',
+          runId: 'stalled-redelivery',
+          batchId: 'logical-batch',
+          attempt: 1,
+        },
+        async () => ({ outcome: 'ready' as const }),
+      ),
+      runDataSyncAttempt(
+        {
+          queue: 'data-sync',
+          jobName: 'core-snapshot',
+          runId: 'stalled-redelivery',
+          batchId: 'logical-batch',
+          attempt: 1,
+        },
+        async () => ({ outcome: 'ready' as const }),
+      ),
+    ]);
+
+    const reports = reportsFrom(infoSpy);
+    expect(reports).toHaveLength(2);
+    expect(new Set(reports.map((report) => report.batchCost.executionId)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.batchCost.attemptKey)).size).toBe(2);
+    expect(reports.every((report) => report.outcome === 'ready')).toBe(true);
   });
 
   test('emits once on failure and rethrows the original error', async () => {
@@ -250,6 +298,8 @@ describe('data sync attempt reporting', () => {
             requiredUnits: 581,
             succeededUnits: 581,
             failedUnits: 0,
+            submittedRows: 581,
+            publicationsCreated: 1,
             timings: { bootstrap: 120, snapshotWrite: 80, derivedView: 15 },
           });
         },
@@ -267,6 +317,20 @@ describe('data sync attempt reporting', () => {
         snapshotWrite: 80,
         derivedView: 15,
       },
+    });
+  });
+
+  test('keeps committed player-value write evidence on a pending attempt', () => {
+    const pending = new PlayerValuesWindowPendingError('20260829', {
+      requiredUnits: 581,
+      succeededUnits: 581,
+      failedUnits: 0,
+      submittedRows: 581,
+      publicationsCreated: 1,
+    });
+    expect(inferDataSyncWorkSummary(pending)).toMatchObject({
+      submittedRows: 581,
+      publicationsCreated: 1,
     });
   });
 

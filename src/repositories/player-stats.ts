@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { and, count, eq, notInArray, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, notInArray, sql } from 'drizzle-orm';
 
 import {
   playerEventSnapshotPublicationsInFpl,
@@ -296,6 +296,11 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
     ): Promise<{
       count: number;
       expectedRowCount: number;
+      insertedRows: number;
+      updatedRows: number;
+      deletedRows: number;
+      publicationsCreated: number;
+      publicationsReused: number;
       revision: number;
       sourceCheckedAt: Date;
       publishedAt: Date;
@@ -361,7 +366,9 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
         }
 
         const previousPublication = await db
-          .select({ baselineVerifiedAt: playerEventSnapshotPublicationsInFpl.baselineVerifiedAt })
+          .select({
+            baselineVerifiedAt: playerEventSnapshotPublicationsInFpl.baselineVerifiedAt,
+          })
           .from(playerEventSnapshotPublicationsInFpl)
           .where(
             and(
@@ -370,6 +377,35 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
             ),
           )
           .limit(1);
+
+        // Capture the exact row classes before the replacement. The write
+        // below updates every matching key, inserts missing keys, and removes
+        // keys outside the complete source set, so these counts remain valid
+        // even when the payload is an idempotent replay.
+        const [existingMatchingRows, existingStaleRows] = await Promise.all([
+          db
+            .select({ count: count() })
+            .from(playerEventSnapshotsInFpl)
+            .where(
+              and(
+                eq(playerEventSnapshotsInFpl.seasonId, season.seasonId),
+                eq(playerEventSnapshotsInFpl.eventId, eventId),
+                inArray(playerEventSnapshotsInFpl.elementId, elementIds),
+              ),
+            ),
+          db
+            .select({ count: count() })
+            .from(playerEventSnapshotsInFpl)
+            .where(
+              and(
+                eq(playerEventSnapshotsInFpl.seasonId, season.seasonId),
+                eq(playerEventSnapshotsInFpl.eventId, eventId),
+                notInArray(playerEventSnapshotsInFpl.elementId, elementIds),
+              ),
+            ),
+        ]);
+        const existingMatchingCount = Number(existingMatchingRows[0]?.count ?? 0);
+        const existingStaleCount = Number(existingStaleRows[0]?.count ?? 0);
 
         await db
           .delete(playerEventSnapshotsInFpl)
@@ -500,6 +536,14 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
         return {
           count: persistedCount,
           expectedRowCount,
+          insertedRows: Math.max(0, expectedRowCount - existingMatchingCount),
+          updatedRows: existingMatchingCount,
+          deletedRows: existingStaleCount,
+          // The publication header is advanced in the same transaction. It
+          // represents one new immutable revision even when its row is an
+          // ON CONFLICT update of the event key.
+          publicationsCreated: 1,
+          publicationsReused: 0,
           revision: publication.revision,
           sourceCheckedAt: publication.sourceCheckedAt,
           publishedAt: publication.publishedAt,

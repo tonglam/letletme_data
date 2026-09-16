@@ -193,9 +193,13 @@ export type PriceChangeSyncResult = {
   readonly outcome: 'ready' | 'noop';
   readonly season: string;
   readonly players: number;
+  /** Number of player rows carried by the committed publication. */
+  readonly submittedRows?: number;
   readonly fetchedAt?: string;
   readonly publicationId?: string;
   readonly revision?: number;
+  readonly publicationsCreated?: number;
+  readonly publicationsReused?: number;
 };
 
 export class PriceChangeCorePublicationRequiredError extends Error {
@@ -1711,9 +1715,12 @@ export async function persistPriceChangePublication(
       outcome: 'ready',
       season: season.seasonCode,
       players: board.players.length,
+      submittedRows: board.players.length,
       fetchedAt: fetchedAt.toISOString(),
       publicationId: publication.publicationId,
       revision: publication.revision,
+      publicationsCreated: 1,
+      publicationsReused: 0,
     };
   } catch (error) {
     if (!dbActivated) {

@@ -113,9 +113,12 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
         queue: job.queueName,
         jobName: job.name,
         runId,
+        batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        parentRunId: data.runId,
         source: tournamentId === undefined ? 'coordinator' : source,
         attempt: job.attemptsMade + 1,
         targetEventId: eventId,
+        season,
         queueWaitMs: context.queueWaitMs,
       },
       () => {

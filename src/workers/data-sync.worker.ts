@@ -438,6 +438,12 @@ async function alertPriceChangePublicationOverdue(
   );
 }
 
+function attachDataSyncCostEvidence(error: unknown, evidence: Record<string, unknown>): void {
+  if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
+    Object.assign(error, evidence);
+  }
+}
+
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
   if (
     !(await startCurrentSchedulerJob(job.data, {
@@ -464,13 +470,17 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     queue: job.queueName,
     jobName: job.name,
     runId: parentRunId,
+    batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+    parentRunId: job.data?.runId,
     source: job.data?.source,
     attempt,
     targetEventId: job.data?.eventId,
+    season,
     queueWaitMs: context.queueWaitMs,
   };
-  const recordResolvedTarget = (eventId: number) => {
+  const recordResolvedTarget = async (eventId: number) => {
     attemptContext.targetEventId = eventId;
+    await attemptContext.onTargetEventResolved?.(eventId);
   };
 
   logJobTriggered(context);
@@ -516,54 +526,85 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           });
           return persisted;
         });
-        if (marketPublication?.publicationId) {
-          const delivered = await dispatchDataPublicationOutbox({
-            limit: 1,
-            publicationId: marketPublication.publicationId,
-          });
-          if (delivered.delivered !== 1) {
-            const active = await readActiveDataPublication({
-              dataset: 'fpl:market',
-              seasonCode: season.seasonCode,
+        const marketPublicationCreated =
+          marketPublication?.status === 'published' && marketPublication.reused !== true ? 1 : 0;
+        const marketPublicationReused =
+          marketPublication?.status === 'unchanged' || marketPublication?.reused === true ? 1 : 0;
+        try {
+          if (marketPublication?.publicationId) {
+            const delivered = await dispatchDataPublicationOutbox({
+              limit: 1,
+              publicationId: marketPublication.publicationId,
             });
-            if (
-              active?.manifest.publicationId !== marketPublication.publicationId ||
-              active.manifest.revision !== marketPublication.revision
-            ) {
-              throw new Error(
-                `Market publication ${marketPublication.publicationId} is canonical but Redis delivery is pending`,
-              );
+            if (delivered.delivered !== 1) {
+              const active = await readActiveDataPublication({
+                dataset: 'fpl:market',
+                seasonCode: season.seasonCode,
+              });
+              if (
+                active?.manifest.publicationId !== marketPublication.publicationId ||
+                active.manifest.revision !== marketPublication.revision
+              ) {
+                throw new Error(
+                  `Market publication ${marketPublication.publicationId} is canonical but Redis delivery is pending`,
+                );
+              }
             }
           }
-        }
-        if (result.notificationMessage) {
-          await notifyTwoBots(result.notificationMessage, {
-            // Notifications are downstream of the canonical publication. Use
-            // its immutable identity so retries after a process crash remain
-            // idempotent even when they cross a UTC minute boundary.
-            idempotencyKey: `market:${season.seasonCode}:${changeDate}:${marketPublication?.publicationId ?? 'snapshot'}`,
-          });
-        }
-        if (result.count > 0) {
-          await enqueuePlayerPricesSyncJob(season, 'cascade', {
-            changeDate,
-            jobId: `player-prices-${changeDate}-immediate`,
-            removeOnSettle: false,
-          });
-        }
-        if (
-          result.count === 0 &&
-          job.data.pollUntilWindowEnd === true &&
-          shouldRetryPlayerValuesNoChange(changeDate)
-        ) {
-          throw new PlayerValuesWindowPendingError(changeDate, {
+          if (result.notificationMessage) {
+            await notifyTwoBots(result.notificationMessage, {
+              // Notifications are downstream of the canonical publication. Use
+              // its immutable identity so retries after a process crash remain
+              // idempotent even when they cross a UTC minute boundary.
+              idempotencyKey: `market:${season.seasonCode}:${changeDate}:${marketPublication?.publicationId ?? 'snapshot'}`,
+            });
+          }
+          if (result.count > 0) {
+            await enqueuePlayerPricesSyncJob(season, 'cascade', {
+              changeDate,
+              jobId: `player-prices-${changeDate}-immediate`,
+              removeOnSettle: false,
+            });
+          }
+          if (
+            result.count === 0 &&
+            job.data.pollUntilWindowEnd === true &&
+            shouldRetryPlayerValuesNoChange(changeDate)
+          ) {
+            throw new PlayerValuesWindowPendingError(changeDate, {
+              requiredUnits: result.requiredUnits,
+              succeededUnits: result.succeededUnits,
+              failedUnits: result.failedUnits,
+              // The canonical snapshot and market publication have already
+              // committed before the window deliberately yields. Preserve those
+              // write facts on the pending error so batch-cost settlement does
+              // not report a successful database transaction as zero work.
+              submittedRows: result.submittedRows,
+              publicationsCreated: marketPublicationCreated || (result.publicationsCreated ?? 0),
+              publicationsReused: marketPublicationReused || (result.publicationsReused ?? 0),
+              timings: result.timings,
+            });
+          }
+          return {
+            ...result,
+            publicationsCreated: marketPublicationCreated || (result.publicationsCreated ?? 0),
+            publicationsReused: marketPublicationReused || (result.publicationsReused ?? 0),
+          };
+        } catch (error) {
+          // The canonical snapshot/publication transaction has already
+          // committed. Preserve its known cost when delivery, notification,
+          // or child scheduling fails afterwards.
+          attachDataSyncCostEvidence(error, {
             requiredUnits: result.requiredUnits,
             succeededUnits: result.succeededUnits,
             failedUnits: result.failedUnits,
+            submittedRows: result.submittedRows,
+            publicationsCreated: marketPublicationCreated || (result.publicationsCreated ?? 0),
+            publicationsReused: marketPublicationReused || (result.publicationsReused ?? 0),
             timings: result.timings,
           });
+          throw error;
         }
-        return result;
       });
     }
 
@@ -660,34 +701,46 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           }
           throw error;
         }
-        await reconcilePriceChangeAfterCommit(prepared, readLatestHotEvent, (evidence) =>
-          enqueueNewerHotPriceEvent(season, evidence),
-        );
-        const delivered = await dispatchDataPublicationOutbox({
-          limit: 1,
-          publicationId: persisted.publicationId,
-        });
-        if (delivered.delivered !== 1) {
-          const active = await readActiveDataPublication({
-            dataset: 'fpl:price-changes',
-            seasonCode: season.seasonCode,
+        try {
+          await reconcilePriceChangeAfterCommit(prepared, readLatestHotEvent, (evidence) =>
+            enqueueNewerHotPriceEvent(season, evidence),
+          );
+          const delivered = await dispatchDataPublicationOutbox({
+            limit: 1,
+            publicationId: persisted.publicationId,
           });
-          if (
-            active?.manifest.publicationId !== persisted.publicationId ||
-            active?.manifest.revision !== persisted.revision
-          ) {
-            throw new Error(
-              `Price-change publication ${persisted.publicationId} is canonical but Redis delivery is pending`,
-            );
+          if (delivered.delivered !== 1) {
+            const active = await readActiveDataPublication({
+              dataset: 'fpl:price-changes',
+              seasonCode: season.seasonCode,
+            });
+            if (
+              active?.manifest.publicationId !== persisted.publicationId ||
+              active?.manifest.revision !== persisted.revision
+            ) {
+              throw new Error(
+                `Price-change publication ${persisted.publicationId} is canonical but Redis delivery is pending`,
+              );
+            }
           }
+          await markHotPriceReconciled(
+            job,
+            persisted.publicationId,
+            persisted.revision,
+            prepared.board.revision,
+          );
+          return persisted;
+        } catch (error) {
+          // Persistence and publication activation completed before these
+          // reconciliation/delivery steps. Keep the committed player and
+          // publication counts on the failure report for cost settlement.
+          attachDataSyncCostEvidence(error, {
+            submittedRows: persisted.submittedRows ?? persisted.players,
+            publicationsCreated: persisted.publicationsCreated ?? 1,
+            publicationsReused: persisted.publicationsReused ?? 0,
+          });
+          throw error;
         }
-        await markHotPriceReconciled(
-          job,
-          persisted.publicationId,
-          persisted.revision,
-          prepared.board.revision,
-        );
-        return persisted;
       });
     }
 
