@@ -493,6 +493,10 @@ function isServingFinalMatchPair(
       desk?.publication.generation === expectedPair?.desk.publication.generation &&
       detail?.publication.publicationId === expectedPair?.detail.publication.publicationId &&
       detail?.publication.generation === expectedPair?.detail.publication.generation);
+  const canonicalFactsMatch =
+    expectedPair == null ||
+    (canonicalJson(desk?.fixtures) === canonicalJson(expectedPair.desk.fixtures) &&
+      canonicalJson(detail?.fixtures) === canonicalJson(expectedPair.detail.fixtures));
   return Boolean(
     desk?.servedFrom === 'REDIS_CURRENT' &&
       detail?.servedFrom === 'REDIS_CURRENT' &&
@@ -507,7 +511,8 @@ function isServingFinalMatchPair(
       detail.publication.observedDeskGeneration === desk.publication.generation &&
       detail.publication.fixtureIdentityRevision ===
         desk.publication.revisions.fixtureIdentity.revision &&
-      canonicalIdentityMatches,
+      canonicalIdentityMatches &&
+      canonicalFactsMatch,
   );
 }
 
@@ -1045,21 +1050,35 @@ export async function syncLiveSnapshotV2(
       // a later pair-level facts check rejects the Redis candidate.
       const observedDeskIsFinal = observedDeskRead?.publication.state === 'FINALIZED';
       const observedDetailIsFinal = observedDetailRead?.publication.finalized === true;
+      const conflictingSiblings: Array<{
+        kind: 'desk' | 'detail';
+        publication: { publicationId: string; generation: number };
+      }> = [];
       if (
         observedDeskIsFinal &&
         !durableMatchDeskFactsAgreeWithLiveFinal(observedDeskRead!, durableFinal)
       ) {
-        await clearConflictingMatchCheckpoint('desk', observedDeskRead!.publication);
-        throw new CacheError(
-          `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
-          'LIVE_MATCH_FINAL_REDIS_CONFLICT',
-        );
+        conflictingSiblings.push({ kind: 'desk', publication: observedDeskRead!.publication });
       }
       if (
         observedDetailIsFinal &&
         durableMatchDetailFactsAgreeWithLiveFinal(observedDetailRead!, durableFinal) === false
       ) {
-        await clearConflictingMatchCheckpoint('detail', observedDetailRead!.publication);
+        conflictingSiblings.push({ kind: 'detail', publication: observedDetailRead!.publication });
+      }
+      if (conflictingSiblings.length > 0) {
+        // Attempt every exact marker cleanup even when one Redis/control-plane
+        // read fails. Leaving a sibling obligation executable would allow a
+        // rejected FINAL to be written back after this invocation exits.
+        let cleanupError: unknown;
+        for (const sibling of conflictingSiblings) {
+          try {
+            await clearConflictingMatchCheckpoint(sibling.kind, sibling.publication);
+          } catch (error) {
+            cleanupError ??= error;
+          }
+        }
+        if (cleanupError) throw cleanupError;
         throw new CacheError(
           `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
           'LIVE_MATCH_FINAL_REDIS_CONFLICT',
@@ -1413,14 +1432,20 @@ export async function syncLiveSnapshotV2(
         }),
       );
       redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
-      if (!restoredPublication.published) {
+      const restoreIdentityMatches =
+        restoredPublication.publication.publicationId === durableFinal.publication.publicationId &&
+        restoredPublication.publication.generation === durableFinal.publication.generation;
+      if (!restoredPublication.published && !restoreIdentityMatches) {
         throw new CacheError(
           `Live Points V2 durable FINAL restore did not publish ${durableFinal.publication.publicationId} for ${season.seasonCode}:${eventId}`,
           'LIVE_V2_CHECKPOINT_RESTORE_FAILED',
         );
       }
       servingPublication = restoredPublication.publication;
-      restored = true;
+      // A concurrent finalizer may have completed the exact same restore
+      // between our read and CAS. Its stale response is already canonical and
+      // should converge without spending another retry.
+      restored = restoredPublication.published;
       logInfo('Restored durable FINALIZED Live Points V2 publication before provider work', {
         season: season.seasonCode,
         eventId,
@@ -1752,11 +1777,13 @@ export async function syncLiveSnapshotV2(
       }),
     );
     redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
-    // A stale response is not proof that the durable FINAL is serving. Even
-    // an equal identity must be rejected here: the active pointer or its
-    // immutable items may still be invalid, and returning success would leave
-    // the next sync retrying the same ineffective restore forever.
-    if (!restored.published) {
+    const restoreIdentityMatches =
+      restored.publication.publicationId === durableFloor.publication.publicationId &&
+      restored.publication.generation === durableFloor.publication.generation;
+    // A stale response naming a different publication is not proof that the
+    // durable FINAL is serving. An exact identity, however, means a racing
+    // finalizer already completed the same restore and is safe to accept.
+    if (!restored.published && !restoreIdentityMatches) {
       throw new CacheError(
         `Live Points V2 durable FINAL restore did not publish ${durableFloor.publication.publicationId} for ${season.seasonCode}:${eventId}`,
         'LIVE_V2_CHECKPOINT_RESTORE_FAILED',

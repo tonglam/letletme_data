@@ -592,8 +592,10 @@ for _, item in ipairs(detail.fixtures) do
   end
 end
 
--- A byte-for-byte candidate is already canonical.  Returning before any
--- writes makes the action idempotent and avoids rotating a healthy previous.
+local function validGeneration(value)
+  return type(value) == 'number' and value > 0 and value <= 9007199254740991 and value == math.floor(value)
+end
+
 local function hasCandidateDetailKey(key)
   for _, item in ipairs(detail.fixtures) do
     if type(item) == 'table' and item.key == key then return true end
@@ -601,54 +603,68 @@ local function hasCandidateDetailKey(key)
   return false
 end
 
--- A recovery that must not retain a provisional fallback also has to remove
--- any pointer left by an earlier attempt.  Delete only the exact immutable
--- siblings named by that pointer, and only within this event's keyspace; a
--- malformed pointer is still removed while unrelated Redis keys are left
--- untouched.  Candidate siblings are protected because content-addressed
--- items can be shared by the old and new publication.
-local function clearPreviousFallback()
-  local previousDeskRaw = redis.call('GET', KEYS[2]) or ''
-  local previousDeskOk, previousDesk = pcall(cjson.decode, previousDeskRaw)
-  if previousDeskOk and type(previousDesk) == 'table' and type(previousDesk.desk) == 'table' and
-     type(previousDesk.desk.key) == 'string' then
-    local deskPrefix = 'llm:data:v3:fpl:live-match:desk:' .. desk.season .. ':' .. tostring(desk.eventId) .. ':'
-    local oldKey = previousDesk.desk.key
-    if string.sub(oldKey, 1, string.len(deskPrefix)) == deskPrefix and oldKey ~= deskItem.key then
-      redis.call('DEL', oldKey, oldKey .. ':meta')
-    end
+-- Delete only immutable siblings whose complete publication descriptor names
+-- the exact generation/item shape for this event.  Prefix checks alone would
+-- let a corrupt pointer delete a control key such as sequence.
+local function clearDeskSiblings(raw)
+  local ok, publication = pcall(cjson.decode, raw or '')
+  if not ok or type(publication) ~= 'table' or
+     publication.contractVersion ~= 'live-matches-v3' or
+     publication.season ~= desk.season or publication.eventId ~= desk.eventId or
+     not validGeneration(publication.generation) or type(publication.desk) ~= 'table' or
+     publication.desk.name ~= 'desk' or publication.desk.type ~= 'string' or
+     type(publication.desk.key) ~= 'string' then return end
+  local prefix = 'llm:data:v3:fpl:live-match:desk:' .. desk.season .. ':' .. tostring(desk.eventId) .. ':'
+  local expectedKey = prefix .. tostring(publication.generation) .. ':desk'
+  if publication.desk.key == expectedKey and publication.desk.key ~= deskItem.key then
+    redis.call('DEL', publication.desk.key, publication.desk.key .. ':meta')
   end
-  redis.call('DEL', KEYS[2])
+end
 
-  local previousDetailRaw = redis.call('GET', KEYS[5]) or ''
-  local previousDetailOk, previousDetail = pcall(cjson.decode, previousDetailRaw)
-  local detailPrefix = 'llm:data:v3:fpl:live-match:detail:' .. detail.season .. ':' .. tostring(detail.eventId) .. ':'
-  if previousDetailOk and type(previousDetail) == 'table' then
-    local oldGeneration = previousDetail.generation
-    if previousDetail.season == detail.season and previousDetail.eventId == detail.eventId and
-       type(oldGeneration) == 'number' and oldGeneration > 0 then
-      local oldManifest = detailPrefix .. tostring(oldGeneration) .. ':manifest'
-      local candidateManifest = detailPrefix .. tostring(detail.generation) .. ':manifest'
-      if oldManifest ~= candidateManifest then redis.call('DEL', oldManifest) end
-    end
-    if type(previousDetail.fixtures) == 'table' then
-      for _, oldItem in ipairs(previousDetail.fixtures) do
-        if type(oldItem) == 'table' and type(oldItem.key) == 'string' and
-           string.sub(oldItem.key, 1, string.len(detailPrefix)) == detailPrefix and
-           not hasCandidateDetailKey(oldItem.key) then
-          redis.call('DEL', oldItem.key, oldItem.key .. ':meta')
-        end
+local function clearDetailSiblings(raw)
+  local ok, publication = pcall(cjson.decode, raw or '')
+  if not ok or type(publication) ~= 'table' or
+     publication.contractVersion ~= 'live-matches-v3' or
+     publication.season ~= detail.season or publication.eventId ~= detail.eventId or
+     not validGeneration(publication.generation) then return end
+  local prefix = 'llm:data:v3:fpl:live-match:detail:' .. detail.season .. ':' .. tostring(detail.eventId) .. ':'
+  local oldManifest = prefix .. tostring(publication.generation) .. ':manifest'
+  local candidateManifest = prefix .. tostring(detail.generation) .. ':manifest'
+  if oldManifest ~= candidateManifest then redis.call('DEL', oldManifest) end
+  if type(publication.fixtures) ~= 'table' then return end
+  for _, oldItem in ipairs(publication.fixtures) do
+    if type(oldItem) == 'table' and oldItem.type == 'string' and
+       type(oldItem.fixtureId) == 'number' and oldItem.fixtureId > 0 and
+       oldItem.fixtureId == math.floor(oldItem.fixtureId) and
+       type(oldItem.sha256) == 'string' and string.len(oldItem.sha256) == 64 and
+       string.match(oldItem.sha256, '^[0-9a-f]+$') and type(oldItem.key) == 'string' then
+      local expectedKey = prefix .. tostring(publication.generation) .. ':' ..
+        tostring(oldItem.fixtureId) .. ':' .. oldItem.sha256
+      if oldItem.key == expectedKey and not hasCandidateDetailKey(oldItem.key) then
+        redis.call('DEL', oldItem.key, oldItem.key .. ':meta')
       end
     end
   end
-  redis.call('DEL', KEYS[5])
 end
 
-if not preservePrevious then clearPreviousFallback() end
+-- A recovery that must not retain a provisional fallback also has to remove
+-- discarded active siblings and any pointer left by an earlier attempt.  The
+-- whole cleanup stays inside this Lua CAS, candidate content-addressed items
+-- are protected, and malformed pointers are removed without touching
+-- unrelated Redis keys.
+local function clearDiscardedFallbacks()
+  clearDeskSiblings(currentDeskRaw)
+  clearDetailSiblings(currentDetailRaw)
+  clearDeskSiblings(redis.call('GET', KEYS[2]) or '')
+  clearDetailSiblings(redis.call('GET', KEYS[5]) or '')
+  redis.call('DEL', KEYS[2], KEYS[5])
+end
+
+if not preservePrevious then clearDiscardedFallbacks() end
 
 -- A byte-for-byte candidate is already canonical.  Returning after the
--- cleanup above keeps this path idempotent while still removing a stale
--- previous pointer when fallback retention is disabled.
+-- cleanup above keeps this path idempotent while still removing stale
+-- pointers and unreachable active siblings when fallback retention is off.
 if currentDeskRaw == deskRaw and currentDetailRaw == detailRaw then return {'already-canonical', currentDeskRaw, currentDetailRaw} end
 
 local currentDeskOk, currentDesk = pcall(cjson.decode, currentDeskRaw)
