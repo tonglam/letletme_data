@@ -925,6 +925,10 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             seasonId: job.data.seasonId,
           });
           if (invalidation.failed > 0) {
+            // Renew the Redis-named superseded revision before propagating an
+            // invalidation delivery failure. The previous pointer may remain
+            // the only readable snapshot until the outbox recovers.
+            await cleanupMyFplSnapshotRevisions({ limit: 100 });
             throw new Error(
               `My FPL invalidation outbox left ${invalidation.failed} receipt(s) for retry`,
             );
@@ -949,15 +953,14 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               evidence: { claimed: result.claimed, superseded: result.superseded },
             });
           }
+          // Run retention before propagating a delivery failure: Redis can
+          // still serve the previous revision while the new receipt retries.
+          const retention = await cleanupMyFplSnapshotRevisions({ limit: 100 });
           if (result.failed > 0) {
             throw new Error(
               `My FPL snapshot outbox left ${result.failed} delivery receipt(s) for retry`,
             );
           }
-          // Keep retention on the same bounded maintenance cadence as outbox
-          // delivery. Pending/processing/failed receipts and verified scope
-          // references are protected by the service query itself.
-          const retention = await cleanupMyFplSnapshotRevisions({ limit: 100 });
           return { ...result, invalidation, retention };
         }
         case MAINTENANCE_JOBS.DATA_PUBLICATION_OUTBOX: {

@@ -624,6 +624,14 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(retainedRevisionMigration).not.toMatch(
       /published_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'/,
     );
+    expect(publicationService).toContain('function normalizedSnapshotRevision');
+    expect(publicationService).toContain(
+      'const lockedRevision = normalizedSnapshotRevision(lockedCandidate.revision)',
+    );
+    expect(publicationService).toContain('redisManifest?.revision === lockedRevision');
+    expect(worker).toContain(
+      'const retention = await cleanupMyFplSnapshotRevisions({ limit: 100 });',
+    );
   });
 
   test('captures official auto substitutions without inferring Bench Boost', () => {

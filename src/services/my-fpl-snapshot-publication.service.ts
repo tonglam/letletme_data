@@ -380,6 +380,11 @@ type MyFplSnapshotRetentionOptions = Readonly<{
   eventId?: number;
 }>;
 
+function normalizedSnapshotRevision(value: number | string): number | null {
+  const revision = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+}
+
 /**
  * Remove only old, superseded immutable revisions whose durable references
  * have settled. The candidate CTE keeps the transaction bounded and protects
@@ -402,24 +407,24 @@ async function deleteExpiredMyFplSnapshotRevisions(
     updatedAt: Date | string;
     seasonId: number;
     eventId: number;
-    revision: number;
+    revision: number | string;
   } | null = null;
   while (deleted < options.limit && scanned < MY_FPL_SNAPSHOT_RETENTION_MAX_SCAN) {
     const cursorUpdatedAt: Date | string | null = cursor?.updatedAt ?? null;
     const cursorSeasonId: number | null = cursor?.seasonId ?? null;
     const cursorEventId: number | null = cursor?.eventId ?? null;
-    const cursorRevision: number | null = cursor?.revision ?? null;
+    const cursorRevision: number | string | null = cursor?.revision ?? null;
     const candidates: {
       season_id: number;
       event_id: number;
-      revision: number;
+      revision: number | string;
       season_code: string;
       updated_at: Date | string;
     }[] = await tx<
       {
         season_id: number;
         event_id: number;
-        revision: number;
+        revision: number | string;
         season_code: string;
         updated_at: Date | string;
       }[]
@@ -485,11 +490,20 @@ async function deleteExpiredMyFplSnapshotRevisions(
     for (const candidate of candidates) {
       if (scanned >= MY_FPL_SNAPSHOT_RETENTION_MAX_SCAN || deleted >= options.limit) break;
       scanned += 1;
+      const candidateRevision = normalizedSnapshotRevision(candidate.revision);
+      if (candidateRevision === null) {
+        logWarn('My FPL snapshot retention found an invalid publication revision', {
+          seasonCode: candidate.season_code,
+          eventId: candidate.event_id,
+          revision: String(candidate.revision),
+        });
+        return deleted;
+      }
       cursor = {
         updatedAt: candidate.updated_at,
         seasonId: candidate.season_id,
         eventId: candidate.event_id,
-        revision: candidate.revision,
+        revision: candidateRevision,
       };
 
       // Publication activation and Redis delivery hold the same event advisory
@@ -504,7 +518,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
         {
           season_id: number;
           event_id: number;
-          revision: number;
+          revision: number | string;
           season_code: string;
           updated_at: Date | string;
         }[]
@@ -515,7 +529,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
         JOIN fpl.seasons season ON season.season_id = publication.season_id
         WHERE publication.season_id = ${candidate.season_id}
           AND publication.event_id = ${candidate.event_id}
-          AND publication.revision = ${candidate.revision}
+          AND publication.revision = ${candidateRevision}
           AND publication.active = false
           AND publication.updated_at < ${candidateBeforeIso}::timestamptz
           AND publication.idempotency_key IS NULL
@@ -548,6 +562,15 @@ async function deleteExpiredMyFplSnapshotRevisions(
       `;
       const lockedCandidate = lockedCandidates[0];
       if (!lockedCandidate) continue;
+      const lockedRevision = normalizedSnapshotRevision(lockedCandidate.revision);
+      if (lockedRevision === null) {
+        logWarn('My FPL snapshot retention found an invalid locked revision', {
+          seasonCode: lockedCandidate.season_code,
+          eventId: lockedCandidate.event_id,
+          revision: String(lockedCandidate.revision),
+        });
+        return deleted;
+      }
 
       let redisManifest: MyFplSnapshotRedisManifest | null;
       try {
@@ -566,7 +589,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
         });
         return deleted;
       }
-      if (redisManifest?.revision === lockedCandidate.revision) {
+      if (redisManifest?.revision === lockedRevision) {
         // Redis can continue serving a previously delivered revision while a
         // newer publication is waiting in the outbox. Keep the durable row
         // within the GraphQL reader's 24-hour retained-revision RLS window as
@@ -577,7 +600,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
           SET updated_at = clock_timestamp()
           WHERE season_id = ${lockedCandidate.season_id}
             AND event_id = ${lockedCandidate.event_id}
-            AND revision = ${lockedCandidate.revision}
+            AND revision = ${lockedRevision}
             AND active = false
         `;
         continue;
@@ -591,7 +614,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
         DELETE FROM competition.my_fpl_snapshot_publications
         WHERE season_id = ${lockedCandidate.season_id}
           AND event_id = ${lockedCandidate.event_id}
-          AND revision = ${lockedCandidate.revision}
+          AND revision = ${lockedRevision}
           AND active = false
           AND idempotency_key IS NULL
           AND updated_at < ${supersededBeforeIso}::timestamptz
