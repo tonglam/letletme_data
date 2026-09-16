@@ -135,6 +135,8 @@ export type MatchCheckpointDesired = Readonly<{
   final: boolean;
   /** Boundary publications bypass the normal ten-minute DB coalescing window. */
   force: boolean;
+  /** Recovery-only permission to replace an incoherent durable FINAL row. */
+  allowFinalReplacement?: boolean;
 }>;
 
 type MatchScope = Readonly<{ season: string; eventId: number }>;
@@ -817,6 +819,7 @@ if currentRaw then
         -- simply because a newer score publication won the desired-pointer race.
         if candidate.force == true and current.force ~= true then
           current.force = true
+          current.allowFinalReplacement = current.allowFinalReplacement == true or candidate.allowFinalReplacement == true
           local encoded = cjson.encode(current)
           redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
           return {'set', encoded}
@@ -826,6 +829,7 @@ if currentRaw then
       if current.generation == candidate.generation and current.publicationId ~= candidate.publicationId then return {'kept', currentRaw} end
       if current.generation == candidate.generation and current.publicationId == candidate.publicationId then
         candidate.force = current.force == true or candidate.force == true
+        candidate.allowFinalReplacement = current.allowFinalReplacement == true or candidate.allowFinalReplacement == true
         if type(current.requestedAt) == 'string' then candidate.requestedAt = current.requestedAt end
         local encoded = cjson.encode(candidate)
         redis.call('SET', KEYS[1], encoded, 'EX', ARGV[2])
@@ -2477,10 +2481,14 @@ function desiredFromRaw(
     generation <= 0 ||
     !validIso(value.requestedAt) ||
     typeof value.final !== 'boolean' ||
-    typeof value.force !== 'boolean'
+    typeof value.force !== 'boolean' ||
+    (value.allowFinalReplacement !== undefined && typeof value.allowFinalReplacement !== 'boolean')
   )
     return null;
-  return value as unknown as MatchCheckpointDesired;
+  return {
+    ...(value as unknown as MatchCheckpointDesired),
+    allowFinalReplacement: value.allowFinalReplacement === true,
+  };
 }
 
 export async function setLiveMatchCheckpointDesiredV3(input: {
@@ -2489,6 +2497,8 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
   readonly requestedAt?: Date | string;
   readonly finalized?: boolean;
   readonly force?: boolean;
+  /** Recovery-only permission to replace an incoherent durable FINAL row. */
+  readonly allowFinalReplacement?: boolean;
   /**
    * Seed-only fenced CAS for replacing a stale finalized desired marker. The
    * candidate must itself be finalized and forced; normal workers never pass
@@ -2518,6 +2528,7 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
         'state' in input.publication &&
         input.publication.state === 'FINALIZED'),
     force: input.force === true,
+    allowFinalReplacement: input.allowFinalReplacement === true,
   };
   const replacement = input.replaceFinalizedForCutover;
   if (replacement !== undefined) {

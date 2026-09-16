@@ -108,6 +108,8 @@ export interface LiveMatchObservationResult {
   readonly desk: MatchDeskPublication;
   readonly deskFixtures: readonly MatchDeskFixture[];
   readonly detail: MatchDetailPublication | null;
+  /** Full detail payload returned by the synchronizer for final-facts checks. */
+  readonly detailFixtures: readonly MatchFixtureDetail[] | null;
   readonly deskChanged: boolean;
   readonly detailChanged: boolean;
   readonly deskCheckpointScheduled: boolean;
@@ -328,6 +330,7 @@ async function scheduleCheckpoint(
       publication,
       finalized,
       force: boundary || forceRecovery,
+      allowFinalReplacement: forceRecovery,
       redis,
     });
     const lastMs = lastCheckpointedAt === null ? Number.NaN : Date.parse(lastCheckpointedAt);
@@ -346,6 +349,7 @@ async function scheduleCheckpoint(
       kind,
       desired.publicationId,
       desired.generation,
+      { allowFinalReplacement: desired.allowFinalReplacement },
     );
     return { scheduled: true, failed: false };
   } catch (error) {
@@ -491,6 +495,7 @@ export async function syncLiveMatchesV3FromObservation(
   const deskCheckpointScheduled = deskCheckpoint.scheduled;
   let checkpointObligationFailed = deskCheckpoint.failed;
   let detail: MatchDetailPublication | null = null;
+  let detailFixtures: readonly MatchFixtureDetail[] | null = null;
   let detailChanged = false;
   let detailCheckpointScheduled = false;
   let detailUnavailableReason: string | null = null;
@@ -578,6 +583,7 @@ export async function syncLiveMatchesV3FromObservation(
         // since changed a price or display name for this historical event.
         // The dedicated retention lane owns its lease and durable recovery.
         detail = currentDetail.publication;
+        detailFixtures = currentDetail.fixtures;
       } else if (!preparedDetailComplete) {
         // Empty explain/BPS evidence is a transient provider regression, not a
         // valid new detail publication. Keep the complete same-fixture LKG and
@@ -604,6 +610,7 @@ export async function syncLiveMatchesV3FromObservation(
             observedActive: input.observedDetail,
             redis: input.redis,
           });
+          if (detail) detailFixtures = completeDetail.fixtures;
         }
         if (
           !detail &&
@@ -628,6 +635,7 @@ export async function syncLiveMatchesV3FromObservation(
           });
           detail = published.publication;
           detailChanged = published.published;
+          detailFixtures = completeDetail.fixtures;
         }
       }
       if (
@@ -641,6 +649,7 @@ export async function syncLiveMatchesV3FromObservation(
         // intentionally serves the older detail with its own generation so
         // consumers can surface its independent staleness.
         detail = currentDetail.publication;
+        detailFixtures = currentDetail.fixtures;
       }
       if (!detail && !detailIsStarted(input.rawFixtures)) detailUnavailableReason = 'PRE_KICKOFF';
       if (!detail && detailUnavailableReason === null)
@@ -678,6 +687,7 @@ export async function syncLiveMatchesV3FromObservation(
         )
       ) {
         detail = currentDetail.publication;
+        detailFixtures = currentDetail.fixtures;
       }
     }
   }
@@ -699,6 +709,7 @@ export async function syncLiveMatchesV3FromObservation(
     desk,
     deskFixtures: preparedDesk.fixtures,
     detail,
+    detailFixtures,
     deskChanged,
     detailChanged,
     deskCheckpointScheduled,

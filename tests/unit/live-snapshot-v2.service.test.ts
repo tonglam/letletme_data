@@ -6,6 +6,7 @@ import {
   prepareCoherentLiveSnapshot,
   type LiveSnapshotReferenceData,
 } from '../../src/services/live-coherent-fetch';
+import { prepareLiveMatchDesk, prepareLiveMatchDetail } from '../../src/services/live-match-v3';
 import { syncLiveSnapshotV2 } from '../../src/services/live-snapshot-v2.service';
 import type { RawFPLFixture } from '../../src/types';
 
@@ -256,6 +257,18 @@ describe('Live Points and Live Matches shared observation', () => {
     };
     const sourceElement = rawExplainElementsFixture[0];
     if (!sourceElement) throw new Error('live snapshot fixture is missing');
+    const finalElement = {
+      ...sourceElement,
+      explain: sourceElement.explain
+        ? sourceElement.explain.filter(
+            (fixture) =>
+              typeof fixture === 'object' &&
+              fixture !== null &&
+              'fixture' in fixture &&
+              (fixture as { fixture?: unknown }).fixture === 401,
+          )
+        : null,
+    };
     const referenceData: LiveSnapshotReferenceData = {
       season: season.seasonCode,
       nameById: new Map([
@@ -271,10 +284,13 @@ describe('Live Points and Live Matches shared observation', () => {
       playerById: new Map([
         [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
       ]),
+      playerByFixtureAndId: new Map([
+        ['401:101', { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+      ]),
     };
     const prepared = prepareCoherentLiveSnapshot(
       2,
-      { elements: [structuredClone(sourceElement)] },
+      { elements: [structuredClone(finalElement)] },
       [rawFixture],
       referenceData,
       [401],
@@ -308,13 +324,31 @@ describe('Live Points and Live Matches shared observation', () => {
     } satisfies LivePublicationRead;
     let providerCalls = 0;
     let matchFinalizeCalls = 0;
+    const expectedDesk = prepareLiveMatchDesk({
+      eventId: 2,
+      rawFixtures: [rawFixture],
+      referenceData,
+      expectedFixtureIds: [401],
+      finalized: true,
+      lifecycleState: 'FINALIZED',
+    });
+    const expectedDetail = prepareLiveMatchDetail({
+      eventId: 2,
+      rawElements: [finalElement],
+      rawFixtures: [rawFixture],
+      deskFixtures: expectedDesk.fixtures,
+      publishedLiveElementIds: [101],
+      referenceData,
+      requireEventPinnedIdentity: true,
+    });
+    let repaired = false;
 
     const result = await syncLiveSnapshotV2(season, 2, {
       finalizeEvent: true,
       dependencies: {
         getEventLive: async () => {
           providerCalls += 1;
-          return { elements: [structuredClone(sourceElement)] };
+          return { elements: [structuredClone(finalElement)] };
         },
         getFixtures: async () => {
           providerCalls += 1;
@@ -331,8 +365,22 @@ describe('Live Points and Live Matches shared observation', () => {
         readPublished: async () => current,
         readCheckpointed: async () => durable,
         hasFinalMatchCheckpoints: async () => true,
-        readObservedMatchDesk: async () => ({ observed: '', read: null }),
-        readObservedMatchDetail: async () => ({ observed: '', read: null }),
+        readObservedMatchDesk: async () => ({
+          observed: repaired ? 'repaired-desk' : '',
+          read: repaired
+            ? ({
+                fixtures: expectedDesk.fixtures,
+              } as never)
+            : null,
+        }),
+        readObservedMatchDetail: async () => ({
+          observed: repaired ? 'repaired-detail' : '',
+          read: repaired
+            ? ({
+                fixtures: expectedDetail.fixtures,
+              } as never)
+            : null,
+        }),
         readCheckpointDesired: async () => null,
         clearCheckpointDesired: async () => true,
         syncLiveMatches: async (observation) => {
@@ -341,9 +389,12 @@ describe('Live Points and Live Matches shared observation', () => {
           expect(observation.publishedLiveElementIds).toEqual([101]);
           expect(observation.observedDesk?.read).toBeNull();
           expect(observation.observedDetail?.read).toBeNull();
+          repaired = true;
           return {
             desk: { state: 'FINALIZED' },
             detail: { finalized: true },
+            deskFixtures: expectedDesk.fixtures,
+            detailFixtures: expectedDetail.fixtures,
           } as never;
         },
         checkpointPublication: async () => {
