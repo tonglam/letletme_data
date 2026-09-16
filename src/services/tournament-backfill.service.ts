@@ -808,6 +808,15 @@ export async function runTournamentEventBackfill(
       freshAfter: finalCutoff ?? undefined,
     },
   );
+  if (
+    finalCutoff &&
+    (await eventRepository.findDataCheckedAtExact(season, eventId)) !== finalCutoff
+  ) {
+    throw new ConflictError(
+      'Event finalization changed during league repair.',
+      'TOURNAMENT_REPAIR_STALE',
+    );
+  }
   const completedLeagueUnits = leagueEventResults.reusedUnits + leagueEventResults.succeededUnits;
   if (
     leagueEventResults.failedUnits > 0 ||
@@ -832,9 +841,30 @@ export async function runTournamentEventBackfill(
   // Structure writes only: hold tournament-structure:global around points /
   // knockout upserts — not around FPL entry/league fetch above (Codex P2).
   const structureScopes = tournamentSetupBackfillEventScopes(eventId);
-  const writeResults = <T>(operation: () => Promise<T>) =>
-    repair
-      ? withTournamentRepairPhase(season, repair.issueId, repair.owner, structureScopes, operation)
+  const writeResults = <T>(operation: () => Promise<T>) => {
+    const fencedOperation = async () => {
+      // Held by the existing short structure transaction through commit; a
+      // finalization correction must not race between validation and writes.
+      if (
+        finalCutoff &&
+        (await eventRepository.findDataCheckedAtExact(season, eventId, { lock: 'share' })) !==
+          finalCutoff
+      ) {
+        throw new ConflictError(
+          'Event finalization changed before standings repair.',
+          'TOURNAMENT_REPAIR_STALE',
+        );
+      }
+      return operation();
+    };
+    return repair
+      ? withTournamentRepairPhase(
+          season,
+          repair.issueId,
+          repair.owner,
+          structureScopes,
+          fencedOperation,
+        )
       : withMutationScopes(
           {
             queueName: 'tournament-setup',
@@ -843,8 +873,9 @@ export async function runTournamentEventBackfill(
             eventId,
             scopes: structureScopes,
           },
-          operation,
+          fencedOperation,
         );
+  };
 
   if (
     tournament.groupMode === 'points_races' &&

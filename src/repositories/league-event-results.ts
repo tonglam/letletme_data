@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 
 import { entriesInCompetition, leagueEventResultsInCompetition } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
@@ -130,6 +130,14 @@ export const createLeagueEventResultsRepository = (dbInstance?: DbHandle) => {
                 eq(leagueEventResultsInCompetition.leagueType, leagueType),
                 eq(leagueEventResultsInCompetition.eventId, eventId),
                 inArray(leagueEventResultsInCompetition.entryId, chunk),
+                isNotNull(leagueEventResultsInCompetition.sourceLiveCheckedAt),
+                isNotNull(leagueEventResultsInCompetition.sourcePicksCheckedAt),
+                threshold
+                  ? gte(leagueEventResultsInCompetition.sourceLiveCheckedAt, threshold)
+                  : undefined,
+                threshold
+                  ? gte(leagueEventResultsInCompetition.sourcePicksCheckedAt, threshold)
+                  : undefined,
                 threshold
                   ? gte(leagueEventResultsInCompetition.sourceCheckedAt, threshold)
                   : undefined,

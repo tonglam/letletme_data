@@ -11,6 +11,8 @@ import { entryEventTransfersRepository } from '../../src/repositories/entry-even
 import { eventRepository } from '../../src/repositories/events';
 import * as entries from '../../src/services/entries.service';
 import * as eventResults from '../../src/services/tournament-event-results.service';
+import * as mutationScopes from '../../src/utils/mutation-scopes';
+import * as pointsResults from '../../src/services/tournament-points-race-results.service';
 import * as leagueResults from '../../src/services/league-event-results.service';
 import { runTournamentEventBackfill } from '../../src/services/tournament-backfill.service';
 
@@ -171,6 +173,49 @@ describe('FINAL tournament repair convergence', () => {
       .mockResolvedValue('2026-09-02T10:00:00.123456Z');
     await expect(run()).rejects.toThrow('finalization changed');
     expect(leagueResults.syncLeagueEventResultsByTournament).not.toHaveBeenCalled();
+  });
+  test('rejects a finalization correction made during league calculation', async () => {
+    spyOn(leagueResults, 'syncLeagueEventResultsByTournament').mockImplementation(async () => {
+      spyOn(eventRepository, 'findDataCheckedAtExact').mockResolvedValue(
+        '2026-09-02T10:00:00.123456Z',
+      );
+      return {
+        totalEntries: ids.length,
+        updated: 0,
+        skipped: 0,
+        reusedUnits: ids.length,
+        succeededUnits: 0,
+        failedUnits: 0,
+      } as never;
+    });
+    await expect(run()).rejects.toThrow('finalization changed during league');
+  });
+  test('fences the expected cutoff inside the short standings transaction', async () => {
+    const writer = spyOn(pointsResults, 'syncTournamentPointsRaceResultsForTournament');
+    spyOn(mutationScopes, 'withMutationScopes').mockImplementation(async (_request, operation) => {
+      spyOn(eventRepository, 'findDataCheckedAtExact').mockResolvedValue(
+        '2026-09-02T10:00:00.123456Z',
+      );
+      return operation();
+    });
+    await expect(
+      runTournamentEventBackfill(
+        TEST_SEASON,
+        4,
+        {
+          ...tournament,
+          groupMode: 'points_races',
+          groupStartedEventId: 1,
+          groupEndedEventId: 4,
+        },
+        ids,
+        3,
+      ),
+    ).rejects.toThrow('finalization changed before standings');
+    expect(writer).not.toHaveBeenCalled();
+    expect(eventRepository.findDataCheckedAtExact).toHaveBeenLastCalledWith(TEST_SEASON, 3, {
+      lock: 'share',
+    });
   });
   test('keeps provisional rounds on the fresh observation path', async () => {
     spyOn(eventRepository, 'findById').mockResolvedValue({
