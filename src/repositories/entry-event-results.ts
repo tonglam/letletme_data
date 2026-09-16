@@ -458,8 +458,12 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const db = await getDbInstance();
         const syncedEntryIds = new Set<number>();
         const threshold =
-          freshAfter instanceof Date ? freshAfter : freshAfter ? new Date(freshAfter) : undefined;
-        if (threshold && !Number.isFinite(threshold.getTime())) {
+          freshAfter instanceof Date
+            ? freshAfter.toISOString()
+            : freshAfter === undefined
+              ? undefined
+              : freshAfter;
+        if (threshold !== undefined && !Number.isFinite(new Date(threshold).getTime())) {
           throw new Error('A valid rich-sync freshness timestamp is required');
         }
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
@@ -475,8 +479,8 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                 eq(entryEventResultsInCompetition.seasonId, season.seasonId),
                 eq(entryEventResultsInCompetition.eventId, eventId),
                 inArray(entryEventResultsInCompetition.entryId, chunk),
-                threshold
-                  ? gte(entryEventResultsInCompetition.richSyncedAt, threshold)
+                threshold !== undefined
+                  ? sql`${entryEventResultsInCompetition.richSyncedAt} >= ${threshold}::timestamptz`
                   : isNotNull(entryEventResultsInCompetition.richSyncedAt),
               ),
             );

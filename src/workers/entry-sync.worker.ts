@@ -628,10 +628,7 @@ export function createEntrySyncWorker(
     // before any provider work, so a later attempt audits the rows committed
     // by the first attempt instead of manufacturing a newer watermark.
     let requestWatermark = job.data?.requestWatermark;
-    if (
-      requestWatermark === undefined &&
-      (executionIntent === 'force' || executionIntent === 'retry')
-    ) {
+    if (requestWatermark === undefined) {
       const ordering = await readDatabaseOrderingTimestamp();
       requestWatermark = ordering.exact;
       await job.updateData({ ...job.data, requestWatermark });
