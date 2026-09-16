@@ -2590,6 +2590,7 @@ type MyFplFinalizationControlRow = {
   finished: boolean;
   data_checked: boolean;
   data_checked_at: Date | string | null;
+  data_checked_at_exact: string | null;
   revision: number | string | null;
   snapshot_date: string | null;
   kind: MyFplSnapshotKind | null;
@@ -2631,6 +2632,13 @@ async function readMyFplFinalizationControlState(
              event.finished,
              event.data_checked,
              event.data_checked_at,
+             CASE
+               WHEN event.data_checked_at IS NULL THEN NULL
+               ELSE to_char(
+                 event.data_checked_at AT TIME ZONE 'UTC',
+                 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+               )
+             END AS data_checked_at_exact,
              publication.revision,
              publication.snapshot_date,
              publication.kind,
@@ -2698,7 +2706,10 @@ async function readMyFplFinalizationControlState(
     deadlineTime: iso(row.deadline_time),
     finished: row.finished,
     dataChecked: row.data_checked,
-    dataCheckedAt: iso(row.data_checked_at),
+    // Keep the event fence at PostgreSQL precision. Date/toISOString would
+    // truncate the six fractional digits and make an unchanged FINAL look
+    // stale on every retry.
+    dataCheckedAt: row.data_checked_at_exact ?? iso(row.data_checked_at),
     activeRevision: row.revision === null ? null : Number(row.revision),
     activeSnapshotDate: row.snapshot_date,
     activeKind: row.kind,
