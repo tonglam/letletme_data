@@ -453,6 +453,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const currentFinalizationRevision = eventRows[0]?.dataCheckedAt?.toISOString() ?? null;
       const finalResourceId = `${resourcePrefix}final`;
       const resultResourceId = `${resourcePrefix}results`;
+      const transferResourceId = `${resourcePrefix}transfers`;
       const sourceRevisionAt = sql`
         CASE
           WHEN (${syncItemsInOps.normalizedPayload}->>'sourceRevision') ~
@@ -483,6 +484,22 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       `;
       const resultEvidenceComplete = sql<boolean>`coalesce(
         bool_or(${resultEvidencePredicate}),
+        false
+      )`;
+      const transferEvidencePredicate = sql`
+        ${syncItemsInOps.resourceId} = ${transferResourceId}
+        AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+        AND (
+          (${syncItemsInOps.normalizedPayload}->>'factCommit') IN ('committed', 'reused')
+          OR (${syncItemsInOps.normalizedPayload}->>'reused') = 'true'
+        )
+      `;
+      const transferComponentPresent = sql<boolean>`coalesce(
+        bool_or(${syncItemsInOps.resourceId} = ${transferResourceId}),
+        false
+      )`;
+      const transferEvidenceComplete = sql<boolean>`coalesce(
+        bool_or(${transferEvidencePredicate}),
         false
       )`;
       const finalEvidenceComplete = !eventFinalized
@@ -542,6 +559,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               )
             )::int`,
             finalEvidenceComplete,
+            transferComponentPresent,
+            transferEvidenceComplete,
             coverageStartAt: sql<string | Date | null>`min(
               coalesce(${syncItemsInOps.createdAt}, ${syncRunsInOps.createdAt})
             )`,
@@ -598,6 +617,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         totalRows > 0 &&
         aggregate?.resultEvidenceComplete === true &&
         aggregate?.finalEvidenceComplete === true &&
+        (aggregate?.transferComponentPresent !== true ||
+          aggregate?.transferEvidenceComplete === true) &&
         Number(aggregate?.unaccountedItems ?? 0) === 0;
       const reasonCodes =
         totalRows === 0
@@ -609,6 +630,10 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               ...(aggregate?.finalEvidenceComplete === true
                 ? []
                 : ['SYNC_AUDIT_FINAL_EVIDENCE_MISSING']),
+              ...(aggregate?.transferComponentPresent !== true ||
+              aggregate?.transferEvidenceComplete === true
+                ? []
+                : ['SYNC_AUDIT_TRANSFER_EVIDENCE_MISSING']),
               ...(Number(aggregate?.unaccountedItems ?? 0) === 0
                 ? []
                 : ['SYNC_AUDIT_ITEMS_UNACCOUNTED']),

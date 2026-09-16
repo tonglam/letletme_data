@@ -216,6 +216,20 @@ export async function persistTournamentTerminalFailureBeforeSettlement(
 }
 
 /**
+ * Only the two explicit final-checkpoint guards may enter dependency-wait.
+ * SOURCE_NOT_READY is also used for provider 404/409 responses, which must
+ * consume the normal terminal failure path instead of being deferred forever.
+ */
+export function isTournamentFinalCheckpointWait(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message;
+  return (
+    message.includes('Final event-live V2 checkpoint is missing for event ') ||
+    message.includes('Tournament cascade is waiting for finalized V2 checkpoint in event ')
+  );
+}
+
+/**
  * Enqueue cascade jobs after tournament-event-results completes.
  * These jobs depend on fresh tournament event results.
  *
@@ -935,7 +949,8 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
     const fence = inspectSchedulerObligationFence(job.data);
     if (fence.kind === 'complete') {
       try {
-        const dependencyNotReady = classifyDataError(error) === 'SOURCE_NOT_READY';
+        const dependencyNotReady =
+          classifyDataError(error) === 'SOURCE_NOT_READY' && isTournamentFinalCheckpointWait(error);
         if (dependencyNotReady && isTerminalJobAttemptFailure(job, error, job.attemptsMade + 1)) {
           // Dependency waits must win the pre-settlement race. Persisting a
           // terminal failure first changes the obligation state so the defer
@@ -1040,7 +1055,8 @@ export function createTournamentSyncWorker(
       eventId: job?.data.eventId,
     });
     const fence = job ? inspectSchedulerObligationFence(job.data) : null;
-    const dependencyNotReady = classifyDataError(err) === 'SOURCE_NOT_READY';
+    const dependencyNotReady =
+      classifyDataError(err) === 'SOURCE_NOT_READY' && isTournamentFinalCheckpointWait(err);
     if (job && dependencyNotReady && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {
       void deferSchedulerObligationForWorker({
         obligationId: fence.obligationId,

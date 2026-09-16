@@ -411,6 +411,56 @@ describe('ops sync state machine', () => {
     expect(recoveredAudit.reasonCodes).toEqual([]);
   });
 
+  test('does not certify results while a transfer component is unresolved', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[1], season);
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:results`,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { factCommit: 'reused', reused: true },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: { unknownRequests: 1 },
+        lastError: 'provider timeout',
+      },
+    ]);
+
+    const incompleteAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(incompleteAudit.evidenceComplete).toBe(false);
+    expect(incompleteAudit.reasonCodes).toContain('SYNC_AUDIT_TRANSFER_EVIDENCE_MISSING');
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'skipped',
+        attempts: 2,
+        normalizedPayload: {
+          factCommit: 'reused',
+          reused: true,
+        },
+      },
+    ]);
+    const recoveredAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(recoveredAudit.evidenceComplete).toBe(true);
+    expect(recoveredAudit.reasonCodes).toEqual([]);
+  });
+
   test('counts only the final audit component as a durable FINAL completion', async () => {
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await syncOperationsRepository.startRun({

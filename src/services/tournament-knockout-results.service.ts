@@ -676,17 +676,41 @@ export async function syncKnockoutForTournament(
           tournament.id,
           nextMatchIds,
         );
-        const nextResults = candidateResultKeys
+        const allNextResults = candidateResultKeys
           ? persistedNextResults.filter((result) =>
               candidateResultKeys.has(knockoutResultBusinessKey(result)),
             )
           : persistedNextResults;
         const nextResultsByMatch = new Map<number, DbTournamentKnockoutResult[]>();
-        for (const result of nextResults) {
+        for (const result of allNextResults) {
           const rows = nextResultsByMatch.get(result.matchId) ?? [];
           rows.push(result);
           nextResultsByMatch.set(result.matchId, rows);
         }
+        const deferredNextMatchIds = new Set(
+          candidateResultKeys === null
+            ? []
+            : [...nextResultsByMatch].flatMap(([matchId, results]) => {
+                const nextData = nextRoundMap.get(matchId);
+                return nextData &&
+                  shouldDeferNextRoundResultRehome(
+                    results,
+                    nextData.nextHomeEntryId,
+                    nextData.nextAwayEntryId,
+                  )
+                  ? [matchId]
+                  : [];
+              }),
+        );
+        // In candidate mode, accepted rows are never part of the rehome
+        // upsert. They stay attributed to their original entrants until the
+        // next event's fresh score calculation replaces them.
+        const nextResults = candidateResultKeys
+          ? allNextResults.filter(
+              (result) =>
+                !deferredNextMatchIds.has(result.matchId) && !hasAcceptedKnockoutFacts(result),
+            )
+          : allNextResults;
         const updatedNextResults = nextResults.map((result) => {
           const nextData = nextRoundMap.get(result.matchId);
           if (!nextData) {
@@ -695,16 +719,6 @@ export async function syncKnockoutForTournament(
           const homeEntryId = nextData.nextHomeEntryId;
           const awayEntryId = nextData.nextAwayEntryId;
           if (!homeEntryId || !awayEntryId) {
-            return result;
-          }
-          const deferRehome =
-            candidateResultKeys !== null &&
-            shouldDeferNextRoundResultRehome(
-              nextResultsByMatch.get(result.matchId) ?? [],
-              homeEntryId,
-              awayEntryId,
-            );
-          if (deferRehome) {
             return result;
           }
           const swap = result.playAgainstId % 2 === 0;
