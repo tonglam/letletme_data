@@ -1290,6 +1290,9 @@ test('audited deleted-entry correction survives checkpoint failure without chang
     changeId: 'integration-final-correction',
     apply: false,
   };
+  const priorCurrentSeasons =
+    await sql`UPDATE fpl.seasons SET is_current=false WHERE is_current RETURNING season_id`;
+  await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${SEASON.seasonId}`;
   try {
     expect((await correctDeletedEntryFinal(target)).mode).toBe('inspect');
     expect((await readEntryLiveInputV2(scope))!.publication.publicationId).toBe(
@@ -1309,6 +1312,17 @@ test('audited deleted-entry correction survives checkpoint failure without chang
         boundary,
       ),
     ).rejects.toThrow('explicit correction');
+    history.mockImplementationOnce(async () => {
+      await sql`UPDATE fpl.seasons SET is_current=false WHERE season_id=${SEASON.seasonId}`;
+      return { current: [picks.entry_history], past: [], chips: [] };
+    });
+    await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+      'current season changed',
+    );
+    await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${SEASON.seasonId}`;
+    const [noAudit] =
+      await sql`SELECT count(*)::int AS n FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
+    expect(noAudit!.n).toBe(0);
     // A canonical writer racing the provider read must stop promotion.
     history.mockImplementationOnce(async () => {
       await sql`UPDATE competition.entry_event_results SET overall_points=1 WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID} AND entry_id=${ENTRY_IDS[0]}`;
@@ -1346,6 +1360,41 @@ test('audited deleted-entry correction survives checkpoint failure without chang
     history.mockRejectedValue(new Error('deleted account history unavailable'));
     const providerCalls = provider.mock.calls.length,
       historyCalls = history.mock.calls.length;
+    const realCheckpoint = entryServices.checkpointEntryLiveInputV2;
+    const changedIdentity = spyOn(
+      entryServices,
+      'checkpointEntryLiveInputV2',
+    ).mockImplementationOnce(async (...args) => {
+      const result = await realCheckpoint(...args);
+      await sql`UPDATE competition.entries SET player_name='Restored identity' WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]}`;
+      return result;
+    });
+    try {
+      await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+        'deleted-entry',
+      );
+    } finally {
+      changedIdentity.mockRestore();
+    }
+    await sql`UPDATE competition.entries SET player_name='Deleted Player' WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]}`;
+    const changedSeason = spyOn(entryServices, 'checkpointEntryLiveInputV2').mockImplementationOnce(
+      async (...args) => {
+        const result = await realCheckpoint(...args);
+        await sql`UPDATE fpl.seasons SET is_current=false WHERE season_id=${SEASON.seasonId}`;
+        return result;
+      },
+    );
+    try {
+      await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+        'current season changed',
+      );
+    } finally {
+      changedSeason.mockRestore();
+    }
+    await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${SEASON.seasonId}`;
+    const [notRecovered] =
+      await sql`SELECT status FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
+    expect(notRecovered!.status).toBe('REQUIRES_REVIEW');
     const settlement = spyOn(
       correctionGovernance,
       'updateGovernanceCaseStatus',
@@ -1403,5 +1452,8 @@ test('audited deleted-entry correction survives checkpoint failure without chang
   } finally {
     provider.mockRestore();
     history.mockRestore();
+    await sql`UPDATE fpl.seasons SET is_current=false WHERE season_id=${SEASON.seasonId}`;
+    for (const row of priorCurrentSeasons)
+      await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${row.season_id}`;
   }
 });

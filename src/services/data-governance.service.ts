@@ -1873,7 +1873,7 @@ export async function openGovernanceCase(input: {
   evidence?: Record<string, unknown>;
   repairTarget?: Record<string, unknown>;
   compensator: string;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }) {
   // Shadow mode records freshness breaches in the SLO ledger but must remain
   // observation-only.  Keep this invariant at the case boundary as well as

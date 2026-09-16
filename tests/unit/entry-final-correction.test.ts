@@ -39,6 +39,7 @@ function fixture() {
     eventRank: 0,
     overallRank: 0,
     eventTransfersCost: 0,
+    eventTransfers: 0,
     eventChip: null,
     richSyncedAt: new Date('2026-09-01T00:01:00Z'),
     eventPicks: picks.picks,
@@ -131,6 +132,55 @@ describe('explicit deleted-entry FINAL correction', () => {
         result: { ...input.result, eventChip: 'freehit' },
       }),
     ).toThrow('chip');
+  });
+  test('rejects transfer metadata and adjustment changes outside the zero-total correction', () => {
+    const input = fixture();
+    expect(() =>
+      buildDeletedEntryFinalCorrection({
+        ...input,
+        result: { ...input.result, eventTransfers: 1 },
+        picks: {
+          ...input.picks,
+          entry_history: { ...input.picks.entry_history, event_transfers: 1 },
+        },
+        history: { ...input.history, event_transfers: 1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      buildDeletedEntryFinalCorrection({
+        ...input,
+        result: { ...input.result, eventTransfersCost: 4 },
+        picks: {
+          ...input.picks,
+          entry_history: { ...input.picks.entry_history, event_transfers_cost: 4 },
+        },
+        history: { ...input.history, event_transfers_cost: 4 },
+      }),
+    ).toThrow();
+    const changed = {
+      ...input.original,
+      officialAdjustment: {
+        ...input.original.officialAdjustment!,
+        multipliers: input.original.officialAdjustment!.multipliers.map((m, i) => ({
+          ...m,
+          multiplier: i === 0 ? 1 : m.multiplier,
+        })),
+      },
+    };
+    expect(() => buildDeletedEntryFinalCorrection({ ...input, original: changed })).toThrow(
+      'official adjustment',
+    );
+  });
+  test('rejects a result preceding the finalization boundary within the same millisecond', () => {
+    const input = fixture();
+    const stale = { ...input.result, richSyncedAt: new Date('2026-09-01T00:00:00.001Z') };
+    expect(
+      buildFinalEntryLiveInputFromBaseAndResult(
+        { ...input.original, finalResult: null },
+        stale,
+        '2026-09-01T00:00:00.001234Z',
+      ),
+    ).toBeNull();
   });
   test('requires exact scope and defaults to read-only inspection', () => {
     const args = [

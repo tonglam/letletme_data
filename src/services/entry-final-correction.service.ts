@@ -1,7 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { fplClient, PicksResponseSchema, EntryHistoryCurrentItemSchema } from '../clients/fpl';
-import { getDb } from '../db/singleton';
-import { dataGovernanceCasesInOps } from '../db/schemas/index.schema';
+import { getDb, type DbOrTransaction } from '../db/singleton';
+import { dataGovernanceCasesInOps, seasonsInFpl } from '../db/schemas/index.schema';
 import type { DbEntryEventResult } from '../db/schemas/platform.types';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse } from '../types';
@@ -58,6 +58,8 @@ export function buildDeletedEntryFinalCorrection(input: {
     original.finalResult.score.totalPoints !== result.eventPoints ||
     result.eventPoints <= 0 ||
     original.finalResult.score.eventPoints !== result.eventPoints ||
+    result.eventTransfers !== original.picksBase.transferCount ||
+    result.eventTransfersCost !== original.picksBase.transferCost ||
     picks.entry_history.event !== result.eventId ||
     history.event !== result.eventId
   ) {
@@ -69,7 +71,8 @@ export function buildDeletedEntryFinalCorrection(input: {
       observed.overall_rank !== 0 ||
       (observed.rank !== null && observed.rank !== 0) ||
       observed.points !== result.eventPoints ||
-      observed.event_transfers_cost !== result.eventTransfersCost
+      observed.event_transfers_cost !== result.eventTransfersCost ||
+      observed.event_transfers !== result.eventTransfers
     ) {
       throw new Error('Independent official sources do not confirm the zero-total correction');
     }
@@ -114,7 +117,22 @@ export function buildDeletedEntryFinalCorrection(input: {
     dataCheckedAt,
   );
   if (!corrected) throw new Error('Corrected FINAL does not satisfy the finalized result contract');
-  return corrected;
+  const originalAdjustment = original.officialAdjustment;
+  const expectedAdjustment = corrected.officialAdjustment;
+  const sortedMultipliers = (
+    rows: NonNullable<EntryLiveInputV2['officialAdjustment']>['multipliers'],
+  ) => [...rows].sort((a, b) => a.element - b.element);
+  if (
+    !originalAdjustment ||
+    !expectedAdjustment ||
+    contentHash(sortedMultipliers(originalAdjustment.multipliers)) !==
+      contentHash(sortedMultipliers(expectedAdjustment.multipliers)) ||
+    contentHash(normalizeSubs(originalAdjustment.automaticSubs)) !==
+      contentHash(normalizeSubs(expectedAdjustment.automaticSubs))
+  )
+    throw new Error('FINAL correction cannot change the frozen official adjustment');
+  // Its accepted revision is immutable too, including historic timestamp spelling.
+  return { ...corrected, officialAdjustment: originalAdjustment };
 }
 
 export async function correctDeletedEntryFinal(input: {
@@ -136,6 +154,19 @@ export async function correctDeletedEntryFinal(input: {
     )
   )
     throw new Error('Invalid explicit correction target');
+  const assertCurrentSeason = async (tx: DbOrTransaction) => {
+    const currentSeasons = await tx
+      .select({ seasonId: seasonsInFpl.seasonId, seasonCode: seasonsInFpl.seasonCode })
+      .from(seasonsInFpl)
+      .where(eq(seasonsInFpl.isCurrent, true))
+      .for('share');
+    if (
+      currentSeasons.length !== 1 ||
+      currentSeasons[0]!.seasonId !== season.seasonId ||
+      currentSeasons[0]!.seasonCode !== season.seasonCode
+    )
+      throw new Error('Canonical current season changed during correction');
+  };
   const fingerprint = contentHash({
     season: season.seasonCode,
     entryId,
@@ -259,34 +290,65 @@ export async function correctDeletedEntryFinal(input: {
   // Persist the complete original evidence before any cache pointer can change.
   const audit =
     existingCase ??
-    (await openGovernanceCase({
-      caseKind: 'entry-final-correction',
-      contractKey: 'entry-live-v2',
-      lane: 'entry-sync',
-      scopeKey: `${season.seasonCode}:event:${eventId}:entry:${entryId}`,
-      targetRevision: input.expectedPublicationId,
-      fingerprint,
-      errorClass: 'DATA_INCOMPLETE',
-      errorCode: 'DELETED_ENTRY_FINAL_TOTAL_CORRECTION',
-      compensator: 'explicit audited deleted-entry FINAL correction',
-      requiresReview: true,
-      evidence: JSON.parse(
-        JSON.stringify({
-          changeId: input.changeId,
-          originalInput: original,
-          originalHead: head,
-          correctionHash,
-          dataCheckedAt: boundary,
-          observedAt: source.exact,
-          providerHistory: historyRow,
-          providerPicks: picks,
-          acceptedResult: results[0],
-        }),
-      ),
-      repairTarget: { eventId, entryId },
-    }));
-  if (!audit || (audit.evidence as Record<string, unknown>).correctionHash !== correctionHash)
+    (await withEntrySeasonSyncTransaction(
+      season,
+      entryId,
+      async (tx) => {
+        await assertCurrentSeason(tx);
+        // Serialize first evidence capture: a concurrent operator cannot replace
+        // the observations archived by the first attempt of this change ID.
+        const [archived] = await tx
+          .select()
+          .from(dataGovernanceCasesInOps)
+          .where(
+            and(
+              eq(dataGovernanceCasesInOps.caseKind, 'entry-final-correction'),
+              eq(dataGovernanceCasesInOps.fingerprint, fingerprint),
+            ),
+          )
+          .orderBy(desc(dataGovernanceCasesInOps.caseId))
+          .limit(1);
+        if (archived) return archived;
+        return openGovernanceCase({
+          db: tx,
+          caseKind: 'entry-final-correction',
+          contractKey: 'entry-live-v2',
+          lane: 'entry-sync',
+          scopeKey: `${season.seasonCode}:event:${eventId}:entry:${entryId}`,
+          targetRevision: input.expectedPublicationId,
+          fingerprint,
+          errorClass: 'DATA_INCOMPLETE',
+          errorCode: 'DELETED_ENTRY_FINAL_TOTAL_CORRECTION',
+          compensator: 'explicit audited deleted-entry FINAL correction',
+          requiresReview: true,
+          evidence: JSON.parse(
+            JSON.stringify({
+              changeId: input.changeId,
+              originalInput: original,
+              originalHead: head,
+              correctionHash,
+              dataCheckedAt: boundary,
+              observedAt: source.exact,
+              providerHistory: historyRow,
+              providerPicks: picks,
+              acceptedResult: results[0],
+            }),
+          ),
+          repairTarget: { eventId, entryId },
+        });
+      },
+      { timeoutMs: 5000 },
+    ));
+  if (
+    !audit ||
+    !['REQUIRES_REVIEW', 'RECOVERED'].includes(audit.status) ||
+    (audit.evidence as Record<string, unknown>).correctionHash !== correctionHash ||
+    (audit.evidence as Record<string, unknown>).dataCheckedAt !== boundary
+  )
     throw new Error('Durable correction evidence is missing or changed');
+  source = {
+    exact: exactTimestamp(String((audit.evidence as Record<string, unknown>).observedAt)),
+  };
   // Serialize canonical revalidation and promotion with the existing entry writer fence.
   // HTTP reads are complete before entering this short transaction; checkpointing
   // reacquires the same fence after it, so it must not run inside this callback.
@@ -294,6 +356,7 @@ export async function correctDeletedEntryFinal(input: {
     season,
     entryId,
     async (tx) => {
+      await assertCurrentSeason(tx);
       const currentBoundary = await createEventRepository(tx).findDataCheckedAtExact(
         season,
         eventId,
@@ -352,6 +415,7 @@ export async function correctDeletedEntryFinal(input: {
     season,
     entryId,
     async (tx) => {
+      await assertCurrentSeason(tx);
       const acceptedBoundary = await createEventRepository(tx).findDataCheckedAtExact(
         season,
         eventId,
@@ -368,16 +432,18 @@ export async function correctDeletedEntryFinal(input: {
         eventId,
         [entryId],
       );
-      const acceptedInput = acceptedResult
-        ? buildDeletedEntryFinalCorrection({
-            original,
-            result: acceptedResult,
-            identity: identities[0]!,
-            picks,
-            history: historyRow,
-            dataCheckedAt: boundary,
-          })
-        : null;
+      const [acceptedIdentity] = await createEntryInfoRepository(tx).findByIds(season, [entryId]);
+      const acceptedInput =
+        acceptedResult && acceptedIdentity
+          ? buildDeletedEntryFinalCorrection({
+              original,
+              result: acceptedResult,
+              identity: acceptedIdentity,
+              picks,
+              history: historyRow,
+              dataCheckedAt: boundary,
+            })
+          : null;
       if (
         acceptedBoundary !== boundary ||
         !accepted ||

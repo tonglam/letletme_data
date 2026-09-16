@@ -1155,7 +1155,7 @@ export function buildFinalEntryLiveInputFromBaseAndResult(
     !Number.isSafeInteger(result.overallPoints) ||
     !result.richSyncedAt ||
     !Number.isFinite(result.richSyncedAt.getTime()) ||
-    result.richSyncedAt.getTime() < new Date(dataCheckedAt).getTime()
+    isFreshnessBoundaryNewer(result.richSyncedAt, dataCheckedAt)
   ) {
     return null;
   }
