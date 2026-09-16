@@ -246,7 +246,6 @@ async function repairTournamentSetupIssuePrepared(
         let candidate: TournamentStructureRepairCandidate | null = null;
         await rebuildTournamentStructure(season, tournament, entrySeeds, {
           preserveDerivedResults: true,
-          acceptedBattleMatchupKeys: staleDerivedResults.battleMatchupKeys,
           onCandidate: (value) => {
             candidate = value;
           },
@@ -311,11 +310,10 @@ async function repairTournamentSetupIssuePrepared(
         }
         if (!repairIssues.some((candidate) => candidate.issueKey === issue.issueKey)) {
           await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
-            pruneTournamentDerivedResultsOutsideStructure(
-              season,
-              issue.tournamentId,
-              rebuilt.staleDerivedResults,
-            ),
+            pruneTournamentDerivedResultsOutsideStructure(season, issue.tournamentId, {
+              ...rebuilt.staleDerivedResults,
+              battleMatchupKeys: [...rebuilt.candidate.battleMatchupKeys],
+            }),
           );
           // A topology rebuild can change group membership, phase boundaries, or
           // bracket edges for every settled event. Defer the correction reset

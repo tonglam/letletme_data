@@ -223,7 +223,10 @@ export async function syncTournamentBattleRaceResultsForTournament(
   }, new Date(0));
   for (const result of battleResults) {
     if (candidateMode && !candidateMatchupKeys.has(battleMatchupKey(result))) {
-      skipped += 1;
+      // This row is outside the complete rebuilt schedule. It is intentionally
+      // ignored during candidate scoring and removed by the post-backfill
+      // topology prune; it is not missing source evidence and must not keep a
+      // valid repair in an incomplete state.
       logWarn('Skipping battle race row outside the accepted repair schedule', {
         tournamentId: tournament.id,
         eventId,

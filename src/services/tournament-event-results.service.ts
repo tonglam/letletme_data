@@ -45,7 +45,7 @@ import {
 } from '../repositories/sync-operations';
 import { classifyDataError, safeDataErrorCode } from '../domain/error-classification';
 import { withTournamentEntrySyncLease } from '../utils/tournament-entry-sync-lease';
-import { redisSingleton } from '../cache/singleton';
+import { queueRedisSingleton } from '../queues/redis';
 
 const DEFAULT_CONCURRENCY = 5;
 const runtimeConfig = getConfig();
@@ -352,9 +352,9 @@ async function resolveEventPointsPayload(
   // handoff lets the next lease holder reuse a completed request across
   // workers. The finalization check above deliberately runs first so this
   // provisional fallback cannot satisfy a newly finalized event.
-  const sharedResultKey = `llm:data:v2:fpl:live:${season.seasonCode}:${eventId}:sync-source`;
+  const sharedResultKey = `llm:queue:coordination:tournament-event-live:${season.seasonCode}:${eventId}:sync-source`;
   try {
-    const redis = await redisSingleton.getClient();
+    const redis = await queueRedisSingleton.getClient();
     const serialized = await redis.get(sharedResultKey);
     if (serialized) {
       const shared = JSON.parse(serialized) as {
@@ -396,7 +396,7 @@ async function resolveEventPointsPayload(
   }
 
   try {
-    const redis = await redisSingleton.getClient();
+    const redis = await queueRedisSingleton.getClient();
     await redis.set(
       sharedResultKey,
       JSON.stringify({

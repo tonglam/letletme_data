@@ -417,6 +417,40 @@ describe('ops sync state machine', () => {
     expect(recoveredAudit.reasonCodes).toEqual([]);
   });
 
+  test('does not let a superseded run keep a later durable audit incomplete', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const resourceId = `${TEST_SEASON_ID}:1:123:results`;
+    await startRun(RUN_IDS[0], season, 'entry', 1);
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results' },
+      },
+    ]);
+
+    await startRun(RUN_IDS[1], season, 'entry', 1);
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { factCommit: 'committed' },
+      },
+    ]);
+
+    const audit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(audit.evidenceComplete).toBe(true);
+    expect(audit.reasonCodes).toEqual([]);
+  });
+
   test('allows same-attempt durable convergence to replace a provisional failure', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

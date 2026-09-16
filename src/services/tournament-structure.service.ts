@@ -31,26 +31,30 @@ import { createTournamentPointsGroupResultsRepository } from '../repositories/to
 export type DerivedResultRepairSnapshot = {
   points: Array<{ sourceResultId: number; updatedAt: string }>;
   battle: Array<{ sourceResultId: number; updatedAt: string }>;
-  /** Durable local fixture identities affected by the structure swap. */
-  battleMatchupKeys: Array<{
-    groupId: number;
-    eventId: number;
-    homeIndex: number;
-    awayIndex: number;
-  }>;
+  /** Canonical local schedule used by the post-repair pruning fence. */
+  battleMatchupKeys: TournamentBattleMatchupKey[];
   knockout: Array<{ sourceResultId: number; updatedAt: string }>;
 };
+
+export type TournamentBattleMatchupKey = Readonly<{
+  groupId: number;
+  eventId: number;
+  homeIndex: number;
+  awayIndex: number;
+}>;
+
+type BattleScheduleGroupRow = Readonly<{
+  groupId: number;
+  groupIndex: number;
+  startedEventId: number | null;
+  endedEventId: number | null;
+}>;
 
 export type TournamentStructureRepairCandidate = Readonly<{
   groupRows: ReadonlyArray<DbTournamentGroupInsert>;
   knockoutResults: ReadonlyArray<DbTournamentKnockoutResultInsert>;
-  /** Fixture identities are schedule facts; entrants are recalculated separately. */
-  battleMatchupKeys: ReadonlyArray<{
-    groupId: number;
-    eventId: number;
-    homeIndex: number;
-    awayIndex: number;
-  }>;
+  /** Fixture identities from the complete rebuilt local round schedule. */
+  battleMatchupKeys: ReadonlyArray<TournamentBattleMatchupKey>;
 }>;
 
 export function resolveKnockoutLegEntrants(
@@ -86,18 +90,96 @@ function groupInsert(row: Record<string, number | string | null>): DbTournamentG
   };
 }
 
+/**
+ * Build the complete local battle schedule from the rebuilt group topology.
+ *
+ * Local battle fixtures are round-robin facts: the group slots, event window,
+ * and round position determine the accepted matchup. Include both orientations
+ * because home/away is a display direction, while the business identity is the
+ * pair of slots. This whitelist is deliberately independent of the pre-repair
+ * result rows, so a corrupt extra row cannot make itself part of the candidate.
+ */
+export function buildBattleMatchupSchedule(
+  groupRows: ReadonlyArray<BattleScheduleGroupRow>,
+): TournamentBattleMatchupKey[] {
+  const rowsByGroup = new Map<number, BattleScheduleGroupRow[]>();
+  for (const row of groupRows) {
+    const rows = rowsByGroup.get(row.groupId) ?? [];
+    rows.push(row);
+    rowsByGroup.set(row.groupId, rows);
+  }
+
+  const keys: TournamentBattleMatchupKey[] = [];
+  const seen = new Set<string>();
+  const append = (groupId: number, eventId: number, homeIndex: number, awayIndex: number) => {
+    if (homeIndex === awayIndex) return;
+    const key = `${groupId}:${eventId}:${homeIndex}:${awayIndex}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    keys.push({ groupId, eventId, homeIndex, awayIndex });
+  };
+
+  for (const [groupId, originalRows] of rowsByGroup) {
+    const slots = [...new Map(originalRows.map((row) => [row.groupIndex, row])).values()].sort(
+      (left, right) => left.groupIndex - right.groupIndex,
+    );
+    const firstStart = slots.reduce<number | null>(
+      (current, row) =>
+        row.startedEventId === null
+          ? current
+          : current === null
+            ? row.startedEventId
+            : Math.min(current, row.startedEventId),
+      null,
+    );
+    const lastEnd = slots.reduce<number | null>(
+      (current, row) =>
+        row.endedEventId === null
+          ? current
+          : current === null
+            ? row.endedEventId
+            : Math.max(current, row.endedEventId),
+      null,
+    );
+    if (slots.length < 2 || firstStart === null || lastEnd === null || lastEnd < firstStart) {
+      continue;
+    }
+
+    for (let eventId = firstStart; eventId <= lastEnd; eventId += 1) {
+      const activeSlots = slots
+        .filter(
+          (row) =>
+            (row.startedEventId === null || eventId >= row.startedEventId) &&
+            (row.endedEventId === null || eventId <= row.endedEventId),
+        )
+        .map((row) => row.groupIndex);
+      if (activeSlots.length < 2) continue;
+
+      const participants: Array<number | null> = [...activeSlots];
+      if (participants.length % 2 === 1) participants.push(null);
+      const rotationLength = participants.length - 1;
+      const round = (eventId - firstStart) % rotationLength;
+      const rotating = participants.slice(1);
+      const rotated = [...rotating.slice(round), ...rotating.slice(0, round)];
+      const ordered: Array<number | null> = [participants[0]!, ...rotated];
+      for (let pair = 0; pair < ordered.length / 2; pair += 1) {
+        const left = ordered[pair];
+        const right = ordered[ordered.length - pair - 1];
+        if (left === null || right === null) continue;
+        append(groupId, eventId, left, right);
+        append(groupId, eventId, right, left);
+      }
+    }
+  }
+  return keys;
+}
+
 export async function rebuildTournamentStructure(
   season: FplSeasonRef,
   tournament: TournamentConfig,
   entrySeeds: EntrySeed[],
   options: Readonly<{
     preserveDerivedResults?: boolean;
-    acceptedBattleMatchupKeys?: ReadonlyArray<{
-      groupId: number;
-      eventId: number;
-      homeIndex: number;
-      awayIndex: number;
-    }>;
     onCandidate?: (candidate: TournamentStructureRepairCandidate) => void;
   }> = {},
 ): Promise<ReadonlyArray<DbTournamentGroupInsert>> {
@@ -112,6 +194,17 @@ export async function rebuildTournamentStructure(
     tournament.groupMode === 'no_group'
       ? []
       : buildGroupRows(tournament, entrySeeds).map(groupInsert);
+  const battleMatchupKeys =
+    tournament.groupMode === 'battle_races'
+      ? buildBattleMatchupSchedule(
+          groupRows.map((row) => ({
+            groupId: row.groupId,
+            groupIndex: row.groupIndex,
+            startedEventId: row.startedEventId ?? null,
+            endedEventId: row.endedEventId ?? null,
+          })),
+        )
+      : [];
   const knockoutRows =
     tournament.knockoutMode === 'no_knockout'
       ? { matches: [], results: [] }
@@ -177,7 +270,7 @@ export async function rebuildTournamentStructure(
   options.onCandidate?.({
     groupRows,
     knockoutResults: publishedKnockoutResults,
-    battleMatchupKeys: options.acceptedBattleMatchupKeys ?? [],
+    battleMatchupKeys,
   });
   return groupRows;
 }
@@ -317,12 +410,9 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
       .filter((result) => !ownsGroupEntry(result.groupId, result.entryId, result.eventId))
       .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
     battle: staleBattleRows.map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
-    battleMatchupKeys: staleBattleRows.map(({ groupId, eventId, homeIndex, awayIndex }) => ({
-      groupId,
-      eventId,
-      homeIndex,
-      awayIndex,
-    })),
+    // The pre-repair snapshot is not authoritative for the candidate schedule;
+    // the rebuilt group rows produce the complete whitelist after the swap.
+    battleMatchupKeys: [],
     knockout: knockoutResults
       .filter((result) => {
         if (result.officialMatchId !== null) return false;
@@ -366,7 +456,27 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
   // again after the rebuild, and an idempotent upsert may leave updated_at
   // unchanged. The argument remains part of the repair contract for callers
   // and provenance, but it must not delete a currently valid row.
-  void snapshot;
+  const acceptedBattleMatchupPayload = JSON.stringify(
+    snapshot.battleMatchupKeys.map(({ groupId, eventId, homeIndex, awayIndex }) => ({
+      group_id: groupId,
+      event_id: eventId,
+      home_index: homeIndex,
+      away_index: awayIndex,
+    })),
+  );
+  const outsideAcceptedBattleSchedule =
+    snapshot.battleMatchupKeys.length === 0
+      ? sql``
+      : sql`
+          OR NOT EXISTS (
+            SELECT 1
+            FROM jsonb_to_recordset(${acceptedBattleMatchupPayload}::jsonb)
+              AS accepted(group_id integer, event_id integer, home_index integer, away_index integer)
+            WHERE accepted.group_id = result.group_id
+              AND accepted.event_id = result.event_id
+              AND accepted.home_index = result.home_index
+              AND accepted.away_index = result.away_index
+          )`;
   const db = await getDb();
   await db.transaction(async (tx) => {
     await tx.execute(sql`
@@ -447,6 +557,7 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
                 AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
             )
           )
+          ${outsideAcceptedBattleSchedule}
         )
     `);
     await tx.execute(sql`

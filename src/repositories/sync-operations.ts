@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, like, lte, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
+import { and, asc, desc, eq, exists, gt, inArray, isNull, like, lte, or, sql } from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
@@ -405,6 +406,29 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         eq(syncItemsInOps.resourceType, 'entry-event'),
         like(syncItemsInOps.resourceId, `${resourcePrefix}%`),
       );
+      const newerAuditItems = alias(syncItemsInOps, 'entry_audit_newer_items');
+      const newerAuditRuns = alias(syncRunsInOps, 'entry_audit_newer_runs');
+      const supersededByLaterAttempt = exists(
+        db
+          .select({ one: sql`1` })
+          .from(newerAuditItems)
+          .innerJoin(newerAuditRuns, eq(newerAuditRuns.runId, newerAuditItems.runId))
+          .where(
+            and(
+              eq(newerAuditRuns.seasonId, syncRunsInOps.seasonId),
+              eq(newerAuditRuns.eventId, syncRunsInOps.eventId),
+              eq(newerAuditItems.resourceType, syncItemsInOps.resourceType),
+              eq(newerAuditItems.resourceId, syncItemsInOps.resourceId),
+              or(
+                gt(newerAuditRuns.createdAt, syncRunsInOps.createdAt),
+                and(
+                  eq(newerAuditRuns.createdAt, syncRunsInOps.createdAt),
+                  gt(newerAuditRuns.runId, syncRunsInOps.runId),
+                ),
+              ),
+            ),
+          ),
+      );
       const selectAuditRows = () =>
         db
           .select({
@@ -539,6 +563,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               WHERE NOT (
                 ${syncItemsInOps.status} IN ('completed', 'skipped')
                 OR (${syncItemsInOps.normalizedPayload}->>'unknownRequests') ~ '^-?[0-9]+([.][0-9]+)?$'
+                OR ${supersededByLaterAttempt}
               )
             )::int`,
             finalEvidenceComplete,
