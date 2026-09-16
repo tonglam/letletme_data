@@ -684,7 +684,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,
-          richSyncedAt: exactRichSyncedAt,
+          // Keep the six-digit PostgreSQL source watermark on the initial
+          // insert as well as the conflict-update fence. A Date here would
+          // truncate microseconds and let an older in-flight response win.
+          richSyncedAt: richSyncedAtValue,
         };
 
         const written = await db
