@@ -346,6 +346,17 @@ export function isSafeFinalizedClassicRosterExpansion(
       return false;
     }
     const candidateRowsById = new Map<number, unknown>();
+    const rankShiftIsValid = (previous: unknown, candidate: unknown): boolean => {
+      if (previous === candidate) return true;
+      return (
+        typeof previous === 'number' &&
+        Number.isSafeInteger(previous) &&
+        previous > 0 &&
+        typeof candidate === 'number' &&
+        Number.isSafeInteger(candidate) &&
+        candidate > 0
+      );
+    };
     const comparableIndexRow = (value: unknown): unknown => {
       if (!isRecord(value)) return value;
       const { overallRank: _overallRank, lastOverallRank: _lastOverallRank, ...stable } = value;
@@ -382,6 +393,14 @@ export function isSafeFinalizedClassicRosterExpansion(
       // entry even when that entry's identity, input and score are unchanged.
       // Keep every other index field strict so a successor cannot hide a
       // mutation behind the roster-expansion exception.
+      if (
+        !isRecord(row) ||
+        !isRecord(candidateRow) ||
+        !rankShiftIsValid(row.overallRank, candidateRow.overallRank) ||
+        !rankShiftIsValid(row.lastOverallRank, candidateRow.lastOverallRank)
+      ) {
+        return false;
+      }
       if (
         canonicalJson(comparableIndexRow(row)) !== canonicalJson(comparableIndexRow(candidateRow))
       ) {
