@@ -2316,7 +2316,7 @@ describe('scheduler obligation generation fencing', () => {
         3,
         3,
         ${new Date('2026-08-23T12:05:00Z').toISOString()}::timestamptz,
-        'Final event-live V2 checkpoint is missing for event 1; wait for final repair',
+        'DATA_INCOMPLETE:DATA_SYNC_INCOMPLETE Final event-live V2 checkpoint is missing for event 1; wait for final repair',
         jsonb_build_object(
           'scheduledDueAtMs', ${dueAt.getTime()}::bigint,
           'resultSlot', 'final-checkpoint',

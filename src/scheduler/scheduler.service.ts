@@ -113,7 +113,12 @@ const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
 // remains the only admission gate for the next real readiness check.
 const FINAL_DEPENDENCY_REVISIT_JOBS = new Set(['my-fpl-finalization']);
 const observedPlanKeys = new Map<string, true>();
-const FINAL_EVENT_LIVE_CHECKPOINT_MISSING_PREFIX = 'Final event-live V2 checkpoint is missing';
+// `failSchedulerObligation` persists the stable class/code before the
+// diagnostic message. Match that durable representation so the recovery
+// path can recognize the real terminal row without broadening the predicate
+// to unrelated errors containing the same wording.
+const FINAL_EVENT_LIVE_CHECKPOINT_MISSING_PREFIX =
+  'DATA_INCOMPLETE:DATA_SYNC_INCOMPLETE Final event-live V2 checkpoint is missing';
 
 /**
  * A permanent post-match checkpoint can outlive the provisional retry window.

@@ -792,7 +792,7 @@ async function refreshPostMatchObligationAuthority(input: {
   const finalCheckpointRecoverySql = finalCheckpointRecovery
     ? sql`(
         ${schedulerObligationsInOps.status} = 'irrecoverable'
-        AND ${schedulerObligationsInOps.lastError} LIKE 'Final event-live V2 checkpoint is missing%'
+        AND ${schedulerObligationsInOps.lastError} LIKE 'DATA_INCOMPLETE:DATA_SYNC_INCOMPLETE Final event-live V2 checkpoint is missing%'
       )`
     : sql`false`;
   const liveFinalizationNeedsRetry =
