@@ -609,7 +609,7 @@ test('mixed points and knockout tournaments retain the existing structural repai
   expect(rebuild).toHaveBeenCalledTimes(1);
 });
 
-test('historical points assignment failures enqueue the affected historical event scopes', async () => {
+test('historical points repairs attach only the earliest missing scope on each validation', async () => {
   const review = await import('../../src/services/tournament-review-publication.service');
   const jobs = await import('../../src/jobs/tournament-repair.jobs');
   const queued: number[] = [];
@@ -627,17 +627,36 @@ test('historical points assignment failures enqueue the affected historical even
     } as Parameters<typeof review.enqueueTournamentReviewRepair>[1],
     new review.TournamentReviewSourceNotReadyError(
       'historical points group assignment is stale',
-      [1, 2],
+      [2, 1],
     ),
     new Date(),
   );
   expect(attached).not.toBeNull();
-  expect(queued.sort()).toEqual([1, 2]);
+  expect(queued).toEqual([1]);
   const issues = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)).filter(
     (i) => i.code === 'TOURNAMENT_RESULTS_INCOMPLETE',
   );
-  expect(issues.map((i) => i.eventId).sort()).toEqual([1, 2]);
+  expect(issues.map((i) => i.eventId)).toEqual([1]);
   expect(issues.some((i) => i.issueId === attached)).toBe(true);
+  // Simulate the first repair completing. A fresh validation finds only event 2.
+  await sql`UPDATE competition.tournament_setup_issues SET resolved_at=clock_timestamp()
+    WHERE issue_id=${attached!} AND season_id=${season.seasonId}`;
+  const nextAttached = await review.enqueueTournamentReviewRepair(
+    season,
+    { tournament_id: tournamentId, event_id: 3 } as Parameters<
+      typeof review.enqueueTournamentReviewRepair
+    >[1],
+    new review.TournamentReviewSourceNotReadyError('historical points group assignment is stale', [
+      2,
+    ]),
+    new Date(),
+  );
+  expect(queued).toEqual([1, 2]);
+  const remaining = (
+    await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)
+  ).filter((candidate) => candidate.code === 'TOURNAMENT_RESULTS_INCOMPLETE');
+  expect(remaining).toHaveLength(1);
+  expect(remaining[0]).toMatchObject({ eventId: 2, issueId: nextAttached });
 });
 
 test('points upsert corrects group-only changes without accepting an older source', async () => {
@@ -667,4 +686,61 @@ test('points upsert corrects group-only changes without accepting an older sourc
   const [stored] =
     await sql`SELECT group_id,event_points FROM competition.tournament_points_group_results WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   expect(stored).toMatchObject({ group_id: 1, event_points: 42 });
+});
+
+test('late historical points standings cannot replace a newer cumulative window', async () => {
+  const { tournamentGroupRepository } = await import('../../src/repositories/tournament-groups');
+  const row = {
+    tournamentId,
+    groupId: 1,
+    groupName: 'A',
+    groupIndex: 1,
+    entryId: tournamentId,
+    played: 2,
+    totalNetPoints: 90,
+    groupPoints: 90,
+    totalPoints: 94,
+    totalTransfersCost: 4,
+    groupRank: 1,
+  };
+  const options = { preserveLaterStandings: true };
+  expect(await tournamentGroupRepository.upsertBatch(season, [row], options)).toBe(1);
+  expect(
+    await tournamentGroupRepository.upsertBatch(
+      season,
+      [
+        {
+          ...row,
+          played: 1,
+          totalNetPoints: 40,
+          groupPoints: 40,
+          totalPoints: 40,
+          totalTransfersCost: 0,
+          groupRank: 2,
+        },
+      ],
+      options,
+    ),
+  ).toBe(0);
+  const [current] =
+    await sql`SELECT played,group_points,total_points,total_transfers_cost,group_rank
+    FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  expect(current).toMatchObject({
+    played: 2,
+    group_points: 90,
+    total_points: 94,
+    total_transfers_cost: 4,
+    group_rank: 1,
+  });
+  // A genuine correction to the same current window still updates the totals.
+  expect(
+    await tournamentGroupRepository.upsertBatch(
+      season,
+      [{ ...row, groupPoints: 91, totalNetPoints: 91 }],
+      options,
+    ),
+  ).toBe(1);
+  const [corrected] = await sql`SELECT played,group_points FROM competition.tournament_groups
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  expect(corrected).toMatchObject({ played: 2, group_points: 91 });
 });

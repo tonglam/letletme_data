@@ -4175,35 +4175,38 @@ export async function enqueueTournamentReviewRepair(
     // The issue is still actionable without an entry list: the existing
     // structure/results repair paths resolve the roster from the tournament.
   }
-  const issues = (error.repairEventIds ?? [obligation.event_id]).map(
-    (eventId) =>
-      ({
-        ...reviewRepairIssue({ ...obligation, event_id: eventId }, error, nextRepairAt),
-        affectedEntryIds,
-      }) satisfies TournamentSetupIssueInput,
-  );
+  // An obligation has one attached repair identity. Repair the earliest missing
+  // scope first; the next real source validation discovers the next gap. Never
+  // create additional issues whose completion this obligation cannot track.
+  const repairEventId = error.repairEventIds?.length
+    ? Math.min(...error.repairEventIds)
+    : obligation.event_id;
+  const issue: TournamentSetupIssueInput = {
+    ...reviewRepairIssue({ ...obligation, event_id: repairEventId }, error, nextRepairAt),
+    affectedEntryIds,
+  };
   try {
     const existing = await tournamentSetupIssueRepository.listUnresolved(
       season,
       obligation.tournament_id,
     );
-    await tournamentSetupIssueRepository.sync(season, obligation.tournament_id, issues, {
+    await tournamentSetupIssueRepository.sync(season, obligation.tournament_id, [issue], {
       preserveUnresolvedIssueKeys: existing.map((candidate) => candidate.issueKey),
     });
     const persisted = (
       await tournamentSetupIssueRepository.listUnresolved(season, obligation.tournament_id)
-    ).filter((candidate) => issues.some((issue) => candidate.issueKey === issue.issueKey));
-    if (persisted.length === 0) return null;
+    ).find((candidate) => candidate.issueKey === issue.issueKey);
+    if (!persisted) return null;
     try {
       // Load the queue adapter only on the failure path. Jobs/status and the
       // normal publication reader remain free of BullMQ connection setup.
       const { enqueueTournamentRepair } = await import('../jobs/tournament-repair.jobs');
-      for (const issue of persisted) await enqueueTournamentRepair(season, issue, 'reconciliation');
+      await enqueueTournamentRepair(season, persisted, 'reconciliation');
     } catch {
       // The persisted issue is the retry source of truth; the repair watchdog
       // will enqueue it when the queue is available again.
     }
-    return persisted[0]!.issueId;
+    return persisted.issueId;
   } catch {
     return null;
   }

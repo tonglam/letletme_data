@@ -284,7 +284,11 @@ export async function syncTournamentPointsRaceResultsForTournament(
     result.eventGroupRank = groupRankMap.get(rankKey) ?? result.eventGroupRank ?? 0;
   }
 
-  const updatedGroupsCount = await tournamentGroupRepository.upsertBatch(season, updatedGroups);
+  // Historical event projections remain repairable, but their shorter cumulative
+  // window must never replace standings already computed through a later event.
+  const updatedGroupsCount = await tournamentGroupRepository.upsertBatch(season, updatedGroups, {
+    preserveLaterStandings: true,
+  });
   const updatedResultsCount = await tournamentPointsGroupResultsRepository.upsertBatch(
     season,
     updatedResults,
