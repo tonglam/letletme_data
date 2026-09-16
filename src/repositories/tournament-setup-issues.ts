@@ -29,7 +29,8 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
 
   return {
     // Call inside the short lifecycle transaction. The issue revision changes
-    // when a new occurrence or retry is recorded; cosmetic tournament edits
+    // when issue facts, occurrence or retry state change. Repeated observations
+    // update last_seen_at without invalidating a running repair; cosmetic tournament edits
     // do not invalidate canonical repair work.
     lockRepairState: async (
       season: FplSeasonRef,
@@ -37,7 +38,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
     ): Promise<TournamentRepairState | null> => {
       const db = await getDbInstance();
       const rows = await db.execute<TournamentRepairState>(sql`
-        SELECT i.tournament_id AS "tournamentId", i.xmin::text AS "issueRevision",
+        SELECT i.tournament_id AS "tournamentId", to_char(i.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "issueRevision",
           (to_jsonb(t) - ARRAY[
             'name', 'source_league_name', 'updated_at', 'setup_warning_count',
             'profiles_ready_at', 'insights_ready_at'
@@ -55,7 +56,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
     // A failure can occur before lifecycle capture. Only adopt the revision
     // of an occurrence already visible to this delivery, still due when its
     // attempt started. New observations and already-accounted retries fail
-    // this fence; recordRepairAttempt additionally compares xmin atomically.
+    // this fence; recordRepairAttempt additionally compares the semantic revision atomically.
     findDueDeliveryRevision: async (
       season: FplSeasonRef,
       issueId: number,
@@ -64,7 +65,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
     ): Promise<string | null> => {
       const db = await getDbInstance();
       const rows = await db.execute<{ revision: string }>(sql`
-        SELECT xmin::text AS revision
+        SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS revision
         FROM competition.tournament_setup_issues
         WHERE season_id = ${season.seasonId} AND issue_id = ${issueId}
           AND resolved_at IS NULL
@@ -155,6 +156,21 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
 
       for (const issue of normalized) {
         const affectedEntryIds = sql.param(issue.affectedEntryIds, table.affectedEntryIds);
+        const factsChanged = sql`ROW(
+          competition.tournament_setup_issues.code,
+          competition.tournament_setup_issues.category,
+          competition.tournament_setup_issues.severity,
+          competition.tournament_setup_issues.event_id,
+          competition.tournament_setup_issues.affected_entry_ids,
+          competition.tournament_setup_issues.diagnostic_code,
+          competition.tournament_setup_issues.internal_message
+        ) IS DISTINCT FROM ROW(
+          EXCLUDED.code, EXCLUDED.category, EXCLUDED.severity, EXCLUDED.event_id,
+          EXCLUDED.affected_entry_ids, EXCLUDED.diagnostic_code, EXCLUDED.internal_message
+        )`;
+        const scheduleInitialized = sql`competition.tournament_setup_issues.next_repair_at IS NULL
+          AND EXCLUDED.next_repair_at IS NOT NULL
+          AND competition.tournament_setup_issues.repair_exhausted_at IS NULL`;
         await db.execute(sql`
           INSERT INTO competition.tournament_setup_issues (
             season_id,
@@ -203,6 +219,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
               WHEN competition.tournament_setup_issues.resolved_at IS NOT NULL
                 THEN EXCLUDED.next_repair_at
               WHEN competition.tournament_setup_issues.repair_exhausted_at IS NULL
+                AND (${factsChanged} OR ${scheduleInitialized})
                 THEN EXCLUDED.next_repair_at
               ELSE competition.tournament_setup_issues.next_repair_at
             END,
@@ -216,7 +233,12 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
             END,
             last_seen_at = EXCLUDED.last_seen_at,
             resolved_at = NULL,
-            updated_at = EXCLUDED.updated_at
+            updated_at = CASE
+              WHEN competition.tournament_setup_issues.resolved_at IS NOT NULL
+                OR ${factsChanged} OR ${scheduleInitialized}
+              THEN GREATEST(clock_timestamp(), competition.tournament_setup_issues.updated_at + interval '1 microsecond')
+              ELSE competition.tournament_setup_issues.updated_at
+            END
         `);
       }
 
@@ -231,7 +253,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
           UPDATE competition.tournament_setup_issues
           SET resolved_at = ${now},
               next_repair_at = NULL,
-              updated_at = ${now}
+              updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
           WHERE season_id = ${season.seasonId}
             AND tournament_id = ${tournamentId}
             AND resolved_at IS NULL
@@ -241,7 +263,7 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
           UPDATE competition.tournament_setup_issues
           SET resolved_at = ${now},
               next_repair_at = NULL,
-              updated_at = ${now}
+              updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
           WHERE season_id = ${season.seasonId}
             AND tournament_id = ${tournamentId}
             AND resolved_at IS NULL
@@ -337,13 +359,13 @@ export const createTournamentSetupIssueRepository = (dbInstance?: DbHandle) => {
           repairAttempts: sql`${table.repairAttempts} + 1`,
           nextRepairAt,
           repairExhaustedAt: exhausted ? new Date() : null,
-          updatedAt: new Date(),
+          updatedAt: sql`GREATEST(clock_timestamp(), ${table.updatedAt} + interval '1 microsecond')`,
         })
         .where(
           and(
             eq(table.issueId, issueId),
             sql`${table.resolvedAt} IS NULL`,
-            sql`xmin::text = ${expectedRevision}`,
+            sql`${table.updatedAt} = ${expectedRevision}::timestamptz`,
           ),
         );
     },
