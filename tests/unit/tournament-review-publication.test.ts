@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 import {
+  reviewRepairIssue,
+  TournamentReviewSourceNotReadyError,
   hasCompleteTournamentReviewH2HGroupCoverage,
   hasCanonicalTournamentReviewGroupAssignment,
   h2hMatchPointsMatchScore,
@@ -33,6 +35,29 @@ const hardCutMigration = readFileSync(
 );
 
 describe('My Tournament Review V2 format and retry policy', () => {
+  test('routes stale points projections to result repair while retaining topology repair', () => {
+    const obligation = { event_id: 3 } as Parameters<typeof reviewRepairIssue>[0];
+    for (const message of [
+      'points group assignment is stale',
+      'historical points group assignment is stale',
+    ]) {
+      expect(
+        reviewRepairIssue(obligation, new TournamentReviewSourceNotReadyError(message), new Date())
+          .code,
+      ).toBe('TOURNAMENT_RESULTS_INCOMPLETE');
+    }
+    for (const message of [
+      'points roster is incomplete',
+      'H2H group assignment is stale',
+      'knockout bracket rows are missing',
+    ]) {
+      expect(
+        reviewRepairIssue(obligation, new TournamentReviewSourceNotReadyError(message), new Date())
+          .code,
+      ).toBe('STRUCTURE_INTEGRITY_FAILED');
+    }
+  });
+
   test('nulls tournament metrics for non-applicable points rows', () => {
     const row = normalizeTournamentReviewPointsRow({
       entryId: 1,

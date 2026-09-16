@@ -221,11 +221,20 @@ async function repairTournamentSetupIssuePrepared(
         season,
         issue.tournamentId,
       );
-      await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
-        rebuildTournamentStructure(season, tournament, entrySeeds, {
+      const rebuilt = await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), async () => {
+        // Old review diagnostics may describe missing points projections rather
+        // than damaged canonical groups. Recheck under the same structure lock
+        // before a tournament-wide rebuild can delete accepted event results.
+        if (tournament.groupMode === 'points_races' && tournament.knockoutMode === 'no_knockout') {
+          const currentAudit = await auditTournamentSetup(season, tournament, null);
+          if (!currentAudit.requiresStructureRebuild) return false;
+        }
+        await rebuildTournamentStructure(season, tournament, entrySeeds, {
           preserveDerivedResults: true,
-        }),
-      );
+        });
+        return true;
+      });
+      if (!rebuilt) break;
       // Rebuild every finalized event from the same canonical inputs before
       // requesting a review correction. Existing derived rows remain present
       // while this phase runs; a failed event backfill therefore cannot leave

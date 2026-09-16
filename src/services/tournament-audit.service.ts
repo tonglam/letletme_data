@@ -121,9 +121,14 @@ export async function auditTournamentSetup(
   if (tournament.groupMode !== 'no_group') {
     const groupRows = await tournamentGroupRepository.findGroupSlots(season, tournament.id);
 
-    if (groupRows.length !== entryIds.length) {
+    const groupedEntryIds = new Set(groupRows.map((row) => row.entryId));
+    if (
+      groupRows.length !== entryIds.length ||
+      groupedEntryIds.size !== entryIds.length ||
+      entryIds.some((entryId) => !groupedEntryIds.has(entryId))
+    ) {
       issues.push(
-        `tournament_groups count ${groupRows.length} does not match participant count ${entryIds.length}`,
+        `tournament_groups count ${groupRows.length} or membership does not match participant count ${entryIds.length}`,
       );
       requiresStructureRebuild = true;
     } else {
