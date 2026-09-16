@@ -368,7 +368,11 @@ describe('Live Points and Live Matches shared observation', () => {
         clearCheckpointDesired: async () => true,
         restoreLivePublicationCheckpoint: async () => {
           restoreCalls += 1;
-          return { publication: durablePublication, previous: current.publication, published: true };
+          return {
+            publication: durablePublication,
+            previous: current.publication,
+            published: true,
+          };
         },
         checkpointPublication: async () => {
           throw new Error('durable FINAL restore must not checkpoint again');
