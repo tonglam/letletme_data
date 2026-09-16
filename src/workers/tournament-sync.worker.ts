@@ -481,6 +481,8 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
         queue: job.queueName,
         jobName: job.name,
         runId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        parentRunId: job.data.runId,
         source,
         attempt: job.attemptsMade + 1,
         targetEventId: eventId,

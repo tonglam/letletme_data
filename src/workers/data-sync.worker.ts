@@ -464,6 +464,8 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     queue: job.queueName,
     jobName: job.name,
     runId: parentRunId,
+    batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+    parentRunId: job.data?.runId,
     source: job.data?.source,
     attempt,
     targetEventId: job.data?.eventId,

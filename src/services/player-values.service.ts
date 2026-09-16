@@ -51,6 +51,7 @@ export type PlayerValuesSyncResult = {
   sourceArtifactId?: string;
   sourceProvenance?: ResolvedFplBootstrapArtifact['provenance'];
   marketSnapshotCount?: number;
+  submittedRows?: number;
   outcome?: 'noop';
   requiredUnits?: number;
   succeededUnits?: number;
@@ -353,6 +354,7 @@ export async function persistPreparedPlayerValuesSync(
       sourceArtifactId: prepared.sourceArtifactId,
       sourceProvenance: prepared.sourceProvenance,
       marketSnapshotCount: persisted.persistedCount,
+      submittedRows: persisted.persistedCount,
       requiredUnits: prepared.requiredUnits,
       succeededUnits,
       failedUnits: Math.max(0, prepared.requiredUnits - succeededUnits),
