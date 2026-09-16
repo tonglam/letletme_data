@@ -526,6 +526,10 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           'updatedRows',
           'deletedRows',
           'submittedRows',
+          'requiredUnits',
+          'reusedUnits',
+          'succeededUnits',
+          'failedUnits',
           'publicationsCreated',
           'publicationsReused',
         ] as const;
