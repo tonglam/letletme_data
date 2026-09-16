@@ -63,6 +63,7 @@ beforeEach(() => {
     failedEntryIds: [],
     requiredUnits: 1,
     reusedUnits: 0,
+    reusedEntryIds: [],
     succeededUnits: 1,
     failedUnits: 0,
   });
@@ -137,6 +138,7 @@ describe('FINAL tournament repair convergence', () => {
       failedEntryIds: [9],
       requiredUnits: 1,
       reusedUnits: 0,
+      reusedEntryIds: [],
       succeededUnits: 0,
       failedUnits: 1,
     });

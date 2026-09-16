@@ -803,7 +803,7 @@ export async function syncTournamentEventResultsForEntryIds(
             const needsTransfer =
               !options?.skipTransfers && transferEntryIds.has(entryId) && durable.transfersMissing;
 
-            if (!needsResult && !needsTransfer) {
+            if (!needsResult) {
               await syncOperationsRepository.upsertItems(auditRunId, [
                 {
                   resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -838,7 +838,7 @@ export async function syncTournamentEventResultsForEntryIds(
                   },
                 ]);
               }
-              return { entryId, success: true } satisfies EntrySyncOutcome;
+              if (!needsTransfer) return { entryId, success: true } satisfies EntrySyncOutcome;
             }
 
             const [picks, transfers] = await withTimeout(
@@ -1073,16 +1073,26 @@ export async function syncTournamentEventResultsForEntryIds(
     });
 
     if (transferOnlyEntryIds.length > 0) {
-      await syncEntryTransferHistories(season, transferOnlyEntryIds, eventId, {
-        concurrency,
-        perEntryMutationScopes: options?.perEntryMutationScopes,
-        sourceCheckedAt: transferSourceCheckedAt ?? sourceOrdering.exact,
-        auditRunId,
-        auditTrigger,
-        auditAttempt,
-        auditInitialize: false,
-        auditFinalizeRun: false,
-      });
+      const transferSummary = await syncEntryTransferHistories(
+        season,
+        transferOnlyEntryIds,
+        eventId,
+        {
+          concurrency,
+          perEntryMutationScopes: options?.perEntryMutationScopes,
+          sourceCheckedAt: transferSourceCheckedAt ?? sourceOrdering.exact,
+          auditRunId,
+          auditTrigger,
+          auditAttempt,
+          auditInitialize: false,
+          auditFinalizeRun: false,
+        },
+      );
+      // A transfer-only entry is deliberately excluded from the run-level
+      // reuse set until its transfer phase confirms whether another worker
+      // already committed that component.  Carry the nested result back into
+      // the parent run so a fully reused entry is not reported as changed.
+      reusableEntryIds = [...new Set([...reusableEntryIds, ...transferSummary.reusedEntryIds])];
     }
 
     // Do not publish any FINAL while provider work can still change the event's
@@ -1175,12 +1185,13 @@ export async function syncTournamentEventResultsForEntryIds(
       );
     }
     if (options?.auditFinalizeRun !== false) {
+      const completedItems = Math.max(0, synced - reusableEntryIds.length);
       await syncOperationsRepository.finishRun(auditRunId, {
         status: 'completed',
-        completedItems: Math.max(0, synced - reusableEntryIds.length),
+        completedItems,
         failedItems: 0,
         skippedItems: reusableEntryIds.length,
-        dataChanged: providerEntryIds.length > 0 || transferOnlyEntryIds.length > 0,
+        dataChanged: completedItems > 0,
         metadata: {
           ...auditRunMetadata(options, auditRunId, auditAttempt),
           finalCompletion: finalizationDate !== null,
@@ -1245,6 +1256,7 @@ export async function syncEntryTransferHistories(
   failedEntryIds: number[];
   requiredUnits: number;
   reusedUnits: number;
+  reusedEntryIds: number[];
   succeededUnits: number;
   failedUnits: number;
 }> {
@@ -1499,6 +1511,7 @@ export async function syncEntryTransferHistories(
     failedEntryIds,
     requiredUnits: uniqueEntryIds.length,
     reusedUnits: reusedTransferEntryIds.size,
+    reusedEntryIds: [...reusedTransferEntryIds],
     succeededUnits: synced,
     failedUnits: failedEntryIds.length,
   };
