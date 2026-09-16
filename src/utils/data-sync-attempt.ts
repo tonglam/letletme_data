@@ -571,13 +571,13 @@ export async function runDataSyncAttempt<T>(
         const reportBase: Omit<DataSyncAttemptReport, 'batchCost'> = {
           event: 'data_sync_attempt',
           queue: context.queue,
-        jobName: context.jobName,
-        runId: context.runId,
-        ...(context.batchId !== undefined ? { batchId: context.batchId } : {}),
-        ...(context.parentRunId !== undefined ? { parentRunId: context.parentRunId } : {}),
-        ...(context.executionIntent !== undefined
-          ? { executionIntent: context.executionIntent }
-          : {}),
+          jobName: context.jobName,
+          runId: context.runId,
+          ...(context.batchId !== undefined ? { batchId: context.batchId } : {}),
+          ...(context.parentRunId !== undefined ? { parentRunId: context.parentRunId } : {}),
+          ...(context.executionIntent !== undefined
+            ? { executionIntent: context.executionIntent }
+            : {}),
           source: normalizeSource(context),
           attempt: boundedAttempt(context.attempt),
           ...(targetEventId !== undefined ? { targetEventId } : {}),
