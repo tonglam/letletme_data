@@ -364,9 +364,19 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       }
     },
 
-    failPendingItems: async (runId: string, error: unknown): Promise<void> => {
+    failPendingItems: async (
+      runId: string,
+      error: unknown,
+      resourceIds?: readonly string[],
+    ): Promise<void> => {
       const db = await getDbInstance();
       const summary = (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
+      const resourceScope =
+        resourceIds === undefined
+          ? undefined
+          : resourceIds.length > 0
+            ? inArray(syncItemsInOps.resourceId, [...new Set(resourceIds)])
+            : sql`false`;
       await db
         .update(syncItemsInOps)
         .set({
@@ -391,6 +401,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           and(
             eq(syncItemsInOps.runId, runId),
             inArray(syncItemsInOps.status, ['pending', 'running']),
+            ...(resourceScope === undefined ? [] : [resourceScope]),
           ),
         );
     },

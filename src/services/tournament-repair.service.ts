@@ -234,10 +234,13 @@ async function repairTournamentSetupIssuePrepared(
           season,
           issue.tournamentId,
         );
-        await rebuildTournamentStructure(season, tournament, entrySeeds, {
-          preserveDerivedResults: true,
-        });
-        return staleDerivedResults;
+        const candidateGroupRows = await rebuildTournamentStructure(
+          season,
+          tournament,
+          entrySeeds,
+          { preserveDerivedResults: true },
+        );
+        return { candidateGroupRows, staleDerivedResults };
       });
       if (rebuilt === false) break;
       // Rebuild every finalized event from the same canonical inputs before
@@ -250,11 +253,19 @@ async function repairTournamentSetupIssuePrepared(
         tournament,
         allEntryIds,
         window,
-        { auditRepairIssueId: issueId, repair: { issueId, owner } },
+        {
+          auditRepairIssueId: issueId,
+          repair: { issueId, owner },
+          candidateGroupSlots: rebuilt.candidateGroupRows,
+        },
       );
       repairIssues.push(...historyIssues);
       if (historyIssues.length === 0) {
-        await pruneTournamentDerivedResultsOutsideStructure(season, issue.tournamentId, rebuilt);
+        await pruneTournamentDerivedResultsOutsideStructure(
+          season,
+          issue.tournamentId,
+          rebuilt.staleDerivedResults,
+        );
         // A topology rebuild can change group membership, phase boundaries, or
         // bracket edges for every settled event. Defer the correction reset
         // until the post-repair audit succeeds, then fence the earliest head

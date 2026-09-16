@@ -799,6 +799,24 @@ export async function syncTournamentEventResultsForEntryIds(
                   completedAt: new Date(),
                 },
               ]);
+              if (finalizationDate !== null && durable.finalComplete) {
+                await syncOperationsRepository.upsertItems(auditRunId, [
+                  {
+                    resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                    resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+                    status: 'skipped',
+                    attempts: auditAttempt,
+                    normalizedPayload: {
+                      phase: 'final-head',
+                      sourceRevision: orderingTimestampString(resultFreshAfter),
+                      finalCompletion: true,
+                      reused: true,
+                      reuseReason: 'coordinated-durable-complete',
+                    },
+                    completedAt: new Date(),
+                  },
+                ]);
+              }
               return { entryId, success: true } satisfies EntrySyncOutcome;
             }
 
@@ -946,6 +964,37 @@ export async function syncTournamentEventResultsForEntryIds(
                   completedAt: new Date(),
                 },
               ]);
+            }
+            if (finalizationDate && finalizationCutoff && !accepted) {
+              const durableFinalHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+                season,
+                eventId,
+                [entryId],
+              );
+              const durableFinalIds = await completedFinalEntryIds(
+                season,
+                eventId,
+                durableFinalHeads,
+                finalizationCutoff,
+              );
+              if (durableFinalIds.has(entryId)) {
+                await syncOperationsRepository.upsertItems(auditRunId, [
+                  {
+                    resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                    resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+                    status: 'skipped',
+                    attempts: auditAttempt,
+                    normalizedPayload: {
+                      phase: 'final-head',
+                      sourceRevision: orderingTimestampString(resultFreshAfter),
+                      finalCompletion: true,
+                      reused: true,
+                      reuseReason: 'coordinated-durable-complete',
+                    },
+                    completedAt: new Date(),
+                  },
+                ]);
+              }
             }
             return { entryId, success: true } satisfies EntrySyncOutcome;
           },
@@ -1355,12 +1404,24 @@ export async function syncEntryTransferHistories(
     // The per-entry work may have committed successfully before this final
     // convergence read failed. Close the durable audit instead of leaving the
     // run running/pending and falsely reporting zero failed items.
-    await syncOperationsRepository.failPendingItems(auditRunId, error).catch((auditError) =>
-      logError('Failed to close transfer audit items after convergence read failure', auditError, {
-        endEventId,
-        runId: auditRunId,
-      }),
-    );
+    await syncOperationsRepository
+      .failPendingItems(
+        auditRunId,
+        error,
+        uniqueEntryIds.map((entryId) =>
+          entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
+        ),
+      )
+      .catch((auditError) =>
+        logError(
+          'Failed to close transfer audit items after convergence read failure',
+          auditError,
+          {
+            endEventId,
+            runId: auditRunId,
+          },
+        ),
+      );
     if (options?.auditInitialize !== false) {
       await syncOperationsRepository
         .failRun(auditRunId, new Error(safeDataErrorCode(error)))

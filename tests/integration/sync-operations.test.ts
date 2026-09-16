@@ -288,6 +288,46 @@ describe('ops sync state machine', () => {
     ]);
   });
 
+  test('resource-scoped terminalization does not fail sibling components', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[1], season);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: 'entry:transfers',
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-transfer-history' },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: 'entry:results',
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results' },
+      },
+    ]);
+
+    await syncOperationsRepository.failPendingItems(
+      RUN_IDS[1],
+      new Error('transfer convergence read failed'),
+      ['entry:transfers'],
+    );
+
+    const rows = await sql<Array<{ resource_id: string; status: string }>>`
+      SELECT resource_id, status
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[1]}::uuid
+      ORDER BY resource_id
+    `;
+    expect(Array.from(rows)).toEqual([
+      { resource_id: 'entry:results', status: 'pending' },
+      { resource_id: 'entry:transfers', status: 'failed' },
+    ]);
+  });
+
   test('keeps terminal run transitions idempotent and rejects a different terminal state', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

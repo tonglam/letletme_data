@@ -3,7 +3,7 @@ import type {
   DbTournamentKnockoutInsert,
   DbTournamentKnockoutResultInsert,
 } from '../db/schemas/index.schema';
-import { and, eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import {
   tournamentBattleGroupResultsInCompetition,
   tournamentGroupsInCompetition,
@@ -34,93 +34,6 @@ export type DerivedResultRepairSnapshot = {
   knockout: Array<{ sourceResultId: number; updatedAt: string }>;
 };
 
-async function rebindLocalBattleFixturesToCandidateGroups(
-  tx: Parameters<Parameters<Awaited<ReturnType<typeof getDb>>['transaction']>[0]>[0],
-  season: FplSeasonRef,
-  tournamentId: number,
-  groupRows: ReadonlyArray<
-    Pick<
-      DbTournamentGroupInsert,
-      'groupId' | 'groupIndex' | 'entryId' | 'startedEventId' | 'endedEventId'
-    >
-  >,
-): Promise<void> {
-  const candidateSlots = new Map<
-    string,
-    { entryId: number; startedEventId: number; endedEventId: number }
-  >();
-  for (const row of groupRows) {
-    const groupId = Number(row.groupId);
-    const groupIndex = Number(row.groupIndex);
-    const entryId = Number(row.entryId);
-    const startedEventId = Number(row.startedEventId);
-    const endedEventId = Number(row.endedEventId);
-    if (
-      !Number.isInteger(groupId) ||
-      !Number.isInteger(groupIndex) ||
-      !Number.isInteger(entryId) ||
-      !Number.isInteger(startedEventId) ||
-      !Number.isInteger(endedEventId)
-    ) {
-      continue;
-    }
-    candidateSlots.set(`${groupId}:${groupIndex}`, { entryId, startedEventId, endedEventId });
-  }
-  const rows = await tx
-    .select({
-      sourceResultId: tournamentBattleGroupResultsInCompetition.sourceResultId,
-      groupId: tournamentBattleGroupResultsInCompetition.groupId,
-      eventId: tournamentBattleGroupResultsInCompetition.eventId,
-      homeIndex: tournamentBattleGroupResultsInCompetition.homeIndex,
-      homeEntryId: tournamentBattleGroupResultsInCompetition.homeEntryId,
-      awayIndex: tournamentBattleGroupResultsInCompetition.awayIndex,
-      awayEntryId: tournamentBattleGroupResultsInCompetition.awayEntryId,
-    })
-    .from(tournamentBattleGroupResultsInCompetition)
-    .where(
-      sql`${tournamentBattleGroupResultsInCompetition.seasonId} = ${season.seasonId}
-        AND ${tournamentBattleGroupResultsInCompetition.tournamentId} = ${tournamentId}
-        AND ${tournamentBattleGroupResultsInCompetition.officialMatchId} IS NULL`,
-    );
-
-  for (const row of rows) {
-    const home = candidateSlots.get(`${row.groupId}:${row.homeIndex}`);
-    const away = candidateSlots.get(`${row.groupId}:${row.awayIndex}`);
-    if (
-      !home ||
-      !away ||
-      row.eventId < home.startedEventId ||
-      row.eventId > home.endedEventId ||
-      row.eventId < away.startedEventId ||
-      row.eventId > away.endedEventId ||
-      (row.homeEntryId === home.entryId && row.awayEntryId === away.entryId)
-    ) {
-      continue;
-    }
-    await tx
-      .update(tournamentBattleGroupResultsInCompetition)
-      .set({
-        homeEntryId: home.entryId,
-        awayEntryId: away.entryId,
-        homeNetPoints: null,
-        homeRank: null,
-        homeMatchPoints: null,
-        awayNetPoints: null,
-        awayRank: null,
-        awayMatchPoints: null,
-        sourceCheckedAt: null,
-        updatedAt: sql`clock_timestamp()`,
-      })
-      .where(
-        and(
-          eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
-          eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
-          eq(tournamentBattleGroupResultsInCompetition.sourceResultId, row.sourceResultId),
-        ),
-      );
-  }
-}
-
 function groupInsert(row: Record<string, number | string | null>): DbTournamentGroupInsert {
   return {
     tournamentId: Number(row.tournament_id),
@@ -149,7 +62,7 @@ export async function rebuildTournamentStructure(
   tournament: TournamentConfig,
   entrySeeds: EntrySeed[],
   options: Readonly<{ preserveDerivedResults?: boolean }> = {},
-): Promise<void> {
+): Promise<ReadonlyArray<DbTournamentGroupInsert>> {
   const entryIds = sortEntrySeeds(entrySeeds).map((entry) => entry.entryId);
   const shouldSeedRoundOneImmediately =
     tournament.knockoutMode !== 'no_knockout' && tournament.groupMode === 'no_group';
@@ -207,16 +120,10 @@ export async function rebuildTournamentStructure(
     await groups.deleteByTournament(season, tournament.id);
 
     await groups.upsertBatch(season, groupRows);
-    if (options.preserveDerivedResults && tournament.groupMode === 'battle_races') {
-      // Local battle rows are keyed by group/slot/event, so a roster reseed
-      // can leave the old entrants under the same fixture identity. Rebind
-      // those fixtures to the candidate slots before the result backfill; the
-      // score fields are cleared only when the matchup actually changes.
-      await rebindLocalBattleFixturesToCandidateGroups(tx, season, tournament.id, groupRows);
-    }
     await knockouts.upsertBatch(season, knockoutMatches);
     await knockoutResultsRepository.upsertBatch(season, publishedKnockoutResults);
   });
+  return groupRows;
 }
 
 /**

@@ -40,7 +40,10 @@ import { withMutationScopes } from '../utils/mutation-scopes';
 import { ConflictError, IncompleteDataSyncError, ValidationError } from '../utils/errors';
 
 import { syncEntryInfo } from './entry-info.service';
-import { syncTournamentBattleRaceResultsForTournament } from './tournament-battle-race-results.service';
+import {
+  syncTournamentBattleRaceResultsForTournament,
+  type CandidateBattleGroupSlot,
+} from './tournament-battle-race-results.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import {
   syncEntryTransferHistories,
@@ -745,6 +748,7 @@ export async function runTournamentEventBackfill(
   eventId: number,
   repair?: { issueId: number; owner: TournamentRepairState },
   audit?: { repairIssueId?: number },
+  candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>,
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
   const auditRepairIssueId = audit?.repairIssueId ?? repair?.issueId;
@@ -947,7 +951,9 @@ export async function runTournamentEventBackfill(
     eventId <= tournament.groupEndedEventId
   ) {
     const battleRaceResult = await writeResults(() =>
-      syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
+      syncTournamentBattleRaceResultsForTournament(season, tournament, eventId, {
+        ...(candidateGroupSlots === undefined ? {} : { candidateGroupSlots }),
+      }),
     );
     if (battleRaceResult.skipped > 0) {
       issues.push({
@@ -1003,6 +1009,7 @@ export async function backfillTournamentHistory(
   options?: {
     auditRepairIssueId?: number;
     repair?: { issueId: number; owner: TournamentRepairState };
+    candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>;
   },
 ): Promise<TournamentSetupIssue[]> {
   if (!window) {
@@ -1023,6 +1030,7 @@ export async function backfillTournamentHistory(
       options?.auditRepairIssueId === undefined
         ? undefined
         : { repairIssueId: options.auditRepairIssueId },
+      options?.candidateGroupSlots,
     );
     issues.push(...eventIssues);
   }

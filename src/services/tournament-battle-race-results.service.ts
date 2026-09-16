@@ -32,6 +32,12 @@ const officialH2HFullReconcileTargets = new WeakMap<
   OfficialH2HFullReconcileTarget[]
 >();
 
+export type CandidateBattleGroupSlot = Readonly<{
+  groupId: number;
+  groupIndex: number;
+  entryId: number;
+}>;
+
 async function getOfficialH2HSyncOptions(
   season: FplSeasonRef,
   eventId: number,
@@ -131,6 +137,9 @@ export async function syncTournamentBattleRaceResultsForTournament(
   season: FplSeasonRef,
   tournament: TournamentSyncContext,
   eventId: number,
+  options: Readonly<{
+    candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>;
+  }> = {},
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
   if (!tournament.groupStartedEventId || !tournament.groupEndedEventId) {
     logInfo('Skipping battle race tournament without group window', {
@@ -182,6 +191,13 @@ export async function syncTournamentBattleRaceResultsForTournament(
   // phantom-zero wins (FP-09 / C6). Skipped matchups keep their NULL points and
   // are excluded from the upsert; they can be scored later once results arrive.
   let skipped = 0;
+  const candidateSlots = new Map(
+    (options.candidateGroupSlots ?? []).map((slot) => [
+      `${slot.groupId}:${slot.groupIndex}`,
+      slot.entryId,
+    ]),
+  );
+  const candidateMode = options.candidateGroupSlots !== undefined;
   const scoredBattleResults = [];
   // Replays of the same finalized event must carry the same source watermark;
   // using wall-clock time here made every retry look like new evidence.
@@ -192,8 +208,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
   for (const result of battleResults) {
     if (
       result.officialMatchId != null ||
-      result.homeEntryId === null ||
-      result.awayEntryId === null
+      (!candidateMode && (result.homeEntryId === null || result.awayEntryId === null))
     ) {
       skipped += 1;
       logWarn('Skipping non-local row in LocalBattleStrategy', {
@@ -203,38 +218,60 @@ export async function syncTournamentBattleRaceResultsForTournament(
       });
       continue;
     }
-    const homeResult = eventResultMap.get(result.homeEntryId);
-    const awayResult = eventResultMap.get(result.awayEntryId);
+    const candidateHomeEntryId = candidateMode
+      ? candidateSlots.get(`${result.groupId}:${result.homeIndex}`)
+      : result.homeEntryId;
+    const candidateAwayEntryId = candidateMode
+      ? candidateSlots.get(`${result.groupId}:${result.awayIndex}`)
+      : result.awayEntryId;
+    if (candidateHomeEntryId == null || candidateAwayEntryId == null) {
+      skipped += 1;
+      continue;
+    }
+    const candidateResult =
+      candidateMode &&
+      (candidateHomeEntryId !== result.homeEntryId || candidateAwayEntryId !== result.awayEntryId)
+        ? {
+            ...result,
+            homeEntryId: candidateHomeEntryId,
+            awayEntryId: candidateAwayEntryId,
+          }
+        : result;
+    const homeResult = eventResultMap.get(candidateHomeEntryId);
+    const awayResult = eventResultMap.get(candidateAwayEntryId);
     if (!homeResult || !awayResult) {
       skipped += 1;
       logWarn('Skipping battle race matchup with missing entry event result', {
         tournamentId: tournament.id,
         eventId,
         groupId: result.groupId,
-        homeEntryId: result.homeEntryId,
-        awayEntryId: result.awayEntryId,
+        homeEntryId: candidateHomeEntryId,
+        awayEntryId: candidateAwayEntryId,
         missingHome: !homeResult,
         missingAway: !awayResult,
       });
-      // Clear any previously written phantom 3/0 points so history recompute
-      // does not keep counting a stale win (FP-09 Codex P1).
-      scoredBattleResults.push({
-        ...result,
-        homeNetPoints: null,
-        homeRank: null,
-        homeMatchPoints: null,
-        awayNetPoints: null,
-        awayRank: null,
-        awayMatchPoints: null,
-        sourceCheckedAt,
-      });
+      if (!candidateMode) {
+        // Clear any previously written phantom 3/0 points so history recompute
+        // does not keep counting a stale win (FP-09 Codex P1). Candidate repair
+        // rows retain their accepted fixture until the replacement facts exist.
+        scoredBattleResults.push({
+          ...candidateResult,
+          homeNetPoints: null,
+          homeRank: null,
+          homeMatchPoints: null,
+          awayNetPoints: null,
+          awayRank: null,
+          awayMatchPoints: null,
+          sourceCheckedAt,
+        });
+      }
       continue;
     }
 
     const homeNet = homeResult.eventNetPoints;
     const awayNet = awayResult.eventNetPoints;
     scoredBattleResults.push({
-      ...result,
+      ...candidateResult,
       homeNetPoints: homeNet,
       homeRank: homeResult.eventRank ?? null,
       homeMatchPoints: matchPoints(homeNet, awayNet),
