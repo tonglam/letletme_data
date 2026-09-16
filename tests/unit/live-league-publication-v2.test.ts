@@ -705,8 +705,13 @@ describe('Live League V2 checkpoint transaction contract', () => {
     expect(conflictClause).toContain('manifest: sql`excluded.manifest`');
     expect(conflictClause).toContain('indexPayload: sql`excluded.index_payload`');
     expect(conflictClause).toContain('payload: sql`excluded.payload`');
-    expect(conflictClause).toContain("manifest}->'revisions' = excluded.manifest->'revisions'");
-    expect(conflictClause).toContain("manifest}->'counts' = excluded.manifest->'counts'");
+    const singleQuote = String.fromCharCode(39);
+    expect(conflictClause).toContain(
+      ['manifest}->', 'revisions', ' = excluded.manifest->', 'revisions', ''].join(singleQuote),
+    );
+    expect(conflictClause).toContain(
+      ['manifest}->', 'counts', ' = excluded.manifest->', 'counts', ''].join(singleQuote),
+    );
     expect(conflictClause).not.toContain('values.manifest');
     expect(conflictClause).not.toContain('values.indexPayload');
     expect(conflictClause).not.toContain('values.payload');
