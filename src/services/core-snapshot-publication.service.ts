@@ -30,6 +30,8 @@ export interface CoreSnapshotPublicationContext {
   readonly sourceRunId: string;
   readonly sourceCheckedAt: Date;
   readonly freshnessWindowId?: number;
+  /** Notify the owning sync attempt after Redis publication activation succeeds. */
+  readonly onActivated?: () => void;
 }
 
 export interface CoreSnapshotCommitResult {
@@ -174,6 +176,10 @@ export async function publishCoreSnapshotPublication(
           outbox: { outboxId: randomUUID() },
         }),
     );
+    // Activation is the durable handoff that creates a new publication. Keep
+    // this milestone separate from staging so post-activation delivery errors
+    // still report the created publication accurately.
+    context.onActivated?.();
     const delivered = await dispatchDataPublicationOutbox({
       limit: 1,
       publicationId: context.publicationId,

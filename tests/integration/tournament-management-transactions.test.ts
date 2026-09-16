@@ -193,6 +193,7 @@ test('scheduled roster recovery includes an inactive pending retry marker', asyn
   } finally {
     await observer`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
     await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${id}`;
+    await observer`DELETE FROM ops.sync_runs WHERE season_id=${season.seasonId} AND mode='batch-cost'`;
     await observer`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
   }
 });
@@ -226,6 +227,7 @@ test('scheduled roster recovery excludes an inactive mode opt-in without a retry
   } finally {
     await observer`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
     await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${id}`;
+    await observer`DELETE FROM ops.sync_runs WHERE season_id=${season.seasonId} AND mode='batch-cost'`;
     await observer`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
   }
 });

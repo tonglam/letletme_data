@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { queueRedisSingleton } from '../queues/redis';
 import { FPLClientError } from './errors';
@@ -130,6 +131,68 @@ export type FplAdmissionStats = Readonly<{
   distributed: boolean;
 }>;
 
+/** Per-batch admission counters; unlike Redis telemetry these never leave the
+ * current async job and can therefore be persisted with one sync run. */
+export type FplAdmissionBatchMetrics = Readonly<{
+  waitMsTotal: number;
+  waitSamples: number;
+  grants: number;
+  deadlineExceeded: number;
+  storeUnavailable: number;
+  cancelled: number;
+  responseSamples: number;
+  response429: number;
+  response5xx: number;
+  networkErrors: number;
+  providerDurationMsTotal: number;
+  providerDurationSamples: number;
+}>;
+
+type MutableFplAdmissionBatchMetrics = {
+  -readonly [Key in keyof FplAdmissionBatchMetrics]: FplAdmissionBatchMetrics[Key];
+};
+
+const admissionBatchMetricsStore = new AsyncLocalStorage<MutableFplAdmissionBatchMetrics>();
+
+function emptyFplAdmissionBatchMetrics(): MutableFplAdmissionBatchMetrics {
+  return {
+    waitMsTotal: 0,
+    waitSamples: 0,
+    grants: 0,
+    deadlineExceeded: 0,
+    storeUnavailable: 0,
+    cancelled: 0,
+    responseSamples: 0,
+    response429: 0,
+    response5xx: 0,
+    networkErrors: 0,
+    providerDurationMsTotal: 0,
+    providerDurationSamples: 0,
+  };
+}
+
+function snapshotFplAdmissionBatchMetrics(
+  metrics: MutableFplAdmissionBatchMetrics,
+): FplAdmissionBatchMetrics {
+  return { ...metrics };
+}
+
+export async function runWithFplAdmissionMetrics<T>(runner: () => Promise<T>): Promise<T> {
+  if (admissionBatchMetricsStore.getStore()) return runner();
+  return admissionBatchMetricsStore.run(emptyFplAdmissionBatchMetrics(), runner);
+}
+
+export function getFplAdmissionBatchMetricsSnapshot(): FplAdmissionBatchMetrics {
+  const metrics = admissionBatchMetricsStore.getStore();
+  return metrics
+    ? snapshotFplAdmissionBatchMetrics(metrics)
+    : snapshotFplAdmissionBatchMetrics(emptyFplAdmissionBatchMetrics());
+}
+
+export function hasFplAdmissionMetricsContext(): boolean {
+  return admissionBatchMetricsStore.getStore() !== undefined;
+}
+
 function useLocalTestScheduler(): boolean {
   return (
     (runtimeConfig.NODE_ENV === 'test' && process.env.RUN_INTEGRATION !== '1') ||
@@ -248,9 +311,22 @@ export function recordFplAdmissionResult(input: {
   outcome: FplAdmissionOutcome;
   waitMs?: number;
   reason?: FplAdmissionWaitReason;
+  /** Set false when a second outcome describes the same wait interval. */
+  countWait?: boolean;
 }): void {
+  const batch = admissionBatchMetricsStore.getStore();
+  if (batch) {
+    if (input.countWait !== false && input.waitMs !== undefined && Number.isFinite(input.waitMs)) {
+      batch.waitMsTotal += Math.max(0, input.waitMs);
+      batch.waitSamples += 1;
+    }
+    if (input.outcome === 'granted') batch.grants += 1;
+    if (input.outcome === 'deadline-exceeded') batch.deadlineExceeded += 1;
+    if (input.outcome === 'store-unavailable') batch.storeUnavailable += 1;
+    if (input.outcome === 'cancelled') batch.cancelled += 1;
+  }
   const fields: Array<readonly [string, number]> = [];
-  if (input.waitMs !== undefined && Number.isFinite(input.waitMs)) {
+  if (input.countWait !== false && input.waitMs !== undefined && Number.isFinite(input.waitMs)) {
     const bucket = waitBucket(input.waitMs);
     fields.push([field(input.priority, 'waitSamples'), 1]);
     fields.push([field(input.priority, `waitLe${bucket}`), 1]);
@@ -275,6 +351,17 @@ export function recordFplResponseTelemetry(
   priority: FplRequestPriority = 'bulk',
   providerDurationMs?: number,
 ): void {
+  const batch = admissionBatchMetricsStore.getStore();
+  if (batch) {
+    batch.responseSamples += 1;
+    if (status === 429) batch.response429 += 1;
+    if (status !== null && status >= 500) batch.response5xx += 1;
+    if (status === null) batch.networkErrors += 1;
+    if (providerDurationMs !== undefined && Number.isFinite(providerDurationMs)) {
+      batch.providerDurationMsTotal += Math.max(0, providerDurationMs);
+      batch.providerDurationSamples += 1;
+    }
+  }
   const fields: Array<readonly [string, number]> = [
     [field(priority, 'responseSamples'), 1],
     ...(status === 429 ? ([[field(priority, 'response429'), 1]] as const) : []),
@@ -1399,6 +1486,7 @@ async function distributedAcquire(
           priority,
           outcome: 'cancelled',
           waitMs,
+          countWait: false,
           reason: lastWaitReason,
         });
         throw admissionAbortError(options.signal);

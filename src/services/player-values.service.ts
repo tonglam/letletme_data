@@ -51,6 +51,9 @@ export type PlayerValuesSyncResult = {
   sourceArtifactId?: string;
   sourceProvenance?: ResolvedFplBootstrapArtifact['provenance'];
   marketSnapshotCount?: number;
+  submittedRows?: number;
+  publicationsCreated?: number;
+  publicationsReused?: number;
   outcome?: 'noop';
   requiredUnits?: number;
   succeededUnits?: number;
@@ -167,6 +170,7 @@ function attachAttemptEvidence(
     succeededUnits: number;
     failedUnits: number;
     timings: Partial<PlayerValuesPhaseTimings>;
+    submittedRows?: number;
   },
 ): void {
   if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
@@ -198,7 +202,7 @@ export async function preparePlayerValuesSync(
   season: FplSeasonRef,
   changeDate: string,
   dependencies: PlayerValuesSyncDependencies = defaultDependencies,
-  options?: { onTargetEventResolved?: (eventId: number) => void },
+  options?: { onTargetEventResolved?: (eventId: number) => unknown | Promise<unknown> },
 ): Promise<PreparedPlayerValuesSync | null> {
   assertChangeDate(changeDate);
 
@@ -211,7 +215,7 @@ export async function preparePlayerValuesSync(
     if (changeDate === currentChangeDate && !currentSyncEvent) {
       throw new Error('No current or next event found for player values');
     }
-    if (currentSyncEvent) options?.onTargetEventResolved?.(currentSyncEvent.event.id);
+    if (currentSyncEvent) await options?.onTargetEventResolved?.(currentSyncEvent.event.id);
 
     const resolvedArtifact = await measurePhase(timings, 'bootstrap', () =>
       dependencies.resolveBootstrapSourceArtifact(season, changeDate),
@@ -231,7 +235,7 @@ export async function preparePlayerValuesSync(
       );
     }
     const eventId = currentSyncEvent?.event.id ?? resolveArchivedMarketEventId(bootstrap);
-    if (!currentSyncEvent) options?.onTargetEventResolved?.(eventId);
+    if (!currentSyncEvent) await options?.onTargetEventResolved?.(eventId);
     const snapshots = transformPlayerMarketSnapshots(bootstrap, capturedAt);
     return {
       season,
@@ -267,6 +271,7 @@ export async function persistPreparedPlayerValuesSync(
 ): Promise<PlayerValuesSyncResult> {
   const timings: Partial<PlayerValuesPhaseTimings> = { ...prepared.timings };
   let succeededUnits = 0;
+  let submittedRows: number | undefined;
   try {
     assertChangeDate(prepared.changeDate);
     if (formatCronDateKey(prepared.capturedAt) !== prepared.changeDate) {
@@ -284,6 +289,10 @@ export async function persistPreparedPlayerValuesSync(
       ),
     );
     succeededUnits = persisted.persistedCount;
+    // The canonical snapshot transaction has committed by the time any
+    // downstream validation/publication/enqueue step can fail. Preserve its
+    // exact row count so the outer batch ledger cannot report an unknown write.
+    submittedRows = persisted.persistedCount;
     if (persisted.snapshotDate.replaceAll('-', '') !== prepared.changeDate) {
       throw new Error(
         `Market snapshot date ${persisted.snapshotDate} does not match requested date ${prepared.changeDate}`,
@@ -299,11 +308,15 @@ export async function persistPreparedPlayerValuesSync(
       prepared.bootstrap.teams,
     );
     let publicationId: string | undefined;
+    let publicationsCreated = 0;
+    let publicationsReused = 0;
     if (dependencies.publishMarketPublication && !options?.deferMarketPublication) {
       const publication = await measurePhase(timings, 'publication', () =>
         dependencies.publishMarketPublication!(prepared.season),
       );
       publicationId = publication.publicationId;
+      if (publication.status === 'published') publicationsCreated = 1;
+      if (publication.status === 'unchanged') publicationsReused = 1;
     }
     const notificationMessage =
       changedRows.length > 0 && prepared.sourceProvenance !== 'archive'
@@ -353,6 +366,9 @@ export async function persistPreparedPlayerValuesSync(
       sourceArtifactId: prepared.sourceArtifactId,
       sourceProvenance: prepared.sourceProvenance,
       marketSnapshotCount: persisted.persistedCount,
+      submittedRows: persisted.persistedCount,
+      publicationsCreated,
+      publicationsReused,
       requiredUnits: prepared.requiredUnits,
       succeededUnits,
       failedUnits: Math.max(0, prepared.requiredUnits - succeededUnits),
@@ -365,6 +381,7 @@ export async function persistPreparedPlayerValuesSync(
       succeededUnits,
       failedUnits: Math.max(0, prepared.requiredUnits - succeededUnits),
       timings,
+      ...(submittedRows === undefined ? {} : { submittedRows }),
     });
     throw error;
   }
@@ -380,7 +397,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
     season: FplSeasonRef,
     changeDate: string = dependencies.getCurrentChangeDate(),
     options?: {
-      onTargetEventResolved?: (eventId: number) => void;
+      onTargetEventResolved?: (eventId: number) => unknown | Promise<unknown>;
       deferPriceSyncEnqueue?: boolean;
       /** Publish only after the caller's canonical mutation transaction commits. */
       deferMarketPublication?: boolean;

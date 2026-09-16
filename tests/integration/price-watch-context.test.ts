@@ -73,6 +73,7 @@ afterAll(async () => {
   await Promise.all(prepared.items.map((item) => redis.del(item.manifest.key)));
   redis.disconnect();
   await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
+  await db`DELETE FROM ops.sync_runs WHERE season_id=2093 AND mode='batch-cost'`;
   await db`DELETE FROM fpl.seasons WHERE season_id=2093`;
   await databaseSingleton.disconnect();
   await db.end();

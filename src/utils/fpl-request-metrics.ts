@@ -79,6 +79,11 @@ export function getFplRequestMetricsSnapshot(): FplRequestMetricsSnapshot {
   return metrics ? cloneMetrics(metrics) : createEmptyFplRequestMetrics();
 }
 
+/** Whether the current async call already owns a request-metrics context. */
+export function hasFplRequestMetricsContext(): boolean {
+  return requestMetricsStore.getStore() !== undefined;
+}
+
 export function classifyFplEndpoint(url: string): FplEndpointLabel {
   let path: string;
   try {

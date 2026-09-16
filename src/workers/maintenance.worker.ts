@@ -69,6 +69,7 @@ import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import { resolveJobFreshAfter } from '../utils/job-freshness';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
+import { reconcileDataSyncBatchCostAfterTerminalFailure } from '../utils/data-sync-attempt';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { createQueueRunAttemptId } from '../utils/queue-run-id';
 import { seasonRefFromJobData } from '../domain/season-scoped-job';
@@ -456,7 +457,14 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
         case MAINTENANCE_JOBS.CLIENT_SIGNAL_RETENTION:
           return purgeClientSignalRetention();
         case MAINTENANCE_JOBS.LAUNCH_MONITOR:
-          return runLaunchMonitor({ source: 'cron' });
+          return runLaunchMonitor({
+            source: 'cron',
+            queue: job.queueName,
+            runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+            batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+            parentRunId: job.data.runId,
+            attempt: job.attemptsMade + 1,
+          });
         case MAINTENANCE_JOBS.POST_MATCH_CONSOLIDATION:
           return runPostMatchConsolidation();
         case MAINTENANCE_JOBS.TOURNAMENT_REVIEW: {
@@ -1043,6 +1051,25 @@ export function createMaintenanceWorker(): WorkerRuntime {
         attemptsMade: job?.attemptsMade,
       });
       const fence = job ? inspectSchedulerObligationFence(job.data) : null;
+      if (job && isTerminalJobFailure(job, error)) {
+        void reconcileDataSyncBatchCostAfterTerminalFailure({
+          queue: job.queueName,
+          jobName: job.name,
+          runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+          batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+          attempt: Math.max(1, job.attemptsMade),
+          error,
+        }).catch((reconciliationError) => {
+          logError(
+            'Failed to reconcile terminal maintenance batch cost marker',
+            reconciliationError,
+            {
+              jobId: job.id,
+              jobName: job.name,
+            },
+          );
+        });
+      }
       if (job && isTerminalJobFailure(job, error) && fence?.kind === 'complete') {
         void failSchedulerObligation({
           obligationId: fence.obligationId,

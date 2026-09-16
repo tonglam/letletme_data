@@ -7,8 +7,10 @@ import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
 import { queueRedisSingleton } from '../queues/redis';
 import { runDataSyncAttempt } from '../utils/data-sync-attempt';
+import { syncOperationsRepository } from '../repositories/sync-operations';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
+import { getConfig } from '../utils/config';
 import {
   NotificationDeliveryRejectedError,
   sendTelegramMessage,
@@ -21,6 +23,18 @@ export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
 const NOTIFICATION_MARKER_ATTEMPTS = 3;
 const NOTIFICATION_MARKER_RETRY_MS = 50;
 const NOTIFICATION_PRE_DELIVERY_LEASE_MS = 60_000;
+const DIRECT_BATCH_COST_MIN_STALE_AGE_MS = 10 * 60_000;
+const DIRECT_BATCH_COST_STALE_GRACE_MS = 5 * 60_000;
+
+function directBatchCostStaleAgeMs(): number {
+  // The marker starts before the bootstrap request. Keep it alive for the
+  // configured logical request deadline plus a bounded post-request grace
+  // period, while retaining the historical ten-minute floor for defaults.
+  return Math.max(
+    DIRECT_BATCH_COST_MIN_STALE_AGE_MS,
+    getConfig().FPL_REQUEST_DEADLINE_MS + DIRECT_BATCH_COST_STALE_GRACE_MS,
+  );
+}
 
 type LaunchRedisClient = {
   get: (key: string) => Promise<string | null>;
@@ -257,16 +271,39 @@ export async function evaluateLaunchMonitor(
 
 export async function runLaunchMonitor(options?: {
   source?: 'cron' | 'manual';
+  queue?: string;
   runId?: string;
+  /** Stable Bull job identity shared by every delivery attempt. */
+  batchId?: string;
+  attempt?: number;
+  parentRunId?: string;
   dependencies?: LaunchMonitorDependencies;
 }): Promise<LaunchMonitorResult> {
   const source = options?.source ?? 'manual';
   const now = options?.dependencies?.now() ?? new Date();
+  // API-owned cron has no Bull terminal event. Reconcile only old markers
+  // from this exact direct lane before starting the next five-minute tick;
+  // queue workers use their own terminal callback and are left untouched.
+  if (source === 'cron' && options?.queue === undefined) {
+    await syncOperationsRepository
+      .reconcileStaleBatchCostMarkers({
+        lane: 'cron',
+        scope: 'launch-monitor',
+        olderThanMs: directBatchCostStaleAgeMs(),
+        limit: 20,
+      })
+      .catch((error) => {
+        logError('Failed to reconcile stale direct launch-monitor markers', error);
+      });
+  }
   return runDataSyncAttempt(
     {
-      queue: 'cron',
+      queue: options?.queue ?? 'cron',
       jobName: 'launch-monitor',
       runId: options?.runId ?? `launch-monitor-${now.getTime()}`,
+      ...(options?.batchId ? { batchId: options.batchId } : {}),
+      ...(options?.attempt === undefined ? {} : { attempt: options.attempt }),
+      ...(options?.parentRunId ? { parentRunId: options.parentRunId } : {}),
       source,
     },
     () => evaluateLaunchMonitor(options?.dependencies),

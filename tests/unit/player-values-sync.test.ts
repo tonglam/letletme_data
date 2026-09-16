@@ -348,4 +348,26 @@ describe('daily player market snapshot synchronization', () => {
       });
     }
   });
+
+  test('preserves committed snapshot rows when a downstream step fails', async () => {
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findByChangeDate: async () => {
+          throw new Error('derived view unavailable');
+        },
+      }),
+    );
+
+    try {
+      await sync(TEST_SEASON, changeDate);
+      throw new Error('expected sync failure');
+    } catch (error) {
+      expect(error).toMatchObject({
+        requiredUnits: 1,
+        succeededUnits: 1,
+        failedUnits: 0,
+        submittedRows: 1,
+      });
+    }
+  });
 });

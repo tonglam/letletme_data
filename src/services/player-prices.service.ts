@@ -26,11 +26,21 @@ const defaultDependencies: PlayerPricesSyncDependencies = {
   readOrderingTimestamp: readCoreSnapshotOrderingTimestamp,
 };
 
+function attachCommittedPriceEvidence(error: unknown, updatedRows: number): void {
+  if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
+    Object.assign(error, {
+      count: updatedRows,
+      updatedRows,
+      submittedRows: updatedRows,
+    });
+  }
+}
+
 export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencies) {
   return async function syncForDate(
     season: FplSeasonRef,
     changeDate: string,
-  ): Promise<{ count: number; changeDate: string }> {
+  ): Promise<{ count: number; changeDate: string; updatedRows?: number }> {
     if (!/^\d{8}$/.test(changeDate)) {
       throw new Error(`Invalid player price change date: ${changeDate}`);
     }
@@ -46,7 +56,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
 
     if (changedIds.length === 0) {
       logInfo('No player price changes to apply', { changeDate });
-      return { count: 0, changeDate };
+      return { count: 0, changeDate, updatedRows: 0 };
     }
 
     // Use PostgreSQL time captured before price source reads so this evidence
@@ -70,7 +80,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     const currentChangedIds = changedIds.filter((elementId) => publishedIdSet.has(elementId));
     if (currentChangedIds.length === 0) {
       logInfo('Affected price rows no longer belong to the published roster', { changeDate });
-      return { count: 0, changeDate };
+      return { count: 0, changeDate, updatedRows: 0 };
     }
     const gw1Deadline = bootstrap.events.find((event) => event.id === 1)?.deadline_time ?? null;
     const { fromChangeDate, beforeChangeDate } = getPlayerValueSeasonBounds(gw1Deadline);
@@ -108,17 +118,25 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     }
 
     if (winningPriceUpdates.length > 0) {
-      await dependencies.enqueueCoreSnapshot(season, 'cascade', {
-        jobId: `core-after-price-${changeDate}`,
-        removeOnSettle: false,
-      });
+      try {
+        await dependencies.enqueueCoreSnapshot(season, 'cascade', {
+          jobId: `core-after-price-${changeDate}`,
+          removeOnSettle: false,
+        });
+      } catch (error) {
+        // Player price rows commit before the dependent Core enqueue. Keep the
+        // committed write count on the error so the enclosing batch ledger does
+        // not report a successful mutation as zero work.
+        attachCommittedPriceEvidence(error, updatedPlayers.length);
+        throw error;
+      }
     }
     logInfo('Player prices updated; coherent core rebuild queued', {
       changeDate,
       count: updatedPlayers.length,
     });
 
-    return { count: updatedPlayers.length, changeDate };
+    return { count: updatedPlayers.length, changeDate, updatedRows: updatedPlayers.length };
   };
 }
 

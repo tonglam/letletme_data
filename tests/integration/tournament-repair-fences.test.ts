@@ -53,6 +53,7 @@ afterAll(async () => {
   await observer`DELETE FROM competition.league_event_results WHERE season_id=${season.seasonId}`;
   await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId}`;
   await observer`DELETE FROM fpl.events WHERE season_id=${season.seasonId}`;
+  await observer`DELETE FROM ops.sync_runs WHERE season_id=${season.seasonId} AND mode='batch-cost'`;
   await observer`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
   await observer.end();
 });

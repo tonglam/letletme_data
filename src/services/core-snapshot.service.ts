@@ -21,7 +21,10 @@ import {
   readCoreSnapshotOrderingTimestamp,
   recoverPendingCoreSnapshotPublication,
 } from './core-snapshot-publication.service';
-import { CORE_SNAPSHOT_STALE_SOURCE_CODE } from './core-snapshot-persistence.service';
+import {
+  CORE_SNAPSHOT_STALE_SOURCE_CODE,
+  type CoreSnapshotPersistenceResult,
+} from './core-snapshot-persistence.service';
 
 import type { RawFPLFixture } from '../types';
 
@@ -41,6 +44,11 @@ export interface CoreSnapshotSyncResult {
   readonly failedUnits: number;
   readonly publicationId?: string;
   readonly revision?: number;
+  /** Entity counts submitted by the canonical persistence transaction. */
+  readonly persistence?: CoreSnapshotPersistenceResult;
+  readonly submittedRows?: number;
+  readonly publicationsCreated?: number;
+  readonly publicationsReused?: number;
 }
 
 export interface CoreSnapshotDependencies {
@@ -94,10 +102,17 @@ function workUnits(snapshot: CoreSnapshot): number {
   );
 }
 
+function attachAttemptEvidence(error: unknown, evidence: Record<string, unknown>): void {
+  if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
+    Object.assign(error, evidence);
+  }
+}
+
 function result(
   snapshot: CoreSnapshot,
   published: boolean,
   publication?: { publicationId: string; revision: number },
+  persistence?: CoreSnapshotPersistenceResult,
 ): CoreSnapshotSyncResult {
   const requiredUnits = workUnits(snapshot);
   return {
@@ -113,6 +128,23 @@ function result(
     succeededUnits: published ? requiredUnits : 0,
     failedUnits: 0,
     ...(publication ?? {}),
+    ...(published
+      ? {
+          publicationsCreated: 1,
+          publicationsReused: 0,
+        }
+      : {}),
+    ...(persistence
+      ? {
+          persistence,
+          submittedRows:
+            persistence.events +
+            persistence.teams +
+            persistence.players +
+            persistence.phases +
+            persistence.fixtures,
+        }
+      : {}),
   };
 }
 
@@ -143,7 +175,9 @@ export async function syncCoreSnapshot(
 
   let preparedPublicationId: string | null = null;
   let persistenceCommitted = false;
+  let publicationActivated = false;
   let validatedSnapshot: CoreSnapshot | null = null;
+  let persistedEvidence: CoreSnapshotPersistenceResult | null = null;
   try {
     const sourceCheckedAt = options.sourceCheckedAt
       ? new Date(options.sourceCheckedAt)
@@ -229,6 +263,7 @@ export async function syncCoreSnapshot(
         return { prepared, persisted, preparedCache };
       },
     );
+    persistedEvidence = preparedAndPersisted.persisted.persistence;
     persistenceCommitted = true;
     dependencies.onMilestone?.('persisted');
     const committed = await publishCoreSnapshotPublication(
@@ -239,16 +274,48 @@ export async function syncCoreSnapshot(
         sourceRunId,
         sourceCheckedAt,
         freshnessWindowId: options.freshnessWindowId,
+        onActivated: () => {
+          publicationActivated = true;
+        },
       },
       preparedAndPersisted.preparedCache,
     );
-    if (committed.status === 'stale') return result(snapshot, false);
+    if (committed.status === 'stale')
+      return result(snapshot, false, undefined, preparedAndPersisted.persisted.persistence);
     dependencies.onMilestone?.('published');
-    return result(snapshot, true, {
-      publicationId: preparedAndPersisted.prepared.publicationId,
-      revision: preparedAndPersisted.prepared.revision,
-    });
+    return result(
+      snapshot,
+      true,
+      {
+        publicationId: preparedAndPersisted.prepared.publicationId,
+        revision: preparedAndPersisted.prepared.revision,
+      },
+      preparedAndPersisted.persisted.persistence,
+    );
   } catch (error) {
+    if (persistenceCommitted && persistedEvidence) {
+      const committedUnits = validatedSnapshot ? workUnits(validatedSnapshot) : 0;
+      attachAttemptEvidence(error, {
+        persistence: persistedEvidence,
+        requiredUnits: committedUnits,
+        reusedUnits: 0,
+        succeededUnits: committedUnits,
+        failedUnits: 0,
+        submittedRows:
+          persistedEvidence.events +
+          persistedEvidence.teams +
+          persistedEvidence.players +
+          persistedEvidence.phases +
+          persistedEvidence.fixtures,
+        ...(preparedPublicationId
+          ? {
+              publicationId: preparedPublicationId,
+              publicationsCreated: publicationActivated ? 1 : 0,
+              publicationsReused: 0,
+            }
+          : {}),
+      });
+    }
     if (
       error instanceof DatabaseError &&
       error.code === CORE_SNAPSHOT_STALE_SOURCE_CODE &&

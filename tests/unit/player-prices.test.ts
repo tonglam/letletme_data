@@ -92,6 +92,7 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260803')).resolves.toEqual({
       count: 2,
       changeDate: '20260803',
+      updatedRows: 2,
     });
     expect(findLatestForPlayerIds).toHaveBeenCalledWith(
       TEST_SEASON,
@@ -128,6 +129,7 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260802')).resolves.toEqual({
       count: 0,
       changeDate: '20260802',
+      updatedRows: 0,
     });
     expect(readOrderingTimestamp).not.toHaveBeenCalled();
     expect(getBootstrap).not.toHaveBeenCalled();
@@ -148,6 +150,7 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260803')).resolves.toEqual({
       count: 0,
       changeDate: '20260803',
+      updatedRows: 0,
     });
     expect(findLatestForPlayerIds).not.toHaveBeenCalled();
     expect(updatePrices).not.toHaveBeenCalled();
@@ -185,7 +188,30 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260803')).resolves.toEqual({
       count: 0,
       changeDate: '20260803',
+      updatedRows: 0,
     });
     expect(enqueueCoreSnapshot).not.toHaveBeenCalled();
+  });
+
+  test('keeps committed price row counts when the core enqueue fails', async () => {
+    const enqueueError = new Error('core queue unavailable');
+    const sync = createPlayerPricesSync(
+      dependencies({
+        findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
+        findLatestForPlayerIds: async () => [stored(2, 63, '20260805', 'Rise')],
+        getBootstrap: async () => bootstrap([1, 2]),
+        updatePrices: async () => [player(2, 63)],
+        enqueueCoreSnapshot: async () => {
+          throw enqueueError;
+        },
+      }),
+    );
+
+    await expect(sync(TEST_SEASON, '20260803')).rejects.toBe(enqueueError);
+    expect(enqueueError).toMatchObject({
+      count: 1,
+      updatedRows: 1,
+      submittedRows: 1,
+    });
   });
 });

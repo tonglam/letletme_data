@@ -1,7 +1,22 @@
 import { randomUUID } from 'node:crypto';
 
 import { alias } from 'drizzle-orm/pg-core';
-import { and, asc, desc, eq, exists, gt, inArray, isNull, like, lte, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNull,
+  like,
+  lte,
+  lt,
+  not,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
@@ -41,6 +56,8 @@ export interface StartSyncRunInput {
   readonly eventId?: number;
   readonly mode: string;
   readonly trigger: string;
+  /** Delivery attempt used to reopen a failed batch-cost ledger. */
+  readonly attempt?: number;
   readonly expectedItems?: number;
   readonly metadata?: Record<string, unknown>;
   readonly startedAt?: Date;
@@ -55,6 +72,34 @@ export interface SyncItemInput {
   readonly normalizedPayload?: Record<string, unknown> | null;
   readonly lastError?: string | null;
   readonly completedAt?: Date | null;
+}
+
+export interface RecordSyncBatchCostInput {
+  /** Stable idempotency key for one delivered execution attempt. */
+  readonly attemptKey: string;
+  readonly batchId: string;
+  readonly parentRunId?: string | null;
+  readonly releaseSha: string;
+  readonly attempt: number;
+  readonly complete: boolean;
+  readonly payload: Record<string, unknown>;
+}
+
+export interface RecordSyncBatchCostStartInput {
+  /** Stable idempotency key for one delivered execution attempt. */
+  readonly attemptKey: string;
+  readonly batchId: string;
+  readonly parentRunId?: string | null;
+  readonly releaseSha: string;
+  readonly attempt: number;
+  readonly payload: Record<string, unknown>;
+}
+
+export interface StartSyncBatchCostRunInput {
+  /** The immutable run identity and optional retry fence. */
+  readonly run: StartSyncRunInput;
+  /** The running marker that must be committed with the run row. */
+  readonly marker: RecordSyncBatchCostStartInput;
 }
 
 export type EntrySyncAuditStatus = Readonly<{
@@ -95,6 +140,32 @@ export type EntrySyncAuditStatus = Readonly<{
   truncated: boolean;
 }>;
 
+export interface MarkSyncBatchCostSettlementFailureInput {
+  /** Stable idempotency key for the running execution marker. */
+  readonly attemptKey: string;
+  readonly attempt: number;
+  readonly error: unknown;
+}
+
+export interface ReconcileSyncBatchCostTerminalFailureInput {
+  /** Stable Bull batch identity shared by every attempt of one job. */
+  readonly batchId: string;
+  /** The delivery attempt that Bull has exhausted or marked terminal. */
+  readonly attempt: number;
+  readonly error: unknown;
+}
+
+export interface ReconcileStaleSyncBatchCostMarkersInput {
+  /** Exact lane used by the direct execution path. */
+  readonly lane: string;
+  /** Exact job scope used by the direct execution path. */
+  readonly scope: string;
+  /** Minimum age of an untouched running marker before it is considered orphaned. */
+  readonly olderThanMs: number;
+  /** Bound one maintenance pass so a large historical backlog cannot monopolize it. */
+  readonly limit?: number;
+}
+
 export interface PreparePublicationInput {
   readonly publicationId?: string;
   readonly dataset: DataPublicationDataset;
@@ -132,6 +203,7 @@ const NON_TERMINAL_RUN_STATUSES: readonly SyncRunStatus[] = [
   'ready_to_publish',
 ];
 const EXPIRED_PUBLICATION_CLEANUP_BATCH_SIZE = 100;
+const SYNC_BATCH_COST_RESOURCE_TYPE = 'batch-cost';
 
 function nullableValue<T>(value: T | undefined): T | null {
   return value ?? null;
@@ -221,11 +293,16 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           mode: syncRunsInOps.mode,
           trigger: syncRunsInOps.trigger,
           status: syncRunsInOps.status,
+          metadata: syncRunsInOps.metadata,
         })
         .from(syncRunsInOps)
         .where(eq(syncRunsInOps.runId, runId))
         .limit(1);
       const row = existing[0];
+      const eventMatches =
+        input.mode === 'batch-cost'
+          ? input.eventId === undefined || row?.eventId === null || row?.eventId === input.eventId
+          : row?.eventId === nullableValue(input.eventId);
       if (
         !row ||
         row.provider !== input.provider ||
@@ -233,7 +310,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         row.scope !== input.scope ||
         row.seasonId !== nullableValue(input.season?.seasonId) ||
         row.seasonCode !== nullableValue(input.season?.seasonCode) ||
-        row.eventId !== nullableValue(input.eventId) ||
+        !eventMatches ||
         row.mode !== input.mode ||
         row.trigger !== input.trigger
       ) {
@@ -242,12 +319,69 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           'SYNC_RUN_ID_CONFLICT',
         );
       }
+      // A recovery may know the event after an earlier unscoped marker was
+      // created. Bind that first positive event to the durable ledger while
+      // the immutable identity is still unscoped; a concurrent recovery for
+      // another event will observe the binding and fail closed below.
+      if (input.mode === 'batch-cost' && input.eventId !== undefined && row.eventId === null) {
+        const bound = await db
+          .update(syncRunsInOps)
+          .set({ eventId: input.eventId, updatedAt: sql`clock_timestamp()` })
+          .where(and(eq(syncRunsInOps.runId, runId), isNull(syncRunsInOps.eventId)))
+          .returning({ eventId: syncRunsInOps.eventId });
+        if (bound.length === 0) {
+          const current = await db
+            .select({ eventId: syncRunsInOps.eventId })
+            .from(syncRunsInOps)
+            .where(eq(syncRunsInOps.runId, runId))
+            .limit(1);
+          if (current[0]?.eventId !== input.eventId) {
+            throw new DatabaseError(
+              'Sync run ID is already bound to another immutable event scope',
+              'SYNC_RUN_ID_CONFLICT',
+            );
+          }
+        }
+      }
       // Scheduler retries intentionally reuse the durable obligation/run
       // correlation so publication evidence can still join the exact window.
       // A failed run is the one terminal state that may be fenced back to
       // running: without this transition the later attempt can fetch and
       // stage data but finishRun is forbidden from activating its publication.
-      if (row.status === 'failed') {
+      // Batch-cost ledgers use the delivery attempt as an explicit fence. A
+      // stale settlement must never reopen a terminal ledger, while a newer
+      // attempt must reopen it before its running marker is written.
+      const currentMetadata = isRecord(row.metadata) ? row.metadata : {};
+      const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+      const latestAttempt =
+        typeof currentCost.latestAttempt === 'number' &&
+        Number.isSafeInteger(currentCost.latestAttempt) &&
+        currentCost.latestAttempt >= 1
+          ? currentCost.latestAttempt
+          : 0;
+      const terminalAttempt =
+        typeof currentCost.terminalAttempt === 'number' &&
+        Number.isSafeInteger(currentCost.terminalAttempt) &&
+        currentCost.terminalAttempt >= 1
+          ? currentCost.terminalAttempt
+          : 0;
+      const requestedAttempt =
+        typeof input.attempt === 'number' && Number.isFinite(input.attempt)
+          ? Math.max(1, Math.floor(input.attempt))
+          : 0;
+      const batchCostRetryIsNewer =
+        row.mode === 'batch-cost' && requestedAttempt > Math.max(latestAttempt, terminalAttempt);
+      if (row.status === 'failed' && (row.mode !== 'batch-cost' || batchCostRetryIsNewer)) {
+        const nextMetadata =
+          input.mode === 'batch-cost' && input.metadata !== undefined
+            ? {
+                ...currentMetadata,
+                ...input.metadata,
+                // Keep the immutable accounting history while allowing the
+                // caller to refresh source/run context for the new attempt.
+                batchCost: currentCost,
+              }
+            : input.metadata;
         const reactivated = await db
           .update(syncRunsInOps)
           .set({
@@ -261,7 +395,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             completedAt: null,
             startedAt: startedAt ?? sql`clock_timestamp()`,
             ...(input.expectedItems === undefined ? {} : { expectedItems: input.expectedItems }),
-            ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+            ...(nextMetadata === undefined ? {} : { metadata: nextMetadata }),
             updatedAt: sql`clock_timestamp()`,
           })
           .where(and(eq(syncRunsInOps.runId, runId), eq(syncRunsInOps.status, 'failed')))
@@ -269,6 +403,30 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         if (reactivated.length === 1) return runId;
       }
       return runId;
+    },
+
+    /**
+     * Create or resume a batch-cost run and persist its running marker in one
+     * database transaction. The marker is the evidence used by queue and
+     * stale-run reconciliation; committing the run without it would leave an
+     * itemless running ledger that no reconciler can identify precisely.
+     */
+    startBatchCostRun: async (
+      input: StartSyncBatchCostRunInput,
+    ): Promise<'recorded' | 'duplicate'> => {
+      const db = await getDbInstance();
+      return db.transaction(async (tx) => {
+        const repository = createSyncOperationsRepository(tx);
+        const runId = await repository.startRun(input.run);
+        const recorded = await repository.recordBatchCostStart(runId, input.marker);
+        if (recorded === 'missing') {
+          throw new DatabaseError(
+            `Batch cost ledger run ${runId} disappeared during atomic start`,
+            'SYNC_BATCH_COST_RUN_MISSING',
+          );
+        }
+        return recorded;
+      });
     },
 
     upsertItems: async (runId: string, items: readonly SyncItemInput[]): Promise<void> => {
@@ -389,6 +547,362 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             ...(resourceScope === undefined ? [] : [resourceScope]),
           ),
         );
+    },
+
+    /**
+     * Persist one batch-level cost record in the existing sync run/item
+     * ledger. The sync item primary key makes duplicate delivery idempotent;
+     * a real retry uses a different attempt key and therefore contributes a
+     * separate cost record.
+     */
+    recordBatchCost: async (
+      runId: string,
+      input: RecordSyncBatchCostInput,
+    ): Promise<'recorded' | 'duplicate' | 'missing'> => {
+      if (!input.attemptKey.trim() || input.attemptKey.length > 240) {
+        throw new DatabaseError('Batch cost attempt key is invalid', 'SYNC_BATCH_COST_KEY_INVALID');
+      }
+      const db = await getDbInstance();
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ metadata: syncRunsInOps.metadata })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (!run) return 'missing';
+
+        const existingRows = await tx
+          .select({
+            status: syncItemsInOps.status,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+          })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, input.attemptKey),
+            ),
+          )
+          .for('update');
+        const existing = existingRows[0];
+        const existingPayload = isRecord(existing?.normalizedPayload)
+          ? existing.normalizedPayload
+          : null;
+        if (existing && existingPayload?.phase !== 'started') return 'duplicate';
+
+        const existingEventId =
+          typeof existingPayload?.eventId === 'number' &&
+          Number.isSafeInteger(existingPayload.eventId) &&
+          existingPayload.eventId > 0
+            ? existingPayload.eventId
+            : undefined;
+        const incomingEventId = input.payload.eventId;
+
+        const settledPayload = {
+          schemaVersion: 1,
+          phase: 'settled',
+          batchId: input.batchId,
+          parentRunId: input.parentRunId ?? null,
+          releaseSha: input.releaseSha,
+          complete: input.complete,
+          ...input.payload,
+          // An unscoped attempt can discover its event before a later scope
+          // conflict aborts the runner. Preserve that durable event binding
+          // when the failure report has no replacement event identity.
+          ...(incomingEventId == null && existingEventId !== undefined
+            ? { eventId: existingEventId }
+            : {}),
+        };
+        if (existing) {
+          await tx
+            .update(syncItemsInOps)
+            .set({
+              status: input.complete ? 'completed' : 'failed',
+              attempts: Math.max(1, Math.floor(input.attempt)),
+              normalizedPayload: settledPayload,
+              completedAt: input.complete ? sql`clock_timestamp()` : null,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(syncItemsInOps.runId, runId),
+                eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                eq(syncItemsInOps.resourceId, input.attemptKey),
+              ),
+            );
+        } else {
+          await tx.insert(syncItemsInOps).values({
+            runId,
+            resourceType: SYNC_BATCH_COST_RESOURCE_TYPE,
+            resourceId: input.attemptKey,
+            status: input.complete ? 'completed' : 'failed',
+            attempts: Math.max(1, Math.floor(input.attempt)),
+            normalizedPayload: settledPayload,
+            completedAt: input.complete ? sql`clock_timestamp()` : null,
+          });
+        }
+
+        const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const currentAttempts = isRecord(currentCost.attempts) ? currentCost.attempts : {};
+        const currentTotals = isRecord(currentCost.totals) ? currentCost.totals : {};
+        const currentLatestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? currentCost.latestAttempt
+            : 0;
+        const currentTerminalAttempt =
+          typeof currentCost.terminalAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.terminalAttempt) &&
+          currentCost.terminalAttempt >= 1
+            ? currentCost.terminalAttempt
+            : 0;
+        const attempt = Math.max(1, Math.floor(input.attempt));
+        const latestAttempt = Math.max(currentLatestAttempt, attempt);
+        // A terminal transition is owned by the newest attempt that has
+        // reached the ledger. A late failure therefore cannot turn a newer
+        // running/successful attempt back into failed; a newer success can
+        // still reopen and complete a run that an older failure closed first.
+        const terminalAllowed =
+          attempt >= latestAttempt &&
+          (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
+        const terminalCandidate = input.complete
+          ? terminalAllowed
+            ? ('completed' as const)
+            : undefined
+          : terminalAllowed
+            ? ('failed' as const)
+            : undefined;
+        let terminalStatus = terminalCandidate;
+        if (terminalStatus) {
+          // A stalled Bull redelivery can run beside the original physical
+          // delivery and has a distinct attempt key. Keep the shared ledger
+          // open until every marker at this or a newer logical attempt has
+          // settled; otherwise quiescence can pass while a sibling still has
+          // provider or canonical-write work in flight.
+          const runningSiblingRows = await tx
+            .select({ one: sql`1` })
+            .from(syncItemsInOps)
+            .where(
+              and(
+                eq(syncItemsInOps.runId, runId),
+                eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                eq(syncItemsInOps.status, 'running'),
+                sql`${syncItemsInOps.attempts} >= ${attempt}`,
+                sql`${syncItemsInOps.normalizedPayload}->>'phase' = 'started'`,
+              ),
+            )
+            .limit(1);
+          if (runningSiblingRows.length > 0) terminalStatus = undefined;
+        }
+        const nextAttempt = {
+          batchId: input.batchId,
+          parentRunId: input.parentRunId ?? null,
+          releaseSha: input.releaseSha,
+          attempt,
+          complete: input.complete,
+          ...input.payload,
+        };
+        const additiveKeys = [
+          'logicalRequests',
+          'httpAttempts',
+          'httpRetries',
+          'admissionWaitMs',
+          'admissionWaitSamples',
+          'admissionGrants',
+          'admissionRejected',
+          'admissionStoreUnavailable',
+          'admissionCancelled',
+          'providerResponseSamples',
+          'providerResponse429',
+          'providerResponse5xx',
+          'providerNetworkErrors',
+          'providerDurationMs',
+          'providerDurationSamples',
+          'insertedRows',
+          'updatedRows',
+          'deletedRows',
+          'submittedRows',
+          'requiredUnits',
+          'reusedUnits',
+          'succeededUnits',
+          'failedUnits',
+          'publicationsCreated',
+          'publicationsReused',
+        ] as const;
+        const nextTotals: Record<string, unknown> = { ...currentTotals };
+        for (const key of additiveKeys) {
+          const value = input.payload[key];
+          if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+          const previous = typeof nextTotals[key] === 'number' ? nextTotals[key] : 0;
+          nextTotals[key] = previous + value;
+        }
+        const endpointRequests = isRecord(input.payload.endpointRequests)
+          ? input.payload.endpointRequests
+          : {};
+        const previousEndpoints = isRecord(currentTotals.endpointRequests)
+          ? currentTotals.endpointRequests
+          : {};
+        const mergedEndpoints: Record<string, number> = {};
+        for (const [endpoint, value] of Object.entries(previousEndpoints)) {
+          if (typeof value === 'number' && Number.isFinite(value))
+            mergedEndpoints[endpoint] = value;
+        }
+        for (const [endpoint, value] of Object.entries(endpointRequests)) {
+          if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+          mergedEndpoints[endpoint] = (mergedEndpoints[endpoint] ?? 0) + value;
+        }
+        nextTotals.endpointRequests = mergedEndpoints;
+        nextTotals.unitAccounting =
+          currentTotals.unitAccounting === undefined
+            ? input.payload.unitAccounting === 'exact'
+              ? 'exact'
+              : 'per_attempt'
+            : currentTotals.unitAccounting === 'exact' && input.payload.unitAccounting === 'exact'
+              ? 'exact'
+              : 'per_attempt';
+        nextTotals.unitAccountingQuality =
+          currentTotals.unitAccountingQuality === undefined
+            ? input.payload.unitAccountingQuality === 'reported'
+              ? 'reported'
+              : 'unknown'
+            : currentTotals.unitAccountingQuality === 'reported' &&
+                input.payload.unitAccountingQuality === 'reported'
+              ? 'reported'
+              : 'unknown';
+        nextTotals.writeAccounting =
+          currentTotals.writeAccounting === undefined
+            ? input.payload.writeAccounting === 'reported'
+              ? 'reported'
+              : 'unknown'
+            : currentTotals.writeAccounting === 'reported' &&
+                input.payload.writeAccounting === 'reported'
+              ? 'reported'
+              : 'unknown';
+
+        const nextMetadata = {
+          ...currentMetadata,
+          batchCost: {
+            schemaVersion: 1,
+            ...currentCost,
+            attempts: { ...currentAttempts, [input.attemptKey]: nextAttempt },
+            totals: nextTotals,
+            latestAttempt,
+            ...(terminalStatus ? { terminalAttempt: attempt } : {}),
+            lastSettledAt: new Date().toISOString(),
+          },
+        };
+        // Keep the aggregate update unconditional. A run may already be
+        // terminal because another attempt settled first, but this attempt is
+        // still real cost and must remain visible in the immutable item/totals.
+        await tx
+          .update(syncRunsInOps)
+          .set({ metadata: nextMetadata, updatedAt: sql`clock_timestamp()` })
+          .where(eq(syncRunsInOps.runId, runId));
+        if (terminalStatus) {
+          await tx
+            .update(syncRunsInOps)
+            .set({
+              status: terminalStatus,
+              ...(terminalStatus === 'completed'
+                ? {
+                    completedItems: 1,
+                    failedItems: 0,
+                    skippedItems: 0,
+                    dataChanged: false,
+                    errorSummary: null,
+                  }
+                : {
+                    completedItems: 0,
+                    failedItems: 1,
+                    skippedItems: 0,
+                    dataChanged: false,
+                    errorSummary: 'Data sync attempt did not settle successfully',
+                  }),
+              completedAt: sql`clock_timestamp()`,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(syncRunsInOps.runId, runId),
+                terminalStatus === 'completed'
+                  ? inArray(syncRunsInOps.status, [...NON_TERMINAL_RUN_STATUSES, 'failed'])
+                  : inArray(syncRunsInOps.status, NON_TERMINAL_RUN_STATUSES),
+              ),
+            );
+        }
+        return 'recorded';
+      });
+    },
+
+    /**
+     * Leave a durable running marker before provider work starts. If the
+     * process exits before settlement, the running sync item is explicit
+     * evidence of an incomplete batch rather than an invented zero-cost row.
+     */
+    recordBatchCostStart: async (
+      runId: string,
+      input: RecordSyncBatchCostStartInput,
+    ): Promise<'recorded' | 'duplicate' | 'missing'> => {
+      if (!input.attemptKey.trim() || input.attemptKey.length > 240) {
+        throw new DatabaseError('Batch cost attempt key is invalid', 'SYNC_BATCH_COST_KEY_INVALID');
+      }
+      const db = await getDbInstance();
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ runId: syncRunsInOps.runId, metadata: syncRunsInOps.metadata })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        if (!runRows[0]) return 'missing';
+        const inserted = await tx
+          .insert(syncItemsInOps)
+          .values({
+            runId,
+            resourceType: SYNC_BATCH_COST_RESOURCE_TYPE,
+            resourceId: input.attemptKey,
+            status: 'running',
+            attempts: Math.max(1, Math.floor(input.attempt)),
+            normalizedPayload: {
+              schemaVersion: 1,
+              phase: 'started',
+              batchId: input.batchId,
+              parentRunId: input.parentRunId ?? null,
+              releaseSha: input.releaseSha,
+              ...input.payload,
+            },
+          })
+          .onConflictDoNothing({
+            target: [syncItemsInOps.runId, syncItemsInOps.resourceType, syncItemsInOps.resourceId],
+          })
+          .returning({ resourceId: syncItemsInOps.resourceId });
+        const currentMetadata = isRecord(runRows[0]?.metadata) ? runRows[0].metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const latestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? Math.max(currentCost.latestAttempt, Math.floor(input.attempt))
+            : Math.max(1, Math.floor(input.attempt));
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            metadata: {
+              ...currentMetadata,
+              batchCost: {
+                schemaVersion: 1,
+                ...currentCost,
+                latestAttempt,
+              },
+            },
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(syncRunsInOps.runId, runId));
+        return inserted.length === 1 ? 'recorded' : 'duplicate';
+      });
     },
 
     entrySyncAudit: async (input: {
@@ -671,6 +1185,583 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         recent,
         truncated,
       };
+    },
+
+    /**
+     * Close a running batch-cost marker when settlement cannot be persisted.
+     * This is deliberately fenced by the marker's phase and attempt number:
+     * an uncertain response after a committed settlement is left intact, and
+     * a newer attempt cannot be reopened or hidden by an older failure.
+     */
+    markBatchCostSettlementFailure: async (
+      runId: string,
+      input: MarkSyncBatchCostSettlementFailureInput,
+    ): Promise<boolean> => {
+      if (!input.attemptKey.trim() || input.attemptKey.length > 240) {
+        throw new DatabaseError('Batch cost attempt key is invalid', 'SYNC_BATCH_COST_KEY_INVALID');
+      }
+      const db = await getDbInstance();
+      const summary = (
+        input.error instanceof Error ? input.error.message : String(input.error)
+      ).slice(0, 4_000);
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ status: syncRunsInOps.status, metadata: syncRunsInOps.metadata })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (!run) return false;
+
+        const itemRows = await tx
+          .select({
+            status: syncItemsInOps.status,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+          })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, input.attemptKey),
+            ),
+          )
+          .for('update');
+        const item = itemRows[0];
+        const payload = isRecord(item?.normalizedPayload) ? item.normalizedPayload : null;
+        if (!item || item.status !== 'running' || payload?.phase !== 'started') return false;
+
+        const failurePayload = {
+          ...payload,
+          schemaVersion: 1,
+          phase: 'settlement_failed',
+          complete: false,
+          incompleteReason: 'batch_cost_persistence_failed',
+          settlementError: summary,
+        };
+        await tx
+          .update(syncItemsInOps)
+          .set({
+            status: 'failed',
+            lastError: summary,
+            normalizedPayload: failurePayload,
+            completedAt: sql`clock_timestamp()`,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, input.attemptKey),
+              eq(syncItemsInOps.status, 'running'),
+            ),
+          );
+
+        const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const currentAttempts = isRecord(currentCost.attempts) ? currentCost.attempts : {};
+        const currentLatestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? currentCost.latestAttempt
+            : 0;
+        const currentTerminalAttempt =
+          typeof currentCost.terminalAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.terminalAttempt) &&
+          currentCost.terminalAttempt >= 1
+            ? currentCost.terminalAttempt
+            : 0;
+        const attempt = Math.max(1, Math.floor(input.attempt));
+        const latestAttempt = Math.max(currentLatestAttempt, attempt);
+        const terminalAllowed =
+          attempt >= latestAttempt &&
+          (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
+        let closeRun =
+          terminalAllowed && NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus);
+        if (closeRun) {
+          // A settlement failure has the same shared-run lifetime as a normal
+          // settlement. Do not let one stalled redelivery terminalize the run
+          // while a same-or-newer sibling marker is still executing.
+          const runningSiblingRows = await tx
+            .select({ one: sql`1` })
+            .from(syncItemsInOps)
+            .where(
+              and(
+                eq(syncItemsInOps.runId, runId),
+                eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                eq(syncItemsInOps.status, 'running'),
+                sql`${syncItemsInOps.attempts} >= ${attempt}`,
+                sql`${syncItemsInOps.normalizedPayload}->>'phase' = 'started'`,
+              ),
+            )
+            .limit(1);
+          if (runningSiblingRows.length > 0) closeRun = false;
+        }
+        const failedAttempt = {
+          ...payload,
+          schemaVersion: 1,
+          attemptKey: input.attemptKey,
+          attempt,
+          phase: 'settlement_failed',
+          complete: false,
+          incompleteAccounting: true,
+          incompleteReason: 'batch_cost_persistence_failed',
+          settlementError: summary,
+        };
+        const nextMetadata = {
+          ...currentMetadata,
+          batchCost: {
+            schemaVersion: 1,
+            ...currentCost,
+            attempts: { ...currentAttempts, [input.attemptKey]: failedAttempt },
+            latestAttempt,
+            ...(closeRun ? { terminalAttempt: attempt } : {}),
+            incompleteAccounting: true,
+            incompleteReason:
+              typeof currentCost.incompleteReason === 'string'
+                ? currentCost.incompleteReason
+                : 'batch_cost_persistence_failed',
+            lastSettlementFailureAt: new Date().toISOString(),
+            lastSettlementFailure: {
+              batchId: payload.batchId ?? null,
+              attempt,
+              error: summary,
+            },
+          },
+        };
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            metadata: nextMetadata,
+            ...(closeRun
+              ? {
+                  status: 'failed',
+                  failedItems: 1,
+                  errorSummary: 'Data sync batch-cost settlement could not be persisted',
+                  completedAt: sql`clock_timestamp()`,
+                }
+              : {}),
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(syncRunsInOps.runId, runId));
+        return true;
+      });
+    },
+
+    /**
+     * Reconcile a batch-cost marker when Bull has exhausted a job after the
+     * business work committed but before runDataSyncAttempt reached its
+     * settlement finally block. The marker is selected by the stable Bull
+     * batch identity and attempt, so a later attempt can remain authoritative
+     * without allowing this terminal callback to close its run.
+     */
+    reconcileBatchCostTerminalFailure: async (
+      runId: string,
+      input: ReconcileSyncBatchCostTerminalFailureInput,
+    ): Promise<boolean> => {
+      if (!input.batchId.trim() || input.batchId.length > 240) {
+        throw new DatabaseError('Batch cost batch ID is invalid', 'SYNC_BATCH_COST_BATCH_INVALID');
+      }
+      const db = await getDbInstance();
+      const summary = (
+        input.error instanceof Error ? input.error.message : String(input.error)
+      ).slice(0, 4_000);
+      const attempt = Math.max(1, Math.floor(input.attempt));
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ status: syncRunsInOps.status, metadata: syncRunsInOps.metadata })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (!run) return false;
+
+        const itemRows = await tx
+          .select({
+            resourceId: syncItemsInOps.resourceId,
+            attempts: syncItemsInOps.attempts,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+          })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.status, 'running'),
+              eq(syncItemsInOps.attempts, attempt),
+              sql`${syncItemsInOps.normalizedPayload}->>'batchId' = ${input.batchId}`,
+              sql`${syncItemsInOps.normalizedPayload}->>'phase' = 'started'`,
+            ),
+          )
+          .for('update');
+        if (itemRows.length === 0) return false;
+
+        const completedAt = sql`clock_timestamp()`;
+        for (const item of itemRows) {
+          const payload = isRecord(item.normalizedPayload) ? item.normalizedPayload : {};
+          await tx
+            .update(syncItemsInOps)
+            .set({
+              status: 'failed',
+              lastError: summary,
+              normalizedPayload: {
+                ...payload,
+                schemaVersion: 1,
+                phase: 'settlement_failed',
+                complete: false,
+                incompleteReason: 'worker_terminal_failure',
+                settlementError: summary,
+                terminalFailureAttempt: attempt,
+                terminalFailedAt: new Date().toISOString(),
+              },
+              completedAt,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(syncItemsInOps.runId, runId),
+                eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                eq(syncItemsInOps.resourceId, item.resourceId),
+                eq(syncItemsInOps.status, 'running'),
+              ),
+            );
+        }
+
+        const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const currentLatestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? currentCost.latestAttempt
+            : 0;
+        const currentTerminalAttempt =
+          typeof currentCost.terminalAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.terminalAttempt) &&
+          currentCost.terminalAttempt >= 1
+            ? currentCost.terminalAttempt
+            : 0;
+        const latestAttempt = Math.max(currentLatestAttempt, attempt);
+        const terminalAllowed =
+          attempt >= latestAttempt &&
+          (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
+        const closeRun =
+          terminalAllowed && NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus);
+        const nextMetadata = {
+          ...currentMetadata,
+          batchCost: {
+            schemaVersion: 1,
+            ...currentCost,
+            latestAttempt,
+            ...(closeRun ? { terminalAttempt: attempt } : {}),
+            incompleteAccounting: true,
+            incompleteReason: 'worker_terminal_failure',
+            lastTerminalFailureAt: new Date().toISOString(),
+            lastTerminalFailure: {
+              batchId: input.batchId,
+              attempt,
+              error: summary,
+              markerCount: itemRows.length,
+            },
+          },
+        };
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            metadata: nextMetadata,
+            ...(closeRun
+              ? {
+                  status: 'failed',
+                  completedItems: 0,
+                  failedItems: 1,
+                  skippedItems: 0,
+                  dataChanged: false,
+                  errorSummary: 'Data sync batch-cost worker ended before settlement',
+                  completedAt,
+                }
+              : {}),
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(syncRunsInOps.runId, runId));
+        return true;
+      });
+    },
+
+    /**
+     * Close a legacy itemless batch-cost run left by a process that crashed
+     * between creating the run row and its first marker. New executions use
+     * startBatchCostRun, but this bounded repair keeps older rows from
+     * blocking queue-quiescence forever.
+     */
+    reconcileBatchCostRunWithoutMarker: async (runId: string, error: unknown): Promise<boolean> => {
+      const db = await getDbInstance();
+      const summary = (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({
+            status: syncRunsInOps.status,
+            mode: syncRunsInOps.mode,
+            metadata: syncRunsInOps.metadata,
+          })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (
+          !run ||
+          run.mode !== 'batch-cost' ||
+          !NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus)
+        ) {
+          return false;
+        }
+        const markerRows = await tx
+          .select({ one: sql`1` })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+            ),
+          )
+          .limit(1);
+        if (markerRows.length > 0) return false;
+
+        const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const latestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? Math.floor(currentCost.latestAttempt)
+            : 0;
+        const completedAt = sql`clock_timestamp()`;
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            status: 'failed',
+            completedItems: 0,
+            failedItems: 1,
+            skippedItems: 0,
+            dataChanged: false,
+            errorSummary: 'Data sync batch-cost marker was never persisted',
+            completedAt,
+            metadata: {
+              ...currentMetadata,
+              batchCost: {
+                schemaVersion: 1,
+                ...currentCost,
+                incompleteAccounting: true,
+                incompleteReason: 'batch_cost_marker_missing',
+                ...(latestAttempt > 0 ? { terminalAttempt: latestAttempt } : {}),
+                lastTerminalFailureAt: new Date().toISOString(),
+                lastTerminalFailure: {
+                  error: summary,
+                  markerCount: 0,
+                  reason: 'batch_cost_marker_missing',
+                },
+              },
+            },
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(syncRunsInOps.runId, runId),
+              inArray(syncRunsInOps.status, [...NON_TERMINAL_RUN_STATUSES]),
+            ),
+          );
+        return true;
+      });
+    },
+
+    /**
+     * Reconcile direct-cron markers that outlived the API process. Direct cron
+     * has no Bull `failed` event, so the next bounded tick adopts only old
+     * launch-monitor markers from the exact lane/scope and closes them through
+     * the same attempt fence used by queue workers.
+     */
+    reconcileStaleBatchCostMarkers: async (
+      input: ReconcileStaleSyncBatchCostMarkersInput,
+    ): Promise<number> => {
+      if (!input.lane.trim() || !input.scope.trim()) {
+        throw new DatabaseError(
+          'Batch cost stale-marker scope is invalid',
+          'SYNC_BATCH_COST_SCOPE_INVALID',
+        );
+      }
+      if (!Number.isFinite(input.olderThanMs) || input.olderThanMs <= 0) {
+        throw new DatabaseError(
+          'Batch cost stale-marker age is invalid',
+          'SYNC_BATCH_COST_AGE_INVALID',
+        );
+      }
+      const limit = Math.min(Math.max(Math.floor(input.limit ?? 20), 1), 100);
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          runId: syncItemsInOps.runId,
+          attempts: syncItemsInOps.attempts,
+          normalizedPayload: syncItemsInOps.normalizedPayload,
+        })
+        .from(syncItemsInOps)
+        .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
+        .where(
+          and(
+            eq(syncRunsInOps.mode, 'batch-cost'),
+            eq(syncRunsInOps.lane, input.lane),
+            eq(syncRunsInOps.scope, input.scope),
+            eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+            eq(syncItemsInOps.status, 'running'),
+            lt(
+              syncItemsInOps.updatedAt,
+              sql`clock_timestamp() - (${Math.floor(input.olderThanMs)} * interval '1 millisecond')`,
+            ),
+          ),
+        )
+        .orderBy(asc(syncItemsInOps.updatedAt))
+        .limit(limit);
+
+      let reconciled = 0;
+      for (const row of rows) {
+        const payload = isRecord(row.normalizedPayload) ? row.normalizedPayload : {};
+        const batchId = typeof payload.batchId === 'string' ? payload.batchId.trim() : '';
+        if (!batchId) continue;
+        const attempt =
+          typeof payload.attempt === 'number' && Number.isFinite(payload.attempt)
+            ? Math.max(1, Math.floor(payload.attempt))
+            : Math.max(1, row.attempts);
+        if (
+          await syncOperationsRepository.reconcileBatchCostTerminalFailure(row.runId, {
+            batchId,
+            attempt,
+            error: new Error('Direct cron process ended before batch-cost settlement'),
+          })
+        ) {
+          reconciled += 1;
+        }
+      }
+
+      // A legacy process could commit the run row and die before inserting
+      // its first marker. Select only exact lane/scope rows with no marker and
+      // use the remaining bounded budget so this maintenance pass cannot grow
+      // with the historical backlog.
+      const remaining = Math.max(0, limit - rows.length);
+      if (remaining > 0) {
+        const itemlessAlias = alias(syncItemsInOps, 'batch_cost_itemless_markers');
+        const itemlessRuns = await db
+          .select({ runId: syncRunsInOps.runId })
+          .from(syncRunsInOps)
+          .where(
+            and(
+              eq(syncRunsInOps.mode, 'batch-cost'),
+              eq(syncRunsInOps.lane, input.lane),
+              eq(syncRunsInOps.scope, input.scope),
+              inArray(syncRunsInOps.status, [...NON_TERMINAL_RUN_STATUSES]),
+              lt(
+                syncRunsInOps.updatedAt,
+                sql`clock_timestamp() - (${Math.floor(input.olderThanMs)} * interval '1 millisecond')`,
+              ),
+              not(
+                exists(
+                  db
+                    .select({ one: sql`1` })
+                    .from(itemlessAlias)
+                    .where(
+                      and(
+                        eq(itemlessAlias.runId, syncRunsInOps.runId),
+                        eq(itemlessAlias.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+          )
+          .orderBy(asc(syncRunsInOps.updatedAt))
+          .limit(remaining);
+        for (const row of itemlessRuns) {
+          if (
+            await syncOperationsRepository.reconcileBatchCostRunWithoutMarker(
+              row.runId,
+              new Error('Direct cron process ended before batch-cost marker creation'),
+            )
+          ) {
+            reconciled += 1;
+          }
+        }
+      }
+      return reconciled;
+    },
+
+    /**
+     * Attach a target event to the running marker after an unscoped worker has
+     * resolved the canonical event. This is deliberately a small, locked
+     * update so a crash after resolution still leaves an auditable scope even
+     * when settlement never runs.
+     */
+    updateBatchCostTargetEvent: async (
+      runId: string,
+      attemptKey: string,
+      eventId: number,
+    ): Promise<boolean> => {
+      if (
+        !attemptKey.trim() ||
+        attemptKey.length > 240 ||
+        !Number.isSafeInteger(eventId) ||
+        eventId <= 0
+      ) {
+        throw new DatabaseError(
+          'Batch cost target event is invalid',
+          'SYNC_BATCH_COST_EVENT_INVALID',
+        );
+      }
+      const db = await getDbInstance();
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ eventId: syncRunsInOps.eventId })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (!run) return false;
+        if (run.eventId !== null && run.eventId !== eventId) return false;
+        const rows = await tx
+          .select({
+            status: syncItemsInOps.status,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+          })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, attemptKey),
+            ),
+          )
+          .for('update');
+        const row = rows[0];
+        const payload = isRecord(row?.normalizedPayload) ? row.normalizedPayload : null;
+        if (!row || !payload || payload.phase !== 'started') return false;
+        await tx
+          .update(syncItemsInOps)
+          .set({
+            normalizedPayload: { ...payload, eventId },
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, attemptKey),
+            ),
+          );
+        if (run.eventId === null) {
+          await tx
+            .update(syncRunsInOps)
+            .set({ eventId, updatedAt: sql`clock_timestamp()` })
+            .where(and(eq(syncRunsInOps.runId, runId), isNull(syncRunsInOps.eventId)));
+        }
+        return true;
+      });
     },
 
     finishRun: async (

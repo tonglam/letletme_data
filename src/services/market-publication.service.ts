@@ -17,6 +17,8 @@ import { formatCronDateKey } from '../utils/timezone';
 
 export type MarketPublicationResult = {
   readonly status: 'published' | 'unchanged' | 'empty';
+  /** True when an already-activated DB publication was recovered for Redis delivery. */
+  readonly reused?: boolean;
   readonly revision?: number;
   readonly publicationId?: string;
   readonly context?: MarketSnapshotContextPayload;
@@ -173,6 +175,7 @@ export async function ensureMarketPublication(
       }
       return {
         status: 'published',
+        reused: true,
         revision: opsActive.revision,
         publicationId: opsActive.publicationId,
         context,

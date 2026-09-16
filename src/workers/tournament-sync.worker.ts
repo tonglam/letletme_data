@@ -45,7 +45,11 @@ import {
 } from '../services/tournament-roster.service';
 import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
-import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
+import {
+  reconcileDataSyncBatchCostAfterTerminalFailure,
+  resolveBullMqAttemptQueueWaitMs,
+  runDataSyncAttempt,
+} from '../utils/data-sync-attempt';
 import { classifyDataError, safeDataErrorCode } from '../domain/error-classification';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -480,10 +484,16 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
       {
         queue: job.queueName,
         jobName: job.name,
-        runId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        // The scheduler's cascade run is the logical batch identity. Bull's
+        // delivery id remains batchId so redeliveries can be distinguished
+        // without creating a fresh cost ledger for every enqueue.
+        runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+        batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        parentRunId: job.data.runId,
         source,
         attempt: job.attemptsMade + 1,
         targetEventId: eventId,
+        season,
         queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
       },
       () =>
@@ -1055,6 +1065,21 @@ export function createTournamentSyncWorker(
       eventId: job?.data.eventId,
     });
     const fence = job ? inspectSchedulerObligationFence(job.data) : null;
+    if (job && isTerminalJobFailure(job, err)) {
+      void reconcileDataSyncBatchCostAfterTerminalFailure({
+        queue: job.queueName,
+        jobName: job.name,
+        runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+        batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        attempt: Math.max(1, job.attemptsMade),
+        error: err,
+      }).catch((reconciliationError) => {
+        logError('Failed to reconcile terminal tournament batch cost marker', reconciliationError, {
+          jobId: job.id,
+          jobName: job.name,
+        });
+      });
+    }
     const dependencyNotReady =
       classifyDataError(err) === 'SOURCE_NOT_READY' && isTournamentFinalCheckpointWait(err);
     if (job && dependencyNotReady && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {
