@@ -76,6 +76,13 @@ export interface RecordSyncBatchCostStartInput {
   readonly payload: Record<string, unknown>;
 }
 
+export interface MarkSyncBatchCostSettlementFailureInput {
+  /** Stable idempotency key for the running execution marker. */
+  readonly attemptKey: string;
+  readonly attempt: number;
+  readonly error: unknown;
+}
+
 export interface PreparePublicationInput {
   readonly publicationId?: string;
   readonly dataset: DataPublicationDataset;
@@ -672,6 +679,126 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           })
           .where(eq(syncRunsInOps.runId, runId));
         return inserted.length === 1 ? 'recorded' : 'duplicate';
+      });
+    },
+
+    /**
+     * Close a running batch-cost marker when settlement cannot be persisted.
+     * This is deliberately fenced by the marker's phase and attempt number:
+     * an uncertain response after a committed settlement is left intact, and
+     * a newer attempt cannot be reopened or hidden by an older failure.
+     */
+    markBatchCostSettlementFailure: async (
+      runId: string,
+      input: MarkSyncBatchCostSettlementFailureInput,
+    ): Promise<boolean> => {
+      if (!input.attemptKey.trim() || input.attemptKey.length > 240) {
+        throw new DatabaseError('Batch cost attempt key is invalid', 'SYNC_BATCH_COST_KEY_INVALID');
+      }
+      const db = await getDbInstance();
+      const summary = (
+        input.error instanceof Error ? input.error.message : String(input.error)
+      ).slice(0, 4_000);
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ status: syncRunsInOps.status, metadata: syncRunsInOps.metadata })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (!run) return false;
+
+        const itemRows = await tx
+          .select({
+            status: syncItemsInOps.status,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+          })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, input.attemptKey),
+            ),
+          )
+          .for('update');
+        const item = itemRows[0];
+        const payload = isRecord(item?.normalizedPayload) ? item.normalizedPayload : null;
+        if (!item || item.status !== 'running' || payload?.phase !== 'started') return false;
+
+        const failurePayload = {
+          ...payload,
+          schemaVersion: 1,
+          phase: 'settlement_failed',
+          complete: false,
+          incompleteReason: 'batch_cost_persistence_failed',
+          settlementError: summary,
+        };
+        await tx
+          .update(syncItemsInOps)
+          .set({
+            status: 'failed',
+            lastError: summary,
+            normalizedPayload: failurePayload,
+            completedAt: sql`clock_timestamp()`,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, input.attemptKey),
+              eq(syncItemsInOps.status, 'running'),
+            ),
+          );
+
+        const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const currentLatestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? currentCost.latestAttempt
+            : 0;
+        const currentTerminalAttempt =
+          typeof currentCost.terminalAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.terminalAttempt) &&
+          currentCost.terminalAttempt >= 1
+            ? currentCost.terminalAttempt
+            : 0;
+        const attempt = Math.max(1, Math.floor(input.attempt));
+        const latestAttempt = Math.max(currentLatestAttempt, attempt);
+        const terminalAllowed =
+          attempt >= latestAttempt &&
+          (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
+        const closeRun =
+          terminalAllowed && NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus);
+        const nextMetadata = {
+          ...currentMetadata,
+          batchCost: {
+            schemaVersion: 1,
+            ...currentCost,
+            latestAttempt,
+            ...(closeRun ? { terminalAttempt: attempt } : {}),
+            lastSettlementFailureAt: new Date().toISOString(),
+          },
+        };
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            metadata: nextMetadata,
+            ...(closeRun
+              ? {
+                  status: 'failed',
+                  failedItems: 1,
+                  errorSummary: 'Data sync batch-cost settlement could not be persisted',
+                  completedAt: sql`clock_timestamp()`,
+                }
+              : {}),
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(syncRunsInOps.runId, runId));
+        return true;
       });
     },
 

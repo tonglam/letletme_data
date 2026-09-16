@@ -457,6 +457,7 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
         source,
         attempt: job.attemptsMade + 1,
         targetEventId: eventId,
+        season,
         queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
       },
       () =>

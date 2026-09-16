@@ -102,6 +102,12 @@ function workUnits(snapshot: CoreSnapshot): number {
   );
 }
 
+function attachAttemptEvidence(error: unknown, evidence: Record<string, unknown>): void {
+  if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
+    Object.assign(error, evidence);
+  }
+}
+
 function result(
   snapshot: CoreSnapshot,
   published: boolean,
@@ -170,6 +176,7 @@ export async function syncCoreSnapshot(
   let preparedPublicationId: string | null = null;
   let persistenceCommitted = false;
   let validatedSnapshot: CoreSnapshot | null = null;
+  let persistedEvidence: CoreSnapshotPersistenceResult | null = null;
   try {
     const sourceCheckedAt = options.sourceCheckedAt
       ? new Date(options.sourceCheckedAt)
@@ -255,6 +262,7 @@ export async function syncCoreSnapshot(
         return { prepared, persisted, preparedCache };
       },
     );
+    persistedEvidence = preparedAndPersisted.persisted.persistence;
     persistenceCommitted = true;
     dependencies.onMilestone?.('persisted');
     const committed = await publishCoreSnapshotPublication(
@@ -281,6 +289,20 @@ export async function syncCoreSnapshot(
       preparedAndPersisted.persisted.persistence,
     );
   } catch (error) {
+    if (persistenceCommitted && persistedEvidence) {
+      attachAttemptEvidence(error, {
+        persistence: persistedEvidence,
+        submittedRows:
+          persistedEvidence.events +
+          persistedEvidence.teams +
+          persistedEvidence.players +
+          persistedEvidence.phases +
+          persistedEvidence.fixtures,
+        ...(preparedPublicationId
+          ? { publicationId: preparedPublicationId, publicationsCreated: 1, publicationsReused: 0 }
+          : {}),
+      });
+    }
     if (
       error instanceof DatabaseError &&
       error.code === CORE_SNAPSHOT_STALE_SOURCE_CODE &&
