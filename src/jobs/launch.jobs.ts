@@ -30,8 +30,6 @@ type LaunchRedisClient = {
 
 export interface LaunchMonitorDependencies {
   getBootstrap: () => Promise<FPLBootstrapResponse>;
-  /** Canonical current season used to address the durable success marker. */
-  getCurrentSeason?: () => Promise<{ seasonCode: string }>;
   getRedis: () => Promise<LaunchRedisClient>;
   sendNotification: (message: string) => Promise<NotificationDeliveryResult>;
   now: () => Date;
