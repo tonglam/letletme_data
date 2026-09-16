@@ -785,7 +785,13 @@ describe('My FPL daily snapshot publication contract', () => {
     );
     expect(publicationService).toContain('publication.updated_at::text AS updated_at');
     expect(publicationService).toContain('has_pending_invalidation');
-    expect(publicationService).toContain('if (lockedCandidate.has_pending_invalidation) continue;');
+    expect(publicationService).toContain(
+      'lockedCandidate.has_pending_invalidation || lockedCandidate.idempotency_key !== null',
+    );
+    const quote = String.fromCharCode(39);
+    expect(publicationService).toContain(`if (kind === ${quote}FINAL${quote})`);
+    expect(publicationService).toContain('pg_try_advisory_xact_lock');
+    expect(publicationService).toContain('lockedCandidate.idempotency_key !== null');
     expect(publicationService).not.toContain('${sourceCheckedAt}, ${now},');
     expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
   });

@@ -435,7 +435,6 @@ async function deleteExpiredMyFplSnapshotRevisions(
       JOIN fpl.seasons season ON season.season_id = publication.season_id
       WHERE publication.active = false
         AND publication.updated_at < ${candidateBeforeIso}::timestamptz
-        AND publication.idempotency_key IS NULL
         ${seasonFilter}
         ${eventFilter}
         AND (
@@ -513,6 +512,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
           season_code: string;
           updated_at: string;
           has_pending_invalidation: boolean;
+          idempotency_key: string | null;
         }[]
       >`
         SELECT publication.season_id, publication.event_id, publication.revision,
@@ -526,6 +526,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
                    AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
                    AND invalidation.delivered_at IS NULL
                ) AS has_pending_invalidation
+               , publication.idempotency_key
         FROM competition.my_fpl_snapshot_publications publication
         JOIN fpl.seasons season ON season.season_id = publication.season_id
         WHERE publication.season_id = ${candidate.season_id}
@@ -533,7 +534,6 @@ async function deleteExpiredMyFplSnapshotRevisions(
           AND publication.revision = ${candidateRevision}
           AND publication.active = false
           AND publication.updated_at < ${candidateBeforeIso}::timestamptz
-          AND publication.idempotency_key IS NULL
           AND NOT EXISTS (
             SELECT 1
             FROM competition.my_fpl_snapshot_publication_outbox outbox
@@ -600,7 +600,9 @@ async function deleteExpiredMyFplSnapshotRevisions(
       // A pending or failed invalidation protects this durable revision from
       // deletion, but it must not prevent the Redis-named row from being
       // renewed above. Keep scanning later candidates in this pass.
-      if (lockedCandidate.has_pending_invalidation) continue;
+      if (lockedCandidate.has_pending_invalidation || lockedCandidate.idempotency_key !== null) {
+        continue;
+      }
       if (
         new Date(lockedCandidate.updated_at).getTime() >= new Date(supersededBeforeIso).getTime()
       ) {
@@ -5341,6 +5343,18 @@ async function captureMyFplSnapshotOnce(
     // rolls back every child/outbox row it prepared.
     await verifyScopeGeneration(revision);
 
+    if (kind === 'FINAL') {
+      // FINAL builds intentionally avoid holding the event lock while they
+      // inspect the full canonical scope. Acquire it before touching any
+      // publication rows so outbox delivery cannot take the advisory lock and
+      // then wait on rows already locked by this transaction.
+      const lockRows = await tx<{ acquired: boolean }[]>`
+        SELECT pg_try_advisory_xact_lock(
+          hashtextextended(${myFplSnapshotEventLockScope(season.seasonId, eventId)}, 0)
+        ) AS acquired
+      `;
+      if (!lockRows[0]?.acquired) throw new MyFplCaptureLockBusyError();
+    }
     await tx`
       UPDATE competition.my_fpl_snapshot_publications
       SET active = false, updated_at = ${nowIso}::timestamptz
