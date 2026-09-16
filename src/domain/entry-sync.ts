@@ -1,4 +1,4 @@
-import type { EntrySyncJobName } from '../queues/entry-sync.queue';
+import type { EntrySyncExecutionIntent, EntrySyncJobName } from '../queues/entry-sync.queue';
 import { findEventEligibleEntryIds, type EntryInfo } from './entry-infos';
 
 type EventFinalizationState = {
@@ -6,6 +6,32 @@ type EventFinalizationState = {
   dataChecked: boolean;
   dataCheckedAt: Date | null;
 };
+
+/** Resolve the source intent that a successful scan continuation must carry. */
+export function resolveEntrySyncExecutionIntent(
+  source: string | undefined,
+): EntrySyncExecutionIntent {
+  if (source === 'manual' || source === 'api') return 'force';
+  if (source === 'reconcile' || source === 'catchup') return 'reconcile';
+  return 'refresh';
+}
+
+export function isReusableEntryPicksHeadForRetry(
+  head: {
+    state: string;
+    rowCount: number;
+    sourceCheckedAt: Date | string;
+    sourceCheckedAtExact?: string;
+  },
+  requestWatermark: string | undefined,
+): boolean {
+  if (!requestWatermark || head.state !== 'COMPLETE' || head.rowCount !== 15) return false;
+  const watermarkMs = new Date(requestWatermark).getTime();
+  const sourceCheckedAtMs = new Date(head.sourceCheckedAtExact ?? head.sourceCheckedAt).getTime();
+  return Number.isFinite(watermarkMs) && Number.isFinite(sourceCheckedAtMs)
+    ? sourceCheckedAtMs >= watermarkMs
+    : false;
+}
 
 export function isExplicitEntryRepairRequest(
   jobData:

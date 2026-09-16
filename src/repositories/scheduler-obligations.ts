@@ -1087,7 +1087,24 @@ export async function supersedeMyFplFinalizationObligations(input: {
             )
           )
         )
-      RETURNING obligation.obligation_id
+      RETURNING obligation.obligation_id, obligation.period_key
+    ), retired_windows AS (
+      UPDATE ops.freshness_slo_windows AS slo_window
+      SET status = 'NOT_APPLICABLE',
+          completeness_status = 'NOT_APPLICABLE',
+          breach_code = NULL,
+          evidence = slo_window.evidence || jsonb_build_object(
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', ${input.periodKey}::text,
+            'supersededByObligationId', ${input.successorObligationId}::text
+          ),
+          updated_at = clock_timestamp()
+      FROM retired
+      WHERE slo_window.contract_key = 'my-fpl'
+        AND slo_window.scope_key = ${input.scopeKey}
+        AND slo_window.period_key = retired.period_key
+        AND slo_window.status IN ('PENDING', 'INVALID')
+      RETURNING slo_window.window_id
     )
     SELECT obligation_id FROM retired
   `);

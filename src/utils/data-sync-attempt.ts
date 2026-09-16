@@ -36,6 +36,9 @@ export interface DataSyncAttemptContext {
   attempt?: number;
   targetEventId?: number;
   queueWaitMs?: number | null;
+  /** Stable parent identity for joining a batch with its triggering run. */
+  parentRunId?: string;
+  executionIntent?: 'refresh' | 'retry' | 'force' | 'reconcile' | 'unknown';
 }
 
 export interface DataSyncWorkSummary {

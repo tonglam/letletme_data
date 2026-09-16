@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   isExplicitEntryRepairRequest,
+  isReusableEntryPicksHeadForRetry,
   planEventEligibleEntrySyncWork,
+  resolveEntrySyncExecutionIntent,
   resolveFinalizationFreshAfter,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
@@ -11,6 +13,29 @@ import {
 } from '../../src/domain/entry-sync';
 
 describe('explicit entry repair selection', () => {
+  test('restores the source intent after a retry continuation', () => {
+    expect(resolveEntrySyncExecutionIntent('manual')).toBe('force');
+    expect(resolveEntrySyncExecutionIntent('api')).toBe('force');
+    expect(resolveEntrySyncExecutionIntent('reconcile')).toBe('reconcile');
+    expect(resolveEntrySyncExecutionIntent('catchup')).toBe('reconcile');
+    expect(resolveEntrySyncExecutionIntent('cron')).toBe('refresh');
+  });
+
+  test('reuses only complete durable picks heads at or after the retry watermark', () => {
+    const head = {
+      state: 'COMPLETE',
+      rowCount: 15,
+      sourceCheckedAt: new Date('2026-09-16T10:00:00.000Z'),
+      sourceCheckedAtExact: '2026-09-16T10:00:00.123456Z',
+    };
+    expect(isReusableEntryPicksHeadForRetry(head, '2026-09-16T10:00:00.123000Z')).toBe(true);
+    expect(isReusableEntryPicksHeadForRetry(head, '2026-09-16T10:00:01.000Z')).toBe(false);
+    expect(
+      isReusableEntryPicksHeadForRetry({ ...head, rowCount: 14 }, head.sourceCheckedAtExact),
+    ).toBe(false);
+    expect(isReusableEntryPicksHeadForRetry(head, undefined)).toBe(false);
+  });
+
   test('skips entries that started after the target event without hiding unknown metadata', () => {
     expect(
       planEventEligibleEntrySyncWork(

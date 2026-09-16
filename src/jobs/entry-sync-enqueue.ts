@@ -38,6 +38,8 @@ export interface EntrySyncJobOptions {
   freshnessWindowId?: number;
   /** Stable source checkpoint shared by a post-match pipeline. */
   freshAfter?: string;
+  /** Original caller watermark used to audit retries of forced refreshes. */
+  requestWatermark?: string;
   /** Stable deduplication key for every table-scan chunk in one trigger lane. */
   queueKey?: string;
   /** Optional Redis-backed deduplication identity that survives process restarts. */
@@ -61,6 +63,7 @@ export function retainEntrySyncChainOptions(
         | 'obligationGeneration'
         | 'freshnessWindowId'
         | 'freshAfter'
+        | 'requestWatermark'
         | 'lane'
         | 'executionIntent'
       >
@@ -74,6 +77,7 @@ export function retainEntrySyncChainOptions(
   | 'obligationGeneration'
   | 'freshnessWindowId'
   | 'freshAfter'
+  | 'requestWatermark'
   | 'lane'
   | 'executionIntent'
 > {
@@ -85,6 +89,7 @@ export function retainEntrySyncChainOptions(
     queueKey: options?.queueKey,
     removeOnSettle: options?.removeOnSettle,
     freshAfter: options?.freshAfter,
+    requestWatermark: options?.requestWatermark,
     lane: options?.lane,
     executionIntent: options?.executionIntent,
   };
@@ -310,13 +315,16 @@ async function enqueueEntrySyncJobWithOutcome(
     // entry-list/API scans. Manual one-shots may still clean up on settle.
     const removeOnSettle = source === 'manual' && options.removeOnSettle !== false;
 
+    const triggeredAt = new Date().toISOString();
+    const requestWatermark = options.requestWatermark ?? triggeredAt;
     const jobData = {
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
       source,
       executionIntent: options.executionIntent,
       lane,
-      triggeredAt: new Date().toISOString(),
+      triggeredAt,
+      requestWatermark,
       entryIds: options.entryIds,
       retryCount: options.retryCount,
       afterEntryId,
