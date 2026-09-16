@@ -567,18 +567,20 @@ function matchPlayerFactsEqual(left: MatchPlayerFacts, right: MatchPlayerFacts):
   return true;
 }
 
-/** Compare the overlapping canonical facts before accepting a durable Match FINAL. */
-function durableMatchFactsAgreeWithLiveFinal(
-  pair: Pick<FinalLiveMatchCheckpointPair, 'desk' | 'detail'>,
+type MatchDeskFactsRead = Pick<FinalLiveMatchCheckpointPair['desk'], 'fixtures'>;
+type MatchDetailFactsRead = Pick<FinalLiveMatchCheckpointPair['detail'], 'fixtures'>;
+
+function durableMatchDeskFactsAgreeWithLiveFinal(
+  desk: MatchDeskFactsRead,
   final: LivePublicationRead,
 ): boolean {
   const finalFixtures = new Map(final.fixtures.map((fixture) => [fixture.id, fixture]));
   if (
     finalFixtures.size !== final.fixtures.length ||
-    pair.desk.fixtures.length !== final.fixtures.length
+    desk.fixtures.length !== final.fixtures.length
   )
     return false;
-  for (const fixture of pair.desk.fixtures as readonly MatchDeskFixture[]) {
+  for (const fixture of desk.fixtures as readonly MatchDeskFixture[]) {
     const source = finalFixtures.get(fixture.fixtureId);
     if (
       !source ||
@@ -596,11 +598,17 @@ function durableMatchFactsAgreeWithLiveFinal(
       return false;
     }
   }
+  return true;
+}
 
+function durableMatchDetailFactsAgreeWithLiveFinal(
+  detail: MatchDetailFactsRead,
+  final: LivePublicationRead,
+): boolean {
   const expectedDetail = matchDetailFactsFromLiveFinal(final);
   if (!expectedDetail) return false;
   const actualDetail = new Map(
-    pair.detail.fixtures.map((fixture) => [
+    detail.fixtures.map((fixture) => [
       fixture.fixtureId,
       new Map(
         fixture.players.map((player) => [
@@ -619,9 +627,9 @@ function durableMatchFactsAgreeWithLiveFinal(
     ]),
   );
   const expectedFixtureIds = new Set(final.fixtures.map((fixture) => fixture.id));
-  const actualFixtureIds = new Set(pair.detail.fixtures.map((fixture) => fixture.fixtureId));
+  const actualFixtureIds = new Set(detail.fixtures.map((fixture) => fixture.fixtureId));
   if (
-    actualFixtureIds.size !== pair.detail.fixtures.length ||
+    actualFixtureIds.size !== detail.fixtures.length ||
     actualFixtureIds.size !== expectedFixtureIds.size
   )
     return false;
@@ -640,6 +648,17 @@ function durableMatchFactsAgreeWithLiveFinal(
     if (!expectedDetail.has(fixtureId) && actualPlayers.size > 0) return false;
   }
   return true;
+}
+
+/** Compare the overlapping canonical facts before accepting a durable Match FINAL. */
+function durableMatchFactsAgreeWithLiveFinal(
+  pair: Pick<FinalLiveMatchCheckpointPair, 'desk' | 'detail'>,
+  final: LivePublicationRead,
+): boolean {
+  return (
+    durableMatchDeskFactsAgreeWithLiveFinal(pair.desk, final) &&
+    durableMatchDetailFactsAgreeWithLiveFinal(pair.detail, final)
+  );
 }
 
 /**
@@ -900,27 +919,25 @@ export async function syncLiveSnapshotV2(
     const observedDeskRead = observedMatchDesk?.read;
     const observedDetailRead = observedMatchDetail?.read;
     if (canProbeServingPair) {
-      const observedFinalPair = Boolean(
-        observedDeskRead &&
-          observedDetailRead &&
-          observedDeskRead.publication.state === 'FINALIZED' &&
-          observedDetailRead.publication.finalized === true &&
-          observedDetailRead.publication.observedDeskGeneration ===
-            observedDeskRead.publication.generation &&
-          observedDetailRead.publication.fixtureIdentityRevision ===
-            observedDeskRead.publication.revisions.fixtureIdentity.revision,
-      );
-      // A complete Redis FINAL without a durable Match pair is still only a
-      // candidate. Validate it before the synchronizer can create forced
-      // checkpoint markers; a conflicting candidate must not leave
-      // obligations behind after this call fails.
+      // Every surviving FINAL sibling is an untrusted recovery candidate until
+      // its own facts agree with the durable Live Points FINAL. Validate these
+      // siblings before invoking the synchronizer: that call creates forced
+      // checkpoint markers and would otherwise leave side effects behind when
+      // a later pair-level facts check rejects the Redis candidate.
+      const observedDeskIsFinal = observedDeskRead?.publication.state === 'FINALIZED';
+      const observedDetailIsFinal = observedDetailRead?.publication.finalized === true;
       if (
-        !durableMatchPair &&
-        observedFinalPair &&
-        !durableMatchFactsAgreeWithLiveFinal(
-          { desk: observedDeskRead!, detail: observedDetailRead! },
-          durableFinal,
-        )
+        observedDeskIsFinal &&
+        !durableMatchDeskFactsAgreeWithLiveFinal(observedDeskRead!, durableFinal)
+      ) {
+        throw new CacheError(
+          `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
+          'LIVE_MATCH_FINAL_REDIS_CONFLICT',
+        );
+      }
+      if (
+        observedDetailIsFinal &&
+        !durableMatchDetailFactsAgreeWithLiveFinal(observedDetailRead!, durableFinal)
       ) {
         throw new CacheError(
           `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
@@ -939,16 +956,22 @@ export async function syncLiveSnapshotV2(
       const servingPairIsComplete = Boolean(observedDeskRead && observedDetailRead);
       const survivingDeskIsVerified =
         !observedDeskRead ||
-        (observedDeskRead.publication.state === 'FINALIZED' &&
+        (observedDeskRead.publication.season === season.seasonCode &&
+          observedDeskRead.publication.eventId === eventId &&
           canonicalJson(observedDeskRead.fixtures) ===
-            canonicalJson(durableMatchPair.desk.fixtures));
+            canonicalJson(durableMatchPair.desk.fixtures) &&
+          (observedDeskRead.publication.state !== 'FINALIZED' ||
+            observedDeskRead.publication.checkpointedAt !== null));
       const survivingDetailIsVerified =
         !observedDetailRead ||
-        (observedDetailRead.publication.finalized === true &&
+        (observedDetailRead.publication.season === season.seasonCode &&
+          observedDetailRead.publication.eventId === eventId &&
           observedDetailRead.publication.fixtureIdentityRevision ===
             durableMatchPair.detail.publication.fixtureIdentityRevision &&
           canonicalJson(observedDetailRead.fixtures) ===
-            canonicalJson(durableMatchPair.detail.fixtures));
+            canonicalJson(durableMatchPair.detail.fixtures) &&
+          (observedDetailRead.publication.finalized !== true ||
+            observedDetailRead.publication.checkpointedAt !== null));
       if (!survivingDeskIsVerified || !survivingDetailIsVerified) {
         throw new CacheError(
           `Live Match Redis sibling conflicts with durable facts for event ${eventId}`,
