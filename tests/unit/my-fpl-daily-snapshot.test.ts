@@ -911,6 +911,16 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(controlProjection).not.toContain('competition.tournament_entries');
   });
 
+  test('retires a stale FINAL obligation when its event reopens before provider work', () => {
+    const initialFenceStart = worker.indexOf('const finalizationControl');
+    const readinessStart = worker.indexOf('const finalizationReadiness', initialFenceStart);
+    const initialFence = worker.slice(initialFenceStart, readinessStart);
+    expect(initialFence).toContain('!finalizationControl.finished');
+    expect(initialFence).toContain('!finalizationControl.dataChecked');
+    const quote = String.fromCharCode(39);
+    expect(initialFence).toContain(`reason: ${quote}superseded-by-scope-generation${quote}`);
+  });
+
   test('rebuilds dirty finals directly and keeps provisional transfer facts on one authority', () => {
     expect(publicationService).not.toContain('isManagerReviewV2MyFplPublication');
     expect(publicationService).not.toContain('readActiveFinalManagerReviewV2');

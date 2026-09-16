@@ -458,8 +458,12 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const db = await getDbInstance();
         const syncedEntryIds = new Set<number>();
         const threshold =
-          freshAfter instanceof Date ? freshAfter : freshAfter ? new Date(freshAfter) : undefined;
-        if (threshold && !Number.isFinite(threshold.getTime())) {
+          freshAfter instanceof Date
+            ? freshAfter.toISOString()
+            : freshAfter === undefined
+              ? undefined
+              : freshAfter;
+        if (threshold !== undefined && !Number.isFinite(new Date(threshold).getTime())) {
           throw new Error('A valid rich-sync freshness timestamp is required');
         }
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
@@ -475,8 +479,8 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                 eq(entryEventResultsInCompetition.seasonId, season.seasonId),
                 eq(entryEventResultsInCompetition.eventId, eventId),
                 inArray(entryEventResultsInCompetition.entryId, chunk),
-                threshold
-                  ? gte(entryEventResultsInCompetition.richSyncedAt, threshold)
+                threshold !== undefined
+                  ? sql`${entryEventResultsInCompetition.richSyncedAt} >= ${threshold}::timestamptz`
                   : isNotNull(entryEventResultsInCompetition.richSyncedAt),
               ),
             );
@@ -536,10 +540,11 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const db = await getDbInstance();
         const exactRichSyncedAt =
           richSyncedAt instanceof Date ? richSyncedAt : new Date(richSyncedAt);
-        if (!Number.isFinite(exactRichSyncedAt.getTime())) {
+        const richSyncedAtIso =
+          richSyncedAt instanceof Date ? exactRichSyncedAt.toISOString() : richSyncedAt.trim();
+        if (!Number.isFinite(exactRichSyncedAt.getTime()) || !richSyncedAtIso) {
           throw new Error('A valid rich-sync source timestamp is required');
         }
-        const richSyncedAtIso = exactRichSyncedAt.toISOString();
 
         const entryHistory = picks.entry_history;
         const eventRank = normalizeAuthoritativeUnrankedEventRank({
@@ -675,7 +680,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,
-          richSyncedAt: exactRichSyncedAt,
+          // Drizzle's Date mode truncates PostgreSQL ordering timestamps to
+          // milliseconds. Keep the source fence as SQL so a retry watermark
+          // with microseconds remains comparable to the value we commit.
+          richSyncedAt: sql`${richSyncedAtIso}::timestamptz`,
         };
 
         const written = await db
@@ -708,7 +716,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               overallRank: insert.overallRank,
               teamValue: insert.teamValue,
               bank: insert.bank,
-              richSyncedAt: exactRichSyncedAt,
+              richSyncedAt: sql`${richSyncedAtIso}::timestamptz`,
               updatedAt: new Date(),
             },
           })

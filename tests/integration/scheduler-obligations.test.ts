@@ -26,6 +26,7 @@ import {
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
   supersedeSchedulerObligationsByDueAtBatch,
+  supersedeMyFplFinalizationObligations,
 } from '../../src/repositories/scheduler-obligations';
 import { upsertFreshnessWindow } from '../../src/services/data-governance.service';
 
@@ -44,6 +45,8 @@ const RETRYING_START_OBLIGATION_ID = '30000000-0000-4000-8000-000000000012';
 const MY_FPL_PRIORITY_HISTORICAL_OBLIGATION_ID = '30000000-0000-4000-8000-000000000013';
 const MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000014';
 const MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID = '30000000-0000-4000-8000-000000000015';
+const MY_FPL_SUPERSEDE_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000020';
+const MY_FPL_SUPERSEDE_CURRENT_OBLIGATION_ID = '30000000-0000-4000-8000-000000000021';
 const RECOVERY_OLDER_OBLIGATION_ID = '30000000-0000-4000-8000-000000000016';
 const RECOVERY_LATEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000017';
 const RECOVERY_NEWEST_OBLIGATION_ID = '30000000-0000-4000-8000-000000000018';
@@ -53,6 +56,9 @@ const RECOVERY_SCOPE_KEY = 'integration:event:scheduler-recovery';
 const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
 const ACCEPTED_BACKOFF_SCOPE_KEY = 'integration:event:accepted-backoff';
 const ACCEPTED_BACKOFF_CASE_FINGERPRINT = 'integration:live-picks-backoff:breach';
+const MY_FPL_SUPERSEDE_SCOPE_KEY = 'integration:event:my-fpl-supersede';
+const MY_FPL_SUPERSEDE_OLDER_PERIOD = 'final-4-2026-09-16T10:00:00.123000Z-scope-e1-t1';
+const MY_FPL_SUPERSEDE_CURRENT_PERIOD = 'final-4-2026-09-16T10:00:00.123456Z-scope-e2-t2';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -74,6 +80,8 @@ async function cleanup(): Promise<void> {
       ${MY_FPL_PRIORITY_HISTORICAL_OBLIGATION_ID}::uuid,
       ${MY_FPL_PRIORITY_CURRENT_OBLIGATION_ID}::uuid,
       ${MY_FPL_PRIORITY_REFRESH_OBLIGATION_ID}::uuid,
+      ${MY_FPL_SUPERSEDE_OLDER_OBLIGATION_ID}::uuid,
+      ${MY_FPL_SUPERSEDE_CURRENT_OBLIGATION_ID}::uuid,
       ${RECOVERY_OLDER_OBLIGATION_ID}::uuid,
       ${RECOVERY_LATEST_OBLIGATION_ID}::uuid,
       ${RECOVERY_NEWEST_OBLIGATION_ID}::uuid,
@@ -90,13 +98,15 @@ async function cleanup(): Promise<void> {
          'integration:event:immutable-claim',
          ${ACCEPTED_BACKOFF_SCOPE_KEY},
          'integration:event:my-fpl-priority',
+         ${MY_FPL_SUPERSEDE_SCOPE_KEY},
          ${RECOVERY_SCOPE_KEY}
        )
   `;
   await sql`
     DELETE FROM ops.freshness_slo_windows
-    WHERE slo_key = ${ACCEPTED_BACKOFF_SLO_KEY}
-      AND scope_key = ${ACCEPTED_BACKOFF_SCOPE_KEY}
+    WHERE (slo_key = ${ACCEPTED_BACKOFF_SLO_KEY}
+      AND scope_key = ${ACCEPTED_BACKOFF_SCOPE_KEY})
+       OR (slo_key = 'integration:my-fpl-supersede' AND scope_key = ${MY_FPL_SUPERSEDE_SCOPE_KEY})
   `;
   await sql`
     DELETE FROM ops.data_governance_cases
@@ -716,6 +726,92 @@ describe('scheduler obligation generation fencing', () => {
         scheduledDueAtMs: dueAt.getTime(),
         preservedEvidence: 'yes',
       },
+    });
+  });
+
+  test('retires the attached My FPL freshness window with a superseded obligation', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, evidence
+      )
+      VALUES (
+        ${MY_FPL_SUPERSEDE_OLDER_OBLIGATION_ID}::uuid,
+        'my-fpl-finalization',
+        ${MY_FPL_SUPERSEDE_SCOPE_KEY},
+        ${MY_FPL_SUPERSEDE_OLDER_PERIOD},
+        '30 seconds',
+        'UTC',
+        'pending',
+        'reconcile',
+        clock_timestamp() - interval '1 minute',
+        1,
+        0,
+        '{}'::jsonb
+      ), (
+        ${MY_FPL_SUPERSEDE_CURRENT_OBLIGATION_ID}::uuid,
+        'my-fpl-finalization',
+        ${MY_FPL_SUPERSEDE_SCOPE_KEY},
+        ${MY_FPL_SUPERSEDE_CURRENT_PERIOD},
+        '30 seconds',
+        'UTC',
+        'pending',
+        'reconcile',
+        clock_timestamp(),
+        2,
+        0,
+        '{}'::jsonb
+      )
+    `;
+    await sql`
+      INSERT INTO ops.freshness_slo_windows (
+        slo_key, contract_key, scope_key, period_key, eligible_at, due_at, obligation_due_at
+      )
+      VALUES (
+        'integration:my-fpl-supersede',
+        'my-fpl',
+        ${MY_FPL_SUPERSEDE_SCOPE_KEY},
+        ${MY_FPL_SUPERSEDE_OLDER_PERIOD},
+        clock_timestamp() - interval '2 minutes',
+        clock_timestamp() - interval '1 minute',
+        clock_timestamp() - interval '1 minute'
+      )
+    `;
+
+    expect(
+      await supersedeMyFplFinalizationObligations({
+        scopeKey: MY_FPL_SUPERSEDE_SCOPE_KEY,
+        periodKey: MY_FPL_SUPERSEDE_CURRENT_PERIOD,
+        successorObligationId: MY_FPL_SUPERSEDE_CURRENT_OBLIGATION_ID,
+        // The successor is only 456 microseconds newer than the old period.
+        // Round-tripping this through Date would truncate the fence and leave
+        // the older obligation eligible.
+        dataCheckedAt: '2026-09-15T10:00:00.123456Z',
+        entryScopeGeneration: 2,
+        tournamentScopeGeneration: 2,
+      }),
+    ).toBe(1);
+
+    const obligations = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.scheduler_obligations
+      WHERE obligation_id = ${MY_FPL_SUPERSEDE_OLDER_OBLIGATION_ID}::uuid
+    `;
+    const windows = await sql<
+      Array<{ status: string; completeness_status: string; reason: string }>
+    >`
+      SELECT status, completeness_status, evidence->>'reason' AS reason
+      FROM ops.freshness_slo_windows
+      WHERE slo_key = 'integration:my-fpl-supersede'
+        AND scope_key = ${MY_FPL_SUPERSEDE_SCOPE_KEY}
+        AND period_key = ${MY_FPL_SUPERSEDE_OLDER_PERIOD}
+    `;
+    expect(obligations[0]?.status).toBe('skipped');
+    expect(windows[0]).toEqual({
+      status: 'NOT_APPLICABLE',
+      completeness_status: 'NOT_APPLICABLE',
+      reason: 'superseded-by-latest-authoritative',
     });
   });
 

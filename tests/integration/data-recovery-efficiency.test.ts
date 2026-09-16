@@ -81,7 +81,7 @@ test('identical terminal replays do not write rows; first identity and changed f
   ).toHaveLength(1);
 });
 
-test('atomic freshness binding preserves concurrent distinct IDs and skips an identical terminal binding', async () => {
+test('atomic freshness binding preserves concurrent distinct IDs and reuses an identical terminal binding', async () => {
   const sql = await getDbClient();
   await sql`INSERT INTO ops.scheduler_obligations (obligation_id,job_name,scope_key,period_key,cadence,timezone,due_at,status,evidence)
     VALUES (${obligationId},'integration-recovery','integration-recovery','once','once','UTC',now(),'irrecoverable','{"originalFailure":"keep"}')`;
@@ -99,7 +99,7 @@ test('atomic freshness binding preserves concurrent distinct IDs and skips an id
       obligationId,
       freshnessWindowId: row.evidence.freshnessWindowId,
     }),
-  ).toBe(false);
+  ).toBe(true);
   const [after] =
     await sql`SELECT evidence,updated_at::text,xmin::text FROM ops.scheduler_obligations WHERE obligation_id=${obligationId}`;
   expect(after).toEqual(row);

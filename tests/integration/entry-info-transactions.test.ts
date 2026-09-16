@@ -13,6 +13,7 @@ import { withEntrySeasonSyncTransaction } from '../../src/repositories/entry-eve
 import { fplClient } from '../../src/clients/fpl';
 import { syncEntryEventResults, syncEntryEventTransfers } from '../../src/services/entries.service';
 import { createEntryEventResultsRepository } from '../../src/repositories/entry-event-results';
+import { entryInfoRepository } from '../../src/repositories/entry-infos';
 import { eventRepository } from '../../src/repositories/events';
 import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../../src/types';
 
@@ -416,6 +417,31 @@ test('equal millisecond observations cannot overwrite the first committed profil
   const rows =
     await db`SELECT entry_name FROM competition.entries WHERE season_id=2091 AND entry_id=919203`;
   expect(rows[0]?.entry_name).toBe('first committed');
+}, 15000);
+
+test('entry profile freshness comparison preserves PostgreSQL microseconds', async () => {
+  await syncEntryInfo(season, ids[0]!, client('microsecond profile'), 0);
+  await db`UPDATE competition.entries
+    SET snapshot_synced_through_event_id = 1,
+        profile_source_checked_at = '2091-01-01T00:00:00.123456Z'::timestamptz
+    WHERE season_id = ${season.seasonId} AND entry_id = ${ids[0]!}`;
+
+  expect(
+    await entryInfoRepository.findIdsNeedingSnapshotSync(
+      season,
+      [ids[0]!],
+      1,
+      '2091-01-01T00:00:00.123456Z',
+    ),
+  ).toEqual([]);
+  expect(
+    await entryInfoRepository.findIdsNeedingSnapshotSync(
+      season,
+      [ids[0]!],
+      1,
+      '2091-01-01T00:00:00.123457Z',
+    ),
+  ).toEqual([ids[0]!]);
 }, 15000);
 
 test('entry deadline cancels a lock wait and never runs its write after the lock is released', async () => {

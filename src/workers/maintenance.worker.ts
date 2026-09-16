@@ -34,6 +34,7 @@ import {
   MyFplSnapshotIncompleteError,
   requeueDeliveredMyFplSnapshotPublication,
   verifyMyFplSnapshotScopeGeneration,
+  type MyFplFinalizationControlState,
   type MyFplSnapshotOutboxDeliveryEvidence,
   type MyFplSnapshotPublication,
 } from '../services/my-fpl-snapshot-publication.service';
@@ -53,6 +54,7 @@ import {
   appendSchedulerObligationRecovery,
   deferSchedulerObligationForWorker,
   markSchedulerObligationRetrying,
+  markSchedulerObligationIrrecoverable,
   renewSchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import {
@@ -69,6 +71,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isTerminalJobFailure } from '../utils/worker-failure';
 import { createQueueRunAttemptId } from '../utils/queue-run-id';
 import { seasonRefFromJobData } from '../domain/season-scoped-job';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { WorkerRuntime } from './worker-runtime';
 import {
   markFreshnessWindowNotApplicable,
@@ -300,6 +303,87 @@ async function persistManualMyFplRecoveryEvidence(
   });
 }
 
+/**
+ * Recheck a scheduled FINAL's input scope at the boundaries where the worker
+ * could otherwise acknowledge a publication that a newer scope has already
+ * superseded. A missing control row is treated as unavailable and lets the
+ * capture's own canonical CAS decide; a concrete mismatch retires only this
+ * stale scheduler generation.
+ */
+async function myFplFinalScopeIsCurrent(input: {
+  job: Job<MaintenanceJobData>;
+  season: FplSeasonRef;
+  eventId: number;
+  snapshotKind: MaintenanceJobData['snapshotKind'];
+  expectedEntryScopeGeneration?: number;
+  expectedTournamentScopeGeneration?: number;
+  expectedFinalDataCheckedAt?: string;
+  control?: MyFplFinalizationControlState | null;
+  phase: string;
+}): Promise<boolean> {
+  const hasExpectedScopeGeneration =
+    Number.isSafeInteger(input.expectedEntryScopeGeneration) &&
+    (input.expectedEntryScopeGeneration ?? -1) >= 0 &&
+    Number.isSafeInteger(input.expectedTournamentScopeGeneration) &&
+    (input.expectedTournamentScopeGeneration ?? -1) >= 0;
+  const hasExpectedFinalFence =
+    input.expectedFinalDataCheckedAt !== undefined &&
+    Number.isFinite(Date.parse(input.expectedFinalDataCheckedAt));
+  if (input.snapshotKind !== 'FINAL' || (!hasExpectedScopeGeneration && !hasExpectedFinalFence)) {
+    return true;
+  }
+  const control =
+    input.control ?? (await getMyFplFinalizationControlStateForEvent(input.season, input.eventId));
+  if (!control) {
+    // A missing control row is temporarily unavailable rather than proof of a
+    // reopened event. The capture's canonical CAS remains the final fence.
+    return true;
+  }
+  if (
+    control.finished &&
+    control.dataChecked &&
+    (!hasExpectedScopeGeneration ||
+      (control.entryScopeGeneration === input.expectedEntryScopeGeneration &&
+        control.tournamentScopeGeneration === input.expectedTournamentScopeGeneration)) &&
+    (!hasExpectedFinalFence || control.dataCheckedAt === input.expectedFinalDataCheckedAt)
+  ) {
+    return true;
+  }
+  const fence = inspectSchedulerObligationFence(input.job.data);
+  if (fence.kind === 'complete') {
+    await markSchedulerObligationIrrecoverable({
+      obligationId: fence.obligationId,
+      generation: fence.generation,
+      status: 'skipped',
+      includeInFlight: true,
+      evidence: {
+        eventId: input.eventId,
+        reason: 'superseded-by-scope-generation',
+        freshnessWindowId: input.job.data.freshnessWindowId ?? null,
+        phase: input.phase,
+        expectedEntryScopeGeneration: input.expectedEntryScopeGeneration,
+        expectedTournamentScopeGeneration: input.expectedTournamentScopeGeneration,
+        expectedFinalDataCheckedAt: input.expectedFinalDataCheckedAt ?? null,
+        currentEntryScopeGeneration: control?.entryScopeGeneration ?? null,
+        currentTournamentScopeGeneration: control?.tournamentScopeGeneration ?? null,
+        currentFinalDataCheckedAt: control?.dataCheckedAt ?? null,
+      },
+    });
+  }
+  logInfo('Skipping stale My FPL FINAL scope generation', {
+    eventId: input.eventId,
+    phase: input.phase,
+    obligationId: fence.kind === 'complete' ? fence.obligationId : undefined,
+    expectedEntryScopeGeneration: input.expectedEntryScopeGeneration,
+    expectedTournamentScopeGeneration: input.expectedTournamentScopeGeneration,
+    expectedFinalDataCheckedAt: input.expectedFinalDataCheckedAt ?? null,
+    currentEntryScopeGeneration: control?.entryScopeGeneration ?? null,
+    currentTournamentScopeGeneration: control?.tournamentScopeGeneration ?? null,
+    currentFinalDataCheckedAt: control?.dataCheckedAt ?? null,
+  });
+  return false;
+}
+
 function startSchedulerLeaseHeartbeat(job: Job<MaintenanceJobData>): () => void {
   const fence = inspectSchedulerObligationFence(job.data);
   if (fence.kind !== 'complete') return () => undefined;
@@ -446,12 +530,71 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             snapshotKind === 'FINAL'
               ? await getMyFplFinalizationControlStateForEvent(season, eventId)
               : null;
+          const expectedEntryScopeGeneration = job.data.entryScopeGeneration;
+          const expectedTournamentScopeGeneration = job.data.tournamentScopeGeneration;
+          const expectedFinalDataCheckedAt = job.data.finalDataCheckedAt;
+          const hasExpectedScopeGeneration =
+            Number.isSafeInteger(expectedEntryScopeGeneration) &&
+            (expectedEntryScopeGeneration ?? -1) >= 0 &&
+            Number.isSafeInteger(expectedTournamentScopeGeneration) &&
+            (expectedTournamentScopeGeneration ?? -1) >= 0;
+          const hasExpectedFinalFence =
+            typeof expectedFinalDataCheckedAt === 'string' &&
+            Number.isFinite(Date.parse(expectedFinalDataCheckedAt));
+          if (
+            snapshotKind === 'FINAL' &&
+            (hasExpectedScopeGeneration || hasExpectedFinalFence) &&
+            finalizationControl &&
+            (!finalizationControl.finished ||
+              !finalizationControl.dataChecked ||
+              (hasExpectedScopeGeneration &&
+                finalizationControl.entryScopeGeneration !== expectedEntryScopeGeneration) ||
+              (hasExpectedScopeGeneration &&
+                finalizationControl.tournamentScopeGeneration !==
+                  expectedTournamentScopeGeneration) ||
+              (hasExpectedFinalFence &&
+                finalizationControl.dataCheckedAt !== expectedFinalDataCheckedAt))
+          ) {
+            const fence = inspectSchedulerObligationFence(job.data);
+            if (fence.kind === 'complete') {
+              await markSchedulerObligationIrrecoverable({
+                obligationId: fence.obligationId,
+                generation: fence.generation,
+                status: 'skipped',
+                includeInFlight: true,
+                evidence: {
+                  eventId,
+                  reason: 'superseded-by-scope-generation',
+                  freshnessWindowId: job.data.freshnessWindowId ?? null,
+                  expectedEntryScopeGeneration,
+                  expectedTournamentScopeGeneration,
+                  expectedFinalDataCheckedAt: expectedFinalDataCheckedAt ?? null,
+                  currentEntryScopeGeneration: finalizationControl.entryScopeGeneration,
+                  currentTournamentScopeGeneration: finalizationControl.tournamentScopeGeneration,
+                  currentFinalDataCheckedAt: finalizationControl.dataCheckedAt,
+                },
+              });
+            }
+            logInfo('Skipping stale My FPL FINAL scope generation before provider work', {
+              eventId,
+              obligationId: fence.kind === 'complete' ? fence.obligationId : undefined,
+              expectedEntryScopeGeneration,
+              expectedTournamentScopeGeneration,
+              expectedFinalDataCheckedAt,
+              currentEntryScopeGeneration: finalizationControl.entryScopeGeneration,
+              currentTournamentScopeGeneration: finalizationControl.tournamentScopeGeneration,
+              currentFinalDataCheckedAt: finalizationControl.dataCheckedAt,
+            });
+            return { status: 'skipped', reason: 'superseded-by-scope-generation' };
+          }
           const activeFinalScopeGenerationVerified = Boolean(
             snapshotKind === 'FINAL' &&
               !hasExplicitFinalOverride &&
               active &&
               active.kind === 'FINAL' &&
               finalizationControl &&
+              finalizationControl.finished &&
+              finalizationControl.dataChecked &&
               finalizationControl.activeRevision === active.revision &&
               finalizationControl.entryScopeGeneration !== null &&
               finalizationControl.entryScopeGeneration ===
@@ -527,6 +670,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                   entry: entryScopeGeneration,
                   tournament: tournamentScopeGeneration,
                 },
+                ...(expectedFinalDataCheckedAt === undefined ? {} : { expectedFinalDataCheckedAt }),
               }))
             ) {
               await recordMyFplOutboxRedisEvidence({
@@ -694,6 +838,20 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               : {}),
           };
           const capture = await captureMyFplSnapshot(season, eventId, snapshotKind, captureOptions);
+          if (
+            !(await myFplFinalScopeIsCurrent({
+              job,
+              season,
+              eventId,
+              snapshotKind,
+              expectedEntryScopeGeneration,
+              expectedTournamentScopeGeneration,
+              expectedFinalDataCheckedAt,
+              phase: 'after-capture-before-delivery',
+            }))
+          ) {
+            return { status: 'skipped', reason: 'superseded-by-scope-generation' };
+          }
           // An idempotent FINAL override may resolve to its original inactive
           // publication after a newer revision has become active. Delivery
           // evidence must certify the current active publication, not the
@@ -737,6 +895,20 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             publication: publicationForDelivery,
             redisRevision: activeRedisManifest.revision,
           });
+          if (
+            !(await myFplFinalScopeIsCurrent({
+              job,
+              season,
+              eventId,
+              snapshotKind,
+              expectedEntryScopeGeneration,
+              expectedTournamentScopeGeneration,
+              expectedFinalDataCheckedAt,
+              phase: 'before-completion',
+            }))
+          ) {
+            return { status: 'skipped', reason: 'superseded-by-scope-generation' };
+          }
           const result = { ...capture, publication: publicationForDelivery, invalidation, redis };
           await persistManualMyFplRecoveryEvidence(job, result);
           return result;

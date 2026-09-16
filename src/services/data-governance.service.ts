@@ -104,7 +104,7 @@ function asJsonObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export async function upsertFreshnessWindow(input: {
+export type FreshnessWindowReservationInput = Readonly<{
   sloKey: string;
   contractKey: string;
   seasonId?: number;
@@ -116,8 +116,11 @@ export async function upsertFreshnessWindow(input: {
   dueAt: Date;
   obligationDueAt?: Date;
   evidence?: Record<string, unknown>;
-  db?: DbHandle;
-}): Promise<number> {
+}>;
+
+export async function upsertFreshnessWindow(
+  input: FreshnessWindowReservationInput & { db?: DbOrTransaction },
+): Promise<number> {
   const db = input.db ?? (await getDb());
   const [row] = await db
     .insert(freshnessSloWindowsInOps)
@@ -538,34 +541,102 @@ export async function observeFreshnessConsumerEvidence(
  * after the obligation insert, so this small JSON merge lets existing rows
  * carry the exact window identity into the eventual Bull payload as well.
  */
-export async function attachFreshnessWindowToSchedulerObligation(input: {
+type AttachFreshnessWindowInput = Readonly<{
   obligationId: string;
   freshnessWindowId: number;
-  db?: DbOrTransaction;
-}): Promise<boolean> {
+}>;
+
+async function attachFreshnessWindowToSchedulerObligationInTransaction(
+  tx: DbOrTransaction,
+  input: AttachFreshnessWindowInput,
+): Promise<boolean> {
   if (
     !input.obligationId ||
     !Number.isSafeInteger(input.freshnessWindowId) ||
     input.freshnessWindowId <= 0
   ) {
-    return false;
+    throw new Error('A valid scheduler obligation and freshness window are required');
   }
-  const db = input.db ?? (await getDb());
+  // Reservation, supersession, and attachment are separate scheduler
+  // phases. Lock the obligation before merging the window so a stale
+  // scheduler replica cannot leave a new PENDING window behind a terminal
+  // skip. If supersession wins first, retire this exact window immediately.
+  const [obligation] = await tx
+    .select({
+      status: schedulerObligationsInOps.status,
+      evidence: schedulerObligationsInOps.evidence,
+    })
+    .from(schedulerObligationsInOps)
+    .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+    .for('update');
+  if (!obligation) return false;
+  if (['skipped', 'irrecoverable'].includes(obligation.status)) {
+    await tx
+      .update(freshnessSloWindowsInOps)
+      .set({
+        status: 'NOT_APPLICABLE',
+        completenessStatus: 'NOT_APPLICABLE',
+        breachCode: null,
+        evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
+          reason: 'SUPERSEDED_BY_TERMINAL_OBLIGATION',
+          schedulerObligationId: input.obligationId,
+        })}::jsonb`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(freshnessSloWindowsInOps.windowId, input.freshnessWindowId),
+          inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID', 'BREACHED']),
+        ),
+      );
+    await tx
+      .update(dataGovernanceCasesInOps)
+      .set({
+        status: 'DISMISSED',
+        lastError: null,
+        repairJobId: null,
+        repairDeadlineAt: null,
+        evidence: sql`${dataGovernanceCasesInOps.evidence} || ${JSON.stringify({
+          reason: 'SUPERSEDED_BY_TERMINAL_OBLIGATION',
+          schedulerObligationId: input.obligationId,
+        })}::jsonb`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(dataGovernanceCasesInOps.sloWindowId, input.freshnessWindowId),
+          inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
+        ),
+      );
+  }
+  const evidence =
+    obligation.evidence && typeof obligation.evidence === 'object'
+      ? (obligation.evidence as Record<string, unknown>)
+      : null;
+  if (
+    Array.isArray(evidence?.freshnessWindowIds) &&
+    evidence.freshnessWindowIds.includes(input.freshnessWindowId) &&
+    evidence.freshnessWindowId === input.freshnessWindowId
+  ) {
+    // The exact attachment is already durable. Return its identity so an
+    // idempotent checkpoint backfill can continue without generating a write.
+    return true;
+  }
   const existingWindowIds = sql`CASE
-    WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
-      THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
-    ELSE '[]'::jsonb
-  END`;
+      WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
+        THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
+      ELSE '[]'::jsonb
+    END`;
   const containsWindow = sql`${existingWindowIds} @> jsonb_build_array(${input.freshnessWindowId}::bigint)`;
-  const updated = await db
+  const updated = await tx
     .update(schedulerObligationsInOps)
     .set({
       evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
-        'freshnessWindowId', ${input.freshnessWindowId}::bigint,
-        'freshnessWindowIds',
-        CASE WHEN ${containsWindow} THEN ${existingWindowIds}
-          ELSE ${existingWindowIds} || jsonb_build_array(${input.freshnessWindowId}::bigint)
-        END
+          'freshnessWindowId', ${input.freshnessWindowId}::bigint,
+          'freshnessWindowIds',
+          CASE WHEN ${containsWindow} THEN ${existingWindowIds}
+            ELSE ${existingWindowIds} || jsonb_build_array(${input.freshnessWindowId}::bigint)
+          END
       )`,
       updatedAt: sql`clock_timestamp()`,
     })
@@ -573,12 +644,51 @@ export async function attachFreshnessWindowToSchedulerObligation(input: {
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligationId),
         sql`(NOT (${containsWindow}) OR
-        ${schedulerObligationsInOps.evidence}->'freshnessWindowId'
-          IS DISTINCT FROM to_jsonb(${input.freshnessWindowId}::bigint))`,
+          ${schedulerObligationsInOps.evidence}->'freshnessWindowId'
+            IS DISTINCT FROM to_jsonb(${input.freshnessWindowId}::bigint))`,
       ),
     )
     .returning({ obligationId: schedulerObligationsInOps.obligationId });
   return updated.length === 1;
+}
+
+export async function attachFreshnessWindowToSchedulerObligation(
+  input: AttachFreshnessWindowInput & { db?: DbOrTransaction },
+): Promise<boolean> {
+  const db = input.db ?? (await getDb());
+  if ('transaction' in db && typeof db.transaction === 'function') {
+    return db.transaction((tx) =>
+      attachFreshnessWindowToSchedulerObligationInTransaction(tx, input),
+    );
+  }
+  return attachFreshnessWindowToSchedulerObligationInTransaction(db, input);
+}
+
+/**
+ * Reserve and bind a freshness window while holding the scheduler obligation
+ * lock. This removes the race in which supersession can terminalize an
+ * obligation after the window upsert but before its evidence is attached.
+ */
+export async function createAndAttachFreshnessWindowToSchedulerObligation(input: {
+  obligationId: string;
+  window: FreshnessWindowReservationInput;
+  db?: DbHandle;
+}): Promise<number | null> {
+  const db = input.db ?? (await getDb());
+  return db.transaction(async (tx) => {
+    const [obligation] = await tx
+      .select({ status: schedulerObligationsInOps.status })
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+      .for('update');
+    if (!obligation || ['skipped', 'irrecoverable'].includes(obligation.status)) return null;
+    const freshnessWindowId = await upsertFreshnessWindow({ ...input.window, db: tx });
+    const attached = await attachFreshnessWindowToSchedulerObligationInTransaction(tx, {
+      obligationId: input.obligationId,
+      freshnessWindowId,
+    });
+    return attached ? freshnessWindowId : null;
+  });
 }
 
 export async function recordFreshnessObservation(input: {

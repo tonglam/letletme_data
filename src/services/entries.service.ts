@@ -42,6 +42,7 @@ import {
   validateEntryLiveInputV2,
   readLivePublicationV2,
   setEntryCheckpointDesiredV2,
+  touchEntryLiveInputV2,
   type AssistantManagerPointsFact,
   type EntryLiveInputV2,
   type EntryLivePublicationV2,
@@ -311,13 +312,10 @@ export async function persistEntryEventPicksResponse(
     readonly preservedPicksBase?: RawFPLEntryEventPicksResponse;
   },
 ) {
-  // The live provider lane must not wait for PostgreSQL merely to obtain a
-  // timestamp. When the caller has no source boundary, capture completion
-  // time locally; the durable checkpoint records its own completion time.
-  const sourceCheckedAt = syncedAt ? new Date(syncedAt) : new Date();
-  if (!Number.isFinite(sourceCheckedAt.getTime())) {
-    throw new Error('A valid entry picks source timestamp is required');
-  }
+  // Keep the source boundary at PostgreSQL precision when the caller has one;
+  // retry fences can differ by microseconds even though JavaScript Dates do
+  // not. Callers without a boundary retain the local completion fallback.
+  const sourceCheckedAt = syncedAt ? exactTimestamp(syncedAt) : new Date().toISOString();
   if (!isEntryPicksPayloadForEvent(picks, eventId)) {
     throw new Error(
       `Refusing entry picks for an unexpected event for entry ${entryId}, event ${eventId}`,
@@ -463,7 +461,7 @@ export async function persistEntryEventPicksResponse(
         },
       }
     : inputWithCurrentTotals;
-  const desired = await readEntryCheckpointDesiredV2({
+  let desired = await readEntryCheckpointDesiredV2({
     season: season.seasonCode,
     eventId,
     entryId,
@@ -510,10 +508,36 @@ export async function persistEntryEventPicksResponse(
     return { entryId, eventId, changed: false };
   }
   if (sameInput && !generationNeedsRepair) {
-    if (desired === null && existing!.publication.checkpointedAt !== null) {
-      return { entryId, eventId, changed: false };
+    let publication = existing!.publication;
+    let touchedPublication = false;
+    // A successful source retry must leave an exact observation watermark for
+    // the durable audit, even when the fifteen pick rows and input content are
+    // unchanged. Touch only a current provisional publication; FINAL inputs
+    // remain immutable and previous-pointer fallbacks require a normal repair
+    // publication instead of mutating an old snapshot in place.
+    if (
+      existing!.servedFrom === 'REDIS_CURRENT' &&
+      publication.state === 'PROVISIONAL' &&
+      isFreshnessBoundaryNewer(publication.sourceCheckedAt, sourceCheckedAt)
+    ) {
+      const touched = await touchEntryLiveInputV2(publication, sourceCheckedAt);
+      if (!touched) {
+        throw new CacheError(
+          'Entry V2 publication changed while recording source observation',
+          'LIVE_V2_ENTRY_OBSERVATION_CHANGED',
+        );
+      }
+      publication = touched;
+      touchedPublication = true;
+      desired = await readEntryCheckpointDesiredV2({
+        season: season.seasonCode,
+        eventId,
+        entryId,
+      });
     }
-    await ensureEntryLiveCheckpoint(season, eventId, entryId, existing!.publication, desired);
+    if (touchedPublication || desired !== null || publication.checkpointedAt === null) {
+      await ensureEntryLiveCheckpoint(season, eventId, entryId, publication, desired);
+    }
     return { entryId, eventId, changed: false };
   }
   if (generationFloor === undefined) {
@@ -547,6 +571,7 @@ export async function persistEntryEventPicksResponse(
     entryId,
     input,
     sourceCheckedAt,
+    preserveSourceCheckedAtPrecision: true,
     generationFloor,
   });
   if (!publication.published) {
@@ -562,7 +587,12 @@ export async function persistEntryEventPicksResponse(
   return { entryId, eventId, changed: true };
 }
 
-export async function syncEntryEventPicks(season: FplSeasonRef, entryId: number, eventId: number) {
+export async function syncEntryEventPicks(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+  options?: { readonly sourceCheckedAt?: Date | string },
+) {
   try {
     logInfo('Starting entry event picks sync', { entryId, eventId });
     // Capture the current live revision before the provider request. When the
@@ -575,10 +605,15 @@ export async function syncEntryEventPicks(season: FplSeasonRef, entryId: number,
       season: season.seasonCode,
       eventId,
     });
+    // Capture the ordering fence before the provider request. Batch workers
+    // pass their shared boundary; direct callers capture one here so the
+    // durable head cannot appear newer merely because the host clock is skewed.
+    const sourceCheckedAt =
+      options?.sourceCheckedAt ?? (await readDatabaseOrderingTimestamp()).exact;
     const picks = await fplClient.getEntryEventPicks(entryId, eventId);
     const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
     const providerEventLive = managerChip ? await fplClient.getEventLive(eventId) : undefined;
-    await persistEntryEventPicksResponse(season, entryId, eventId, picks, new Date(), {
+    await persistEntryEventPicksResponse(season, entryId, eventId, picks, sourceCheckedAt, {
       liveObservation,
       providerEventLive,
     });
@@ -663,17 +698,38 @@ export async function syncEntryEventResults(
   season: FplSeasonRef,
   entryId: number,
   eventId: number,
+  options?: {
+    /** One validated event-live observation shared by the containing batch. */
+    providerEventLive?: EventPointsPayload;
+    /** Exact database ordering timestamp captured with the shared event-live observation. */
+    providerEventLiveSourceCheckedAt?: Date | string;
+  },
 ) {
   try {
     logInfo('Starting entry event results sync', { entryId, eventId });
     // This timestamp describes the evidence window, not database completion.
     // If the GW finalizes while either request is in flight, the persisted
     // marker remains before data_checked_at and the finalized scan refetches it.
-    const richSyncStartedAt = await readDatabaseOrderingTimestamp();
-    const [picks, live] = await Promise.all([
-      fplClient.getEntryEventPicks(entryId, eventId),
-      fplClient.getEventLive(eventId),
-    ]);
+    const richSyncStartedAt = options?.providerEventLiveSourceCheckedAt
+      ? (() => {
+          const date = new Date(options.providerEventLiveSourceCheckedAt!);
+          return {
+            date,
+            exact:
+              typeof options.providerEventLiveSourceCheckedAt === 'string'
+                ? options.providerEventLiveSourceCheckedAt
+                : date.toISOString(),
+          };
+        })()
+      : await readDatabaseOrderingTimestamp();
+    if (!Number.isFinite(richSyncStartedAt.date.getTime()) || !richSyncStartedAt.exact) {
+      throw new Error('A valid shared event-live source timestamp is required');
+    }
+    const picksPromise = fplClient.getEntryEventPicks(entryId, eventId);
+    const livePromise = options?.providerEventLive
+      ? Promise.resolve(options.providerEventLive)
+      : fplClient.getEventLive(eventId);
+    const [picks, live] = await Promise.all([picksPromise, livePromise]);
     const accepted = await withMutationScopes(
       {
         queueName: 'entry-sync',

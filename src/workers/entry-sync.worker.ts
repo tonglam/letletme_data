@@ -1,11 +1,14 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 import { and, asc, eq, gt } from 'drizzle-orm';
 
+import { fplClient } from '../clients/fpl';
 import {
   isExplicitEntryRepairRequest,
   planEventEligibleEntrySyncWork,
   shouldRefreshEntryInfoFromSource,
   shouldRefreshEntryPicks,
+  isReusableEntryPicksHeadForRetry,
+  resolveEntrySyncExecutionIntent,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
 } from '../domain/entry-sync';
@@ -60,6 +63,7 @@ import {
   type DataSyncAttemptContext,
 } from '../utils/data-sync-attempt';
 import { latestFreshnessTimestamp } from '../domain/freshness';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { runWithJobLogContext } from '../utils/job-log-context';
 import { logError, logInfo } from '../utils/logger';
@@ -254,6 +258,10 @@ async function scheduleRetry(
     delayMs,
     eventId: jobData?.eventId,
     ...retainEntrySyncChainOptions(jobData),
+    // The retry intent must win over a force/reconcile intent retained from
+    // the failed delivery; otherwise explicit failed IDs would be refreshed
+    // again instead of being re-audited against the current source fence.
+    executionIntent: 'retry',
     resumeAfterEntryId: jobData?.resumeAfterEntryId,
   });
 }
@@ -470,6 +478,10 @@ async function handleEntryJob(
           throttleMs,
           eventId: jobData?.eventId,
           ...retainEntrySyncChainOptions(jobData),
+          // A successful failed-ID retry only repairs that bounded set. The
+          // following keyset chunk must resume the original source intent so
+          // a retry marker cannot suppress its freshness audit.
+          executionIntent: resolveEntrySyncExecutionIntent(jobData?.source),
         });
         logInfo('Entry sync next keyset chunk enqueued', {
           jobName,
@@ -607,14 +619,36 @@ export function createEntrySyncWorker(
 
     logJobTriggered(context);
 
+    const executionIntent =
+      attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
+        ? ('retry' as const)
+        : (job.data?.executionIntent ?? resolveEntrySyncExecutionIntent(job.data?.source));
+    // A Bull automatic retry reuses the original payload. Capture the
+    // database ordering boundary once and persist it back to that payload
+    // before any provider work, so a later attempt audits the rows committed
+    // by the first attempt instead of manufacturing a newer watermark.
+    let requestWatermark = job.data?.requestWatermark;
+    if (requestWatermark === undefined) {
+      const ordering = await readDatabaseOrderingTimestamp();
+      requestWatermark = ordering.exact;
+      await job.updateData({ ...job.data, requestWatermark });
+    }
+
     const attemptContext: DataSyncAttemptContext = {
       queue: job.queueName,
       jobName: job.name,
       runId: job.data?.runId ?? String(jobId),
+      batchId: String(jobId),
+      parentRunId: job.data?.runId,
       source: attempt.source,
       attempt: attempt.attempt,
       targetEventId: job.data?.eventId,
       queueWaitMs: context.queueWaitMs,
+      // Resolve this before runDataSyncAttempt emits the attempt report.  A
+      // Bull automatic retry has no new payload, so reporting the raw intent
+      // would claim a force/refresh execution even though the worker applies
+      // the retry branch below.
+      executionIntent,
     };
 
     return runDataSyncAttempt(attemptContext, async () => {
@@ -623,8 +657,20 @@ export function createEntrySyncWorker(
         job.data?.eventId,
         async () => (await getCurrentEvent(season))?.id ?? null,
       );
+      const effectiveExecutionIntent = attemptContext.executionIntent!;
       const effectiveJobData =
-        targetEventId !== undefined ? { ...job.data, eventId: targetEventId } : job.data;
+        targetEventId !== undefined
+          ? {
+              ...job.data,
+              eventId: targetEventId,
+              executionIntent: effectiveExecutionIntent,
+              ...(requestWatermark === undefined ? {} : { requestWatermark }),
+            }
+          : {
+              ...job.data,
+              executionIntent: effectiveExecutionIntent,
+              ...(requestWatermark === undefined ? {} : { requestWatermark }),
+            };
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
       const runMutation = async (): Promise<EntrySyncMutationResult> => {
@@ -641,10 +687,19 @@ export function createEntrySyncWorker(
                   if (targetEventId === undefined) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
+                  const retrying = effectiveJobData?.executionIntent === 'retry';
+                  // A legacy retry without the original watermark cannot
+                  // prove that its profile observation belongs to this
+                  // request. Re-read the bounded IDs rather than completing
+                  // from an older checkpoint.
+                  if (retrying && !effectiveJobData?.requestWatermark) {
+                    return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                  }
                   const requiredEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
                     season,
                     entryIds,
                     targetEventId,
+                    retrying ? effectiveJobData.requestWatermark : undefined,
                   );
                   return planEntryInfoSyncWork(
                     entryIds,
@@ -676,7 +731,10 @@ export function createEntrySyncWorker(
               season,
               'entry-picks',
               'entry picks sync',
-              (entryId) => syncEntryEventPicks(season, entryId, targetEventId!),
+              (entryId) =>
+                syncEntryEventPicks(season, entryId, targetEventId!, {
+                  sourceCheckedAt: requestWatermark,
+                }),
               effectiveJobData,
               {
                 afterComplete:
@@ -707,6 +765,28 @@ export function createEntrySyncWorker(
                   // scheduled scans may reuse a complete picks row.
                   if (shouldRefreshEntryPicks(effectiveJobData)) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                  }
+                  if (effectiveJobData?.executionIntent === 'retry') {
+                    // A retry carries the original request watermark. Reuse
+                    // only a complete durable head observed at or after that
+                    // boundary; old payloads without a watermark are audited
+                    // against the provider instead of being trusted warm.
+                    const heads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+                      season,
+                      targetEventId,
+                      entryIds,
+                    );
+                    const reusable = new Set(
+                      heads
+                        .filter((head) =>
+                          isReusableEntryPicksHeadForRetry(head, effectiveJobData.requestWatermark),
+                        )
+                        .map((head) => head.entryId),
+                    );
+                    return {
+                      requiredEntryIds: entryIds.filter((entryId) => !reusable.has(entryId)),
+                      reusedUnits: reusable.size,
+                    };
                   }
                   const existing = new Set(
                     await entryEventPicksRepository.findEntryIdsByEvent(
@@ -740,6 +820,24 @@ export function createEntrySyncWorker(
                       );
                     }
                   });
+                  if (
+                    effectiveJobData?.executionIntent === 'retry' &&
+                    effectiveJobData.requestWatermark
+                  ) {
+                    const heads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+                      season,
+                      targetEventId!,
+                      entryIds,
+                    );
+                    const reusable = new Set(
+                      heads
+                        .filter((head) =>
+                          isReusableEntryPicksHeadForRetry(head, effectiveJobData.requestWatermark),
+                        )
+                        .map((head) => head.entryId),
+                    );
+                    return entryIds.filter((entryId) => !reusable.has(entryId));
+                  }
                   const persisted = await entryEventPicksRepository.findEntryIdsByEvent(
                     season,
                     targetEventId!,
@@ -751,6 +849,7 @@ export function createEntrySyncWorker(
               },
             );
           case 'entry-transfers':
+            let selectedTransferFreshAfter: string | Date | undefined;
             return handleEntryJob(
               season,
               'entry-transfers',
@@ -765,17 +864,25 @@ export function createEntrySyncWorker(
                   if (isExplicitEntryRepairRequest(effectiveJobData)) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
+                  const retrying = effectiveJobData?.executionIntent === 'retry';
+                  const transferFreshAfter =
+                    effectiveJobData.freshAfter ??
+                    (retrying ? effectiveJobData.requestWatermark : undefined);
+                  selectedTransferFreshAfter = transferFreshAfter;
+                  if (retrying && !transferFreshAfter) {
+                    return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                  }
                   const [checkpointGaps, staleSources] = await Promise.all([
                     entryEventTransfersRepository.findEntryIdsNeedingSync(
                       season,
                       entryIds,
                       targetEventId,
                     ),
-                    effectiveJobData.freshAfter
+                    transferFreshAfter
                       ? entryEventTransfersRepository.findEntryIdsNeedingSourceRefresh(
                           season,
                           entryIds,
-                          effectiveJobData.freshAfter,
+                          transferFreshAfter,
                         )
                       : Promise.resolve([]),
                   ]);
@@ -786,20 +893,55 @@ export function createEntrySyncWorker(
                     reusedUnits: entryIds.length - requiredEntryIds.length,
                   };
                 },
-                auditRequired: (entryIds) =>
-                  entryEventTransfersRepository.findEntryIdsNeedingSync(
-                    season,
-                    entryIds,
-                    targetEventId!,
-                  ),
+                auditRequired: async (entryIds) => {
+                  const [checkpointGaps, staleSources] = await Promise.all([
+                    entryEventTransfersRepository.findEntryIdsNeedingSync(
+                      season,
+                      entryIds,
+                      targetEventId!,
+                    ),
+                    selectedTransferFreshAfter
+                      ? entryEventTransfersRepository.findEntryIdsNeedingSourceRefresh(
+                          season,
+                          entryIds,
+                          selectedTransferFreshAfter,
+                        )
+                      : Promise.resolve([]),
+                  ]);
+                  return [...new Set([...checkpointGaps, ...staleSources])];
+                },
               },
             );
           case 'entry-results':
+            // All required entries in this worker batch share one validated
+            // event-live observation. The promise is lazy so a fully reused
+            // batch sends no provider request, and a failed observation is
+            // shared by every entry rather than retried as a fan-out.
+            let sharedEventLive:
+              | Promise<{
+                  providerEventLive: Awaited<ReturnType<typeof fplClient.getEventLive>>;
+                  sourceCheckedAt: string;
+                }>
+              | undefined;
+            const getSharedEventLive = () =>
+              (sharedEventLive ??= (async () => {
+                const sourceCheckedAt = await readDatabaseOrderingTimestamp();
+                const providerEventLive = await fplClient.getEventLive(targetEventId!);
+                return { providerEventLive, sourceCheckedAt: sourceCheckedAt.exact };
+              })());
+            let selectedResultFreshAfter: Date | string | undefined;
             return handleEntryJob(
               season,
               'entry-results',
               'entry results sync',
-              (entryId) => syncEntryEventResults(season, entryId, targetEventId!),
+              async (entryId) =>
+                (async () => {
+                  const shared = await getSharedEventLive();
+                  return syncEntryEventResults(season, entryId, targetEventId!, {
+                    providerEventLive: shared.providerEventLive,
+                    providerEventLiveSourceCheckedAt: shared.sourceCheckedAt,
+                  });
+                })(),
               effectiveJobData,
               {
                 selectRequired: async (entryIds) => {
@@ -819,7 +961,15 @@ export function createEntrySyncWorker(
                   // full provider fan-out from their own wall clock.
                   const event = await eventRepository.findById(season, targetEventId);
                   const finalizationDate = resolveRichResultFreshnessCutoff(event);
-                  const sharedFreshAfter = effectiveJobData.freshAfter;
+                  const retryFreshAfter =
+                    effectiveJobData.executionIntent === 'retry'
+                      ? effectiveJobData.requestWatermark
+                      : undefined;
+                  const sharedFreshAfter = effectiveJobData.freshAfter
+                    ? retryFreshAfter
+                      ? latestFreshnessTimestamp(effectiveJobData.freshAfter, retryFreshAfter)
+                      : effectiveJobData.freshAfter
+                    : retryFreshAfter;
                   if (!finalizationDate && !sharedFreshAfter) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
@@ -830,6 +980,7 @@ export function createEntrySyncWorker(
                   const freshAfter = sharedFreshAfter
                     ? latestFreshnessTimestamp(sharedFreshAfter, finalizationCutoff)
                     : finalizationCutoff!;
+                  selectedResultFreshAfter = freshAfter;
                   const requiredEntryIds =
                     await entryEventResultsRepository.findEntryIdsNeedingRichSync(
                       season,
@@ -842,6 +993,15 @@ export function createEntrySyncWorker(
                     reusedUnits: entryIds.length - requiredEntryIds.length,
                   };
                 },
+                auditRequired: async (entryIds) =>
+                  selectedResultFreshAfter
+                    ? entryEventResultsRepository.findEntryIdsNeedingRichSync(
+                        season,
+                        entryIds,
+                        targetEventId!,
+                        selectedResultFreshAfter,
+                      )
+                    : [],
               },
             );
           default:
