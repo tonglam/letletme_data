@@ -20,6 +20,7 @@ const tournamentId = 995_601;
 let issueId: number;
 const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
 async function cleanup() {
+  await sql`DELETE FROM competition.entry_event_results WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
   await sql`DELETE FROM competition.tournament_points_group_results WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM ops.mutation_scopes WHERE scope_key IN (${`entry-core:${season.seasonId}:${tournamentId}`}, ${`entry-core:${season.seasonId}:${tournamentId + 1}`})`;
@@ -763,3 +764,75 @@ test('late historical points standings cannot replace a newer cumulative window'
     WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   expect(corrected).toMatchObject({ played: 2, group_points: 91 });
 });
+
+for (const gap of [
+  'missing-group',
+  'missing-result',
+  'stale-score',
+  'stale-watermark',
+  'stale-rank',
+  'wrong-group',
+  'complete',
+  'joined-later',
+] as const) {
+  test(`review routes ${gap} history to its actual event scope`, async () => {
+    const { buildPointsPayload, TournamentReviewSourceNotReadyError } = await import(
+      '../../src/services/tournament-review-publication.service'
+    );
+    const checkedAt = new Date('2026-09-01T00:00:00Z');
+    for (const eventId of [1, 2]) {
+      await sql`INSERT INTO fpl.events(season_id,event_id,name,finished,data_checked,data_checked_at)
+        VALUES (${season.seasonId},${eventId},'History scope fixture',true,true,${checkedAt})`;
+    }
+    await sql`UPDATE competition.tournaments SET total_team_num=1,group_mode='points_races',group_started_event_id=1,group_ended_event_id=2
+      WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    await sql`UPDATE competition.entries SET started_event=${gap === 'joined-later' ? 2 : 1}
+      WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+    await sql`INSERT INTO competition.tournament_entries(season_id,tournament_id,league_id,entry_id)
+      VALUES (${season.seasonId},${tournamentId},${tournamentId},${tournamentId})`;
+    await sql`INSERT INTO competition.tournament_groups(season_id,tournament_id,group_id,group_name,group_index,entry_id)
+      VALUES (${season.seasonId},${tournamentId},1,'A',1,${tournamentId})`;
+    for (const eventId of [1, 2]) {
+      await sql`INSERT INTO competition.entry_event_results(season_id,entry_id,event_id,event_points,event_transfers_cost,event_net_points,rich_synced_at,updated_at)
+        VALUES (${season.seasonId},${tournamentId},${eventId},42,0,42,${checkedAt},${checkedAt})`;
+      if (eventId === 1 && (gap === 'missing-group' || gap === 'joined-later')) continue;
+      await sql`INSERT INTO competition.tournament_points_group_results(season_id,tournament_id,group_id,event_id,entry_id,event_points,event_cost,event_net_points,event_group_rank)
+        VALUES (${season.seasonId},${tournamentId},${eventId === 1 && gap === 'wrong-group' ? 2 : 1},${eventId},${tournamentId},42,0,42,1)`;
+    }
+    if (gap === 'missing-result')
+      await sql`DELETE FROM competition.entry_event_results WHERE season_id=${season.seasonId} AND entry_id=${tournamentId} AND event_id=1`;
+    if (gap === 'stale-score')
+      await sql`UPDATE competition.tournament_points_group_results SET event_points=43,event_net_points=43 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+    if (gap === 'stale-rank')
+      await sql`UPDATE competition.tournament_points_group_results SET event_group_rank=2 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+    if (gap === 'stale-watermark')
+      await sql`UPDATE competition.tournament_points_group_results SET updated_at='2026-08-31T00:00:00Z' WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+    const run = () =>
+      sql.begin((tx) =>
+        buildPointsPayload(
+          tx,
+          season.seasonId,
+          {
+            tournament_id: tournamentId,
+            total_team_num: 1,
+            group_started_event_id: 1,
+            group_ended_event_id: 2,
+          } as Parameters<typeof buildPointsPayload>[2],
+          { event_id: 2, data_checked_at: checkedAt } as Parameters<typeof buildPointsPayload>[3],
+          {},
+        ),
+      );
+    if (gap === 'complete' || gap === 'joined-later') {
+      const result = await run();
+      expect(result.rowCount).toBe(1);
+      expect(result.readySubjectCount).toBe(1);
+    } else {
+      const failure = await run().then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(TournamentReviewSourceNotReadyError);
+      expect(failure).toMatchObject({ repairEventIds: [1] });
+    }
+  });
+}
