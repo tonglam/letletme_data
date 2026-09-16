@@ -1149,6 +1149,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
 
         const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
         const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const currentAttempts = isRecord(currentCost.attempts) ? currentCost.attempts : {};
         const currentLatestAttempt =
           typeof currentCost.latestAttempt === 'number' &&
           Number.isSafeInteger(currentCost.latestAttempt) &&
@@ -1168,14 +1169,36 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
         const closeRun =
           terminalAllowed && NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus);
+        const failedAttempt = {
+          ...payload,
+          schemaVersion: 1,
+          attemptKey: input.attemptKey,
+          attempt,
+          phase: 'settlement_failed',
+          complete: false,
+          incompleteAccounting: true,
+          incompleteReason: 'batch_cost_persistence_failed',
+          settlementError: summary,
+        };
         const nextMetadata = {
           ...currentMetadata,
           batchCost: {
             schemaVersion: 1,
             ...currentCost,
+            attempts: { ...currentAttempts, [input.attemptKey]: failedAttempt },
             latestAttempt,
             ...(closeRun ? { terminalAttempt: attempt } : {}),
+            incompleteAccounting: true,
+            incompleteReason:
+              typeof currentCost.incompleteReason === 'string'
+                ? currentCost.incompleteReason
+                : 'batch_cost_persistence_failed',
             lastSettlementFailureAt: new Date().toISOString(),
+            lastSettlementFailure: {
+              batchId: payload.batchId ?? null,
+              attempt,
+              error: summary,
+            },
           },
         };
         await tx

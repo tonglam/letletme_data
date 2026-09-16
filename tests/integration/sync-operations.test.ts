@@ -1063,13 +1063,30 @@ describe('ops sync state machine', () => {
       phase: 'settlement_failed',
       incompleteReason: 'batch_cost_persistence_failed',
     });
-    const [run] = await sql<Array<{ status: string; error_summary: string | null }>>`
-      SELECT status, error_summary
+    const [run] = await sql<
+      Array<{
+        status: string;
+        error_summary: string | null;
+        metadata: { batchCost?: Record<string, unknown> };
+      }>
+    >`
+      SELECT status, error_summary, metadata
       FROM ops.sync_runs
       WHERE run_id = ${RUN_IDS[2]}::uuid
     `;
     expect(run?.status).toBe('failed');
     expect(run?.error_summary).toContain('batch-cost settlement');
+    expect(run?.metadata.batchCost).toMatchObject({
+      incompleteAccounting: true,
+      incompleteReason: 'batch_cost_persistence_failed',
+      attempts: {
+        [attemptKey]: {
+          phase: 'settlement_failed',
+          incompleteAccounting: true,
+          incompleteReason: 'batch_cost_persistence_failed',
+        },
+      },
+    });
   });
 
   test('reconciles an orphaned marker after terminal worker loss', async () => {

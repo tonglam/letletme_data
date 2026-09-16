@@ -290,8 +290,13 @@ export async function syncCoreSnapshot(
     );
   } catch (error) {
     if (persistenceCommitted && persistedEvidence) {
+      const committedUnits = validatedSnapshot ? workUnits(validatedSnapshot) : 0;
       attachAttemptEvidence(error, {
         persistence: persistedEvidence,
+        requiredUnits: committedUnits,
+        reusedUnits: 0,
+        succeededUnits: committedUnits,
+        failedUnits: 0,
         submittedRows:
           persistedEvidence.events +
           persistedEvidence.teams +
