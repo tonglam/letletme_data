@@ -153,8 +153,12 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
         scheduled = enqueueWork(() => {
           if (cancellation) throw cancellation;
           assertDeadline();
-          executing = true;
-          return query;
+          return new Promise((resolve, reject) => {
+            // Subscribe synchronously: returning the thenable would leave a
+            // microtask gap where cancellation can reach an unobserved query.
+            query.then(resolve, reject);
+            executing = true;
+          });
         });
         const timer = setTimeout(() => {
           cancel(new TimeoutError('PostgreSQL query queue wait exceeded its deadline'));

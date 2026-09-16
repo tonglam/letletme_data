@@ -114,6 +114,19 @@ describe('scheduler database query cancellation', () => {
     expect(f.counts().cancelCount).toBe(0);
   });
 
+  test('subscribes to driver settlement before cancellation from the next microtask', async () => {
+    const f = fixture(1000);
+    const query = f.client`cancel after admission`.execute();
+    const result = Promise.resolve(query).catch((error: Error) => error);
+    await Promise.resolve();
+    const observedBeforeCancel = f.counts().executionCount;
+    query.cancel();
+    f.reject(new Error('cancel acknowledged'));
+    expect(await result).toBeInstanceOf(Error);
+    expect(observedBeforeCancel).toBe(1);
+    expect(f.counts().cancelCount).toBe(1);
+  });
+
   test('keeps unconsumed SQL fragments lazy', async () => {
     const f = fixture();
     void f.client`fragment`;
