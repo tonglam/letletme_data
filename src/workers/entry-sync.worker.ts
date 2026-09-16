@@ -820,6 +820,24 @@ export function createEntrySyncWorker(
                       );
                     }
                   });
+                  if (
+                    effectiveJobData?.executionIntent === 'retry' &&
+                    effectiveJobData.requestWatermark
+                  ) {
+                    const heads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
+                      season,
+                      targetEventId!,
+                      entryIds,
+                    );
+                    const reusable = new Set(
+                      heads
+                        .filter((head) =>
+                          isReusableEntryPicksHeadForRetry(head, effectiveJobData.requestWatermark),
+                        )
+                        .map((head) => head.entryId),
+                    );
+                    return entryIds.filter((entryId) => !reusable.has(entryId));
+                  }
                   const persisted = await entryEventPicksRepository.findEntryIdsByEvent(
                     season,
                     targetEventId!,

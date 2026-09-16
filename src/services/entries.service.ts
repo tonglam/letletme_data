@@ -43,6 +43,7 @@ import {
   validateEntryLiveInputV2,
   readLivePublicationV2,
   setEntryCheckpointDesiredV2,
+  touchEntryLiveInputV2,
   type AssistantManagerPointsFact,
   type EntryLiveInputV2,
   type EntryLivePublicationV2,
@@ -461,7 +462,7 @@ export async function persistEntryEventPicksResponse(
         },
       }
     : inputWithCurrentTotals;
-  const desired = await readEntryCheckpointDesiredV2({
+  let desired = await readEntryCheckpointDesiredV2({
     season: season.seasonCode,
     eventId,
     entryId,
@@ -508,10 +509,34 @@ export async function persistEntryEventPicksResponse(
     return { entryId, eventId, changed: false };
   }
   if (sameInput && !generationNeedsRepair) {
-    if (desired === null && existing!.publication.checkpointedAt !== null) {
-      return { entryId, eventId, changed: false };
+    let publication = existing!.publication;
+    // A successful source retry must leave an exact observation watermark for
+    // the durable audit, even when the fifteen pick rows and input content are
+    // unchanged. Touch only a current provisional publication; FINAL inputs
+    // remain immutable and previous-pointer fallbacks require a normal repair
+    // publication instead of mutating an old snapshot in place.
+    if (
+      existing!.servedFrom === 'REDIS_CURRENT' &&
+      publication.state === 'PROVISIONAL' &&
+      isFreshnessBoundaryNewer(publication.sourceCheckedAt, sourceCheckedAt)
+    ) {
+      const touched = await touchEntryLiveInputV2(publication, sourceCheckedAt);
+      if (!touched) {
+        throw new CacheError(
+          'Entry V2 publication changed while recording source observation',
+          'LIVE_V2_ENTRY_OBSERVATION_CHANGED',
+        );
+      }
+      publication = touched;
+      desired = await readEntryCheckpointDesiredV2({
+        season: season.seasonCode,
+        eventId,
+        entryId,
+      });
     }
-    await ensureEntryLiveCheckpoint(season, eventId, entryId, existing!.publication, desired);
+    if (desired !== null || publication.checkpointedAt === null) {
+      await ensureEntryLiveCheckpoint(season, eventId, entryId, publication, desired);
+    }
     return { entryId, eventId, changed: false };
   }
   if (generationFloor === undefined) {

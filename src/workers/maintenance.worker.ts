@@ -334,12 +334,18 @@ async function myFplFinalScopeIsCurrent(input: {
   }
   const control =
     input.control ?? (await getMyFplFinalizationControlStateForEvent(input.season, input.eventId));
+  if (!control) {
+    // A missing control row is temporarily unavailable rather than proof of a
+    // reopened event. The capture's canonical CAS remains the final fence.
+    return true;
+  }
   if (
-    !control ||
-    ((!hasExpectedScopeGeneration ||
+    control.finished &&
+    control.dataChecked &&
+    (!hasExpectedScopeGeneration ||
       (control.entryScopeGeneration === input.expectedEntryScopeGeneration &&
         control.tournamentScopeGeneration === input.expectedTournamentScopeGeneration)) &&
-      (!hasExpectedFinalFence || control.dataCheckedAt === input.expectedFinalDataCheckedAt))
+    (!hasExpectedFinalFence || control.dataCheckedAt === input.expectedFinalDataCheckedAt)
   ) {
     return true;
   }

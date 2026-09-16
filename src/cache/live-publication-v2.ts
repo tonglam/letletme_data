@@ -1136,6 +1136,48 @@ end
 return {'touched', cjson.encode(value)}
 `;
 
+// An unchanged entry-picks observation still advances the source watermark,
+// but it must not allocate a generation or rewrite the immutable input item.
+// Keep the update behind the active publication identity and never move the
+// watermark backwards when an older retry arrives.
+const TOUCH_ENTRY_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {'missing'} end
+local ok, value = pcall(cjson.decode, raw)
+if not ok or value.contractVersion ~= 'live-points-v2' or
+   value.publicationId ~= ARGV[1] or value.generation ~= tonumber(ARGV[2]) or
+   value.state ~= 'PROVISIONAL' then return {'changed'} end
+local function timestamp_key(value)
+  if type(value) ~= 'string' then return '' end
+  local prefix, fraction = string.match(value, '^(.-)%.([0-9]+)Z$')
+  if prefix == nil then
+    prefix = string.match(value, '^(.-)Z$')
+    if prefix == nil then return '' end
+    fraction = ''
+  end
+  if string.len(fraction) < 6 then
+    fraction = fraction .. string.rep('0', 6 - string.len(fraction))
+  else
+    fraction = string.sub(fraction, 1, 6)
+  end
+  return prefix .. '.' .. fraction .. 'Z'
+end
+local current_source = timestamp_key(value.sourceCheckedAt)
+local candidate_source = timestamp_key(ARGV[3])
+if candidate_source == '' then return {'invalid'} end
+if current_source ~= '' and current_source > candidate_source then return {'stale', raw} end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl == -2 then return {'changed'} end
+value.sourceCheckedAt = ARGV[3]
+local encoded = cjson.encode(value)
+if ttl > 0 then
+  redis.call('SET', KEYS[1], encoded, 'PX', ttl)
+else
+  redis.call('SET', KEYS[1], encoded)
+end
+return {'touched', encoded}
+`;
+
 const CHECKPOINT_SCRIPT = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'missing'} end
@@ -2007,6 +2049,37 @@ export async function touchLivePublicationV2(
   return result[0] === 'touched'
     ? parseLiveManifest(result[1] ?? null, scope)
     : readLivePublicationV2(scope, redis).then((value) => value?.publication ?? null);
+}
+
+/**
+ * Advance an unchanged provisional entry input's source observation without
+ * allocating a new generation or changing its immutable payload item.
+ */
+export async function touchEntryLiveInputV2(
+  publication: EntryLivePublicationV2,
+  sourceCheckedAt: Date | string,
+  redisClient?: Redis,
+): Promise<EntryLivePublicationV2 | null> {
+  const scope = {
+    season: publication.season,
+    eventId: publication.eventId,
+    entryId: publication.entryId,
+  } as const;
+  assertEntryScope(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const result = promotionResult(
+    await redis.eval(
+      TOUCH_ENTRY_SCRIPT,
+      1,
+      entryLiveV2Key(scope, 'active'),
+      publication.publicationId,
+      String(publication.generation),
+      exactTimestamp(sourceCheckedAt),
+    ),
+  );
+  if (result[0] === 'stale') return parseEntryManifest(result[1] ?? null, scope);
+  if (result[0] !== 'touched') return null;
+  return parseEntryManifest(result[1] ?? null, scope);
 }
 
 export async function markLivePublicationCheckpointedV2(

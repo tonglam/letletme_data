@@ -555,13 +555,17 @@ async function attachFreshnessWindowToSchedulerObligationInTransaction(
     !Number.isSafeInteger(input.freshnessWindowId) ||
     input.freshnessWindowId <= 0
   ) {
+    throw new Error('A valid scheduler obligation and freshness window are required');
   }
   // Reservation, supersession, and attachment are separate scheduler
   // phases. Lock the obligation before merging the window so a stale
   // scheduler replica cannot leave a new PENDING window behind a terminal
   // skip. If supersession wins first, retire this exact window immediately.
   const [obligation] = await tx
-    .select({ status: schedulerObligationsInOps.status })
+    .select({
+      status: schedulerObligationsInOps.status,
+      evidence: schedulerObligationsInOps.evidence,
+    })
     .from(schedulerObligationsInOps)
     .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
     .for('update');
@@ -604,6 +608,19 @@ async function attachFreshnessWindowToSchedulerObligationInTransaction(
           inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
         ),
       );
+  }
+  const evidence =
+    obligation.evidence && typeof obligation.evidence === 'object'
+      ? (obligation.evidence as Record<string, unknown>)
+      : null;
+  if (
+    Array.isArray(evidence?.freshnessWindowIds) &&
+    evidence.freshnessWindowIds.includes(input.freshnessWindowId) &&
+    evidence.freshnessWindowId === input.freshnessWindowId
+  ) {
+    // The exact attachment is already durable. Return its identity so an
+    // idempotent checkpoint backfill can continue without generating a write.
+    return true;
   }
   const existingWindowIds = sql`CASE
       WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
