@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   applyCandidateKnockoutResults,
   calcEntryWinningNum,
+  shouldDeferNextRoundResultRehome,
 } from '../../src/services/tournament-knockout-results.service';
 
 describe('tournament knockout win counts', () => {
@@ -77,6 +78,97 @@ describe('tournament knockout win counts', () => {
       homeEntryId: 303,
       awayEntryId: 404,
     });
+  });
+
+  test('uses the repaired bracket seed for an unseeded later-round candidate', () => {
+    const persisted = [
+      {
+        sourceResultId: 8,
+        tournamentId: 1,
+        seasonId: 1,
+        eventId: 35,
+        matchId: 2,
+        playAgainstId: 1,
+        homeEntryId: 101,
+        awayEntryId: 202,
+        homeNetPoints: 40,
+        awayNetPoints: 30,
+        sourceCheckedAt: new Date('2026-09-16T00:00:00.000Z'),
+      },
+    ] as never[];
+    const candidate = [
+      {
+        tournamentId: 1,
+        eventId: 35,
+        matchId: 2,
+        playAgainstId: 1,
+        homeEntryId: null,
+        awayEntryId: null,
+        sourceCheckedAt: null,
+      },
+    ] as never[];
+
+    expect(
+      applyCandidateKnockoutResults(
+        persisted,
+        candidate,
+        35,
+        new Map([
+          [
+            2,
+            {
+              homeEntryId: 303,
+              awayEntryId: 404,
+            },
+          ],
+        ]),
+      )[0],
+    ).toMatchObject({
+      homeEntryId: 303,
+      awayEntryId: 404,
+      homeNetPoints: 40,
+      awayNetPoints: 30,
+    });
+  });
+
+  test('defers rehoming accepted next-round facts until replacement scores exist', () => {
+    const accepted = [
+      {
+        homeEntryId: 101,
+        awayEntryId: 202,
+        homeNetPoints: 40,
+        awayNetPoints: 30,
+        homeGoalsScored: 1,
+        homeGoalsConceded: 0,
+        awayGoalsScored: 0,
+        awayGoalsConceded: 1,
+        matchWinner: 101,
+        sourceCheckedAt: new Date('2026-09-16T00:00:00.000Z'),
+      },
+    ] as never[];
+
+    expect(shouldDeferNextRoundResultRehome(accepted, 303, 404)).toBe(true);
+    expect(shouldDeferNextRoundResultRehome(accepted, 101, 202)).toBe(false);
+    expect(
+      shouldDeferNextRoundResultRehome(
+        [
+          {
+            homeEntryId: 101,
+            awayEntryId: 202,
+            homeNetPoints: null,
+            awayNetPoints: null,
+            homeGoalsScored: null,
+            homeGoalsConceded: null,
+            awayGoalsScored: null,
+            awayGoalsConceded: null,
+            matchWinner: null,
+            sourceCheckedAt: null,
+          },
+        ] as never[],
+        303,
+        404,
+      ),
+    ).toBe(false);
   });
 
   test('drops persisted result rows outside the rebuilt candidate topology', () => {

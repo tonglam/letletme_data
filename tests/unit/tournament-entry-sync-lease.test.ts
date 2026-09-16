@@ -92,4 +92,23 @@ describe('tournament entry/GW coordination lease', () => {
     expect(renewals).toBeGreaterThan(0);
     expect(values.size).toBe(0);
   });
+
+  test('aborts the current owner after renewal loses the token', async () => {
+    const scope = { seasonId: 2627, eventId: 4, entryId: 12345 };
+    const promise = withTournamentEntrySyncLease(
+      scope,
+      async (assertLease) => {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        values.set(tournamentEntrySyncLeaseKey(scope), 'successor-token');
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assertLease();
+      },
+      { leaseMs: 1_000, waitMs: 2_000, pollMs: 5 },
+    );
+
+    await expect(promise).rejects.toMatchObject({
+      name: 'TournamentEntrySyncLeaseLostError',
+    });
+    expect(values.get(tournamentEntrySyncLeaseKey(scope))).toBe('successor-token');
+  });
 });

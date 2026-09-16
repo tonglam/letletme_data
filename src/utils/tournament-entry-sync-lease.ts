@@ -35,6 +35,15 @@ export type TournamentEntrySyncLeaseOptions = Readonly<{
   pollMs?: number;
 }>;
 
+export class TournamentEntrySyncLeaseLostError extends Error {
+  constructor(scope: TournamentEntrySyncLeaseScope) {
+    super(
+      `Tournament entry sync coordination lease lost for ${tournamentEntrySyncLeaseKey(scope)}`,
+    );
+    this.name = 'TournamentEntrySyncLeaseLostError';
+  }
+}
+
 export function tournamentEntrySyncLeaseKey(scope: TournamentEntrySyncLeaseScope): string {
   return `${TOURNAMENT_ENTRY_SYNC_LEASE_PREFIX}:${scope.seasonId}:${scope.eventId}:${scope.entryId}`;
 }
@@ -52,7 +61,7 @@ const sleep = (milliseconds: number): Promise<void> =>
  */
 export async function withTournamentEntrySyncLease<T>(
   scope: TournamentEntrySyncLeaseScope,
-  operation: () => Promise<T>,
+  operation: (assertLease: () => void) => Promise<T>,
   options: TournamentEntrySyncLeaseOptions = {},
 ): Promise<T> {
   const leaseMs = Math.max(1_000, Math.floor(options.leaseMs ?? DEFAULT_LEASE_MS));
@@ -67,16 +76,28 @@ export async function withTournamentEntrySyncLease<T>(
     const acquired = await redis.set(key, token, 'PX', leaseMs, 'NX');
     if (acquired === 'OK') {
       let renewalInFlight = false;
+      let lostError: TournamentEntrySyncLeaseLostError | null = null;
+      const markLost = () => {
+        lostError ??= new TournamentEntrySyncLeaseLostError(scope);
+      };
+      const assertLease = () => {
+        if (lostError) throw lostError;
+      };
       const renew = async () => {
         if (renewalInFlight) return;
         renewalInFlight = true;
         try {
           // Token fencing makes a late renewal harmless after this owner has
           // lost the lease to another worker.
-          await redis.eval(RENEW_SCRIPT, 1, key, token, String(leaseMs));
+          const renewed = await redis.eval(RENEW_SCRIPT, 1, key, token, String(leaseMs));
+          if (Number(renewed) !== 1) {
+            markLost();
+          }
         } catch {
-          // The bounded TTL remains the crash/Redis-outage safety net. The
-          // operation still owns the token and release remains fenced.
+          // A renewal error is not safe to ignore: the bounded TTL may expire
+          // while this callback is still fetching or writing. Stop the current
+          // owner at its next lease boundary instead of racing a new owner.
+          markLost();
         } finally {
           renewalInFlight = false;
         }
@@ -89,7 +110,8 @@ export async function withTournamentEntrySyncLease<T>(
       );
       renewalTimer.unref?.();
       try {
-        return await operation();
+        assertLease();
+        return await operation(assertLease);
       } finally {
         clearInterval(renewalTimer);
         // A Redis outage during cleanup cannot strand the work permanently;

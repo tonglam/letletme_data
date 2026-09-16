@@ -644,16 +644,20 @@ export async function syncTournamentEventResultsForEntryIds(
               // entryId=0 is the event-scoped shared live-source unit. Real FPL
               // entry ids are positive, so it cannot collide with an entry lock.
               { seasonId: season.seasonId, eventId, entryId: 0 },
-              () =>
-                resolveEventPointsPayload(
+              async (assertLease) => {
+                const resolved = await resolveEventPointsPayload(
                   season,
                   eventId,
                   options?.live,
                   () => {
+                    assertLease();
                     eventLiveProviderRequestStarted = true;
                   },
                   sourceOrdering.exact,
-                ),
+                );
+                assertLease();
+                return resolved;
+              },
               {
                 leaseMs: Math.max(120_000, EVENT_LIVE_FETCH_TIMEOUT_MS + 15_000),
                 waitMs: Math.max(60_000, EVENT_LIVE_FETCH_TIMEOUT_MS + 15_000),
@@ -792,20 +796,24 @@ export async function syncTournamentEventResultsForEntryIds(
       const trackedRequest = async <T>(
         state: { started: boolean; completed: boolean },
         request: () => Promise<T>,
+        assertLease: () => void,
       ): Promise<T> => {
+        assertLease();
         state.started = true;
         const response = await request();
+        assertLease();
         state.completed = true;
         return response;
       };
       try {
         return await withTournamentEntrySyncLease(
           { seasonId: season.seasonId, eventId, entryId },
-          async () => {
+          async (assertLease) => {
             // A different tournament or retry may have completed this entry
             // while the batch was planning. Recheck after the cross-worker lease,
             // immediately before any provider request, so the loser reuses the
             // durable facts instead of issuing the same FPL calls again.
+            assertLease();
             const durable = await readEntrySyncDurableState(
               season,
               entryId,
@@ -814,6 +822,7 @@ export async function syncTournamentEventResultsForEntryIds(
               finalizationCutoff,
               !options?.skipTransfers && transferEntryIds.has(entryId),
             );
+            assertLease();
             const needsResult =
               !durable.resultFresh ||
               !durable.picksPresent ||
@@ -822,6 +831,7 @@ export async function syncTournamentEventResultsForEntryIds(
               !options?.skipTransfers && transferEntryIds.has(entryId) && durable.transfersMissing;
 
             if (!needsResult) {
+              assertLease();
               await syncOperationsRepository.upsertItems(auditRunId, [
                 {
                   resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -839,6 +849,7 @@ export async function syncTournamentEventResultsForEntryIds(
                 },
               ]);
               if (finalizationDate !== null && durable.finalComplete) {
+                assertLease();
                 await syncOperationsRepository.upsertItems(auditRunId, [
                   {
                     resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -862,8 +873,10 @@ export async function syncTournamentEventResultsForEntryIds(
             const [picks, transfers] = await withTimeout(
               Promise.all([
                 needsResult
-                  ? trackedRequest(picksRequest, () =>
-                      fplClient.getEntryEventPicks(entryId, eventId),
+                  ? trackedRequest(
+                      picksRequest,
+                      () => fplClient.getEntryEventPicks(entryId, eventId),
+                      assertLease,
                     )
                   : Promise.resolve(null),
                 !needsTransfer
@@ -872,22 +885,30 @@ export async function syncTournamentEventResultsForEntryIds(
                     ? options.transfersByEntry.has(entryId)
                       ? Promise.resolve(options.transfersByEntry.get(entryId)!)
                       : Promise.reject(new Error('Transfer payload is missing for requested entry'))
-                    : trackedRequest(transferRequest, () => fplClient.getEntryTransfers(entryId)),
+                    : trackedRequest(
+                        transferRequest,
+                        () => fplClient.getEntryTransfers(entryId),
+                        assertLease,
+                      ),
               ]),
               ENTRY_FETCH_TIMEOUT_MS,
               `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
             );
+            assertLease();
             if (!picks && !transfers) {
               throw new Error('Entry sync planner requested no provider component');
             }
 
             const persistEntry = async () => {
+              assertLease();
               await withEntrySeasonSyncTransaction(
                 season,
                 entryId,
                 async (tx) => {
+                  assertLease();
                   const auditItems = [];
                   if (picks) {
+                    assertLease();
                     accepted = await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
                       season,
                       entryId,
@@ -896,6 +917,7 @@ export async function syncTournamentEventResultsForEntryIds(
                       live!,
                       eventLiveSourceCheckedAt,
                     );
+                    assertLease();
                     await createEntryEventPicksRepository(tx).upsertFromPicks(
                       season,
                       entryId,
@@ -925,6 +947,7 @@ export async function syncTournamentEventResultsForEntryIds(
                     });
                   }
                   if (transfers) {
+                    assertLease();
                     const acceptedTransfer = await createEntryEventTransfersRepository(
                       tx,
                     ).replaceForEvent(
@@ -956,10 +979,12 @@ export async function syncTournamentEventResultsForEntryIds(
                       completedAt: new Date(),
                     });
                   }
+                  assertLease();
                   await createSyncOperationsRepository(tx).upsertItems(auditRunId, auditItems);
                 },
                 { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
               );
+              assertLease();
             };
             if (options?.perEntryMutationScopes) {
               await withMutationScopes(
@@ -979,6 +1004,7 @@ export async function syncTournamentEventResultsForEntryIds(
               // complete. Otherwise a concurrent tournament can observe the
               // relational write without its final evidence and fetch the same
               // entry again.
+              assertLease();
               await checkpointFinalEntryFromProviderResponse(
                 season,
                 entryId,
@@ -988,6 +1014,7 @@ export async function syncTournamentEventResultsForEntryIds(
                 finalizationCutoff,
                 live,
               );
+              assertLease();
               await syncOperationsRepository.upsertItems(auditRunId, [
                 {
                   resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -1005,11 +1032,13 @@ export async function syncTournamentEventResultsForEntryIds(
               ]);
             }
             if (finalizationDate && finalizationCutoff && !accepted) {
+              assertLease();
               const durableFinalHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(
                 season,
                 eventId,
                 [entryId],
               );
+              assertLease();
               const durableFinalIds = await completedFinalEntryIds(
                 season,
                 eventId,
@@ -1017,6 +1046,7 @@ export async function syncTournamentEventResultsForEntryIds(
                 finalizationCutoff,
               );
               if (durableFinalIds.has(entryId)) {
+                assertLease();
                 await syncOperationsRepository.upsertItems(auditRunId, [
                   {
                     resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -1341,16 +1371,19 @@ export async function syncEntryTransferHistories(
     try {
       await withTournamentEntrySyncLease(
         { seasonId: season.seasonId, eventId: endEventId, entryId },
-        async () => {
+        async (assertLease) => {
           // Re-plan after the lease: a result repair in another tournament may
           // already have advanced the shared transfer checkpoint.
+          assertLease();
           const missing = await entryEventTransfersRepository.findEntryIdsNeedingSync(
             season,
             [entryId],
             endEventId,
           );
+          assertLease();
           if (missing.length === 0) {
             reusedTransferEntryIds.add(entryId);
+            assertLease();
             await syncOperationsRepository.upsertItems(auditRunId, [
               {
                 resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -1370,6 +1403,7 @@ export async function syncEntryTransferHistories(
             return;
           }
 
+          assertLease();
           transferRequest.started = true;
           const transfers = await withTimeout(
             fplClient.getEntryTransfers(entryId).then((response) => {
@@ -1379,17 +1413,20 @@ export async function syncEntryTransferHistories(
             ENTRY_FETCH_TIMEOUT_MS,
             `Timed out fetching transfer history for entry ${entryId}`,
           );
+          assertLease();
           const persistTransfers = () =>
             withEntrySeasonSyncTransaction(
               season,
               entryId,
               (tx) =>
                 (async () => {
+                  assertLease();
                   const acceptedTransfer = await createEntryEventTransfersRepository(
                     tx,
                   ).replaceForEvent(season, entryId, endEventId, transfers, undefined, {
                     sourceCheckedAt,
                   });
+                  assertLease();
                   await createSyncOperationsRepository(tx).upsertItems(auditRunId, [
                     {
                       resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
@@ -1429,6 +1466,7 @@ export async function syncEntryTransferHistories(
           } else {
             await persistTransfers();
           }
+          assertLease();
         },
         {
           leaseMs: Math.max(120_000, ENTRY_FETCH_TIMEOUT_MS + ENTRY_PERSIST_TIMEOUT_MS + 30_000),
