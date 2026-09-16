@@ -74,6 +74,38 @@ describe('scheduler SQL deadlines against PostgreSQL', () => {
     ).toBe(0);
   });
 
+  test('nested deadlines cancel queued writes without unhandled driver rejection or late writes', async () => {
+    const inner = withPostgresQueryTimeout(raw, 2000);
+    const outer = withPostgresQueryTimeout(inner, 50);
+    await raw`CREATE TEMP TABLE scheduler_nested_cancel_test (value integer)`;
+    let release!: () => void;
+    let acquired!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const owner = inner.begin(async () => {
+      acquired();
+      await hold;
+    });
+    await ready;
+    try {
+      await expect(
+        Promise.resolve(outer`INSERT INTO scheduler_nested_cancel_test VALUES (1)`),
+      ).rejects.toThrow();
+    } finally {
+      release();
+      await owner;
+    }
+    await Bun.sleep(100);
+    expect(
+      (await raw`SELECT count(*)::int AS count FROM scheduler_nested_cancel_test`)[0]?.count,
+    ).toBe(0);
+    expect((await outer`SELECT 42 AS answer`)[0]?.answer).toBe(42);
+  });
+
   test('preserves lazy fragments and values mode', async () => {
     const fragment = bounded`40 + 2`;
     await Bun.sleep(200);
