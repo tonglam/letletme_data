@@ -395,7 +395,8 @@ async function deleteExpiredMyFplSnapshotRevisions(
              season.season_code
       FROM competition.my_fpl_snapshot_publications publication
       JOIN fpl.seasons season ON season.season_id = publication.season_id
-      WHERE active = false AND updated_at < ${supersededBeforeIso}::timestamptz
+      WHERE publication.active = false
+        AND publication.updated_at < ${supersededBeforeIso}::timestamptz
         ${seasonFilter}
         ${eventFilter}
         AND NOT EXISTS (
