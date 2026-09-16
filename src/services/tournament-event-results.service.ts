@@ -243,6 +243,24 @@ export function planTournamentEventSync(
   return { requiredResultEntryIds, requiredTransferEntryIds, reusedUnits };
 }
 
+/**
+ * Convert component work into entry-level changes after coordinated transfer
+ * reuse has been observed. A reused transfer must not make an entry look
+ * changed unless that same entry still required a result write in this run.
+ */
+export function changedTournamentEventEntryIds(
+  requiredResultEntryIds: ReadonlyArray<number>,
+  requiredTransferEntryIds: ReadonlyArray<number>,
+  reusedTransferEntryIds: ReadonlyArray<number>,
+): number[] {
+  const changed = new Set([...requiredResultEntryIds, ...requiredTransferEntryIds]);
+  const resultEntryIds = new Set(requiredResultEntryIds);
+  for (const entryId of reusedTransferEntryIds) {
+    if (!resultEntryIds.has(entryId)) changed.delete(entryId);
+  }
+  return [...changed];
+}
+
 export function planEntrySyncAuditReuse(
   entryIds: readonly number[],
   requiredResultEntryIds: ReadonlyArray<number>,
@@ -1718,6 +1736,7 @@ export async function syncTournamentEventResults(
       ...plan.requiredResultEntryIds,
       ...finalizationRecoveryEntryIds,
     ]);
+    let coordinatedTransferReuseEntryIds = new Set<number>();
 
     // Both operations write the same season/entry transfer fences. Running them
     // in parallel lets one entry-results transaction hold an entry lock while a
@@ -1756,16 +1775,22 @@ export async function syncTournamentEventResults(
     }
     if (plan.requiredTransferEntryIds.length > 0) {
       try {
-        await syncEntryTransferHistories(season, plan.requiredTransferEntryIds, eventId, {
-          concurrency: options?.concurrency,
-          perEntryMutationScopes: options?.perEntryMutationScopes,
-          auditRunId,
-          auditTrigger,
-          auditAttempt,
-          auditInitialize: false,
-          auditFinalizeRun: false,
-          sourceCheckedAt: options?.transferSourceCheckedAt ?? sourceOrdering.exact,
-        });
+        const transferSummary = await syncEntryTransferHistories(
+          season,
+          plan.requiredTransferEntryIds,
+          eventId,
+          {
+            concurrency: options?.concurrency,
+            perEntryMutationScopes: options?.perEntryMutationScopes,
+            auditRunId,
+            auditTrigger,
+            auditAttempt,
+            auditInitialize: false,
+            auditFinalizeRun: false,
+            sourceCheckedAt: options?.transferSourceCheckedAt ?? sourceOrdering.exact,
+          },
+        );
+        coordinatedTransferReuseEntryIds = new Set(transferSummary.reusedEntryIds);
       } catch (error) {
         logError('Tournament transfer phase did not converge', error, { eventId });
       }
@@ -1909,19 +1934,24 @@ export async function syncTournamentEventResults(
             completedAt: new Date(),
           }))),
     ]);
-    const changedEntryIds = new Set([...requiredResultEntryIds, ...plan.requiredTransferEntryIds]);
+    const changedEntryIds = new Set(
+      changedTournamentEventEntryIds(requiredResultEntryIds, plan.requiredTransferEntryIds, [
+        ...coordinatedTransferReuseEntryIds,
+      ]),
+    );
     const reusedAuditUnits = Math.max(0, entryIds.length - changedEntryIds.size);
     await syncOperationsRepository.finishRun(auditRunId, {
       status: 'completed',
       completedItems: Math.max(0, changedEntryIds.size - failedUnits),
       failedItems: 0,
       skippedItems: reusedAuditUnits,
-      dataChanged: requiredResultEntryIds.length > 0 || plan.requiredTransferEntryIds.length > 0,
+      dataChanged: changedEntryIds.size > 0,
       metadata: {
         ...auditRunMetadata(options, auditRunId, auditAttempt),
         finalCompletion: finalizationDate !== null,
         providerEntryCount: requiredResultEntryIds.length,
         transferEntryCount: plan.requiredTransferEntryIds.length,
+        coordinatedTransferReuseCount: coordinatedTransferReuseEntryIds.size,
       },
     });
 

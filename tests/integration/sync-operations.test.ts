@@ -332,6 +332,74 @@ describe('ops sync state machine', () => {
     ]);
   });
 
+  test('does not certify a failed provisional result from request accounting alone', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await sql`
+      INSERT INTO fpl.events (
+        season_id,
+        event_id,
+        name,
+        finished,
+        data_checked,
+        data_checked_at
+      )
+      VALUES (
+        ${TEST_SEASON_ID},
+        1,
+        'GW1',
+        false,
+        false,
+        NULL
+      )
+    `;
+    await startRun(RUN_IDS[1], season);
+    const resultResourceId = `${TEST_SEASON_ID}:1:123:results`;
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: resultResourceId,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          unknownRequests: 1,
+        },
+        lastError: 'provider timeout',
+      },
+    ]);
+
+    const failedAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(failedAudit.evidenceComplete).toBe(false);
+    expect(failedAudit.reasonCodes).toContain('SYNC_AUDIT_RESULT_EVIDENCE_MISSING');
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: resultResourceId,
+        status: 'completed',
+        attempts: 2,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          factCommit: 'reused',
+          reused: true,
+        },
+      },
+    ]);
+
+    const recoveredAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(recoveredAudit.evidenceComplete).toBe(true);
+    expect(recoveredAudit.reasonCodes).toEqual([]);
+  });
+
   test('counts only the final audit component as a durable FINAL completion', async () => {
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await syncOperationsRepository.startRun({

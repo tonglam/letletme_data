@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { findMissingTournamentPickEntryIds } from '../../src/services/tournament-event-picks.service';
 import {
+  changedTournamentEventEntryIds,
   findFreshTournamentResultEntryIds,
   planTournamentEventSync,
 } from '../../src/services/tournament-event-results.service';
@@ -84,6 +85,12 @@ describe('tournament sync convergence planning', () => {
       requiredTransferEntryIds: [],
       reusedUnits: 1,
     });
+  });
+
+  test('removes coordinated transfer reuse from entry-level changed work', () => {
+    expect(changedTournamentEventEntryIds([11], [11, 12, 13], [12, 13])).toEqual([11]);
+    expect(changedTournamentEventEntryIds([], [12], [12])).toEqual([]);
+    expect(changedTournamentEventEntryIds([11], [11], [11])).toEqual([11]);
   });
 
   test('includes GW1 in transfer checkpoint synchronization', () => {

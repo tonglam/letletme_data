@@ -452,6 +452,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const eventFinalized = eventRows[0]?.finished === true && eventRows[0]?.dataChecked === true;
       const currentFinalizationRevision = eventRows[0]?.dataCheckedAt?.toISOString() ?? null;
       const finalResourceId = `${resourcePrefix}final`;
+      const resultResourceId = `${resourcePrefix}results`;
       const sourceRevisionAt = sql`
         CASE
           WHEN (${syncItemsInOps.normalizedPayload}->>'sourceRevision') ~
@@ -472,6 +473,18 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               : sql`${sourceRevisionAt} >= ${currentFinalizationRevision}::timestamptz`
         }
       `;
+      const resultEvidencePredicate = sql`
+        ${syncItemsInOps.resourceId} = ${resultResourceId}
+        AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+        AND (
+          (${syncItemsInOps.normalizedPayload}->>'factCommit') IN ('committed', 'reused')
+          OR (${syncItemsInOps.normalizedPayload}->>'reused') = 'true'
+        )
+      `;
+      const resultEvidenceComplete = sql<boolean>`coalesce(
+        bool_or(${resultEvidencePredicate}),
+        false
+      )`;
       const finalEvidenceComplete = !eventFinalized
         ? sql<boolean>`true`
         : currentFinalizationRevision === null
@@ -514,6 +527,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               WHERE (${syncItemsInOps.normalizedPayload}->>'factCommit') = 'committed'
             )::int`,
             finalCompletions: sql<number>`count(*) FILTER (WHERE ${finalEvidencePredicate})::int`,
+            resultEvidenceComplete,
             reusedSkips: sql<number>`count(*) FILTER (
               WHERE ${syncItemsInOps.status} = 'skipped'
                 OR (${syncItemsInOps.normalizedPayload}->>'reused') = 'true'
@@ -582,8 +596,23 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             : null;
       const evidenceComplete =
         totalRows > 0 &&
+        aggregate?.resultEvidenceComplete === true &&
         aggregate?.finalEvidenceComplete === true &&
         Number(aggregate?.unaccountedItems ?? 0) === 0;
+      const reasonCodes =
+        totalRows === 0
+          ? ['SYNC_AUDIT_EVIDENCE_MISSING']
+          : [
+              ...(aggregate?.resultEvidenceComplete === true
+                ? []
+                : ['SYNC_AUDIT_RESULT_EVIDENCE_MISSING']),
+              ...(aggregate?.finalEvidenceComplete === true
+                ? []
+                : ['SYNC_AUDIT_FINAL_EVIDENCE_MISSING']),
+              ...(Number(aggregate?.unaccountedItems ?? 0) === 0
+                ? []
+                : ['SYNC_AUDIT_ITEMS_UNACCOUNTED']),
+            ];
       return {
         schemaVersion: 'entry-sync-audit-v1',
         seasonId: input.seasonId,
@@ -592,7 +621,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         coverageStartAt,
         observedAt: new Date().toISOString(),
         available: totalRows > 0,
-        reasonCodes: totalRows > 0 ? [] : ['SYNC_AUDIT_EVIDENCE_MISSING'],
+        reasonCodes,
         executions: Number(aggregate?.executions ?? 0),
         providerRequests: {
           eventLive: Number(aggregate?.eventLiveRequests ?? 0),
