@@ -241,7 +241,12 @@ test('correction writes and issue resolution roll back together when settlement 
   ]);
   issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
   await mockAudit([]);
-  spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue(undefined);
+  spyOn(structure, 'rebuildTournamentStructure').mockImplementation(
+    async (_season, _tournament, _entrySeeds, options) => {
+      options?.onCandidate?.({ groupRows: [], knockoutResults: [], battleMatchupKeys: [] });
+      return [];
+    },
+  );
   const requestCorrection = review.requestTournamentReviewTournamentCorrection;
   const correction = spyOn(
     review,
@@ -537,7 +542,7 @@ test('resolution and identical reappearance reject the prior occurrence without 
 });
 
 for (const topology of ['valid', 'missing', 'wrong-member'] as const) {
-  test(`points structure repair rechecks ${topology} canonical groups before deleting results`, async () => {
+  test(`points structure repair rechecks ${topology} canonical groups before pruning results`, async () => {
     const { repairTournamentSetupIssue } = await import(
       '../../src/services/tournament-repair.service'
     );
@@ -576,8 +581,11 @@ for (const topology of ['valid', 'missing', 'wrong-member'] as const) {
     await repairTournamentSetupIssue(season, issueId);
     const results = await sql`SELECT event_points FROM competition.tournament_points_group_results
       WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
-    expect(results).toHaveLength(topology === 'valid' ? 1 : 0);
-    if (topology === 'valid') expect(results[0]!.event_points).toBe(42);
+    // A result that is valid under the rebuilt canonical topology must remain
+    // visible even when the pre-repair snapshot classified its old topology as
+    // missing or wrong-member.
+    expect(results).toHaveLength(1);
+    expect(results[0]!.event_points).toBe(42);
     expect(correction).toHaveBeenCalledTimes(topology === 'valid' ? 0 : 1);
     const groups =
       await sql`SELECT entry_id FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
@@ -604,7 +612,12 @@ test('mixed points and knockout tournaments retain the existing structural repai
   ]);
   issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
   await mockAudit([]);
-  const rebuild = spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue(undefined);
+  const rebuild = spyOn(structure, 'rebuildTournamentStructure').mockImplementation(
+    async (_season, _tournament, _entrySeeds, options) => {
+      options?.onCandidate?.({ groupRows: [], knockoutResults: [], battleMatchupKeys: [] });
+      return [];
+    },
+  );
   spyOn(review, 'requestTournamentReviewTournamentCorrection').mockResolvedValue([]);
   await repairTournamentSetupIssue(season, issueId);
   expect(rebuild).toHaveBeenCalledTimes(1);

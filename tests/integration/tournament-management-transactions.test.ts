@@ -165,6 +165,8 @@ test('roster retry intent creates a committed marker that fences old queue claim
   } finally {
     await observer`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${id}`;
     await observer`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id=${id}`;
+    await observer`DELETE FROM ops.sync_items WHERE run_id IN (SELECT run_id FROM ops.sync_runs WHERE season_id=${season.seasonId})`;
+    await observer`DELETE FROM ops.sync_runs WHERE season_id=${season.seasonId}`;
     await observer`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
     await observer`DELETE FROM ops.mutation_scopes WHERE scope_key=${scope}`;
   }

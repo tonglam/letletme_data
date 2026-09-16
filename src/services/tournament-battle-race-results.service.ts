@@ -12,7 +12,12 @@ import { mapWithConcurrency } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
-import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
+import type {
+  DbTournamentBattleGroupResult,
+  DbTournamentBattleGroupResultInsert,
+  DbTournamentGroup,
+  DbTournamentGroupInsert,
+} from '../db/schemas/index.schema';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { isOfficialH2HTournament, type TournamentSyncContext } from '../domain/tournament';
 import { eventRepository } from '../repositories/events';
@@ -31,6 +36,23 @@ const officialH2HFullReconcileTargets = new WeakMap<
   IncompleteDataSyncError,
   OfficialH2HFullReconcileTarget[]
 >();
+
+export type CandidateBattleGroupSlot = Readonly<{
+  groupId: number;
+  groupIndex: number;
+  entryId: number;
+}>;
+
+export type CandidateBattleMatchupKey = Readonly<{
+  groupId: number;
+  eventId: number;
+  homeIndex: number;
+  awayIndex: number;
+}>;
+
+export function battleMatchupKey(row: CandidateBattleMatchupKey): string {
+  return `${row.groupId}:${row.eventId}:${row.homeIndex}:${row.awayIndex}`;
+}
 
 async function getOfficialH2HSyncOptions(
   season: FplSeasonRef,
@@ -131,6 +153,11 @@ export async function syncTournamentBattleRaceResultsForTournament(
   season: FplSeasonRef,
   tournament: TournamentSyncContext,
   eventId: number,
+  options: Readonly<{
+    candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>;
+    /** Exact fixture identities accepted by the structure-repair snapshot. */
+    candidateBattleMatchupKeys?: ReadonlyArray<CandidateBattleMatchupKey>;
+  }> = {},
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
   if (!tournament.groupStartedEventId || !tournament.groupEndedEventId) {
     logInfo('Skipping battle race tournament without group window', {
@@ -155,33 +182,102 @@ export async function syncTournamentBattleRaceResultsForTournament(
     eventId,
     entryIds,
   );
-  if (eventResults.length === 0) {
-    logInfo('Entry event results missing for battle race', {
-      tournamentId: tournament.id,
-      eventId,
-    });
-    return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
-  }
-  const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
-
   const battleResults = await tournamentBattleGroupResultsRepository.findByTournamentAndEvent(
     season,
     tournament.id,
     eventId,
   );
-  if (battleResults.length === 0) {
+  const candidateSlots = new Map(
+    (options.candidateGroupSlots ?? []).map((slot) => [
+      `${slot.groupId}:${slot.groupIndex}`,
+      slot.entryId,
+    ]),
+  );
+  const candidateMode = options.candidateGroupSlots !== undefined;
+  const candidateMatchupKeys = new Set(
+    (options.candidateBattleMatchupKeys ?? []).map((row) => battleMatchupKey(row)),
+  );
+  const candidateEventKeys = (options.candidateBattleMatchupKeys ?? []).filter(
+    (row) => row.eventId === eventId,
+  );
+  const persistedMatchupKeys = new Set(battleResults.map((row) => battleMatchupKey(row)));
+  let missingCandidateSlotCount = 0;
+  const missingCandidateRows: DbTournamentBattleGroupResultInsert[] = [];
+  if (candidateMode) {
+    for (const key of candidateEventKeys) {
+      if (persistedMatchupKeys.has(battleMatchupKey(key))) continue;
+      const homeEntryId = candidateSlots.get(`${key.groupId}:${key.homeIndex}`);
+      const awayEntryId = candidateSlots.get(`${key.groupId}:${key.awayIndex}`);
+      if (homeEntryId === undefined || awayEntryId === undefined) {
+        missingCandidateSlotCount += 1;
+        logWarn('Cannot materialize battle race fixture without rebuilt group slots', {
+          tournamentId: tournament.id,
+          eventId,
+          groupId: key.groupId,
+          homeIndex: key.homeIndex,
+          awayIndex: key.awayIndex,
+        });
+        continue;
+      }
+      missingCandidateRows.push({
+        tournamentId: tournament.id,
+        groupId: key.groupId,
+        eventId: key.eventId,
+        homeIndex: key.homeIndex,
+        homeEntryId,
+        homeNetPoints: null,
+        homeRank: null,
+        homeMatchPoints: null,
+        awayIndex: key.awayIndex,
+        awayEntryId,
+        awayNetPoints: null,
+        awayRank: null,
+        awayMatchPoints: null,
+        officialMatchId: null,
+        sourceOrder: null,
+        homeIsAverage: false,
+        awayIsAverage: false,
+        isBye: false,
+        sourceCheckedAt: null,
+      });
+    }
+  }
+  const resultsForScoring: Array<
+    DbTournamentBattleGroupResult | DbTournamentBattleGroupResultInsert
+  > = [...battleResults, ...missingCandidateRows];
+  if (eventResults.length === 0) {
+    if (missingCandidateRows.length > 0) {
+      await tournamentBattleGroupResultsRepository.upsertBatch(season, missingCandidateRows);
+    }
+    logInfo('Entry event results missing for battle race', {
+      tournamentId: tournament.id,
+      eventId,
+    });
+    return {
+      updatedGroups: 0,
+      updatedResults: missingCandidateRows.length,
+      skipped: entryIds.length + missingCandidateSlotCount,
+    };
+  }
+  if (resultsForScoring.length === 0) {
     logInfo('No battle group fixtures found for battle race', {
       tournamentId: tournament.id,
       eventId,
     });
-    return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
+    return {
+      updatedGroups: 0,
+      updatedResults: 0,
+      skipped: entryIds.length + missingCandidateSlotCount,
+    };
   }
+  const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
 
   // Score this event's matchups. A matchup is scored only when BOTH sides have
   // an entry_event_results row — scoring a missing side as 0 would award
   // phantom-zero wins (FP-09 / C6). Skipped matchups keep their NULL points and
-  // are excluded from the upsert; they can be scored later once results arrive.
-  let skipped = 0;
+  // are persisted as shells during repair so the missing fixture remains an
+  // explicit convergence failure until its source facts arrive.
+  let skipped = missingCandidateSlotCount;
   const scoredBattleResults = [];
   // Replays of the same finalized event must carry the same source watermark;
   // using wall-clock time here made every retry look like new evidence.
@@ -189,11 +285,24 @@ export async function syncTournamentBattleRaceResultsForTournament(
     const candidate = result.richSyncedAt ?? result.updatedAt ?? new Date(0);
     return candidate.getTime() > latest.getTime() ? candidate : latest;
   }, new Date(0));
-  for (const result of battleResults) {
+  for (const result of resultsForScoring) {
+    if (candidateMode && !candidateMatchupKeys.has(battleMatchupKey(result))) {
+      // This row is outside the complete rebuilt schedule. It is intentionally
+      // ignored during candidate scoring and removed by the post-backfill
+      // topology prune; it is not missing source evidence and must not keep a
+      // valid repair in an incomplete state.
+      logWarn('Skipping battle race row outside the accepted repair schedule', {
+        tournamentId: tournament.id,
+        eventId,
+        groupId: result.groupId,
+        homeIndex: result.homeIndex,
+        awayIndex: result.awayIndex,
+      });
+      continue;
+    }
     if (
       result.officialMatchId != null ||
-      result.homeEntryId === null ||
-      result.awayEntryId === null
+      (!candidateMode && (result.homeEntryId === null || result.awayEntryId === null))
     ) {
       skipped += 1;
       logWarn('Skipping non-local row in LocalBattleStrategy', {
@@ -203,23 +312,44 @@ export async function syncTournamentBattleRaceResultsForTournament(
       });
       continue;
     }
-    const homeResult = eventResultMap.get(result.homeEntryId);
-    const awayResult = eventResultMap.get(result.awayEntryId);
+    const candidateHomeEntryId = candidateMode
+      ? candidateSlots.get(`${result.groupId}:${result.homeIndex}`)
+      : result.homeEntryId;
+    const candidateAwayEntryId = candidateMode
+      ? candidateSlots.get(`${result.groupId}:${result.awayIndex}`)
+      : result.awayEntryId;
+    if (candidateHomeEntryId == null || candidateAwayEntryId == null) {
+      skipped += 1;
+      continue;
+    }
+    const candidateResult =
+      candidateMode &&
+      (candidateHomeEntryId !== result.homeEntryId || candidateAwayEntryId !== result.awayEntryId)
+        ? {
+            ...result,
+            homeEntryId: candidateHomeEntryId,
+            awayEntryId: candidateAwayEntryId,
+          }
+        : result;
+    const homeResult = eventResultMap.get(candidateHomeEntryId);
+    const awayResult = eventResultMap.get(candidateAwayEntryId);
     if (!homeResult || !awayResult) {
       skipped += 1;
       logWarn('Skipping battle race matchup with missing entry event result', {
         tournamentId: tournament.id,
         eventId,
         groupId: result.groupId,
-        homeEntryId: result.homeEntryId,
-        awayEntryId: result.awayEntryId,
+        homeEntryId: candidateHomeEntryId,
+        awayEntryId: candidateAwayEntryId,
         missingHome: !homeResult,
         missingAway: !awayResult,
       });
       // Clear any previously written phantom 3/0 points so history recompute
-      // does not keep counting a stale win (FP-09 Codex P1).
+      // does not keep counting a stale win (FP-09 Codex P1). Candidate repair
+      // shells are also persisted here so missing source facts remain visible
+      // to the convergence audit instead of being silently dropped.
       scoredBattleResults.push({
-        ...result,
+        ...candidateResult,
         homeNetPoints: null,
         homeRank: null,
         homeMatchPoints: null,
@@ -234,7 +364,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
     const homeNet = homeResult.eventNetPoints;
     const awayNet = awayResult.eventNetPoints;
     scoredBattleResults.push({
-      ...result,
+      ...candidateResult,
       homeNetPoints: homeNet,
       homeRank: homeResult.eventRank ?? null,
       homeMatchPoints: matchPoints(homeNet, awayNet),
@@ -271,12 +401,15 @@ export async function syncTournamentBattleRaceResultsForTournament(
   // window. Re-runs are idempotent and backfill + re-run converges; the old
   // one-way increment guard (played >= expected → skip) locked wrong counters
   // in place forever (FP-09 / C6).
-  const history = await tournamentBattleGroupResultsRepository.findByTournamentAndEventRange(
+  const loadedHistory = await tournamentBattleGroupResultsRepository.findByTournamentAndEventRange(
     season,
     tournament.id,
     groupStartedEventId,
     recomputeThroughEventId,
   );
+  const history = candidateMode
+    ? loadedHistory.filter((row) => candidateMatchupKeys.has(battleMatchupKey(row)))
+    : loadedHistory;
 
   const totalsMap = new Map(
     (

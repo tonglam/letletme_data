@@ -15,6 +15,7 @@ import * as mutationScopes from '../../src/utils/mutation-scopes';
 import * as pointsResults from '../../src/services/tournament-points-race-results.service';
 import * as leagueResults from '../../src/services/league-event-results.service';
 import { runTournamentEventBackfill } from '../../src/services/tournament-backfill.service';
+import { buildBattleMatchupSchedule } from '../../src/services/tournament-structure.service';
 
 const ids = Array.from({ length: 1567 }, (_, i) => i + 1);
 const cutoff = '2026-09-01T10:00:00.123456Z';
@@ -63,6 +64,7 @@ beforeEach(() => {
     failedEntryIds: [],
     requiredUnits: 1,
     reusedUnits: 0,
+    reusedEntryIds: [],
     succeededUnits: 1,
     failedUnits: 0,
   });
@@ -79,6 +81,41 @@ beforeEach(() => {
 afterEach(() => mock.restore());
 
 const run = () => runTournamentEventBackfill(TEST_SEASON, 4, tournament, ids, 3);
+
+describe('rebuilt battle schedule', () => {
+  test('derives the complete round whitelist independently of persisted result rows', () => {
+    const keys = buildBattleMatchupSchedule(
+      [1, 2, 3, 4].map((groupIndex) => ({
+        groupId: 1,
+        groupIndex,
+        startedEventId: 1,
+        endedEventId: 3,
+      })),
+    );
+    const eventOnePairs = keys
+      .filter((key) => key.eventId === 1)
+      .map((key) => [key.homeIndex, key.awayIndex].sort((left, right) => left - right).join('-'));
+    expect(new Set(eventOnePairs)).toEqual(new Set(['1-4', '2-3']));
+    expect(keys).not.toContainEqual({
+      groupId: 1,
+      eventId: 1,
+      homeIndex: 4,
+      awayIndex: 1,
+    });
+    expect(keys).not.toContainEqual({
+      groupId: 1,
+      eventId: 1,
+      homeIndex: 1,
+      awayIndex: 3,
+    });
+    expect(keys).toContainEqual({
+      groupId: 1,
+      eventId: 2,
+      homeIndex: 1,
+      awayIndex: 2,
+    });
+  });
+});
 
 describe('FINAL tournament repair convergence', () => {
   test('reuses 1567 completed FINAL inputs without repeating provider synchronization', async () => {
@@ -137,6 +174,7 @@ describe('FINAL tournament repair convergence', () => {
       failedEntryIds: [9],
       requiredUnits: 1,
       reusedUnits: 0,
+      reusedEntryIds: [],
       succeededUnits: 0,
       failedUnits: 1,
     });

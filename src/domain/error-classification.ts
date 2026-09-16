@@ -82,6 +82,9 @@ export function classifyDataError(error: unknown): DataErrorClass {
   ) {
     return 'CONTRACT_DRIFT';
   }
+  if (code === 'SOURCE_NOT_READY') return 'SOURCE_NOT_READY';
+  if (code === 'TRANSIENT_PROVIDER') return 'TRANSIENT_PROVIDER';
+  if (code === 'TRANSIENT_INFRA') return 'TRANSIENT_INFRA';
   if (
     error instanceof IncompleteDataSyncError ||
     code === 'DATA_SYNC_INCOMPLETE' ||

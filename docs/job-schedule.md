@@ -401,11 +401,21 @@ Manual triggers are listed by `GET /jobs`; scheduler definitions and their
 catch-up policies are included in that response. `GET /jobs/status` requires
 the service API key and reports current runtime, scheduler progress, and
 DB/Redis identity consistency. The optional `section` values are
-`myFplIntegrity`, `tournamentReviewV2`, `liveFinalRetention`, and
-`clientSignals`; historical SLO/governance scans remain on the explicit
+`myFplIntegrity`, `tournamentReviewV2`, `liveFinalRetention`,
+`entrySyncAudit`, and `clientSignals`; historical SLO/governance scans remain on the explicit
 `/ops/data-governance/overview` endpoint. Some manual paths intentionally
 bypass a cron time gate for recovery; operators must verify upstream readiness
 before using them.
+
+`entrySyncAudit` is a protected, read-only status section. It requires explicit
+`season`, `eventId`, and `watchEntryId` query values and reports only the
+persisted audit ledger for that entry/GW: execution attempts, provider requests
+(event-live, picks, transfers, and unknown), fact commits, durable FINAL
+completions, reuse skips, failures, triggers, and recent evidence. The response
+includes `coverageStartAt`; it does not reconstruct pre-deployment history or
+run a deep scan. A completed entry/GW requires its facts and FINAL head evidence
+to be complete, while publication, MyFPL, and retention outcomes remain separate
+components.
 
 
 ### Scoped historical FINAL retention recovery

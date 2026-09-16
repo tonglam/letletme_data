@@ -80,6 +80,10 @@ async function cleanup(): Promise<void> {
     DELETE FROM ops.sync_runs
     WHERE run_id = ANY(${[...RUN_IDS]}::uuid[])
   `;
+  await sql`
+    DELETE FROM fpl.events
+    WHERE season_id = ${TEST_SEASON_ID}
+  `;
 }
 
 async function expectDatabaseErrorCode(
@@ -126,13 +130,19 @@ function publicationManifest(
   };
 }
 
-async function startRun(runId: string, season: FplSeasonRef, lane = 'core'): Promise<string> {
+async function startRun(
+  runId: string,
+  season: FplSeasonRef,
+  lane = 'core',
+  eventId?: number,
+): Promise<string> {
   return syncOperationsRepository.startRun({
     runId,
     provider: 'fpl',
     lane,
     scope: 'integration-contract',
     season,
+    ...(eventId === undefined ? {} : { eventId }),
     mode: 'full',
     trigger: 'test',
     expectedItems: 1,
@@ -220,6 +230,487 @@ describe('ops sync state machine', () => {
       normalized_payload: { attempt: 2 },
     });
     expect(new Date(String(rows[0]?.completed_at)).toISOString()).toBe('2026-08-09T00:02:00.000Z');
+  });
+
+  test('terminalizes only pending audit items and preserves failed request evidence', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[0], season);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId: 'pending',
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results' },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: 'failed',
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          picksRequests: 1,
+          unknownRequests: 1,
+        },
+        lastError: 'provider timeout',
+      },
+    ]);
+
+    await syncOperationsRepository.failPendingItems(RUN_IDS[0], new Error('planning failed'));
+
+    const rows = await sql<
+      Array<{
+        resource_id: string;
+        status: string;
+        normalized_payload: Record<string, unknown> | null;
+        last_error: string | null;
+      }>
+    >`
+      SELECT resource_id, status, normalized_payload, last_error
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+      ORDER BY resource_id
+    `;
+    expect(Array.from(rows)).toEqual([
+      {
+        resource_id: 'failed',
+        status: 'failed',
+        normalized_payload: {
+          phase: 'entry-event-results',
+          picksRequests: 1,
+          unknownRequests: 1,
+        },
+        last_error: 'provider timeout',
+      },
+      {
+        resource_id: 'pending',
+        status: 'failed',
+        normalized_payload: {
+          phase: 'entry-event-results',
+          setupFailure: true,
+          unknownRequests: 0,
+        },
+        last_error: 'planning failed',
+      },
+    ]);
+  });
+
+  test('resource-scoped terminalization does not fail sibling components', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[1], season);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: 'entry:transfers',
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-transfer-history' },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: 'entry:results',
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results' },
+      },
+    ]);
+
+    await syncOperationsRepository.failPendingItems(
+      RUN_IDS[1],
+      new Error('transfer convergence read failed'),
+      ['entry:transfers'],
+    );
+
+    const rows = await sql<Array<{ resource_id: string; status: string }>>`
+      SELECT resource_id, status
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[1]}::uuid
+      ORDER BY resource_id
+    `;
+    expect(Array.from(rows)).toEqual([
+      { resource_id: 'entry:results', status: 'pending' },
+      { resource_id: 'entry:transfers', status: 'failed' },
+    ]);
+  });
+
+  test('does not certify a failed provisional result from request accounting alone', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await sql`
+      INSERT INTO fpl.events (
+        season_id,
+        event_id,
+        name,
+        finished,
+        data_checked,
+        data_checked_at
+      )
+      VALUES (
+        ${TEST_SEASON_ID},
+        1,
+        'GW1',
+        false,
+        false,
+        NULL
+      )
+    `;
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[1],
+      provider: 'fpl',
+      lane: 'entry',
+      scope: 'entry-event',
+      season,
+      eventId: 1,
+      mode: 'entry-event-results',
+      trigger: 'test',
+      expectedItems: 1,
+      startedAt: new Date('2026-08-08T00:00:00.000Z'),
+    });
+    const resultResourceId = `${TEST_SEASON_ID}:1:123:results`;
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: resultResourceId,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          unknownRequests: 1,
+        },
+        lastError: 'provider timeout',
+      },
+    ]);
+
+    const failedAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(failedAudit.evidenceComplete).toBe(false);
+    expect(failedAudit.reasonCodes).toContain('SYNC_AUDIT_RESULT_EVIDENCE_MISSING');
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: resultResourceId,
+        status: 'completed',
+        attempts: 2,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          factCommit: 'reused',
+          reused: true,
+        },
+      },
+    ]);
+
+    const recoveredAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(recoveredAudit.evidenceComplete).toBe(true);
+    expect(recoveredAudit.reasonCodes).toEqual([]);
+  });
+
+  test('does not let a superseded run keep a later durable audit incomplete', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const resourceId = `${TEST_SEASON_ID}:1:123:results`;
+    await startRun(RUN_IDS[0], season, 'entry', 1);
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results' },
+      },
+    ]);
+
+    await startRun(RUN_IDS[1], season, 'entry', 1);
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { factCommit: 'committed' },
+      },
+    ]);
+
+    const audit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(audit.evidenceComplete).toBe(true);
+    expect(audit.reasonCodes).toEqual([]);
+  });
+
+  test('allows same-attempt durable convergence to replace a provisional failure', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[0], season);
+    const resourceId = 'same-attempt-convergence';
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results', unknownRequests: 1 },
+        lastError: 'provider timeout',
+      },
+    ]);
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results', factCommit: 'reused' },
+        completedAt: new Date('2026-08-08T00:01:00.000Z'),
+      },
+    ]);
+    // A late same-attempt running/failed write must not undo the converged
+    // terminal evidence.
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'running',
+        attempts: 1,
+        normalizedPayload: { phase: 'late-replay' },
+      },
+    ]);
+
+    const [row] = await sql<Array<{ status: string; last_error: string | null }>>`
+      SELECT status, last_error
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+        AND resource_type = 'entry-event'
+        AND resource_id = ${resourceId}
+    `;
+    expect(row).toEqual({ status: 'completed', last_error: null });
+  });
+
+  test('does not certify results while a transfer component is unresolved', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[1], season, 'entry', 1);
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:results`,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { factCommit: 'reused', reused: true },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: { unknownRequests: 1 },
+        lastError: 'provider timeout',
+      },
+    ]);
+
+    const incompleteAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(incompleteAudit.evidenceComplete).toBe(false);
+    expect(incompleteAudit.reasonCodes).toContain('SYNC_AUDIT_TRANSFER_EVIDENCE_MISSING');
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[1], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'skipped',
+        attempts: 2,
+        normalizedPayload: {
+          factCommit: 'reused',
+          reused: true,
+        },
+      },
+    ]);
+    const recoveredAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(recoveredAudit.evidenceComplete).toBe(true);
+    expect(recoveredAudit.reasonCodes).toEqual([]);
+  });
+
+  test('counts a combined transfer failure only on the transfer component', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[2], season, 'entry', 1);
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:results`,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          picksRequests: 1,
+          transferRequests: 0,
+          unknownRequests: 0,
+        },
+        lastError: 'transfer provider timeout',
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-transfer-history',
+          transferRequests: 1,
+          unknownRequests: 1,
+        },
+        lastError: 'transfer provider timeout',
+      },
+    ]);
+
+    const audit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(audit.providerRequests).toEqual({
+      eventLive: 0,
+      picks: 1,
+      transfers: 1,
+      unknown: 1,
+    });
+  });
+
+  test('counts only the final audit component as a durable FINAL completion', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[2],
+      provider: 'fpl',
+      lane: 'entry',
+      scope: 'entry-event',
+      season,
+      eventId: 1,
+      mode: 'final',
+      trigger: 'repair',
+      expectedItems: 3,
+      startedAt: new Date('2026-08-08T00:00:00.000Z'),
+    });
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:results`,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { finalCompletion: true, factCommit: 'committed' },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
+        status: 'skipped',
+        attempts: 1,
+        normalizedPayload: { reused: true },
+      },
+    ]);
+
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO fpl.events (
+        season_id,
+        event_id,
+        name,
+        finished,
+        data_checked,
+        data_checked_at
+      )
+      VALUES (
+        ${TEST_SEASON_ID},
+        1,
+        'GW1',
+        true,
+        true,
+        '2026-08-09T00:00:00.000Z'::timestamptz
+      )
+    `;
+
+    const incompleteAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(incompleteAudit.finalCompletions).toBe(0);
+    expect(incompleteAudit.evidenceComplete).toBe(false);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:final`,
+        status: 'skipped',
+        attempts: 1,
+        normalizedPayload: {
+          finalCompletion: true,
+          reused: true,
+          sourceRevision: '2026-08-09T00:00:00.000Z',
+        },
+      },
+    ]);
+
+    const audit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(audit.finalCompletions).toBe(1);
+    expect(audit.executions).toBe(1);
+    expect(audit.evidenceComplete).toBe(true);
+    expect(audit.coverageStartAt).not.toBeNull();
+
+    await sql`
+      UPDATE fpl.events
+      SET data_checked_at = '2026-08-10T00:00:00.000Z'::timestamptz
+      WHERE season_id = ${TEST_SEASON_ID}
+        AND event_id = 1
+    `;
+    const reopenedAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(reopenedAudit.finalCompletions).toBe(0);
+    expect(reopenedAudit.evidenceComplete).toBe(false);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:final`,
+        status: 'skipped',
+        attempts: 2,
+        normalizedPayload: {
+          finalCompletion: true,
+          reused: true,
+          sourceRevision: '2026-08-10T00:00:00.000Z',
+        },
+      },
+    ]);
+    const refinalizedAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(refinalizedAudit.finalCompletions).toBe(1);
+    expect(refinalizedAudit.evidenceComplete).toBe(true);
   });
 
   test('keeps terminal run transitions idempotent and rejects a different terminal state', async () => {

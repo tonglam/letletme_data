@@ -1,4 +1,5 @@
 import { completedFinalEntryIds } from './entries.service';
+import type { DbTournamentKnockoutResultInsert } from '../db/schemas/index.schema';
 import { eventRepository } from '../repositories/events';
 import { publishTournamentTrendScope } from './tournament-trends-publication.service';
 import type { TournamentSetupExecution } from '../repositories/tournament-infos';
@@ -40,11 +41,16 @@ import { withMutationScopes } from '../utils/mutation-scopes';
 import { ConflictError, IncompleteDataSyncError, ValidationError } from '../utils/errors';
 
 import { syncEntryInfo } from './entry-info.service';
-import { syncTournamentBattleRaceResultsForTournament } from './tournament-battle-race-results.service';
+import {
+  syncTournamentBattleRaceResultsForTournament,
+  type CandidateBattleGroupSlot,
+} from './tournament-battle-race-results.service';
+import type { TournamentStructureRepairCandidate } from './tournament-structure.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import {
   syncEntryTransferHistories,
   syncTournamentEventResultsForEntryIds,
+  type TournamentEventResultsSyncOptions,
 } from './tournament-event-results.service';
 import { syncTournamentPointsRaceResultsForTournament } from './tournament-points-race-results.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
@@ -411,6 +417,14 @@ export async function ensureTournamentCoreResults(
   onPlan?: (plan: TournamentCoreSyncPlan) => void | Promise<void>,
   options?: {
     requirePicksForEvents?: readonly number[];
+    audit?: Pick<
+      TournamentEventResultsSyncOptions,
+      | 'auditTrigger'
+      | 'auditParentRunId'
+      | 'auditObligationId'
+      | 'auditGeneration'
+      | 'auditRepairIssueId'
+    >;
   },
 ): Promise<void> {
   const requiredPicksEvents = new Set(options?.requirePicksForEvents ?? []);
@@ -435,6 +449,7 @@ export async function ensureTournamentCoreResults(
       skipTransfers: true,
       perEntryMutationScopes: true,
       finalizationRecoveryEntryIds: new Set(missingEntryIds),
+      ...options?.audit,
     });
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);
@@ -734,8 +749,17 @@ export async function runTournamentEventBackfill(
   entryIds: number[],
   eventId: number,
   repair?: { issueId: number; owner: TournamentRepairState },
+  audit?: { repairIssueId?: number },
+  candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>,
+  candidateKnockoutResults?: ReadonlyArray<DbTournamentKnockoutResultInsert>,
+  candidateBattleMatchupKeys?: TournamentStructureRepairCandidate['battleMatchupKeys'],
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
+  const auditRepairIssueId = audit?.repairIssueId ?? repair?.issueId;
+  const auditTrigger =
+    auditRepairIssueId === undefined
+      ? 'tournament-backfill'
+      : `tournament-repair:${auditRepairIssueId}`;
   const event = await eventRepository.findById(season, eventId);
   const finalCutoff =
     event?.finished && event.dataChecked && event.dataCheckedAt
@@ -752,7 +776,13 @@ export async function runTournamentEventBackfill(
       { startEventId: eventId, endEventId: eventId },
       undefined,
       undefined,
-      { requirePicksForEvents: [eventId] },
+      {
+        requirePicksForEvents: [eventId],
+        audit: {
+          auditTrigger,
+          ...(auditRepairIssueId === undefined ? {} : { auditRepairIssueId }),
+        },
+      },
     );
     const entryStartEvents = await loadEntryStartEvents(season, entryIds);
     const eligibleEntryIds = entryIds.filter((entryId) =>
@@ -767,6 +797,8 @@ export async function runTournamentEventBackfill(
       const transfers = await syncEntryTransferHistories(season, missingTransfers, eventId, {
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
         perEntryMutationScopes: true,
+        auditTrigger,
+        ...(auditRepairIssueId === undefined ? {} : { auditRepairIssueId }),
       });
       if (transfers.failedUnits > 0) {
         throw new IncompleteDataSyncError(
@@ -795,6 +827,8 @@ export async function runTournamentEventBackfill(
     const result = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       perEntryMutationScopes: true,
+      auditTrigger,
+      ...(auditRepairIssueId === undefined ? {} : { auditRepairIssueId }),
     });
     if (result.failedUnits > 0 || result.errors > 0) {
       throw new IncompleteDataSyncError(
@@ -921,7 +955,10 @@ export async function runTournamentEventBackfill(
     eventId <= tournament.groupEndedEventId
   ) {
     const battleRaceResult = await writeResults(() =>
-      syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
+      syncTournamentBattleRaceResultsForTournament(season, tournament, eventId, {
+        ...(candidateGroupSlots === undefined ? {} : { candidateGroupSlots }),
+        ...(candidateBattleMatchupKeys === undefined ? {} : { candidateBattleMatchupKeys }),
+      }),
     );
     if (battleRaceResult.skipped > 0) {
       issues.push({
@@ -948,7 +985,9 @@ export async function runTournamentEventBackfill(
   ) {
     const { syncKnockoutForTournament } = await import('./tournament-knockout-results.service');
     const knockoutResult = await writeResults(() =>
-      syncKnockoutForTournament(season, tournament, eventId),
+      syncKnockoutForTournament(season, tournament, eventId, {
+        candidateResults: candidateKnockoutResults,
+      }),
     );
     if (knockoutResult.skipped > 0) {
       issues.push({
@@ -974,6 +1013,13 @@ export async function backfillTournamentHistory(
   tournament: TournamentConfig,
   entryIds: number[],
   window: TournamentBackfillWindow | null,
+  options?: {
+    auditRepairIssueId?: number;
+    repair?: { issueId: number; owner: TournamentRepairState };
+    candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>;
+    candidateKnockoutResults?: ReadonlyArray<DbTournamentKnockoutResultInsert>;
+    candidateBattleMatchupKeys?: TournamentStructureRepairCandidate['battleMatchupKeys'];
+  },
 ): Promise<TournamentSetupIssue[]> {
   if (!window) {
     return [];
@@ -989,6 +1035,13 @@ export async function backfillTournamentHistory(
       tournament,
       entryIds,
       eventId,
+      options?.repair,
+      options?.auditRepairIssueId === undefined
+        ? undefined
+        : { repairIssueId: options.auditRepairIssueId },
+      options?.candidateGroupSlots,
+      options?.candidateKnockoutResults,
+      options?.candidateBattleMatchupKeys,
     );
     issues.push(...eventIssues);
   }

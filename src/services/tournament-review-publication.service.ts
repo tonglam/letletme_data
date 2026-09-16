@@ -4606,6 +4606,9 @@ export type TournamentReviewV2OperationalStatus = Readonly<{
     readyWithIncompleteChunks: number;
   }>;
   oldestActiveEligibleAt: string | null;
+  oldestPendingAt: string | null;
+  oldestWaitingSourceAt: string | null;
+  oldestProcessingAt: string | null;
   oldestDegradedAt: string | null;
   latestUpdatedAt: string | null;
   watch: Readonly<{
@@ -4643,6 +4646,9 @@ type TournamentReviewOperationalAggregateRow = {
   ready_incoherent_count: number | string;
   ready_chunk_complete_count: number | string;
   oldest_active_eligible_at: Date | string | null;
+  oldest_pending_at: Date | string | null;
+  oldest_waiting_source_at: Date | string | null;
+  oldest_processing_at: Date | string | null;
   oldest_degraded_at: Date | string | null;
   latest_updated_at: Date | string | null;
 };
@@ -5018,6 +5024,9 @@ export async function getTournamentReviewV2OperationalStatus(
 	                 AND chunks_complete
 	             )::integer AS ready_chunk_complete_count,
              min(first_eligible_at) FILTER (WHERE state IN ('PENDING', 'WAITING_SOURCE', 'PROCESSING')) AS oldest_active_eligible_at,
+             min(first_eligible_at) FILTER (WHERE state = 'PENDING') AS oldest_pending_at,
+             min(first_eligible_at) FILTER (WHERE state = 'WAITING_SOURCE') AS oldest_waiting_source_at,
+             min(first_eligible_at) FILTER (WHERE state = 'PROCESSING') AS oldest_processing_at,
              min(degraded_at) FILTER (WHERE state = 'DEGRADED') AS oldest_degraded_at,
              max(updated_at) AS latest_updated_at
       FROM joined
@@ -5242,6 +5251,9 @@ export async function getTournamentReviewV2OperationalStatus(
       readyWithIncompleteChunks: Math.max(0, readyCount - readyChunkCompleteCount),
     },
     oldestActiveEligibleAt: dateIso(aggregate?.oldest_active_eligible_at),
+    oldestPendingAt: dateIso(aggregate?.oldest_pending_at),
+    oldestWaitingSourceAt: dateIso(aggregate?.oldest_waiting_source_at),
+    oldestProcessingAt: dateIso(aggregate?.oldest_processing_at),
     oldestDegradedAt: dateIso(aggregate?.oldest_degraded_at),
     latestUpdatedAt: dateIso(aggregate?.latest_updated_at),
     watch,

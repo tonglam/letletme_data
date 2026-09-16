@@ -2,6 +2,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   tournamentBattleGroupResultsInCompetition,
+  tournamentKnockoutsInCompetition,
   tournamentKnockoutResultsInCompetition,
   tournamentsInCompetition,
   tournamentOfficialH2HPageManifestsInCompetition,
@@ -314,6 +315,39 @@ export const tournamentOfficialH2HRepository = {
                 lockedAt: sql`COALESCE(${tournamentOfficialH2HPageManifestsInCompetition.lockedAt}, excluded.locked_at)`,
               },
             });
+        }
+
+        if (publication.fullReconcile === true) {
+          // A guarded full feed is the authoritative replacement boundary for
+          // provider-owned H2H state. Upsert-only reconciliation cannot remove
+          // vanished matches or repair bracket topology columns (round, event
+          // window, next match, or stale extra rows). Keep the delete and
+          // complete reinsert in this same tournament transaction so a source
+          // conflict or process failure leaves the previous publication intact.
+          await tx
+            .delete(tournamentBattleGroupResultsInCompetition)
+            .where(
+              and(
+                eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
+                eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
+              ),
+            );
+          await tx
+            .delete(tournamentKnockoutResultsInCompetition)
+            .where(
+              and(
+                eq(tournamentKnockoutResultsInCompetition.seasonId, season.seasonId),
+                eq(tournamentKnockoutResultsInCompetition.tournamentId, tournamentId),
+              ),
+            );
+          await tx
+            .delete(tournamentKnockoutsInCompetition)
+            .where(
+              and(
+                eq(tournamentKnockoutsInCompetition.seasonId, season.seasonId),
+                eq(tournamentKnockoutsInCompetition.tournamentId, tournamentId),
+              ),
+            );
         }
 
         const fetchedOfficialMatchIds = publication.fetchedOfficialMatchIds?.filter(

@@ -166,6 +166,11 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON.seasonId} AND team_id = ${TEAM_ID}
   `;
   await sql`
+    DELETE FROM ops.sync_items
+    WHERE run_id IN (SELECT run_id FROM ops.sync_runs WHERE season_id = ${SEASON.seasonId})
+  `;
+  await sql`DELETE FROM ops.sync_runs WHERE season_id = ${SEASON.seasonId}`;
+  await sql`
     DELETE FROM fpl.seasons
     WHERE season_id = ${SEASON.seasonId} AND season_code = ${SEASON.seasonCode}
   `;

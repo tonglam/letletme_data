@@ -22,9 +22,10 @@ function renderSql(value: unknown): string {
 function fakeDatabase() {
   const returning = mock(async () => []);
   const onConflictDoUpdate = mock((_config: unknown) => ({ returning }));
-  const values = mock((_rows: unknown) => ({ onConflictDoUpdate }));
+  const onConflictDoNothing = mock((_config: unknown) => ({ returning }));
+  const values = mock((_rows: unknown) => ({ onConflictDoUpdate, onConflictDoNothing }));
   const insert = mock((_table: unknown) => ({ values }));
-  return { db: { insert }, onConflictDoUpdate };
+  return { db: { insert }, onConflictDoUpdate, onConflictDoNothing };
 }
 
 test('derived batch upserts skip unchanged conflict rows', async () => {
@@ -112,6 +113,17 @@ test('points result repairs without a source marker cannot overwrite a sourced r
   ]);
   const config = fake.onConflictDoUpdate.mock.calls[0]?.[0] as { where?: SQL };
   expect(renderSql(config.where)).toContain('source_updated_at" IS NULL');
+});
+
+test('structure repair seeds missing knockout rows without rehoming accepted facts', async () => {
+  const fake = fakeDatabase();
+  await createTournamentKnockoutResultsRepository(fake.db as never).upsertBatch(
+    TEST_SEASON,
+    [{} as never],
+    { preserveExistingFacts: true },
+  );
+  expect(fake.onConflictDoNothing).toHaveBeenCalledTimes(1);
+  expect(fake.onConflictDoUpdate).not.toHaveBeenCalled();
 });
 
 test('points race uses one cohort watermark for every ranked output', () => {

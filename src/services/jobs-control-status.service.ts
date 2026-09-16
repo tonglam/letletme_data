@@ -41,6 +41,7 @@ export const JOBS_STATUS_SECTIONS = [
   'myFplIntegrity',
   'tournamentReviewV2',
   'liveFinalRetention',
+  'entrySyncAudit',
   'clientSignals',
 ] as const;
 
@@ -279,6 +280,36 @@ async function readClientSignals(window: JobsStatusWindow): Promise<Record<strin
   }));
 }
 
+async function readEntrySyncAudit(
+  season: FplSeasonRecord,
+  eventId: number | undefined,
+  entryId: number | undefined,
+  requestedSeasonCode: string | undefined,
+): Promise<Record<string, unknown>> {
+  if (requestedSeasonCode === undefined || eventId === undefined || entryId === undefined) {
+    return {
+      schemaVersion: 'entry-sync-audit-v1',
+      available: false,
+      reasonCodes: ['SEASON_EVENT_AND_ENTRY_REQUIRED'],
+      season: requestedSeasonCode ?? season.seasonCode,
+      eventId: eventId ?? null,
+      entryId: entryId ?? null,
+    };
+  }
+  const requestedSeason =
+    requestedSeasonCode === season.seasonCode
+      ? season
+      : await createSeasonRepository().requireByCode(requestedSeasonCode);
+  return {
+    season: requestedSeason.seasonCode,
+    ...(await createSyncOperationsRepository().entrySyncAudit({
+      seasonId: requestedSeason.seasonId,
+      eventId,
+      entryId,
+    })),
+  };
+}
+
 /**
  * Lightweight, sectioned control projection for the frequent `/jobs/status`
  * probes. The default response reads only current identities and heartbeats.
@@ -290,6 +321,8 @@ export async function getJobsControlStatus(
   window: JobsStatusWindow = '1h',
   section?: JobsStatusSection,
   watchEntryId?: number,
+  watchEventId?: number,
+  entryAuditSeason?: string,
 ): Promise<Record<string, unknown>> {
   const [databaseState, runtime, schedulerProgress, queuePause, orphanState] = await Promise.all([
     readControlDatabaseState(),
@@ -344,6 +377,9 @@ export async function getJobsControlStatus(
             readyWithIncompleteChunks: 0,
           },
           oldestActiveEligibleAt: null,
+          oldestPendingAt: null,
+          oldestWaitingSourceAt: null,
+          oldestProcessingAt: null,
           oldestDegradedAt: null,
           latestUpdatedAt: null,
           watch: null,
@@ -368,6 +404,23 @@ export async function getJobsControlStatus(
           families: {},
           schedulerObligation: null,
           reasonCodes: ['RETENTION_STATUS_UNAVAILABLE'],
+        })),
+      };
+    case 'entrySyncAudit':
+      return {
+        ...base,
+        entrySyncAudit: await readEntrySyncAudit(
+          databaseState.season,
+          watchEventId,
+          watchEntryId,
+          entryAuditSeason,
+        ).catch(() => ({
+          schemaVersion: 'entry-sync-audit-v1',
+          available: false,
+          reasonCodes: ['ENTRY_SYNC_AUDIT_UNAVAILABLE'],
+          season: entryAuditSeason ?? databaseState.season.seasonCode,
+          eventId: watchEventId ?? null,
+          entryId: watchEntryId ?? null,
         })),
       };
     case 'clientSignals':
