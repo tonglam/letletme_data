@@ -261,10 +261,12 @@ async function repairTournamentSetupIssuePrepared(
       );
       repairIssues.push(...historyIssues);
       if (historyIssues.length === 0) {
-        await pruneTournamentDerivedResultsOutsideStructure(
-          season,
-          issue.tournamentId,
-          rebuilt.staleDerivedResults,
+        await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
+          pruneTournamentDerivedResultsOutsideStructure(
+            season,
+            issue.tournamentId,
+            rebuilt.staleDerivedResults,
+          ),
         );
         // A topology rebuild can change group membership, phase boundaries, or
         // bracket edges for every settled event. Defer the correction reset

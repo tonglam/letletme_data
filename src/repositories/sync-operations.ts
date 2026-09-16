@@ -6,6 +6,7 @@ import {
   datasetPublicationItemsInOps,
   datasetPublicationsInOps,
   dataPublicationOutboxInOps,
+  eventsInFpl,
   syncItemsInOps,
   syncRunsInOps,
 } from '../db/schemas/index.schema';
@@ -437,11 +438,18 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .from(syncItemsInOps)
           .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
           .where(auditWhere);
-      const [allRows, recentRows] = await Promise.all([
+      const [allRows, recentRows, eventRows] = await Promise.all([
         selectAuditRows(),
         selectAuditRows()
           .orderBy(desc(syncItemsInOps.updatedAt), desc(syncItemsInOps.runId))
           .limit(limit + 1),
+        db
+          .select({ finished: eventsInFpl.finished, dataChecked: eventsInFpl.dataChecked })
+          .from(eventsInFpl)
+          .where(
+            and(eq(eventsInFpl.seasonId, input.seasonId), eq(eventsInFpl.eventId, input.eventId)),
+          )
+          .limit(1),
       ]);
       const truncated = recentRows.length > limit;
       const observedRows = recentRows.slice(0, limit);
@@ -487,6 +495,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const finalCompletions = allRows.filter(
         (row) =>
           componentFor(row.resourceId) === 'final' &&
+          (row.itemStatus === 'completed' || row.itemStatus === 'skipped') &&
           boolValue(payloadFor(row.normalizedPayload).finalCompletion),
       ).length;
       const reusedSkips = allRows.filter(
@@ -494,8 +503,18 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           row.itemStatus === 'skipped' || boolValue(payloadFor(row.normalizedPayload).reused),
       ).length;
       const failedItems = allRows.filter((row) => row.itemStatus === 'failed').length;
+      const eventFinalized = eventRows[0]?.finished === true && eventRows[0]?.dataChecked === true;
+      const finalEvidenceComplete =
+        !eventFinalized ||
+        allRows.some(
+          (row) =>
+            componentFor(row.resourceId) === 'final' &&
+            (row.itemStatus === 'completed' || row.itemStatus === 'skipped') &&
+            boolValue(payloadFor(row.normalizedPayload).finalCompletion),
+        );
       const evidenceComplete =
         allRows.length > 0 &&
+        finalEvidenceComplete &&
         allRows.every((row) => {
           const payload = payloadFor(row.normalizedPayload);
           return (

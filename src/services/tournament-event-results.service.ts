@@ -1012,6 +1012,7 @@ export async function syncTournamentEventResultsForEntryIds(
             attempts: auditAttempt,
             normalizedPayload: {
               phase: 'entry-event-results',
+              eventLiveRequests: eventLiveProviderRequestStarted ? 1 : 0,
               picksRequests: picksRequest.started ? 1 : 0,
               transferRequests: transferRequest.started ? 1 : 0,
               unknownRequests:
@@ -1253,16 +1254,34 @@ export async function syncEntryTransferHistories(
       expectedItems: uniqueEntryIds.length,
       metadata: auditRunMetadata(options, auditRunId, auditAttempt),
     });
-    await syncOperationsRepository.upsertItems(
-      auditRunId,
-      uniqueEntryIds.map((entryId) => ({
-        resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
-        resourceId: entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
-        status: 'pending' as const,
-        attempts: auditAttempt,
-        normalizedPayload: { phase: 'entry-transfer-history' },
-      })),
-    );
+    try {
+      await syncOperationsRepository.upsertItems(
+        auditRunId,
+        uniqueEntryIds.map((entryId) => ({
+          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+          resourceId: entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
+          status: 'pending' as const,
+          attempts: auditAttempt,
+          normalizedPayload: { phase: 'entry-transfer-history' },
+        })),
+      );
+    } catch (error) {
+      await syncOperationsRepository.failPendingItems(auditRunId, error).catch((auditError) =>
+        logError('Failed to close transfer audit items after initialization failure', auditError, {
+          endEventId,
+          runId: auditRunId,
+        }),
+      );
+      await syncOperationsRepository
+        .failRun(auditRunId, new Error(safeDataErrorCode(error)))
+        .catch((auditError) =>
+          logError('Failed to fail transfer audit run after initialization failure', auditError, {
+            endEventId,
+            runId: auditRunId,
+          }),
+        );
+      throw error;
+    }
   }
 
   const reusedTransferEntryIds = new Set<number>();
@@ -1442,7 +1461,7 @@ export async function syncEntryTransferHistories(
     } else {
       await syncOperationsRepository.finishRun(auditRunId, {
         status: 'completed',
-        completedItems: synced,
+        completedItems: Math.max(0, synced - reusedTransferEntryIds.size),
         skippedItems: reusedTransferEntryIds.size,
         dataChanged: uniqueEntryIds.length > reusedTransferEntryIds.size,
         metadata: {

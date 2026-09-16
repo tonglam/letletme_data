@@ -80,6 +80,10 @@ async function cleanup(): Promise<void> {
     DELETE FROM ops.sync_runs
     WHERE run_id = ANY(${[...RUN_IDS]}::uuid[])
   `;
+  await sql`
+    DELETE FROM fpl.events
+    WHERE season_id = ${TEST_SEASON_ID}
+  `;
 }
 
 async function expectDatabaseErrorCode(
@@ -353,17 +357,48 @@ describe('ops sync state machine', () => {
       },
       {
         resourceType: 'entry-event',
-        resourceId: `${TEST_SEASON_ID}:1:123:final`,
-        status: 'skipped',
-        attempts: 1,
-        normalizedPayload: { finalCompletion: true, reused: true },
-      },
-      {
-        resourceType: 'entry-event',
         resourceId: `${TEST_SEASON_ID}:1:123:transfers`,
         status: 'skipped',
         attempts: 1,
         normalizedPayload: { reused: true },
+      },
+    ]);
+
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO fpl.events (
+        season_id,
+        event_id,
+        name,
+        finished,
+        data_checked,
+        data_checked_at
+      )
+      VALUES (
+        ${TEST_SEASON_ID},
+        1,
+        'GW1',
+        true,
+        true,
+        '2026-08-09T00:00:00.000Z'::timestamptz
+      )
+    `;
+
+    const incompleteAudit = await syncOperationsRepository.entrySyncAudit({
+      seasonId: TEST_SEASON_ID,
+      eventId: 1,
+      entryId: 123,
+    });
+    expect(incompleteAudit.finalCompletions).toBe(0);
+    expect(incompleteAudit.evidenceComplete).toBe(false);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[2], [
+      {
+        resourceType: 'entry-event',
+        resourceId: `${TEST_SEASON_ID}:1:123:final`,
+        status: 'skipped',
+        attempts: 1,
+        normalizedPayload: { finalCompletion: true, reused: true },
       },
     ]);
 
@@ -374,6 +409,7 @@ describe('ops sync state machine', () => {
     });
     expect(audit.finalCompletions).toBe(1);
     expect(audit.executions).toBe(1);
+    expect(audit.evidenceComplete).toBe(true);
     expect(audit.coverageStartAt).not.toBeNull();
   });
 
