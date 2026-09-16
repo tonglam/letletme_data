@@ -132,15 +132,36 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
     }
     const query = result as postgres.PendingQuery<postgres.Row[]>;
     let pending: Promise<unknown> | undefined;
+    let scheduled: ReturnType<typeof enqueueWork> | undefined;
+    let executing = false;
+    let cancellation: Error | undefined;
+    function cancel(error: Error): void {
+      if (cancellation) return;
+      cancellation = error;
+      // An outer budget can cancel this wrapper before it admits the query.
+      // Reject only our queued operation: cancelling an unconsumed postgres.js
+      // Query rejects a promise that has no driver-settlement observer yet.
+      if (scheduled?.cancelQueued(error)) return;
+      if (executing) query.cancel();
+    }
     function start(): Promise<unknown> {
       if (!pending) {
-        const scheduled = enqueueWork(() => {
+        if (cancellation) {
+          pending = Promise.reject(cancellation);
+          return pending;
+        }
+        scheduled = enqueueWork(() => {
+          if (cancellation) throw cancellation;
           assertDeadline();
-          return query;
+          return new Promise((resolve, reject) => {
+            // Subscribe synchronously: returning the thenable would leave a
+            // microtask gap where cancellation can reach an unobserved query.
+            query.then(resolve, reject);
+            executing = true;
+          });
         });
         const timer = setTimeout(() => {
-          const error = new TimeoutError('PostgreSQL query queue wait exceeded its deadline');
-          if (!scheduled.cancelQueued(error)) query.cancel();
+          cancel(new TimeoutError('PostgreSQL query queue wait exceeded its deadline'));
         }, remainingMs());
         pending = scheduled.promise.finally(() => clearTimeout(timer));
       }
@@ -148,6 +169,8 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
     }
     const wrapped = new Proxy(query, {
       get(target, property) {
+        if (property === 'cancel')
+          return () => cancel(new TimeoutError('PostgreSQL query cancelled before settlement'));
         if (property === 'then')
           return (...args: Parameters<Promise<unknown>['then']>) => start().then(...args);
         if (property === 'catch')

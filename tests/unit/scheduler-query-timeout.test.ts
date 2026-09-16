@@ -3,7 +3,7 @@ import type postgres from 'postgres';
 
 import { withPostgresQueryTimeout } from '../../src/db/postgres-query-timeout';
 
-function fixture() {
+function fixture(timeoutMs = 20) {
   let cancelCount = 0;
   let executionCount = 0;
   let reject!: (error: Error) => void;
@@ -40,7 +40,7 @@ function fixture() {
       return callback(raw);
     },
   });
-  const client = withPostgresQueryTimeout(raw as unknown as postgres.Sql, 20);
+  const client = withPostgresQueryTimeout(raw as unknown as postgres.Sql, timeoutMs);
   return { client, resolve, reject, counts: () => ({ cancelCount, executionCount, values }) };
 }
 
@@ -58,6 +58,73 @@ describe('scheduler database query cancellation', () => {
     await active;
     await f.client`after recovery`;
     expect(f.counts().executionCount).toBe(2);
+  });
+
+  test('nested deadlines discard inner queued work without cancelling its unconsumed driver query', async () => {
+    const f = fixture(1000);
+    const active = Promise.resolve(f.client`active`);
+    await Bun.sleep(1);
+    const outer = withPostgresQueryTimeout(f.client, 5);
+    const queued = Promise.resolve(outer`queued`).catch((error: Error) => error);
+    await Bun.sleep(12);
+    expect(f.counts().cancelCount).toBe(0);
+    expect(await queued).toBeInstanceOf(Error);
+    f.resolve([]);
+    await active;
+    expect(f.counts().executionCount).toBe(1);
+  });
+
+  test('explicit cancellation before consumption never sends the query to the driver', async () => {
+    const f = fixture();
+    const query = f.client`cancel before await`;
+    query.cancel();
+    await expect(Promise.resolve(query)).rejects.toThrow('cancelled');
+    expect(f.counts().executionCount).toBe(0);
+    expect(f.counts().cancelCount).toBe(0);
+  });
+
+  test('a pre-cancelled query rejects while another operation still owns admission', async () => {
+    const f = fixture(1000);
+    const active = Promise.resolve(f.client`active`);
+    await Bun.sleep(1);
+    const query = f.client`cancel before queueing`;
+    query.cancel();
+    let rejection: unknown;
+    const result = Promise.resolve(query).catch((error: unknown) => {
+      rejection = error;
+    });
+    try {
+      await Bun.sleep(10);
+      expect(rejection).toBeInstanceOf(Error);
+      expect(f.counts().executionCount).toBe(1);
+      expect(f.counts().cancelCount).toBe(0);
+    } finally {
+      f.resolve([]);
+      await active;
+      await result;
+    }
+  });
+
+  test('cancellation immediately after execute fences the admission microtask', async () => {
+    const f = fixture();
+    const query = f.client`cancel after execute`.execute();
+    query.cancel();
+    await expect(Promise.resolve(query)).rejects.toThrow('cancelled');
+    expect(f.counts().executionCount).toBe(0);
+    expect(f.counts().cancelCount).toBe(0);
+  });
+
+  test('subscribes to driver settlement before cancellation from the next microtask', async () => {
+    const f = fixture(1000);
+    const query = f.client`cancel after admission`.execute();
+    const result = Promise.resolve(query).catch((error: Error) => error);
+    await Promise.resolve();
+    const observedBeforeCancel = f.counts().executionCount;
+    query.cancel();
+    f.reject(new Error('cancel acknowledged'));
+    expect(await result).toBeInstanceOf(Error);
+    expect(observedBeforeCancel).toBe(1);
+    expect(f.counts().cancelCount).toBe(1);
   });
 
   test('keeps unconsumed SQL fragments lazy', async () => {
