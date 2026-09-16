@@ -427,6 +427,7 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
         eventId,
         kind: job.data.checkpointKind,
         db: databaseBudget?.writeDb,
+        allowFinalReplacement: job.data.checkpointAllowFinalReplacement === true,
       });
       // A failed or coalesced checkpoint leaves the Redis desired marker in
       // place for the periodic reconciler. Re-enqueue only after a successful
@@ -868,6 +869,7 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
           eventId,
           kind,
           db: databaseBudget?.writeDb,
+          allowFinalReplacement: false,
         });
       }
       if (!(await hasFinalLiveMatchCheckpointsV3(season, eventId, databaseBudget?.readDb))) {

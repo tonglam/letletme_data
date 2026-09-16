@@ -133,6 +133,8 @@ export interface LiveMatchDeskCheckpointRequest {
   readonly publication: MatchDeskPublication;
   readonly fixtures: readonly MatchDeskFixture[];
   readonly db?: DbOrTransaction;
+  /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
+  readonly allowFinalReplacement?: boolean;
 }
 
 export interface LiveMatchDetailCheckpointRequest {
@@ -142,6 +144,8 @@ export interface LiveMatchDetailCheckpointRequest {
   readonly fixtures: readonly MatchFixtureDetail[];
   readonly finalized?: boolean;
   readonly db?: DbOrTransaction;
+  /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
+  readonly allowFinalReplacement?: boolean;
 }
 
 export async function checkpointLiveMatchScopeV3(input: {
@@ -149,6 +153,8 @@ export async function checkpointLiveMatchScopeV3(input: {
   readonly eventId: number;
   readonly kind: 'desk' | 'detail';
   readonly db?: DbOrTransaction;
+  /** Only an explicitly fenced FINAL recovery may replace a conflicting row. */
+  readonly allowFinalReplacement?: boolean;
 }): Promise<{ checkpointed: boolean; skipped: boolean }> {
   const desired = await readLiveMatchCheckpointDesiredV3({
     kind: input.kind,
@@ -190,6 +196,8 @@ export async function checkpointLiveMatchScopeV3(input: {
       publication: current.publication,
       fixtures: current.fixtures,
       db: input.db,
+      allowFinalReplacement:
+        input.allowFinalReplacement === true || desired.allowFinalReplacement === true,
     });
     if (!result.checkpointed || !result.checkpointedAt)
       return { checkpointed: false, skipped: false };
@@ -221,6 +229,8 @@ export async function checkpointLiveMatchScopeV3(input: {
     fixtures: current.fixtures,
     finalized: desired.final,
     db: input.db,
+    allowFinalReplacement:
+      input.allowFinalReplacement === true || desired.allowFinalReplacement === true,
   });
   if (!result.checkpointed || !result.checkpointedAt)
     return { checkpointed: false, skipped: false };
@@ -314,6 +324,11 @@ export async function checkpointLiveMatchDeskV3(
             ${liveMatchDeskCheckpointsInFpl.state} <> 'FINALIZED'
             AND ${liveMatchDeskCheckpointsInFpl.generation} < excluded.generation
           )
+          OR (
+            ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
+            AND ${liveMatchDeskCheckpointsInFpl.state} = 'FINALIZED'
+            AND excluded.state = 'FINALIZED'
+          )
         `,
       })
       .returning({ eventId: liveMatchDeskCheckpointsInFpl.eventId });
@@ -400,6 +415,11 @@ export async function checkpointLiveMatchDetailV3(
           OR (
             ${liveMatchDetailCheckpointsInFpl.state} <> 'FINALIZED'
             AND ${liveMatchDetailCheckpointsInFpl.generation} < excluded.generation
+          )
+          OR (
+            ${request.allowFinalReplacement === true ? sql`TRUE` : sql`FALSE`}
+            AND ${liveMatchDetailCheckpointsInFpl.state} = 'FINALIZED'
+            AND excluded.state = 'FINALIZED'
           )
         `,
       })

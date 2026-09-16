@@ -24,6 +24,7 @@ import {
 import {
   loadLiveReferenceData,
   prepareCoherentLiveSnapshot,
+  resolveLiveReferenceDataForDetail,
   type LiveSnapshotReferenceData,
   type PreparedLiveSnapshot,
 } from './live-coherent-fetch';
@@ -40,7 +41,11 @@ import {
   readFinalLiveMatchCheckpointPairV3,
   type FinalLiveMatchCheckpointPair,
 } from './live-match-v3-checkpoint.service';
-import type { MatchLifecycleState } from './live-match-v3';
+import {
+  prepareLiveMatchDesk,
+  prepareLiveMatchDetail,
+  type MatchLifecycleState,
+} from './live-match-v3';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
 import { canonicalJson } from '../utils/content-hash';
@@ -671,6 +676,29 @@ export async function syncLiveSnapshotV2(
     }
 
     if (durableMatchPair && canProbeServingPair) {
+      // A valid Redis pair with a different identity is not automatically a
+      // recoverable cache miss.  The durable pair is immutable authority, but
+      // rotating a conflicting Redis pair into `previous` would make stale
+      // facts readable during a later active-pointer fault.  Only restore when
+      // at least one serving sibling is missing/corrupt, or when both siblings
+      // are semantically the same facts under a different publication id.
+      const observedDeskRead = observedMatchDesk?.read;
+      const observedDetailRead = observedMatchDetail?.read;
+      const servingPairIsComplete = Boolean(observedDeskRead && observedDetailRead);
+      const servingPairIsEquivalent =
+        servingPairIsComplete &&
+        canonicalJson(observedDeskRead!.fixtures) ===
+          canonicalJson(durableMatchPair.desk.fixtures) &&
+        canonicalJson(observedDetailRead!.fixtures) ===
+          canonicalJson(durableMatchPair.detail.fixtures) &&
+        observedDetailRead!.publication.fixtureIdentityRevision ===
+          durableMatchPair.detail.publication.fixtureIdentityRevision;
+      if (servingPairIsComplete && !servingPairIsEquivalent) {
+        throw new CacheError(
+          `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
+          'LIVE_MATCH_FINAL_REDIS_CONFLICT',
+        );
+      }
       // A complete durable pair can repair a missing/corrupt Redis serving
       // namespace without any provider dependency. Restore both siblings in
       // one fenced CAS, then capture the resulting pointers for any later
@@ -810,6 +838,51 @@ export async function syncLiveSnapshotV2(
       throw new Error(
         `Live Match final publication was not complete for event ${eventId}; desk=${match.desk.state}; detail=${match.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
       );
+    }
+    // The synchronizer is allowed to reuse an existing FINAL desk/detail.
+    // Re-read both active pointers after that call and prove that the winning
+    // payloads are the facts checked against the durable Live Points FINAL.
+    if (canProbeServingPair) {
+      const expectedDesk = prepareLiveMatchDesk({
+        eventId,
+        rawFixtures: fixturesResult.value,
+        referenceData: referenceDataResult.value,
+        expectedFixtureIds: expectedFixtureIdsResult.value,
+        finalized: true,
+        lifecycleState: 'FINALIZED',
+      });
+      const detailReference = await resolveLiveReferenceDataForDetail(referenceDataResult.value, {
+        requireEventPinnedIdentity: true,
+      });
+      const expectedDetail = detailReference
+        ? prepareLiveMatchDetail({
+            eventId,
+            rawElements: liveResult.value.elements,
+            rawFixtures: fixturesResult.value,
+            deskFixtures: expectedDesk.fixtures,
+            publishedLiveElementIds: durableFinal.eventLives.map((row) => row.elementId),
+            referenceData: detailReference,
+            requireEventPinnedIdentity: true,
+          })
+        : null;
+      const [afterDesk, afterDetail] = await Promise.all([
+        dependencies.readObservedMatchDesk!({ season: season.seasonCode, eventId }),
+        dependencies.readObservedMatchDetail!({ season: season.seasonCode, eventId }),
+      ]);
+      if (
+        !afterDesk.read ||
+        !afterDetail.read ||
+        canonicalJson(afterDesk.read.fixtures) !== canonicalJson(expectedDesk.fixtures) ||
+        canonicalJson(afterDetail.read.fixtures) !==
+          canonicalJson(expectedDetail?.fixtures ?? []) ||
+        canonicalJson(match.deskFixtures) !== canonicalJson(expectedDesk.fixtures) ||
+        canonicalJson(match.detailFixtures ?? []) !== canonicalJson(expectedDetail?.fixtures ?? [])
+      ) {
+        throw new CacheError(
+          `Live Match recovery did not publish facts for event ${eventId}`,
+          'LIVE_MATCH_FINAL_FACTS_MISMATCH',
+        );
+      }
     }
   };
   // A FINAL must be reconciled with its durable checkpoint before provider
