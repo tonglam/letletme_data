@@ -1108,29 +1108,25 @@ export async function syncLiveSnapshotV2(
       // at least one serving sibling is missing/corrupt, or when both siblings
       // are semantically the same facts under a different publication id.
       const servingPairIsComplete = Boolean(observedDeskRead && observedDetailRead);
-      const survivingDeskIsVerified =
+      const survivingDeskIsScoped =
         !observedDeskRead ||
         (observedDeskRead.publication.season === season.seasonCode &&
           observedDeskRead.publication.eventId === eventId &&
           canonicalJson(observedDeskRead.fixtures) ===
-            canonicalJson(durableMatchPair.desk.fixtures) &&
-          (observedDeskRead.publication.state !== 'FINALIZED' ||
-            observedDeskRead.publication.checkpointedAt !== null));
-      const survivingDetailIsVerified =
+            canonicalJson(durableMatchPair.desk.fixtures));
+      const survivingDetailIsScoped =
         !observedDetailRead ||
         (observedDetailRead.publication.season === season.seasonCode &&
           observedDetailRead.publication.eventId === eventId &&
           observedDetailRead.publication.fixtureIdentityRevision ===
             durableMatchPair.detail.publication.fixtureIdentityRevision &&
           canonicalJson(observedDetailRead.fixtures) ===
-            canonicalJson(durableMatchPair.detail.fixtures) &&
-          (observedDetailRead.publication.finalized !== true ||
-            observedDetailRead.publication.checkpointedAt !== null));
-      if (!survivingDeskIsVerified || !survivingDetailIsVerified) {
-        if (observedDeskRead && !survivingDeskIsVerified) {
+            canonicalJson(durableMatchPair.detail.fixtures));
+      if (!survivingDeskIsScoped || !survivingDetailIsScoped) {
+        if (observedDeskRead && !survivingDeskIsScoped) {
           await clearConflictingMatchCheckpoint('desk', observedDeskRead.publication);
         }
-        if (observedDetailRead && !survivingDetailIsVerified) {
+        if (observedDetailRead && !survivingDetailIsScoped) {
           await clearConflictingMatchCheckpoint('detail', observedDetailRead.publication);
         }
         throw new CacheError(
@@ -1278,14 +1274,46 @@ export async function syncLiveSnapshotV2(
 
     const clearRejectedMatch = async (match: LiveMatchObservationResult): Promise<void> => {
       let cleanupError: unknown;
-      try {
-        await clearConflictingMatchCheckpoint('desk', match.desk);
-      } catch (error) {
-        cleanupError = error;
-      }
-      if (match.detail) {
+      const cleanup = async (
+        kind: 'desk' | 'detail',
+        publication: { publicationId: string; generation: number },
+      ): Promise<void> => {
         try {
-          await clearConflictingMatchCheckpoint('detail', match.detail);
+          await clearConflictingMatchCheckpoint(kind, publication);
+        } catch (error) {
+          cleanupError ??= error;
+        }
+      };
+      await cleanup('desk', match.desk);
+      if (match.detail) await cleanup('detail', match.detail);
+      // The synchronizer may reject before returning a detail publication.
+      // Re-read the active pointer so a raced FINAL detail marker is still
+      // removed when it was installed after the initial serving probe.
+      if (!match.detail && canProbeServingPair) {
+        try {
+          const latestDetail = await dependencies.readObservedMatchDetail!({
+            season: season.seasonCode,
+            eventId,
+          });
+          const latestPublication = latestDetail.read?.publication;
+          const initialObserved = observedMatchDetail?.observed ?? '';
+          const raced = latestDetail.observed !== initialObserved;
+          const conflictsDurable =
+            latestDetail.read &&
+            durableMatchPair !== null &&
+            durableMatchDetailFactsAgreeWithLiveFinal(latestDetail.read, durableFinal) === false;
+          const differsFromDurableIdentity =
+            latestPublication &&
+            expectedFinalCheckpointIdentities?.detail &&
+            (latestPublication.publicationId !==
+              expectedFinalCheckpointIdentities.detail.publicationId ||
+              latestPublication.generation !== expectedFinalCheckpointIdentities.detail.generation);
+          if (
+            latestPublication?.finalized === true &&
+            (raced || conflictsDurable || differsFromDurableIdentity)
+          ) {
+            await cleanup('detail', latestPublication);
+          }
         } catch (error) {
           cleanupError ??= error;
         }

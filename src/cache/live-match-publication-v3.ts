@@ -915,7 +915,7 @@ if currentRaw then
       local expectedGeneration = tonumber(ARGV[5])
       if allowReplacement and candidate.final == true and candidate.force == true and
          current.publicationId == ARGV[4] and current.generation == expectedGeneration and
-         candidate.generation >= current.generation and activeMatchesCandidate and
+         activeMatchesCandidate and
          (current.publicationId ~= candidate.publicationId or current.generation ~= candidate.generation) then
         replacingFinalized = true
       else
