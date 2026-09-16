@@ -545,8 +545,10 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
             snapshotKind === 'FINAL' &&
             (hasExpectedScopeGeneration || hasExpectedFinalFence) &&
             finalizationControl &&
-            ((hasExpectedScopeGeneration &&
-              finalizationControl.entryScopeGeneration !== expectedEntryScopeGeneration) ||
+            (!finalizationControl.finished ||
+              !finalizationControl.dataChecked ||
+              (hasExpectedScopeGeneration &&
+                finalizationControl.entryScopeGeneration !== expectedEntryScopeGeneration) ||
               (hasExpectedScopeGeneration &&
                 finalizationControl.tournamentScopeGeneration !==
                   expectedTournamentScopeGeneration) ||

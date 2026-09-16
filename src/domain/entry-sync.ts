@@ -7,6 +7,52 @@ type EventFinalizationState = {
   dataCheckedAt: Date | null;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isVerifiedFinalInputPayload(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.finalResult)) return false;
+  const finalResult = value.finalResult;
+  if (
+    typeof finalResult.revision !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(finalResult.revision) ||
+    !isRecord(finalResult.score) ||
+    !Number.isSafeInteger(finalResult.score.eventPoints) ||
+    (finalResult.score.totalPoints !== null &&
+      !Number.isSafeInteger(finalResult.score.totalPoints)) ||
+    !Array.isArray(finalResult.picks) ||
+    finalResult.picks.length !== 15 ||
+    !Array.isArray(finalResult.automaticSubs)
+  ) {
+    return false;
+  }
+  const positions = new Set<number>();
+  return finalResult.picks.every((pick) => {
+    if (!isRecord(pick)) return false;
+    const position = pick.position as number;
+    const element = pick.element as number;
+    const multiplier = pick.multiplier as number;
+    if (
+      !Number.isSafeInteger(position) ||
+      position < 1 ||
+      position > 15 ||
+      positions.has(position) ||
+      !Number.isSafeInteger(element) ||
+      element <= 0 ||
+      !Number.isSafeInteger(multiplier) ||
+      multiplier < 0 ||
+      multiplier > 3 ||
+      typeof pick.isCaptain !== 'boolean' ||
+      typeof pick.isViceCaptain !== 'boolean'
+    ) {
+      return false;
+    }
+    positions.add(position);
+    return true;
+  });
+}
+
 /** Resolve the source intent that a successful scan continuation must carry. */
 export function resolveEntrySyncExecutionIntent(
   source: string | undefined,
@@ -22,6 +68,7 @@ export function isReusableEntryPicksHeadForRetry(
     rowCount: number;
     sourceCheckedAt: Date | string;
     sourceCheckedAtExact?: string;
+    inputPayload?: unknown | null;
   },
   requestWatermark: string | undefined,
 ): boolean {
@@ -43,6 +90,13 @@ export function isReusableEntryPicksHeadForRetry(
         ? head.sourceCheckedAt.toISOString()
         : String(head.sourceCheckedAt)),
   );
+  if (watermark === null || sourceCheckedAt === null) return false;
+  // A FINAL input is an immutable, already-verified source observation.  Its
+  // original source watermark is intentionally frozen at finalization and
+  // therefore may predate a later retry watermark.  Requiring that frozen
+  // timestamp to advance would keep a successful retry in the missing set
+  // forever because FINAL persistence correctly refuses to rewrite it.
+  if (isVerifiedFinalInputPayload(head.inputPayload)) return true;
   // PostgreSQL ordering timestamps are normalized UTC strings with six
   // fractional digits. Lexical comparison preserves microseconds; converting
   // them through Date would truncate the last three digits and can incorrectly

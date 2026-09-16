@@ -36,6 +36,36 @@ describe('explicit entry repair selection', () => {
     expect(isReusableEntryPicksHeadForRetry(head, undefined)).toBe(false);
   });
 
+  test('reuses a verified immutable FINAL head even when its frozen watermark is older', () => {
+    const finalHead = {
+      state: 'COMPLETE',
+      rowCount: 15,
+      sourceCheckedAt: new Date('2026-09-16T10:00:00.000Z'),
+      sourceCheckedAtExact: '2026-09-16T10:00:00.123456Z',
+      inputPayload: {
+        finalResult: {
+          revision: 'a'.repeat(64),
+          score: { eventPoints: 42, totalPoints: 142 },
+          picks: Array.from({ length: 15 }, (_, index) => ({
+            element: index + 1,
+            position: index + 1,
+            multiplier: 1,
+            isCaptain: index === 0,
+            isViceCaptain: index === 1,
+          })),
+          automaticSubs: [],
+        },
+      },
+    };
+    expect(isReusableEntryPicksHeadForRetry(finalHead, '2026-09-17T10:00:00.000000Z')).toBe(true);
+    expect(
+      isReusableEntryPicksHeadForRetry(
+        { ...finalHead, inputPayload: { ...finalHead.inputPayload, finalResult: null } },
+        '2026-09-17T10:00:00.000000Z',
+      ),
+    ).toBe(false);
+  });
+
   test('skips entries that started after the target event without hiding unknown metadata', () => {
     expect(
       planEventEligibleEntrySyncWork(

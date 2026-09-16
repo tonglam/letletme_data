@@ -1075,8 +1075,11 @@ export async function supersedeMyFplFinalizationObligations(input: {
   ) {
     throw new Error('My FPL finalization supersession input is invalid');
   }
-  const dataCheckedAt = new Date(input.dataCheckedAt);
-  if (!Number.isFinite(dataCheckedAt.getTime())) {
+  const dataCheckedAtExact =
+    typeof input.dataCheckedAt === 'string'
+      ? input.dataCheckedAt.trim()
+      : input.dataCheckedAt.toISOString();
+  if (!Number.isFinite(new Date(dataCheckedAtExact).getTime())) {
     throw new Error('My FPL finalization supersession fence must be a valid timestamp');
   }
   const db = input.db ?? (await getDb());
@@ -1133,7 +1136,7 @@ export async function supersedeMyFplFinalizationObligations(input: {
             AND candidates.tournament_scope_generation = ${input.tournamentScopeGeneration}::bigint
             AND (
               candidates.source_checked_at IS NULL
-              OR candidates.source_checked_at::timestamptz < ${dataCheckedAt.toISOString()}::timestamptz
+              OR candidates.source_checked_at::timestamptz < ${dataCheckedAtExact}::timestamptz
             )
           )
         )

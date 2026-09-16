@@ -57,8 +57,8 @@ const ACCEPTED_BACKOFF_SLO_KEY = 'integration:live-picks-backoff';
 const ACCEPTED_BACKOFF_SCOPE_KEY = 'integration:event:accepted-backoff';
 const ACCEPTED_BACKOFF_CASE_FINGERPRINT = 'integration:live-picks-backoff:breach';
 const MY_FPL_SUPERSEDE_SCOPE_KEY = 'integration:event:my-fpl-supersede';
-const MY_FPL_SUPERSEDE_OLDER_PERIOD = 'final-4-2026-09-15T10:00:00.000Z-scope-e1-t1';
-const MY_FPL_SUPERSEDE_CURRENT_PERIOD = 'final-4-2026-09-16T10:00:00.000Z-scope-e2-t2';
+const MY_FPL_SUPERSEDE_OLDER_PERIOD = 'final-4-2026-09-16T10:00:00.123000Z-scope-e1-t1';
+const MY_FPL_SUPERSEDE_CURRENT_PERIOD = 'final-4-2026-09-16T10:00:00.123456Z-scope-e2-t2';
 
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
@@ -784,7 +784,10 @@ describe('scheduler obligation generation fencing', () => {
         scopeKey: MY_FPL_SUPERSEDE_SCOPE_KEY,
         periodKey: MY_FPL_SUPERSEDE_CURRENT_PERIOD,
         successorObligationId: MY_FPL_SUPERSEDE_CURRENT_OBLIGATION_ID,
-        dataCheckedAt: '2026-09-16T10:00:00.000Z',
+        // The successor is only 456 microseconds newer than the old period.
+        // Round-tripping this through Date would truncate the fence and leave
+        // the older obligation eligible.
+        dataCheckedAt: '2026-09-15T10:00:00.123456Z',
         entryScopeGeneration: 2,
         tournamentScopeGeneration: 2,
       }),
