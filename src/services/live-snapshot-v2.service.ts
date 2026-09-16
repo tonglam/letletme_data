@@ -18,6 +18,8 @@ import {
 import {
   readLiveMatchDeskFenceV3,
   readLiveMatchDetailFenceV3,
+  readLiveMatchCheckpointDesiredV3,
+  clearLiveMatchCheckpointDesiredV3,
   restoreLiveMatchEquivalentFinalPairV3,
   setLiveMatchActiveEventV3,
   type MatchDeskActiveFence,
@@ -122,6 +124,8 @@ export interface LiveSnapshotV2Dependencies {
   readonly setActiveMatchEvent?: typeof setLiveMatchActiveEventV3;
   readonly restoreFinalMatchPair?: typeof restoreLiveMatchEquivalentFinalPairV3;
   readonly hasFinalMatchCheckpoints?: typeof hasFinalLiveMatchCheckpointsV3;
+  readonly readMatchCheckpointDesired?: typeof readLiveMatchCheckpointDesiredV3;
+  readonly clearMatchCheckpointDesired?: typeof clearLiveMatchCheckpointDesiredV3;
   readonly checkpointPublication: (request: {
     readonly season: FplSeasonRef;
     readonly eventId: number;
@@ -196,6 +200,8 @@ const defaultDependencies: LiveSnapshotV2Dependencies = {
     readLivePublicationV2Checkpoint(season, eventId, dbInstance),
   readFinalMatchCheckpoints: readFinalLiveMatchCheckpointPairV3,
   readMatchCheckpointIdentities: readLiveMatchFinalCheckpointIdentitiesV3,
+  readMatchCheckpointDesired: readLiveMatchCheckpointDesiredV3,
+  clearMatchCheckpointDesired: clearLiveMatchCheckpointDesiredV3,
   setActiveMatchEvent: setLiveMatchActiveEventV3,
   checkpointPublication: checkpointLivePublicationV2,
 };
@@ -224,6 +230,29 @@ function samePayload(
 }
 
 /**
+ * Legacy Live Points FINAL rows may predate the optional fixture-breakdown
+ * field. Compare the common player facts exactly while treating that omitted
+ * field as unavailable evidence rather than as a changed payload.
+ */
+function sameLiveEventFacts(left: readonly EventLive[], right: readonly EventLive[]): boolean {
+  if (left.length !== right.length) return false;
+  const leftByElement = new Map(left.map((row) => [row.elementId, row]));
+  const rightByElement = new Map(right.map((row) => [row.elementId, row]));
+  if (leftByElement.size !== left.length || rightByElement.size !== right.length) return false;
+  for (const leftRow of left) {
+    const rightRow = rightByElement.get(leftRow.elementId);
+    if (!rightRow) return false;
+    if (rightRow.fixtureBreakdown === undefined) {
+      const { fixtureBreakdown: _ignored, ...leftWithoutBreakdown } = leftRow;
+      if (canonicalJson(leftWithoutBreakdown) !== canonicalJson(rightRow)) return false;
+    } else if (canonicalJson(leftRow) !== canonicalJson(rightRow)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * A FINAL publication is reusable only when the serving pointer and the
  * durable checkpoint identify the same immutable payload.  The checkpoint
  * reader validates the PostgreSQL manifest/hash/count proof; comparing the
@@ -249,7 +278,7 @@ function isCompleteFinalPublication(
       current.publication.generation === durable.publication.generation &&
       current.publication.checkpointedAt !== null &&
       durable.publication.checkpointedAt !== null &&
-      canonicalJson(current.eventLives) === canonicalJson(durable.eventLives) &&
+      sameLiveEventFacts(current.eventLives, durable.eventLives) &&
       canonicalJson(current.fixtures) === canonicalJson(durable.fixtures),
   );
 }
@@ -478,6 +507,10 @@ type MatchPlayerFacts = Readonly<{
 }>;
 
 type MatchDetailFacts = ReadonlyMap<number, ReadonlyMap<number, MatchPlayerFacts>>;
+type MatchDetailFactsResult =
+  | Readonly<{ kind: 'available'; facts: MatchDetailFacts }>
+  | Readonly<{ kind: 'unavailable' }>
+  | Readonly<{ kind: 'invalid' }>;
 
 function matchStatAwardedPoints(stat: {
   readonly points: number;
@@ -486,7 +519,7 @@ function matchStatAwardedPoints(stat: {
   return stat.points + (stat.pointsModification ?? 0);
 }
 
-function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailFacts | null {
+function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailFactsResult {
   const byFixture = new Map<
     number,
     Map<
@@ -494,8 +527,12 @@ function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailF
       { totalPoints: number; stats: Map<string, { value: number; awardedPoints: number }> }
     >
   >();
+  let unavailable = false;
   for (const row of final.eventLives as readonly EventLive[]) {
-    if (!row.fixtureBreakdown) return null;
+    if (!row.fixtureBreakdown) {
+      unavailable = true;
+      continue;
+    }
     let rowTotalPoints = 0;
     for (const breakdown of row.fixtureBreakdown) {
       let players = byFixture.get(breakdown.fixtureId);
@@ -516,7 +553,7 @@ function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailF
       rowTotalPoints += totalPoints;
       players.set(row.elementId, { totalPoints, stats });
     }
-    if (rowTotalPoints !== row.totalPoints) return null;
+    if (rowTotalPoints !== row.totalPoints) return { kind: 'invalid' };
   }
   for (const fixture of final.fixtures) {
     const bps = fixture.stats.find((stat) => stat.identifier === 'bps');
@@ -549,7 +586,7 @@ function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailF
     }
     if (players.size === 0) byFixture.delete(fixtureId);
   }
-  return byFixture;
+  return unavailable ? { kind: 'unavailable' } : { kind: 'available', facts: byFixture };
 }
 
 function matchPlayerFactsEqual(left: MatchPlayerFacts, right: MatchPlayerFacts): boolean {
@@ -605,12 +642,14 @@ function durableMatchDetailFactsAgreeWithLiveFinal(
   detail: MatchDetailFactsRead,
   final: LivePublicationRead,
 ): boolean | null {
-  const expectedDetail = matchDetailFactsFromLiveFinal(final);
+  const expectedDetailResult = matchDetailFactsFromLiveFinal(final);
   // Older durable Live Points FINALs may legitimately omit fixture-level
   // explain breakdowns. That is unavailable comparison evidence, not a facts
   // contradiction; callers must use the desk/identity proof or fetch a fresh
   // compatible observation instead of rejecting the retained FINAL.
-  if (!expectedDetail) return null;
+  if (expectedDetailResult.kind === 'unavailable') return null;
+  if (expectedDetailResult.kind === 'invalid') return false;
+  const expectedDetail = expectedDetailResult.facts;
   const actualDetail = new Map(
     detail.fixtures.map((fixture) => [
       fixture.fixtureId,
@@ -924,6 +963,40 @@ export async function syncLiveSnapshotV2(
 
     const observedDeskRead = observedMatchDesk?.read;
     const observedDetailRead = observedMatchDetail?.read;
+    const clearConflictingMatchCheckpoint = async (
+      kind: 'desk' | 'detail',
+      publication: { publicationId: string; generation: number },
+    ): Promise<void> => {
+      const readDesired = dependencies.readMatchCheckpointDesired;
+      const clearDesired = dependencies.clearMatchCheckpointDesired;
+      if (!readDesired || !clearDesired) return;
+      try {
+        const desired = await readDesired({
+          kind,
+          season: season.seasonCode,
+          eventId,
+        });
+        if (
+          desired &&
+          desired.final &&
+          desired.publicationId === publication.publicationId &&
+          desired.generation === publication.generation
+        ) {
+          await clearDesired(desired);
+        }
+      } catch (error) {
+        // The conflicting Redis payload is already rejected. A marker cleanup
+        // outage must remain visible without replacing the bounded conflict
+        // error with an infrastructure retry loop.
+        logError('Live Match conflicting checkpoint marker cleanup failed', error, {
+          season: season.seasonCode,
+          eventId,
+          kind,
+          publicationId: publication.publicationId,
+          generation: publication.generation,
+        });
+      }
+    };
     if (canProbeServingPair) {
       // Every surviving FINAL sibling is an untrusted recovery candidate until
       // its own facts agree with the durable Live Points FINAL. Validate these
@@ -936,6 +1009,7 @@ export async function syncLiveSnapshotV2(
         observedDeskIsFinal &&
         !durableMatchDeskFactsAgreeWithLiveFinal(observedDeskRead!, durableFinal)
       ) {
+        await clearConflictingMatchCheckpoint('desk', observedDeskRead!.publication);
         throw new CacheError(
           `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
           'LIVE_MATCH_FINAL_REDIS_CONFLICT',
@@ -945,6 +1019,7 @@ export async function syncLiveSnapshotV2(
         observedDetailIsFinal &&
         durableMatchDetailFactsAgreeWithLiveFinal(observedDetailRead!, durableFinal) === false
       ) {
+        await clearConflictingMatchCheckpoint('detail', observedDetailRead!.publication);
         throw new CacheError(
           `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
           'LIVE_MATCH_FINAL_REDIS_CONFLICT',
@@ -1107,8 +1182,7 @@ export async function syncLiveSnapshotV2(
       );
     }
     if (
-      canonicalJson(preparedObservation.eventLives.eventLives) !==
-        canonicalJson(durableFinal.eventLives) ||
+      !sameLiveEventFacts(preparedObservation.eventLives.eventLives, durableFinal.eventLives) ||
       canonicalJson(preparedObservation.fixtures) !== canonicalJson(durableFinal.fixtures)
     ) {
       throw new CacheError(
