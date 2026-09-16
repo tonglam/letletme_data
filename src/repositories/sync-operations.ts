@@ -826,6 +826,13 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       }
       const db = await getDbInstance();
       return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ eventId: syncRunsInOps.eventId })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (!run) return false;
         const rows = await tx
           .select({
             status: syncItemsInOps.status,
@@ -856,6 +863,12 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               eq(syncItemsInOps.resourceId, attemptKey),
             ),
           );
+        if (run.eventId === null) {
+          await tx
+            .update(syncRunsInOps)
+            .set({ eventId, updatedAt: sql`clock_timestamp()` })
+            .where(and(eq(syncRunsInOps.runId, runId), isNull(syncRunsInOps.eventId)));
+        }
         return true;
       });
     },

@@ -193,6 +193,8 @@ export type PriceChangeSyncResult = {
   readonly outcome: 'ready' | 'noop';
   readonly season: string;
   readonly players: number;
+  /** Number of player rows carried by the committed publication. */
+  readonly submittedRows?: number;
   readonly fetchedAt?: string;
   readonly publicationId?: string;
   readonly revision?: number;
@@ -1713,6 +1715,7 @@ export async function persistPriceChangePublication(
       outcome: 'ready',
       season: season.seasonCode,
       players: board.players.length,
+      submittedRows: board.players.length,
       fetchedAt: fetchedAt.toISOString(),
       publicationId: publication.publicationId,
       revision: publication.revision,
