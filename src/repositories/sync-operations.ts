@@ -275,6 +275,19 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const db = await getDbInstance();
       for (let offset = 0; offset < items.length; offset += 500) {
         const chunk = items.slice(offset, offset + 500);
+        const preserveExistingItem = sql`
+          excluded.attempts < ${syncItemsInOps.attempts}
+          OR (
+            excluded.attempts = ${syncItemsInOps.attempts}
+            AND (
+              ${syncItemsInOps.status} IN ('completed', 'skipped')
+              OR (
+                ${syncItemsInOps.status} = 'failed'
+                AND excluded.status NOT IN ('completed', 'skipped')
+              )
+            )
+          )
+        `;
         await db
           .insert(syncItemsInOps)
           .values(
@@ -295,68 +308,38 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             set: {
               status: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
-                    )
-                  THEN ${syncItemsInOps.status}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.status}
                   ELSE excluded.status
                 END
               `,
               attempts: sql`greatest(${syncItemsInOps.attempts}, excluded.attempts)`,
               sourceHash: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
-                    )
-                  THEN ${syncItemsInOps.sourceHash}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.sourceHash}
                   ELSE excluded.source_hash
                 END
               `,
               normalizedPayload: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
-                    )
-                  THEN ${syncItemsInOps.normalizedPayload}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.normalizedPayload}
                   ELSE excluded.normalized_payload
                 END
               `,
               lastError: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
-                    )
-                  THEN ${syncItemsInOps.lastError}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.lastError}
                   ELSE excluded.last_error
                 END
               `,
               completedAt: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
-                    )
-                  THEN ${syncItemsInOps.completedAt}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.completedAt}
                   ELSE excluded.completed_at
                 END
               `,
               updatedAt: sql`
                 CASE
-                  WHEN excluded.attempts < ${syncItemsInOps.attempts}
-                    OR (
-                      excluded.attempts = ${syncItemsInOps.attempts}
-                      AND ${syncItemsInOps.status} IN ('completed', 'skipped', 'failed')
-                    )
-                  THEN ${syncItemsInOps.updatedAt}
+                  WHEN ${preserveExistingItem} THEN ${syncItemsInOps.updatedAt}
                   ELSE clock_timestamp()
                 END
               `,

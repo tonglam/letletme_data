@@ -242,7 +242,7 @@ test('correction writes and issue resolution roll back together when settlement 
   await mockAudit([]);
   spyOn(structure, 'rebuildTournamentStructure').mockImplementation(
     async (_season, _tournament, _entrySeeds, options) => {
-      options?.onCandidate?.({ groupRows: [], knockoutResults: [] });
+      options?.onCandidate?.({ groupRows: [], knockoutResults: [], battleMatchupKeys: [] });
       return [];
     },
   );
@@ -613,7 +613,7 @@ test('mixed points and knockout tournaments retain the existing structural repai
   await mockAudit([]);
   const rebuild = spyOn(structure, 'rebuildTournamentStructure').mockImplementation(
     async (_season, _tournament, _entrySeeds, options) => {
-      options?.onCandidate?.({ groupRows: [], knockoutResults: [] });
+      options?.onCandidate?.({ groupRows: [], knockoutResults: [], battleMatchupKeys: [] });
       return [];
     },
   );

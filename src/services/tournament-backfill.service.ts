@@ -45,6 +45,7 @@ import {
   syncTournamentBattleRaceResultsForTournament,
   type CandidateBattleGroupSlot,
 } from './tournament-battle-race-results.service';
+import type { TournamentStructureRepairCandidate } from './tournament-structure.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import {
   syncEntryTransferHistories,
@@ -751,6 +752,7 @@ export async function runTournamentEventBackfill(
   audit?: { repairIssueId?: number },
   candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>,
   candidateKnockoutResults?: ReadonlyArray<DbTournamentKnockoutResultInsert>,
+  candidateBattleMatchupKeys?: TournamentStructureRepairCandidate['battleMatchupKeys'],
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
   const auditRepairIssueId = audit?.repairIssueId ?? repair?.issueId;
@@ -955,6 +957,7 @@ export async function runTournamentEventBackfill(
     const battleRaceResult = await writeResults(() =>
       syncTournamentBattleRaceResultsForTournament(season, tournament, eventId, {
         ...(candidateGroupSlots === undefined ? {} : { candidateGroupSlots }),
+        ...(candidateBattleMatchupKeys === undefined ? {} : { candidateBattleMatchupKeys }),
       }),
     );
     if (battleRaceResult.skipped > 0) {
@@ -1015,6 +1018,7 @@ export async function backfillTournamentHistory(
     repair?: { issueId: number; owner: TournamentRepairState };
     candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>;
     candidateKnockoutResults?: ReadonlyArray<DbTournamentKnockoutResultInsert>;
+    candidateBattleMatchupKeys?: TournamentStructureRepairCandidate['battleMatchupKeys'];
   },
 ): Promise<TournamentSetupIssue[]> {
   if (!window) {
@@ -1037,6 +1041,7 @@ export async function backfillTournamentHistory(
         : { repairIssueId: options.auditRepairIssueId },
       options?.candidateGroupSlots,
       options?.candidateKnockoutResults,
+      options?.candidateBattleMatchupKeys,
     );
     issues.push(...eventIssues);
   }

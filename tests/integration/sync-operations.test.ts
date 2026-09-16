@@ -417,6 +417,54 @@ describe('ops sync state machine', () => {
     expect(recoveredAudit.reasonCodes).toEqual([]);
   });
 
+  test('allows same-attempt durable convergence to replace a provisional failure', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[0], season);
+    const resourceId = 'same-attempt-convergence';
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results', unknownRequests: 1 },
+        lastError: 'provider timeout',
+      },
+    ]);
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'completed',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results', factCommit: 'reused' },
+        completedAt: new Date('2026-08-08T00:01:00.000Z'),
+      },
+    ]);
+    // A late same-attempt running/failed write must not undo the converged
+    // terminal evidence.
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId,
+        status: 'running',
+        attempts: 1,
+        normalizedPayload: { phase: 'late-replay' },
+      },
+    ]);
+
+    const [row] = await sql<Array<{ status: string; last_error: string | null }>>`
+      SELECT status, last_error
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+        AND resource_type = 'entry-event'
+        AND resource_id = ${resourceId}
+    `;
+    expect(row).toEqual({ status: 'completed', last_error: null });
+  });
+
   test('does not certify results while a transfer component is unresolved', async () => {
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     await startRun(RUN_IDS[1], season, 'entry', 1);

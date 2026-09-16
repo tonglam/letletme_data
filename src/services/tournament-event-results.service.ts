@@ -647,6 +647,11 @@ export async function syncTournamentEventResultsForEntryIds(
       requiredResultEntryIds,
       transferOnlyEntryIds,
     );
+    // Lease rechecks can discover that another worker completed both the
+    // result and transfer components after this run was planned. Keep those
+    // entries separate until the concurrent phase finishes, then include them
+    // in the run-level reuse totals as a single durable convergence outcome.
+    const coordinatedReuseEntryIds = new Set<number>();
     let liveResolution: Awaited<ReturnType<typeof resolveEventPointsPayload>> | null = null;
     let eventLiveProviderRequestStarted = false;
     try {
@@ -909,6 +914,7 @@ export async function syncTournamentEventResultsForEntryIds(
                   },
                 ]);
               }
+              if (!needsTransfer) coordinatedReuseEntryIds.add(entryId);
               if (!needsTransfer) return { entryId, success: true } satisfies EntrySyncOutcome;
             }
 
@@ -1161,6 +1167,8 @@ export async function syncTournamentEventResultsForEntryIds(
         return { entryId, success: false } satisfies EntrySyncOutcome;
       }
     });
+
+    reusableEntryIds = [...new Set([...reusableEntryIds, ...coordinatedReuseEntryIds])];
 
     if (transferOnlyEntryIds.length > 0) {
       const transferSummary = await syncEntryTransferHistories(

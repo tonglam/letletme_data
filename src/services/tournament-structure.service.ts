@@ -31,12 +31,26 @@ import { createTournamentPointsGroupResultsRepository } from '../repositories/to
 export type DerivedResultRepairSnapshot = {
   points: Array<{ sourceResultId: number; updatedAt: string }>;
   battle: Array<{ sourceResultId: number; updatedAt: string }>;
+  /** Durable local fixture identities affected by the structure swap. */
+  battleMatchupKeys: Array<{
+    groupId: number;
+    eventId: number;
+    homeIndex: number;
+    awayIndex: number;
+  }>;
   knockout: Array<{ sourceResultId: number; updatedAt: string }>;
 };
 
 export type TournamentStructureRepairCandidate = Readonly<{
   groupRows: ReadonlyArray<DbTournamentGroupInsert>;
   knockoutResults: ReadonlyArray<DbTournamentKnockoutResultInsert>;
+  /** Fixture identities are schedule facts; entrants are recalculated separately. */
+  battleMatchupKeys: ReadonlyArray<{
+    groupId: number;
+    eventId: number;
+    homeIndex: number;
+    awayIndex: number;
+  }>;
 }>;
 
 export function resolveKnockoutLegEntrants(
@@ -78,6 +92,12 @@ export async function rebuildTournamentStructure(
   entrySeeds: EntrySeed[],
   options: Readonly<{
     preserveDerivedResults?: boolean;
+    acceptedBattleMatchupKeys?: ReadonlyArray<{
+      groupId: number;
+      eventId: number;
+      homeIndex: number;
+      awayIndex: number;
+    }>;
     onCandidate?: (candidate: TournamentStructureRepairCandidate) => void;
   }> = {},
 ): Promise<ReadonlyArray<DbTournamentGroupInsert>> {
@@ -157,6 +177,7 @@ export async function rebuildTournamentStructure(
   options.onCandidate?.({
     groupRows,
     knockoutResults: publishedKnockoutResults,
+    battleMatchupKeys: options.acceptedBattleMatchupKeys ?? [],
   });
   return groupRows;
 }
@@ -283,19 +304,25 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         eventId <= group.endedEventId,
     );
 
+  const staleBattleRows = battles.filter(
+    (result) =>
+      result.officialMatchId === null &&
+      (!ownsGroup(result.groupId, result.eventId) ||
+        !ownsLocalSlot(result.groupId, result.homeIndex, result.homeEntryId, result.eventId) ||
+        !ownsLocalSlot(result.groupId, result.awayIndex, result.awayEntryId, result.eventId)),
+  );
+
   return {
     points: points
       .filter((result) => !ownsGroupEntry(result.groupId, result.entryId, result.eventId))
       .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
-    battle: battles
-      .filter(
-        (result) =>
-          result.officialMatchId === null &&
-          (!ownsGroup(result.groupId, result.eventId) ||
-            !ownsLocalSlot(result.groupId, result.homeIndex, result.homeEntryId, result.eventId) ||
-            !ownsLocalSlot(result.groupId, result.awayIndex, result.awayEntryId, result.eventId)),
-      )
-      .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
+    battle: staleBattleRows.map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
+    battleMatchupKeys: staleBattleRows.map(({ groupId, eventId, homeIndex, awayIndex }) => ({
+      groupId,
+      eventId,
+      homeIndex,
+      awayIndex,
+    })),
     knockout: knockoutResults
       .filter((result) => {
         if (result.officialMatchId !== null) return false;
@@ -326,7 +353,12 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
 export async function pruneTournamentDerivedResultsOutsideStructure(
   season: FplSeasonRef,
   tournamentId: number,
-  snapshot: DerivedResultRepairSnapshot = { points: [], battle: [], knockout: [] },
+  snapshot: DerivedResultRepairSnapshot = {
+    points: [],
+    battle: [],
+    battleMatchupKeys: [],
+    knockout: [],
+  },
 ): Promise<void> {
   // The DELETE predicates below are the authoritative recheck against the
   // rebuilt topology. Do not apply the pre-repair timestamp snapshot after

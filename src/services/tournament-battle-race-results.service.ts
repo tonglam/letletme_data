@@ -38,6 +38,17 @@ export type CandidateBattleGroupSlot = Readonly<{
   entryId: number;
 }>;
 
+export type CandidateBattleMatchupKey = Readonly<{
+  groupId: number;
+  eventId: number;
+  homeIndex: number;
+  awayIndex: number;
+}>;
+
+export function battleMatchupKey(row: CandidateBattleMatchupKey): string {
+  return `${row.groupId}:${row.eventId}:${row.homeIndex}:${row.awayIndex}`;
+}
+
 async function getOfficialH2HSyncOptions(
   season: FplSeasonRef,
   eventId: number,
@@ -139,6 +150,8 @@ export async function syncTournamentBattleRaceResultsForTournament(
   eventId: number,
   options: Readonly<{
     candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>;
+    /** Exact fixture identities accepted by the structure-repair snapshot. */
+    candidateBattleMatchupKeys?: ReadonlyArray<CandidateBattleMatchupKey>;
   }> = {},
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
   if (!tournament.groupStartedEventId || !tournament.groupEndedEventId) {
@@ -198,6 +211,9 @@ export async function syncTournamentBattleRaceResultsForTournament(
     ]),
   );
   const candidateMode = options.candidateGroupSlots !== undefined;
+  const candidateMatchupKeys = new Set(
+    (options.candidateBattleMatchupKeys ?? []).map((row) => battleMatchupKey(row)),
+  );
   const scoredBattleResults = [];
   // Replays of the same finalized event must carry the same source watermark;
   // using wall-clock time here made every retry look like new evidence.
@@ -206,6 +222,17 @@ export async function syncTournamentBattleRaceResultsForTournament(
     return candidate.getTime() > latest.getTime() ? candidate : latest;
   }, new Date(0));
   for (const result of battleResults) {
+    if (candidateMode && !candidateMatchupKeys.has(battleMatchupKey(result))) {
+      skipped += 1;
+      logWarn('Skipping battle race row outside the accepted repair schedule', {
+        tournamentId: tournament.id,
+        eventId,
+        groupId: result.groupId,
+        homeIndex: result.homeIndex,
+        awayIndex: result.awayIndex,
+      });
+      continue;
+    }
     if (
       result.officialMatchId != null ||
       (!candidateMode && (result.homeEntryId === null || result.awayEntryId === null))

@@ -246,6 +246,7 @@ async function repairTournamentSetupIssuePrepared(
         let candidate: TournamentStructureRepairCandidate | null = null;
         await rebuildTournamentStructure(season, tournament, entrySeeds, {
           preserveDerivedResults: true,
+          acceptedBattleMatchupKeys: staleDerivedResults.battleMatchupKeys,
           onCandidate: (value) => {
             candidate = value;
           },
@@ -270,7 +271,14 @@ async function repairTournamentSetupIssuePrepared(
         {
           auditRepairIssueId: issueId,
           repair: { issueId, owner },
-          candidateGroupSlots: rebuilt.candidate.groupRows,
+          candidateGroupSlots:
+            rebuilt.candidate.battleMatchupKeys.length > 0
+              ? rebuilt.candidate.groupRows
+              : undefined,
+          candidateBattleMatchupKeys:
+            rebuilt.candidate.battleMatchupKeys.length > 0
+              ? rebuilt.candidate.battleMatchupKeys
+              : undefined,
           candidateKnockoutResults: rebuilt.candidate.knockoutResults,
         },
       );
