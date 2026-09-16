@@ -83,6 +83,11 @@ export type MaintenanceJobData = {
   };
   /** Stable source checkpoint shared by all My FPL child refreshes. */
   freshAfter?: string;
+  /** Expected My FPL FINAL input-scope generations captured by the scheduler. */
+  entryScopeGeneration?: number;
+  tournamentScopeGeneration?: number;
+  /** Immutable FPL data_checked_at fence captured by a FINAL obligation. */
+  finalDataCheckedAt?: string;
 };
 
 export { maintenanceQueueName } from './names';

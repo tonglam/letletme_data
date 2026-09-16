@@ -31,6 +31,10 @@ describe('explicit entry repair selection', () => {
   test('distinguishes targeted repair lists from scheduled scans', () => {
     expect(isExplicitEntryRepairRequest({ entryIds: [1, 2] })).toBe(true);
     expect(isExplicitEntryRepairRequest({ entryIds: [] })).toBe(true);
+    expect(isExplicitEntryRepairRequest({ entryIds: [1, 2], retryCount: 1 })).toBe(false);
+    expect(isExplicitEntryRepairRequest({ entryIds: [1, 2], executionIntent: 'retry' })).toBe(
+      false,
+    );
     expect(isExplicitEntryRepairRequest({})).toBe(false);
     expect(isExplicitEntryRepairRequest(undefined)).toBe(false);
   });
@@ -57,7 +61,7 @@ describe('explicit entry repair selection', () => {
         retryCount: 1,
         obligationId: 'daily-1',
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test('refreshes picks for every cron run and explicit repair', () => {
@@ -65,6 +69,9 @@ describe('explicit entry repair selection', () => {
     expect(shouldRefreshEntryPicks({ source: 'cron', entryIds: [42] })).toBe(true);
     expect(shouldRefreshEntryPicks({ source: 'api', entryIds: [42] })).toBe(true);
     expect(shouldRefreshEntryPicks({ source: 'manual' })).toBe(false);
+    expect(
+      shouldRefreshEntryPicks({ source: 'api', entryIds: [42], executionIntent: 'retry' }),
+    ).toBe(false);
   });
 });
 

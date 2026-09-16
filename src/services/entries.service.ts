@@ -663,6 +663,10 @@ export async function syncEntryEventResults(
   season: FplSeasonRef,
   entryId: number,
   eventId: number,
+  options?: {
+    /** One validated event-live observation shared by the containing batch. */
+    providerEventLive?: EventPointsPayload;
+  },
 ) {
   try {
     logInfo('Starting entry event results sync', { entryId, eventId });
@@ -670,10 +674,11 @@ export async function syncEntryEventResults(
     // If the GW finalizes while either request is in flight, the persisted
     // marker remains before data_checked_at and the finalized scan refetches it.
     const richSyncStartedAt = await readDatabaseOrderingTimestamp();
-    const [picks, live] = await Promise.all([
-      fplClient.getEntryEventPicks(entryId, eventId),
-      fplClient.getEventLive(eventId),
-    ]);
+    const picksPromise = fplClient.getEntryEventPicks(entryId, eventId);
+    const livePromise = options?.providerEventLive
+      ? Promise.resolve(options.providerEventLive)
+      : fplClient.getEventLive(eventId);
+    const [picks, live] = await Promise.all([picksPromise, livePromise]);
     const accepted = await withMutationScopes(
       {
         queueName: 'entry-sync',

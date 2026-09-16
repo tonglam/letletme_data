@@ -30,6 +30,8 @@ export interface DataSyncAttemptContext {
   queue: string;
   jobName: string;
   runId: string;
+  /** Stable batch identity used by entry-scope workers and later cost ledgers. */
+  batchId?: string;
   source?: string;
   attempt?: number;
   targetEventId?: number;

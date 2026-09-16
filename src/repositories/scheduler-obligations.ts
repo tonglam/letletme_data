@@ -998,6 +998,102 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
   return updated.length;
 }
 
+/**
+ * Retire pending My FPL FINAL obligations whose source scope is older than the
+ * newly observed generation.  Scope generations are numeric authority, so the
+ * comparison deliberately does not use period-key string ordering.  Enqueued
+ * or running rows are left intact; their worker rechecks the same fence before
+ * provider work, canonical writes, and completion.
+ */
+export async function supersedeMyFplFinalizationObligations(input: {
+  scopeKey: string;
+  periodKey: string;
+  successorObligationId: string;
+  dataCheckedAt: Date | string;
+  entryScopeGeneration: number;
+  tournamentScopeGeneration: number;
+  db?: DbHandle;
+}): Promise<number> {
+  if (
+    input.scopeKey.length === 0 ||
+    input.periodKey.length === 0 ||
+    input.successorObligationId.length === 0 ||
+    !Number.isSafeInteger(input.entryScopeGeneration) ||
+    input.entryScopeGeneration < 0 ||
+    !Number.isSafeInteger(input.tournamentScopeGeneration) ||
+    input.tournamentScopeGeneration < 0
+  ) {
+    throw new Error('My FPL finalization supersession input is invalid');
+  }
+  const dataCheckedAt = new Date(input.dataCheckedAt);
+  if (!Number.isFinite(dataCheckedAt.getTime())) {
+    throw new Error('My FPL finalization supersession fence must be a valid timestamp');
+  }
+  const db = input.db ?? (await getDb());
+  const updated = await db.execute<{ obligation_id: string }>(sql`
+    WITH candidates AS (
+      SELECT
+        obligation_id,
+        (regexp_match(
+          period_key,
+          '^final-[0-9]+-([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)-scope-e([0-9]{1,16})-t([0-9]{1,16})$'
+        ))[1] AS source_checked_at,
+        ((regexp_match(
+          period_key,
+          '^final-[0-9]+-([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)-scope-e([0-9]{1,16})-t([0-9]{1,16})$'
+        ))[2])::bigint AS entry_scope_generation,
+        ((regexp_match(
+          period_key,
+          '^final-[0-9]+-([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)-scope-e([0-9]{1,16})-t([0-9]{1,16})$'
+        ))[3])::bigint AS tournament_scope_generation
+      FROM ops.scheduler_obligations
+      WHERE job_name = 'my-fpl-finalization'
+        AND scope_key = ${input.scopeKey}
+        AND period_key <> ${input.periodKey}
+        AND status IN ('pending', 'failed')
+    ), retired AS (
+      UPDATE ops.scheduler_obligations AS obligation
+      SET status = 'skipped',
+          evidence = obligation.evidence || jsonb_build_object(
+            'provider', 'fpl',
+            'terminal', true,
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', ${input.periodKey}::text,
+            'supersededByObligationId', ${input.successorObligationId}::text,
+            'supersededByEntryScopeGeneration', ${input.entryScopeGeneration}::bigint,
+            'supersededByTournamentScopeGeneration', ${input.tournamentScopeGeneration}::bigint
+          ),
+          completed_at = clock_timestamp(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          last_error = NULL,
+          updated_at = clock_timestamp()
+      FROM candidates
+      WHERE obligation.obligation_id = candidates.obligation_id
+        AND (
+          candidates.entry_scope_generation IS NULL
+          OR candidates.tournament_scope_generation IS NULL
+          OR candidates.entry_scope_generation < ${input.entryScopeGeneration}::bigint
+          OR (
+            candidates.entry_scope_generation = ${input.entryScopeGeneration}::bigint
+            AND candidates.tournament_scope_generation < ${input.tournamentScopeGeneration}::bigint
+          )
+          OR (
+            candidates.entry_scope_generation = ${input.entryScopeGeneration}::bigint
+            AND candidates.tournament_scope_generation = ${input.tournamentScopeGeneration}::bigint
+            AND (
+              candidates.source_checked_at IS NULL
+              OR candidates.source_checked_at::timestamptz < ${dataCheckedAt.toISOString()}::timestamptz
+            )
+          )
+        )
+      RETURNING obligation.obligation_id
+    )
+    SELECT obligation_id FROM retired
+  `);
+  return updated.length;
+}
+
 export type SchedulerDueAtSupersessionBoundary = Readonly<{
   jobName: string;
   scopeKey: string;

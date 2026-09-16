@@ -18,6 +18,7 @@ import {
   reserveSchedulerObligation,
   supersedeSchedulerObligations,
   supersedeSchedulerObligationsByDueAt,
+  supersedeMyFplFinalizationObligations,
   type SchedulerObligation,
 } from '../repositories/scheduler-obligations';
 import {
@@ -1770,6 +1771,33 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
           definition: { ...definition, queueName: schedulerLaneName(definition) },
           plan,
         });
+        if (definition.name === 'my-fpl-finalization' && plan.terminalStatus === undefined) {
+          const entryScopeGeneration = evidenceNumber(plan.evidence, 'entryScopeGeneration');
+          const tournamentScopeGeneration = evidenceNumber(
+            plan.evidence,
+            'tournamentScopeGeneration',
+          );
+          const dataCheckedAt = evidenceString(plan.evidence, 'dataCheckedAt');
+          if (
+            dataCheckedAt &&
+            Number.isFinite(Date.parse(dataCheckedAt)) &&
+            typeof entryScopeGeneration === 'number' &&
+            Number.isSafeInteger(entryScopeGeneration) &&
+            entryScopeGeneration >= 0 &&
+            typeof tournamentScopeGeneration === 'number' &&
+            Number.isSafeInteger(tournamentScopeGeneration) &&
+            tournamentScopeGeneration >= 0
+          ) {
+            await supersedeMyFplFinalizationObligations({
+              scopeKey: plan.scopeKey,
+              periodKey: plan.periodKey,
+              successorObligationId: obligation.obligationId,
+              dataCheckedAt,
+              entryScopeGeneration: entryScopeGeneration as number,
+              tournamentScopeGeneration: tournamentScopeGeneration as number,
+            });
+          }
+        }
         if (!plan.terminalStatus) {
           const freshnessWindowId = await recordFreshnessWindowForPlan(
             definition,

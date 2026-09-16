@@ -8,9 +8,19 @@ type EventFinalizationState = {
 };
 
 export function isExplicitEntryRepairRequest(
-  jobData: { entryIds?: readonly number[] } | undefined,
+  jobData:
+    | {
+        entryIds?: readonly number[];
+        retryCount?: number;
+        executionIntent?: string;
+      }
+    | undefined,
 ): boolean {
-  return jobData?.entryIds !== undefined;
+  return (
+    jobData?.entryIds !== undefined &&
+    jobData.executionIntent !== 'retry' &&
+    (jobData.retryCount ?? 0) === 0
+  );
 }
 
 export function shouldRefreshEntryInfoFromSource(
@@ -19,10 +29,12 @@ export function shouldRefreshEntryInfoFromSource(
         source?: string;
         entryIds?: readonly number[];
         retryCount?: number;
+        executionIntent?: string;
         obligationId?: string;
       }
     | undefined,
 ): boolean {
+  if (jobData?.executionIntent === 'retry' || (jobData?.retryCount ?? 0) > 0) return false;
   const isRoutineCapture =
     (jobData?.source === 'catchup' || jobData?.source === 'reconcile') &&
     jobData.obligationId === undefined;
@@ -38,8 +50,16 @@ export function shouldRefreshEntryInfoFromSource(
 }
 
 export function shouldRefreshEntryPicks(
-  jobData: { source?: string; entryIds?: readonly number[] } | undefined,
+  jobData:
+    | {
+        source?: string;
+        entryIds?: readonly number[];
+        retryCount?: number;
+        executionIntent?: string;
+      }
+    | undefined,
 ): boolean {
+  if (jobData?.executionIntent === 'retry' || (jobData?.retryCount ?? 0) > 0) return false;
   return jobData?.source === 'cron' || isExplicitEntryRepairRequest(jobData);
 }
 
