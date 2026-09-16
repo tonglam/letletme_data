@@ -902,6 +902,12 @@ describe('ops sync state machine', () => {
         AND resource_id = ${attemptKey}
     `;
     expect(running).toEqual({ phase: 'started', eventId: 12, outcome: 'pending' });
+    const [runningRun] = await sql<Array<{ event_id: number | null }>>`
+      SELECT event_id
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+    `;
+    expect(runningRun?.event_id).toBe(12);
 
     expect(
       await syncOperationsRepository.recordBatchCost(RUN_IDS[2], {
