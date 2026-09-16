@@ -548,6 +548,7 @@ local observedDeskRaw = ARGV[3] or ''
 local observedDetailRaw = ARGV[4] or ''
 local previousTtl = ARGV[5]
 local finalTtl = ARGV[6]
+local preservePrevious = ARGV[7] == '1'
 local currentDeskRaw = redis.call('GET', KEYS[1]) or ''
 local currentDetailRaw = redis.call('GET', KEYS[4]) or ''
 if currentDeskRaw ~= observedDeskRaw or currentDetailRaw ~= observedDetailRaw then return {'changed'} end
@@ -596,7 +597,7 @@ end
 if currentDeskRaw == deskRaw and currentDetailRaw == detailRaw then return {'already-canonical', currentDeskRaw, currentDetailRaw} end
 
 local currentDeskOk, currentDesk = pcall(cjson.decode, currentDeskRaw)
-if currentDeskRaw ~= '' and currentDeskOk and type(currentDesk) == 'table' and type(currentDesk.desk) == 'table' then
+if preservePrevious and currentDeskRaw ~= '' and currentDeskOk and type(currentDesk) == 'table' and type(currentDesk.desk) == 'table' then
   redis.call('SET', KEYS[2], currentDeskRaw, 'PX', previousTtl)
   if currentDesk.desk.key then
     redis.call('PEXPIRE', currentDesk.desk.key, previousTtl)
@@ -604,7 +605,7 @@ if currentDeskRaw ~= '' and currentDeskOk and type(currentDesk) == 'table' and t
   end
 end
 local currentDetailOk, currentDetail = pcall(cjson.decode, currentDetailRaw)
-if currentDetailRaw ~= '' and currentDetailOk and type(currentDetail) == 'table' then
+if preservePrevious and currentDetailRaw ~= '' and currentDetailOk and type(currentDetail) == 'table' then
   redis.call('SET', KEYS[5], currentDetailRaw, 'PX', previousTtl)
   local oldManifest = 'llm:data:v3:fpl:live-match:detail:' .. currentDetail.season .. ':' .. tostring(currentDetail.eventId) .. ':' .. tostring(currentDetail.generation) .. ':manifest'
   redis.call('PEXPIRE', oldManifest, previousTtl)
@@ -2010,6 +2011,12 @@ export async function restoreLiveMatchEquivalentFinalPairV3(input: {
   readonly detailCheckpoint: MatchDetailRead;
   readonly observedDesk: MatchDeskActiveFence;
   readonly observedDetail: MatchDetailActiveFence;
+  /**
+   * Keep the currently serving pair as a previous fallback only when that
+   * pair is itself FINAL.  Recovery callers can disable rotation when a
+   * payload-equivalent provisional pair must not remain readable on fallback.
+   */
+  readonly preservePrevious?: boolean;
   readonly promoteActiveEvent?: boolean;
   readonly redis?: Redis;
 }): Promise<{
@@ -2129,6 +2136,7 @@ export async function restoreLiveMatchEquivalentFinalPairV3(input: {
       input.observedDetail.observed,
       String(LIVE_MATCH_PREVIOUS_TTL_MS),
       String(LIVE_MATCH_FINAL_TTL_MS),
+      input.preservePrevious === false ? '0' : '1',
     ),
   );
   const status = result[0];
@@ -2159,8 +2167,10 @@ export async function restoreLiveMatchEquivalentFinalPairV3(input: {
     status: status as 'restored' | 'already-canonical',
     desk: currentDesk.publication,
     detail: currentDetail.publication,
-    previousDesk: input.observedDesk.read?.publication ?? null,
-    previousDetail: input.observedDetail.read?.publication ?? null,
+    previousDesk:
+      input.preservePrevious === false ? null : (input.observedDesk.read?.publication ?? null),
+    previousDetail:
+      input.preservePrevious === false ? null : (input.observedDetail.read?.publication ?? null),
   };
 }
 

@@ -242,7 +242,13 @@ function sameLiveEventFacts(left: readonly EventLive[], right: readonly EventLiv
   for (const leftRow of left) {
     const rightRow = rightByElement.get(leftRow.elementId);
     if (!rightRow) return false;
+    // A legacy durable row may omit fixture breakdown, but a fresh row that
+    // does include it still has to be internally coherent before the field is
+    // ignored for the common-facts comparison.  Otherwise contradictory
+    // provider evidence could be accepted simply because the durable row is
+    // old enough to lack the optional field.
     if (rightRow.fixtureBreakdown === undefined) {
+      if (leftRow.fixtureBreakdown && !fixtureBreakdownMatchesTotal(leftRow)) return false;
       const { fixtureBreakdown: _ignored, ...leftWithoutBreakdown } = leftRow;
       if (canonicalJson(leftWithoutBreakdown) !== canonicalJson(rightRow)) return false;
     } else if (canonicalJson(leftRow) !== canonicalJson(rightRow)) {
@@ -509,8 +515,23 @@ type MatchPlayerFacts = Readonly<{
 type MatchDetailFacts = ReadonlyMap<number, ReadonlyMap<number, MatchPlayerFacts>>;
 type MatchDetailFactsResult =
   | Readonly<{ kind: 'available'; facts: MatchDetailFacts }>
+  | Readonly<{ kind: 'partial'; facts: MatchDetailFacts }>
   | Readonly<{ kind: 'unavailable' }>
   | Readonly<{ kind: 'invalid' }>;
+
+function fixtureBreakdownMatchesTotal(row: EventLive): boolean {
+  if (!row.fixtureBreakdown) return true;
+  const awardedPoints = row.fixtureBreakdown.reduce(
+    (fixtureTotal, fixture) =>
+      fixtureTotal +
+      fixture.stats.reduce(
+        (total, stat) => total + stat.points + (stat.pointsModification ?? 0),
+        0,
+      ),
+    0,
+  );
+  return awardedPoints === row.totalPoints;
+}
 
 function matchStatAwardedPoints(stat: {
   readonly points: number;
@@ -586,7 +607,10 @@ function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailF
     }
     if (players.size === 0) byFixture.delete(fixtureId);
   }
-  return unavailable ? { kind: 'unavailable' } : { kind: 'available', facts: byFixture };
+  if (unavailable) {
+    return byFixture.size === 0 ? { kind: 'unavailable' } : { kind: 'partial', facts: byFixture };
+  }
+  return { kind: 'available', facts: byFixture };
 }
 
 function matchPlayerFactsEqual(left: MatchPlayerFacts, right: MatchPlayerFacts): boolean {
@@ -649,6 +673,7 @@ function durableMatchDetailFactsAgreeWithLiveFinal(
   // compatible observation instead of rejecting the retained FINAL.
   if (expectedDetailResult.kind === 'unavailable') return null;
   if (expectedDetailResult.kind === 'invalid') return false;
+  const partial = expectedDetailResult.kind === 'partial';
   const expectedDetail = expectedDetailResult.facts;
   const actualDetail = new Map(
     detail.fixtures.map((fixture) => [
@@ -681,14 +706,20 @@ function durableMatchDetailFactsAgreeWithLiveFinal(
   }
   for (const [fixtureId, expectedPlayers] of expectedDetail) {
     const actualPlayers = actualDetail.get(fixtureId);
-    if (!actualPlayers || actualPlayers.size !== expectedPlayers.size) return false;
+    if (!actualPlayers || (!partial && actualPlayers.size !== expectedPlayers.size)) {
+      return false;
+    }
     for (const [playerId, expected] of expectedPlayers) {
       const actual = actualPlayers.get(playerId);
       if (!actual || !matchPlayerFactsEqual(expected, actual)) return false;
     }
   }
   for (const [fixtureId, actualPlayers] of actualDetail) {
-    if (!expectedDetail.has(fixtureId) && actualPlayers.size > 0) return false;
+    // When any event-live row lacks the optional breakdown, its fixture
+    // assignment is unavailable.  Compare all facts that are present, while
+    // allowing the durable detail to contain players belonging to that
+    // unavailable portion of the observation.
+    if (!partial && !expectedDetail.has(fixtureId) && actualPlayers.size > 0) return false;
   }
   return true;
 }
@@ -985,9 +1016,9 @@ export async function syncLiveSnapshotV2(
           await clearDesired(desired);
         }
       } catch (error) {
-        // The conflicting Redis payload is already rejected. A marker cleanup
-        // outage must remain visible without replacing the bounded conflict
-        // error with an infrastructure retry loop.
+        // Do not reject a candidate while its exact marker may still be
+        // executable. Surface the cleanup failure so the scheduler retries the
+        // bounded recovery instead of claiming that the conflict is fenced.
         logError('Live Match conflicting checkpoint marker cleanup failed', error, {
           season: season.seasonCode,
           eventId,
@@ -995,6 +1026,11 @@ export async function syncLiveSnapshotV2(
           publicationId: publication.publicationId,
           generation: publication.generation,
         });
+        throw new CacheError(
+          `Live Match conflicting checkpoint marker could not be cleared for event ${eventId}`,
+          'LIVE_MATCH_FINAL_MARKER_CLEANUP_FAILED',
+          error instanceof Error ? error : undefined,
+        );
       }
     };
     if (canProbeServingPair) {
@@ -1085,11 +1121,15 @@ export async function syncLiveSnapshotV2(
       // namespace without any provider dependency. Restore both siblings in
       // one fenced CAS, then capture the resulting pointers for any later
       // observation path.
+      const preserveEquivalentPrevious =
+        observedDeskRead?.publication.state === 'FINALIZED' &&
+        observedDetailRead?.publication.finalized === true;
       await (dependencies.restoreFinalMatchPair ?? restoreLiveMatchEquivalentFinalPairV3)({
         deskCheckpoint: durableMatchPair.desk,
         detailCheckpoint: durableMatchPair.detail,
         observedDesk: observedMatchDesk!,
         observedDetail: observedMatchDetail!,
+        preservePrevious: preserveEquivalentPrevious,
         redis: undefined,
       });
       [observedMatchDesk, observedMatchDetail] = await Promise.all([
@@ -1199,68 +1239,80 @@ export async function syncLiveSnapshotV2(
       );
     }
 
-    const validateAcceptedMatch = async (match: LiveMatchObservationResult): Promise<void> => {
-      if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {
-        throw new Error(
-          `Live Match final publication was not complete for event ${eventId}; desk=${match.desk.state}; detail=${match.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
-        );
+    const clearRejectedMatch = async (match: LiveMatchObservationResult): Promise<void> => {
+      await clearConflictingMatchCheckpoint('desk', match.desk);
+      if (match.detail) {
+        await clearConflictingMatchCheckpoint('detail', match.detail);
       }
-      // The synchronizer is allowed to reuse an existing FINAL desk/detail.
-      // Re-read both active pointers after that call and prove that the winning
-      // payloads are the facts checked against the durable Live Points FINAL.
-      // Production invokes this callback before forced checkpoint markers are
-      // created, so a rejected winner leaves no recovery obligation behind.
-      if (!canProbeServingPair) return;
-      const expectedDesk = prepareLiveMatchDesk({
-        eventId,
-        rawFixtures: fixturesResult.value,
-        referenceData: referenceDataResult.value,
-        expectedFixtureIds: expectedFixtureIdsResult.value,
-        finalized: true,
-        lifecycleState: 'FINALIZED',
-      });
-      const detailReference = await resolveLiveReferenceDataForDetail(referenceDataResult.value, {
-        requireEventPinnedIdentity: true,
-      });
-      const expectedDetail = detailReference
-        ? prepareLiveMatchDetail({
-            eventId,
-            rawElements: liveResult.value.elements,
-            rawFixtures: fixturesResult.value,
-            deskFixtures: expectedDesk.fixtures,
-            publishedLiveElementIds: durableFinal.eventLives.map((row) => row.elementId),
-            referenceData: detailReference,
-            requireEventPinnedIdentity: true,
-          })
-        : null;
-      const [afterDesk, afterDetail] = await Promise.all([
-        dependencies.readObservedMatchDesk!({ season: season.seasonCode, eventId }),
-        dependencies.readObservedMatchDetail!({ season: season.seasonCode, eventId }),
-      ]);
-      const deskIdentityAgrees =
-        !afterDesk.read?.publication ||
-        (afterDesk.read.publication.publicationId === match.desk.publicationId &&
-          afterDesk.read.publication.generation === match.desk.generation);
-      const detailIdentityAgrees =
-        !afterDetail.read?.publication ||
-        !match.detail ||
-        (afterDetail.read.publication.publicationId === match.detail.publicationId &&
-          afterDetail.read.publication.generation === match.detail.generation);
-      if (
-        !afterDesk.read ||
-        !afterDetail.read ||
-        !deskIdentityAgrees ||
-        !detailIdentityAgrees ||
-        canonicalJson(afterDesk.read.fixtures) !== canonicalJson(expectedDesk.fixtures) ||
-        canonicalJson(afterDetail.read.fixtures) !==
-          canonicalJson(expectedDetail?.fixtures ?? []) ||
-        canonicalJson(match.deskFixtures) !== canonicalJson(expectedDesk.fixtures) ||
-        canonicalJson(match.detailFixtures ?? []) !== canonicalJson(expectedDetail?.fixtures ?? [])
-      ) {
-        throw new CacheError(
-          `Live Match recovery did not publish facts for event ${eventId}`,
-          'LIVE_MATCH_FINAL_FACTS_MISMATCH',
-        );
+    };
+    const validateAcceptedMatch = async (match: LiveMatchObservationResult): Promise<void> => {
+      try {
+        if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {
+          throw new Error(
+            `Live Match final publication was not complete for event ${eventId}; desk=${match.desk.state}; detail=${match.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
+          );
+        }
+        // The synchronizer is allowed to reuse an existing FINAL desk/detail.
+        // Re-read both active pointers after that call and prove that the winning
+        // payloads are the facts checked against the durable Live Points FINAL.
+        // Production invokes this callback before forced checkpoint markers are
+        // created, so a rejected winner leaves no recovery obligation behind.
+        if (!canProbeServingPair) return;
+        const expectedDesk = prepareLiveMatchDesk({
+          eventId,
+          rawFixtures: fixturesResult.value,
+          referenceData: referenceDataResult.value,
+          expectedFixtureIds: expectedFixtureIdsResult.value,
+          finalized: true,
+          lifecycleState: 'FINALIZED',
+        });
+        const detailReference = await resolveLiveReferenceDataForDetail(referenceDataResult.value, {
+          requireEventPinnedIdentity: true,
+        });
+        const expectedDetail = detailReference
+          ? prepareLiveMatchDetail({
+              eventId,
+              rawElements: liveResult.value.elements,
+              rawFixtures: fixturesResult.value,
+              deskFixtures: expectedDesk.fixtures,
+              publishedLiveElementIds: durableFinal.eventLives.map((row) => row.elementId),
+              referenceData: detailReference,
+              requireEventPinnedIdentity: true,
+            })
+          : null;
+        const [afterDesk, afterDetail] = await Promise.all([
+          dependencies.readObservedMatchDesk!({ season: season.seasonCode, eventId }),
+          dependencies.readObservedMatchDetail!({ season: season.seasonCode, eventId }),
+        ]);
+        const deskIdentityAgrees =
+          !afterDesk.read?.publication ||
+          (afterDesk.read.publication.publicationId === match.desk.publicationId &&
+            afterDesk.read.publication.generation === match.desk.generation);
+        const detailIdentityAgrees =
+          !afterDetail.read?.publication ||
+          !match.detail ||
+          (afterDetail.read.publication.publicationId === match.detail.publicationId &&
+            afterDetail.read.publication.generation === match.detail.generation);
+        if (
+          !afterDesk.read ||
+          !afterDetail.read ||
+          !deskIdentityAgrees ||
+          !detailIdentityAgrees ||
+          canonicalJson(afterDesk.read.fixtures) !== canonicalJson(expectedDesk.fixtures) ||
+          canonicalJson(afterDetail.read.fixtures) !==
+            canonicalJson(expectedDetail?.fixtures ?? []) ||
+          canonicalJson(match.deskFixtures) !== canonicalJson(expectedDesk.fixtures) ||
+          canonicalJson(match.detailFixtures ?? []) !==
+            canonicalJson(expectedDetail?.fixtures ?? [])
+        ) {
+          throw new CacheError(
+            `Live Match recovery did not publish facts for event ${eventId}`,
+            'LIVE_MATCH_FINAL_FACTS_MISMATCH',
+          );
+        }
+      } catch (error) {
+        await clearRejectedMatch(match);
+        throw error;
       }
     };
     const syncLiveMatches = dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation;
