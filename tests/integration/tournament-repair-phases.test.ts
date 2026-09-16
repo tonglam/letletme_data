@@ -67,9 +67,11 @@ test('renaming a tournament preserves the observed repair', async () => {
     'accepted',
   );
 });
-test('a newly observed issue rejects the old repair callback', async () => {
+test('changed issue facts reject the old repair callback', async () => {
   const owner = await capture();
-  await tournamentSetupIssueRepository.sync(season, tournamentId, [input]);
+  await tournamentSetupIssueRepository.sync(season, tournamentId, [
+    { ...input, diagnosticCode: 'NEW_FAILURE' },
+  ]);
   let called = false;
   await expect(
     withTournamentRepairPhase(season, issueId, owner, [], async () => {
@@ -119,7 +121,10 @@ test('repair provider wait releases lifecycle lock and cannot resolve a newly re
         tournamentId,
         scopes: [tournamentSetupLifecycleScope(tournamentId)],
       },
-      () => tournamentSetupIssueRepository.sync(season, tournamentId, [input]),
+      () =>
+        tournamentSetupIssueRepository.sync(season, tournamentId, [
+          { ...input, diagnosticCode: 'NEW_FAILURE' },
+        ]),
     );
     release();
     expect(await pending).toMatchObject({ code: 'TOURNAMENT_REPAIR_STALE' });
@@ -132,7 +137,9 @@ test('repair provider wait releases lifecycle lock and cannot resolve a newly re
 
 test('an old failed job cannot consume retry budget for a new issue observation', async () => {
   const old = await capture();
-  await tournamentSetupIssueRepository.sync(season, tournamentId, [input]);
+  await tournamentSetupIssueRepository.sync(season, tournamentId, [
+    { ...input, diagnosticCode: 'NEW_FAILURE' },
+  ]);
   await tournamentSetupIssueRepository.recordRepairAttempt(
     issueId,
     new Date(),
@@ -474,4 +481,53 @@ test('league eligibility changes cannot turn an empty write batch into success',
     service.syncLeagueEventResultsByTournament(season, tournamentId, 1),
   ).rejects.toMatchObject({ code: 'LEAGUE_ENTRY_SOURCE_STALE' });
   expect(publish).not.toHaveBeenCalled();
+});
+
+test('identical periodic observations preserve active repair and its due time', async () => {
+  const due = new Date(Date.now() - 1000);
+  await tournamentSetupIssueRepository.sync(season, tournamentId, [
+    { ...input, nextRepairAt: due },
+  ]);
+  const owner = await capture();
+  const [before] =
+    await sql`SELECT xmin::text AS physical_revision, last_seen_at FROM competition.tournament_setup_issues WHERE issue_id=${issueId}`;
+  for (let pass = 0; pass < 3; pass++) {
+    await tournamentSetupIssueRepository.sync(season, tournamentId, [
+      { ...input, nextRepairAt: new Date(Date.now() + 300000) },
+    ]);
+  }
+  const [after] =
+    await sql`SELECT xmin::text AS physical_revision, last_seen_at FROM competition.tournament_setup_issues WHERE issue_id=${issueId}`;
+  expect(after!.physical_revision).not.toBe(before!.physical_revision);
+  expect(after!.last_seen_at.getTime()).toBeGreaterThanOrEqual(before!.last_seen_at.getTime());
+  expect((await capture()).issueRevision).toBe(owner.issueRevision);
+  expect(
+    (await tournamentSetupIssueRepository.findUnresolvedById(season, issueId))!.nextRepairAt,
+  ).toEqual(due);
+  expect(await withTournamentRepairPhase(season, issueId, owner, [], async () => 'accepted')).toBe(
+    'accepted',
+  );
+  await tournamentSetupIssueRepository.recordRepairAttempt(
+    issueId,
+    new Date(Date.now() + 600000),
+    false,
+    owner.issueRevision,
+  );
+  expect((await capture()).issueRevision).not.toBe(owner.issueRevision);
+  await expect(
+    withTournamentRepairPhase(season, issueId, owner, [], async () => {}),
+  ).rejects.toMatchObject({ code: 'TOURNAMENT_REPAIR_STALE' });
+});
+
+test('resolution and identical reappearance reject the prior occurrence without losing first-seen evidence', async () => {
+  const before = await tournamentSetupIssueRepository.findUnresolvedById(season, issueId);
+  const owner = await capture();
+  await tournamentSetupIssueRepository.sync(season, tournamentId, []);
+  await tournamentSetupIssueRepository.sync(season, tournamentId, [input]);
+  const after = await tournamentSetupIssueRepository.findUnresolvedById(season, issueId);
+  expect(after!.firstSeenAt).toEqual(before!.firstSeenAt);
+  expect((await capture()).issueRevision).not.toBe(owner.issueRevision);
+  await expect(
+    withTournamentRepairPhase(season, issueId, owner, [], async () => {}),
+  ).rejects.toMatchObject({ code: 'TOURNAMENT_REPAIR_STALE' });
 });
