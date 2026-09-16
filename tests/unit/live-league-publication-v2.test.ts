@@ -713,6 +713,13 @@ describe('Live League V2 checkpoint transaction contract', () => {
   test('normalizes provider rank zero before strict publication validation', () => {
     expect(publicationServiceSource).toContain('NULLIF(entry.overall_rank, 0)');
   });
+
+  test('advances only validated FINAL checkpoints with a monotonic generation', () => {
+    expect(checkpointServiceSource).toContain('candidateIsValidFinalized');
+    expect(checkpointServiceSource).toContain(String.raw`excluded.state = 'FINALIZED'`);
+    expect(checkpointServiceSource).toContain('generationCompatible');
+    expect(checkpointServiceSource).toContain('candidateGeneration >= currentGeneration');
+  });
 });
 
 describe('Live League V2 checkpoint generation fence', () => {

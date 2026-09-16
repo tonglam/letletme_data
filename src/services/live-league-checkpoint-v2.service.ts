@@ -249,39 +249,6 @@ function checkpointValues(read: LeagueLiveRead, checkpointedAt: Date) {
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function sameFinalizedPublicationContent(
-  read: LeagueLiveRead,
-  persisted: {
-    readonly state: string;
-    readonly manifest: unknown;
-    readonly rowCount: number;
-  },
-): boolean {
-  // A Redis rebuild may allocate a fresh publication identity.  FINALIZED is
-  // still immutable: accept only the same scope, global vector, revision
-  // vector, counts, and semantic content identity; never replace the durable
-  // row with a different final result.
-  if (persisted.state !== 'FINALIZED' || persisted.rowCount !== read.index.length) return false;
-  if (!isRecord(persisted.manifest)) return false;
-  const stable = (manifest: Record<string, unknown>) => ({
-    contractVersion: manifest.contractVersion,
-    season: manifest.season,
-    eventId: manifest.eventId,
-    tournamentId: manifest.tournamentId,
-    scope: manifest.scope,
-    matchId: manifest.matchId,
-    state: manifest.state,
-    globalRef: manifest.globalRef,
-    revisions: manifest.revisions,
-    counts: manifest.counts,
-  });
-  return canonicalJson(stable(persisted.manifest)) === canonicalJson(stable(read.publication));
-}
-
 function storedFinalizedCheckpointIsValid(
   scope: LeagueLiveScope,
   current: {
@@ -320,6 +287,29 @@ export async function checkpointLiveLeaguePublicationV2(
   if (read.publication.scope === 'H2H_MATCH') return false;
   const db = dbInstance ?? (await getDb());
   const values = checkpointValues(read, new Date());
+  const scope = {
+    season: read.publication.season,
+    eventId: read.publication.eventId,
+    tournamentId: read.publication.tournamentId,
+    scope: read.publication.scope,
+  } as const;
+  const candidateIsValidFinalized =
+    read.publication.state === 'FINALIZED' &&
+    validateLiveLeaguePublicationV2Checkpoint(
+      scope,
+      values.manifest,
+      values.indexPayload,
+      values.payload,
+      {
+        publicationId: read.publication.publicationId,
+        generation: read.publication.generation,
+        state: read.publication.state,
+        rowCount: values.rowCount,
+        payloadBytes: values.payloadBytes,
+        payloadSha256: values.payloadSha256,
+      },
+    );
+  if (read.publication.state === 'FINALIZED' && !candidateIsValidFinalized) return false;
   try {
     return await db.transaction(async (tx) => {
       // Lock contention must fail fast, while a validated multi-megabyte league
@@ -354,48 +344,46 @@ export async function checkpointLiveLeaguePublicationV2(
       const current = existing[0];
       let currentIsInvalidFinalized = false;
       if (current && current.state === 'FINALIZED') {
-        const scope = {
-          season: read.publication.season,
-          eventId: read.publication.eventId,
-          tournamentId: read.publication.tournamentId,
-          scope: read.publication.scope,
-        } as const;
-        if (storedFinalizedCheckpointIsValid(scope, current)) {
-          return (
-            current.publicationId === read.publication.publicationId ||
-            sameFinalizedPublicationContent(read, current)
-          );
+        const currentIsValidFinalized = storedFinalizedCheckpointIsValid(scope, current);
+        // FINALIZED remains a fence against provisional data, stale
+        // generations, and same-generation identity conflicts. A Redis
+        // rebuild may nevertheless create a newer complete FINAL publication
+        // after the old checkpoint was retained; that validated successor is
+        // the only allowed advancement of a durable FINAL checkpoint.
+        if (!candidateIsValidFinalized) {
+          return false;
         }
-        // A corrupt FINALIZED row is not a fence. Only another validated
-        // FINALIZED publication may repair it; a provisional candidate must
-        // never delete or supersede the durable final state.
-        if (read.publication.state !== 'FINALIZED') return false;
-        currentIsInvalidFinalized = true;
-        const candidateValid = validateLiveLeaguePublicationV2Checkpoint(
-          scope,
-          values.manifest,
-          values.indexPayload,
-          values.payload,
-          {
-            publicationId: read.publication.publicationId,
-            generation: read.publication.generation,
-            state: read.publication.state,
-            rowCount: values.rowCount,
-            payloadBytes: values.payloadBytes,
-            payloadSha256: values.payloadSha256,
-          },
-        );
-        if (!candidateValid) return false;
-        await tx
-          .delete(liveLeagueCheckpointsInCompetition)
-          .where(
-            and(
-              eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
-              eq(liveLeagueCheckpointsInCompetition.eventId, read.publication.eventId),
-              eq(liveLeagueCheckpointsInCompetition.tournamentId, read.publication.tournamentId),
-              eq(liveLeagueCheckpointsInCompetition.scopeKind, read.publication.scope),
-            ),
-          );
+        const candidateGeneration = read.publication.generation;
+        const currentGeneration = Number(current.generation);
+        const generationCompatible = currentIsValidFinalized
+          ? isLiveLeagueCheckpointGenerationCompatible(
+              {
+                generation: currentGeneration,
+                publicationId: current.publicationId,
+              },
+              {
+                generation: candidateGeneration,
+                publicationId: read.publication.publicationId,
+              },
+            )
+          : Number.isSafeInteger(candidateGeneration) && candidateGeneration >= currentGeneration;
+        if (!generationCompatible) return false;
+        if (!currentIsValidFinalized) {
+          // A corrupt FINALIZED row may be repaired by the same validated
+          // monotonic successor. It can never be replaced by provisional data
+          // or a lower generation.
+          currentIsInvalidFinalized = true;
+          await tx
+            .delete(liveLeagueCheckpointsInCompetition)
+            .where(
+              and(
+                eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
+                eq(liveLeagueCheckpointsInCompetition.eventId, read.publication.eventId),
+                eq(liveLeagueCheckpointsInCompetition.tournamentId, read.publication.tournamentId),
+                eq(liveLeagueCheckpointsInCompetition.scopeKind, read.publication.scope),
+              ),
+            );
+        }
       }
       if (
         current &&
@@ -464,6 +452,11 @@ export async function checkpointLiveLeaguePublicationV2(
             (
               ${liveLeagueCheckpointsInCompetition.publicationId} = excluded.publication_id
               AND ${liveLeagueCheckpointsInCompetition.generation} = excluded.generation
+            )
+            OR (
+              ${liveLeagueCheckpointsInCompetition.state} = 'FINALIZED'
+              AND excluded.state = 'FINALIZED'
+              AND ${liveLeagueCheckpointsInCompetition.generation} < excluded.generation
             )
             OR (
               ${liveLeagueCheckpointsInCompetition.state} <> 'FINALIZED'

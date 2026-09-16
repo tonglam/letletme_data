@@ -197,6 +197,55 @@ test('validated checkpoint payloads are reused until identity changes or five mi
       db,
     ),
   ).toBe(true);
+  const successor: LeagueLiveManifest = {
+    ...publication,
+    publicationId: '30000000-0000-4000-8000-000000000100',
+    generation: 2,
+    items: {
+      index: {
+        ...publication.items.index,
+        key: liveLeagueV2ItemKey(scope, 2, 'index'),
+      },
+      payload: {
+        ...publication.items.payload,
+        key: liveLeagueV2ItemKey(scope, 2, 'payload'),
+      },
+    },
+  };
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication: successor, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(true);
+  const [advanced] = await sql`SELECT publication_id AS "publicationId", generation, state
+      FROM competition.live_league_checkpoints
+      WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
+        AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`;
+  expect(advanced).toMatchObject({
+    publicationId: successor.publicationId,
+    state: 'FINALIZED',
+  });
+  expect(Number(advanced.generation)).toBe(successor.generation);
+  // A replay from the previous final generation cannot move the durable
+  // checkpoint backwards after the validated successor has been stored.
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(false);
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      {
+        publication: { ...successor, state: 'LIVE_ACTIVE' },
+        index: [],
+        payload: {},
+        servedFrom: 'REDIS_CURRENT',
+      },
+      db,
+    ),
+  ).toBe(false);
   const selection = spyOn(db, 'select');
   const fullReads = () => selection.mock.calls.filter((call) => call[0] === undefined).length;
   try {
