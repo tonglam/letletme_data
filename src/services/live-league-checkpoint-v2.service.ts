@@ -283,6 +283,112 @@ function sameFinalizedPublicationContent(
   return canonicalJson(stable(persisted.manifest)) === canonicalJson(stable(read.publication));
 }
 
+/**
+ * Allow a validated Classic FINAL publication to advance a durable FINAL
+ * checkpoint only when it is an append-only roster successor. A roster can
+ * grow after a checkpoint is written when a late tournament entry is created;
+ * retaining the old checkpoint forever would make the retention obligation
+ * impossible to satisfy even though the new publication is complete. Existing
+ * rows and their payloads must remain canonically equivalent by entry ID;
+ * ordering may change when the canonical roster query inserts a lower ID. The
+ * caller validates the candidate as a complete FINAL publication before this
+ * predicate is considered, so additions are the only permitted change.
+ */
+export function isSafeFinalizedClassicRosterExpansion(
+  read: LeagueLiveRead,
+  persisted: {
+    readonly state: string;
+    readonly manifest: unknown;
+    readonly rowCount: number;
+    readonly indexPayload: unknown;
+    readonly payload: unknown;
+  },
+): boolean {
+  try {
+    if (
+      read.publication.scope !== 'CLASSIC' ||
+      read.publication.state !== 'FINALIZED' ||
+      persisted.state !== 'FINALIZED' ||
+      !isRecord(persisted.manifest) ||
+      !Array.isArray(persisted.indexPayload) ||
+      !isRecord(persisted.payload) ||
+      !Number.isSafeInteger(persisted.rowCount) ||
+      persisted.rowCount < 0 ||
+      persisted.rowCount !== persisted.indexPayload.length ||
+      read.index.length <= persisted.indexPayload.length
+    ) {
+      return false;
+    }
+
+    const persistedIndex = persisted.indexPayload;
+    const candidateIndex = read.index;
+    const persistedManifest = persisted.manifest;
+    if (
+      persistedManifest.state !== 'FINALIZED' ||
+      persistedManifest.contractVersion !== read.publication.contractVersion ||
+      persistedManifest.season !== read.publication.season ||
+      persistedManifest.eventId !== read.publication.eventId ||
+      persistedManifest.tournamentId !== read.publication.tournamentId ||
+      persistedManifest.scope !== 'CLASSIC' ||
+      !isRecord(persistedManifest.counts) ||
+      persistedManifest.counts.expected !== persistedIndex.length ||
+      canonicalJson(persistedManifest.globalRef) !== canonicalJson(read.publication.globalRef)
+    ) {
+      return false;
+    }
+
+    if (
+      !isRecord(read.publication.counts) ||
+      read.publication.counts.expected !== candidateIndex.length ||
+      Object.keys(persisted.payload).length !== persistedIndex.length ||
+      Object.keys(read.payload).length !== candidateIndex.length
+    ) {
+      return false;
+    }
+    const candidateRowsById = new Map<number, unknown>();
+    const entryId = (value: unknown): number | null => {
+      if (
+        !isRecord(value) ||
+        typeof value.entryId !== 'number' ||
+        !Number.isSafeInteger(value.entryId) ||
+        value.entryId <= 0
+      ) {
+        return null;
+      }
+      return value.entryId;
+    };
+
+    for (const row of candidateIndex) {
+      const id = entryId(row);
+      if (id === null || candidateRowsById.has(id)) return false;
+      candidateRowsById.set(id, row);
+    }
+
+    const persistedIds = new Set<number>();
+    for (const row of persistedIndex) {
+      const id = entryId(row);
+      if (id === null) return false;
+      if (persistedIds.has(id)) return false;
+      persistedIds.add(id);
+      const candidateRow = candidateRowsById.get(id);
+      if (candidateRow === undefined || canonicalJson(row) !== canonicalJson(candidateRow)) {
+        return false;
+      }
+      const key = String(id);
+      if (
+        !Object.prototype.hasOwnProperty.call(persisted.payload, key) ||
+        !Object.prototype.hasOwnProperty.call(read.payload, key) ||
+        canonicalJson(persisted.payload[key]) !== canonicalJson(read.payload[key])
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function storedFinalizedCheckpointIsValid(
   scope: LeagueLiveScope,
   current: {
@@ -377,6 +483,7 @@ export async function checkpointLiveLeaguePublicationV2(
         .for('update');
       const current = existing[0];
       let currentIsInvalidFinalized = false;
+      let allowFinalizedRosterExpansion = false;
       if (current && current.state === 'FINALIZED') {
         const currentIsValidFinalized = storedFinalizedCheckpointIsValid(scope, current);
         // FINALIZED remains a fence against provisional data, stale
@@ -411,7 +518,8 @@ export async function checkpointLiveLeaguePublicationV2(
           return true;
         }
         if (currentIsValidFinalized && !sameFinalizedPublicationContent(read, current)) {
-          return false;
+          allowFinalizedRosterExpansion = isSafeFinalizedClassicRosterExpansion(read, current);
+          if (!allowFinalizedRosterExpansion) return false;
         }
         if (!currentIsValidFinalized) {
           // A corrupt FINALIZED row may be repaired by the same validated
@@ -511,6 +619,12 @@ export async function checkpointLiveLeaguePublicationV2(
               AND ${liveLeagueCheckpointsInCompetition.manifest}->'globalRef' = excluded.manifest->'globalRef'
               AND ${liveLeagueCheckpointsInCompetition.manifest}->'revisions' = excluded.manifest->'revisions'
               AND ${liveLeagueCheckpointsInCompetition.manifest}->'counts' = excluded.manifest->'counts'
+            )
+            OR (
+              ${allowFinalizedRosterExpansion}
+              AND ${liveLeagueCheckpointsInCompetition.state} = 'FINALIZED'
+              AND excluded.state = 'FINALIZED'
+              AND ${liveLeagueCheckpointsInCompetition.generation} < excluded.generation
             )
             OR (
               ${liveLeagueCheckpointsInCompetition.state} <> 'FINALIZED'
