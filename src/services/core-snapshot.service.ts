@@ -175,6 +175,7 @@ export async function syncCoreSnapshot(
 
   let preparedPublicationId: string | null = null;
   let persistenceCommitted = false;
+  let publicationActivated = false;
   let validatedSnapshot: CoreSnapshot | null = null;
   let persistedEvidence: CoreSnapshotPersistenceResult | null = null;
   try {
@@ -273,6 +274,9 @@ export async function syncCoreSnapshot(
         sourceRunId,
         sourceCheckedAt,
         freshnessWindowId: options.freshnessWindowId,
+        onActivated: () => {
+          publicationActivated = true;
+        },
       },
       preparedAndPersisted.preparedCache,
     );
@@ -304,7 +308,11 @@ export async function syncCoreSnapshot(
           persistedEvidence.phases +
           persistedEvidence.fixtures,
         ...(preparedPublicationId
-          ? { publicationId: preparedPublicationId, publicationsCreated: 1, publicationsReused: 0 }
+          ? {
+              publicationId: preparedPublicationId,
+              publicationsCreated: publicationActivated ? 1 : 0,
+              publicationsReused: 0,
+            }
           : {}),
       });
     }

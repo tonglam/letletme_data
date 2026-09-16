@@ -1331,6 +1331,54 @@ describe('ops sync state machine', () => {
     expect(running?.status).toBe('running');
   });
 
+  test('keeps a batch-cost run open while a sibling delivery is still running', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const marker = (delivery: string) => ({
+      attemptKey: `entry-sync|entry-results|sibling-fence|1|none|${delivery}`,
+      batchId: 'sibling-fence',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+      payload: { startedAt: `2026-08-09T00:00:0${delivery === 'execution-1' ? 1 : 2}.000Z` },
+    });
+
+    await syncOperationsRepository.startBatchCostRun({
+      run: {
+        runId: RUN_IDS[0],
+        provider: 'fpl',
+        lane: 'entry-sync',
+        scope: 'entry-results',
+        season,
+        mode: 'batch-cost',
+        trigger: 'batch-cost',
+        attempt: 1,
+      },
+      marker: marker('execution-1'),
+    });
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], marker('execution-2'));
+
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+      ...marker('execution-1'),
+      complete: true,
+      payload: { logicalRequests: 1 },
+    });
+    const [whileSiblingRuns] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.sync_runs WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(whileSiblingRuns?.status).toBe('running');
+
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+      ...marker('execution-2'),
+      complete: true,
+      payload: { logicalRequests: 1 },
+    });
+    const [settled] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.sync_runs WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(settled?.status).toBe('completed');
+  });
+
   test('fences a late failure behind a newer batch attempt', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

@@ -669,13 +669,35 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         const terminalAllowed =
           attempt >= latestAttempt &&
           (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
-        const terminalStatus = input.complete
+        const terminalCandidate = input.complete
           ? terminalAllowed
             ? ('completed' as const)
             : undefined
           : terminalAllowed
             ? ('failed' as const)
             : undefined;
+        let terminalStatus = terminalCandidate;
+        if (terminalStatus) {
+          // A stalled Bull redelivery can run beside the original physical
+          // delivery and has a distinct attempt key. Keep the shared ledger
+          // open until every marker at this or a newer logical attempt has
+          // settled; otherwise quiescence can pass while a sibling still has
+          // provider or canonical-write work in flight.
+          const runningSiblingRows = await tx
+            .select({ one: sql`1` })
+            .from(syncItemsInOps)
+            .where(
+              and(
+                eq(syncItemsInOps.runId, runId),
+                eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                eq(syncItemsInOps.status, 'running'),
+                sql`${syncItemsInOps.attempts} >= ${attempt}`,
+                sql`${syncItemsInOps.normalizedPayload}->>'phase' = 'started'`,
+              ),
+            )
+            .limit(1);
+          if (runningSiblingRows.length > 0) terminalStatus = undefined;
+        }
         const nextAttempt = {
           batchId: input.batchId,
           parentRunId: input.parentRunId ?? null,
