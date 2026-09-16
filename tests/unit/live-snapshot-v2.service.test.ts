@@ -248,13 +248,13 @@ describe('Live Points and Live Matches shared observation', () => {
     };
     const current = {
       publication,
-      eventLives: [],
+      eventLives: [{ elementId: 99 } as never],
       fixtures: [],
       servedFrom: 'REDIS_CURRENT' as const,
     } satisfies LivePublicationRead;
     const durable = {
       publication: { ...publication },
-      eventLives: [],
+      eventLives: [{ elementId: 99 } as never],
       fixtures: [],
       servedFrom: 'POSTGRES_CHECKPOINT' as const,
     } satisfies LivePublicationRead;
@@ -282,12 +282,17 @@ describe('Live Points and Live Matches shared observation', () => {
         },
         readPublished: async () => current,
         readCheckpointed: async () => durable,
-        hasFinalMatchCheckpoints: async () => false,
+        hasFinalMatchCheckpoints: async () => true,
+        readObservedMatchDesk: async () => ({ observed: '', read: null }),
+        readObservedMatchDetail: async () => ({ observed: '', read: null }),
         readCheckpointDesired: async () => null,
         clearCheckpointDesired: async () => true,
         syncLiveMatches: async (observation) => {
           matchFinalizeCalls += 1;
           expect(observation.finalizeEvent).toBe(true);
+          expect(observation.publishedLiveElementIds).toEqual([99]);
+          expect(observation.observedDesk?.read).toBeNull();
+          expect(observation.observedDetail?.read).toBeNull();
           return {
             desk: { state: 'FINALIZED' },
             detail: { finalized: true },
