@@ -34,6 +34,11 @@ export type DerivedResultRepairSnapshot = {
   knockout: Array<{ sourceResultId: number; updatedAt: string }>;
 };
 
+export type TournamentStructureRepairCandidate = Readonly<{
+  groupRows: ReadonlyArray<DbTournamentGroupInsert>;
+  knockoutResults: ReadonlyArray<DbTournamentKnockoutResultInsert>;
+}>;
+
 function groupInsert(row: Record<string, number | string | null>): DbTournamentGroupInsert {
   return {
     tournamentId: Number(row.tournament_id),
@@ -61,7 +66,10 @@ export async function rebuildTournamentStructure(
   season: FplSeasonRef,
   tournament: TournamentConfig,
   entrySeeds: EntrySeed[],
-  options: Readonly<{ preserveDerivedResults?: boolean }> = {},
+  options: Readonly<{
+    preserveDerivedResults?: boolean;
+    onCandidate?: (candidate: TournamentStructureRepairCandidate) => void;
+  }> = {},
 ): Promise<ReadonlyArray<DbTournamentGroupInsert>> {
   const entryIds = sortEntrySeeds(entrySeeds).map((entry) => entry.entryId);
   const shouldSeedRoundOneImmediately =
@@ -129,6 +137,10 @@ export async function rebuildTournamentStructure(
     await knockoutResultsRepository.upsertBatch(season, publishedKnockoutResults, {
       preserveExistingFacts: options.preserveDerivedResults === true,
     });
+  });
+  options.onCandidate?.({
+    groupRows,
+    knockoutResults: publishedKnockoutResults,
   });
   return groupRows;
 }

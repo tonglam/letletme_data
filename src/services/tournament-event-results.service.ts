@@ -596,7 +596,8 @@ export async function syncTournamentEventResultsForEntryIds(
     const transferEntryIds = new Set(plannedMissingTransferEntryIds);
     let providerEntryIds = requiredResultEntryIds;
     let reusableEntryIds = uniqueEntryIds.filter(
-      (entryId) => !requiredResultEntryIds.includes(entryId),
+      (entryId) =>
+        !requiredResultEntryIds.includes(entryId) && !transferOnlyEntryIds.includes(entryId),
     );
     let liveResolution: Awaited<ReturnType<typeof resolveEventPointsPayload>> | null = null;
     let eventLiveProviderRequestStarted = false;
@@ -698,7 +699,8 @@ export async function syncTournamentEventResultsForEntryIds(
       );
       providerEntryIds = requiredResultEntryIds;
       reusableEntryIds = uniqueEntryIds.filter(
-        (entryId) => !requiredResultEntryIds.includes(entryId),
+        (entryId) =>
+          !requiredResultEntryIds.includes(entryId) && !transferOnlyEntryIds.includes(entryId),
       );
     }
     if (reusableEntryIds.length > 0) {
@@ -1149,14 +1151,14 @@ export async function syncTournamentEventResultsForEntryIds(
         'Tournament event results did not converge for every requested entry',
         totalEntries,
         Math.max(0, totalEntries - requiredResultEntryIds.length - transferOnlyEntryIds.length),
-        synced,
+        Math.max(0, synced - reusableEntryIds.length),
         failedUnits,
       );
     }
     if (options?.auditFinalizeRun !== false) {
       await syncOperationsRepository.finishRun(auditRunId, {
         status: 'completed',
-        completedItems: synced,
+        completedItems: Math.max(0, synced - reusableEntryIds.length),
         failedItems: 0,
         skippedItems: reusableEntryIds.length,
         dataChanged: providerEntryIds.length > 0 || transferOnlyEntryIds.length > 0,
@@ -1174,8 +1176,8 @@ export async function syncTournamentEventResultsForEntryIds(
       synced,
       errors,
       requiredUnits: totalEntries,
-      reusedUnits: Math.max(0, totalEntries - requiredResultEntryIds.length),
-      succeededUnits: synced,
+      reusedUnits: reusableEntryIds.length,
+      succeededUnits: Math.max(0, synced - reusableEntryIds.length),
       failedUnits,
       effectiveFreshAfter: resultFreshAfter,
     };

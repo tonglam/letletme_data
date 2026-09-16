@@ -34,6 +34,8 @@ import {
   pruneTournamentDerivedResultsOutsideStructure,
   rebuildTournamentStructure,
   snapshotDerivedResultsInvalidBeforeStructureRepair,
+  type DerivedResultRepairSnapshot,
+  type TournamentStructureRepairCandidate,
 } from './tournament-structure.service';
 import {
   requestTournamentReviewCorrection,
@@ -222,7 +224,13 @@ async function repairTournamentSetupIssuePrepared(
         season,
         issue.tournamentId,
       );
-      const rebuilt = await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), async () => {
+      const rebuilt = await runPhase<
+        | false
+        | {
+            staleDerivedResults: DerivedResultRepairSnapshot;
+            candidate: TournamentStructureRepairCandidate;
+          }
+      >(tournamentSetupRebuildScopes(issue.tournamentId), async () => {
         // Old review diagnostics may describe missing points projections rather
         // than damaged canonical groups. Recheck under the same structure lock
         // before a tournament-wide rebuild can delete accepted event results.
@@ -234,13 +242,18 @@ async function repairTournamentSetupIssuePrepared(
           season,
           issue.tournamentId,
         );
-        const candidateGroupRows = await rebuildTournamentStructure(
-          season,
-          tournament,
-          entrySeeds,
-          { preserveDerivedResults: true },
-        );
-        return { candidateGroupRows, staleDerivedResults };
+        let candidate: TournamentStructureRepairCandidate | null = null;
+        await rebuildTournamentStructure(season, tournament, entrySeeds, {
+          preserveDerivedResults: true,
+          onCandidate: (value) => {
+            candidate = value;
+          },
+        });
+        const capturedCandidate = candidate;
+        if (!capturedCandidate) {
+          throw new Error('TOURNAMENT_STRUCTURE_CANDIDATE_MISSING');
+        }
+        return { staleDerivedResults, candidate: capturedCandidate };
       });
       if (rebuilt === false) break;
       // Rebuild every finalized event from the same canonical inputs before
@@ -256,7 +269,8 @@ async function repairTournamentSetupIssuePrepared(
         {
           auditRepairIssueId: issueId,
           repair: { issueId, owner },
-          candidateGroupSlots: rebuilt.candidateGroupRows,
+          candidateGroupSlots: rebuilt.candidate.groupRows,
+          candidateKnockoutResults: rebuilt.candidate.knockoutResults,
         },
       );
       repairIssues.push(...historyIssues);

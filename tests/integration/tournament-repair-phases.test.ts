@@ -240,7 +240,12 @@ test('correction writes and issue resolution roll back together when settlement 
   ]);
   issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
   await mockAudit([]);
-  spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue([]);
+  spyOn(structure, 'rebuildTournamentStructure').mockImplementation(
+    async (_season, _tournament, _entrySeeds, options) => {
+      options?.onCandidate?.({ groupRows: [], knockoutResults: [] });
+      return [];
+    },
+  );
   const requestCorrection = review.requestTournamentReviewTournamentCorrection;
   const correction = spyOn(
     review,
@@ -603,7 +608,12 @@ test('mixed points and knockout tournaments retain the existing structural repai
   ]);
   issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
   await mockAudit([]);
-  const rebuild = spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue([]);
+  const rebuild = spyOn(structure, 'rebuildTournamentStructure').mockImplementation(
+    async (_season, _tournament, _entrySeeds, options) => {
+      options?.onCandidate?.({ groupRows: [], knockoutResults: [] });
+      return [];
+    },
+  );
   spyOn(review, 'requestTournamentReviewTournamentCorrection').mockResolvedValue([]);
   await repairTournamentSetupIssue(season, issueId);
   expect(rebuild).toHaveBeenCalledTimes(1);

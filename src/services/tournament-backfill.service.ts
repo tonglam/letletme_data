@@ -1,4 +1,5 @@
 import { completedFinalEntryIds } from './entries.service';
+import type { DbTournamentKnockoutResultInsert } from '../db/schemas/index.schema';
 import { eventRepository } from '../repositories/events';
 import { publishTournamentTrendScope } from './tournament-trends-publication.service';
 import type { TournamentSetupExecution } from '../repositories/tournament-infos';
@@ -749,6 +750,7 @@ export async function runTournamentEventBackfill(
   repair?: { issueId: number; owner: TournamentRepairState },
   audit?: { repairIssueId?: number },
   candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>,
+  candidateKnockoutResults?: ReadonlyArray<DbTournamentKnockoutResultInsert>,
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
   const auditRepairIssueId = audit?.repairIssueId ?? repair?.issueId;
@@ -980,7 +982,9 @@ export async function runTournamentEventBackfill(
   ) {
     const { syncKnockoutForTournament } = await import('./tournament-knockout-results.service');
     const knockoutResult = await writeResults(() =>
-      syncKnockoutForTournament(season, tournament, eventId),
+      syncKnockoutForTournament(season, tournament, eventId, {
+        candidateResults: candidateKnockoutResults,
+      }),
     );
     if (knockoutResult.skipped > 0) {
       issues.push({
@@ -1010,6 +1014,7 @@ export async function backfillTournamentHistory(
     auditRepairIssueId?: number;
     repair?: { issueId: number; owner: TournamentRepairState };
     candidateGroupSlots?: ReadonlyArray<CandidateBattleGroupSlot>;
+    candidateKnockoutResults?: ReadonlyArray<DbTournamentKnockoutResultInsert>;
   },
 ): Promise<TournamentSetupIssue[]> {
   if (!window) {
@@ -1031,6 +1036,7 @@ export async function backfillTournamentHistory(
         ? undefined
         : { repairIssueId: options.auditRepairIssueId },
       options?.candidateGroupSlots,
+      options?.candidateKnockoutResults,
     );
     issues.push(...eventIssues);
   }
