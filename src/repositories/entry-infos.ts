@@ -13,6 +13,18 @@ import { logError, logInfo } from '../utils/logger';
 
 type EntryStorage = typeof entriesInCompetition.$inferSelect;
 
+/** Normalize a timestamp without discarding PostgreSQL's microsecond fence. */
+function normalizeExactTimestamp(value: string | Date): string {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error('A valid entry profile freshness cutoff is required');
+  }
+  const source = value instanceof Date ? value.toISOString() : value.trim();
+  const fraction = /\.(\d+)(?:Z|[+-]\d{2}:?\d{2})$/i.exec(source)?.[1] ?? '';
+  const exactFraction = fraction.slice(0, 6).padEnd(6, '0');
+  return parsed.toISOString().replace(/\.\d{3}Z$/, `.${exactFraction}Z`);
+}
+
 function uniqueNames(names: (string | null | undefined)[]): string[] {
   const result: string[] = [];
   for (const name of names) {
@@ -95,14 +107,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
       if (ids.length === 0) return [];
 
       const freshnessCutoff =
-        profileFreshAfter instanceof Date
-          ? profileFreshAfter
-          : profileFreshAfter === undefined
-            ? null
-            : new Date(profileFreshAfter);
-      if (freshnessCutoff && !Number.isFinite(freshnessCutoff.getTime())) {
-        throw new Error('A valid entry profile freshness cutoff is required');
-      }
+        profileFreshAfter === undefined ? null : normalizeExactTimestamp(profileFreshAfter);
 
       try {
         const db = await getDbInstance();
@@ -114,7 +119,15 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
             .select({
               entryId: entriesInCompetition.entryId,
               syncedThroughEventId: entriesInCompetition.snapshotSyncedThroughEventId,
-              profileSourceCheckedAt: entriesInCompetition.profileSourceCheckedAt,
+              profileSourceCheckedAtExact: sql<string | null>`
+                CASE
+                  WHEN ${entriesInCompetition.profileSourceCheckedAt} IS NULL THEN NULL
+                  ELSE to_char(
+                    ${entriesInCompetition.profileSourceCheckedAt} AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                  )
+                END
+              `,
             })
             .from(entriesInCompetition)
             .where(
@@ -135,7 +148,8 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
                 checkpoint === undefined || checkpoint === null || checkpoint < targetEventId;
               const profileStale =
                 freshnessCutoff !== null &&
-                (!row?.profileSourceCheckedAt || row.profileSourceCheckedAt < freshnessCutoff);
+                (!row?.profileSourceCheckedAtExact ||
+                  row.profileSourceCheckedAtExact < freshnessCutoff);
               return checkpointMissing || profileStale;
             }),
           );
