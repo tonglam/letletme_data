@@ -387,10 +387,14 @@ async function deleteExpiredMyFplSnapshotRevisions(
     options.seasonId === undefined ? tx`` : tx`AND publication.season_id = ${options.seasonId}`;
   const eventFilter =
     options.eventId === undefined ? tx`` : tx`AND publication.event_id = ${options.eventId}`;
-  const deleted = await tx<{ revision: number }[]>`
+  const candidates = await tx<
+    { season_id: number; event_id: number; revision: number; season_code: string }[]
+  >`
     WITH candidates AS (
-      SELECT publication.season_id, publication.event_id, publication.revision
+      SELECT publication.season_id, publication.event_id, publication.revision,
+             season.season_code
       FROM competition.my_fpl_snapshot_publications publication
+      JOIN fpl.seasons season ON season.season_id = publication.season_id
       WHERE active = false AND updated_at < ${supersededBeforeIso}::timestamptz
         ${seasonFilter}
         ${eventFilter}
@@ -423,14 +427,47 @@ async function deleteExpiredMyFplSnapshotRevisions(
       LIMIT ${options.limit}
       FOR UPDATE SKIP LOCKED
     )
-    DELETE FROM competition.my_fpl_snapshot_publications publication
-    USING candidates
-    WHERE publication.season_id = candidates.season_id
-      AND publication.event_id = candidates.event_id
-      AND publication.revision = candidates.revision
-    RETURNING publication.revision
+    SELECT season_id, event_id, revision, season_code FROM candidates
   `;
-  return deleted.length;
+  let deleted = 0;
+  for (const candidate of candidates) {
+    // Publication activation and Redis delivery hold the same event advisory
+    // lock. Read the serving pointer while that lock is held so a concurrent
+    // delivery cannot make this cleanup delete the revision it names.
+    await tx`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${myFplSnapshotEventLockScope(candidate.season_id, candidate.event_id)}, 0)
+      )
+    `;
+    let redisManifest: MyFplSnapshotRedisManifest | null;
+    try {
+      redisManifest = await getActiveMyFplSnapshotRedisManifest(
+        candidate.season_code,
+        candidate.event_id,
+      );
+    } catch (error) {
+      // A Redis read outage cannot prove that the candidate is unreferenced;
+      // retain it for the next bounded pass instead of breaking consumers.
+      logWarn('My FPL snapshot retention could not verify Redis pointer', {
+        seasonCode: candidate.season_code,
+        eventId: candidate.event_id,
+        revision: candidate.revision,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    if (redisManifest?.revision === candidate.revision) continue;
+    const result = await tx<{ revision: number }[]>`
+      DELETE FROM competition.my_fpl_snapshot_publications
+      WHERE season_id = ${candidate.season_id}
+        AND event_id = ${candidate.event_id}
+        AND revision = ${candidate.revision}
+        AND active = false
+      RETURNING revision
+    `;
+    deleted += result.length;
+  }
+  return deleted;
 }
 
 /** Run one bounded retention pass from the periodic maintenance lane. */
