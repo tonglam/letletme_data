@@ -33,6 +33,7 @@ import {
   renewLivePublicationV2FinalLease,
   setLiveCheckpointDesiredV2,
   touchLivePublicationV2,
+  touchEntryLiveInputV2,
 } from '../../src/cache/live-publication-v2';
 import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse } from '../../src/clients/fpl';
@@ -710,6 +711,43 @@ describe('immutable Redis publication', () => {
     expect(renewed.status).toBe('renewed');
     expect(renewed.ttlMs).toBeGreaterThan(24 * 60 * 60 * 1000);
     expect(JSON.parse((await redis.get(activeKey)) ?? '{}')).toEqual(before);
+  });
+
+  test('touches an unchanged provisional entry observation without a new generation', async () => {
+    const provisionalInput = entryLiveInputFromFplPicks(
+      explicitSeasonRef(ENTRY_SCOPE.season),
+      ENTRY_SCOPE.eventId,
+      ENTRY_SCOPE.entryId,
+      entryPicks(ENTRY_SCOPE.eventId),
+      '2026-08-09T04:00:00.123456Z',
+    );
+    const published = await publishEntryLiveInputV2({
+      ...ENTRY_SCOPE,
+      input: provisionalInput,
+      sourceCheckedAt: '2026-08-09T04:00:00.123456Z',
+      generationFloor: 0,
+      redis,
+    });
+    const touched = await touchEntryLiveInputV2(
+      published.publication,
+      '2026-08-09T04:00:01.654321Z',
+      redis,
+    );
+
+    expect(touched).toMatchObject({
+      publicationId: published.publication.publicationId,
+      generation: published.publication.generation,
+      sourceCheckedAt: '2026-08-09T04:00:01.654321Z',
+      state: 'PROVISIONAL',
+    });
+    expect(touched?.item.key).toBe(published.publication.item.key);
+
+    const older = await touchEntryLiveInputV2(
+      published.publication,
+      '2026-08-09T04:00:01.100000Z',
+      redis,
+    );
+    expect(older?.sourceCheckedAt).toBe('2026-08-09T04:00:01.654321Z');
   });
 
   test('a crash after staging leaves the prior revision active and the stage bounded', async () => {
