@@ -196,6 +196,8 @@ export type PriceChangeSyncResult = {
   readonly fetchedAt?: string;
   readonly publicationId?: string;
   readonly revision?: number;
+  readonly publicationsCreated?: number;
+  readonly publicationsReused?: number;
 };
 
 export class PriceChangeCorePublicationRequiredError extends Error {
@@ -1714,6 +1716,8 @@ export async function persistPriceChangePublication(
       fetchedAt: fetchedAt.toISOString(),
       publicationId: publication.publicationId,
       revision: publication.revision,
+      publicationsCreated: 1,
+      publicationsReused: 0,
     };
   } catch (error) {
     if (!dbActivated) {

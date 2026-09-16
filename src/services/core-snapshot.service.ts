@@ -47,6 +47,8 @@ export interface CoreSnapshotSyncResult {
   /** Entity counts submitted by the canonical persistence transaction. */
   readonly persistence?: CoreSnapshotPersistenceResult;
   readonly submittedRows?: number;
+  readonly publicationsCreated?: number;
+  readonly publicationsReused?: number;
 }
 
 export interface CoreSnapshotDependencies {
@@ -120,6 +122,12 @@ function result(
     succeededUnits: published ? requiredUnits : 0,
     failedUnits: 0,
     ...(publication ?? {}),
+    ...(published
+      ? {
+          publicationsCreated: 1,
+          publicationsReused: 0,
+        }
+      : {}),
     ...(persistence
       ? {
           persistence,

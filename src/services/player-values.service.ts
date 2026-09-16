@@ -52,6 +52,8 @@ export type PlayerValuesSyncResult = {
   sourceProvenance?: ResolvedFplBootstrapArtifact['provenance'];
   marketSnapshotCount?: number;
   submittedRows?: number;
+  publicationsCreated?: number;
+  publicationsReused?: number;
   outcome?: 'noop';
   requiredUnits?: number;
   succeededUnits?: number;
@@ -300,11 +302,15 @@ export async function persistPreparedPlayerValuesSync(
       prepared.bootstrap.teams,
     );
     let publicationId: string | undefined;
+    let publicationsCreated = 0;
+    let publicationsReused = 0;
     if (dependencies.publishMarketPublication && !options?.deferMarketPublication) {
       const publication = await measurePhase(timings, 'publication', () =>
         dependencies.publishMarketPublication!(prepared.season),
       );
       publicationId = publication.publicationId;
+      if (publication.status === 'published') publicationsCreated = 1;
+      if (publication.status === 'unchanged') publicationsReused = 1;
     }
     const notificationMessage =
       changedRows.length > 0 && prepared.sourceProvenance !== 'archive'
@@ -355,6 +361,8 @@ export async function persistPreparedPlayerValuesSync(
       sourceProvenance: prepared.sourceProvenance,
       marketSnapshotCount: persisted.persistedCount,
       submittedRows: persisted.persistedCount,
+      publicationsCreated,
+      publicationsReused,
       requiredUnits: prepared.requiredUnits,
       succeededUnits,
       failedUnits: Math.max(0, prepared.requiredUnits - succeededUnits),
