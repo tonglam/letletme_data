@@ -89,7 +89,7 @@ describe('FINAL tournament repair convergence', () => {
       TEST_SEASON,
       4,
       3,
-      expect.objectContaining({ freshAfter: cutoff }),
+      expect.objectContaining({ freshAfter: cutoff, rebuildFromCurrentInputs: true }),
     );
   });
   test('accepts fully reused or concurrently completed league units without new writes', async () => {
@@ -216,6 +216,24 @@ describe('FINAL tournament repair convergence', () => {
     expect(eventRepository.findDataCheckedAtExact).toHaveBeenLastCalledWith(TEST_SEASON, 3, {
       lock: 'share',
     });
+  });
+  test('does not accept failed provisional inputs even when older derived rows exist', async () => {
+    spyOn(eventRepository, 'findById').mockResolvedValue({
+      finished: false,
+      dataChecked: false,
+    } as never);
+    spyOn(eventResults, 'syncTournamentEventResultsForEntryIds').mockResolvedValue({
+      eventId: 3,
+      totalEntries: ids.length,
+      synced: ids.length - 1,
+      errors: 1,
+      requiredUnits: ids.length,
+      reusedUnits: 0,
+      succeededUnits: ids.length - 1,
+      failedUnits: 1,
+    });
+    await expect(run()).rejects.toThrow('provisional inputs remain incomplete');
+    expect(leagueResults.syncLeagueEventResultsByTournament).not.toHaveBeenCalled();
   });
   test('keeps provisional rounds on the fresh observation path', async () => {
     spyOn(eventRepository, 'findById').mockResolvedValue({

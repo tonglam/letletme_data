@@ -792,10 +792,19 @@ export async function runTournamentEventBackfill(
     }
   } else {
     // Provisional rounds still require a fresh provider observation.
-    await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
+    const result = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       perEntryMutationScopes: true,
     });
+    if (result.failedUnits > 0 || result.errors > 0) {
+      throw new IncompleteDataSyncError(
+        'Tournament repair provisional inputs remain incomplete',
+        result.requiredUnits,
+        result.reusedUnits,
+        result.succeededUnits,
+        result.failedUnits,
+      );
+    }
   }
 
   const leagueEventResults = await syncLeagueEventResultsByTournament(
@@ -806,6 +815,7 @@ export async function runTournamentEventBackfill(
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       entryIds,
       freshAfter: finalCutoff ?? undefined,
+      rebuildFromCurrentInputs: Boolean(finalCutoff),
     },
   );
   if (

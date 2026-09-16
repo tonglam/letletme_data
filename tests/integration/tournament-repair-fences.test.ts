@@ -64,3 +64,65 @@ test('the exact FINAL boundary cannot change until the standings transaction fin
   // Release is real: a correction can proceed after the protected commit.
   await observer`UPDATE fpl.events SET data_checked_at=clock_timestamp() WHERE season_id=${season.seasonId} AND event_id=1`;
 });
+
+test('corrected FINAL derivation advances its ordering without demanding newer provider evidence', async () => {
+  const source = new Date(cutoff);
+  const attempt = new Date('2026-09-16T06:00:00.000Z');
+  await observer`UPDATE fpl.events SET data_checked_at=${cutoff}::text::timestamptz WHERE season_id=${season.seasonId} AND event_id=1`;
+  // Legacy repair stamped a later attempt time into both source fields.
+  await observer`UPDATE competition.league_event_results
+    SET source_live_checked_at='2026-09-15'::timestamptz, source_picks_checked_at='2026-09-15'::timestamptz
+    WHERE season_id=${season.seasonId} AND entry_id=${ids[3]}`;
+  expect(
+    await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+      season,
+      997471,
+      'classic',
+      1,
+      [ids[3]],
+      cutoff,
+      attempt,
+    ),
+  ).toEqual([]);
+  const row = {
+    leagueId: 997471,
+    leagueType: 'classic' as const,
+    eventId: 1,
+    entryId: ids[3],
+    entryName: 'Corrected',
+    sourceCheckedAt: attempt,
+    sourceLiveCheckedAt: source,
+    sourcePicksCheckedAt: source,
+  };
+  await leagueEventResultsRepository.upsertBatch(season, [row], { eventId: 1, cutoff });
+  expect(
+    await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+      season,
+      997471,
+      'classic',
+      1,
+      [ids[3]],
+      cutoff,
+      attempt,
+    ),
+  ).toEqual([ids[3]]);
+  await leagueEventResultsRepository.upsertBatch(
+    season,
+    [{ ...row, entryName: 'Late stale attempt', sourceCheckedAt: source }],
+    { eventId: 1, cutoff },
+  );
+  const [stored] =
+    await observer`SELECT entry_name FROM competition.league_event_results WHERE season_id=${season.seasonId} AND entry_id=${ids[3]}`;
+  expect(stored?.entry_name).toBe('Corrected');
+  await observer`UPDATE fpl.events SET data_checked_at=clock_timestamp() WHERE season_id=${season.seasonId} AND event_id=1`;
+  await expect(
+    leagueEventResultsRepository.upsertBatch(
+      season,
+      [{ ...row, entryName: 'Stale FINAL', sourceCheckedAt: new Date(attempt.getTime() + 1000) }],
+      { eventId: 1, cutoff },
+    ),
+  ).rejects.toThrow('Failed to upsert league event results');
+  const [after] =
+    await observer`SELECT entry_name FROM competition.league_event_results WHERE season_id=${season.seasonId} AND entry_id=${ids[3]}`;
+  expect(after?.entry_name).toBe('Corrected');
+});
