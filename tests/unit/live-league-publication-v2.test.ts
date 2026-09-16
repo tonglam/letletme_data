@@ -24,6 +24,7 @@ import type {
 } from '../../src/cache/live-publication-v2';
 import { canonicalJson, contentHash } from '../../src/utils/content-hash';
 import {
+  checkpointLiveLeaguePublicationV2,
   isH2HTournamentPhaseActive,
   isLiveLeagueCheckpointGenerationCompatible,
   isSafeFinalizedClassicRosterExpansion,
@@ -689,6 +690,29 @@ describe('Live League V2 checkpoint cadence', () => {
 });
 
 describe('Live League V2 checkpoint transaction contract', () => {
+  test('reports transaction failures to the caller without changing the boolean contract', async () => {
+    const failure = new Error('lock timeout');
+    let observed: unknown;
+    const db = {
+      transaction: async () => {
+        throw failure;
+      },
+    } as never;
+
+    await expect(
+      checkpointLiveLeaguePublicationV2(
+        { publication: manifest(), index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+        db,
+        {
+          onInfrastructureFailure: (error) => {
+            observed = error;
+          },
+        },
+      ),
+    ).resolves.toBe(false);
+    expect(observed).toBe(failure);
+  });
+
   test('gives large JSONB writes a bounded budget without binding payloads twice', () => {
     expect(checkpointServiceSource).toContain(String.raw`SET LOCAL lock_timeout = '2s'`);
     expect(checkpointServiceSource).toContain(String.raw`SET LOCAL statement_timeout = '20s'`);

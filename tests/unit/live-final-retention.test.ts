@@ -594,8 +594,9 @@ describe('Live final retention active-season policy', () => {
 describe('Live final retention league scope completeness', () => {
   test('checkpoints a validated newer Classic Redis successor before applying the retention fence', () => {
     expect(retentionServiceSource).toContain('isSafeFinalizedClassicRosterExpansion');
-    expect(retentionServiceSource).toContain('checkpointLiveLeaguePublicationV2(active)');
+    expect(retentionServiceSource).toContain('checkpointLiveLeaguePublicationV2(active, undefined');
     expect(retentionServiceSource).toContain('expectedCheckpoint = active');
+    expect(retentionServiceSource).toContain('onInfrastructureFailure');
   });
 
   test('requires missing active Classic and in-phase official H2H checkpoints', () => {

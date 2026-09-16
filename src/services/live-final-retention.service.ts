@@ -1080,7 +1080,11 @@ async function processLeagueScope(
       payload: checkpoint.payload,
     })
   ) {
-    const checkpointed = await checkpointLiveLeaguePublicationV2(active);
+    const checkpointed = await checkpointLiveLeaguePublicationV2(active, undefined, {
+      onInfrastructureFailure: () => {
+        family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
+      },
+    });
     if (!checkpointed) {
       family.failed += 1;
       return false;
