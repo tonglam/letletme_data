@@ -294,6 +294,9 @@ describe('Live Points and Live Matches shared observation', () => {
     if (!sourceElement) throw new Error('live snapshot fixture is missing');
     const finalElement = {
       ...sourceElement,
+      // The filtered fixture's awarded points sum to 12; keep the provider
+      // fixture internally coherent for FINAL identity validation.
+      stats: { ...sourceElement.stats, total_points: 12 },
       explain: sourceElement.explain
         ? sourceElement.explain.filter(
             (fixture) =>
@@ -792,6 +795,11 @@ describe('Live Points and Live Matches shared observation', () => {
     };
     const sourceElement = rawExplainElementsFixture[0];
     if (!sourceElement) throw new Error('live snapshot fixture is missing');
+    const coherentSourceElement = {
+      ...sourceElement,
+      // Both fixture breakdowns together award 16 points in this fixture.
+      stats: { ...sourceElement.stats, total_points: 16 },
+    };
     const referenceData: LiveSnapshotReferenceData = {
       season: season.seasonCode,
       nameById: new Map([
@@ -810,7 +818,7 @@ describe('Live Points and Live Matches shared observation', () => {
     };
     const prepared = prepareCoherentLiveSnapshot(
       2,
-      { elements: [structuredClone(sourceElement)] },
+      { elements: [structuredClone(coherentSourceElement)] },
       [rawFixture],
       referenceData,
       [401],
@@ -851,7 +859,7 @@ describe('Live Points and Live Matches shared observation', () => {
       finalizeEvent: true,
       lifecycleState: 'FINALIZED',
       dependencies: {
-        getEventLive: async () => ({ elements: [structuredClone(sourceElement)] }),
+        getEventLive: async () => ({ elements: [structuredClone(coherentSourceElement)] }),
         getFixtures: async () => {
           throw new Error('cutover seed must reuse observed fixtures');
         },

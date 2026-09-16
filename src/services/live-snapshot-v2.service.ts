@@ -242,13 +242,17 @@ function sameLiveEventFacts(left: readonly EventLive[], right: readonly EventLiv
   for (const leftRow of left) {
     const rightRow = rightByElement.get(leftRow.elementId);
     if (!rightRow) return false;
+    // A fixture breakdown is provider evidence, not display-only metadata.
+    // Validate both sides before comparing them so a pair of contradictory
+    // payloads cannot pass merely because their JSON happens to match.
+    if (leftRow.fixtureBreakdown && !fixtureBreakdownMatchesTotal(leftRow)) return false;
+    if (rightRow.fixtureBreakdown && !fixtureBreakdownMatchesTotal(rightRow)) return false;
     // A legacy durable row may omit fixture breakdown, but a fresh row that
     // does include it still has to be internally coherent before the field is
     // ignored for the common-facts comparison.  Otherwise contradictory
     // provider evidence could be accepted simply because the durable row is
     // old enough to lack the optional field.
     if (rightRow.fixtureBreakdown === undefined) {
-      if (leftRow.fixtureBreakdown && !fixtureBreakdownMatchesTotal(leftRow)) return false;
       const { fixtureBreakdown: _ignored, ...leftWithoutBreakdown } = leftRow;
       if (canonicalJson(leftWithoutBreakdown) !== canonicalJson(rightRow)) return false;
     } else if (canonicalJson(leftRow) !== canonicalJson(rightRow)) {

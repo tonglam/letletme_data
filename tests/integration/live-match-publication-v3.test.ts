@@ -243,7 +243,7 @@ describe('Live Matches V3 Redis publications', () => {
       sourceCheckedAt: '2026-08-29T10:05:00.000Z',
       redis,
     });
-    await publishLiveMatchDetailV3({
+    const provisionalDetail = await publishLiveMatchDetailV3({
       ...scope,
       observedDeskGeneration: provisionalDesk.publication.generation,
       fixtureIdentityRevision: provisionalDesk.publication.revisions.fixtureIdentity.revision,
@@ -252,9 +252,24 @@ describe('Live Matches V3 Redis publications', () => {
       finalized: false,
       redis,
     });
-    await redis.del(liveMatchDeskKey(scope, 'previous'), liveMatchDetailKey(scope, 'previous'));
+    // Leave a valid but stale fallback behind so the preservePrevious=false
+    // path must remove both its pointer and its immutable siblings.
+    await redis.set(
+      liveMatchDeskKey(scope, 'previous'),
+      JSON.stringify(provisionalDesk.publication),
+    );
+    await redis.set(
+      liveMatchDetailKey(scope, 'previous'),
+      JSON.stringify(provisionalDetail.publication),
+    );
     const observedDesk = await readLiveMatchDeskFenceV3({ ...scope, redis });
     const observedDetail = await readLiveMatchDetailFenceV3({ ...scope, redis });
+    expect(observedDesk.read?.publication.publicationId).toBe(
+      provisionalDesk.publication.publicationId,
+    );
+    expect(observedDetail.read?.publication.publicationId).toBe(
+      provisionalDetail.publication.publicationId,
+    );
 
     const restored = await restoreLiveMatchEquivalentFinalPairV3({
       deskCheckpoint,
@@ -270,6 +285,17 @@ describe('Live Matches V3 Redis publications', () => {
     expect(restored.detail.publicationId).toBe(finalDetail.publication.publicationId);
     expect(await redis.get(liveMatchDeskKey(scope, 'previous'))).toBeNull();
     expect(await redis.get(liveMatchDetailKey(scope, 'previous'))).toBeNull();
+    expect(await redis.exists(provisionalDesk.publication.desk.key)).toBe(0);
+    expect(await redis.exists(`${provisionalDesk.publication.desk.key}:meta`)).toBe(0);
+    for (const item of provisionalDetail.publication.fixtures) {
+      expect(await redis.exists(item.key)).toBe(0);
+      expect(await redis.exists(`${item.key}:meta`)).toBe(0);
+    }
+    expect(
+      await redis.exists(
+        liveMatchDetailManifestKey(scope, provisionalDetail.publication.generation),
+      ),
+    ).toBe(0);
   });
 
   test('rejects a stale pair fence without changing either active pointer', async () => {
