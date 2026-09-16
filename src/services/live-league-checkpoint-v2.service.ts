@@ -420,9 +420,15 @@ function storedFinalizedCheckpointIsValid(
 }
 
 /** Persist one self-contained latest publication without blocking its Redis promotion. */
+export type LiveLeagueCheckpointOptions = Readonly<{
+  /** Observe database failures so callers can preserve retryable classification. */
+  onInfrastructureFailure?: (error: unknown) => void;
+}>;
+
 export async function checkpointLiveLeaguePublicationV2(
   read: LeagueLiveRead,
   dbInstance?: DbOrTransaction,
+  options: LiveLeagueCheckpointOptions = {},
 ): Promise<boolean> {
   if (read.publication.scope === 'H2H_MATCH') return false;
   const db = dbInstance ?? (await getDb());
@@ -636,6 +642,7 @@ export async function checkpointLiveLeaguePublicationV2(
       return upserted.length > 0;
     });
   } catch (error) {
+    options.onInfrastructureFailure?.(error);
     logError('Live league publication checkpoint failed', error, {
       season: read.publication.season,
       eventId: read.publication.eventId,

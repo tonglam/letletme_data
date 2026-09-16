@@ -60,6 +60,8 @@ import {
   type EntryEventPickHeadMetadata,
 } from '../repositories/entry-event-picks';
 import {
+  checkpointLiveLeaguePublicationV2,
+  isSafeFinalizedClassicRosterExpansion,
   listRequiredLiveLeagueFinalCheckpointScopesV2,
   readLiveLeagueCheckpointV2,
 } from './live-league-checkpoint-v2.service';
@@ -1061,14 +1063,42 @@ async function processLeagueScope(
   }
   const activeRaw = (await redis.get(liveLeagueV2Key(scope, 'active'))) ?? '';
   const active = await readLiveLeaguePublicationV2Pointer(scope, 'active', redis);
+
+  // A late tournament entry can produce a complete newer Classic publication
+  // after the durable FINAL checkpoint was written.  The checkpoint service
+  // owns the append-only successor fence; adopt that successor before the
+  // retention identity check instead of treating it as a conflicting result.
+  let expectedCheckpoint = checkpoint;
   if (
-    finalPublicationConflict(activeRaw, checkpoint.publication, scope, {
+    active &&
+    scope.scope === 'CLASSIC' &&
+    isSafeFinalizedClassicRosterExpansion(active, {
+      state: checkpoint.publication.state,
+      manifest: checkpoint.publication,
+      rowCount: checkpoint.index.length,
+      indexPayload: checkpoint.index,
+      payload: checkpoint.payload,
+    })
+  ) {
+    const checkpointed = await checkpointLiveLeaguePublicationV2(active, undefined, {
+      onInfrastructureFailure: () => {
+        family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
+      },
+    });
+    if (!checkpointed) {
+      family.failed += 1;
+      return false;
+    }
+    expectedCheckpoint = active;
+  }
+  if (
+    finalPublicationConflict(activeRaw, expectedCheckpoint.publication, scope, {
       contractVersion: 'live-points-v2',
       state: 'FINALIZED',
     }) ||
     (active &&
-      (active.publication.publicationId !== checkpoint.publication.publicationId ||
-        active.publication.generation !== checkpoint.publication.generation))
+      (active.publication.publicationId !== expectedCheckpoint.publication.publicationId ||
+        active.publication.generation !== expectedCheckpoint.publication.generation))
   ) {
     family.failed += 1;
     return false;
@@ -1082,8 +1112,8 @@ async function processLeagueScope(
   ];
   if (
     active &&
-    active.publication.publicationId === checkpoint.publication.publicationId &&
-    active.publication.generation === checkpoint.publication.generation &&
+    active.publication.publicationId === expectedCheckpoint.publication.publicationId &&
+    active.publication.generation === expectedCheckpoint.publication.generation &&
     active.publication.state === 'FINALIZED'
   ) {
     const ttl = await minimumTtl(redis, keys(active));
@@ -1106,9 +1136,9 @@ async function processLeagueScope(
     return true;
   }
   try {
-    await restoreLiveLeaguePublicationV2Checkpoint({ checkpoint, redis });
+    await restoreLiveLeaguePublicationV2Checkpoint({ checkpoint: expectedCheckpoint, redis });
     family.restored += 1;
-    updateMinimum(family, await minimumTtl(redis, keys(checkpoint)));
+    updateMinimum(family, await minimumTtl(redis, keys(expectedCheckpoint)));
     return true;
   } catch (error) {
     if (classifyDataError(error) !== 'DATA_INCOMPLETE')
