@@ -146,6 +146,10 @@ export function withPostgresQueryTimeout<T extends postgres.Sql | postgres.Trans
     }
     function start(): Promise<unknown> {
       if (!pending) {
+        if (cancellation) {
+          pending = Promise.reject(cancellation);
+          return pending;
+        }
         scheduled = enqueueWork(() => {
           if (cancellation) throw cancellation;
           assertDeadline();
