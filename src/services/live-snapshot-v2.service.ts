@@ -967,9 +967,10 @@ export async function syncLiveSnapshotV2(
       kind: 'desk' | 'detail',
       publication: { publicationId: string; generation: number },
     ): Promise<void> => {
-      const readDesired = dependencies.readMatchCheckpointDesired;
-      const clearDesired = dependencies.clearMatchCheckpointDesired;
-      if (!readDesired || !clearDesired) return;
+      const readDesired =
+        dependencies.readMatchCheckpointDesired ?? readLiveMatchCheckpointDesiredV3;
+      const clearDesired =
+        dependencies.clearMatchCheckpointDesired ?? clearLiveMatchCheckpointDesiredV3;
       try {
         const desired = await readDesired({
           kind,
@@ -978,7 +979,6 @@ export async function syncLiveSnapshotV2(
         });
         if (
           desired &&
-          desired.final &&
           desired.publicationId === publication.publicationId &&
           desired.generation === publication.generation
         ) {
@@ -1054,6 +1054,12 @@ export async function syncLiveSnapshotV2(
           (observedDetailRead.publication.finalized !== true ||
             observedDetailRead.publication.checkpointedAt !== null));
       if (!survivingDeskIsVerified || !survivingDetailIsVerified) {
+        if (observedDeskRead && !survivingDeskIsVerified) {
+          await clearConflictingMatchCheckpoint('desk', observedDeskRead.publication);
+        }
+        if (observedDetailRead && !survivingDetailIsVerified) {
+          await clearConflictingMatchCheckpoint('detail', observedDetailRead.publication);
+        }
         throw new CacheError(
           `Live Match Redis sibling conflicts with durable facts for event ${eventId}`,
           'LIVE_MATCH_FINAL_REDIS_CONFLICT',
@@ -1068,6 +1074,8 @@ export async function syncLiveSnapshotV2(
         observedDetailRead!.publication.fixtureIdentityRevision ===
           durableMatchPair.detail.publication.fixtureIdentityRevision;
       if (servingPairIsComplete && !servingPairIsEquivalent) {
+        await clearConflictingMatchCheckpoint('desk', observedDeskRead!.publication);
+        await clearConflictingMatchCheckpoint('detail', observedDetailRead!.publication);
         throw new CacheError(
           `Live Match Redis FINAL conflicts with durable facts for event ${eventId}`,
           'LIVE_MATCH_FINAL_REDIS_CONFLICT',
