@@ -670,6 +670,64 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       });
     },
 
+    /**
+     * Attach a target event to the running marker after an unscoped worker has
+     * resolved the canonical event. This is deliberately a small, locked
+     * update so a crash after resolution still leaves an auditable scope even
+     * when settlement never runs.
+     */
+    updateBatchCostTargetEvent: async (
+      runId: string,
+      attemptKey: string,
+      eventId: number,
+    ): Promise<boolean> => {
+      if (
+        !attemptKey.trim() ||
+        attemptKey.length > 240 ||
+        !Number.isSafeInteger(eventId) ||
+        eventId <= 0
+      ) {
+        throw new DatabaseError(
+          'Batch cost target event is invalid',
+          'SYNC_BATCH_COST_EVENT_INVALID',
+        );
+      }
+      const db = await getDbInstance();
+      return db.transaction(async (tx) => {
+        const rows = await tx
+          .select({
+            status: syncItemsInOps.status,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+          })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, attemptKey),
+            ),
+          )
+          .for('update');
+        const row = rows[0];
+        const payload = isRecord(row?.normalizedPayload) ? row.normalizedPayload : null;
+        if (!row || !payload || payload.phase !== 'started') return false;
+        await tx
+          .update(syncItemsInOps)
+          .set({
+            normalizedPayload: { ...payload, eventId },
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.resourceId, attemptKey),
+            ),
+          );
+        return true;
+      });
+    },
+
     finishRun: async (
       runId: string,
       input: {

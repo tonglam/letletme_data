@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 
 import {
@@ -50,6 +50,8 @@ export interface DataSyncAttemptContext {
   parentRunId?: string;
   executionIntent?: 'refresh' | 'retry' | 'force' | 'reconcile' | 'unknown';
   releaseSha?: string;
+  /** Internal hook used to persist an event resolved after the running marker. */
+  onTargetEventResolved?: (eventId: number) => unknown | Promise<unknown>;
 }
 
 export interface DataSyncWorkSummary {
@@ -131,6 +133,7 @@ export interface DataSyncAttemptReport {
   admission: FplAdmissionBatchMetrics;
   batchCost: {
     attemptKey: string;
+    executionId: string;
     batchId: string;
     ledgerRunId: string;
     complete: boolean;
@@ -297,7 +300,7 @@ function reportingEnabled(): boolean {
   );
 }
 
-function stableAttemptKey(context: DataSyncAttemptContext): string {
+function stableAttemptKey(context: DataSyncAttemptContext, executionId: string): string {
   const batchId = context.batchId ?? context.runId;
   return [
     context.queue,
@@ -305,6 +308,7 @@ function stableAttemptKey(context: DataSyncAttemptContext): string {
     batchId,
     boundedAttempt(context.attempt),
     context.targetEventId ?? 'none',
+    executionId,
   ]
     .map((value) => String(value).replaceAll('|', '_'))
     .join('|');
@@ -339,6 +343,7 @@ function batchCostPayload(
   complete: boolean,
   summary: DataSyncWorkSummary,
   startedAtIso: string,
+  executionId: string,
 ): Record<string, unknown> {
   const admission = report.admission;
   const writeFields = [
@@ -358,10 +363,12 @@ function batchCostPayload(
     job: context.jobName,
     queue: context.queue,
     eventId: context.targetEventId ?? null,
+    executionId,
     executionIntent: executionIntent(context),
     startedAt: startedAtIso,
     settledAt: new Date().toISOString(),
     complete,
+    outcome: report.outcome,
     logicalRequests: report.fpl.logicalRequests,
     httpAttempts: report.fpl.attempts,
     httpRetries: report.fpl.retries,
@@ -447,6 +454,7 @@ async function persistBatchCost(
   complete: boolean,
   summary: DataSyncWorkSummary,
   startedAtIso: string,
+  executionId: string,
 ): Promise<string> {
   const ledgerRunId = batchCostLedgerRunId(context);
   await ensureBatchCostLedgerRun(context, ledgerRunId);
@@ -460,7 +468,7 @@ async function persistBatchCost(
     payload: {
       originalRunId: context.runId,
       ledgerRunId,
-      ...batchCostPayload(context, report, complete, summary, startedAtIso),
+      ...batchCostPayload(context, report, complete, summary, startedAtIso, executionId),
     },
   });
   if (recorded === 'missing') throw new Error(`Batch cost ledger run ${ledgerRunId} disappeared`);
@@ -474,6 +482,7 @@ async function persistBatchCostStart(
   context: DataSyncAttemptContext,
   attemptKey: string,
   startedAtIso: string,
+  executionId: string,
 ): Promise<string> {
   const ledgerRunId = batchCostLedgerRunId(context);
   await ensureBatchCostLedgerRun(context, ledgerRunId);
@@ -489,6 +498,7 @@ async function persistBatchCostStart(
       job: context.jobName,
       queue: context.queue,
       eventId: context.targetEventId ?? null,
+      executionId,
       executionIntent: executionIntent(context),
       startedAt: startedAtIso,
     },
@@ -516,16 +526,23 @@ export async function runDataSyncAttempt<T>(
     runWithFplAdmissionMetrics(async () => {
       const startedAt = performance.now();
       const startedAtIso = new Date().toISOString();
+      const executionId = randomUUID();
       let summary: DataSyncWorkSummary = {};
       let outcome: DataSyncAttemptOutcome = 'failed';
       let targetEventId = context.targetEventId;
       let settledSuccessfully = false;
 
-      const attemptKey = stableAttemptKey(context);
+      const attemptKey = stableAttemptKey(context, executionId);
+      let batchCostRunId: string | undefined;
       try {
         if (!nestedMetricsContext) {
           try {
-            await persistBatchCostStart(context, attemptKey, startedAtIso);
+            batchCostRunId = await persistBatchCostStart(
+              context,
+              attemptKey,
+              startedAtIso,
+              executionId,
+            );
           } catch (error) {
             logError('Failed to persist data sync batch cost start', error, {
               runId: context.runId,
@@ -533,6 +550,25 @@ export async function runDataSyncAttempt<T>(
             });
           }
         }
+        const previousTargetResolver = context.onTargetEventResolved;
+        context.onTargetEventResolved = async (eventId: number) => {
+          context.targetEventId = eventId;
+          await previousTargetResolver?.(eventId);
+          if (!batchCostRunId) return;
+          try {
+            await syncOperationsRepository.updateBatchCostTargetEvent(
+              batchCostRunId,
+              attemptKey,
+              eventId,
+            );
+          } catch (error) {
+            logError('Failed to persist resolved data sync target event', error, {
+              runId: context.runId,
+              attemptKey,
+              eventId,
+            });
+          }
+        };
         const result = await runner();
         // Some unscoped workers resolve their canonical event inside the runner
         // immediately before taking database mutation scopes. The context is shared by
@@ -540,6 +576,9 @@ export async function runDataSyncAttempt<T>(
         targetEventId ??= context.targetEventId;
         if (targetEventId === undefined && isRecord(result)) {
           targetEventId = firstBoundedUnit(result.eventId);
+          if (targetEventId !== undefined) {
+            await context.onTargetEventResolved?.(targetEventId);
+          }
         }
         summary = options.summarize?.(result) ?? inferDataSyncWorkSummary(result);
         outcome = resolveOutcome(summary);
@@ -591,6 +630,7 @@ export async function runDataSyncAttempt<T>(
           ...reportBase,
           batchCost: {
             attemptKey,
+            executionId,
             batchId: context.batchId ?? context.runId,
             ledgerRunId: batchCostLedgerRunId(context),
             complete: settledSuccessfully,
@@ -607,6 +647,7 @@ export async function runDataSyncAttempt<T>(
               settledSuccessfully,
               summary,
               startedAtIso,
+              executionId,
             );
           } catch (error) {
             // Cost accounting is observability. Never turn an already-settled
