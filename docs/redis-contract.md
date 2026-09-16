@@ -135,6 +135,25 @@ item. Those global and entry manifests remain V2 and are still read by the V2
 publication parser; this document's V3 manifest rules apply only to the Live
 Matches desk/detail namespace described above.
 
+An already checkpointed entry FINAL remains immutable during ordinary sync.
+The operator-only `scripts/correct-deleted-entry-final.ts` command handles the
+known deleted-entry cumulative-total defect. It defaults to inspection and
+requires exact season, entry, event, publication ID, generation and change ID;
+`--apply` enables the bounded correction. Both current official picks and
+history must confirm zero cumulative points and unranked status, while event
+points, picks, chip and substitutions must match accepted durable evidence.
+The original input, head and source observations are retained in
+`ops.data_governance_cases` before promotion. Promotion rechecks canonical
+facts under the existing entry writer fence and compares the expected Redis
+publication identity atomically. The event finalization boundary is unchanged.
+The normal desired-checkpoint path persists the replacement; rerunning the same
+change ID resumes an interrupted checkpoint from its archived official observations,
+even when the deleted account endpoints are unavailable. Canonical microseconds
+are preserved in revision hashes, and the durable chip must agree with both
+the frozen and provider chip. Recovery is recorded only after
+Redis and PostgreSQL identify the same corrected FINAL. Its previous pointer
+also names the corrected revision, so fallback cannot resurrect the old score.
+
 An active Live Matches V3 manifest is scoped to one season/event, carries a
 monotonic generation, and uses the lifecycle states defined by its own
 contract. It contains the V3 contract version, publication identity,
