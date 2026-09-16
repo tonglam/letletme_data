@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 
 import {
@@ -61,6 +62,7 @@ export interface DataSyncWorkSummary {
   insertedRows?: number;
   updatedRows?: number;
   deletedRows?: number;
+  submittedRows?: number;
   publicationsCreated?: number;
   publicationsReused?: number;
   /** Set only when the caller supplied stable unit identities. */
@@ -130,6 +132,7 @@ export interface DataSyncAttemptReport {
   batchCost: {
     attemptKey: string;
     batchId: string;
+    ledgerRunId: string;
     complete: boolean;
   };
 }
@@ -184,6 +187,14 @@ function readPhaseTimings(value: unknown): DataSyncPhaseTimings | undefined {
 export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
   if (!isRecord(result)) return {};
 
+  const persistence = isRecord(result.persistence) ? result.persistence : undefined;
+  const persistenceRows = persistence
+    ? Object.values(persistence).reduce<number>(
+        (total, value) => total + (typeof value === 'number' && Number.isFinite(value) ? value : 0),
+        0,
+      )
+    : undefined;
+
   const explicitRequiredUnits = firstBoundedUnit(
     result.requiredUnits,
     result.totalEntries,
@@ -233,10 +244,18 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
       : undefined);
   const explicitOutcome = readOutcome(result.outcome);
   const timings = readPhaseTimings(result.timings);
-  const insertedRows = firstBoundedUnit(result.insertedRows);
-  const updatedRows = firstBoundedUnit(result.updatedRows);
-  const deletedRows = firstBoundedUnit(result.deletedRows);
-  const publicationsCreated = firstBoundedUnit(result.publicationsCreated);
+  const insertedRows = firstBoundedUnit(result.insertedRows, persistence?.insertedRows);
+  const updatedRows = firstBoundedUnit(result.updatedRows, persistence?.updatedRows);
+  const deletedRows = firstBoundedUnit(result.deletedRows, persistence?.deletedRows);
+  const submittedRows = firstBoundedUnit(
+    result.submittedRows,
+    result.marketSnapshotCount,
+    persistenceRows,
+  );
+  const publicationsCreated = firstBoundedUnit(
+    result.publicationsCreated,
+    isRecord(result.publication) || typeof result.publicationId === 'string' ? 1 : undefined,
+  );
   const publicationsReused = firstBoundedUnit(result.publicationsReused);
   const unitAccounting =
     result.unitAccounting === 'exact' || result.unitAccounting === 'per_attempt'
@@ -253,6 +272,7 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
     ...(insertedRows !== undefined ? { insertedRows } : {}),
     ...(updatedRows !== undefined ? { updatedRows } : {}),
     ...(deletedRows !== undefined ? { deletedRows } : {}),
+    ...(submittedRows !== undefined ? { submittedRows } : {}),
     ...(publicationsCreated !== undefined ? { publicationsCreated } : {}),
     ...(publicationsReused !== undefined ? { publicationsReused } : {}),
     ...(unitAccounting ? { unitAccounting } : {}),
@@ -357,6 +377,7 @@ function batchCostPayload(
     insertedRows: nullableNumber(summary.insertedRows),
     updatedRows: nullableNumber(summary.updatedRows),
     deletedRows: nullableNumber(summary.deletedRows),
+    submittedRows: nullableNumber(summary.submittedRows),
     publicationsCreated: nullableNumber(summary.publicationsCreated),
     publicationsReused: nullableNumber(summary.publicationsReused),
     writeAccounting: writeFields.every((value) => nullableNumber(value) !== null)
@@ -379,7 +400,45 @@ function batchCostPayload(
   };
 }
 
-const UUID_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function batchCostLedgerRunId(context: DataSyncAttemptContext): string {
+  const identity = JSON.stringify([
+    'data-sync-batch-cost',
+    context.queue,
+    context.jobName,
+    context.runId,
+    context.batchId ?? context.runId,
+  ]);
+  const bytes = createHash('sha256').update(identity).digest('hex').slice(0, 32).split('');
+  bytes[12] = '4';
+  bytes[16] = ['8', '9', 'a', 'b'][Number.parseInt(bytes[16]!, 16) % 4]!;
+  return `${bytes.slice(0, 8).join('')}-${bytes.slice(8, 12).join('')}-${bytes.slice(12, 16).join('')}-${bytes.slice(16, 20).join('')}-${bytes.slice(20).join('')}`;
+}
+
+async function ensureBatchCostLedgerRun(
+  context: DataSyncAttemptContext,
+  ledgerRunId: string,
+): Promise<void> {
+  const releaseSha = context.releaseSha ?? runtimeReleaseRevision();
+  await syncOperationsRepository.startRun({
+    runId: ledgerRunId,
+    provider: 'fpl',
+    lane: context.queue,
+    scope: context.jobName,
+    mode: 'batch-cost',
+    // Keep this identity constant across Bull retries. The original source
+    // and run IDs remain in metadata/payload and never participate in the
+    // immutable sync-run identity check.
+    trigger: 'batch-cost',
+    metadata: {
+      batchCostLedger: true,
+      originalRunId: context.runId,
+      batchId: context.batchId ?? context.runId,
+      parentRunId: context.parentRunId ?? null,
+      source: context.source ?? null,
+      releaseSha,
+    },
+  });
+}
 
 async function persistBatchCost(
   context: DataSyncAttemptContext,
@@ -388,35 +447,54 @@ async function persistBatchCost(
   complete: boolean,
   summary: DataSyncWorkSummary,
   startedAtIso: string,
-): Promise<void> {
-  // Scheduler/queue-local synthetic IDs (for example launch-monitor-*) do
-  // not belong to ops.sync_runs. Leave their log report intact rather than
-  // manufacturing a second ledger row.
-  if (!UUID_RUN_ID.test(context.runId)) return;
-  await syncOperationsRepository.recordBatchCost(context.runId, {
+): Promise<string> {
+  const ledgerRunId = batchCostLedgerRunId(context);
+  await ensureBatchCostLedgerRun(context, ledgerRunId);
+  const recorded = await syncOperationsRepository.recordBatchCost(ledgerRunId, {
     attemptKey,
     batchId: context.batchId ?? context.runId,
     parentRunId: context.parentRunId ?? null,
     releaseSha: context.releaseSha ?? runtimeReleaseRevision(),
     attempt: boundedAttempt(context.attempt),
     complete,
-    payload: batchCostPayload(context, report, complete, summary, startedAtIso),
+    payload: {
+      originalRunId: context.runId,
+      ledgerRunId,
+      ...batchCostPayload(context, report, complete, summary, startedAtIso),
+    },
   });
+  if (recorded === 'missing') throw new Error(`Batch cost ledger run ${ledgerRunId} disappeared`);
+  if (complete) {
+    await syncOperationsRepository.finishRun(ledgerRunId, {
+      status: 'completed',
+      completedItems: 1,
+      dataChanged: false,
+    });
+  } else {
+    await syncOperationsRepository.failRun(
+      ledgerRunId,
+      new Error('Data sync attempt did not settle successfully'),
+    );
+  }
+  return ledgerRunId;
 }
 
 async function persistBatchCostStart(
   context: DataSyncAttemptContext,
   attemptKey: string,
   startedAtIso: string,
-): Promise<void> {
-  if (!UUID_RUN_ID.test(context.runId)) return;
-  await syncOperationsRepository.recordBatchCostStart(context.runId, {
+): Promise<string> {
+  const ledgerRunId = batchCostLedgerRunId(context);
+  await ensureBatchCostLedgerRun(context, ledgerRunId);
+  const recorded = await syncOperationsRepository.recordBatchCostStart(ledgerRunId, {
     attemptKey,
     batchId: context.batchId ?? context.runId,
     parentRunId: context.parentRunId ?? null,
     releaseSha: context.releaseSha ?? runtimeReleaseRevision(),
     attempt: boundedAttempt(context.attempt),
     payload: {
+      originalRunId: context.runId,
+      ledgerRunId,
       job: context.jobName,
       queue: context.queue,
       eventId: context.targetEventId ?? null,
@@ -424,6 +502,8 @@ async function persistBatchCostStart(
       startedAt: startedAtIso,
     },
   });
+  if (recorded === 'missing') throw new Error(`Batch cost ledger run ${ledgerRunId} disappeared`);
+  return ledgerRunId;
 }
 
 function resolveOutcome(summary: DataSyncWorkSummary): DataSyncAttemptOutcome {
@@ -521,6 +601,7 @@ export async function runDataSyncAttempt<T>(
           batchCost: {
             attemptKey,
             batchId: context.batchId ?? context.runId,
+            ledgerRunId: batchCostLedgerRunId(context),
             complete: settledSuccessfully,
           },
         };

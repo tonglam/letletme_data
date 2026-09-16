@@ -129,6 +129,16 @@ describe('data sync attempt reporting', () => {
       failedUnits: 0,
       timings: { bootstrap: 120, snapshotWrite: 81, derivedView: 15 },
     });
+    expect(
+      inferDataSyncWorkSummary({
+        persistence: { events: 2, teams: 3, players: 5, phases: 1, fixtures: 4 },
+        marketSnapshotCount: 7,
+        publicationId: 'publication-1',
+      }),
+    ).toMatchObject({
+      submittedRows: 7,
+      publicationsCreated: 1,
+    });
   });
 
   test('emits one bounded report with inferred work and FPL metrics', async () => {

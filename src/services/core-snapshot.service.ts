@@ -21,7 +21,10 @@ import {
   readCoreSnapshotOrderingTimestamp,
   recoverPendingCoreSnapshotPublication,
 } from './core-snapshot-publication.service';
-import { CORE_SNAPSHOT_STALE_SOURCE_CODE } from './core-snapshot-persistence.service';
+import {
+  CORE_SNAPSHOT_STALE_SOURCE_CODE,
+  type CoreSnapshotPersistenceResult,
+} from './core-snapshot-persistence.service';
 
 import type { RawFPLFixture } from '../types';
 
@@ -41,6 +44,9 @@ export interface CoreSnapshotSyncResult {
   readonly failedUnits: number;
   readonly publicationId?: string;
   readonly revision?: number;
+  /** Entity counts submitted by the canonical persistence transaction. */
+  readonly persistence?: CoreSnapshotPersistenceResult;
+  readonly submittedRows?: number;
 }
 
 export interface CoreSnapshotDependencies {
@@ -98,6 +104,7 @@ function result(
   snapshot: CoreSnapshot,
   published: boolean,
   publication?: { publicationId: string; revision: number },
+  persistence?: CoreSnapshotPersistenceResult,
 ): CoreSnapshotSyncResult {
   const requiredUnits = workUnits(snapshot);
   return {
@@ -113,6 +120,17 @@ function result(
     succeededUnits: published ? requiredUnits : 0,
     failedUnits: 0,
     ...(publication ?? {}),
+    ...(persistence
+      ? {
+          persistence,
+          submittedRows:
+            persistence.events +
+            persistence.teams +
+            persistence.players +
+            persistence.phases +
+            persistence.fixtures,
+        }
+      : {}),
   };
 }
 
@@ -242,12 +260,18 @@ export async function syncCoreSnapshot(
       },
       preparedAndPersisted.preparedCache,
     );
-    if (committed.status === 'stale') return result(snapshot, false);
+    if (committed.status === 'stale')
+      return result(snapshot, false, undefined, preparedAndPersisted.persisted.persistence);
     dependencies.onMilestone?.('published');
-    return result(snapshot, true, {
-      publicationId: preparedAndPersisted.prepared.publicationId,
-      revision: preparedAndPersisted.prepared.revision,
-    });
+    return result(
+      snapshot,
+      true,
+      {
+        publicationId: preparedAndPersisted.prepared.publicationId,
+        revision: preparedAndPersisted.prepared.revision,
+      },
+      preparedAndPersisted.persisted.persistence,
+    );
   } catch (error) {
     if (
       error instanceof DatabaseError &&
