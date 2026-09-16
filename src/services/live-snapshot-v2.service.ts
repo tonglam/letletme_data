@@ -519,8 +519,11 @@ function isServingFinalMatchPair(
 }
 
 type MatchPlayerFacts = Readonly<{
-  totalPoints: number;
+  /** Null means the durable final did not expose the player's event total. */
+  totalPoints: number | null;
   stats: ReadonlyMap<string, Readonly<{ value: number; awardedPoints: number }>>;
+  /** False means only the independently available stats are authoritative. */
+  complete?: boolean;
 }>;
 
 type MatchDetailFacts = ReadonlyMap<number, ReadonlyMap<number, MatchPlayerFacts>>;
@@ -556,7 +559,11 @@ function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailF
     number,
     Map<
       number,
-      { totalPoints: number; stats: Map<string, { value: number; awardedPoints: number }> }
+      {
+        totalPoints: number | null;
+        stats: Map<string, { value: number; awardedPoints: number }>;
+        complete?: boolean;
+      }
     >
   >();
   let unavailable = false;
@@ -603,8 +610,12 @@ function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailF
         }
       } else {
         players.set(bpsRow.element, {
-          totalPoints: 0,
+          // A legacy event-live row can omit explain/fixture breakdown while
+          // still exposing BPS. BPS proves only that one stat; it cannot
+          // prove a zero event total or an empty stat set.
+          totalPoints: null,
           stats: new Map([['bps', { value: bpsRow.value, awardedPoints: 0 }]]),
+          complete: false,
         });
       }
     }
@@ -625,7 +636,8 @@ function matchDetailFactsFromLiveFinal(final: LivePublicationRead): MatchDetailF
 }
 
 function matchPlayerFactsEqual(left: MatchPlayerFacts, right: MatchPlayerFacts): boolean {
-  if (left.totalPoints !== right.totalPoints || left.stats.size !== right.stats.size) return false;
+  if (left.totalPoints !== null && left.totalPoints !== right.totalPoints) return false;
+  if (left.complete !== false && left.stats.size !== right.stats.size) return false;
   for (const [identifier, stat] of left.stats) {
     const candidate = right.stats.get(identifier);
     if (
@@ -1265,10 +1277,20 @@ export async function syncLiveSnapshotV2(
     }
 
     const clearRejectedMatch = async (match: LiveMatchObservationResult): Promise<void> => {
-      await clearConflictingMatchCheckpoint('desk', match.desk);
-      if (match.detail) {
-        await clearConflictingMatchCheckpoint('detail', match.detail);
+      let cleanupError: unknown;
+      try {
+        await clearConflictingMatchCheckpoint('desk', match.desk);
+      } catch (error) {
+        cleanupError = error;
       }
+      if (match.detail) {
+        try {
+          await clearConflictingMatchCheckpoint('detail', match.detail);
+        } catch (error) {
+          cleanupError ??= error;
+        }
+      }
+      if (cleanupError) throw cleanupError;
     };
     const validateAcceptedMatch = async (match: LiveMatchObservationResult): Promise<void> => {
       try {

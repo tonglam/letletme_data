@@ -603,6 +603,21 @@ local function hasCandidateDetailKey(key)
   return false
 end
 
+local function validDetailItemKey(key, fixtureId, sha256)
+  if type(key) ~= 'string' or type(fixtureId) ~= 'number' or
+     fixtureId <= 0 or fixtureId ~= math.floor(fixtureId) or
+     type(sha256) ~= 'string' or string.len(sha256) ~= 64 or
+     not string.match(sha256, '^[0-9a-f]+$') then return false end
+  local prefix = 'llm:data:v3:fpl:live-match:detail:' .. detail.season .. ':' .. tostring(detail.eventId) .. ':'
+  local suffix = ':' .. tostring(fixtureId) .. ':' .. sha256
+  if string.sub(key, 1, string.len(prefix)) ~= prefix or
+     string.sub(key, -string.len(suffix)) ~= suffix then return false end
+  local itemGeneration = string.sub(key, string.len(prefix) + 1, string.len(key) - string.len(suffix))
+  local generation = tonumber(itemGeneration)
+  return string.match(itemGeneration, '^[1-9][0-9]*$') ~= nil and
+    validGeneration(generation)
+end
+
 -- Delete only immutable siblings whose complete publication descriptor names
 -- the exact generation/item shape for this event.  Prefix checks alone would
 -- let a corrupt pointer delete a control key such as sequence.
@@ -626,21 +641,19 @@ local function clearDetailSiblings(raw)
   if not ok or type(publication) ~= 'table' or
      publication.contractVersion ~= 'live-matches-v3' or
      publication.season ~= detail.season or publication.eventId ~= detail.eventId or
-     not validGeneration(publication.generation) then return end
+     not validGeneration(publication.generation) or type(publication.fixtures) ~= 'table' then return end
   local prefix = 'llm:data:v3:fpl:live-match:detail:' .. detail.season .. ':' .. tostring(detail.eventId) .. ':'
   local oldManifest = prefix .. tostring(publication.generation) .. ':manifest'
   local candidateManifest = prefix .. tostring(detail.generation) .. ':manifest'
   if oldManifest ~= candidateManifest then redis.call('DEL', oldManifest) end
-  if type(publication.fixtures) ~= 'table' then return end
   for _, oldItem in ipairs(publication.fixtures) do
     if type(oldItem) == 'table' and oldItem.type == 'string' and
        type(oldItem.fixtureId) == 'number' and oldItem.fixtureId > 0 and
        oldItem.fixtureId == math.floor(oldItem.fixtureId) and
        type(oldItem.sha256) == 'string' and string.len(oldItem.sha256) == 64 and
        string.match(oldItem.sha256, '^[0-9a-f]+$') and type(oldItem.key) == 'string' then
-      local expectedKey = prefix .. tostring(publication.generation) .. ':' ..
-        tostring(oldItem.fixtureId) .. ':' .. oldItem.sha256
-      if oldItem.key == expectedKey and not hasCandidateDetailKey(oldItem.key) then
+      if validDetailItemKey(oldItem.key, oldItem.fixtureId, oldItem.sha256) and
+         not hasCandidateDetailKey(oldItem.key) then
         redis.call('DEL', oldItem.key, oldItem.key .. ':meta')
       end
     end
@@ -867,6 +880,10 @@ return {'checkpointed', encoded}
 const SET_DESIRED_LUA = `
 local currentRaw = redis.call('GET', KEYS[1])
 local candidate = cjson.decode(ARGV[1])
+local activeRaw = redis.call('GET', KEYS[2]) or ''
+local activeOk, active = pcall(cjson.decode, activeRaw)
+local activeMatchesCandidate = activeOk and type(active) == 'table' and
+  active.publicationId == candidate.publicationId and active.generation == candidate.generation
 local replacingFinalized = false
 if currentRaw then
   local ok, current = pcall(cjson.decode, currentRaw)
@@ -898,7 +915,8 @@ if currentRaw then
       local expectedGeneration = tonumber(ARGV[5])
       if allowReplacement and candidate.final == true and candidate.force == true and
          current.publicationId == ARGV[4] and current.generation == expectedGeneration and
-         candidate.generation >= current.generation then
+         candidate.generation >= current.generation and activeMatchesCandidate and
+         (current.publicationId ~= candidate.publicationId or current.generation ~= candidate.generation) then
         replacingFinalized = true
       else
         return {'kept', currentRaw}
@@ -2690,8 +2708,11 @@ export async function setLiveMatchCheckpointDesiredV3(input: {
   const [status, raw] = promotionResult(
     await redis.eval(
       SET_DESIRED_LUA,
-      1,
+      2,
       liveMatchCheckpointKey(scope, input.kind),
+      input.kind === 'desk'
+        ? liveMatchDeskKey(scope, 'active')
+        : liveMatchDetailKey(scope, 'active'),
       JSON.stringify(desired),
       '86400',
       replacement === undefined ? '0' : '1',

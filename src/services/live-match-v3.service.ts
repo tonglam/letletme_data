@@ -337,6 +337,16 @@ async function scheduleCheckpoint(
         redis,
       }),
     ]);
+    const replaceFinalizedForCutover =
+      forceRecovery &&
+      existingDesired?.final === true &&
+      (existingDesired.publicationId !== publication.publicationId ||
+        existingDesired.generation !== publication.generation)
+        ? {
+            expectedPublicationId: existingDesired.publicationId,
+            expectedGeneration: existingDesired.generation,
+          }
+        : undefined;
     const desired = await setLiveMatchCheckpointDesiredV3({
       kind,
       publication,
@@ -344,6 +354,7 @@ async function scheduleCheckpoint(
       force: boundary || forceRecovery,
       allowFinalReplacement: forceRecovery,
       ...(expectedFinalIdentity ? { expectedFinalIdentity } : {}),
+      ...(replaceFinalizedForCutover ? { replaceFinalizedForCutover } : {}),
       redis,
     });
     const lastMs = lastCheckpointedAt === null ? Number.NaN : Date.parse(lastCheckpointedAt);
