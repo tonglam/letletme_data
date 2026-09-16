@@ -771,10 +771,10 @@ describe('Live League V2 checkpoint generation fence', () => {
 });
 
 describe('Live League V2 Classic finalized roster successor fence', () => {
-  function successorFixture() {
+  function successorFixture(newEntryId = 202) {
     const base = completeClassicCheckpointFixture();
     const oldRow = base.index[0];
-    const newRow = { ...oldRow, entryId: 202, entryName: 'Entry 202' };
+    const newRow = { ...oldRow, entryId: newEntryId, entryName: `Entry ${newEntryId}` };
     const successorPublication: LeagueLiveManifest = {
       ...base.checkpointManifest,
       publicationId: '00000000-0000-4000-8000-000000000202',
@@ -797,18 +797,27 @@ describe('Live League V2 Classic finalized roster successor fence', () => {
       read: {
         publication: successorPublication,
         index: [oldRow, newRow],
-        payload: { ...base.payload, '202': { entryId: 202 } },
+        payload: { ...base.payload, [String(newEntryId)]: { entryId: newEntryId } },
         servedFrom: 'REDIS_CURRENT' as const,
       } as LeagueLiveRead,
     };
   }
 
-  test('allows a complete append-only successor with the same old prefix', () => {
+  test('allows a complete append-only successor with the same rows by entry ID', () => {
     const fixture = successorFixture();
     expect(isSafeFinalizedClassicRosterExpansion(fixture.read, fixture.persisted)).toBe(true);
   });
 
-  test('rejects changed, removed, or reordered persisted rows', () => {
+  test('allows a lower-ID insertion without treating existing rows as changed', () => {
+    const fixture = successorFixture(50);
+    const insertedBeforeRead: LeagueLiveRead = {
+      ...fixture.read,
+      index: [fixture.read.index[1], fixture.read.index[0]],
+    };
+    expect(isSafeFinalizedClassicRosterExpansion(insertedBeforeRead, fixture.persisted)).toBe(true);
+  });
+
+  test('rejects changed, removed, or duplicate persisted rows', () => {
     const changed = successorFixture();
     const changedRead: LeagueLiveRead = {
       ...changed.read,
@@ -820,12 +829,12 @@ describe('Live League V2 Classic finalized roster successor fence', () => {
     const removedRead: LeagueLiveRead = { ...removed.read, index: [removed.read.index[0]] };
     expect(isSafeFinalizedClassicRosterExpansion(removedRead, removed.persisted)).toBe(false);
 
-    const reordered = successorFixture();
-    const reorderedRead: LeagueLiveRead = {
-      ...reordered.read,
-      index: [reordered.read.index[1], reordered.read.index[0]],
+    const duplicate = successorFixture();
+    const duplicateRead: LeagueLiveRead = {
+      ...duplicate.read,
+      index: [duplicate.read.index[0], duplicate.read.index[0]],
     };
-    expect(isSafeFinalizedClassicRosterExpansion(reorderedRead, reordered.persisted)).toBe(false);
+    expect(isSafeFinalizedClassicRosterExpansion(duplicateRead, duplicate.persisted)).toBe(false);
   });
 
   test('rejects a successor from a different global publication', () => {

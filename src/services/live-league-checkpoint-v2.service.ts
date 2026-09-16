@@ -285,14 +285,14 @@ function sameFinalizedPublicationContent(
 
 /**
  * Allow a validated Classic FINAL publication to advance a durable FINAL
- * checkpoint only when it is an append-only roster successor.  A roster can
+ * checkpoint only when it is an append-only roster successor. A roster can
  * grow after a checkpoint is written when a late tournament entry is created;
  * retaining the old checkpoint forever would make the retention obligation
- * impossible to satisfy even though the new publication is complete.  Existing
- * rows and their payloads must remain byte-for-byte equivalent and in the same
- * order.  The caller validates the candidate as a complete FINAL publication
- * before this predicate is considered, so rows beyond the persisted prefix are
- * the only permitted change.
+ * impossible to satisfy even though the new publication is complete. Existing
+ * rows and their payloads must remain canonically equivalent by entry ID;
+ * ordering may change when the canonical roster query inserts a lower ID. The
+ * caller validates the candidate as a complete FINAL publication before this
+ * predicate is considered, so additions are the only permitted change.
  */
 export function isSafeFinalizedClassicRosterExpansion(
   read: LeagueLiveRead,
@@ -345,7 +345,7 @@ export function isSafeFinalizedClassicRosterExpansion(
     ) {
       return false;
     }
-    const candidateIds = new Set<number>();
+    const candidateRowsById = new Map<number, unknown>();
     const entryId = (value: unknown): number | null => {
       if (
         !isRecord(value) ||
@@ -360,15 +360,20 @@ export function isSafeFinalizedClassicRosterExpansion(
 
     for (const row of candidateIndex) {
       const id = entryId(row);
-      if (id === null || candidateIds.has(id)) return false;
-      candidateIds.add(id);
+      if (id === null || candidateRowsById.has(id)) return false;
+      candidateRowsById.set(id, row);
     }
-    for (let index = 0; index < persistedIndex.length; index += 1) {
-      if (canonicalJson(persistedIndex[index]) !== canonicalJson(candidateIndex[index])) {
+
+    const persistedIds = new Set<number>();
+    for (const row of persistedIndex) {
+      const id = entryId(row);
+      if (id === null) return false;
+      if (persistedIds.has(id)) return false;
+      persistedIds.add(id);
+      const candidateRow = candidateRowsById.get(id);
+      if (candidateRow === undefined || canonicalJson(row) !== canonicalJson(candidateRow)) {
         return false;
       }
-      const id = entryId(persistedIndex[index]);
-      if (id === null) return false;
       const key = String(id);
       if (
         !Object.prototype.hasOwnProperty.call(persisted.payload, key) ||
