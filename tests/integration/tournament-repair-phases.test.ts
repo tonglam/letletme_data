@@ -656,7 +656,7 @@ test('historical points repairs attach only the earliest missing scope on each v
     await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)
   ).filter((candidate) => candidate.code === 'TOURNAMENT_RESULTS_INCOMPLETE');
   expect(unfinished).toHaveLength(1);
-  expect(unfinished[0]!.issueId).toBe(attached);
+  expect(unfinished[0]!.issueId).toBe(attached!);
   // Only after normal issue finalization may the next missing scope be attached.
   await sql`UPDATE competition.tournament_setup_issues SET resolved_at=clock_timestamp()
     WHERE issue_id=${attached!} AND season_id=${season.seasonId}`;
