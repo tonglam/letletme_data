@@ -26,11 +26,28 @@ export function isReusableEntryPicksHeadForRetry(
   requestWatermark: string | undefined,
 ): boolean {
   if (!requestWatermark || head.state !== 'COMPLETE' || head.rowCount !== 15) return false;
-  const watermarkMs = new Date(requestWatermark).getTime();
-  const sourceCheckedAtMs = new Date(head.sourceCheckedAtExact ?? head.sourceCheckedAt).getTime();
-  return Number.isFinite(watermarkMs) && Number.isFinite(sourceCheckedAtMs)
-    ? sourceCheckedAtMs >= watermarkMs
-    : false;
+  const normalizeExact = (value: string): string | null => {
+    const trimmed = value.trim();
+    const exact = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$/.exec(trimmed);
+    if (exact) {
+      const fraction = (exact[2] ?? '').padEnd(6, '0').slice(0, 6);
+      return `${exact[1]}.${fraction}Z`;
+    }
+    const date = new Date(trimmed);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  };
+  const watermark = normalizeExact(requestWatermark);
+  const sourceCheckedAt = normalizeExact(
+    head.sourceCheckedAtExact ??
+      (head.sourceCheckedAt instanceof Date
+        ? head.sourceCheckedAt.toISOString()
+        : String(head.sourceCheckedAt)),
+  );
+  // PostgreSQL ordering timestamps are normalized UTC strings with six
+  // fractional digits. Lexical comparison preserves microseconds; converting
+  // them through Date would truncate the last three digits and can incorrectly
+  // reuse a stale head captured in the same millisecond.
+  return watermark !== null && sourceCheckedAt !== null && sourceCheckedAt >= watermark;
 }
 
 export function isExplicitEntryRepairRequest(

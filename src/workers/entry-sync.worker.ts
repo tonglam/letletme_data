@@ -619,6 +619,24 @@ export function createEntrySyncWorker(
 
     logJobTriggered(context);
 
+    const executionIntent =
+      attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
+        ? ('retry' as const)
+        : (job.data?.executionIntent ?? resolveEntrySyncExecutionIntent(job.data?.source));
+    // A Bull automatic retry reuses the original payload. Capture the
+    // database ordering boundary once and persist it back to that payload
+    // before any provider work, so a later attempt audits the rows committed
+    // by the first attempt instead of manufacturing a newer watermark.
+    let requestWatermark = job.data?.requestWatermark;
+    if (
+      requestWatermark === undefined &&
+      (executionIntent === 'force' || executionIntent === 'retry')
+    ) {
+      const ordering = await readDatabaseOrderingTimestamp();
+      requestWatermark = ordering.exact;
+      await job.updateData({ ...job.data, requestWatermark });
+    }
+
     const attemptContext: DataSyncAttemptContext = {
       queue: job.queueName,
       jobName: job.name,
@@ -633,10 +651,7 @@ export function createEntrySyncWorker(
       // Bull automatic retry has no new payload, so reporting the raw intent
       // would claim a force/refresh execution even though the worker applies
       // the retry branch below.
-      executionIntent:
-        attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
-          ? 'retry'
-          : (job.data?.executionIntent ?? resolveEntrySyncExecutionIntent(job.data?.source)),
+      executionIntent,
     };
 
     return runDataSyncAttempt(attemptContext, async () => {
@@ -646,11 +661,6 @@ export function createEntrySyncWorker(
         async () => (await getCurrentEvent(season))?.id ?? null,
       );
       const effectiveExecutionIntent = attemptContext.executionIntent!;
-      const requestWatermark =
-        job.data?.requestWatermark ??
-        (effectiveExecutionIntent === 'force' || effectiveExecutionIntent === 'retry'
-          ? (await readDatabaseOrderingTimestamp()).exact
-          : undefined);
       const effectiveJobData =
         targetEventId !== undefined
           ? {

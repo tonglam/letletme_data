@@ -551,34 +551,67 @@ export async function attachFreshnessWindowToSchedulerObligation(input: {
     return false;
   }
   const db = input.db ?? (await getDb());
-  const existingWindowIds = sql`CASE
-    WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
-      THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
-    ELSE '[]'::jsonb
-  END`;
-  const containsWindow = sql`${existingWindowIds} @> jsonb_build_array(${input.freshnessWindowId}::bigint)`;
-  const updated = await db
-    .update(schedulerObligationsInOps)
-    .set({
-      evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
-        'freshnessWindowId', ${input.freshnessWindowId}::bigint,
-        'freshnessWindowIds',
-        CASE WHEN ${containsWindow} THEN ${existingWindowIds}
-          ELSE ${existingWindowIds} || jsonb_build_array(${input.freshnessWindowId}::bigint)
-        END
-      )`,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(schedulerObligationsInOps.obligationId, input.obligationId),
-        sql`(NOT (${containsWindow}) OR
-        ${schedulerObligationsInOps.evidence}->'freshnessWindowId'
-          IS DISTINCT FROM to_jsonb(${input.freshnessWindowId}::bigint))`,
-      ),
-    )
-    .returning({ obligationId: schedulerObligationsInOps.obligationId });
-  return updated.length === 1;
+  return db.transaction(async (tx) => {
+    // Reservation, supersession, and attachment are separate scheduler
+    // phases. Lock the obligation before merging the window so a stale
+    // scheduler replica cannot leave a new PENDING window behind a terminal
+    // skip. If supersession wins first, retire this exact window immediately.
+    const [obligation] = await tx
+      .select({ status: schedulerObligationsInOps.status })
+      .from(schedulerObligationsInOps)
+      .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
+      .for('update');
+    if (!obligation) return false;
+    if (['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) {
+      await tx
+        .update(freshnessSloWindowsInOps)
+        .set({
+          status: 'NOT_APPLICABLE',
+          completenessStatus: 'NOT_APPLICABLE',
+          breachCode: null,
+          evidence: sql`${freshnessSloWindowsInOps.evidence} || ${JSON.stringify({
+            reason: 'SUPERSEDED_BY_TERMINAL_OBLIGATION',
+            schedulerObligationId: input.obligationId,
+          })}::jsonb`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(freshnessSloWindowsInOps.windowId, input.freshnessWindowId),
+            inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID', 'BREACHED']),
+          ),
+        );
+      return false;
+    }
+    const existingWindowIds = sql`CASE
+      WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
+        THEN ${schedulerObligationsInOps.evidence}->'freshnessWindowIds'
+      ELSE '[]'::jsonb
+    END`;
+    const containsWindow = sql`${existingWindowIds} @> jsonb_build_array(${input.freshnessWindowId}::bigint)`;
+    const updated = await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        evidence: sql`${schedulerObligationsInOps.evidence} || jsonb_build_object(
+          'freshnessWindowId', ${input.freshnessWindowId}::bigint,
+          'freshnessWindowIds',
+          CASE WHEN ${containsWindow} THEN ${existingWindowIds}
+            ELSE ${existingWindowIds} || jsonb_build_array(${input.freshnessWindowId}::bigint)
+          END
+        )`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, input.obligationId),
+          sql`(NOT (${containsWindow}) OR
+          ${schedulerObligationsInOps.evidence}->'freshnessWindowId'
+            IS DISTINCT FROM to_jsonb(${input.freshnessWindowId}::bigint))`,
+        ),
+      )
+      .returning({ obligationId: schedulerObligationsInOps.obligationId });
+    return updated.length === 1;
+  });
 }
 
 export async function recordFreshnessObservation(input: {
