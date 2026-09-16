@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   checkpointEntryLiveInputV2,
   checkpointFinalEntryFromProviderResponse,
@@ -37,6 +39,11 @@ import { findEventEligibleEntryIds } from '../domain/entry-infos';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { getConfig } from '../utils/config';
 import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
+import {
+  createSyncOperationsRepository,
+  syncOperationsRepository,
+} from '../repositories/sync-operations';
+import { classifyDataError, safeDataErrorCode } from '../domain/error-classification';
 
 const DEFAULT_CONCURRENCY = 5;
 const runtimeConfig = getConfig();
@@ -69,6 +76,16 @@ export type TournamentEventResultsSyncOptions = {
    * each waits on a different entry advisory lock.
    */
   perEntryMutationScopes?: boolean;
+  /** Durable correlation for entry/GW execution and provider-request audit. */
+  auditRunId?: string;
+  auditParentRunId?: string;
+  auditObligationId?: string;
+  auditGeneration?: number;
+  auditRepairIssueId?: number;
+  auditTrigger?: string;
+  auditAttempt?: number;
+  auditInitialize?: boolean;
+  auditFinalizeRun?: boolean;
 };
 
 type TournamentResultWorkSummary = {
@@ -77,6 +94,12 @@ type TournamentResultWorkSummary = {
   succeededUnits: number;
   failedUnits: number;
 };
+
+type EntrySyncAuditComponent = 'results' | 'transfers' | 'final';
+type EntrySyncAuditOptions = Pick<
+  TournamentEventResultsSyncOptions,
+  'auditParentRunId' | 'auditObligationId' | 'auditGeneration' | 'auditRepairIssueId'
+>;
 
 function validateOrderingTimestamp(value: string): string;
 function validateOrderingTimestamp(value: Date): Date;
@@ -89,9 +112,45 @@ function validateOrderingTimestamp(value: Date | string): Date | string {
   return value;
 }
 
+function orderingTimestampString(value: Date | string): string {
+  return typeof value === 'string' ? value : value.toISOString();
+}
+
 function freshEntryIds(entryIds: number[], staleEntryIds: number[]): Set<number> {
   const staleEntryIdSet = new Set(staleEntryIds);
   return new Set(entryIds.filter((entryId) => !staleEntryIdSet.has(entryId)));
+}
+
+const ENTRY_EVENT_AUDIT_RESOURCE_TYPE = 'entry-event';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function entryEventAuditResourceId(
+  season: FplSeasonRef,
+  eventId: number,
+  entryId: number,
+  component: EntrySyncAuditComponent = 'results',
+): string {
+  return `${season.seasonId}:${eventId}:${entryId}:${component}`;
+}
+
+function auditRunMetadata(
+  options: EntrySyncAuditOptions | undefined,
+  auditRunId: string,
+  auditAttempt: number,
+): Record<string, unknown> {
+  return {
+    auditVersion: 'entry-sync-audit-v1',
+    attemptRunId: auditRunId,
+    ...(options?.auditParentRunId ? { parentRunId: options.auditParentRunId } : {}),
+    ...(options?.auditObligationId ? { obligationId: options.auditObligationId } : {}),
+    ...(options?.auditGeneration === undefined
+      ? {}
+      : { obligationGeneration: options.auditGeneration }),
+    ...(options?.auditRepairIssueId === undefined
+      ? {}
+      : { repairIssueId: options.auditRepairIssueId }),
+    bullAttempt: auditAttempt,
+  };
 }
 
 async function loadEventEligibleEntryIds(
@@ -145,8 +204,8 @@ async function resolveEventPointsPayload(
   season: FplSeasonRef,
   eventId: number,
   provided?: EventPointsPayload,
-): Promise<EventPointsPayload> {
-  if (provided) return provided;
+): Promise<{ payload: EventPointsPayload; providerRequested: boolean }> {
+  if (provided) return { payload: provided, providerRequested: false };
 
   const event = await eventRepository.findById(season, eventId);
   const finalizationBoundary = event?.finished && event.dataChecked && event.dataCheckedAt !== null;
@@ -158,10 +217,13 @@ async function resolveEventPointsPayload(
     const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
     if (checkpoint?.publication.state === 'FINALIZED' && checkpoint.eventLives.length > 0) {
       return {
-        elements: checkpoint.eventLives.map((row) => ({
-          id: row.elementId,
-          stats: { total_points: row.totalPoints },
-        })),
+        payload: {
+          elements: checkpoint.eventLives.map((row) => ({
+            id: row.elementId,
+            stats: { total_points: row.totalPoints },
+          })),
+        },
+        providerRequested: false,
       };
     }
     throw new IncompleteDataSyncError(
@@ -170,6 +232,7 @@ async function resolveEventPointsPayload(
       0,
       0,
       1,
+      'SOURCE_NOT_READY',
     );
   } else {
     const cached = await readLivePublicationV2({ season: season.seasonCode, eventId }).catch(
@@ -177,20 +240,26 @@ async function resolveEventPointsPayload(
     );
     if (cached && cached.eventLives.length > 0) {
       return {
-        elements: cached.eventLives.map((row) => ({
-          id: row.elementId,
-          stats: { total_points: row.totalPoints },
-        })),
+        payload: {
+          elements: cached.eventLives.map((row) => ({
+            id: row.elementId,
+            stats: { total_points: row.totalPoints },
+          })),
+        },
+        providerRequested: false,
       };
     }
 
     const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
     if (checkpoint && checkpoint.eventLives.length > 0) {
       return {
-        elements: checkpoint.eventLives.map((row) => ({
-          id: row.elementId,
-          stats: { total_points: row.totalPoints },
-        })),
+        payload: {
+          elements: checkpoint.eventLives.map((row) => ({
+            id: row.elementId,
+            stats: { total_points: row.totalPoints },
+          })),
+        },
+        providerRequested: false,
       };
     }
   }
@@ -208,7 +277,7 @@ async function resolveEventPointsPayload(
   // it here could let a request that started before finalization overwrite the
   // canonical final rows after the snapshot commits. The regular live pipeline
   // owns durable/cache publication and its ordering fences.
-  return live;
+  return { payload: live, providerRequested: true };
 }
 
 export async function syncTournamentEventResultsForEntryIds(
@@ -236,6 +305,37 @@ export async function syncTournamentEventResultsForEntryIds(
       succeededUnits: 0,
       failedUnits: 0,
     };
+  }
+
+  const auditRunId =
+    options?.auditRunId && UUID_PATTERN.test(options.auditRunId)
+      ? options.auditRunId
+      : randomUUID();
+  const auditAttempt = Math.max(1, Math.floor(options?.auditAttempt ?? 1));
+  const auditTrigger = options?.auditTrigger ?? 'tournament-event-results';
+  if (options?.auditInitialize !== false) {
+    await syncOperationsRepository.startRun({
+      runId: auditRunId,
+      provider: 'fpl',
+      lane: 'tournament-sync',
+      scope: 'entry-event',
+      season,
+      eventId,
+      mode: 'entry-event-results',
+      trigger: auditTrigger,
+      expectedItems: uniqueEntryIds.length,
+      metadata: auditRunMetadata(options, auditRunId, auditAttempt),
+    });
+    await syncOperationsRepository.upsertItems(
+      auditRunId,
+      uniqueEntryIds.map((entryId) => ({
+        resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+        resourceId: entryEventAuditResourceId(season, eventId, entryId),
+        status: 'pending' as const,
+        attempts: auditAttempt,
+        normalizedPayload: { phase: 'entry-event-results' },
+      })),
+    );
   }
 
   const sourceOrdering = options?.sourceCheckedAt
@@ -323,11 +423,105 @@ export async function syncTournamentEventResultsForEntryIds(
     }
   }
 
-  const providerEntryIds = uniqueEntryIds.filter((entryId) => !recoveredFinalEntryIds.has(entryId));
-  const live =
-    providerEntryIds.length > 0
-      ? await resolveEventPointsPayload(season, eventId, options?.live)
-      : null;
+  // Repair callers may pass the whole tournament roster. Re-plan against the
+  // durable result/pick/transfer state before asking FPL for anything so a
+  // missing row cannot fan out into a full-roster provider fetch.
+  const [plannedStaleResultEntryIds, plannedPersistedPickEntryIds, plannedMissingTransferEntryIds] =
+    await Promise.all([
+      entryEventResultsRepository.findEntryIdsNeedingRichSync(
+        season,
+        uniqueEntryIds,
+        eventId,
+        freshAfter,
+      ),
+      entryEventPicksRepository.findEntryIdsByEvent(season, eventId, uniqueEntryIds),
+      options?.skipTransfers
+        ? Promise.resolve([])
+        : entryEventTransfersRepository.findEntryIdsNeedingSync(season, uniqueEntryIds, eventId),
+    ]);
+  const plannedFreshResultEntryIds = freshEntryIds(uniqueEntryIds, plannedStaleResultEntryIds);
+  const plannedPersistedPickSet = new Set(plannedPersistedPickEntryIds);
+  const plannedFinalHeads = finalizationDate
+    ? await entryEventPicksRepository.findHeadsByEventAndEntryIds(season, eventId, uniqueEntryIds)
+    : [];
+  const plannedFinalEntryIds = finalizationDate
+    ? await completedFinalEntryIds(
+        season,
+        eventId,
+        plannedFinalHeads,
+        finalizationCutoff ?? finalizationDate,
+      )
+    : new Set<number>();
+  for (const entryId of recoveredFinalEntryIds) plannedFreshResultEntryIds.add(entryId);
+  const requiredResultEntryIds = uniqueEntryIds.filter(
+    (entryId) =>
+      !recoveredFinalEntryIds.has(entryId) &&
+      (!plannedFreshResultEntryIds.has(entryId) ||
+        !plannedPersistedPickSet.has(entryId) ||
+        (finalizationDate !== null && !plannedFinalEntryIds.has(entryId))),
+  );
+  const transferOnlyEntryIds = plannedMissingTransferEntryIds.filter(
+    (entryId) => !requiredResultEntryIds.includes(entryId),
+  );
+  const transferEntryIds = new Set(plannedMissingTransferEntryIds);
+  const providerEntryIds = requiredResultEntryIds;
+  const reusableEntryIds = uniqueEntryIds.filter(
+    (entryId) => !requiredResultEntryIds.includes(entryId),
+  );
+  if (reusableEntryIds.length > 0) {
+    await syncOperationsRepository.upsertItems(
+      auditRunId,
+      reusableEntryIds.map((entryId) => ({
+        resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+        resourceId: entryEventAuditResourceId(season, eventId, entryId),
+        status: 'skipped' as const,
+        attempts: auditAttempt,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          reused: true,
+          reuseReason: recoveredFinalEntryIds.has(entryId)
+            ? 'durable-final-recovery'
+            : 'durable-fresh',
+          sourceRevision: orderingTimestampString(sourceOrdering.exact),
+          finalCompletion: finalizationDate !== null,
+        },
+        completedAt: new Date(),
+      })),
+    );
+  }
+  let liveResolution: Awaited<ReturnType<typeof resolveEventPointsPayload>> | null = null;
+  try {
+    liveResolution =
+      providerEntryIds.length > 0
+        ? await resolveEventPointsPayload(season, eventId, options?.live)
+        : null;
+  } catch (error) {
+    const errorClass = classifyDataError(error);
+    await syncOperationsRepository
+      .upsertItems(
+        auditRunId,
+        providerEntryIds.map((entryId) => ({
+          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+          resourceId: entryEventAuditResourceId(season, eventId, entryId),
+          status: 'failed' as const,
+          attempts: auditAttempt,
+          normalizedPayload: {
+            phase: 'entry-event-results',
+            eventLiveRequests: 1,
+            unknownRequests:
+              errorClass === 'TRANSIENT_PROVIDER' || errorClass === 'TRANSIENT_INFRA' ? 1 : 0,
+          },
+          lastError: safeDataErrorCode(error),
+        })),
+      )
+      .catch((auditError) =>
+        logError('Failed to persist shared event-live audit failure', auditError, { eventId }),
+      );
+    await syncOperationsRepository.failRun(auditRunId, new Error(safeDataErrorCode(error)));
+    throw error;
+  }
+  const live = liveResolution?.payload ?? null;
+  const eventLiveProviderRequests = liveResolution?.providerRequested ? 1 : 0;
   const pointsByElement = new Map<number, number>();
   if (live) {
     for (const element of live.elements) {
@@ -339,17 +533,28 @@ export async function syncTournamentEventResultsForEntryIds(
   const picksByEntry = new Map<number, RawFPLEntryEventPicksResponse>();
   await mapWithConcurrency(providerEntryIds, concurrency, async (entryId) => {
     let accepted = false;
+    const picksRequest = { started: false, completed: false };
+    const transferRequest = { started: false, completed: false };
+    const trackedRequest = async <T>(
+      state: { started: boolean; completed: boolean },
+      request: () => Promise<T>,
+    ): Promise<T> => {
+      state.started = true;
+      const response = await request();
+      state.completed = true;
+      return response;
+    };
     try {
       const [picks, transfers] = await withTimeout(
         Promise.all([
-          fplClient.getEntryEventPicks(entryId, eventId),
-          options?.skipTransfers
+          trackedRequest(picksRequest, () => fplClient.getEntryEventPicks(entryId, eventId)),
+          options?.skipTransfers || !transferEntryIds.has(entryId)
             ? Promise.resolve(null)
             : options?.transfersByEntry
               ? options.transfersByEntry.has(entryId)
                 ? Promise.resolve(options.transfersByEntry.get(entryId)!)
                 : Promise.reject(new Error('Transfer payload is missing for requested entry'))
-              : fplClient.getEntryTransfers(entryId),
+              : trackedRequest(transferRequest, () => fplClient.getEntryTransfers(entryId)),
         ]),
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
@@ -390,6 +595,25 @@ export async function syncTournamentEventResultsForEntryIds(
                 { sourceCheckedAt: transferSourceCheckedAt! },
               );
             }
+            await createSyncOperationsRepository(tx).upsertItems(auditRunId, [
+              {
+                resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                resourceId: entryEventAuditResourceId(season, eventId, entryId),
+                status: 'completed',
+                attempts: auditAttempt,
+                normalizedPayload: {
+                  phase: 'entry-event-results',
+                  sourceRevision: orderingTimestampString(sourceOrdering.exact),
+                  eventLiveRequests: eventLiveProviderRequests,
+                  picksRequests: picksRequest.started ? 1 : 0,
+                  transferRequests: transferRequest.started ? 1 : 0,
+                  factCommit: 'committed',
+                  finalCompletion: false,
+                  reused: false,
+                },
+                completedAt: new Date(),
+              },
+            ]);
           },
           { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
         );
@@ -411,10 +635,44 @@ export async function syncTournamentEventResultsForEntryIds(
       if (accepted) acceptedEntryIds.add(entryId);
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
+      await syncOperationsRepository
+        .upsertItems(auditRunId, [
+          {
+            resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+            resourceId: entryEventAuditResourceId(season, eventId, entryId),
+            status: 'failed',
+            attempts: auditAttempt,
+            normalizedPayload: {
+              phase: 'entry-event-results',
+              picksRequests: picksRequest.started ? 1 : 0,
+              transferRequests: transferRequest.started ? 1 : 0,
+              unknownRequests:
+                (picksRequest.started && !picksRequest.completed ? 1 : 0) +
+                (transferRequest.started && !transferRequest.completed ? 1 : 0),
+            },
+            lastError: safeDataErrorCode(error),
+          },
+        ])
+        .catch((auditError) =>
+          logError('Failed to persist entry sync audit failure', auditError, { eventId, entryId }),
+        );
       logError('Failed to sync tournament entry results', error, { eventId, entryId });
       return { entryId, success: false } satisfies EntrySyncOutcome;
     }
   });
+
+  if (transferOnlyEntryIds.length > 0) {
+    await syncEntryTransferHistories(season, transferOnlyEntryIds, eventId, {
+      concurrency,
+      perEntryMutationScopes: options?.perEntryMutationScopes,
+      sourceCheckedAt: transferSourceCheckedAt ?? sourceOrdering.exact,
+      auditRunId,
+      auditTrigger,
+      auditAttempt,
+      auditInitialize: false,
+      auditFinalizeRun: false,
+    });
+  }
 
   // Do not publish any FINAL while provider work can still change the event's
   // finalization fence. The batch boundary check below is the gate; the
@@ -436,6 +694,10 @@ export async function syncTournamentEventResultsForEntryIds(
     (afterCutoff &&
       (!finalizationCutoff || isFreshnessBoundaryNewer(finalizationCutoff, afterCutoff)))
   ) {
+    await syncOperationsRepository.failRun(
+      auditRunId,
+      new Error(finalizationBoundaryChanged ? 'SOURCE_CHANGED_DURING_SYNC' : 'SOURCE_NOT_READY'),
+    );
     throw new IncompleteDataSyncError(
       finalizationBoundaryChanged
         ? 'Event finalization boundary changed during historical sync; fresh source evidence is required'
@@ -444,6 +706,7 @@ export async function syncTournamentEventResultsForEntryIds(
       0,
       0,
       uniqueEntryIds.length,
+      'SOURCE_CHANGED_DURING_SYNC',
     );
   }
 
@@ -470,6 +733,21 @@ export async function syncTournamentEventResultsForEntryIds(
           finalizationCutoff,
           live,
         );
+        await syncOperationsRepository.upsertItems(auditRunId, [
+          {
+            resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+            resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
+            status: 'completed',
+            attempts: auditAttempt,
+            normalizedPayload: {
+              phase: 'final-head',
+              sourceRevision: orderingTimestampString(sourceOrdering.exact),
+              finalCompletion: true,
+              reused: false,
+            },
+            completedAt: new Date(),
+          },
+        ]);
         return true;
       } catch (error) {
         finalizationCheckpointFailureEntryIds.add(entryId);
@@ -522,13 +800,29 @@ export async function syncTournamentEventResultsForEntryIds(
   const synced = totalEntries - failedUnits;
   const errors = failedUnits;
   if (failedUnits > 0) {
+    await syncOperationsRepository.failRun(auditRunId, new Error('ENTRY_RESULTS_INCOMPLETE'));
     throw new IncompleteDataSyncError(
       'Tournament event results did not converge for every requested entry',
       totalEntries,
-      0,
+      Math.max(0, totalEntries - requiredResultEntryIds.length - transferOnlyEntryIds.length),
       synced,
       failedUnits,
     );
+  }
+  if (options?.auditFinalizeRun !== false) {
+    await syncOperationsRepository.finishRun(auditRunId, {
+      status: 'completed',
+      completedItems: synced,
+      failedItems: 0,
+      skippedItems: reusableEntryIds.length,
+      dataChanged: providerEntryIds.length > 0 || transferOnlyEntryIds.length > 0,
+      metadata: {
+        ...auditRunMetadata(options, auditRunId, auditAttempt),
+        finalCompletion: finalizationDate !== null,
+        providerEntryCount: providerEntryIds.length,
+        transferOnlyEntryCount: transferOnlyEntryIds.length,
+      },
+    });
   }
   return {
     eventId,
@@ -536,7 +830,7 @@ export async function syncTournamentEventResultsForEntryIds(
     synced,
     errors,
     requiredUnits: totalEntries,
-    reusedUnits: 0,
+    reusedUnits: Math.max(0, totalEntries - requiredResultEntryIds.length),
     succeededUnits: synced,
     failedUnits,
   };
@@ -546,7 +840,20 @@ export async function syncEntryTransferHistories(
   season: FplSeasonRef,
   entryIds: number[],
   endEventId: number,
-  options?: { concurrency?: number; perEntryMutationScopes?: boolean },
+  options?: {
+    concurrency?: number;
+    perEntryMutationScopes?: boolean;
+    auditRunId?: string;
+    auditParentRunId?: string;
+    auditObligationId?: string;
+    auditGeneration?: number;
+    auditRepairIssueId?: number;
+    auditTrigger?: string;
+    auditAttempt?: number;
+    auditInitialize?: boolean;
+    auditFinalizeRun?: boolean;
+    sourceCheckedAt?: Date | string;
+  },
 ): Promise<{
   synced: number;
   errors: number;
@@ -558,12 +865,46 @@ export async function syncEntryTransferHistories(
 }> {
   const uniqueEntryIds = uniqueNumbers(entryIds);
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
+  const sourceCheckedAt = options?.sourceCheckedAt ?? (await readDatabaseOrderingTimestamp()).exact;
+  const auditRunId =
+    options?.auditRunId && UUID_PATTERN.test(options.auditRunId)
+      ? options.auditRunId
+      : randomUUID();
+  const auditAttempt = Math.max(1, Math.floor(options?.auditAttempt ?? 1));
+  if (options?.auditInitialize !== false) {
+    await syncOperationsRepository.startRun({
+      runId: auditRunId,
+      provider: 'fpl',
+      lane: 'tournament-sync',
+      scope: 'entry-event',
+      season,
+      eventId: endEventId,
+      mode: 'entry-transfer-history',
+      trigger: options?.auditTrigger ?? 'tournament-event-transfers',
+      expectedItems: uniqueEntryIds.length,
+      metadata: auditRunMetadata(options, auditRunId, auditAttempt),
+    });
+    await syncOperationsRepository.upsertItems(
+      auditRunId,
+      uniqueEntryIds.map((entryId) => ({
+        resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+        resourceId: entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
+        status: 'pending' as const,
+        attempts: auditAttempt,
+        normalizedPayload: { phase: 'entry-transfer-history' },
+      })),
+    );
+  }
 
   await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
+    const transferRequest = { started: false, completed: false };
     try {
+      transferRequest.started = true;
       const transfers = await withTimeout(
-        fplClient.getEntryTransfers(entryId),
+        fplClient.getEntryTransfers(entryId).then((response) => {
+          transferRequest.completed = true;
+          return response;
+        }),
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching transfer history for entry ${entryId}`,
       );
@@ -572,14 +913,33 @@ export async function syncEntryTransferHistories(
           season,
           entryId,
           (tx) =>
-            createEntryEventTransfersRepository(tx).replaceForEvent(
-              season,
-              entryId,
-              endEventId,
-              transfers,
-              undefined,
-              { sourceCheckedAt },
-            ),
+            (async () => {
+              await createEntryEventTransfersRepository(tx).replaceForEvent(
+                season,
+                entryId,
+                endEventId,
+                transfers,
+                undefined,
+                { sourceCheckedAt },
+              );
+              await createSyncOperationsRepository(tx).upsertItems(auditRunId, [
+                {
+                  resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                  resourceId: entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
+                  status: 'completed',
+                  attempts: auditAttempt,
+                  normalizedPayload: {
+                    phase: 'entry-transfer-history',
+                    sourceRevision: orderingTimestampString(sourceCheckedAt),
+                    transferRequests: transferRequest.started ? 1 : 0,
+                    factCommit: 'committed',
+                    finalCompletion: false,
+                    reused: false,
+                  },
+                  completedAt: new Date(),
+                },
+              ]);
+            })(),
           { timeoutMs: ENTRY_PERSIST_TIMEOUT_MS },
         );
       if (options?.perEntryMutationScopes) {
@@ -597,6 +957,27 @@ export async function syncEntryTransferHistories(
       }
       return true;
     } catch (error) {
+      await syncOperationsRepository
+        .upsertItems(auditRunId, [
+          {
+            resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+            resourceId: entryEventAuditResourceId(season, endEventId, entryId, 'transfers'),
+            status: 'failed',
+            attempts: auditAttempt,
+            normalizedPayload: {
+              phase: 'entry-transfer-history',
+              transferRequests: transferRequest.started ? 1 : 0,
+              unknownRequests: transferRequest.started && !transferRequest.completed ? 1 : 0,
+            },
+            lastError: safeDataErrorCode(error),
+          },
+        ])
+        .catch((auditError) =>
+          logError('Failed to persist transfer sync audit failure', auditError, {
+            endEventId,
+            entryId,
+          }),
+        );
       logError('Failed to sync entry transfer history', error, { entryId, endEventId });
       return false;
     }
@@ -608,6 +989,23 @@ export async function syncEntryTransferHistories(
     endEventId,
   );
   const synced = uniqueEntryIds.length - failedEntryIds.length;
+
+  if (options?.auditFinalizeRun !== false) {
+    if (failedEntryIds.length > 0) {
+      await syncOperationsRepository.failRun(auditRunId, new Error('ENTRY_TRANSFERS_INCOMPLETE'));
+    } else {
+      await syncOperationsRepository.finishRun(auditRunId, {
+        status: 'completed',
+        completedItems: synced,
+        skippedItems: 0,
+        dataChanged: uniqueEntryIds.length > 0,
+        metadata: {
+          ...auditRunMetadata(options, auditRunId, auditAttempt),
+          phase: 'entry-transfer-history',
+        },
+      });
+    }
+  }
 
   return {
     synced,
@@ -716,6 +1114,36 @@ export async function syncTournamentEventResults(
     };
   }
 
+  const auditRunId =
+    options?.auditRunId && UUID_PATTERN.test(options.auditRunId)
+      ? options.auditRunId
+      : randomUUID();
+  const auditTrigger = options?.auditTrigger ?? 'tournament-event-results';
+  const auditAttempt = Math.max(1, Math.floor(options?.auditAttempt ?? 1));
+  const auditOptions = { ...options, auditRunId, auditTrigger, auditAttempt };
+  await syncOperationsRepository.startRun({
+    runId: auditRunId,
+    provider: 'fpl',
+    lane: 'tournament-sync',
+    scope: 'entry-event',
+    season,
+    eventId,
+    mode: 'entry-event-results',
+    trigger: auditTrigger,
+    expectedItems: entryIds.length,
+    metadata: auditRunMetadata(options, auditRunId, auditAttempt),
+  });
+  await syncOperationsRepository.upsertItems(
+    auditRunId,
+    entryIds.map((entryId) => ({
+      resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+      resourceId: entryEventAuditResourceId(season, eventId, entryId),
+      status: 'pending' as const,
+      attempts: auditAttempt,
+      normalizedPayload: { phase: 'entry-event-results' },
+    })),
+  );
+
   const sourceOrdering = options?.sourceCheckedAt
     ? { exact: validateOrderingTimestamp(options.sourceCheckedAt) }
     : await readDatabaseOrderingTimestamp();
@@ -779,11 +1207,13 @@ export async function syncTournamentEventResults(
   if (requiredResultEntryIds.length > 0) {
     try {
       await syncTournamentEventResultsForEntryIds(season, requiredResultEntryIds, eventId, {
-        ...options,
+        ...auditOptions,
         skipTransfers: true,
         freshAfter,
         sourceCheckedAt: sourceOrdering.exact,
         finalizationRecoveryEntryIds,
+        auditInitialize: false,
+        auditFinalizeRun: false,
       });
     } catch (error) {
       logError('Tournament result phase did not converge', error, { eventId });
@@ -795,6 +1225,11 @@ export async function syncTournamentEventResults(
       await syncEntryTransferHistories(season, plan.requiredTransferEntryIds, eventId, {
         concurrency: options?.concurrency,
         perEntryMutationScopes: options?.perEntryMutationScopes,
+        auditRunId,
+        auditTrigger,
+        auditAttempt,
+        auditInitialize: false,
+        sourceCheckedAt: options?.transferSourceCheckedAt ?? sourceOrdering.exact,
       });
     } catch (error) {
       logError('Tournament transfer phase did not converge', error, { eventId });
@@ -860,6 +1295,7 @@ export async function syncTournamentEventResults(
   const succeededUnits = Math.max(0, requiredUnits - failedUnits);
 
   if (failedUnits > 0) {
+    await syncOperationsRepository.failRun(auditRunId, new Error('ENTRY_EVENT_SYNC_INCOMPLETE'));
     throw new IncompleteDataSyncError(
       'Tournament event synchronization did not converge for every active entry',
       requiredUnits,
@@ -883,6 +1319,7 @@ export async function syncTournamentEventResults(
       isFreshnessBoundaryNewer(postWorkFinalizationCutoff, finalizationCutoff));
   if (postWorkBoundaryChanged || isFreshnessBoundaryNewer(freshAfter, postWorkFinalizationCutoff)) {
     const retryUnits = Math.max(entryIds.length, requiredUnits);
+    await syncOperationsRepository.failRun(auditRunId, new Error('SOURCE_CHANGED_DURING_SYNC'));
     throw new IncompleteDataSyncError(
       postWorkBoundaryChanged
         ? 'Tournament event finalized during result sync; finalization boundary changed, retrying with final evidence'
@@ -891,12 +1328,45 @@ export async function syncTournamentEventResults(
       0,
       0,
       retryUnits,
+      'SOURCE_CHANGED_DURING_SYNC',
     );
   }
 
   const totalEntries = entryIds.length;
   const synced = requiredResultEntryIds.length;
   const errors = 0;
+
+  await syncOperationsRepository.upsertItems(
+    auditRunId,
+    entryIds.map((entryId) => ({
+      resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+      resourceId: entryEventAuditResourceId(season, eventId, entryId),
+      status: 'skipped' as const,
+      attempts: auditAttempt,
+      normalizedPayload: {
+        phase: 'entry-event-results',
+        reused: true,
+        reuseReason: 'outer-convergence-audit',
+        finalCompletion: finalizationDate !== null,
+      },
+      completedAt: new Date(),
+    })),
+  );
+  const changedEntryIds = new Set([...requiredResultEntryIds, ...plan.requiredTransferEntryIds]);
+  const reusedAuditUnits = Math.max(0, entryIds.length - changedEntryIds.size);
+  await syncOperationsRepository.finishRun(auditRunId, {
+    status: 'completed',
+    completedItems: Math.max(0, changedEntryIds.size - failedUnits),
+    failedItems: 0,
+    skippedItems: reusedAuditUnits,
+    dataChanged: requiredResultEntryIds.length > 0 || plan.requiredTransferEntryIds.length > 0,
+    metadata: {
+      ...auditRunMetadata(options, auditRunId, auditAttempt),
+      finalCompletion: finalizationDate !== null,
+      providerEntryCount: requiredResultEntryIds.length,
+      transferEntryCount: plan.requiredTransferEntryIds.length,
+    },
+  });
 
   logInfo('Tournament event results sync completed', {
     eventId,

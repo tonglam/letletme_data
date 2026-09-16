@@ -21,6 +21,7 @@ import { registerDatabasePostCommit } from '../db/singleton';
 import { syncEntryTransferHistories } from './tournament-event-results.service';
 import {
   normalizeTournamentSetupIssue,
+  backfillTournamentHistory,
   runTournamentEventBackfill,
   syncTournamentEntryDetails,
   tournamentSetupIssueFromAuditMessage,
@@ -218,17 +219,34 @@ async function repairTournamentSetupIssuePrepared(
         issue.tournamentId,
       );
       await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
-        rebuildTournamentStructure(season, tournament, entrySeeds),
+        rebuildTournamentStructure(season, tournament, entrySeeds, {
+          preserveDerivedResults: true,
+        }),
       );
-      // A topology rebuild can change group membership, phase boundaries, or
-      // bracket edges for every settled event. Defer the correction reset
-      // until the post-repair audit succeeds, then fence the earliest head
-      // and enqueue every affected scope with durable provenance.
-      reviewCorrection = {
-        kind: 'tournament',
-        reason: `Tournament structure repair issue ${issue.issueId}`,
-        changeId: repairCorrectionChangeId(season, issue),
-      };
+      // Rebuild every finalized event from the same canonical inputs before
+      // requesting a review correction. Existing derived rows remain present
+      // while this phase runs; a failed event backfill therefore cannot leave
+      // an empty history or publish a half-repaired tournament.
+      const historyIssues = await backfillTournamentHistory(
+        season,
+        issue.tournamentId,
+        tournament,
+        allEntryIds,
+        window,
+        { auditRepairIssueId: issueId },
+      );
+      repairIssues.push(...historyIssues);
+      if (historyIssues.length === 0) {
+        // A topology rebuild can change group membership, phase boundaries, or
+        // bracket edges for every settled event. Defer the correction reset
+        // until the post-repair audit succeeds, then fence the earliest head
+        // and enqueue every affected scope with durable provenance.
+        reviewCorrection = {
+          kind: 'tournament',
+          reason: `Tournament structure repair issue ${issue.issueId}`,
+          changeId: repairCorrectionChangeId(season, issue),
+        };
+      }
       break;
     }
 

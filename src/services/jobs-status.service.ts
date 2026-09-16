@@ -14,6 +14,7 @@ import {
 } from './price-change-predictions.service';
 import { seasonRepository } from '../repositories/seasons';
 import { eventRepository } from '../repositories/events';
+import { fixtureRepository } from '../repositories/fixtures';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { allQueueNames } from '../queues/names';
 import { getQueueConnection } from '../utils/queue';
@@ -341,7 +342,10 @@ export async function getLiveFinalRetentionOperationalStatus(
 ): Promise<Record<string, unknown>> {
   const now = new Date();
   const checkedAt = now.toISOString();
-  const finalizedEvents = (await eventRepository.findAll(season)).filter(
+  const allEvents = (await eventRepository.findAll(season)).sort(
+    (left, right) => left.id - right.id,
+  );
+  const finalizedEvents = allEvents.filter(
     (event) =>
       event.finished &&
       event.dataChecked &&
@@ -549,6 +553,41 @@ export async function getLiveFinalRetentionOperationalStatus(
   const missingEventIds = eventStatuses
     .filter((event) => !event.certified)
     .map((event) => event.eventId);
+  const currentFinalizedEvent = finalizedEvents[finalizedEvents.length - 1] ?? null;
+  const nextEvent = currentFinalizedEvent
+    ? (allEvents.find((event) => event.id > currentFinalizedEvent.id) ?? null)
+    : null;
+  const [currentFixtures, nextFixtures] = await Promise.all([
+    currentFinalizedEvent
+      ? fixtureRepository.findByEvent(season, currentFinalizedEvent.id).catch(() => [])
+      : Promise.resolve([]),
+    nextEvent
+      ? fixtureRepository.findByEvent(season, nextEvent.id).catch(() => [])
+      : Promise.resolve([]),
+  ]);
+  const alertContext =
+    currentFinalizedEvent && nextEvent
+      ? {
+          source: 'canonical-events-and-fixtures',
+          phase: 'POST_EVENT_PRE_NEXT',
+          currentEventId: currentFinalizedEvent.id,
+          nextEventId: nextEvent.id,
+          currentFixtureCount: currentFixtures.length,
+          nextFixtureCount: nextFixtures.length,
+          currentEventAllFixturesFinished:
+            currentFixtures.length > 0 && currentFixtures.every((fixture) => fixture.finished),
+          nextEventStarted: nextFixtures.some((fixture) => fixture.started || fixture.finished),
+        }
+      : {
+          source: 'canonical-events-and-fixtures',
+          phase: 'UNKNOWN',
+          currentEventId: currentFinalizedEvent?.id ?? null,
+          nextEventId: nextEvent?.id ?? null,
+          currentFixtureCount: currentFixtures.length,
+          nextFixtureCount: nextFixtures.length,
+          currentEventAllFixturesFinished: false,
+          nextEventStarted: false,
+        };
   return {
     schemaVersion: LIVE_FINAL_RETENTION_STATUS_SCHEMA_VERSION,
     seasonCode: season.seasonCode,
@@ -576,6 +615,7 @@ export async function getLiveFinalRetentionOperationalStatus(
       )?.criticality,
     },
     reasonCodes: [...new Set(eventStatuses.flatMap((event) => event.reasonCodes))],
+    alertContext,
   };
 }
 
@@ -720,6 +760,9 @@ export async function getJobsStatus(
         readyWithIncompleteChunks: 0,
       },
       oldestActiveEligibleAt: null,
+      oldestPendingAt: null,
+      oldestWaitingSourceAt: null,
+      oldestProcessingAt: null,
       oldestDegradedAt: null,
       latestUpdatedAt: null,
       watch: null,

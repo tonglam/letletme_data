@@ -45,6 +45,7 @@ import { syncLeagueEventResultsByTournament } from './league-event-results.servi
 import {
   syncEntryTransferHistories,
   syncTournamentEventResultsForEntryIds,
+  type TournamentEventResultsSyncOptions,
 } from './tournament-event-results.service';
 import { syncTournamentPointsRaceResultsForTournament } from './tournament-points-race-results.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
@@ -411,6 +412,14 @@ export async function ensureTournamentCoreResults(
   onPlan?: (plan: TournamentCoreSyncPlan) => void | Promise<void>,
   options?: {
     requirePicksForEvents?: readonly number[];
+    audit?: Pick<
+      TournamentEventResultsSyncOptions,
+      | 'auditTrigger'
+      | 'auditParentRunId'
+      | 'auditObligationId'
+      | 'auditGeneration'
+      | 'auditRepairIssueId'
+    >;
   },
 ): Promise<void> {
   const requiredPicksEvents = new Set(options?.requirePicksForEvents ?? []);
@@ -435,6 +444,7 @@ export async function ensureTournamentCoreResults(
       skipTransfers: true,
       perEntryMutationScopes: true,
       finalizationRecoveryEntryIds: new Set(missingEntryIds),
+      ...options?.audit,
     });
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);
@@ -734,8 +744,14 @@ export async function runTournamentEventBackfill(
   entryIds: number[],
   eventId: number,
   repair?: { issueId: number; owner: TournamentRepairState },
+  audit?: { repairIssueId?: number },
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
+  const auditRepairIssueId = audit?.repairIssueId ?? repair?.issueId;
+  const auditTrigger =
+    auditRepairIssueId === undefined
+      ? 'tournament-backfill'
+      : `tournament-repair:${auditRepairIssueId}`;
   const event = await eventRepository.findById(season, eventId);
   const finalCutoff =
     event?.finished && event.dataChecked && event.dataCheckedAt
@@ -752,7 +768,13 @@ export async function runTournamentEventBackfill(
       { startEventId: eventId, endEventId: eventId },
       undefined,
       undefined,
-      { requirePicksForEvents: [eventId] },
+      {
+        requirePicksForEvents: [eventId],
+        audit: {
+          auditTrigger,
+          ...(auditRepairIssueId === undefined ? {} : { auditRepairIssueId }),
+        },
+      },
     );
     const entryStartEvents = await loadEntryStartEvents(season, entryIds);
     const eligibleEntryIds = entryIds.filter((entryId) =>
@@ -767,6 +789,8 @@ export async function runTournamentEventBackfill(
       const transfers = await syncEntryTransferHistories(season, missingTransfers, eventId, {
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
         perEntryMutationScopes: true,
+        auditTrigger,
+        ...(auditRepairIssueId === undefined ? {} : { auditRepairIssueId }),
       });
       if (transfers.failedUnits > 0) {
         throw new IncompleteDataSyncError(
@@ -795,6 +819,8 @@ export async function runTournamentEventBackfill(
     const result = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       perEntryMutationScopes: true,
+      auditTrigger,
+      ...(auditRepairIssueId === undefined ? {} : { auditRepairIssueId }),
     });
     if (result.failedUnits > 0 || result.errors > 0) {
       throw new IncompleteDataSyncError(
@@ -974,6 +1000,7 @@ export async function backfillTournamentHistory(
   tournament: TournamentConfig,
   entryIds: number[],
   window: TournamentBackfillWindow | null,
+  options?: { auditRepairIssueId?: number },
 ): Promise<TournamentSetupIssue[]> {
   if (!window) {
     return [];
@@ -989,6 +1016,10 @@ export async function backfillTournamentHistory(
       tournament,
       entryIds,
       eventId,
+      undefined,
+      options?.auditRepairIssueId === undefined
+        ? undefined
+        : { repairIssueId: options.auditRepairIssueId },
     );
     issues.push(...eventIssues);
   }

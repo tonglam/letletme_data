@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, like, lte, sql } from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
@@ -54,6 +54,42 @@ export interface SyncItemInput {
   readonly lastError?: string | null;
   readonly completedAt?: Date | null;
 }
+
+export type EntrySyncAuditStatus = Readonly<{
+  schemaVersion: 'entry-sync-audit-v1';
+  seasonId: number;
+  eventId: number;
+  entryId: number;
+  coverageStartAt: string | null;
+  observedAt: string;
+  executions: number;
+  providerRequests: Readonly<{
+    eventLive: number;
+    picks: number;
+    transfers: number;
+    unknown: number;
+  }>;
+  factCommits: number;
+  finalCompletions: number;
+  reusedSkips: number;
+  failedItems: number;
+  evidenceComplete: boolean;
+  triggers: readonly string[];
+  recent: readonly Readonly<{
+    runId: string;
+    trigger: string;
+    component: string;
+    status: SyncItemStatus;
+    attempts: number;
+    sourceRevision: string | null;
+    reuseReason: string | null;
+    factCommit: string | null;
+    finalCompletion: boolean;
+    unknownRequests: number;
+    observedAt: string;
+  }>[];
+  truncated: boolean;
+}>;
 
 export interface PreparePublicationInput {
   readonly publicationId?: string;
@@ -324,6 +360,144 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             },
           });
       }
+    },
+
+    entrySyncAudit: async (input: {
+      seasonId: number;
+      eventId: number;
+      entryId: number;
+      limit?: number;
+    }): Promise<EntrySyncAuditStatus> => {
+      const db = await getDbInstance();
+      const limit = Math.min(Math.max(Math.floor(input.limit ?? 200), 1), 500);
+      const resourcePrefix = `${input.seasonId}:${input.eventId}:${input.entryId}:`;
+      const auditWhere = and(
+        eq(syncRunsInOps.seasonId, input.seasonId),
+        eq(syncRunsInOps.eventId, input.eventId),
+        eq(syncItemsInOps.resourceType, 'entry-event'),
+        like(syncItemsInOps.resourceId, `${resourcePrefix}%`),
+      );
+      const selectAuditRows = () =>
+        db
+          .select({
+            runId: syncItemsInOps.runId,
+            resourceId: syncItemsInOps.resourceId,
+            trigger: syncRunsInOps.trigger,
+            itemStatus: syncItemsInOps.status,
+            attempts: syncItemsInOps.attempts,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+            itemCreatedAt: syncItemsInOps.createdAt,
+            itemUpdatedAt: syncItemsInOps.updatedAt,
+            runCreatedAt: syncRunsInOps.createdAt,
+          })
+          .from(syncItemsInOps)
+          .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
+          .where(auditWhere);
+      const [allRows, recentRows] = await Promise.all([
+        selectAuditRows(),
+        selectAuditRows()
+          .orderBy(desc(syncItemsInOps.updatedAt), desc(syncItemsInOps.runId))
+          .limit(limit + 1),
+      ]);
+      const truncated = recentRows.length > limit;
+      const observedRows = recentRows.slice(0, limit);
+      const payloadFor = (value: unknown): Record<string, unknown> =>
+        isRecord(value) ? value : {};
+      const numberValue = (value: unknown): number =>
+        typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+      const stringValue = (value: unknown): string | null =>
+        typeof value === 'string' && value.length > 0 ? value : null;
+      const boolValue = (value: unknown): boolean => value === true;
+      const componentFor = (resourceId: string): string =>
+        resourceId.startsWith(resourcePrefix) ? resourceId.slice(resourcePrefix.length) : 'unknown';
+      const recent = observedRows.map((row) => {
+        const payload = payloadFor(row.normalizedPayload);
+        return {
+          runId: row.runId,
+          trigger: row.trigger,
+          component: componentFor(row.resourceId),
+          status: row.itemStatus as SyncItemStatus,
+          attempts: row.attempts,
+          sourceRevision: stringValue(payload.sourceRevision),
+          reuseReason: stringValue(payload.reuseReason),
+          factCommit: stringValue(payload.factCommit),
+          finalCompletion: boolValue(payload.finalCompletion),
+          unknownRequests: numberValue(payload.unknownRequests),
+          observedAt: (row.itemUpdatedAt ?? row.itemCreatedAt ?? row.runCreatedAt).toISOString(),
+        };
+      });
+      const providerRequests = allRows.reduce(
+        (counts, row) => {
+          const payload = payloadFor(row.normalizedPayload);
+          counts.eventLive += numberValue(payload.eventLiveRequests);
+          counts.picks += numberValue(payload.picksRequests);
+          counts.transfers += numberValue(payload.transferRequests);
+          counts.unknown += numberValue(payload.unknownRequests);
+          return counts;
+        },
+        { eventLive: 0, picks: 0, transfers: 0, unknown: 0 },
+      );
+      const factCommits = allRows.filter(
+        (row) => stringValue(payloadFor(row.normalizedPayload).factCommit) === 'committed',
+      ).length;
+      const finalCompletions = allRows.filter((row) =>
+        boolValue(payloadFor(row.normalizedPayload).finalCompletion),
+      ).length;
+      const reusedSkips = allRows.filter(
+        (row) =>
+          row.itemStatus === 'skipped' || boolValue(payloadFor(row.normalizedPayload).reused),
+      ).length;
+      const failedItems = allRows.filter((row) => row.itemStatus === 'failed').length;
+      const evidenceComplete =
+        allRows.length === 0 ||
+        allRows.every((row) => {
+          const payload = payloadFor(row.normalizedPayload);
+          return (
+            row.itemStatus === 'completed' ||
+            row.itemStatus === 'skipped' ||
+            typeof payload.unknownRequests === 'number'
+          );
+        });
+      return {
+        schemaVersion: 'entry-sync-audit-v1',
+        seasonId: input.seasonId,
+        eventId: input.eventId,
+        entryId: input.entryId,
+        coverageStartAt:
+          allRows.length > 0
+            ? ((
+                allRows.reduce(
+                  (oldest, row) => {
+                    const candidate = row.runCreatedAt ?? row.itemCreatedAt;
+                    if (!candidate) return oldest;
+                    return !oldest || candidate < oldest ? candidate : oldest;
+                  },
+                  null as Date | null,
+                ) ?? null
+              )?.toISOString() ?? null)
+            : null,
+        observedAt: new Date().toISOString(),
+        executions: [
+          ...allRows
+            .reduce((attemptsByRun, row) => {
+              attemptsByRun.set(
+                row.runId,
+                Math.max(attemptsByRun.get(row.runId) ?? 0, Math.max(1, row.attempts)),
+              );
+              return attemptsByRun;
+            }, new Map<string, number>())
+            .values(),
+        ].reduce((sum, attempts) => sum + attempts, 0),
+        providerRequests,
+        factCommits,
+        finalCompletions,
+        reusedSkips,
+        failedItems,
+        evidenceComplete,
+        triggers: [...new Set(allRows.map((row) => row.trigger))],
+        recent,
+        truncated,
+      };
     },
 
     finishRun: async (

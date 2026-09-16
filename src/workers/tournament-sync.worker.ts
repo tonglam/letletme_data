@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { Worker, Job, QueueEvents, type Queue } from 'bullmq';
 
 import { finalizeTournamentEventLifecycle } from '../domain/tournament-event-finalization';
@@ -44,6 +46,7 @@ import {
 import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
+import { classifyDataError, safeDataErrorCode } from '../domain/error-classification';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
@@ -81,6 +84,7 @@ import { renewSchedulerObligation } from '../repositories/scheduler-obligations'
 import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
+  deferSchedulerObligationForWorker,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
 } from '../services/scheduler-obligation-lifecycle.service';
@@ -134,6 +138,17 @@ const cascadeRefreshDependencies: CascadeRefreshDependencies = {
 };
 
 const SCHEDULER_LEASE_HEARTBEAT_MS = 60_000;
+
+function tournamentEntryAuditAttemptId(job: Job<TournamentSyncJobData>): string {
+  const parentRunId = job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);
+  const attempt = job.attemptsMade + 1;
+  const digest = createHash('sha256')
+    .update(
+      `tournament-entry-sync:${parentRunId}:season:${job.data.seasonId}:event:${job.data.eventId}:attempt:${attempt}`,
+    )
+    .digest('hex');
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
 
 function startSchedulerLeaseHeartbeat(job: Job<TournamentSyncJobData>): () => void {
   const fence = inspectSchedulerObligationFence(job.data);
@@ -477,6 +492,14 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
             const result = await syncTournamentEventResults(season, eventId, {
               freshAfter,
               perEntryMutationScopes: true,
+              auditRunId: tournamentEntryAuditAttemptId(job),
+              ...(job.data.runId ? { auditParentRunId: job.data.runId } : {}),
+              ...(job.data.obligationId ? { auditObligationId: job.data.obligationId } : {}),
+              ...(job.data.obligationGeneration === undefined
+                ? {}
+                : { auditGeneration: job.data.obligationGeneration }),
+              auditTrigger: `tournament-sync:${job.data.source}`,
+              auditAttempt: job.attemptsMade + 1,
             });
             const event = await eventRepository.findById(season, eventId);
             const hasEntries = shouldEnqueueTournamentCascade(result);
@@ -520,6 +543,7 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
                   0,
                   0,
                   1,
+                  'SOURCE_NOT_READY',
                 );
               }
               await enqueueOfficialRosterSyncAfterFinalization(season, eventId, job.data.runId);
@@ -997,18 +1021,41 @@ export function createTournamentSyncWorker(
       jobName: job?.name,
       eventId: job?.data.eventId,
     });
-    if (job) void alertOnFinalFailure(job, err);
     const fence = job ? inspectSchedulerObligationFence(job.data) : null;
-    if (job && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {
-      void failSchedulerObligation({
+    const dependencyNotReady = classifyDataError(err) === 'SOURCE_NOT_READY';
+    if (job && dependencyNotReady && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {
+      void deferSchedulerObligationForWorker({
         obligationId: fence.obligationId,
         generation: fence.generation,
-        error: err,
-      }).catch(() => undefined);
-    } else if (job?.id !== undefined && isTerminalJobFailure(job, err) && fence?.kind === 'none') {
-      void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
-        () => undefined,
-      );
+        dependencyWait: { reasonCodes: [safeDataErrorCode(err, 'SOURCE_NOT_READY')] },
+        evidence: {
+          dependencyPhase: 'tournament-event-results',
+          eventId: job.data.eventId,
+          status: 'waiting-for-final-checkpoint',
+        },
+      }).catch((deferError) => {
+        logError('Failed to defer tournament sync dependency wait', deferError, {
+          eventId: job.data.eventId,
+          jobId: job.id,
+        });
+      });
+    } else {
+      if (job) void alertOnFinalFailure(job, err);
+      if (job && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {
+        void failSchedulerObligation({
+          obligationId: fence.obligationId,
+          generation: fence.generation,
+          error: err,
+        }).catch(() => undefined);
+      } else if (
+        job?.id !== undefined &&
+        isTerminalJobFailure(job, err) &&
+        fence?.kind === 'none'
+      ) {
+        void failSchedulerObligationByBullJobId({ bullJobId: job.id, error: err }).catch(
+          () => undefined,
+        );
+      }
     }
   });
   worker.on('error', (err) => logError('Tournament sync worker error', err));

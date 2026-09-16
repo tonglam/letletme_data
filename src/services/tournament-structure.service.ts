@@ -47,6 +47,7 @@ export async function rebuildTournamentStructure(
   season: FplSeasonRef,
   tournament: TournamentConfig,
   entrySeeds: EntrySeed[],
+  options: Readonly<{ preserveDerivedResults?: boolean }> = {},
 ): Promise<void> {
   const entryIds = sortEntrySeeds(entrySeeds).map((entry) => entry.entryId);
   const shouldSeedRoundOneImmediately =
@@ -96,10 +97,12 @@ export async function rebuildTournamentStructure(
     const knockouts = createTournamentKnockoutsRepository(tx);
     const knockoutResultsRepository = createTournamentKnockoutResultsRepository(tx);
 
-    await knockoutResultsRepository.deleteByTournament(season, tournament.id);
     await knockouts.deleteByTournament(season, tournament.id);
-    await points.deleteByTournament(season, tournament.id);
-    await battles.deleteByTournament(season, tournament.id);
+    if (!options.preserveDerivedResults) {
+      await knockoutResultsRepository.deleteByTournament(season, tournament.id);
+      await points.deleteByTournament(season, tournament.id);
+      await battles.deleteByTournament(season, tournament.id);
+    }
     await groups.deleteByTournament(season, tournament.id);
 
     await groups.upsertBatch(season, groupRows);
