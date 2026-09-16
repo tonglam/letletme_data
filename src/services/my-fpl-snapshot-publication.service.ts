@@ -355,6 +355,9 @@ const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
 // publication.
 const MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE = 100;
 const MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE = 100;
+// Renew a Redis-named retained revision before the 24-hour reader lease can
+// expire. The maintenance cadence is hourly, so keep a small lead window.
+const MY_FPL_SNAPSHOT_RETENTION_RENEWAL_LEAD_MS = 10 * 60_000;
 // Retention may have to walk past revisions that are still named by the
 // serving Redis pointer. Keep that walk bounded so a large protected history
 // cannot turn maintenance into an unbounded transaction.
@@ -371,6 +374,7 @@ function batches<T>(rows: readonly T[], size: number): T[][] {
 
 type MyFplSnapshotRetentionOptions = Readonly<{
   supersededBeforeIso: string;
+  candidateBeforeIso?: string;
   limit: number;
   seasonId?: number;
   eventId?: number;
@@ -387,6 +391,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
   options: MyFplSnapshotRetentionOptions,
 ): Promise<number> {
   const supersededBeforeIso = options.supersededBeforeIso;
+  const candidateBeforeIso = options.candidateBeforeIso ?? supersededBeforeIso;
   const seasonFilter =
     options.seasonId === undefined ? tx`` : tx`AND publication.season_id = ${options.seasonId}`;
   const eventFilter =
@@ -424,7 +429,7 @@ async function deleteExpiredMyFplSnapshotRevisions(
       FROM competition.my_fpl_snapshot_publications publication
       JOIN fpl.seasons season ON season.season_id = publication.season_id
       WHERE publication.active = false
-        AND publication.updated_at < ${supersededBeforeIso}::timestamptz
+        AND publication.updated_at < ${candidateBeforeIso}::timestamptz
         ${seasonFilter}
         ${eventFilter}
         AND (
@@ -495,17 +500,23 @@ async function deleteExpiredMyFplSnapshotRevisions(
         )
       `;
       const lockedCandidates = await tx<
-        { season_id: number; event_id: number; revision: number; season_code: string }[]
+        {
+          season_id: number;
+          event_id: number;
+          revision: number;
+          season_code: string;
+          updated_at: Date | string;
+        }[]
       >`
         SELECT publication.season_id, publication.event_id, publication.revision,
-               season.season_code
+               season.season_code, publication.updated_at
         FROM competition.my_fpl_snapshot_publications publication
         JOIN fpl.seasons season ON season.season_id = publication.season_id
         WHERE publication.season_id = ${candidate.season_id}
           AND publication.event_id = ${candidate.event_id}
           AND publication.revision = ${candidate.revision}
           AND publication.active = false
-          AND publication.updated_at < ${supersededBeforeIso}::timestamptz
+          AND publication.updated_at < ${candidateBeforeIso}::timestamptz
           AND NOT EXISTS (
             SELECT 1
             FROM competition.my_fpl_snapshot_publication_outbox outbox
@@ -569,12 +580,18 @@ async function deleteExpiredMyFplSnapshotRevisions(
         `;
         continue;
       }
+      if (
+        new Date(lockedCandidate.updated_at).getTime() >= new Date(supersededBeforeIso).getTime()
+      ) {
+        continue;
+      }
       const result = await tx<{ revision: number }[]>`
         DELETE FROM competition.my_fpl_snapshot_publications
         WHERE season_id = ${lockedCandidate.season_id}
           AND event_id = ${lockedCandidate.event_id}
           AND revision = ${lockedCandidate.revision}
           AND active = false
+          AND updated_at < ${supersededBeforeIso}::timestamptz
         RETURNING revision
       `;
       deleted += result.length;
@@ -598,10 +615,14 @@ export async function cleanupMyFplSnapshotRevisions(
   }
   const now = options.now ?? new Date();
   const supersededBeforeIso = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
+  const candidateBeforeIso = new Date(
+    now.getTime() - 24 * 60 * 60_000 + MY_FPL_SNAPSHOT_RETENTION_RENEWAL_LEAD_MS,
+  ).toISOString();
   const db = await getDbClient();
   const deleted = await db.begin((tx) =>
     deleteExpiredMyFplSnapshotRevisions(tx, {
       supersededBeforeIso,
+      candidateBeforeIso,
       limit,
     }),
   );
