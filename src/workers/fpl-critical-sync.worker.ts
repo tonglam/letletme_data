@@ -743,6 +743,8 @@ async function processCriticalJob(job: Job<FplCriticalJobData>) {
     queue: fplCriticalSyncQueueName,
     jobName: job.name,
     runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+    batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+    parentRunId: job.data.runId,
     source: job.data.source,
     attempt: job.attemptsMade + 1,
     queueWaitMs: context.queueWaitMs,

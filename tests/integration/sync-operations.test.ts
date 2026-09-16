@@ -256,6 +256,110 @@ describe('ops sync state machine', () => {
     expect(rows[0]).toEqual({ status: 'completed', error_summary: null });
   });
 
+  test('keeps one start marker and one settlement per batch attempt', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[0], season);
+
+    const input = {
+      attemptKey: 'entry-sync|entry-results|batch-1|1|4',
+      batchId: 'batch-1',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+    } as const;
+    expect(
+      await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+        ...input,
+        payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+      }),
+    ).toBe('recorded');
+    expect(
+      await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+        ...input,
+        payload: { startedAt: '2026-08-09T00:00:01.000Z' },
+      }),
+    ).toBe('duplicate');
+    expect(
+      await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+        ...input,
+        complete: true,
+        payload: {
+          logicalRequests: 2,
+          httpAttempts: 3,
+          httpRetries: 1,
+          requiredUnits: null,
+          writeAccounting: 'unknown',
+          endpointRequests: { entry_results: 2 },
+        },
+      }),
+    ).toBe('recorded');
+    expect(
+      await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+        ...input,
+        complete: true,
+        payload: { logicalRequests: 2 },
+      }),
+    ).toBe('duplicate');
+    const retryInput = {
+      ...input,
+      attemptKey: 'entry-sync|entry-results|batch-1|2|4',
+      attempt: 2,
+    } as const;
+    expect(
+      await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+        ...retryInput,
+        payload: { startedAt: '2026-08-09T00:01:00.000Z' },
+      }),
+    ).toBe('recorded');
+    expect(
+      await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+        ...retryInput,
+        complete: false,
+        payload: {
+          logicalRequests: 1,
+          httpAttempts: 1,
+          httpRetries: 0,
+          requiredUnits: null,
+          writeAccounting: 'unknown',
+          endpointRequests: { entry_results: 1 },
+        },
+      }),
+    ).toBe('recorded');
+
+    const rows = await sql<
+      Array<{
+        status: string;
+        phase: string;
+        logicalRequests: number | null;
+      }>
+    >`
+      SELECT status, normalized_payload->>'phase' AS phase,
+             (normalized_payload->>'logicalRequests')::integer AS "logicalRequests"
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+        AND resource_type = 'batch-cost'
+      ORDER BY resource_id
+    `;
+    expect([...rows]).toEqual([
+      { status: 'completed', phase: 'settled', logicalRequests: 2 },
+      { status: 'failed', phase: 'settled', logicalRequests: 1 },
+    ]);
+    const [run] = await sql<
+      Array<{ metadata: { batchCost?: { totals?: Record<string, unknown> } } }>
+    >`
+      SELECT metadata
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(run?.metadata.batchCost?.totals).toMatchObject({
+      logicalRequests: 3,
+      httpAttempts: 4,
+      httpRetries: 1,
+      unitAccounting: 'per_attempt',
+    });
+  });
+
   test('uses wall-clock completion time inside a long mutation transaction', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

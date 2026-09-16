@@ -5,9 +5,13 @@ import {
   acquireFplRequest,
   closeFplCriticalWindow,
   FplAdmissionCriticalWindowBusyError,
+  getFplAdmissionBatchMetricsSnapshot,
   getFplAdmissionStats,
   openFplCriticalWindow,
+  recordFplAdmissionResult,
+  recordFplResponseTelemetry,
   resetFplAdmissionForTests,
+  runWithFplAdmissionMetrics,
 } from '../../src/utils/fpl-admission';
 
 describe('FPL admission reservations', () => {
@@ -127,6 +131,32 @@ describe('FPL admission reservations', () => {
     expect(getFplAdmissionStats().inflight).toBe(0);
     expect(ACQUIRE_SCRIPT).toContain('critical-priority');
     expect(ACQUIRE_SCRIPT).toContain('liveBurst');
+  });
+
+  test('keeps admission and provider outcomes scoped to one batch', async () => {
+    const metrics = await runWithFplAdmissionMetrics(async () => {
+      recordFplAdmissionResult({ priority: 'bulk', outcome: 'granted', waitMs: 12 });
+      recordFplAdmissionResult({ priority: 'bulk', outcome: 'deadline-exceeded', waitMs: 30 });
+      recordFplResponseTelemetry(429, 'bulk', 40);
+      recordFplResponseTelemetry(null, 'bulk', 60);
+      return getFplAdmissionBatchMetricsSnapshot();
+    });
+
+    expect(metrics).toMatchObject({
+      waitMsTotal: 42,
+      waitSamples: 2,
+      grants: 1,
+      deadlineExceeded: 1,
+      responseSamples: 2,
+      response429: 1,
+      networkErrors: 1,
+      providerDurationMsTotal: 100,
+      providerDurationSamples: 2,
+    });
+    expect(getFplAdmissionBatchMetricsSnapshot()).toMatchObject({
+      waitMsTotal: 0,
+      responseSamples: 0,
+    });
   });
 
   test('reports a distinct error when another owner holds the critical window', async () => {

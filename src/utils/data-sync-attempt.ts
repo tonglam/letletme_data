@@ -1,13 +1,22 @@
 import { performance } from 'node:perf_hooks';
 
 import {
+  getFplAdmissionBatchMetricsSnapshot,
+  hasFplAdmissionMetricsContext,
+  runWithFplAdmissionMetrics,
+  type FplAdmissionBatchMetrics,
+} from './fpl-admission';
+import {
   getFplRequestMetricsSnapshot,
+  hasFplRequestMetricsContext,
   runWithFplRequestMetrics,
   type FplRequestMetricsSnapshot,
 } from './fpl-request-metrics';
-import { logInfo } from './logger';
+import { logError, logInfo } from './logger';
 import { parseStrictBooleanEnvValue } from './config';
 import { isPlayerValuesWindowPendingError } from '../domain/player-values-window';
+import { syncOperationsRepository } from '../repositories/sync-operations';
+import { runtimeReleaseRevision } from './runtime-heartbeat';
 
 export const DATA_SYNC_ATTEMPT_OUTCOMES = [
   'ready',
@@ -36,9 +45,10 @@ export interface DataSyncAttemptContext {
   attempt?: number;
   targetEventId?: number;
   queueWaitMs?: number | null;
-  /** Stable parent identity for joining a batch with its triggering run. */
+  /** Stable parent/batch identity for persisted cost accounting. */
   parentRunId?: string;
   executionIntent?: 'refresh' | 'retry' | 'force' | 'reconcile' | 'unknown';
+  releaseSha?: string;
 }
 
 export interface DataSyncWorkSummary {
@@ -48,6 +58,13 @@ export interface DataSyncWorkSummary {
   succeededUnits?: number;
   failedUnits?: number;
   timings?: DataSyncPhaseTimings;
+  insertedRows?: number;
+  updatedRows?: number;
+  deletedRows?: number;
+  publicationsCreated?: number;
+  publicationsReused?: number;
+  /** Set only when the caller supplied stable unit identities. */
+  unitAccounting?: 'exact' | 'per_attempt';
 }
 
 export type DataSyncPhaseTimings = Partial<
@@ -109,6 +126,12 @@ export interface DataSyncAttemptReport {
   failedUnits: number;
   timings: DataSyncAttemptTimings;
   fpl: FplRequestMetricsSnapshot;
+  admission: FplAdmissionBatchMetrics;
+  batchCost: {
+    attemptKey: string;
+    batchId: string;
+    complete: boolean;
+  };
 }
 
 type ReportOptions<T> = {
@@ -184,21 +207,41 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
     result.errors,
     result.totalErrors,
   );
-  const reusedUnits = firstBoundedUnit(result.reusedUnits, result.skipped) ?? 0;
+  const hasUnitEvidence =
+    explicitRequiredUnits !== undefined ||
+    explicitSucceededUnits !== undefined ||
+    explicitFailedUnits !== undefined ||
+    firstBoundedUnit(result.reusedUnits, result.skipped) !== undefined;
+  const reusedUnits =
+    firstBoundedUnit(result.reusedUnits, result.skipped) ?? (hasUnitEvidence ? 0 : undefined);
   const failedUnits =
     explicitFailedUnits ??
     (explicitRequiredUnits !== undefined && explicitSucceededUnits !== undefined
-      ? Math.max(0, explicitRequiredUnits - explicitSucceededUnits - reusedUnits)
-      : 0);
+      ? Math.max(0, explicitRequiredUnits - explicitSucceededUnits - (reusedUnits ?? 0))
+      : hasUnitEvidence && explicitSucceededUnits !== undefined
+        ? 0
+        : undefined);
   const succeededUnits =
     explicitSucceededUnits ??
-    (explicitRequiredUnits !== undefined
-      ? Math.max(0, explicitRequiredUnits - reusedUnits - failedUnits)
-      : 0);
+    (explicitRequiredUnits !== undefined && failedUnits !== undefined
+      ? Math.max(0, explicitRequiredUnits - (reusedUnits ?? 0) - failedUnits)
+      : undefined);
   const requiredUnits =
-    explicitRequiredUnits ?? Math.max(0, succeededUnits + reusedUnits + failedUnits);
+    explicitRequiredUnits ??
+    (succeededUnits !== undefined && reusedUnits !== undefined && failedUnits !== undefined
+      ? Math.max(0, succeededUnits + reusedUnits + failedUnits)
+      : undefined);
   const explicitOutcome = readOutcome(result.outcome);
   const timings = readPhaseTimings(result.timings);
+  const insertedRows = firstBoundedUnit(result.insertedRows);
+  const updatedRows = firstBoundedUnit(result.updatedRows);
+  const deletedRows = firstBoundedUnit(result.deletedRows);
+  const publicationsCreated = firstBoundedUnit(result.publicationsCreated);
+  const publicationsReused = firstBoundedUnit(result.publicationsReused);
+  const unitAccounting =
+    result.unitAccounting === 'exact' || result.unitAccounting === 'per_attempt'
+      ? result.unitAccounting
+      : undefined;
 
   return {
     ...(explicitOutcome ? { outcome: explicitOutcome } : {}),
@@ -207,6 +250,12 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
     succeededUnits,
     failedUnits,
     ...(timings ? { timings } : {}),
+    ...(insertedRows !== undefined ? { insertedRows } : {}),
+    ...(updatedRows !== undefined ? { updatedRows } : {}),
+    ...(deletedRows !== undefined ? { deletedRows } : {}),
+    ...(publicationsCreated !== undefined ? { publicationsCreated } : {}),
+    ...(publicationsReused !== undefined ? { publicationsReused } : {}),
+    ...(unitAccounting ? { unitAccounting } : {}),
   };
 }
 
@@ -228,6 +277,155 @@ function reportingEnabled(): boolean {
   );
 }
 
+function stableAttemptKey(context: DataSyncAttemptContext): string {
+  const batchId = context.batchId ?? context.runId;
+  return [
+    context.queue,
+    context.jobName,
+    batchId,
+    boundedAttempt(context.attempt),
+    context.targetEventId ?? 'none',
+  ]
+    .map((value) => String(value).replaceAll('|', '_'))
+    .join('|');
+}
+
+function executionIntent(context: DataSyncAttemptContext): string {
+  if (context.executionIntent) return context.executionIntent;
+  if (boundedAttempt(context.attempt) > 1 || context.source === 'retry') return 'retry';
+  if (context.source === 'manual' || context.source === 'api') return 'force';
+  if (
+    context.source === 'watchdog' ||
+    context.source === 'reconcile' ||
+    context.source === 'catchup' ||
+    context.source === 'cascade' ||
+    context.source === 'event-transition' ||
+    context.source === 'coordinator'
+  ) {
+    return 'reconcile';
+  }
+  return 'refresh';
+}
+
+function nullableNumber(value: number | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
+function batchCostPayload(
+  context: DataSyncAttemptContext,
+  report: Omit<DataSyncAttemptReport, 'batchCost'>,
+  complete: boolean,
+  summary: DataSyncWorkSummary,
+  startedAtIso: string,
+): Record<string, unknown> {
+  const admission = report.admission;
+  const writeFields = [
+    summary.insertedRows,
+    summary.updatedRows,
+    summary.deletedRows,
+    summary.publicationsCreated,
+    summary.publicationsReused,
+  ];
+  const unitFields = [
+    summary.requiredUnits,
+    summary.reusedUnits,
+    summary.succeededUnits,
+    summary.failedUnits,
+  ];
+  return {
+    job: context.jobName,
+    queue: context.queue,
+    eventId: context.targetEventId ?? null,
+    executionIntent: executionIntent(context),
+    startedAt: startedAtIso,
+    settledAt: new Date().toISOString(),
+    complete,
+    logicalRequests: report.fpl.logicalRequests,
+    httpAttempts: report.fpl.attempts,
+    httpRetries: report.fpl.retries,
+    endpointRequests: report.fpl.byEndpoint,
+    requiredUnits: nullableNumber(summary.requiredUnits),
+    reusedUnits: nullableNumber(summary.reusedUnits),
+    succeededUnits: nullableNumber(summary.succeededUnits),
+    failedUnits: nullableNumber(summary.failedUnits),
+    unitAccounting: summary.unitAccounting ?? 'per_attempt',
+    unitAccountingQuality: unitFields.every((value) => nullableNumber(value) !== null)
+      ? 'reported'
+      : 'unknown',
+    insertedRows: nullableNumber(summary.insertedRows),
+    updatedRows: nullableNumber(summary.updatedRows),
+    deletedRows: nullableNumber(summary.deletedRows),
+    publicationsCreated: nullableNumber(summary.publicationsCreated),
+    publicationsReused: nullableNumber(summary.publicationsReused),
+    writeAccounting: writeFields.every((value) => nullableNumber(value) !== null)
+      ? 'reported'
+      : 'unknown',
+    admissionWaitMs: Math.max(0, Math.floor(admission.waitMsTotal)),
+    admissionWaitSamples: admission.waitSamples,
+    admissionGrants: admission.grants,
+    admissionRejected: admission.deadlineExceeded,
+    admissionStoreUnavailable: admission.storeUnavailable,
+    admissionCancelled: admission.cancelled,
+    providerResponseSamples: admission.responseSamples,
+    providerResponse429: admission.response429,
+    providerResponse5xx: admission.response5xx,
+    providerNetworkErrors: admission.networkErrors,
+    providerDurationMs: Math.max(0, Math.floor(admission.providerDurationMsTotal)),
+    providerDurationSamples: admission.providerDurationSamples,
+    timings: report.timings,
+    ...(complete ? {} : { incompleteReason: 'attempt_failed_before_cost_settlement' }),
+  };
+}
+
+const UUID_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+async function persistBatchCost(
+  context: DataSyncAttemptContext,
+  report: Omit<DataSyncAttemptReport, 'batchCost'>,
+  attemptKey: string,
+  complete: boolean,
+  summary: DataSyncWorkSummary,
+  startedAtIso: string,
+): Promise<void> {
+  // Scheduler/queue-local synthetic IDs (for example launch-monitor-*) do
+  // not belong to ops.sync_runs. Leave their log report intact rather than
+  // manufacturing a second ledger row.
+  if (!UUID_RUN_ID.test(context.runId)) return;
+  await syncOperationsRepository.recordBatchCost(context.runId, {
+    attemptKey,
+    batchId: context.batchId ?? context.runId,
+    parentRunId: context.parentRunId ?? null,
+    releaseSha: context.releaseSha ?? runtimeReleaseRevision(),
+    attempt: boundedAttempt(context.attempt),
+    complete,
+    payload: batchCostPayload(context, report, complete, summary, startedAtIso),
+  });
+}
+
+async function persistBatchCostStart(
+  context: DataSyncAttemptContext,
+  attemptKey: string,
+  startedAtIso: string,
+): Promise<void> {
+  if (!UUID_RUN_ID.test(context.runId)) return;
+  await syncOperationsRepository.recordBatchCostStart(context.runId, {
+    attemptKey,
+    batchId: context.batchId ?? context.runId,
+    parentRunId: context.parentRunId ?? null,
+    releaseSha: context.releaseSha ?? runtimeReleaseRevision(),
+    attempt: boundedAttempt(context.attempt),
+    payload: {
+      job: context.jobName,
+      queue: context.queue,
+      eventId: context.targetEventId ?? null,
+      executionIntent: executionIntent(context),
+      startedAt: startedAtIso,
+    },
+  });
+}
+
 function resolveOutcome(summary: DataSyncWorkSummary): DataSyncAttemptOutcome {
   if (summary.outcome) return summary.outcome;
   return boundedUnit(summary.failedUnits) > 0 ? 'partial' : 'ready';
@@ -242,40 +440,57 @@ export async function runDataSyncAttempt<T>(
     return runner();
   }
 
-  return runWithFplRequestMetrics(async () => {
-    const startedAt = performance.now();
-    let summary: DataSyncWorkSummary = {};
-    let outcome: DataSyncAttemptOutcome = 'failed';
-    let targetEventId = context.targetEventId;
+  const nestedMetricsContext = hasFplRequestMetricsContext() || hasFplAdmissionMetricsContext();
+  return runWithFplRequestMetrics(() =>
+    runWithFplAdmissionMetrics(async () => {
+      const startedAt = performance.now();
+      const startedAtIso = new Date().toISOString();
+      let summary: DataSyncWorkSummary = {};
+      let outcome: DataSyncAttemptOutcome = 'failed';
+      let targetEventId = context.targetEventId;
+      let settledSuccessfully = false;
 
-    try {
-      const result = await runner();
-      // Some unscoped workers resolve their canonical event inside the runner
-      // immediately before taking database mutation scopes. The context is shared by
-      // reference, so adopt that resolution before falling back to the result.
-      targetEventId ??= context.targetEventId;
-      if (targetEventId === undefined && isRecord(result)) {
-        targetEventId = firstBoundedUnit(result.eventId);
-      }
-      summary = options.summarize?.(result) ?? inferDataSyncWorkSummary(result);
-      outcome = resolveOutcome(summary);
-      return result;
-    } catch (error) {
-      // Bounded operational errors may carry useful unit counters. The market
-      // window's expected no-change wait is reported as pending, not failed.
-      summary = {
-        ...inferDataSyncWorkSummary(error),
-        ...(isPlayerValuesWindowPendingError(error) ? { outcome: 'pending' as const } : {}),
-      };
-      if (isPlayerValuesWindowPendingError(error)) outcome = 'pending';
-      throw error;
-    } finally {
-      // Preserve the resolved target even when the runner fails after lookup;
-      // the failure report still needs to identify the bounded event unit.
-      targetEventId ??= context.targetEventId;
-      const report: DataSyncAttemptReport = {
-        event: 'data_sync_attempt',
-        queue: context.queue,
+      const attemptKey = stableAttemptKey(context);
+      try {
+        if (!nestedMetricsContext) {
+          try {
+            await persistBatchCostStart(context, attemptKey, startedAtIso);
+          } catch (error) {
+            logError('Failed to persist data sync batch cost start', error, {
+              runId: context.runId,
+              attemptKey,
+            });
+          }
+        }
+        const result = await runner();
+        // Some unscoped workers resolve their canonical event inside the runner
+        // immediately before taking database mutation scopes. The context is shared by
+        // reference, so adopt that resolution before falling back to the result.
+        targetEventId ??= context.targetEventId;
+        if (targetEventId === undefined && isRecord(result)) {
+          targetEventId = firstBoundedUnit(result.eventId);
+        }
+        summary = options.summarize?.(result) ?? inferDataSyncWorkSummary(result);
+        outcome = resolveOutcome(summary);
+        settledSuccessfully = true;
+        return result;
+      } catch (error) {
+        // Bounded operational errors may carry useful unit counters. The market
+        // window's expected no-change wait is reported as pending, not failed.
+        summary = {
+          ...inferDataSyncWorkSummary(error),
+          ...(isPlayerValuesWindowPendingError(error) ? { outcome: 'pending' as const } : {}),
+        };
+        if (isPlayerValuesWindowPendingError(error)) outcome = 'pending';
+        throw error;
+      } finally {
+        // Preserve the resolved target even when the runner fails after lookup;
+        // the failure report still needs to identify the bounded event unit.
+        targetEventId ??= context.targetEventId;
+        if (targetEventId !== undefined) context.targetEventId = targetEventId;
+        const reportBase: Omit<DataSyncAttemptReport, 'batchCost'> = {
+          event: 'data_sync_attempt',
+          queue: context.queue,
         jobName: context.jobName,
         runId: context.runId,
         ...(context.batchId !== undefined ? { batchId: context.batchId } : {}),
@@ -283,25 +498,55 @@ export async function runDataSyncAttempt<T>(
         ...(context.executionIntent !== undefined
           ? { executionIntent: context.executionIntent }
           : {}),
-        source: normalizeSource(context),
-        attempt: boundedAttempt(context.attempt),
-        ...(targetEventId !== undefined ? { targetEventId } : {}),
-        outcome,
-        queueWaitMs: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),
-        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
-        requiredUnits: boundedUnit(summary.requiredUnits),
-        reusedUnits: boundedUnit(summary.reusedUnits),
-        succeededUnits: boundedUnit(summary.succeededUnits),
-        failedUnits: boundedUnit(summary.failedUnits),
-        timings: {
-          queueWait: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),
-          total: Math.max(0, Math.round(performance.now() - startedAt)),
-          ...summary.timings,
-        },
-        fpl: getFplRequestMetricsSnapshot(),
-      };
+          source: normalizeSource(context),
+          attempt: boundedAttempt(context.attempt),
+          ...(targetEventId !== undefined ? { targetEventId } : {}),
+          outcome,
+          queueWaitMs: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),
+          durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          requiredUnits: boundedUnit(summary.requiredUnits),
+          reusedUnits: boundedUnit(summary.reusedUnits),
+          succeededUnits: boundedUnit(summary.succeededUnits),
+          failedUnits: boundedUnit(summary.failedUnits),
+          timings: {
+            queueWait: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),
+            total: Math.max(0, Math.round(performance.now() - startedAt)),
+            ...summary.timings,
+          },
+          fpl: getFplRequestMetricsSnapshot(),
+          admission: getFplAdmissionBatchMetricsSnapshot(),
+        };
+        const report: DataSyncAttemptReport = {
+          ...reportBase,
+          batchCost: {
+            attemptKey,
+            batchId: context.batchId ?? context.runId,
+            complete: settledSuccessfully,
+          },
+        };
 
-      logInfo('Data sync attempt', report);
-    }
-  });
+        logInfo('Data sync attempt', report);
+        if (!nestedMetricsContext) {
+          try {
+            await persistBatchCost(
+              context,
+              reportBase,
+              attemptKey,
+              settledSuccessfully,
+              summary,
+              startedAtIso,
+            );
+          } catch (error) {
+            // Cost accounting is observability. Never turn an already-settled
+            // business result into a retry because the optional ops ledger is
+            // unavailable; the log carries the explicit persistence gap.
+            logError('Failed to persist data sync batch cost', error, {
+              runId: context.runId,
+              attemptKey,
+            });
+          }
+        }
+      }
+    }),
+  );
 }
