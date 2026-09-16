@@ -38,6 +38,11 @@ export type MaintenanceEnqueueOptions = Readonly<{
   snapshotIdempotencyKey?: string;
   /** Shared source checkpoint for a coordinated post-match refresh. */
   freshAfter?: string;
+  /** Expected My FPL FINAL input-scope generations captured by the scheduler. */
+  entryScopeGeneration?: number;
+  tournamentScopeGeneration?: number;
+  /** Immutable FPL data_checked_at fence captured by a FINAL obligation. */
+  finalDataCheckedAt?: string;
   attempts?: number;
   backoffDelayMs?: number;
   backoffType?: 'fixed' | 'exponential';
@@ -156,6 +161,15 @@ export async function enqueueMaintenanceJob(
         }
       : {}),
     ...(options.freshAfter === undefined ? {} : { freshAfter: options.freshAfter }),
+    ...(options.entryScopeGeneration === undefined
+      ? {}
+      : { entryScopeGeneration: options.entryScopeGeneration }),
+    ...(options.tournamentScopeGeneration === undefined
+      ? {}
+      : { tournamentScopeGeneration: options.tournamentScopeGeneration }),
+    ...(options.finalDataCheckedAt === undefined
+      ? {}
+      : { finalDataCheckedAt: options.finalDataCheckedAt }),
   };
   try {
     const queue = queueForMaintenanceLane(lane);

@@ -7,6 +7,7 @@ import {
   type EntrySyncLane,
   type EntrySyncJobName,
   type EntrySyncJobSource,
+  type EntrySyncExecutionIntent,
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
@@ -45,6 +46,8 @@ export interface EntrySyncJobOptions {
   deduplicationCadenceMs?: number;
   removeOnSettle?: boolean;
   lane?: EntrySyncLane;
+  /** Internal intent; retries must re-audit instead of force-refreshing warm rows. */
+  executionIntent?: EntrySyncExecutionIntent;
 }
 
 export function retainEntrySyncChainOptions(
@@ -59,6 +62,7 @@ export function retainEntrySyncChainOptions(
         | 'freshnessWindowId'
         | 'freshAfter'
         | 'lane'
+        | 'executionIntent'
       >
     | undefined,
 ): Pick<
@@ -71,6 +75,7 @@ export function retainEntrySyncChainOptions(
   | 'freshnessWindowId'
   | 'freshAfter'
   | 'lane'
+  | 'executionIntent'
 > {
   return {
     runId: options?.runId,
@@ -81,6 +86,7 @@ export function retainEntrySyncChainOptions(
     removeOnSettle: options?.removeOnSettle,
     freshAfter: options?.freshAfter,
     lane: options?.lane,
+    executionIntent: options?.executionIntent,
   };
 }
 
@@ -308,6 +314,7 @@ async function enqueueEntrySyncJobWithOutcome(
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
       source,
+      executionIntent: options.executionIntent,
       lane,
       triggeredAt: new Date().toISOString(),
       entryIds: options.entryIds,

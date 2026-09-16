@@ -1,6 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 import { and, asc, eq, gt } from 'drizzle-orm';
 
+import { fplClient } from '../clients/fpl';
 import {
   isExplicitEntryRepairRequest,
   planEventEligibleEntrySyncWork,
@@ -254,6 +255,10 @@ async function scheduleRetry(
     delayMs,
     eventId: jobData?.eventId,
     ...retainEntrySyncChainOptions(jobData),
+    // The retry intent must win over a force/reconcile intent retained from
+    // the failed delivery; otherwise explicit failed IDs would be refreshed
+    // again instead of being re-audited against the current source fence.
+    executionIntent: 'retry',
     resumeAfterEntryId: jobData?.resumeAfterEntryId,
   });
 }
@@ -611,10 +616,13 @@ export function createEntrySyncWorker(
       queue: job.queueName,
       jobName: job.name,
       runId: job.data?.runId ?? String(jobId),
+      batchId: String(jobId),
+      parentRunId: job.data?.runId,
       source: attempt.source,
       attempt: attempt.attempt,
       targetEventId: job.data?.eventId,
       queueWaitMs: context.queueWaitMs,
+      executionIntent: job.data?.executionIntent,
     };
 
     return runDataSyncAttempt(attemptContext, async () => {
@@ -623,8 +631,19 @@ export function createEntrySyncWorker(
         job.data?.eventId,
         async () => (await getCurrentEvent(season))?.id ?? null,
       );
+      const effectiveExecutionIntent =
+        job.data?.executionIntent ??
+        (attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
+          ? 'retry'
+          : job.data?.source === 'manual' || job.data?.source === 'api'
+            ? 'force'
+            : job.data?.source === 'reconcile' || job.data?.source === 'catchup'
+              ? 'reconcile'
+              : 'refresh');
       const effectiveJobData =
-        targetEventId !== undefined ? { ...job.data, eventId: targetEventId } : job.data;
+        targetEventId !== undefined
+          ? { ...job.data, eventId: targetEventId, executionIntent: effectiveExecutionIntent }
+          : { ...job.data, executionIntent: effectiveExecutionIntent };
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
       const runMutation = async (): Promise<EntrySyncMutationResult> => {
@@ -795,11 +814,21 @@ export function createEntrySyncWorker(
               },
             );
           case 'entry-results':
+            // All required entries in this worker batch share one validated
+            // event-live observation. The promise is lazy so a fully reused
+            // batch sends no provider request, and a failed observation is
+            // shared by every entry rather than retried as a fan-out.
+            let sharedEventLive: ReturnType<typeof fplClient.getEventLive> | undefined;
+            const getSharedEventLive = () =>
+              (sharedEventLive ??= fplClient.getEventLive(targetEventId!));
             return handleEntryJob(
               season,
               'entry-results',
               'entry results sync',
-              (entryId) => syncEntryEventResults(season, entryId, targetEventId!),
+              async (entryId) =>
+                syncEntryEventResults(season, entryId, targetEventId!, {
+                  providerEventLive: await getSharedEventLive(),
+                }),
               effectiveJobData,
               {
                 selectRequired: async (entryIds) => {

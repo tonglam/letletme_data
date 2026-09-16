@@ -775,6 +775,14 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
           evidence: {
             snapshotKind: 'FINAL',
             dataCheckedAt: checkedAt,
+            ...(control?.entryScopeGeneration === null ||
+            control?.entryScopeGeneration === undefined
+              ? {}
+              : { entryScopeGeneration: control.entryScopeGeneration }),
+            ...(control?.tournamentScopeGeneration === null ||
+            control?.tournamentScopeGeneration === undefined
+              ? {}
+              : { tournamentScopeGeneration: control.tournamentScopeGeneration }),
             expectedEntryCount: control?.expectedEntryCount,
             expectedEntryScopeSha256: control?.entryScopeSha256,
             expectedNotApplicableEntryCount: control?.notApplicableEntryCount,
@@ -793,6 +801,16 @@ function myFplFinalizationDefinition(): ScheduledJobDefinition {
         eventId,
         snapshotKind: 'FINAL',
         freshAfter: plan.dueAt.toISOString(),
+        ...(typeof plan.evidence?.entryScopeGeneration === 'number'
+          ? { entryScopeGeneration: plan.evidence.entryScopeGeneration }
+          : {}),
+        ...(typeof plan.evidence?.tournamentScopeGeneration === 'number'
+          ? { tournamentScopeGeneration: plan.evidence.tournamentScopeGeneration }
+          : {}),
+        ...(typeof plan.evidence?.dataCheckedAt === 'string' &&
+        Number.isFinite(Date.parse(plan.evidence.dataCheckedAt))
+          ? { finalDataCheckedAt: plan.evidence.dataCheckedAt }
+          : {}),
         jobId: `scheduler-${obligationId}-g${generation}`,
         obligationId,
         obligationGeneration: generation,
