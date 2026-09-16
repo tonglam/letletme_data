@@ -4160,6 +4160,25 @@ export async function enqueueTournamentReviewRepair(
   error: TournamentReviewSourceNotReadyError,
   nextRepairAt: Date,
 ): Promise<number | null> {
+  // A backfill can commit before its worker closes the issue. Keep that exact
+  // identity attached until normal repair finalization resolves it, even when
+  // the next validation discovers a different gap. Absence from the latest
+  // diagnostic alone is not proof that the prior issue is fully repaired.
+  if (obligation.repair_issue_id != null) {
+    const prior = await tournamentSetupIssueRepository.findUnresolvedById(
+      season,
+      obligation.repair_issue_id,
+    );
+    if (prior?.tournamentId === obligation.tournament_id) {
+      try {
+        const { enqueueTournamentRepair } = await import('../jobs/tournament-repair.jobs');
+        await enqueueTournamentRepair(season, prior, 'reconciliation');
+      } catch {
+        // Retain the durable identity for the repair watchdog during an outage.
+      }
+      return prior.issueId;
+    }
+  }
   const db = await getDbClient();
   let affectedEntryIds: number[] = [];
   try {

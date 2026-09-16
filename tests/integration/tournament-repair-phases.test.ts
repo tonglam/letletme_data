@@ -638,12 +638,11 @@ test('historical points repairs attach only the earliest missing scope on each v
   );
   expect(issues.map((i) => i.eventId)).toEqual([1]);
   expect(issues.some((i) => i.issueId === attached)).toBe(true);
-  // Simulate the first repair completing. A fresh validation finds only event 2.
-  await sql`UPDATE competition.tournament_setup_issues SET resolved_at=clock_timestamp()
-    WHERE issue_id=${attached!} AND season_id=${season.seasonId}`;
-  const nextAttached = await review.enqueueTournamentReviewRepair(
+  // The data for event 1 was repaired, but the worker exited before issue
+  // finalization. A fresh event-2 diagnostic must not orphan the attached issue.
+  const retained = await review.enqueueTournamentReviewRepair(
     season,
-    { tournament_id: tournamentId, event_id: 3 } as Parameters<
+    { tournament_id: tournamentId, event_id: 3, repair_issue_id: attached } as Parameters<
       typeof review.enqueueTournamentReviewRepair
     >[1],
     new review.TournamentReviewSourceNotReadyError('historical points group assignment is stale', [
@@ -651,7 +650,27 @@ test('historical points repairs attach only the earliest missing scope on each v
     ]),
     new Date(),
   );
-  expect(queued).toEqual([1, 2]);
+  expect(retained).toBe(attached);
+  expect(queued).toEqual([1, 1]);
+  const unfinished = (
+    await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)
+  ).filter((candidate) => candidate.code === 'TOURNAMENT_RESULTS_INCOMPLETE');
+  expect(unfinished).toHaveLength(1);
+  expect(unfinished[0]!.issueId).toBe(attached);
+  // Only after normal issue finalization may the next missing scope be attached.
+  await sql`UPDATE competition.tournament_setup_issues SET resolved_at=clock_timestamp()
+    WHERE issue_id=${attached!} AND season_id=${season.seasonId}`;
+  const nextAttached = await review.enqueueTournamentReviewRepair(
+    season,
+    { tournament_id: tournamentId, event_id: 3, repair_issue_id: attached } as Parameters<
+      typeof review.enqueueTournamentReviewRepair
+    >[1],
+    new review.TournamentReviewSourceNotReadyError('historical points group assignment is stale', [
+      2,
+    ]),
+    new Date(),
+  );
+  expect(queued).toEqual([1, 1, 2]);
   const remaining = (
     await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)
   ).filter((candidate) => candidate.code === 'TOURNAMENT_RESULTS_INCOMPLETE');
