@@ -978,6 +978,33 @@ describe('ops sync state machine', () => {
     );
   });
 
+  test('binds a recovered scoped batch-cost retry to an unscoped ledger', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const run = {
+      runId: RUN_IDS[0],
+      provider: 'fpl',
+      lane: 'data-sync',
+      scope: 'player-stats',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+    } as const;
+
+    await syncOperationsRepository.startRun(run);
+    expect(await syncOperationsRepository.startRun({ ...run, eventId: 12 })).toBe(RUN_IDS[0]);
+    const [bound] = await sql<Array<{ event_id: number | null }>>`
+      SELECT event_id
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(bound?.event_id).toBe(12);
+    await expectDatabaseErrorCode(
+      syncOperationsRepository.startRun({ ...run, eventId: 13 }),
+      'SYNC_RUN_ID_CONFLICT',
+    );
+  });
+
   test('stops an unscoped runner when its target event scope changes', async () => {
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
     const context: DataSyncAttemptContext = {
@@ -1106,6 +1133,55 @@ describe('ops sync state machine', () => {
       completed_items: 0,
       failed_items: 1,
       skipped_items: 0,
+    });
+  });
+
+  test('preserves incomplete accounting evidence after a later settlement', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[0],
+      provider: 'fpl',
+      lane: 'entry-sync',
+      scope: 'entry-results',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+    });
+    const marker = (attempt: number) => ({
+      attemptKey: `entry-sync|entry-results|incomplete-evidence|${attempt}|none`,
+      batchId: 'incomplete-evidence',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt,
+    });
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+      ...marker(1),
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    });
+    await syncOperationsRepository.reconcileBatchCostTerminalFailure(RUN_IDS[0], {
+      batchId: 'incomplete-evidence',
+      attempt: 1,
+      error: new Error('worker exited after provider request'),
+    });
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+      ...marker(2),
+      payload: { startedAt: '2026-08-09T00:00:01.000Z' },
+    });
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+      ...marker(2),
+      complete: true,
+      payload: { logicalRequests: 1 },
+    });
+
+    const [run] = await sql<Array<{ metadata: { batchCost?: Record<string, unknown> } }>>`
+      SELECT metadata
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(run?.metadata.batchCost).toMatchObject({
+      incompleteAccounting: true,
+      incompleteReason: 'worker_terminal_failure',
     });
   });
 

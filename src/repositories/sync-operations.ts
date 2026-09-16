@@ -283,6 +283,30 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           'SYNC_RUN_ID_CONFLICT',
         );
       }
+      // A recovery may know the event after an earlier unscoped marker was
+      // created. Bind that first positive event to the durable ledger while
+      // the immutable identity is still unscoped; a concurrent recovery for
+      // another event will observe the binding and fail closed below.
+      if (input.mode === 'batch-cost' && input.eventId !== undefined && row.eventId === null) {
+        const bound = await db
+          .update(syncRunsInOps)
+          .set({ eventId: input.eventId, updatedAt: sql`clock_timestamp()` })
+          .where(and(eq(syncRunsInOps.runId, runId), isNull(syncRunsInOps.eventId)))
+          .returning({ eventId: syncRunsInOps.eventId });
+        if (bound.length === 0) {
+          const current = await db
+            .select({ eventId: syncRunsInOps.eventId })
+            .from(syncRunsInOps)
+            .where(eq(syncRunsInOps.runId, runId))
+            .limit(1);
+          if (current[0]?.eventId !== input.eventId) {
+            throw new DatabaseError(
+              'Sync run ID is already bound to another immutable event scope',
+              'SYNC_RUN_ID_CONFLICT',
+            );
+          }
+        }
+      }
       // Scheduler retries intentionally reuse the durable obligation/run
       // correlation so publication evidence can still join the exact window.
       // A failed run is the one terminal state that may be fenced back to
@@ -653,6 +677,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           ...currentMetadata,
           batchCost: {
             schemaVersion: 1,
+            ...currentCost,
             attempts: { ...currentAttempts, [input.attemptKey]: nextAttempt },
             totals: nextTotals,
             latestAttempt,

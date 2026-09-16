@@ -588,6 +588,7 @@ export async function runDataSyncAttempt<T>(
       let outcome: DataSyncAttemptOutcome = 'failed';
       let targetEventId = context.targetEventId;
       let settledSuccessfully = false;
+      let batchCostMarkerStarted = false;
 
       const attemptKey = stableAttemptKey(context, executionId);
       let batchCostRunId: string | undefined;
@@ -605,6 +606,7 @@ export async function runDataSyncAttempt<T>(
               startedAtIso,
               executionId,
             );
+            batchCostMarkerStarted = true;
           } catch (error) {
             logError('Failed to persist data sync batch cost start', error, {
               runId: context.runId,
@@ -615,7 +617,11 @@ export async function runDataSyncAttempt<T>(
         const previousTargetResolver = context.onTargetEventResolved;
         context.onTargetEventResolved = async (eventId: number) => {
           await previousTargetResolver?.(eventId);
-          if (!batchCostRunId) {
+          // If the initial marker could not be confirmed, this is an
+          // observability gap rather than an event conflict. Let business
+          // work continue; a later attempt can bind the recovered ledger
+          // after its own start marker is confirmed.
+          if (!batchCostRunId || !batchCostMarkerStarted) {
             context.targetEventId = eventId;
             return;
           }
