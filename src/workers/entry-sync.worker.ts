@@ -57,6 +57,7 @@ import {
   shouldMarkEntryInfoSynced,
 } from '../jobs/entry-info-sync-marker';
 import {
+  reconcileDataSyncBatchCostAfterTerminalFailure,
   resolveBullMqAttemptQueueWaitMs,
   resolveDataSyncAttempt,
   runDataSyncAttempt,
@@ -673,9 +674,9 @@ export function createEntrySyncWorker(
               ...(requestWatermark === undefined ? {} : { requestWatermark }),
             };
       context.eventId = targetEventId;
-      attemptContext.targetEventId = targetEventId;
       if (targetEventId !== undefined) {
         await attemptContext.onTargetEventResolved?.(targetEventId);
+        attemptContext.targetEventId = targetEventId;
       }
       const runMutation = async (): Promise<EntrySyncMutationResult> => {
         switch (job.name) {
@@ -1111,6 +1112,21 @@ export function createEntrySyncWorker(
     if (job) {
       void alertOnFinalFailure(job, error);
       const fence = inspectSchedulerObligationFence(job.data);
+      if (isTerminalJobFailure(job, error)) {
+        void reconcileDataSyncBatchCostAfterTerminalFailure({
+          queue: job.queueName,
+          jobName: job.name,
+          runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+          batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+          attempt: Math.max(1, job.attemptsMade),
+          error,
+        }).catch((reconciliationError) => {
+          logError('Failed to reconcile terminal entry batch cost marker', reconciliationError, {
+            jobId: job.id,
+            jobName: job.name,
+          });
+        });
+      }
       if (isTerminalJobFailure(job, error) && fence.kind === 'complete') {
         void failSchedulerObligation({
           obligationId: fence.obligationId,

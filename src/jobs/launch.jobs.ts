@@ -257,16 +257,24 @@ export async function evaluateLaunchMonitor(
 
 export async function runLaunchMonitor(options?: {
   source?: 'cron' | 'manual';
+  queue?: string;
   runId?: string;
+  /** Stable Bull job identity shared by every delivery attempt. */
+  batchId?: string;
+  attempt?: number;
+  parentRunId?: string;
   dependencies?: LaunchMonitorDependencies;
 }): Promise<LaunchMonitorResult> {
   const source = options?.source ?? 'manual';
   const now = options?.dependencies?.now() ?? new Date();
   return runDataSyncAttempt(
     {
-      queue: 'cron',
+      queue: options?.queue ?? 'cron',
       jobName: 'launch-monitor',
       runId: options?.runId ?? `launch-monitor-${now.getTime()}`,
+      ...(options?.batchId ? { batchId: options.batchId } : {}),
+      ...(options?.attempt === undefined ? {} : { attempt: options.attempt }),
+      ...(options?.parentRunId ? { parentRunId: options.parentRunId } : {}),
       source,
     },
     () => evaluateLaunchMonitor(options?.dependencies),

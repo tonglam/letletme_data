@@ -26,6 +26,16 @@ const defaultDependencies: PlayerPricesSyncDependencies = {
   readOrderingTimestamp: readCoreSnapshotOrderingTimestamp,
 };
 
+function attachCommittedPriceEvidence(error: unknown, updatedRows: number): void {
+  if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
+    Object.assign(error, {
+      count: updatedRows,
+      updatedRows,
+      submittedRows: updatedRows,
+    });
+  }
+}
+
 export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencies) {
   return async function syncForDate(
     season: FplSeasonRef,
@@ -108,10 +118,18 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     }
 
     if (winningPriceUpdates.length > 0) {
-      await dependencies.enqueueCoreSnapshot(season, 'cascade', {
-        jobId: `core-after-price-${changeDate}`,
-        removeOnSettle: false,
-      });
+      try {
+        await dependencies.enqueueCoreSnapshot(season, 'cascade', {
+          jobId: `core-after-price-${changeDate}`,
+          removeOnSettle: false,
+        });
+      } catch (error) {
+        // Player price rows commit before the dependent Core enqueue. Keep the
+        // committed write count on the error so the enclosing batch ledger does
+        // not report a successful mutation as zero work.
+        attachCommittedPriceEvidence(error, updatedPlayers.length);
+        throw error;
+      }
     }
     logInfo('Player prices updated; coherent core rebuild queued', {
       changeDate,

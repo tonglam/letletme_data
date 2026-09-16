@@ -13,7 +13,11 @@ import {
   processLeagueEventPicksJob,
   processLeagueEventResultsJob,
 } from '../services/league-sync.service';
-import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
+import {
+  reconcileDataSyncBatchCostAfterTerminalFailure,
+  resolveBullMqAttemptQueueWaitMs,
+  runDataSyncAttempt,
+} from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -216,6 +220,21 @@ export function createLeagueSyncWorker(): WorkerRuntime {
       return;
     }
     if (job) void alertOnFinalFailure(job, err);
+    if (job && isTerminalJobFailure(job, err)) {
+      void reconcileDataSyncBatchCostAfterTerminalFailure({
+        queue: job.queueName,
+        jobName: job.name,
+        runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+        batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        attempt: Math.max(1, job.attemptsMade),
+        error: err,
+      }).catch((reconciliationError) => {
+        logError('Failed to reconcile terminal league batch cost marker', reconciliationError, {
+          jobId: job.id,
+          jobName: job.name,
+        });
+      });
+    }
     const fence = job ? inspectSchedulerObligationFence(job.data) : null;
     if (job && isTerminalJobFailure(job, err) && fence?.kind === 'complete') {
       void failSchedulerObligation({

@@ -15,6 +15,7 @@ import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import { seasonRepository } from '../../src/repositories/seasons';
 import { syncOperationsRepository } from '../../src/repositories/sync-operations';
 import { DatabaseError } from '../../src/utils/errors';
+import { runDataSyncAttempt, type DataSyncAttemptContext } from '../../src/utils/data-sync-attempt';
 import { withMutationScopes } from '../../src/utils/mutation-scopes';
 
 const RUN_IDS = [
@@ -79,6 +80,11 @@ async function cleanup(): Promise<void> {
   await sql`
     DELETE FROM ops.sync_runs
     WHERE run_id = ANY(${[...RUN_IDS]}::uuid[])
+  `;
+  await sql`
+    DELETE FROM ops.sync_runs
+    WHERE season_id = ${TEST_SEASON_ID}
+      AND mode = 'batch-cost'
   `;
   await sql`
     DELETE FROM fpl.events
@@ -972,6 +978,28 @@ describe('ops sync state machine', () => {
     );
   });
 
+  test('stops an unscoped runner when its target event scope changes', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const context: DataSyncAttemptContext = {
+      queue: 'entry-sync',
+      jobName: 'entry-results',
+      runId: 'unscoped-runner',
+      batchId: 'unscoped-runner',
+      attempt: 1,
+      season,
+    };
+    let providerWorkStarted = false;
+    await expect(
+      runDataSyncAttempt(context, async () => {
+        await context.onTargetEventResolved?.(12);
+        await context.onTargetEventResolved?.(13);
+        providerWorkStarted = true;
+        return { requiredUnits: 1, succeededUnits: 1 };
+      }),
+    ).rejects.toMatchObject({ code: 'SYNC_BATCH_COST_EVENT_CONFLICT' });
+    expect(providerWorkStarted).toBe(false);
+  });
+
   test('closes a running marker when batch-cost settlement fails', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
@@ -1015,6 +1043,153 @@ describe('ops sync state machine', () => {
     `;
     expect(run?.status).toBe('failed');
     expect(run?.error_summary).toContain('batch-cost settlement');
+  });
+
+  test('reconciles an orphaned marker after terminal worker loss', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[2],
+      provider: 'fpl',
+      lane: 'entry-sync',
+      scope: 'entry-results',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+    });
+    const attemptKey = 'entry-sync|entry-results|orphaned|1|none|execution-1';
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[2], {
+      attemptKey,
+      batchId: 'orphaned',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    });
+
+    expect(
+      await syncOperationsRepository.reconcileBatchCostTerminalFailure(RUN_IDS[2], {
+        batchId: 'orphaned',
+        attempt: 1,
+        error: new Error('Bull exhausted after worker loss'),
+      }),
+    ).toBe(true);
+
+    const [item] = await sql<Array<{ status: string; phase: string; incompleteReason: string }>>`
+      SELECT status,
+             normalized_payload->>'phase' AS phase,
+             normalized_payload->>'incompleteReason' AS "incompleteReason"
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+        AND resource_type = 'batch-cost'
+        AND resource_id = ${attemptKey}
+    `;
+    expect(item).toEqual({
+      status: 'failed',
+      phase: 'settlement_failed',
+      incompleteReason: 'worker_terminal_failure',
+    });
+    const [run] = await sql<
+      Array<{
+        status: string;
+        completed_items: number;
+        failed_items: number;
+        skipped_items: number;
+      }>
+    >`
+      SELECT status, completed_items, failed_items, skipped_items
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+    `;
+    expect(run).toEqual({
+      status: 'failed',
+      completed_items: 0,
+      failed_items: 1,
+      skipped_items: 0,
+    });
+  });
+
+  test('sets failure counters when the first batch settlement fails', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[1],
+      provider: 'fpl',
+      lane: 'entry-sync',
+      scope: 'entry-results',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+    });
+    const input = {
+      attemptKey: 'entry-sync|entry-results|first-failure|1|none|execution-1',
+      batchId: 'first-failure',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+    } as const;
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[1], {
+      ...input,
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    });
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[1], {
+      ...input,
+      complete: false,
+      payload: { logicalRequests: 1 },
+    });
+    const [run] = await sql<
+      Array<{
+        status: string;
+        completed_items: number;
+        failed_items: number;
+        skipped_items: number;
+      }>
+    >`
+      SELECT status, completed_items, failed_items, skipped_items
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[1]}::uuid
+    `;
+    expect(run).toEqual({
+      status: 'failed',
+      completed_items: 0,
+      failed_items: 1,
+      skipped_items: 0,
+    });
+  });
+
+  test('does not close an orphan marker while a newer attempt is running', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[0],
+      provider: 'fpl',
+      lane: 'entry-sync',
+      scope: 'entry-results',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+    });
+    const marker = (attempt: number) => ({
+      attemptKey: `entry-sync|entry-results|orphan-fence|${attempt}|none|execution-${attempt}`,
+      batchId: 'orphan-fence',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt,
+      payload: { startedAt: `2026-08-09T00:00:0${attempt}.000Z` },
+    });
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], marker(1));
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], marker(2));
+    expect(
+      await syncOperationsRepository.reconcileBatchCostTerminalFailure(RUN_IDS[0], {
+        batchId: 'orphan-fence',
+        attempt: 1,
+        error: new Error('first worker lost'),
+      }),
+    ).toBe(true);
+    const sql = await getDbClient();
+    const [running] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.sync_runs WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(running?.status).toBe('running');
   });
 
   test('fences a late failure behind a newer batch attempt', async () => {

@@ -39,6 +39,8 @@ import {
   readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
 import {
+  attachDataSyncCostEvidence,
+  reconcileDataSyncBatchCostAfterTerminalFailure,
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
   type DataSyncAttemptContext,
@@ -438,12 +440,6 @@ async function alertPriceChangePublicationOverdue(
   );
 }
 
-function attachDataSyncCostEvidence(error: unknown, evidence: Record<string, unknown>): void {
-  if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
-    Object.assign(error, evidence);
-  }
-}
-
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
   if (
     !(await startCurrentSchedulerJob(job.data, {
@@ -479,8 +475,8 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     queueWaitMs: context.queueWaitMs,
   };
   const recordResolvedTarget = async (eventId: number) => {
-    attemptContext.targetEventId = eventId;
     await attemptContext.onTargetEventResolved?.(eventId);
+    attemptContext.targetEventId = eventId;
   };
 
   logJobTriggered(context);
@@ -846,6 +842,23 @@ export function createDataSyncWorker(): WorkerRuntime {
         // the alert observes the previous database state and under-counts the
         // current failed cycle.
         void (async () => {
+          await reconcileDataSyncBatchCostAfterTerminalFailure({
+            queue: job.queueName,
+            jobName: job.name,
+            runId: job.data?.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+            batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+            attempt: Math.max(1, job.attemptsMade),
+            error,
+          }).catch((reconciliationError) => {
+            logError(
+              'Failed to reconcile terminal data sync batch cost marker',
+              reconciliationError,
+              {
+                jobId: job.id,
+                jobName: job.name,
+              },
+            );
+          });
           const fence = inspectSchedulerObligationFence(job.data);
           await markHotPriceReconciliationFailed(job, error).catch((reconciliationError) => {
             logError('Price-change hot reconciliation failure update failed', reconciliationError, {

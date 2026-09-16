@@ -123,6 +123,14 @@ export interface MarkSyncBatchCostSettlementFailureInput {
   readonly error: unknown;
 }
 
+export interface ReconcileSyncBatchCostTerminalFailureInput {
+  /** Stable Bull batch identity shared by every attempt of one job. */
+  readonly batchId: string;
+  /** The delivery attempt that Bull has exhausted or marked terminal. */
+  readonly attempt: number;
+  readonly error: unknown;
+}
+
 export interface PreparePublicationInput {
   readonly publicationId?: string;
   readonly dataset: DataPublicationDataset;
@@ -472,6 +480,14 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           : null;
         if (existing && existingPayload?.phase !== 'started') return 'duplicate';
 
+        const existingEventId =
+          typeof existingPayload?.eventId === 'number' &&
+          Number.isSafeInteger(existingPayload.eventId) &&
+          existingPayload.eventId > 0
+            ? existingPayload.eventId
+            : undefined;
+        const incomingEventId = input.payload.eventId;
+
         const settledPayload = {
           schemaVersion: 1,
           phase: 'settled',
@@ -480,6 +496,12 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           releaseSha: input.releaseSha,
           complete: input.complete,
           ...input.payload,
+          // An unscoped attempt can discover its event before a later scope
+          // conflict aborts the runner. Preserve that durable event binding
+          // when the failure report has no replacement event identity.
+          ...(incomingEventId == null && existingEventId !== undefined
+            ? { eventId: existingEventId }
+            : {}),
         };
         if (existing) {
           await tx
@@ -659,6 +681,10 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                     errorSummary: null,
                   }
                 : {
+                    completedItems: 0,
+                    failedItems: 1,
+                    skippedItems: 0,
+                    dataChanged: false,
                     errorSummary: 'Data sync attempt did not settle successfully',
                   }),
               completedAt: sql`clock_timestamp()`,
@@ -1137,6 +1163,145 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                   failedItems: 1,
                   errorSummary: 'Data sync batch-cost settlement could not be persisted',
                   completedAt: sql`clock_timestamp()`,
+                }
+              : {}),
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(syncRunsInOps.runId, runId));
+        return true;
+      });
+    },
+
+    /**
+     * Reconcile a batch-cost marker when Bull has exhausted a job after the
+     * business work committed but before runDataSyncAttempt reached its
+     * settlement finally block. The marker is selected by the stable Bull
+     * batch identity and attempt, so a later attempt can remain authoritative
+     * without allowing this terminal callback to close its run.
+     */
+    reconcileBatchCostTerminalFailure: async (
+      runId: string,
+      input: ReconcileSyncBatchCostTerminalFailureInput,
+    ): Promise<boolean> => {
+      if (!input.batchId.trim() || input.batchId.length > 240) {
+        throw new DatabaseError('Batch cost batch ID is invalid', 'SYNC_BATCH_COST_BATCH_INVALID');
+      }
+      const db = await getDbInstance();
+      const summary = (
+        input.error instanceof Error ? input.error.message : String(input.error)
+      ).slice(0, 4_000);
+      const attempt = Math.max(1, Math.floor(input.attempt));
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({ status: syncRunsInOps.status, metadata: syncRunsInOps.metadata })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (!run) return false;
+
+        const itemRows = await tx
+          .select({
+            resourceId: syncItemsInOps.resourceId,
+            attempts: syncItemsInOps.attempts,
+            normalizedPayload: syncItemsInOps.normalizedPayload,
+          })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+              eq(syncItemsInOps.status, 'running'),
+              eq(syncItemsInOps.attempts, attempt),
+              sql`${syncItemsInOps.normalizedPayload}->>'batchId' = ${input.batchId}`,
+              sql`${syncItemsInOps.normalizedPayload}->>'phase' = 'started'`,
+            ),
+          )
+          .for('update');
+        if (itemRows.length === 0) return false;
+
+        const completedAt = sql`clock_timestamp()`;
+        for (const item of itemRows) {
+          const payload = isRecord(item.normalizedPayload) ? item.normalizedPayload : {};
+          await tx
+            .update(syncItemsInOps)
+            .set({
+              status: 'failed',
+              lastError: summary,
+              normalizedPayload: {
+                ...payload,
+                schemaVersion: 1,
+                phase: 'settlement_failed',
+                complete: false,
+                incompleteReason: 'worker_terminal_failure',
+                settlementError: summary,
+                terminalFailureAttempt: attempt,
+                terminalFailedAt: new Date().toISOString(),
+              },
+              completedAt,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(syncItemsInOps.runId, runId),
+                eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                eq(syncItemsInOps.resourceId, item.resourceId),
+                eq(syncItemsInOps.status, 'running'),
+              ),
+            );
+        }
+
+        const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const currentLatestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? currentCost.latestAttempt
+            : 0;
+        const currentTerminalAttempt =
+          typeof currentCost.terminalAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.terminalAttempt) &&
+          currentCost.terminalAttempt >= 1
+            ? currentCost.terminalAttempt
+            : 0;
+        const latestAttempt = Math.max(currentLatestAttempt, attempt);
+        const terminalAllowed =
+          attempt >= latestAttempt &&
+          (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
+        const closeRun =
+          terminalAllowed && NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus);
+        const nextMetadata = {
+          ...currentMetadata,
+          batchCost: {
+            schemaVersion: 1,
+            ...currentCost,
+            latestAttempt,
+            ...(closeRun ? { terminalAttempt: attempt } : {}),
+            incompleteAccounting: true,
+            incompleteReason: 'worker_terminal_failure',
+            lastTerminalFailureAt: new Date().toISOString(),
+            lastTerminalFailure: {
+              batchId: input.batchId,
+              attempt,
+              error: summary,
+              markerCount: itemRows.length,
+            },
+          },
+        };
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            metadata: nextMetadata,
+            ...(closeRun
+              ? {
+                  status: 'failed',
+                  completedItems: 0,
+                  failedItems: 1,
+                  skippedItems: 0,
+                  dataChanged: false,
+                  errorSummary: 'Data sync batch-cost worker ended before settlement',
+                  completedAt,
                 }
               : {}),
             updatedAt: sql`clock_timestamp()`,

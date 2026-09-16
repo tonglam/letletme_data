@@ -18,6 +18,7 @@ import { parseStrictBooleanEnvValue } from './config';
 import { isPlayerValuesWindowPendingError } from '../domain/player-values-window';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { syncOperationsRepository } from '../repositories/sync-operations';
+import { DatabaseError } from './errors';
 import { runtimeReleaseRevision } from './runtime-heartbeat';
 
 export const DATA_SYNC_ATTEMPT_OUTCOMES = [
@@ -152,6 +153,16 @@ type ReportOptions<T> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Preserve committed work counters when a later delivery/reconciliation step fails. */
+export function attachDataSyncCostEvidence(
+  error: unknown,
+  evidence: Record<string, unknown>,
+): void {
+  if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
+    Object.assign(error, evidence);
+  }
 }
 
 function boundedUnit(value: unknown): number {
@@ -438,6 +449,28 @@ function batchCostLedgerRunId(context: DataSyncAttemptContext): string {
   return `${bytes.slice(0, 8).join('')}-${bytes.slice(8, 12).join('')}-${bytes.slice(12, 16).join('')}-${bytes.slice(16, 20).join('')}-${bytes.slice(20).join('')}`;
 }
 
+export async function reconcileDataSyncBatchCostAfterTerminalFailure(input: {
+  queue: string;
+  jobName: string;
+  runId: string;
+  batchId: string;
+  attempt: number;
+  error: unknown;
+}): Promise<boolean> {
+  const context: DataSyncAttemptContext = {
+    queue: input.queue,
+    jobName: input.jobName,
+    runId: input.runId,
+    batchId: input.batchId,
+    attempt: input.attempt,
+  };
+  return syncOperationsRepository.reconcileBatchCostTerminalFailure(batchCostLedgerRunId(context), {
+    batchId: input.batchId,
+    attempt: boundedAttempt(input.attempt),
+    error: input.error,
+  });
+}
+
 async function ensureBatchCostLedgerRun(
   context: DataSyncAttemptContext,
   ledgerRunId: string,
@@ -581,16 +614,28 @@ export async function runDataSyncAttempt<T>(
         }
         const previousTargetResolver = context.onTargetEventResolved;
         context.onTargetEventResolved = async (eventId: number) => {
-          context.targetEventId = eventId;
           await previousTargetResolver?.(eventId);
-          if (!batchCostRunId) return;
+          if (!batchCostRunId) {
+            context.targetEventId = eventId;
+            return;
+          }
           try {
-            await syncOperationsRepository.updateBatchCostTargetEvent(
+            const updated = await syncOperationsRepository.updateBatchCostTargetEvent(
               batchCostRunId,
               attemptKey,
               eventId,
             );
+            if (!updated) {
+              throw new DatabaseError(
+                `Batch cost target event ${eventId} conflicts with the existing event scope`,
+                'SYNC_BATCH_COST_EVENT_CONFLICT',
+              );
+            }
+            context.targetEventId = eventId;
           } catch (error) {
+            if (error instanceof DatabaseError && error.code === 'SYNC_BATCH_COST_EVENT_CONFLICT') {
+              throw error;
+            }
             logError('Failed to persist resolved data sync target event', error, {
               runId: context.runId,
               attemptKey,

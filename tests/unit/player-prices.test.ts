@@ -192,4 +192,26 @@ describe('player price reconciliation', () => {
     });
     expect(enqueueCoreSnapshot).not.toHaveBeenCalled();
   });
+
+  test('keeps committed price row counts when the core enqueue fails', async () => {
+    const enqueueError = new Error('core queue unavailable');
+    const sync = createPlayerPricesSync(
+      dependencies({
+        findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
+        findLatestForPlayerIds: async () => [stored(2, 63, '20260805', 'Rise')],
+        getBootstrap: async () => bootstrap([1, 2]),
+        updatePrices: async () => [player(2, 63)],
+        enqueueCoreSnapshot: async () => {
+          throw enqueueError;
+        },
+      }),
+    );
+
+    await expect(sync(TEST_SEASON, '20260803')).rejects.toBe(enqueueError);
+    expect(enqueueError).toMatchObject({
+      count: 1,
+      updatedRows: 1,
+      submittedRows: 1,
+    });
+  });
 });

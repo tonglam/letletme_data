@@ -43,6 +43,8 @@ import { syncCoreSnapshot } from '../services/core-snapshot.service';
 import { readActiveDataPublication } from '../cache/data-publication';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
+  attachDataSyncCostEvidence,
+  reconcileDataSyncBatchCostAfterTerminalFailure,
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
   type DataSyncAttemptContext,
@@ -630,31 +632,50 @@ async function processPriceChangeJob(job: Job<FplCriticalJobData>) {
       }
       throw error;
     }
-    await reconcilePriceChangeAfterCommit(prepared, readLatestHotEvent, enqueueNewerHotPriceEvent);
-    if (!persisted.publicationId || persisted.revision === undefined) {
-      throw new Error('Price-change publication did not return durable identity');
+    try {
+      await reconcilePriceChangeAfterCommit(
+        prepared,
+        readLatestHotEvent,
+        enqueueNewerHotPriceEvent,
+      );
+      if (!persisted.publicationId || persisted.revision === undefined) {
+        throw new Error('Price-change publication did not return durable identity');
+      }
+      await verifyPricePublication(season, persisted.publicationId, persisted.revision);
+      await markHotPriceReconciled(
+        job,
+        persisted.publicationId,
+        persisted.revision,
+        prepared.board.revision,
+        hotPriceSourceMetadata(job, activeTarget.obligation.evidence),
+      );
+      const completed = await completeSchedulerLane({
+        laneId,
+        dispatchGeneration,
+        activeObligationId: activeTarget.obligation.obligationId,
+        status: 'succeeded',
+        evidence: {
+          publicationId: persisted.publicationId,
+          revision: persisted.revision,
+          fetchedAt: persisted.fetchedAt,
+        },
+      });
+      if (!completed.ok) throw new Error('Scheduler lane completion CAS failed');
+      return persisted;
+    } catch (error) {
+      // Publication activation and player rows commit before reconciliation,
+      // Redis verification, and lane completion. Keep those committed counts
+      // on a later error so batch-cost settlement remains auditable.
+      attachDataSyncCostEvidence(error, {
+        requiredUnits: persisted.players,
+        succeededUnits: persisted.players,
+        failedUnits: 0,
+        submittedRows: persisted.submittedRows ?? persisted.players,
+        publicationsCreated: persisted.publicationsCreated ?? 1,
+        publicationsReused: persisted.publicationsReused ?? 0,
+      });
+      throw error;
     }
-    await verifyPricePublication(season, persisted.publicationId, persisted.revision);
-    await markHotPriceReconciled(
-      job,
-      persisted.publicationId,
-      persisted.revision,
-      prepared.board.revision,
-      hotPriceSourceMetadata(job, activeTarget.obligation.evidence),
-    );
-    const completed = await completeSchedulerLane({
-      laneId,
-      dispatchGeneration,
-      activeObligationId: activeTarget.obligation.obligationId,
-      status: 'succeeded',
-      evidence: {
-        publicationId: persisted.publicationId,
-        revision: persisted.revision,
-        fetchedAt: persisted.fetchedAt,
-      },
-    });
-    if (!completed.ok) throw new Error('Scheduler lane completion CAS failed');
-    return persisted;
   }
   throw new Error('Price-change lane exceeded its bounded target dispatch');
 }
@@ -717,16 +738,31 @@ async function processCoreRepairJob(job: Job<FplCriticalJobData>) {
   if (result.outcome !== 'ready' || !result.publicationId || result.revision === undefined) {
     throw new Error('Core repair did not produce a durable publication');
   }
-  const unblocked = await unblockSchedulerLane({ blockerJobId: blockerId, success: true });
-  if (!unblocked) throw new Error('Scheduler lane unblock CAS failed');
-  logInfo('Core repair unblocked price lane', {
-    laneId,
-    dispatchGeneration,
-    blockerJobId: blockerId,
-    publicationId: result.publicationId,
-    revision: result.revision,
-  });
-  return result;
+  try {
+    const unblocked = await unblockSchedulerLane({ blockerJobId: blockerId, success: true });
+    if (!unblocked) throw new Error('Scheduler lane unblock CAS failed');
+    logInfo('Core repair unblocked price lane', {
+      laneId,
+      dispatchGeneration,
+      blockerJobId: blockerId,
+      publicationId: result.publicationId,
+      revision: result.revision,
+    });
+    return result;
+  } catch (error) {
+    // Core facts and publication are durable before the lane-unblock CAS.
+    // Preserve their counts if this control-plane step fails afterwards.
+    attachDataSyncCostEvidence(error, {
+      requiredUnits: result.requiredUnits,
+      succeededUnits: result.succeededUnits,
+      failedUnits: result.failedUnits,
+      submittedRows: result.submittedRows,
+      publicationsCreated: result.publicationsCreated,
+      publicationsReused: result.publicationsReused,
+      persistence: result.persistence,
+    });
+    throw error;
+  }
 }
 
 async function processCriticalJob(job: Job<FplCriticalJobData>) {
@@ -792,6 +828,19 @@ export function createFplCriticalSyncWorker(): WorkerRuntime {
     void alertOnFinalFailure(job, error);
     if (!isTerminalJobFailure(job, error)) return;
     void (async () => {
+      await reconcileDataSyncBatchCostAfterTerminalFailure({
+        queue: job.queueName,
+        jobName: job.name,
+        runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+        batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        attempt: Math.max(1, job.attemptsMade),
+        error,
+      }).catch((reconciliationError) => {
+        logError('Failed to reconcile terminal critical batch cost marker', reconciliationError, {
+          jobId: job.id,
+          jobName: job.name,
+        });
+      });
       await markHotPriceReconciliationFailed(job, error).catch((reconciliationError) => {
         logError('Price-change hot reconciliation failure update failed', reconciliationError, {
           jobId: job.id,
