@@ -90,8 +90,19 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
       season: FplSeasonRef,
       ids: number[],
       targetEventId: number,
+      profileFreshAfter?: string | Date,
     ): Promise<number[]> => {
       if (ids.length === 0) return [];
+
+      const freshnessCutoff =
+        profileFreshAfter instanceof Date
+          ? profileFreshAfter
+          : profileFreshAfter === undefined
+            ? null
+            : new Date(profileFreshAfter);
+      if (freshnessCutoff && !Number.isFinite(freshnessCutoff.getTime())) {
+        throw new Error('A valid entry profile freshness cutoff is required');
+      }
 
       try {
         const db = await getDbInstance();
@@ -103,6 +114,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
             .select({
               entryId: entriesInCompetition.entryId,
               syncedThroughEventId: entriesInCompetition.snapshotSyncedThroughEventId,
+              profileSourceCheckedAt: entriesInCompetition.profileSourceCheckedAt,
             })
             .from(entriesInCompetition)
             .where(
@@ -114,10 +126,17 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
           const checkpoints = new Map(
             rows.map((row) => [row.entryId, row.syncedThroughEventId] as const),
           );
+          const entries = new Map(rows.map((row) => [row.entryId, row] as const));
           results.push(
             ...chunk.filter((id) => {
               const checkpoint = checkpoints.get(id);
-              return checkpoint === undefined || checkpoint === null || checkpoint < targetEventId;
+              const row = entries.get(id);
+              const checkpointMissing =
+                checkpoint === undefined || checkpoint === null || checkpoint < targetEventId;
+              const profileStale =
+                freshnessCutoff !== null &&
+                (!row?.profileSourceCheckedAt || row.profileSourceCheckedAt < freshnessCutoff);
+              return checkpointMissing || profileStale;
             }),
           );
         }

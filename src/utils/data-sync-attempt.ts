@@ -94,6 +94,9 @@ export interface DataSyncAttemptReport {
   queue: string;
   jobName: string;
   runId: string;
+  batchId?: string;
+  parentRunId?: string;
+  executionIntent?: DataSyncAttemptContext['executionIntent'];
   source: DataSyncAttemptSource;
   attempt: number;
   targetEventId?: number;
@@ -275,6 +278,11 @@ export async function runDataSyncAttempt<T>(
         queue: context.queue,
         jobName: context.jobName,
         runId: context.runId,
+        ...(context.batchId !== undefined ? { batchId: context.batchId } : {}),
+        ...(context.parentRunId !== undefined ? { parentRunId: context.parentRunId } : {}),
+        ...(context.executionIntent !== undefined
+          ? { executionIntent: context.executionIntent }
+          : {}),
         source: normalizeSource(context),
         attempt: boundedAttempt(context.attempt),
         ...(targetEventId !== undefined ? { targetEventId } : {}),

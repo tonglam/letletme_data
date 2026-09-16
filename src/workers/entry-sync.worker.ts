@@ -663,10 +663,19 @@ export function createEntrySyncWorker(
                   if (targetEventId === undefined) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
+                  const retrying = effectiveJobData?.executionIntent === 'retry';
+                  // A legacy retry without the original watermark cannot
+                  // prove that its profile observation belongs to this
+                  // request. Re-read the bounded IDs rather than completing
+                  // from an older checkpoint.
+                  if (retrying && !effectiveJobData?.requestWatermark) {
+                    return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                  }
                   const requiredEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
                     season,
                     entryIds,
                     targetEventId,
+                    retrying ? effectiveJobData.requestWatermark : undefined,
                   );
                   return planEntryInfoSyncWork(
                     entryIds,
@@ -795,6 +804,7 @@ export function createEntrySyncWorker(
               },
             );
           case 'entry-transfers':
+            let selectedTransferFreshAfter: string | Date | undefined;
             return handleEntryJob(
               season,
               'entry-transfers',
@@ -809,17 +819,25 @@ export function createEntrySyncWorker(
                   if (isExplicitEntryRepairRequest(effectiveJobData)) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
+                  const retrying = effectiveJobData?.executionIntent === 'retry';
+                  const transferFreshAfter =
+                    effectiveJobData.freshAfter ??
+                    (retrying ? effectiveJobData.requestWatermark : undefined);
+                  selectedTransferFreshAfter = transferFreshAfter;
+                  if (retrying && !transferFreshAfter) {
+                    return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                  }
                   const [checkpointGaps, staleSources] = await Promise.all([
                     entryEventTransfersRepository.findEntryIdsNeedingSync(
                       season,
                       entryIds,
                       targetEventId,
                     ),
-                    effectiveJobData.freshAfter
+                    transferFreshAfter
                       ? entryEventTransfersRepository.findEntryIdsNeedingSourceRefresh(
                           season,
                           entryIds,
-                          effectiveJobData.freshAfter,
+                          transferFreshAfter,
                         )
                       : Promise.resolve([]),
                   ]);
@@ -830,12 +848,23 @@ export function createEntrySyncWorker(
                     reusedUnits: entryIds.length - requiredEntryIds.length,
                   };
                 },
-                auditRequired: (entryIds) =>
-                  entryEventTransfersRepository.findEntryIdsNeedingSync(
-                    season,
-                    entryIds,
-                    targetEventId!,
-                  ),
+                auditRequired: async (entryIds) => {
+                  const [checkpointGaps, staleSources] = await Promise.all([
+                    entryEventTransfersRepository.findEntryIdsNeedingSync(
+                      season,
+                      entryIds,
+                      targetEventId!,
+                    ),
+                    selectedTransferFreshAfter
+                      ? entryEventTransfersRepository.findEntryIdsNeedingSourceRefresh(
+                          season,
+                          entryIds,
+                          selectedTransferFreshAfter,
+                        )
+                      : Promise.resolve([]),
+                  ]);
+                  return [...new Set([...checkpointGaps, ...staleSources])];
+                },
               },
             );
           case 'entry-results':
@@ -855,6 +884,7 @@ export function createEntrySyncWorker(
                 const providerEventLive = await fplClient.getEventLive(targetEventId!);
                 return { providerEventLive, sourceCheckedAt: sourceCheckedAt.exact };
               })());
+            let selectedResultFreshAfter: Date | string | undefined;
             return handleEntryJob(
               season,
               'entry-results',
@@ -886,7 +916,15 @@ export function createEntrySyncWorker(
                   // full provider fan-out from their own wall clock.
                   const event = await eventRepository.findById(season, targetEventId);
                   const finalizationDate = resolveRichResultFreshnessCutoff(event);
-                  const sharedFreshAfter = effectiveJobData.freshAfter;
+                  const retryFreshAfter =
+                    effectiveJobData.executionIntent === 'retry'
+                      ? effectiveJobData.requestWatermark
+                      : undefined;
+                  const sharedFreshAfter = effectiveJobData.freshAfter
+                    ? retryFreshAfter
+                      ? latestFreshnessTimestamp(effectiveJobData.freshAfter, retryFreshAfter)
+                      : effectiveJobData.freshAfter
+                    : retryFreshAfter;
                   if (!finalizationDate && !sharedFreshAfter) {
                     return { requiredEntryIds: entryIds, reusedUnits: 0 };
                   }
@@ -897,6 +935,7 @@ export function createEntrySyncWorker(
                   const freshAfter = sharedFreshAfter
                     ? latestFreshnessTimestamp(sharedFreshAfter, finalizationCutoff)
                     : finalizationCutoff!;
+                  selectedResultFreshAfter = freshAfter;
                   const requiredEntryIds =
                     await entryEventResultsRepository.findEntryIdsNeedingRichSync(
                       season,
@@ -909,6 +948,15 @@ export function createEntrySyncWorker(
                     reusedUnits: entryIds.length - requiredEntryIds.length,
                   };
                 },
+                auditRequired: async (entryIds) =>
+                  selectedResultFreshAfter
+                    ? entryEventResultsRepository.findEntryIdsNeedingRichSync(
+                        season,
+                        entryIds,
+                        targetEventId!,
+                        selectedResultFreshAfter,
+                      )
+                    : [],
               },
             );
           default:
