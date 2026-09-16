@@ -975,6 +975,68 @@ describe('ops sync state machine', () => {
     expect(completed?.status).toBe('completed');
   });
 
+  test('does not reopen a failed batch-cost ledger for a stale settlement', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[1],
+      provider: 'fpl',
+      lane: 'data-sync',
+      scope: 'player-values',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+      metadata: { test: 'stale-batch-settlement' },
+    });
+    const attempt = (number: number) => ({
+      attemptKey: `data-sync|player-values|stale-batch|${number}|none`,
+      batchId: 'stale-batch',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: number,
+    });
+
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[1], {
+      ...attempt(2),
+      payload: { startedAt: '2026-08-09T00:00:02.000Z' },
+    });
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[1], {
+      ...attempt(2),
+      complete: false,
+      payload: { logicalRequests: 1 },
+    });
+    const [failed] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.sync_runs WHERE run_id = ${RUN_IDS[1]}::uuid
+    `;
+    expect(failed?.status).toBe('failed');
+
+    // This is the same ensure/start call made by a delayed attempt. It must
+    // not reactivate the ledger before the attempt fence is evaluated.
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[1],
+      provider: 'fpl',
+      lane: 'data-sync',
+      scope: 'player-values',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+      metadata: { test: 'stale-batch-settlement', delayed: true },
+    });
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[1], {
+      ...attempt(1),
+      payload: { startedAt: '2026-08-09T00:00:01.000Z' },
+    });
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[1], {
+      ...attempt(1),
+      complete: false,
+      payload: { logicalRequests: 1 },
+    });
+    const [stillFailed] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.sync_runs WHERE run_id = ${RUN_IDS[1]}::uuid
+    `;
+    expect(stillFailed?.status).toBe('failed');
+  });
+
   test('uses wall-clock completion time inside a long mutation transaction', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

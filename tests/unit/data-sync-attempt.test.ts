@@ -298,6 +298,8 @@ describe('data sync attempt reporting', () => {
             requiredUnits: 581,
             succeededUnits: 581,
             failedUnits: 0,
+            submittedRows: 581,
+            publicationsCreated: 1,
             timings: { bootstrap: 120, snapshotWrite: 80, derivedView: 15 },
           });
         },
@@ -315,6 +317,20 @@ describe('data sync attempt reporting', () => {
         snapshotWrite: 80,
         derivedView: 15,
       },
+    });
+  });
+
+  test('keeps committed player-value write evidence on a pending attempt', () => {
+    const pending = new PlayerValuesWindowPendingError('20260829', {
+      requiredUnits: 581,
+      succeededUnits: 581,
+      failedUnits: 0,
+      submittedRows: 581,
+      publicationsCreated: 1,
+    });
+    expect(inferDataSyncWorkSummary(pending)).toMatchObject({
+      submittedRows: 581,
+      publicationsCreated: 1,
     });
   });
 

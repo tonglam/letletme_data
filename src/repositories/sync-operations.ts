@@ -269,7 +269,12 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       // A failed run is the one terminal state that may be fenced back to
       // running: without this transition the later attempt can fetch and
       // stage data but finishRun is forbidden from activating its publication.
-      if (row.status === 'failed') {
+      // Batch-cost ledger runs retain a terminal failed state until a newer
+      // attempt settles. Re-activating them here lets a late older settlement
+      // turn the ledger back to running after the newer failure was recorded;
+      // recordBatchCost already has the attempt fence needed to reopen it for
+      // a newer successful settlement.
+      if (row.status === 'failed' && row.mode !== 'batch-cost') {
         const reactivated = await db
           .update(syncRunsInOps)
           .set({

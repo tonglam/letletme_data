@@ -13,6 +13,12 @@ export type PlayerValuesWindowPendingEvidence = Readonly<{
   requiredUnits?: number;
   succeededUnits?: number;
   failedUnits?: number;
+  submittedRows?: number;
+  insertedRows?: number;
+  updatedRows?: number;
+  deletedRows?: number;
+  publicationsCreated?: number;
+  publicationsReused?: number;
   timings?: Partial<Record<'bootstrap' | 'snapshotWrite' | 'derivedView', number>>;
 }>;
 
@@ -39,6 +45,12 @@ export class PlayerValuesWindowPendingError extends Error {
   readonly requiredUnits: number;
   readonly succeededUnits: number;
   readonly failedUnits: number;
+  readonly submittedRows?: number;
+  readonly insertedRows?: number;
+  readonly updatedRows?: number;
+  readonly deletedRows?: number;
+  readonly publicationsCreated?: number;
+  readonly publicationsReused?: number;
   readonly timings?: PlayerValuesWindowPendingEvidence['timings'];
 
   constructor(changeDate: string, evidence: PlayerValuesWindowPendingEvidence = {}) {
@@ -48,6 +60,12 @@ export class PlayerValuesWindowPendingError extends Error {
     this.requiredUnits = evidence.requiredUnits ?? 0;
     this.succeededUnits = evidence.succeededUnits ?? 0;
     this.failedUnits = evidence.failedUnits ?? 0;
+    this.submittedRows = evidence.submittedRows;
+    this.insertedRows = evidence.insertedRows;
+    this.updatedRows = evidence.updatedRows;
+    this.deletedRows = evidence.deletedRows;
+    this.publicationsCreated = evidence.publicationsCreated;
+    this.publicationsReused = evidence.publicationsReused;
     this.timings = evidence.timings;
   }
 }
