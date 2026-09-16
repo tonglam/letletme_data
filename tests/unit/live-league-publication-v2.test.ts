@@ -705,6 +705,13 @@ describe('Live League V2 checkpoint transaction contract', () => {
     expect(conflictClause).toContain('manifest: sql`excluded.manifest`');
     expect(conflictClause).toContain('indexPayload: sql`excluded.index_payload`');
     expect(conflictClause).toContain('payload: sql`excluded.payload`');
+    const singleQuote = String.fromCharCode(39);
+    expect(conflictClause).toContain(
+      ['manifest}->', 'revisions', ' = excluded.manifest->', 'revisions', ''].join(singleQuote),
+    );
+    expect(conflictClause).toContain(
+      ['manifest}->', 'counts', ' = excluded.manifest->', 'counts', ''].join(singleQuote),
+    );
     expect(conflictClause).not.toContain('values.manifest');
     expect(conflictClause).not.toContain('values.indexPayload');
     expect(conflictClause).not.toContain('values.payload');
@@ -712,6 +719,17 @@ describe('Live League V2 checkpoint transaction contract', () => {
 
   test('normalizes provider rank zero before strict publication validation', () => {
     expect(publicationServiceSource).toContain('NULLIF(entry.overall_rank, 0)');
+  });
+
+  test('advances only validated FINAL checkpoints with a monotonic generation', () => {
+    expect(checkpointServiceSource).toContain('candidateIsValidFinalized');
+    expect(checkpointServiceSource).toContain(String.raw`excluded.state = 'FINALIZED'`);
+    expect(checkpointServiceSource).toContain('generationCompatible');
+    expect(checkpointServiceSource).toContain('isLiveLeagueCheckpointGenerationCompatible');
+    expect(checkpointServiceSource).toContain('sameFinalizedPublicationContent');
+    expect(checkpointServiceSource).toContain(
+      'current.publicationId === read.publication.publicationId',
+    );
   });
 });
 

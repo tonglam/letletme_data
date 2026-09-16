@@ -134,6 +134,12 @@ test('new Classic scope invalidates readiness and missing semantic input blocks 
 test('validated checkpoint payloads are reused until identity changes or five minutes elapse', async () => {
   const sql = await getDbClient();
   const db = await getDb();
+  // The preceding readiness test deliberately inserts a malformed checkpoint
+  // to prove the read path fails closed. Start this persistence test from an
+  // empty scope so its generation and identity assertions are independent.
+  await sql`DELETE FROM competition.live_league_checkpoints
+    WHERE season_id=${season.seasonId} AND event_id=1
+      AND tournament_id=89001 AND scope_kind='CLASSIC'`;
   const scope = {
     season: season.seasonCode,
     eventId: 1,
@@ -197,6 +203,122 @@ test('validated checkpoint payloads are reused until identity changes or five mi
       db,
     ),
   ).toBe(true);
+  const [sameBefore] =
+    await sql`SELECT updated_at::text, xmin::text FROM competition.live_league_checkpoints
+      WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
+        AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`;
+  // Replaying the exact final identity is a no-op. In particular, it must not
+  // rewrite the multi-megabyte payload or move checkpointedAt forward.
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(true);
+  const [sameAfter] =
+    await sql`SELECT updated_at::text, xmin::text FROM competition.live_league_checkpoints
+      WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
+        AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`;
+  expect(sameAfter).toEqual(sameBefore);
+
+  const semanticMismatch: LeagueLiveManifest = {
+    ...publication,
+    publicationId: '30000000-0000-4000-8000-000000000101',
+    generation: 2,
+    revisions: { ...publication.revisions, roster: 'b'.repeat(64) },
+    items: {
+      index: {
+        ...publication.items.index,
+        key: liveLeagueV2ItemKey(scope, 2, 'index'),
+      },
+      payload: {
+        ...publication.items.payload,
+        key: liveLeagueV2ItemKey(scope, 2, 'payload'),
+      },
+    },
+  };
+  // A higher generation alone is insufficient to replace an accepted final
+  // result when its semantic revision vector has drifted.
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication: semanticMismatch, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(false);
+
+  const successor: LeagueLiveManifest = {
+    ...publication,
+    publicationId: '30000000-0000-4000-8000-000000000100',
+    generation: 2,
+    items: {
+      index: {
+        ...publication.items.index,
+        key: liveLeagueV2ItemKey(scope, 2, 'index'),
+      },
+      payload: {
+        ...publication.items.payload,
+        key: liveLeagueV2ItemKey(scope, 2, 'payload'),
+      },
+    },
+  };
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication: successor, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(true);
+  const [advanced] = await sql`SELECT publication_id AS "publicationId", generation, state
+      FROM competition.live_league_checkpoints
+      WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
+        AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`;
+  expect(advanced).toMatchObject({
+    publicationId: successor.publicationId,
+    state: 'FINALIZED',
+  });
+  expect(Number(advanced.generation)).toBe(successor.generation);
+
+  // A corrupt final row still fences a different publication at the same
+  // generation. The exact identity may repair its payload after validation.
+  await sql`UPDATE competition.live_league_checkpoints
+    SET payload_sha256=${'b'.repeat(64)}
+    WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
+      AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`;
+  const conflictingRepair: LeagueLiveManifest = {
+    ...successor,
+    publicationId: '30000000-0000-4000-8000-000000000102',
+  };
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication: conflictingRepair, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(false);
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication: successor, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(true);
+
+  // A replay from the previous final generation cannot move the durable
+  // checkpoint backwards after the validated successor has been stored.
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      { publication, index: [], payload: {}, servedFrom: 'REDIS_CURRENT' },
+      db,
+    ),
+  ).toBe(false);
+  expect(
+    await checkpointLiveLeaguePublicationV2(
+      {
+        publication: { ...successor, state: 'LIVE_ACTIVE' },
+        index: [],
+        payload: {},
+        servedFrom: 'REDIS_CURRENT',
+      },
+      db,
+    ),
+  ).toBe(false);
   const selection = spyOn(db, 'select');
   const fullReads = () => selection.mock.calls.filter((call) => call[0] === undefined).length;
   try {
