@@ -277,6 +277,7 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
     db
       .select({
         sourceResultId: tournamentKnockoutResultsInCompetition.sourceResultId,
+        officialMatchId: tournamentKnockoutResultsInCompetition.officialMatchId,
         eventId: tournamentKnockoutResultsInCompetition.eventId,
         matchId: tournamentKnockoutResultsInCompetition.matchId,
         playAgainstId: tournamentKnockoutResultsInCompetition.playAgainstId,
@@ -347,15 +348,15 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
     battle: battles
       .filter(
         (result) =>
-          !ownsGroup(result.groupId, result.eventId) ||
-          (result.officialMatchId === null &&
-            !ownsLocalSlot(result.groupId, result.homeIndex, result.homeEntryId, result.eventId)) ||
-          (result.officialMatchId === null &&
+          result.officialMatchId === null &&
+          (!ownsGroup(result.groupId, result.eventId) ||
+            !ownsLocalSlot(result.groupId, result.homeIndex, result.homeEntryId, result.eventId) ||
             !ownsLocalSlot(result.groupId, result.awayIndex, result.awayEntryId, result.eventId)),
       )
       .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
     knockout: knockoutResults
       .filter((result) => {
+        if (result.officialMatchId !== null) return false;
         const match = knockouts.find((candidate) => candidate.matchId === result.matchId);
         return (
           !match ||
@@ -402,6 +403,7 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
       DELETE FROM ${tournamentBattleGroupResultsInCompetition} AS result
       WHERE result.season_id = ${season.seasonId}
         AND result.tournament_id = ${tournamentId}
+        AND result.official_match_id IS NULL
         AND (
           NOT EXISTS (
             SELECT 1
@@ -467,6 +469,7 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
       DELETE FROM ${tournamentKnockoutResultsInCompetition} AS result
       WHERE result.season_id = ${season.seasonId}
         AND result.tournament_id = ${tournamentId}
+        AND result.official_match_id IS NULL
         AND NOT EXISTS (
           SELECT 1
             FROM ${tournamentKnockoutsInCompetition} AS knockout
