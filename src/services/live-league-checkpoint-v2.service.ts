@@ -502,6 +502,15 @@ export async function checkpointLiveLeaguePublicationV2(
               ${liveLeagueCheckpointsInCompetition.state} = 'FINALIZED'
               AND excluded.state = 'FINALIZED'
               AND ${liveLeagueCheckpointsInCompetition.generation} < excluded.generation
+              AND ${liveLeagueCheckpointsInCompetition.rowCount} = excluded.row_count
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'contractVersion' = excluded.manifest->'contractVersion'
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'season' = excluded.manifest->'season'
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'eventId' = excluded.manifest->'eventId'
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'tournamentId' = excluded.manifest->'tournamentId'
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'scope' = excluded.manifest->'scope'
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'globalRef' = excluded.manifest->'globalRef'
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'revisions' = excluded.manifest->'revisions'
+              AND ${liveLeagueCheckpointsInCompetition.manifest}->'counts' = excluded.manifest->'counts'
             )
             OR (
               ${liveLeagueCheckpointsInCompetition.state} <> 'FINALIZED'
