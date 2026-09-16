@@ -311,10 +311,12 @@ export function recordFplAdmissionResult(input: {
   outcome: FplAdmissionOutcome;
   waitMs?: number;
   reason?: FplAdmissionWaitReason;
+  /** Set false when a second outcome describes the same wait interval. */
+  countWait?: boolean;
 }): void {
   const batch = admissionBatchMetricsStore.getStore();
   if (batch) {
-    if (input.waitMs !== undefined && Number.isFinite(input.waitMs)) {
+    if (input.countWait !== false && input.waitMs !== undefined && Number.isFinite(input.waitMs)) {
       batch.waitMsTotal += Math.max(0, input.waitMs);
       batch.waitSamples += 1;
     }
@@ -324,7 +326,7 @@ export function recordFplAdmissionResult(input: {
     if (input.outcome === 'cancelled') batch.cancelled += 1;
   }
   const fields: Array<readonly [string, number]> = [];
-  if (input.waitMs !== undefined && Number.isFinite(input.waitMs)) {
+  if (input.countWait !== false && input.waitMs !== undefined && Number.isFinite(input.waitMs)) {
     const bucket = waitBucket(input.waitMs);
     fields.push([field(input.priority, 'waitSamples'), 1]);
     fields.push([field(input.priority, `waitLe${bucket}`), 1]);
@@ -1484,6 +1486,7 @@ async function distributedAcquire(
           priority,
           outcome: 'cancelled',
           waitMs,
+          countWait: false,
           reason: lastWaitReason,
         });
         throw admissionAbortError(options.signal);

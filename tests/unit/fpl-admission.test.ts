@@ -159,6 +159,26 @@ describe('FPL admission reservations', () => {
     });
   });
 
+  test('does not count the wait interval twice when a granted request is cancelled', async () => {
+    const metrics = await runWithFplAdmissionMetrics(async () => {
+      recordFplAdmissionResult({ priority: 'live', outcome: 'granted', waitMs: 24 });
+      recordFplAdmissionResult({
+        priority: 'live',
+        outcome: 'cancelled',
+        waitMs: 24,
+        countWait: false,
+      });
+      return getFplAdmissionBatchMetricsSnapshot();
+    });
+
+    expect(metrics).toMatchObject({
+      waitMsTotal: 24,
+      waitSamples: 1,
+      grants: 1,
+      cancelled: 1,
+    });
+  });
+
   test('reports a distinct error when another owner holds the critical window', async () => {
     resetFplAdmissionForTests();
     const owner = 'critical-window-owner';

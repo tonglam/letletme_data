@@ -13,6 +13,7 @@ import {
   like,
   lte,
   lt,
+  not,
   or,
   sql,
 } from 'drizzle-orm';
@@ -55,6 +56,8 @@ export interface StartSyncRunInput {
   readonly eventId?: number;
   readonly mode: string;
   readonly trigger: string;
+  /** Delivery attempt used to reopen a failed batch-cost ledger. */
+  readonly attempt?: number;
   readonly expectedItems?: number;
   readonly metadata?: Record<string, unknown>;
   readonly startedAt?: Date;
@@ -90,6 +93,13 @@ export interface RecordSyncBatchCostStartInput {
   readonly releaseSha: string;
   readonly attempt: number;
   readonly payload: Record<string, unknown>;
+}
+
+export interface StartSyncBatchCostRunInput {
+  /** The immutable run identity and optional retry fence. */
+  readonly run: StartSyncRunInput;
+  /** The running marker that must be committed with the run row. */
+  readonly marker: RecordSyncBatchCostStartInput;
 }
 
 export type EntrySyncAuditStatus = Readonly<{
@@ -283,6 +293,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           mode: syncRunsInOps.mode,
           trigger: syncRunsInOps.trigger,
           status: syncRunsInOps.status,
+          metadata: syncRunsInOps.metadata,
         })
         .from(syncRunsInOps)
         .where(eq(syncRunsInOps.runId, runId))
@@ -337,12 +348,40 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       // A failed run is the one terminal state that may be fenced back to
       // running: without this transition the later attempt can fetch and
       // stage data but finishRun is forbidden from activating its publication.
-      // Batch-cost ledger runs retain a terminal failed state until a newer
-      // attempt settles. Re-activating them here lets a late older settlement
-      // turn the ledger back to running after the newer failure was recorded;
-      // recordBatchCost already has the attempt fence needed to reopen it for
-      // a newer successful settlement.
-      if (row.status === 'failed' && row.mode !== 'batch-cost') {
+      // Batch-cost ledgers use the delivery attempt as an explicit fence. A
+      // stale settlement must never reopen a terminal ledger, while a newer
+      // attempt must reopen it before its running marker is written.
+      const currentMetadata = isRecord(row.metadata) ? row.metadata : {};
+      const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+      const latestAttempt =
+        typeof currentCost.latestAttempt === 'number' &&
+        Number.isSafeInteger(currentCost.latestAttempt) &&
+        currentCost.latestAttempt >= 1
+          ? currentCost.latestAttempt
+          : 0;
+      const terminalAttempt =
+        typeof currentCost.terminalAttempt === 'number' &&
+        Number.isSafeInteger(currentCost.terminalAttempt) &&
+        currentCost.terminalAttempt >= 1
+          ? currentCost.terminalAttempt
+          : 0;
+      const requestedAttempt =
+        typeof input.attempt === 'number' && Number.isFinite(input.attempt)
+          ? Math.max(1, Math.floor(input.attempt))
+          : 0;
+      const batchCostRetryIsNewer =
+        row.mode === 'batch-cost' && requestedAttempt > Math.max(latestAttempt, terminalAttempt);
+      if (row.status === 'failed' && (row.mode !== 'batch-cost' || batchCostRetryIsNewer)) {
+        const nextMetadata =
+          input.mode === 'batch-cost' && input.metadata !== undefined
+            ? {
+                ...currentMetadata,
+                ...input.metadata,
+                // Keep the immutable accounting history while allowing the
+                // caller to refresh source/run context for the new attempt.
+                batchCost: currentCost,
+              }
+            : input.metadata;
         const reactivated = await db
           .update(syncRunsInOps)
           .set({
@@ -356,7 +395,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             completedAt: null,
             startedAt: startedAt ?? sql`clock_timestamp()`,
             ...(input.expectedItems === undefined ? {} : { expectedItems: input.expectedItems }),
-            ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+            ...(nextMetadata === undefined ? {} : { metadata: nextMetadata }),
             updatedAt: sql`clock_timestamp()`,
           })
           .where(and(eq(syncRunsInOps.runId, runId), eq(syncRunsInOps.status, 'failed')))
@@ -364,6 +403,30 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         if (reactivated.length === 1) return runId;
       }
       return runId;
+    },
+
+    /**
+     * Create or resume a batch-cost run and persist its running marker in one
+     * database transaction. The marker is the evidence used by queue and
+     * stale-run reconciliation; committing the run without it would leave an
+     * itemless running ledger that no reconciler can identify precisely.
+     */
+    startBatchCostRun: async (
+      input: StartSyncBatchCostRunInput,
+    ): Promise<'recorded' | 'duplicate'> => {
+      const db = await getDbInstance();
+      return db.transaction(async (tx) => {
+        const repository = createSyncOperationsRepository(tx);
+        const runId = await repository.startRun(input.run);
+        const recorded = await repository.recordBatchCostStart(runId, input.marker);
+        if (recorded === 'missing') {
+          throw new DatabaseError(
+            `Batch cost ledger run ${runId} disappeared during atomic start`,
+            'SYNC_BATCH_COST_RUN_MISSING',
+          );
+        }
+        return recorded;
+      });
     },
 
     upsertItems: async (runId: string, items: readonly SyncItemInput[]): Promise<void> => {
@@ -1385,6 +1448,92 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     },
 
     /**
+     * Close a legacy itemless batch-cost run left by a process that crashed
+     * between creating the run row and its first marker. New executions use
+     * startBatchCostRun, but this bounded repair keeps older rows from
+     * blocking queue-quiescence forever.
+     */
+    reconcileBatchCostRunWithoutMarker: async (runId: string, error: unknown): Promise<boolean> => {
+      const db = await getDbInstance();
+      const summary = (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
+      return db.transaction(async (tx) => {
+        const runRows = await tx
+          .select({
+            status: syncRunsInOps.status,
+            mode: syncRunsInOps.mode,
+            metadata: syncRunsInOps.metadata,
+          })
+          .from(syncRunsInOps)
+          .where(eq(syncRunsInOps.runId, runId))
+          .for('update');
+        const run = runRows[0];
+        if (
+          !run ||
+          run.mode !== 'batch-cost' ||
+          !NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus)
+        ) {
+          return false;
+        }
+        const markerRows = await tx
+          .select({ one: sql`1` })
+          .from(syncItemsInOps)
+          .where(
+            and(
+              eq(syncItemsInOps.runId, runId),
+              eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+            ),
+          )
+          .limit(1);
+        if (markerRows.length > 0) return false;
+
+        const currentMetadata = isRecord(run.metadata) ? run.metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const latestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? Math.floor(currentCost.latestAttempt)
+            : 0;
+        const completedAt = sql`clock_timestamp()`;
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            status: 'failed',
+            completedItems: 0,
+            failedItems: 1,
+            skippedItems: 0,
+            dataChanged: false,
+            errorSummary: 'Data sync batch-cost marker was never persisted',
+            completedAt,
+            metadata: {
+              ...currentMetadata,
+              batchCost: {
+                schemaVersion: 1,
+                ...currentCost,
+                incompleteAccounting: true,
+                incompleteReason: 'batch_cost_marker_missing',
+                ...(latestAttempt > 0 ? { terminalAttempt: latestAttempt } : {}),
+                lastTerminalFailureAt: new Date().toISOString(),
+                lastTerminalFailure: {
+                  error: summary,
+                  markerCount: 0,
+                  reason: 'batch_cost_marker_missing',
+                },
+              },
+            },
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(syncRunsInOps.runId, runId),
+              inArray(syncRunsInOps.status, [...NON_TERMINAL_RUN_STATUSES]),
+            ),
+          );
+        return true;
+      });
+    },
+
+    /**
      * Reconcile direct-cron markers that outlived the API process. Direct cron
      * has no Bull `failed` event, so the next bounded tick adopts only old
      * launch-monitor markers from the exact lane/scope and closes them through
@@ -1448,6 +1597,55 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           })
         ) {
           reconciled += 1;
+        }
+      }
+
+      // A legacy process could commit the run row and die before inserting
+      // its first marker. Select only exact lane/scope rows with no marker and
+      // use the remaining bounded budget so this maintenance pass cannot grow
+      // with the historical backlog.
+      const remaining = Math.max(0, limit - rows.length);
+      if (remaining > 0) {
+        const itemlessAlias = alias(syncItemsInOps, 'batch_cost_itemless_markers');
+        const itemlessRuns = await db
+          .select({ runId: syncRunsInOps.runId })
+          .from(syncRunsInOps)
+          .where(
+            and(
+              eq(syncRunsInOps.mode, 'batch-cost'),
+              eq(syncRunsInOps.lane, input.lane),
+              eq(syncRunsInOps.scope, input.scope),
+              inArray(syncRunsInOps.status, [...NON_TERMINAL_RUN_STATUSES]),
+              lt(
+                syncRunsInOps.updatedAt,
+                sql`clock_timestamp() - (${Math.floor(input.olderThanMs)} * interval '1 millisecond')`,
+              ),
+              not(
+                exists(
+                  db
+                    .select({ one: sql`1` })
+                    .from(itemlessAlias)
+                    .where(
+                      and(
+                        eq(itemlessAlias.runId, syncRunsInOps.runId),
+                        eq(itemlessAlias.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+          )
+          .orderBy(asc(syncRunsInOps.updatedAt))
+          .limit(remaining);
+        for (const row of itemlessRuns) {
+          if (
+            await syncOperationsRepository.reconcileBatchCostRunWithoutMarker(
+              row.runId,
+              new Error('Direct cron process ended before batch-cost marker creation'),
+            )
+          ) {
+            reconciled += 1;
+          }
         }
       }
       return reconciled;

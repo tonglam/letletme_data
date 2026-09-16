@@ -484,6 +484,7 @@ async function ensureBatchCostLedgerRun(
     season: context.season,
     eventId: ledgerTargetEventId(context),
     mode: 'batch-cost',
+    attempt: boundedAttempt(context.attempt),
     // Keep this identity constant across Bull retries. The original source
     // and run IDs remain in metadata/payload and never participate in the
     // immutable sync-run identity check.
@@ -498,6 +499,10 @@ async function ensureBatchCostLedgerRun(
       seasonId: context.season?.seasonId ?? null,
       seasonCode: context.season?.seasonCode ?? null,
       eventId: ledgerTargetEventId(context) ?? null,
+      batchCost: {
+        schemaVersion: 1,
+        latestAttempt: boundedAttempt(context.attempt),
+      },
     },
   });
 }
@@ -540,27 +545,56 @@ async function persistBatchCostStart(
   executionId: string,
 ): Promise<string> {
   const ledgerRunId = batchCostLedgerRunId(context);
-  await ensureBatchCostLedgerRun(context, ledgerRunId);
-  const recorded = await syncOperationsRepository.recordBatchCostStart(ledgerRunId, {
-    attemptKey,
-    batchId: context.batchId ?? context.runId,
-    parentRunId: context.parentRunId ?? null,
-    releaseSha: context.releaseSha ?? runtimeReleaseRevision(),
-    attempt: boundedAttempt(context.attempt),
-    payload: {
-      originalRunId: context.runId,
-      ledgerRunId,
-      job: context.jobName,
-      queue: context.queue,
-      eventId: context.targetEventId ?? null,
-      seasonId: context.season?.seasonId ?? null,
-      seasonCode: context.season?.seasonCode ?? null,
-      executionId,
-      executionIntent: executionIntent(context),
-      startedAt: startedAtIso,
+  await syncOperationsRepository.startBatchCostRun({
+    run: {
+      runId: ledgerRunId,
+      provider: 'fpl',
+      lane: context.queue,
+      scope: context.jobName,
+      season: context.season,
+      eventId: ledgerTargetEventId(context),
+      mode: 'batch-cost',
+      attempt: boundedAttempt(context.attempt),
+      // Keep this identity constant across Bull retries. The original source
+      // and run IDs remain in metadata/payload and never participate in the
+      // immutable sync-run identity check.
+      trigger: 'batch-cost',
+      metadata: {
+        batchCostLedger: true,
+        originalRunId: context.runId,
+        batchId: context.batchId ?? context.runId,
+        parentRunId: context.parentRunId ?? null,
+        source: context.source ?? null,
+        releaseSha: context.releaseSha ?? runtimeReleaseRevision(),
+        seasonId: context.season?.seasonId ?? null,
+        seasonCode: context.season?.seasonCode ?? null,
+        eventId: ledgerTargetEventId(context) ?? null,
+        batchCost: {
+          schemaVersion: 1,
+          latestAttempt: boundedAttempt(context.attempt),
+        },
+      },
+    },
+    marker: {
+      attemptKey,
+      batchId: context.batchId ?? context.runId,
+      parentRunId: context.parentRunId ?? null,
+      releaseSha: context.releaseSha ?? runtimeReleaseRevision(),
+      attempt: boundedAttempt(context.attempt),
+      payload: {
+        originalRunId: context.runId,
+        ledgerRunId,
+        job: context.jobName,
+        queue: context.queue,
+        eventId: context.targetEventId ?? null,
+        seasonId: context.season?.seasonId ?? null,
+        seasonCode: context.season?.seasonCode ?? null,
+        executionId,
+        executionIntent: executionIntent(context),
+        startedAt: startedAtIso,
+      },
     },
   });
-  if (recorded === 'missing') throw new Error(`Batch cost ledger run ${ledgerRunId} disappeared`);
   return ledgerRunId;
 }
 

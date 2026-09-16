@@ -170,6 +170,7 @@ function attachAttemptEvidence(
     succeededUnits: number;
     failedUnits: number;
     timings: Partial<PlayerValuesPhaseTimings>;
+    submittedRows?: number;
   },
 ): void {
   if (typeof error === 'object' && error !== null && Object.isExtensible(error)) {
@@ -270,6 +271,7 @@ export async function persistPreparedPlayerValuesSync(
 ): Promise<PlayerValuesSyncResult> {
   const timings: Partial<PlayerValuesPhaseTimings> = { ...prepared.timings };
   let succeededUnits = 0;
+  let submittedRows: number | undefined;
   try {
     assertChangeDate(prepared.changeDate);
     if (formatCronDateKey(prepared.capturedAt) !== prepared.changeDate) {
@@ -287,6 +289,10 @@ export async function persistPreparedPlayerValuesSync(
       ),
     );
     succeededUnits = persisted.persistedCount;
+    // The canonical snapshot transaction has committed by the time any
+    // downstream validation/publication/enqueue step can fail. Preserve its
+    // exact row count so the outer batch ledger cannot report an unknown write.
+    submittedRows = persisted.persistedCount;
     if (persisted.snapshotDate.replaceAll('-', '') !== prepared.changeDate) {
       throw new Error(
         `Market snapshot date ${persisted.snapshotDate} does not match requested date ${prepared.changeDate}`,
@@ -375,6 +381,7 @@ export async function persistPreparedPlayerValuesSync(
       succeededUnits,
       failedUnits: Math.max(0, prepared.requiredUnits - succeededUnits),
       timings,
+      ...(submittedRows === undefined ? {} : { submittedRows }),
     });
     throw error;
   }

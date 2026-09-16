@@ -1439,6 +1439,163 @@ describe('ops sync state machine', () => {
     expect(stillFailed?.status).toBe('failed');
   });
 
+  test('reopens a failed batch-cost ledger only when a newer attempt starts', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const run = {
+      runId: RUN_IDS[2],
+      provider: 'fpl',
+      lane: 'entry-sync',
+      scope: 'entry-results',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+      attempt: 1,
+      metadata: { test: 'attempt-fence' },
+    } as const;
+    const marker = {
+      attemptKey: 'entry-sync|entry-results|attempt-fence|1|none|execution-1',
+      batchId: 'attempt-fence',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    } as const;
+    await syncOperationsRepository.startBatchCostRun({ run, marker });
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[2], {
+      ...marker,
+      complete: false,
+      payload: { logicalRequests: 1 },
+    });
+
+    await syncOperationsRepository.startRun({ ...run, attempt: 1 });
+    const [sameAttempt] = await sql<Array<{ status: string }>>`
+      SELECT status FROM ops.sync_runs WHERE run_id = ${RUN_IDS[2]}::uuid
+    `;
+    expect(sameAttempt?.status).toBe('failed');
+
+    await syncOperationsRepository.startRun({ ...run, attempt: 2 });
+    const [newAttempt] = await sql<
+      Array<{ status: string; completed_at: Date | null; failed_items: number }>
+    >`
+      SELECT status, completed_at, failed_items
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+    `;
+    expect(newAttempt).toMatchObject({ status: 'running', completed_at: null, failed_items: 0 });
+  });
+
+  test('atomically creates a batch-cost run and its start marker', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startBatchCostRun({
+      run: {
+        runId: RUN_IDS[0],
+        provider: 'fpl',
+        lane: 'cron',
+        scope: 'launch-monitor',
+        season,
+        mode: 'batch-cost',
+        trigger: 'batch-cost',
+        attempt: 1,
+      },
+      marker: {
+        attemptKey: 'cron|launch-monitor|atomic-start|1|none|execution-1',
+        batchId: 'atomic-start',
+        parentRunId: null,
+        releaseSha: 'test-release',
+        attempt: 1,
+        payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+      },
+    });
+    const [counts] = await sql<Array<{ runs: number; markers: number }>>`
+      SELECT
+        (SELECT count(*)::int FROM ops.sync_runs WHERE run_id = ${RUN_IDS[0]}::uuid) AS runs,
+        (SELECT count(*)::int FROM ops.sync_items WHERE run_id = ${RUN_IDS[0]}::uuid AND resource_type = 'batch-cost') AS markers
+    `;
+    expect(counts).toEqual({ runs: 1, markers: 1 });
+
+    await expectDatabaseErrorCode(
+      syncOperationsRepository.startBatchCostRun({
+        run: {
+          runId: RUN_IDS[1],
+          provider: 'fpl',
+          lane: 'cron',
+          scope: 'launch-monitor',
+          season,
+          mode: 'batch-cost',
+          trigger: 'batch-cost',
+          attempt: 1,
+        },
+        marker: {
+          attemptKey: '',
+          batchId: 'atomic-rollback',
+          parentRunId: null,
+          releaseSha: 'test-release',
+          attempt: 1,
+          payload: {},
+        },
+      }),
+      'SYNC_BATCH_COST_KEY_INVALID',
+    );
+    const [rolledBack] = await sql<Array<{ runs: number }>>`
+      SELECT count(*)::int AS runs
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[1]}::uuid
+    `;
+    expect(rolledBack?.runs).toBe(0);
+  });
+
+  test('reconciles an old itemless batch-cost run within the exact scope', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[1],
+      provider: 'fpl',
+      lane: 'cron',
+      scope: 'launch-monitor',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+      attempt: 1,
+      metadata: { batchCost: { schemaVersion: 1, latestAttempt: 1 } },
+    });
+    await sql`
+      UPDATE ops.sync_runs
+      SET updated_at = clock_timestamp() - interval '11 minutes'
+      WHERE run_id = ${RUN_IDS[1]}::uuid
+    `;
+
+    expect(
+      await syncOperationsRepository.reconcileStaleBatchCostMarkers({
+        lane: 'cron',
+        scope: 'launch-monitor',
+        olderThanMs: 10 * 60_000,
+      }),
+    ).toBe(1);
+    const [run] = await sql<
+      Array<{
+        status: string;
+        failed_items: number;
+        metadata: { batchCost?: Record<string, unknown> };
+      }>
+    >`
+      SELECT status, failed_items, metadata
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[1]}::uuid
+    `;
+    expect(run).toMatchObject({
+      status: 'failed',
+      failed_items: 1,
+      metadata: {
+        batchCost: {
+          incompleteAccounting: true,
+          incompleteReason: 'batch_cost_marker_missing',
+        },
+      },
+    });
+  });
+
   test('uses wall-clock completion time inside a long mutation transaction', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
