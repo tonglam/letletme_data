@@ -123,7 +123,6 @@ export interface MarkSyncBatchCostSettlementFailureInput {
   readonly error: unknown;
 }
 
-
 export interface PreparePublicationInput {
   readonly publicationId?: string;
   readonly dataset: DataPublicationDataset;
@@ -745,7 +744,6 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       });
     },
 
-
     entrySyncAudit: async (input: {
       seasonId: number;
       eventId: number;
@@ -1218,7 +1216,6 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         }
         return true;
       });
-
     },
 
     finishRun: async (
