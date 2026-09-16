@@ -328,6 +328,13 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
   tournamentId: number,
   snapshot: DerivedResultRepairSnapshot = { points: [], battle: [], knockout: [] },
 ): Promise<void> {
+  // The DELETE predicates below are the authoritative recheck against the
+  // rebuilt topology. Do not apply the pre-repair timestamp snapshot after
+  // this recheck: a row that was invalid under the old topology can be valid
+  // again after the rebuild, and an idempotent upsert may leave updated_at
+  // unchanged. The argument remains part of the repair contract for callers
+  // and provenance, but it must not delete a currently valid row.
+  void snapshot;
   const db = await getDb();
   await db.transaction(async (tx) => {
     await tx.execute(sql`
@@ -439,27 +446,5 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
               )
         )
       `);
-
-    const deleteUnchangedRows = async <T extends { sourceResultId: number; updatedAt: string }>(
-      table:
-        | typeof tournamentPointsGroupResultsInCompetition
-        | typeof tournamentBattleGroupResultsInCompetition
-        | typeof tournamentKnockoutResultsInCompetition,
-      rows: T[],
-    ) => {
-      for (const row of rows) {
-        await tx.execute(sql`
-          DELETE FROM ${table}
-          WHERE season_id = ${season.seasonId}
-            AND tournament_id = ${tournamentId}
-            AND source_result_id = ${row.sourceResultId}
-            AND updated_at = ${row.updatedAt}::timestamptz
-        `);
-      }
-    };
-
-    await deleteUnchangedRows(tournamentPointsGroupResultsInCompetition, snapshot.points);
-    await deleteUnchangedRows(tournamentBattleGroupResultsInCompetition, snapshot.battle);
-    await deleteUnchangedRows(tournamentKnockoutResultsInCompetition, snapshot.knockout);
   });
 }

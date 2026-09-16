@@ -5,7 +5,7 @@ import {
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
-import { getTournamentBackfillWindow } from '../domain/tournament';
+import { getTournamentBackfillWindow, isOfficialH2HTournament } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { enqueueTournamentRepair } from '../jobs/tournament-repair.jobs';
 import { enqueueTournamentReview } from '../jobs/maintenance.jobs';
@@ -41,6 +41,7 @@ import {
   requestTournamentReviewCorrection,
   requestTournamentReviewTournamentCorrection,
 } from './tournament-review-publication.service';
+import { syncOfficialH2HTournament } from './tournament-official-h2h.service';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
@@ -275,22 +276,49 @@ async function repairTournamentSetupIssuePrepared(
       );
       repairIssues.push(...historyIssues);
       if (historyIssues.length === 0) {
-        await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
-          pruneTournamentDerivedResultsOutsideStructure(
-            season,
-            issue.tournamentId,
-            rebuilt.staleDerivedResults,
-          ),
-        );
-        // A topology rebuild can change group membership, phase boundaries, or
-        // bracket edges for every settled event. Defer the correction reset
-        // until the post-repair audit succeeds, then fence the earliest head
-        // and enqueue every affected scope with durable provenance.
-        reviewCorrection = {
-          kind: 'tournament',
-          reason: `Tournament structure repair issue ${issue.issueId}`,
-          changeId: repairCorrectionChangeId(season, issue),
-        };
+        if (isOfficialH2HTournament(tournament)) {
+          try {
+            // Provider-owned official brackets are preserved during the local
+            // structure candidate swap. Reconcile them from the authoritative
+            // full FPL feed before the issue can be resolved; otherwise a
+            // preserved corrupt bracket would immediately recreate the review
+            // failure on the next publication attempt.
+            await syncOfficialH2HTournament(season, tournament, undefined, {
+              finalizedThroughEventId: finalizedEvent?.id ?? null,
+              forceFull: true,
+            });
+          } catch {
+            repairIssues.push({
+              issueKey: issue.issueKey,
+              scope: 'event-results',
+              code: 'STRUCTURE_INTEGRITY_FAILED',
+              category: 'results',
+              severity: 'blocking',
+              eventId: issue.eventId ?? undefined,
+              failedEntries: allEntryIds,
+              diagnosticCode: 'TOURNAMENT_OFFICIAL_H2H_RECONCILIATION_FAILED',
+              message: 'Official H2H full reconciliation remains incomplete',
+            });
+          }
+        }
+        if (!repairIssues.some((candidate) => candidate.issueKey === issue.issueKey)) {
+          await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
+            pruneTournamentDerivedResultsOutsideStructure(
+              season,
+              issue.tournamentId,
+              rebuilt.staleDerivedResults,
+            ),
+          );
+          // A topology rebuild can change group membership, phase boundaries, or
+          // bracket edges for every settled event. Defer the correction reset
+          // until the post-repair audit succeeds, then fence the earliest head
+          // and enqueue every affected scope with durable provenance.
+          reviewCorrection = {
+            kind: 'tournament',
+            reason: `Tournament structure repair issue ${issue.issueId}`,
+            changeId: repairCorrectionChangeId(season, issue),
+          };
+        }
       }
       break;
     }

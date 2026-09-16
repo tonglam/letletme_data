@@ -842,6 +842,36 @@ export async function syncTournamentEventResultsForEntryIds(
             const needsTransfer =
               !options?.skipTransfers && transferEntryIds.has(entryId) && durable.transfersMissing;
 
+            if (!options?.skipTransfers && transferEntryIds.has(entryId) && !needsTransfer) {
+              // The initial planner created a transfer audit item, but another
+              // worker may have completed that component before this entry
+              // acquired its lease. Terminalize the item here as a durable
+              // reuse; otherwise a successful result-only path leaves the
+              // combined run permanently incomplete.
+              assertLease();
+              await syncOperationsRepository.upsertItems(auditRunId, [
+                {
+                  resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                  resourceId: entryEventAuditResourceId(season, eventId, entryId, 'transfers'),
+                  status: 'skipped',
+                  attempts: auditAttempt,
+                  normalizedPayload: {
+                    phase: 'entry-transfer-history',
+                    sourceRevision: orderingTimestampString(
+                      transferSourceCheckedAt ?? sourceOrdering.exact,
+                    ),
+                    transferRequests: 0,
+                    factCommit: 'reused',
+                    finalCompletion: false,
+                    reused: true,
+                    reuseReason: 'coordinated-durable-complete',
+                  },
+                  completedAt: new Date(),
+                },
+              ]);
+              assertLease();
+            }
+
             if (!needsResult) {
               assertLease();
               await syncOperationsRepository.upsertItems(auditRunId, [
