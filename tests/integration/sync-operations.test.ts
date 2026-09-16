@@ -1153,6 +1153,52 @@ describe('ops sync state machine', () => {
     });
   });
 
+  test('reconciles stale direct-cron markers by exact lane and scope', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await syncOperationsRepository.startRun({
+      runId: RUN_IDS[2],
+      provider: 'fpl',
+      lane: 'cron',
+      scope: 'launch-monitor',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+    });
+    const attemptKey = 'cron|launch-monitor|direct-orphan|1|none|execution-1';
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[2], {
+      attemptKey,
+      batchId: 'direct-orphan',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    });
+    await sql`
+      UPDATE ops.sync_items
+      SET updated_at = clock_timestamp() - interval '11 minutes'
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+        AND resource_type = 'batch-cost'
+        AND resource_id = ${attemptKey}
+    `;
+
+    expect(
+      await syncOperationsRepository.reconcileStaleBatchCostMarkers({
+        lane: 'cron',
+        scope: 'launch-monitor',
+        olderThanMs: 10 * 60_000,
+      }),
+    ).toBe(1);
+    const [item] = await sql<Array<{ status: string; phase: string }>>`
+      SELECT status, normalized_payload->>'phase' AS phase
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+        AND resource_type = 'batch-cost'
+        AND resource_id = ${attemptKey}
+    `;
+    expect(item).toEqual({ status: 'failed', phase: 'settlement_failed' });
+  });
+
   test('preserves incomplete accounting evidence after a later settlement', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

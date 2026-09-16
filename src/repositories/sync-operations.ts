@@ -1,7 +1,21 @@
 import { randomUUID } from 'node:crypto';
 
 import { alias } from 'drizzle-orm/pg-core';
-import { and, asc, desc, eq, exists, gt, inArray, isNull, like, lte, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNull,
+  like,
+  lte,
+  lt,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import {
   datasetPublicationItemsInOps,
@@ -129,6 +143,17 @@ export interface ReconcileSyncBatchCostTerminalFailureInput {
   /** The delivery attempt that Bull has exhausted or marked terminal. */
   readonly attempt: number;
   readonly error: unknown;
+}
+
+export interface ReconcileStaleSyncBatchCostMarkersInput {
+  /** Exact lane used by the direct execution path. */
+  readonly lane: string;
+  /** Exact job scope used by the direct execution path. */
+  readonly scope: string;
+  /** Minimum age of an untouched running marker before it is considered orphaned. */
+  readonly olderThanMs: number;
+  /** Bound one maintenance pass so a large historical backlog cannot monopolize it. */
+  readonly limit?: number;
 }
 
 export interface PreparePublicationInput {
@@ -1357,6 +1382,75 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .where(eq(syncRunsInOps.runId, runId));
         return true;
       });
+    },
+
+    /**
+     * Reconcile direct-cron markers that outlived the API process. Direct cron
+     * has no Bull `failed` event, so the next bounded tick adopts only old
+     * launch-monitor markers from the exact lane/scope and closes them through
+     * the same attempt fence used by queue workers.
+     */
+    reconcileStaleBatchCostMarkers: async (
+      input: ReconcileStaleSyncBatchCostMarkersInput,
+    ): Promise<number> => {
+      if (!input.lane.trim() || !input.scope.trim()) {
+        throw new DatabaseError(
+          'Batch cost stale-marker scope is invalid',
+          'SYNC_BATCH_COST_SCOPE_INVALID',
+        );
+      }
+      if (!Number.isFinite(input.olderThanMs) || input.olderThanMs <= 0) {
+        throw new DatabaseError(
+          'Batch cost stale-marker age is invalid',
+          'SYNC_BATCH_COST_AGE_INVALID',
+        );
+      }
+      const limit = Math.min(Math.max(Math.floor(input.limit ?? 20), 1), 100);
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          runId: syncItemsInOps.runId,
+          attempts: syncItemsInOps.attempts,
+          normalizedPayload: syncItemsInOps.normalizedPayload,
+        })
+        .from(syncItemsInOps)
+        .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
+        .where(
+          and(
+            eq(syncRunsInOps.mode, 'batch-cost'),
+            eq(syncRunsInOps.lane, input.lane),
+            eq(syncRunsInOps.scope, input.scope),
+            eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+            eq(syncItemsInOps.status, 'running'),
+            lt(
+              syncItemsInOps.updatedAt,
+              sql`clock_timestamp() - (${Math.floor(input.olderThanMs)} * interval '1 millisecond')`,
+            ),
+          ),
+        )
+        .orderBy(asc(syncItemsInOps.updatedAt))
+        .limit(limit);
+
+      let reconciled = 0;
+      for (const row of rows) {
+        const payload = isRecord(row.normalizedPayload) ? row.normalizedPayload : {};
+        const batchId = typeof payload.batchId === 'string' ? payload.batchId.trim() : '';
+        if (!batchId) continue;
+        const attempt =
+          typeof payload.attempt === 'number' && Number.isFinite(payload.attempt)
+            ? Math.max(1, Math.floor(payload.attempt))
+            : Math.max(1, row.attempts);
+        if (
+          await syncOperationsRepository.reconcileBatchCostTerminalFailure(row.runId, {
+            batchId,
+            attempt,
+            error: new Error('Direct cron process ended before batch-cost settlement'),
+          })
+        ) {
+          reconciled += 1;
+        }
+      }
+      return reconciled;
     },
 
     /**

@@ -731,6 +731,10 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           // reconciliation/delivery steps. Keep the committed player and
           // publication counts on the failure report for cost settlement.
           attachDataSyncCostEvidence(error, {
+            requiredUnits: persisted.requiredUnits ?? persisted.players,
+            reusedUnits: persisted.reusedUnits ?? 0,
+            succeededUnits: persisted.succeededUnits ?? persisted.players,
+            failedUnits: persisted.failedUnits ?? 0,
             submittedRows: persisted.submittedRows ?? persisted.players,
             publicationsCreated: persisted.publicationsCreated ?? 1,
             publicationsReused: persisted.publicationsReused ?? 0,

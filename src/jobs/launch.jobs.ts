@@ -7,6 +7,7 @@ import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
 import { queueRedisSingleton } from '../queues/redis';
 import { runDataSyncAttempt } from '../utils/data-sync-attempt';
+import { syncOperationsRepository } from '../repositories/sync-operations';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import {
@@ -267,6 +268,21 @@ export async function runLaunchMonitor(options?: {
 }): Promise<LaunchMonitorResult> {
   const source = options?.source ?? 'manual';
   const now = options?.dependencies?.now() ?? new Date();
+  // API-owned cron has no Bull terminal event. Reconcile only old markers
+  // from this exact direct lane before starting the next five-minute tick;
+  // queue workers use their own terminal callback and are left untouched.
+  if (source === 'cron' && options?.queue === undefined) {
+    await syncOperationsRepository
+      .reconcileStaleBatchCostMarkers({
+        lane: 'cron',
+        scope: 'launch-monitor',
+        olderThanMs: 10 * 60_000,
+        limit: 20,
+      })
+      .catch((error) => {
+        logError('Failed to reconcile stale direct launch-monitor markers', error);
+      });
+  }
   return runDataSyncAttempt(
     {
       queue: options?.queue ?? 'cron',
