@@ -1,6 +1,7 @@
 import { classifyDataError } from '../../src/domain/error-classification';
 import { parseRecoveryArgs } from '../../scripts/recover-live-final-retention';
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   LIVE_POINTS_CONTRACT_VERSION,
@@ -40,6 +41,11 @@ import {
   liveFinalRetentionPeriodKey,
 } from '../../src/domain/live-final-retention-policy';
 import { contentHash } from '../../src/utils/content-hash';
+
+const retentionServiceSource = readFileSync(
+  new URL('../../src/services/live-final-retention.service.ts', import.meta.url),
+  'utf8',
+);
 
 const picks = Array.from({ length: 15 }, (_, index) => ({
   element: 100 + index,
@@ -586,6 +592,12 @@ describe('Live final retention active-season policy', () => {
 });
 
 describe('Live final retention league scope completeness', () => {
+  test('checkpoints a validated newer Classic Redis successor before applying the retention fence', () => {
+    expect(retentionServiceSource).toContain('isSafeFinalizedClassicRosterExpansion');
+    expect(retentionServiceSource).toContain('checkpointLiveLeaguePublicationV2(active)');
+    expect(retentionServiceSource).toContain('expectedCheckpoint = active');
+  });
+
   test('requires missing active Classic and in-phase official H2H checkpoints', () => {
     const tournament = {
       rosterMode: 'snapshot',
