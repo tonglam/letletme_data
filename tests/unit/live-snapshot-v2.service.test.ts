@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test';
 
 import { rawExplainElementsFixture } from '../fixtures/event-live-explains.fixtures';
 import type { LivePublicationRead, LivePublicationV2 } from '../../src/cache/live-publication-v2';
-import type { LiveSnapshotReferenceData } from '../../src/services/live-coherent-fetch';
+import {
+  prepareCoherentLiveSnapshot,
+  type LiveSnapshotReferenceData,
+} from '../../src/services/live-coherent-fetch';
 import { syncLiveSnapshotV2 } from '../../src/services/live-snapshot-v2.service';
 import type { RawFPLFixture } from '../../src/types';
 
@@ -232,6 +235,51 @@ describe('Live Points and Live Matches shared observation', () => {
   });
 
   test('reuses Live Points FINAL but repairs a missing Match sibling', async () => {
+    const rawFixture: RawFPLFixture = {
+      code: 10401,
+      event: 2,
+      finished: false,
+      finished_provisional: false,
+      id: 401,
+      kickoff_time: '2026-08-29T10:00:00.000Z',
+      minutes: 45,
+      provisional_start_time: false,
+      started: true,
+      team_a: 20,
+      team_a_score: 0,
+      team_h: 10,
+      team_h_score: 1,
+      stats: [{ identifier: 'bps', h: [{ element: 101, value: 30 }], a: [] }],
+      team_h_difficulty: 3,
+      team_a_difficulty: 3,
+      pulse_id: 401,
+    };
+    const sourceElement = rawExplainElementsFixture[0];
+    if (!sourceElement) throw new Error('live snapshot fixture is missing');
+    const referenceData: LiveSnapshotReferenceData = {
+      season: season.seasonCode,
+      nameById: new Map([
+        [10, 'Home FC'],
+        [20, 'Away FC'],
+      ]),
+      shortNameById: new Map([
+        [10, 'HOM'],
+        [20, 'AWA'],
+      ]),
+      positionById: new Map(),
+      playerTeamById: new Map([[101, 10]]),
+      playerById: new Map([
+        [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+      ]),
+    };
+    const prepared = prepareCoherentLiveSnapshot(
+      2,
+      { elements: [structuredClone(sourceElement)] },
+      [rawFixture],
+      referenceData,
+      [401],
+      [101],
+    );
     const publication: LivePublicationV2 = {
       contractVersion: 'live-points-v2',
       publicationId: '00000000-0000-4000-8000-000000000043',
@@ -248,14 +296,14 @@ describe('Live Points and Live Matches shared observation', () => {
     };
     const current = {
       publication,
-      eventLives: [{ elementId: 99 } as never],
-      fixtures: [],
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
       servedFrom: 'REDIS_CURRENT' as const,
     } satisfies LivePublicationRead;
     const durable = {
       publication: { ...publication },
-      eventLives: [{ elementId: 99 } as never],
-      fixtures: [],
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
       servedFrom: 'POSTGRES_CHECKPOINT' as const,
     } satisfies LivePublicationRead;
     let providerCalls = 0;
@@ -266,19 +314,19 @@ describe('Live Points and Live Matches shared observation', () => {
       dependencies: {
         getEventLive: async () => {
           providerCalls += 1;
-          return { elements: [] };
+          return { elements: [structuredClone(sourceElement)] };
         },
         getFixtures: async () => {
           providerCalls += 1;
-          return [];
+          return [rawFixture];
         },
         getExpectedFixtureIds: async () => {
           providerCalls += 1;
-          return [];
+          return [401];
         },
         getReferenceData: async () => {
           providerCalls += 1;
-          return { playerById: new Map(), playerTeamById: new Map() } as never;
+          return referenceData;
         },
         readPublished: async () => current,
         readCheckpointed: async () => durable,
@@ -290,7 +338,7 @@ describe('Live Points and Live Matches shared observation', () => {
         syncLiveMatches: async (observation) => {
           matchFinalizeCalls += 1;
           expect(observation.finalizeEvent).toBe(true);
-          expect(observation.publishedLiveElementIds).toEqual([99]);
+          expect(observation.publishedLiveElementIds).toEqual([101]);
           expect(observation.observedDesk?.read).toBeNull();
           expect(observation.observedDetail?.read).toBeNull();
           return {
@@ -637,6 +685,51 @@ describe('Live Points and Live Matches shared observation', () => {
   });
 
   test('finalizes Match after restoring a durable Live Points FINAL during cutover seed', async () => {
+    const rawFixture: RawFPLFixture = {
+      code: 10401,
+      event: 2,
+      finished: false,
+      finished_provisional: false,
+      id: 401,
+      kickoff_time: '2026-08-29T10:00:00.000Z',
+      minutes: 45,
+      provisional_start_time: false,
+      started: true,
+      team_a: 20,
+      team_a_score: 0,
+      team_h: 10,
+      team_h_score: 1,
+      stats: [{ identifier: 'bps', h: [{ element: 101, value: 30 }], a: [] }],
+      team_h_difficulty: 3,
+      team_a_difficulty: 3,
+      pulse_id: 401,
+    };
+    const sourceElement = rawExplainElementsFixture[0];
+    if (!sourceElement) throw new Error('live snapshot fixture is missing');
+    const referenceData: LiveSnapshotReferenceData = {
+      season: season.seasonCode,
+      nameById: new Map([
+        [10, 'Home FC'],
+        [20, 'Away FC'],
+      ]),
+      shortNameById: new Map([
+        [10, 'HOM'],
+        [20, 'AWA'],
+      ]),
+      positionById: new Map(),
+      playerTeamById: new Map([[101, 10]]),
+      playerById: new Map([
+        [101, { id: 101, type: 3, teamId: 10, price: 50, webName: 'Player One' }],
+      ]),
+    };
+    const prepared = prepareCoherentLiveSnapshot(
+      2,
+      { elements: [structuredClone(sourceElement)] },
+      [rawFixture],
+      referenceData,
+      [401],
+      [101],
+    );
     const finalPublication = {
       contractVersion: 'live-points-v2',
       publicationId: '00000000-0000-4000-8000-000000000001',
@@ -647,8 +740,8 @@ describe('Live Points and Live Matches shared observation', () => {
     } as unknown as LivePublicationRead['publication'];
     const durable = {
       publication: finalPublication,
-      eventLives: [],
-      fixtures: [],
+      eventLives: prepared.eventLives.eventLives,
+      fixtures: prepared.fixtures,
       servedFrom: 'POSTGRES_CHECKPOINT',
     } as LivePublicationRead;
     const finalizeFlags: boolean[] = [];
@@ -668,16 +761,16 @@ describe('Live Points and Live Matches shared observation', () => {
       detailUnavailableReason: null,
     };
     const sync = syncLiveSnapshotV2(season, 2, {
-      observedFixtures: [],
+      observedFixtures: [rawFixture],
       finalizeEvent: true,
       lifecycleState: 'FINALIZED',
       dependencies: {
-        getEventLive: async () => ({ elements: [] }),
+        getEventLive: async () => ({ elements: [structuredClone(sourceElement)] }),
         getFixtures: async () => {
           throw new Error('cutover seed must reuse observed fixtures');
         },
-        getExpectedFixtureIds: async () => [],
-        getReferenceData: async () => ({ playerById: new Map() }) as never,
+        getExpectedFixtureIds: async () => [401],
+        getReferenceData: async () => referenceData,
         syncLiveMatches: async (observation) => {
           finalizeFlags.push(observation.finalizeEvent === true);
           return observation.finalizeEvent

@@ -596,6 +596,15 @@ export async function syncLiveSnapshotV2(
         season: season.seasonCode,
         eventId,
       });
+      // A failed durable probe is not evidence that the Match checkpoints are
+      // absent.  Treating it as absence would send a duplicate provider
+      // request and could overwrite an otherwise recoverable FINAL.  Surface a
+      // bounded cache error so the scheduler can retry the obligation.
+      throw new CacheError(
+        `Live Match FINAL checkpoints unavailable for event ${eventId}`,
+        'LIVE_MATCH_FINAL_CHECKPOINT_PROBE_FAILED',
+        error instanceof Error ? error : undefined,
+      );
     }
 
     // Production dependencies expose both active-pointer readers. A custom
@@ -749,34 +758,36 @@ export async function syncLiveSnapshotV2(
     if (expectedFixtureIdsResult.status === 'rejected') throw expectedFixtureIdsResult.reason;
     if (referenceDataResult.status === 'rejected') throw referenceDataResult.reason;
 
-    if (dependencies.syncLiveMatches === undefined) {
-      let preparedObservation: PreparedLiveSnapshot;
-      try {
-        preparedObservation = prepareCoherentLiveSnapshot(
-          eventId,
-          liveResult.value,
-          fixturesResult.value,
-          referenceDataResult.value,
-          expectedFixtureIdsResult.value,
-          durableFinal.eventLives.map((row) => row.elementId),
-        );
-      } catch (error) {
-        throw new CacheError(
-          `Live Match recovery observation is not coherent with the durable Live Points FINAL for event ${eventId}`,
-          'LIVE_MATCH_FINAL_FACTS_UNAVAILABLE',
-          error instanceof Error ? error : undefined,
-        );
-      }
-      if (
-        canonicalJson(preparedObservation.eventLives.eventLives) !==
-          canonicalJson(durableFinal.eventLives) ||
-        canonicalJson(preparedObservation.fixtures) !== canonicalJson(durableFinal.fixtures)
-      ) {
-        throw new CacheError(
-          `Live Match recovery observation differs from the durable Live Points FINAL for event ${eventId}`,
-          'LIVE_MATCH_FINAL_FACTS_MISMATCH',
-        );
-      }
+    // Validate the provider observation against the durable Live Points FINAL
+    // on every path, including production's injected Match synchronizer.  A
+    // custom synchronizer does not replace this authority check; it only
+    // controls how the already-validated facts are persisted.
+    let preparedObservation: PreparedLiveSnapshot;
+    try {
+      preparedObservation = prepareCoherentLiveSnapshot(
+        eventId,
+        liveResult.value,
+        fixturesResult.value,
+        referenceDataResult.value,
+        expectedFixtureIdsResult.value,
+        durableFinal.eventLives.map((row) => row.elementId),
+      );
+    } catch (error) {
+      throw new CacheError(
+        `Live Match recovery observation is not coherent with the durable Live Points FINAL for event ${eventId}`,
+        'LIVE_MATCH_FINAL_FACTS_UNAVAILABLE',
+        error instanceof Error ? error : undefined,
+      );
+    }
+    if (
+      canonicalJson(preparedObservation.eventLives.eventLives) !==
+        canonicalJson(durableFinal.eventLives) ||
+      canonicalJson(preparedObservation.fixtures) !== canonicalJson(durableFinal.fixtures)
+    ) {
+      throw new CacheError(
+        `Live Match recovery observation differs from the durable Live Points FINAL for event ${eventId}`,
+        'LIVE_MATCH_FINAL_FACTS_MISMATCH',
+      );
     }
 
     const match = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
