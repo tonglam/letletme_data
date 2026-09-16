@@ -553,7 +553,22 @@ async function deleteExpiredMyFplSnapshotRevisions(
         });
         return deleted;
       }
-      if (redisManifest?.revision === lockedCandidate.revision) continue;
+      if (redisManifest?.revision === lockedCandidate.revision) {
+        // Redis can continue serving a previously delivered revision while a
+        // newer publication is waiting in the outbox. Keep the durable row
+        // within the GraphQL reader's 24-hour retained-revision RLS window as
+        // long as that pointer is still authoritative; once Redis advances or
+        // disappears, the normal age cutoff can collect it on a later pass.
+        await tx`
+          UPDATE competition.my_fpl_snapshot_publications
+          SET updated_at = clock_timestamp()
+          WHERE season_id = ${lockedCandidate.season_id}
+            AND event_id = ${lockedCandidate.event_id}
+            AND revision = ${lockedCandidate.revision}
+            AND active = false
+        `;
+        continue;
+      }
       const result = await tx<{ revision: number }[]>`
         DELETE FROM competition.my_fpl_snapshot_publications
         WHERE season_id = ${lockedCandidate.season_id}
