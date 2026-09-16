@@ -2187,8 +2187,14 @@ export async function publishEntryLiveInputV2(input: {
   readonly preserveSourceCheckedAtPrecision?: boolean;
   /** Zero is explicit evidence that no durable V2 head exists. */
   readonly generationFloor: number;
-  /** Canonical finalized-event boundary, checked by the recovery service. */
+  /** Canonical event fence or audited, entry-scoped explicit correction fence. */
   readonly finalizationCorrectionBoundary?: Date | string;
+  /** Explicit corrections must target the exact validated current publication. */
+  readonly expectedCurrentPublication?: {
+    readonly publicationId: string;
+    readonly generation: number;
+    readonly contentSha256: string;
+  };
   readonly redis?: Redis;
 }): Promise<{
   readonly publication: EntryLivePublicationV2;
@@ -2232,6 +2238,21 @@ export async function publishEntryLiveInputV2(input: {
   };
   await stage(redis, [item]);
   const currentProof = await readEntryPromotionProof(redis, scope);
+  if (input.expectedCurrentPublication) {
+    const observed = parseEntryManifest(currentProof.pointerRaw, scope);
+    const expected = input.expectedCurrentPublication;
+    if (
+      !currentProof.valid ||
+      observed?.publicationId !== expected.publicationId ||
+      observed.generation !== expected.generation ||
+      observed.item.sha256 !== expected.contentSha256
+    ) {
+      throw new CacheError(
+        'Explicit FINAL correction identity changed',
+        'LIVE_V2_ENTRY_PROMOTE_CHANGED',
+      );
+    }
+  }
   const [status, detail] = promotionResult(
     await redis.eval(
       PROMOTE_ENTRY_SCRIPT,
