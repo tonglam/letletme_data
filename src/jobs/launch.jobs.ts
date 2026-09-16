@@ -6,6 +6,7 @@ import { Elysia } from 'elysia';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
 import { queueRedisSingleton } from '../queues/redis';
+import { seasonRepository } from '../repositories/seasons';
 import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
@@ -30,6 +31,8 @@ type LaunchRedisClient = {
 
 export interface LaunchMonitorDependencies {
   getBootstrap: () => Promise<FPLBootstrapResponse>;
+  /** Canonical current season used to address the durable success marker. */
+  getCurrentSeason?: () => Promise<{ seasonCode: string }>;
   getRedis: () => Promise<LaunchRedisClient>;
   sendNotification: (message: string) => Promise<NotificationDeliveryResult>;
   now: () => Date;
@@ -49,6 +52,7 @@ export interface LaunchMonitorResult {
 
 const defaultDependencies: LaunchMonitorDependencies = {
   getBootstrap: () => fplClient.getBootstrap(),
+  getCurrentSeason: () => seasonRepository.findCurrent(),
   getRedis: async () => (await queueRedisSingleton.getClient()) as unknown as LaunchRedisClient,
   sendNotification: sendTelegramMessage,
   now: () => new Date(),
@@ -203,16 +207,51 @@ function result(
   };
 }
 
+function seasonCodeForCalendarYear(year: number): string {
+  const start = String(year).slice(-2);
+  const next = String(year + 1).slice(-2);
+  return `${start}${next}`;
+}
+
 export async function evaluateLaunchMonitor(
   dependencies: LaunchMonitorDependencies = defaultDependencies,
 ): Promise<LaunchMonitorResult> {
-  const bootstrap = await dependencies.getBootstrap();
   const now = dependencies.now();
+  let redis: LaunchRedisClient | null = null;
+  // Once the current canonical season has a durable happening marker, the
+  // five-minute monitor has completed its discovery work. Avoid another
+  // bootstrap request until the next season (or until the marker is absent).
+  // Hermetic callers without a database seam use the calendar-derived season
+  // only to address the marker; production uses fpl.seasons.is_current.
+  let currentSeasonCode: string | null = null;
+  try {
+    currentSeasonCode = dependencies.getCurrentSeason
+      ? (await dependencies.getCurrentSeason()).seasonCode
+      : seasonCodeForCalendarYear(now.getUTCFullYear());
+  } catch (error) {
+    logError('Launch monitor could not read canonical season; continuing discovery', error);
+  }
+  try {
+    redis = await dependencies.getRedis();
+    if (
+      currentSeasonCode &&
+      (await redis.get(`llm:queue:coordination:launch-notification:happening:${currentSeasonCode}`))
+    ) {
+      return result('happening', 'already_sent');
+    }
+  } catch (error) {
+    // A missing/unknown marker must not suppress the provider discovery. The
+    // notification path below retries the Redis acquisition after bootstrap.
+    redis = null;
+    logError('Launch monitor could not read its completion marker; continuing discovery', error);
+  }
+
+  const bootstrap = await dependencies.getBootstrap();
+  const notificationRedis = redis ?? (await dependencies.getRedis());
 
   if (bootstrap.events.length === 0) {
-    const redis = await dependencies.getRedis();
     const delivery = await sendLaunchNotificationOnce(
-      redis,
+      notificationRedis,
       `llm:queue:coordination:launch-notification:warning:${now.getFullYear()}`,
       '【NEW SEASON】WARNING! WARNING! WARNING!',
       dependencies,
@@ -229,9 +268,8 @@ export async function evaluateLaunchMonitor(
     return result('none', 'not_applicable');
   }
 
-  const redis = await dependencies.getRedis();
   const delivery = await sendLaunchNotificationOnce(
-    redis,
+    notificationRedis,
     `llm:queue:coordination:launch-notification:happening:${publishedSeason}`,
     '【NEW SEASON】ITS HAPPENING!!!',
     dependencies,

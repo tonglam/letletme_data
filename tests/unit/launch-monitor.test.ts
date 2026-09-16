@@ -158,7 +158,7 @@ describe('launch monitor', () => {
     });
     deps.getRedis = async () => {
       redisCalls += 1;
-      throw new Error('Redis should not be needed for an ordinary no-op');
+      return new FakeRedis();
     };
     const result = await evaluateLaunchMonitor(deps);
 
@@ -170,7 +170,28 @@ describe('launch monitor', () => {
       succeededUnits: 0,
       failedUnits: 0,
     });
-    expect(redisCalls).toBe(0);
+    expect(redisCalls).toBe(1);
+  });
+
+  test('skips bootstrap after the current season happening marker is confirmed', async () => {
+    const redis = new FakeRedis();
+    redis.values.set(HAPPENING_KEY, '2026-08-15T10:00:01.000Z');
+    let bootstrapCalls = 0;
+    const deps = dependencies({
+      redis,
+      onBootstrap: () => {
+        bootstrapCalls += 1;
+      },
+    });
+
+    const result = await evaluateLaunchMonitor(deps);
+
+    expect(result).toMatchObject({
+      notification: 'happening',
+      delivery: 'already_sent',
+      requiredUnits: 0,
+    });
+    expect(bootstrapCalls).toBe(0);
   });
 
   test('serializes concurrent ticks so only one notification is delivered', async () => {

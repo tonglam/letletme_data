@@ -354,6 +354,7 @@ const MAX_MY_FPL_CAPTURE_COMMIT_CONFLICT_RETRIES = 3;
 // still rolls back the complete candidate instead of exposing a partial
 // publication.
 const MY_FPL_SNAPSHOT_CHILD_INSERT_BATCH_SIZE = 100;
+const MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE = 100;
 const myFplCaptureTails = new Map<string, Promise<void>>();
 
 function batches<T>(rows: readonly T[], size: number): T[][] {
@@ -362,6 +363,104 @@ function batches<T>(rows: readonly T[], size: number): T[][] {
     result.push(rows.slice(offset, offset + size));
   }
   return result;
+}
+
+type MyFplSnapshotRetentionOptions = Readonly<{
+  supersededBeforeIso: string;
+  limit: number;
+  seasonId?: number;
+  eventId?: number;
+}>;
+
+/**
+ * Remove only old, superseded immutable revisions whose durable references
+ * have settled. The candidate CTE keeps the transaction bounded and protects
+ * the active pointer, an outbox that still needs delivery, and the revision
+ * currently recorded by the scope verification fence.
+ */
+async function deleteExpiredMyFplSnapshotRevisions(
+  tx: postgres.TransactionSql,
+  options: MyFplSnapshotRetentionOptions,
+): Promise<number> {
+  const supersededBeforeIso = options.supersededBeforeIso;
+  const seasonFilter =
+    options.seasonId === undefined ? tx`` : tx`AND publication.season_id = ${options.seasonId}`;
+  const eventFilter =
+    options.eventId === undefined ? tx`` : tx`AND publication.event_id = ${options.eventId}`;
+  const deleted = await tx<{ revision: number }[]>`
+    WITH candidates AS (
+      SELECT publication.season_id, publication.event_id, publication.revision
+      FROM competition.my_fpl_snapshot_publications publication
+      WHERE active = false AND updated_at < ${supersededBeforeIso}::timestamptz
+        ${seasonFilter}
+        ${eventFilter}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_publication_outbox outbox
+          WHERE outbox.season_id = publication.season_id
+            AND outbox.event_id = publication.event_id
+            AND outbox.revision = publication.revision
+            AND outbox.status IN ('PENDING', 'PROCESSING', 'FAILED')
+            AND outbox.delivered_at IS NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_scope_state scope_state
+          WHERE scope_state.season_id = publication.season_id
+            AND scope_state.event_id = publication.event_id
+            AND scope_state.verified_revision = publication.revision
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM competition.my_fpl_snapshot_invalidation_outbox invalidation
+          WHERE invalidation.season_id = publication.season_id
+            AND invalidation.event_id = publication.event_id
+            AND invalidation.revision = publication.revision
+            AND invalidation.status IN ('PENDING', 'PROCESSING', 'FAILED')
+            AND invalidation.delivered_at IS NULL
+        )
+      ORDER BY publication.updated_at, publication.season_id, publication.event_id, publication.revision
+      LIMIT ${options.limit}
+      FOR UPDATE SKIP LOCKED
+    )
+    DELETE FROM competition.my_fpl_snapshot_publications publication
+    USING candidates
+    WHERE publication.season_id = candidates.season_id
+      AND publication.event_id = candidates.event_id
+      AND publication.revision = candidates.revision
+    RETURNING publication.revision
+  `;
+  return deleted.length;
+}
+
+/** Run one bounded retention pass from the periodic maintenance lane. */
+export async function cleanupMyFplSnapshotRevisions(
+  options: {
+    limit?: number;
+    now?: Date;
+  } = {},
+): Promise<{ deleted: number; cutoff: string }> {
+  const limit = options.limit ?? MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE) {
+    throw new Error(
+      `My FPL snapshot retention limit must be between 1 and ${MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE}`,
+    );
+  }
+  const now = options.now ?? new Date();
+  const supersededBeforeIso = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
+  const db = await getDbClient();
+  const deleted = await db.begin((tx) =>
+    deleteExpiredMyFplSnapshotRevisions(tx, {
+      supersededBeforeIso,
+      limit,
+    }),
+  );
+  logInfo('My FPL snapshot retention pass completed', {
+    deleted,
+    cutoff: supersededBeforeIso,
+    limit,
+  });
+  return { deleted, cutoff: supersededBeforeIso };
 }
 
 export function serializeMyFplSnapshotCapture(
@@ -5050,11 +5149,12 @@ async function captureMyFplSnapshotOnce(
       SET active = true, updated_at = ${nowIso}::timestamptz
       WHERE season_id = ${season.seasonId} AND event_id = ${eventId} AND revision = ${revision}
     `;
-    await tx`
-      DELETE FROM competition.my_fpl_snapshot_publications
-      WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
-        AND active = false AND updated_at < ${supersededBeforeIso}::timestamptz
-    `;
+    await deleteExpiredMyFplSnapshotRevisions(tx, {
+      supersededBeforeIso,
+      limit: MY_FPL_SNAPSHOT_RETENTION_BATCH_SIZE,
+      seasonId: season.seasonId,
+      eventId,
+    });
 
     const publication: MyFplSnapshotPublication = {
       seasonId: season.seasonId,
