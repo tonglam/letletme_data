@@ -562,7 +562,7 @@ export async function attachFreshnessWindowToSchedulerObligation(input: {
       .where(eq(schedulerObligationsInOps.obligationId, input.obligationId))
       .for('update');
     if (!obligation) return false;
-    if (['succeeded', 'skipped', 'irrecoverable'].includes(obligation.status)) {
+    if (['skipped', 'irrecoverable'].includes(obligation.status)) {
       await tx
         .update(freshnessSloWindowsInOps)
         .set({
@@ -581,7 +581,25 @@ export async function attachFreshnessWindowToSchedulerObligation(input: {
             inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID', 'BREACHED']),
           ),
         );
-      return false;
+      await tx
+        .update(dataGovernanceCasesInOps)
+        .set({
+          status: 'DISMISSED',
+          lastError: null,
+          repairJobId: null,
+          repairDeadlineAt: null,
+          evidence: sql`${dataGovernanceCasesInOps.evidence} || ${JSON.stringify({
+            reason: 'SUPERSEDED_BY_TERMINAL_OBLIGATION',
+            schedulerObligationId: input.obligationId,
+          })}::jsonb`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(dataGovernanceCasesInOps.sloWindowId, input.freshnessWindowId),
+            inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
+          ),
+        );
     }
     const existingWindowIds = sql`CASE
       WHEN jsonb_typeof(${schedulerObligationsInOps.evidence}->'freshnessWindowIds') = 'array'
