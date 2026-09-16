@@ -480,7 +480,10 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
       {
         queue: job.queueName,
         jobName: job.name,
-        runId: String(job.id ?? `${job.name}-${job.timestamp}`),
+        // The scheduler's cascade run is the logical batch identity. Bull's
+        // delivery id remains batchId so redeliveries can be distinguished
+        // without creating a fresh cost ledger for every enqueue.
+        runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
         batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
         parentRunId: job.data.runId,
         source,

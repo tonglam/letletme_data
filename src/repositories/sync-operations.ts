@@ -256,6 +256,10 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         .where(eq(syncRunsInOps.runId, runId))
         .limit(1);
       const row = existing[0];
+      const eventMatches =
+        input.mode === 'batch-cost'
+          ? input.eventId === undefined || row?.eventId === null || row?.eventId === input.eventId
+          : row?.eventId === nullableValue(input.eventId);
       if (
         !row ||
         row.provider !== input.provider ||
@@ -263,7 +267,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         row.scope !== input.scope ||
         row.seasonId !== nullableValue(input.season?.seasonId) ||
         row.seasonCode !== nullableValue(input.season?.seasonCode) ||
-        row.eventId !== nullableValue(input.eventId) ||
+        !eventMatches ||
         row.mode !== input.mode ||
         row.trigger !== input.trigger
       ) {
@@ -1175,6 +1179,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .for('update');
         const run = runRows[0];
         if (!run) return false;
+        if (run.eventId !== null && run.eventId !== eventId) return false;
         const rows = await tx
           .select({
             status: syncItemsInOps.status,

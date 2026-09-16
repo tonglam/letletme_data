@@ -935,6 +935,43 @@ describe('ops sync state machine', () => {
     ).toBe(false);
   });
 
+  test('keeps an unscoped batch-cost retry compatible after event resolution', async () => {
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    const run = {
+      runId: RUN_IDS[0],
+      provider: 'fpl',
+      lane: 'data-sync',
+      scope: 'entry-results',
+      season,
+      mode: 'batch-cost',
+      trigger: 'batch-cost',
+    } as const;
+    await syncOperationsRepository.startRun(run);
+    const attemptKey = 'data-sync|entry-results|unscoped-retry|1|none|execution-1';
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+      attemptKey,
+      batchId: 'unscoped-retry',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    });
+    expect(
+      await syncOperationsRepository.updateBatchCostTargetEvent(RUN_IDS[0], attemptKey, 12),
+    ).toBe(true);
+
+    // The next delivery starts without an event in its Bull payload, while a
+    // direct recovery may already know the resolved event. Both are the same
+    // batch-cost ledger identity; a different positive event remains a real
+    // immutable-scope conflict.
+    expect(await syncOperationsRepository.startRun(run)).toBe(RUN_IDS[0]);
+    expect(await syncOperationsRepository.startRun({ ...run, eventId: 12 })).toBe(RUN_IDS[0]);
+    await expectDatabaseErrorCode(
+      syncOperationsRepository.startRun({ ...run, eventId: 13 }),
+      'SYNC_RUN_ID_CONFLICT',
+    );
+  });
+
   test('closes a running marker when batch-cost settlement fails', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

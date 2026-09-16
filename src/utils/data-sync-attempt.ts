@@ -342,6 +342,16 @@ function nullableNumber(value: number | undefined): number | null {
     : null;
 }
 
+/** The ops ledger accepts only positive FPL event identities. Some legacy
+ * tournament jobs use zero as an internal "unscoped" sentinel; keep that
+ * sentinel out of durable scope and let the worker resolve the real event. */
+function ledgerTargetEventId(context: DataSyncAttemptContext): number | undefined {
+  const eventId = context.targetEventId;
+  return typeof eventId === 'number' && Number.isSafeInteger(eventId) && eventId > 0
+    ? eventId
+    : undefined;
+}
+
 function batchCostPayload(
   context: DataSyncAttemptContext,
   report: Omit<DataSyncAttemptReport, 'batchCost'>,
@@ -367,7 +377,7 @@ function batchCostPayload(
   return {
     job: context.jobName,
     queue: context.queue,
-    eventId: context.targetEventId ?? null,
+    eventId: ledgerTargetEventId(context) ?? null,
     seasonId: context.season?.seasonId ?? null,
     seasonCode: context.season?.seasonCode ?? null,
     executionId,
@@ -439,7 +449,7 @@ async function ensureBatchCostLedgerRun(
     lane: context.queue,
     scope: context.jobName,
     season: context.season,
-    eventId: context.targetEventId,
+    eventId: ledgerTargetEventId(context),
     mode: 'batch-cost',
     // Keep this identity constant across Bull retries. The original source
     // and run IDs remain in metadata/payload and never participate in the
@@ -454,7 +464,7 @@ async function ensureBatchCostLedgerRun(
       releaseSha,
       seasonId: context.season?.seasonId ?? null,
       seasonCode: context.season?.seasonCode ?? null,
-      eventId: context.targetEventId ?? null,
+      eventId: ledgerTargetEventId(context) ?? null,
     },
   });
 }
@@ -617,6 +627,7 @@ export async function runDataSyncAttempt<T>(
         // the failure report still needs to identify the bounded event unit.
         targetEventId ??= context.targetEventId;
         if (targetEventId !== undefined) context.targetEventId = targetEventId;
+        const reportTargetEventId = ledgerTargetEventId(context);
         const reportBase: Omit<DataSyncAttemptReport, 'batchCost'> = {
           event: 'data_sync_attempt',
           queue: context.queue,
@@ -629,7 +640,7 @@ export async function runDataSyncAttempt<T>(
             : {}),
           source: normalizeSource(context),
           attempt: boundedAttempt(context.attempt),
-          ...(targetEventId !== undefined ? { targetEventId } : {}),
+          ...(reportTargetEventId !== undefined ? { targetEventId: reportTargetEventId } : {}),
           ...(context.season
             ? { seasonId: context.season.seasonId, seasonCode: context.season.seasonCode }
             : {}),
