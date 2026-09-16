@@ -639,10 +639,9 @@ export function createEntrySyncWorker(
         async () => (await getCurrentEvent(season))?.id ?? null,
       );
       const effectiveExecutionIntent =
-        job.data?.executionIntent ??
-        (attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
+        attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
           ? 'retry'
-          : resolveEntrySyncExecutionIntent(job.data?.source));
+          : (job.data?.executionIntent ?? resolveEntrySyncExecutionIntent(job.data?.source));
       const effectiveJobData =
         targetEventId !== undefined
           ? { ...job.data, eventId: targetEventId, executionIntent: effectiveExecutionIntent }

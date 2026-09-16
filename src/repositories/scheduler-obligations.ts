@@ -1047,8 +1047,9 @@ export async function supersedeSchedulerObligationsByDueAt(input: {
  * Retire pending My FPL FINAL obligations whose source scope is older than the
  * newly observed generation.  Scope generations are numeric authority, so the
  * comparison deliberately does not use period-key string ordering.  Enqueued
- * or running rows are left intact; their worker rechecks the same fence before
- * provider work, canonical writes, and completion.
+ * or running rows are left intact; retrying rows are terminally retired so
+ * their backoff cannot hold the lane, and every worker still rechecks the
+ * same fence before provider work, canonical writes, and completion.
  */
 export async function supersedeMyFplFinalizationObligations(input: {
   scopeKey: string;
@@ -1095,7 +1096,7 @@ export async function supersedeMyFplFinalizationObligations(input: {
       WHERE job_name = 'my-fpl-finalization'
         AND scope_key = ${input.scopeKey}
         AND period_key <> ${input.periodKey}
-        AND status IN ('pending', 'failed')
+        AND status IN ('pending', 'failed', 'retrying')
     ), retired AS (
       UPDATE ops.scheduler_obligations AS obligation
       SET status = 'skipped',
