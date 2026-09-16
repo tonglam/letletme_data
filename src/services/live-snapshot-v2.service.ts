@@ -34,6 +34,7 @@ import {
   syncLiveMatchesV3FromObservation,
   type LiveMatchObservationResult,
 } from './live-match-v3.service';
+import { hasFinalLiveMatchCheckpointsV3 } from './live-match-v3-checkpoint.service';
 import type { MatchLifecycleState } from './live-match-v3';
 import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
 import { logError, logInfo } from '../utils/logger';
@@ -101,6 +102,7 @@ export interface LiveSnapshotV2Dependencies {
   ) => Promise<LivePublicationRead | null>;
   readonly readCheckpointDesired?: typeof readLiveCheckpointDesiredV2;
   readonly clearCheckpointDesired?: typeof clearLiveCheckpointDesiredV2;
+  readonly hasFinalMatchCheckpoints?: typeof hasFinalLiveMatchCheckpointsV3;
   readonly checkpointPublication: (request: {
     readonly season: FplSeasonRef;
     readonly eventId: number;
@@ -227,6 +229,20 @@ function isCompleteFinalPublication(
       durable.publication.checkpointedAt !== null &&
       canonicalJson(current.eventLives) === canonicalJson(durable.eventLives) &&
       canonicalJson(current.fixtures) === canonicalJson(durable.fixtures),
+  );
+}
+
+function isDurableFinalPublication(
+  durable: LivePublicationRead | null,
+  season: FplSeasonRef,
+  eventId: number,
+): boolean {
+  return Boolean(
+    durable?.servedFrom === 'POSTGRES_CHECKPOINT' &&
+      durable.publication.season === season.seasonCode &&
+      durable.publication.eventId === eventId &&
+      durable.publication.state === 'FINALIZED' &&
+      durable.publication.checkpointedAt !== null,
   );
 }
 
@@ -512,126 +528,181 @@ export async function syncLiveSnapshotV2(
   const current = await currentReadPromise;
   currentReadMs = Math.max(0, Date.now() - currentReadStartedAt);
   redisReadMs = currentReadMs;
-  // A terminal Redis head must be reconciled with its durable checkpoint before
-  // provider work. The normal provisional path keeps its provider observation
-  // independent of a slow PostgreSQL read; the existing durable-FINAL restore
-  // branch below handles a missing Redis head after that shared observation.
-  const earlyDurableFinalRead =
-    current?.publication.state === 'FINALIZED' ? await durableReadPromise : null;
-  if (earlyDurableFinalRead) controlReadMs = durableReadMs;
-  // A complete FINAL already has an immutable provider snapshot and a
-  // PostgreSQL checkpoint.  Resolve that durable identity before constructing
-  // any provider promises so a repeated finalization is a read-only reuse.
-  // The worker continues with downstream league/tournament readiness after this
-  // function returns.
-  if (current?.publication.state === 'FINALIZED') {
-    const durableFinalRead = earlyDurableFinalRead ?? (await durableReadPromise);
-    controlReadMs = durableReadMs;
-    if (durableFinalRead.failed) {
-      // Keep the Redis FINAL serving while making the durable uncertainty
-      // visible to the caller.  The live worker treats checkpointed=false as
-      // incomplete and retains the scheduler obligation for retry.
-      return {
+  const hasFinalMatchCheckpoints =
+    dependencies.hasFinalMatchCheckpoints ?? hasFinalLiveMatchCheckpointsV3;
+  const repairMatchForReusedFinal = async (): Promise<void> => {
+    let matchFinalized = false;
+    try {
+      matchFinalized = await hasFinalMatchCheckpoints(season, eventId, databaseBudget?.readDb);
+    } catch (error) {
+      logError('Live Match FINAL checkpoint probe failed during Live Points reuse', error, {
+        season: season.seasonCode,
         eventId,
-        changed: false,
-        stale: true,
-        published: false,
-        generation: current.publication.generation,
-        publicationId: current.publication.publicationId,
-        sourceCheckedAt: current.publication.sourceCheckedAt,
-        state: 'FINALIZED',
-        eventLiveCount: current.eventLives.length,
-        fixtureCount: current.fixtures.length,
-        checkpointScheduled: false,
-        checkpointed: false,
-        checkpointObligationFailed: false,
-        stageTimings: stageTimings(),
-      };
+      });
     }
-    if (isCompleteFinalPublication(current, durableFinalRead.value, season, eventId)) {
-      try {
-        const readDesired = dependencies.readCheckpointDesired ?? readLiveCheckpointDesiredV2;
-        const clearDesired = dependencies.clearCheckpointDesired ?? clearLiveCheckpointDesiredV2;
-        const desired = await readDesired({
-          season: season.seasonCode,
-          eventId,
-        });
+    if (matchFinalized) return;
+
+    // Live Points is already immutable here. Rebuild only the missing Match
+    // sibling from a fresh observation; this preserves the final publication
+    // without repeating its global fact preparation or checkpoint write.
+    const expectedFixtureIdsPromise = dependencies
+      .getExpectedFixtureIds(season, eventId)
+      .catch((error) => {
         if (
-          desired &&
-          desired.publicationId === current.publication.publicationId &&
-          desired.generation === current.publication.generation
+          current?.publication.season === season.seasonCode &&
+          current.publication.eventId === eventId
         ) {
-          await clearDesired(desired);
+          return current.fixtures.map((fixture) => fixture.id);
         }
-      } catch (error) {
-        // The durable FINAL remains complete even if the best-effort stale
-        // desired marker cleanup is unavailable.
-        logError('Live Points V2 complete FINAL desired-marker cleanup failed', error, {
-          season: season.seasonCode,
-          eventId,
-          publicationId: current.publication.publicationId,
-          generation: current.publication.generation,
-        });
-      }
-      return {
-        eventId,
-        changed: false,
-        stale: false,
-        published: false,
-        generation: current.publication.generation,
-        publicationId: current.publication.publicationId,
-        sourceCheckedAt: current.publication.sourceCheckedAt,
-        state: 'FINALIZED',
-        eventLiveCount: current.eventLives.length,
-        fixtureCount: current.fixtures.length,
-        checkpointScheduled: false,
-        checkpointed: true,
-        checkpointObligationFailed: false,
-        stageTimings: stageTimings(),
-      };
-    }
-  }
-  if (
-    current?.publication.state === 'FINALIZED' &&
-    earlyDurableFinalRead?.value?.publication.state === 'FINALIZED' &&
-    !earlyDurableFinalRead.failed &&
-    !isCompleteFinalPublication(current, earlyDurableFinalRead.value, season, eventId)
-  ) {
-    // A complete durable FINAL outranks a missing, damaged, or provisional
-    // Redis head. Restore its exact publication identity through the existing
-    // Lua CAS instead of fetching a new provider observation or allocating a
-    // replacement generation.
-    const redisStartedAt = Date.now();
-    const restored = await activatePublication(() =>
-      (dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint)({
-        checkpoint: earlyDurableFinalRead.value!,
-      }),
-    );
-    redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
-    if (!restored.published) {
-      throw new CacheError(
-        `Live Points V2 durable FINAL restore did not publish ${earlyDurableFinalRead.value.publication.publicationId} for ${season.seasonCode}:${eventId}`,
-        'LIVE_V2_CHECKPOINT_RESTORE_FAILED',
+        throw error;
+      });
+    const fixturesPromise = options.observedFixtures
+      ? Promise.resolve([...options.observedFixtures])
+      : dependencies.getFixtures(eventId);
+    const matchProviderStartedAt = Date.now();
+    const observation = await Promise.allSettled([
+      dependencies.getEventLive(eventId),
+      fixturesPromise,
+      expectedFixtureIdsPromise,
+      dependencies.getReferenceData(season, eventId, databaseBudget?.readDb),
+    ] as const);
+    providerMs = Math.max(0, Date.now() - matchProviderStartedAt);
+    const [liveResult, fixturesResult, expectedFixtureIdsResult, referenceDataResult] = observation;
+    if (liveResult.status === 'rejected') throw liveResult.reason;
+    if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
+    if (expectedFixtureIdsResult.status === 'rejected') throw expectedFixtureIdsResult.reason;
+    if (referenceDataResult.status === 'rejected') throw referenceDataResult.reason;
+
+    const match = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
+      season,
+      eventId,
+      rawEventLive: liveResult.value,
+      rawFixtures: fixturesResult.value,
+      expectedFixtureIds: expectedFixtureIdsResult.value,
+      referenceData: referenceDataResult.value,
+      publishedLiveElementIds: current?.eventLives.map((row) => row.elementId),
+      finalizeEvent: true,
+      lifecycleState: 'FINALIZED',
+      expectedNextCheckAt: options.expectedNextCheckAt,
+      databaseRead: databaseBudget?.readDb,
+    });
+    if (match.desk.state !== 'FINALIZED' || match.detail?.finalized !== true) {
+      throw new Error(
+        `Live Match final publication was not complete for event ${eventId}; desk=${match.desk.state}; detail=${match.detail?.finalized === true ? 'FINALIZED' : 'UNAVAILABLE'}`,
       );
     }
-    logInfo('Restored durable FINALIZED Live Points V2 publication before provider work', {
-      season: season.seasonCode,
-      eventId,
-      generation: restored.publication.generation,
-      publicationId: restored.publication.publicationId,
-      trigger: options.trigger ?? 'queue',
-    });
+  };
+  // A FINAL must be reconciled with its durable checkpoint before provider
+  // work. Provisional heartbeats keep their provider observation independent of
+  // a slow durable read; a FINAL request waits for the already-started read so
+  // a missing or provisional Redis head cannot trigger a duplicate global pull.
+  const reconcileDurableFinalBeforeProvider =
+    options.finalizeEvent === true || current?.publication.state === 'FINALIZED';
+  const earlyDurableFinalRead = reconcileDurableFinalBeforeProvider
+    ? await durableReadPromise
+    : null;
+  if (earlyDurableFinalRead) controlReadMs = durableReadMs;
+
+  if (current?.publication.state === 'FINALIZED' && earlyDurableFinalRead?.failed) {
+    // Keep the Redis FINAL serving while making the durable uncertainty visible
+    // to the caller. The worker retains the scheduler obligation for retry.
     return {
       eventId,
       changed: false,
       stale: true,
       published: false,
-      generation: restored.publication.generation,
-      publicationId: restored.publication.publicationId,
-      sourceCheckedAt: restored.publication.sourceCheckedAt,
+      generation: current.publication.generation,
+      publicationId: current.publication.publicationId,
+      sourceCheckedAt: current.publication.sourceCheckedAt,
       state: 'FINALIZED',
-      eventLiveCount: earlyDurableFinalRead.value.eventLives.length,
-      fixtureCount: earlyDurableFinalRead.value.fixtures.length,
+      eventLiveCount: current.eventLives.length,
+      fixtureCount: current.fixtures.length,
+      checkpointScheduled: false,
+      checkpointed: false,
+      checkpointObligationFailed: false,
+      stageTimings: stageTimings(),
+    };
+  }
+
+  const durableFinal =
+    earlyDurableFinalRead &&
+    !earlyDurableFinalRead.failed &&
+    isDurableFinalPublication(earlyDurableFinalRead.value, season, eventId)
+      ? earlyDurableFinalRead.value
+      : null;
+  if (durableFinal) {
+    const servingIdentityMatches = isCompleteFinalPublication(
+      current,
+      durableFinal,
+      season,
+      eventId,
+    );
+    let servingPublication = current?.publication ?? durableFinal.publication;
+    let restored = false;
+    if (!servingIdentityMatches) {
+      // A complete durable FINAL outranks a missing, damaged, or provisional
+      // Redis head. Restore its exact identity through the existing Lua CAS
+      // before any provider request or replacement generation is considered.
+      const redisStartedAt = Date.now();
+      const restoredPublication = await activatePublication(() =>
+        (dependencies.restoreLivePublicationCheckpoint ?? restoreLivePublicationV2Checkpoint)({
+          checkpoint: durableFinal,
+        }),
+      );
+      redisPublishMs = Math.max(0, Date.now() - redisStartedAt);
+      if (!restoredPublication.published) {
+        throw new CacheError(
+          `Live Points V2 durable FINAL restore did not publish ${durableFinal.publication.publicationId} for ${season.seasonCode}:${eventId}`,
+          'LIVE_V2_CHECKPOINT_RESTORE_FAILED',
+        );
+      }
+      servingPublication = restoredPublication.publication;
+      restored = true;
+      logInfo('Restored durable FINALIZED Live Points V2 publication before provider work', {
+        season: season.seasonCode,
+        eventId,
+        generation: servingPublication.generation,
+        publicationId: servingPublication.publicationId,
+        trigger: options.trigger ?? 'queue',
+      });
+    }
+
+    if (options.finalizeEvent === true) await repairMatchForReusedFinal();
+    try {
+      const readDesired = dependencies.readCheckpointDesired ?? readLiveCheckpointDesiredV2;
+      const clearDesired = dependencies.clearCheckpointDesired ?? clearLiveCheckpointDesiredV2;
+      const desired = await readDesired({
+        season: season.seasonCode,
+        eventId,
+      });
+      if (
+        desired &&
+        desired.publicationId === servingPublication.publicationId &&
+        desired.generation === servingPublication.generation
+      ) {
+        await clearDesired(desired);
+      }
+    } catch (error) {
+      // A complete FINAL remains valid if best-effort marker cleanup is
+      // temporarily unavailable; the retention reconciler can clear it later.
+      logError('Live Points V2 complete FINAL desired-marker cleanup failed', error, {
+        season: season.seasonCode,
+        eventId,
+        publicationId: servingPublication.publicationId,
+        generation: servingPublication.generation,
+      });
+    }
+    return {
+      eventId,
+      changed: false,
+      stale: restored,
+      published: false,
+      generation: servingPublication.generation,
+      publicationId: servingPublication.publicationId,
+      sourceCheckedAt: servingPublication.sourceCheckedAt,
+      state: 'FINALIZED',
+      eventLiveCount: durableFinal.eventLives.length,
+      fixtureCount: durableFinal.fixtures.length,
       checkpointScheduled: false,
       checkpointed: true,
       checkpointObligationFailed: false,

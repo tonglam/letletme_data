@@ -187,6 +187,7 @@ describe('Live Points and Live Matches shared observation', () => {
     let checkpointCalls = 0;
 
     const result = await syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
       dependencies: {
         getEventLive: async () => {
           providerCalls += 1;
@@ -206,6 +207,7 @@ describe('Live Points and Live Matches shared observation', () => {
         },
         readPublished: async () => current,
         readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => true,
         readCheckpointDesired: async () => null,
         clearCheckpointDesired: async () => true,
         checkpointPublication: async () => {
@@ -227,6 +229,162 @@ describe('Live Points and Live Matches shared observation', () => {
     expect(providerCalls).toBe(0);
     expect(checkpointCalls).toBe(0);
     expect(result.stageTimings.providerMs).toBeNull();
+  });
+
+  test('reuses Live Points FINAL but repairs a missing Match sibling', async () => {
+    const publication: LivePublicationV2 = {
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000043',
+      generation: 43,
+      season: season.seasonCode,
+      eventId: 2,
+      state: 'FINALIZED' as const,
+      sourceCheckedAt: '2026-08-30T00:00:00.000Z',
+      publishedAt: '2026-08-30T00:00:01.000Z',
+      checkpointedAt: '2026-08-30T00:00:02.000Z',
+      expectedNextCheckAt: null,
+      revisions: {} as never,
+      items: {} as never,
+    };
+    const current = {
+      publication,
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'REDIS_CURRENT' as const,
+    } satisfies LivePublicationRead;
+    const durable = {
+      publication: { ...publication },
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'POSTGRES_CHECKPOINT' as const,
+    } satisfies LivePublicationRead;
+    let providerCalls = 0;
+    let matchFinalizeCalls = 0;
+
+    const result = await syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => {
+          providerCalls += 1;
+          return { elements: [] };
+        },
+        getFixtures: async () => {
+          providerCalls += 1;
+          return [];
+        },
+        getExpectedFixtureIds: async () => {
+          providerCalls += 1;
+          return [];
+        },
+        getReferenceData: async () => {
+          providerCalls += 1;
+          return { playerById: new Map(), playerTeamById: new Map() } as never;
+        },
+        readPublished: async () => current,
+        readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => false,
+        readCheckpointDesired: async () => null,
+        clearCheckpointDesired: async () => true,
+        syncLiveMatches: async (observation) => {
+          matchFinalizeCalls += 1;
+          expect(observation.finalizeEvent).toBe(true);
+          return {
+            desk: { state: 'FINALIZED' },
+            detail: { finalized: true },
+          } as never;
+        },
+        checkpointPublication: async () => {
+          throw new Error('reused Live Points FINAL must not checkpoint again');
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      changed: false,
+      published: false,
+      state: 'FINALIZED',
+      checkpointScheduled: false,
+      checkpointed: true,
+      publicationId: publication.publicationId,
+      generation: publication.generation,
+    });
+    expect(matchFinalizeCalls).toBe(1);
+    expect(providerCalls).toBe(4);
+  });
+
+  test('restores a durable FINAL before provider work when Redis is provisional', async () => {
+    const durablePublication: LivePublicationV2 = {
+      contractVersion: 'live-points-v2',
+      publicationId: '00000000-0000-4000-8000-000000000044',
+      generation: 44,
+      season: season.seasonCode,
+      eventId: 2,
+      state: 'FINALIZED' as const,
+      sourceCheckedAt: '2026-08-30T00:00:00.000Z',
+      publishedAt: '2026-08-30T00:00:01.000Z',
+      checkpointedAt: '2026-08-30T00:00:02.000Z',
+      expectedNextCheckAt: null,
+      revisions: {} as never,
+      items: {} as never,
+    };
+    const current = {
+      publication: { ...durablePublication, state: 'LIVE_ACTIVE' as const },
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'REDIS_CURRENT' as const,
+    } satisfies LivePublicationRead;
+    const durable = {
+      publication: durablePublication,
+      eventLives: [],
+      fixtures: [],
+      servedFrom: 'POSTGRES_CHECKPOINT' as const,
+    } satisfies LivePublicationRead;
+    let restoreCalls = 0;
+    let providerCalls = 0;
+
+    const result = await syncLiveSnapshotV2(season, 2, {
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid event-live');
+        },
+        getFixtures: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid fixtures');
+        },
+        getExpectedFixtureIds: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid fixture identity');
+        },
+        getReferenceData: async () => {
+          providerCalls += 1;
+          throw new Error('durable FINAL restore must avoid reference data');
+        },
+        readPublished: async () => current,
+        readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => true,
+        readCheckpointDesired: async () => null,
+        clearCheckpointDesired: async () => true,
+        restoreLivePublicationCheckpoint: async () => {
+          restoreCalls += 1;
+          return { publication: durablePublication, previous: current.publication, published: true };
+        },
+        checkpointPublication: async () => {
+          throw new Error('durable FINAL restore must not checkpoint again');
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      state: 'FINALIZED',
+      stale: true,
+      checkpointed: true,
+      publicationId: durablePublication.publicationId,
+      generation: durablePublication.generation,
+    });
+    expect(restoreCalls).toBe(1);
+    expect(providerCalls).toBe(0);
   });
 
   test('publishes the score desk before event-live detail or identity fallback settles', async () => {
@@ -528,6 +686,9 @@ describe('Live Points and Live Matches shared observation', () => {
         },
         readPublished: async () => null,
         readCheckpointed: async () => durable,
+        hasFinalMatchCheckpoints: async () => false,
+        readCheckpointDesired: async () => null,
+        clearCheckpointDesired: async () => true,
         checkpointPublication: async () => false,
       },
       withPublicationActivationFence: async (activate) => {
@@ -539,7 +700,7 @@ describe('Live Points and Live Matches shared observation', () => {
     const result = await sync;
     expect(restoreCalls).toBe(1);
     expect(activationCalls).toBe(1);
-    expect(finalizeFlags).toEqual([false, false, true]);
+    expect(finalizeFlags).toEqual([true]);
     expect(result.state).toBe('FINALIZED');
     expect(result.stageTimings.totalMs).toBeGreaterThanOrEqual(0);
     expect(result.stageTimings.providerMs).toEqual(expect.any(Number));
