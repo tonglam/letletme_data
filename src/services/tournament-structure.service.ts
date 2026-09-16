@@ -29,9 +29,9 @@ import { createTournamentKnockoutsRepository } from '../repositories/tournament-
 import { createTournamentPointsGroupResultsRepository } from '../repositories/tournament-points-group-results';
 
 export type DerivedResultRepairSnapshot = {
-  points: Array<{ sourceResultId: number; updatedAt: Date }>;
-  battle: Array<{ sourceResultId: number; updatedAt: Date }>;
-  knockout: Array<{ sourceResultId: number; updatedAt: Date }>;
+  points: Array<{ sourceResultId: number; updatedAt: string }>;
+  battle: Array<{ sourceResultId: number; updatedAt: string }>;
+  knockout: Array<{ sourceResultId: number; updatedAt: string }>;
 };
 
 function groupInsert(row: Record<string, number | string | null>): DbTournamentGroupInsert {
@@ -155,7 +155,7 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         groupId: tournamentPointsGroupResultsInCompetition.groupId,
         eventId: tournamentPointsGroupResultsInCompetition.eventId,
         entryId: tournamentPointsGroupResultsInCompetition.entryId,
-        updatedAt: tournamentPointsGroupResultsInCompetition.updatedAt,
+        updatedAt: sql<string>`${tournamentPointsGroupResultsInCompetition.updatedAt}::text`,
       })
       .from(tournamentPointsGroupResultsInCompetition)
       .where(
@@ -169,7 +169,7 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         eventId: tournamentBattleGroupResultsInCompetition.eventId,
         homeEntryId: tournamentBattleGroupResultsInCompetition.homeEntryId,
         awayEntryId: tournamentBattleGroupResultsInCompetition.awayEntryId,
-        updatedAt: tournamentBattleGroupResultsInCompetition.updatedAt,
+        updatedAt: sql<string>`${tournamentBattleGroupResultsInCompetition.updatedAt}::text`,
       })
       .from(tournamentBattleGroupResultsInCompetition)
       .where(
@@ -182,7 +182,7 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
         eventId: tournamentKnockoutResultsInCompetition.eventId,
         matchId: tournamentKnockoutResultsInCompetition.matchId,
         playAgainstId: tournamentKnockoutResultsInCompetition.playAgainstId,
-        updatedAt: tournamentKnockoutResultsInCompetition.updatedAt,
+        updatedAt: sql<string>`${tournamentKnockoutResultsInCompetition.updatedAt}::text`,
       })
       .from(tournamentKnockoutResultsInCompetition)
       .where(
@@ -334,7 +334,7 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
         )
     `);
 
-    const deleteUnchangedRows = async <T extends { sourceResultId: number; updatedAt: Date }>(
+    const deleteUnchangedRows = async <T extends { sourceResultId: number; updatedAt: string }>(
       table:
         | typeof tournamentPointsGroupResultsInCompetition
         | typeof tournamentBattleGroupResultsInCompetition
@@ -347,7 +347,7 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
           WHERE season_id = ${season.seasonId}
             AND tournament_id = ${tournamentId}
             AND source_result_id = ${row.sourceResultId}
-            AND updated_at = ${row.updatedAt}
+            AND updated_at = ${row.updatedAt}::timestamptz
         `);
       }
     };
