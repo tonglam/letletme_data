@@ -10,6 +10,7 @@ import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
+import { getConfig } from '../utils/config';
 import {
   NotificationDeliveryRejectedError,
   sendTelegramMessage,
@@ -22,6 +23,18 @@ export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
 const NOTIFICATION_MARKER_ATTEMPTS = 3;
 const NOTIFICATION_MARKER_RETRY_MS = 50;
 const NOTIFICATION_PRE_DELIVERY_LEASE_MS = 60_000;
+const DIRECT_BATCH_COST_MIN_STALE_AGE_MS = 10 * 60_000;
+const DIRECT_BATCH_COST_STALE_GRACE_MS = 5 * 60_000;
+
+function directBatchCostStaleAgeMs(): number {
+  // The marker starts before the bootstrap request. Keep it alive for the
+  // configured logical request deadline plus a bounded post-request grace
+  // period, while retaining the historical ten-minute floor for defaults.
+  return Math.max(
+    DIRECT_BATCH_COST_MIN_STALE_AGE_MS,
+    getConfig().FPL_REQUEST_DEADLINE_MS + DIRECT_BATCH_COST_STALE_GRACE_MS,
+  );
+}
 
 type LaunchRedisClient = {
   get: (key: string) => Promise<string | null>;
@@ -276,7 +289,7 @@ export async function runLaunchMonitor(options?: {
       .reconcileStaleBatchCostMarkers({
         lane: 'cron',
         scope: 'launch-monitor',
-        olderThanMs: 10 * 60_000,
+        olderThanMs: directBatchCostStaleAgeMs(),
         limit: 20,
       })
       .catch((error) => {

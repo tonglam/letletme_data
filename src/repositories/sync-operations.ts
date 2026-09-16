@@ -1277,8 +1277,27 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         const terminalAllowed =
           attempt >= latestAttempt &&
           (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
-        const closeRun =
+        let closeRun =
           terminalAllowed && NON_TERMINAL_RUN_STATUSES.includes(run.status as SyncRunStatus);
+        if (closeRun) {
+          // A settlement failure has the same shared-run lifetime as a normal
+          // settlement. Do not let one stalled redelivery terminalize the run
+          // while a same-or-newer sibling marker is still executing.
+          const runningSiblingRows = await tx
+            .select({ one: sql`1` })
+            .from(syncItemsInOps)
+            .where(
+              and(
+                eq(syncItemsInOps.runId, runId),
+                eq(syncItemsInOps.resourceType, SYNC_BATCH_COST_RESOURCE_TYPE),
+                eq(syncItemsInOps.status, 'running'),
+                sql`${syncItemsInOps.attempts} >= ${attempt}`,
+                sql`${syncItemsInOps.normalizedPayload}->>'phase' = 'started'`,
+              ),
+            )
+            .limit(1);
+          if (runningSiblingRows.length > 0) closeRun = false;
+        }
         const failedAttempt = {
           ...payload,
           schemaVersion: 1,
