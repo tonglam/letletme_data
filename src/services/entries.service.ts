@@ -32,7 +32,6 @@ import {
   exactTimestamp,
   clearEntryCheckpointDesiredV2,
   entryLiveInputFromFplPicks,
-  exactTimestamp,
   isEntryPublicationActiveAndCheckpointedV2,
   markEntryPublicationCheckpointedV2,
   publishEntryLiveFinalResultV2,
