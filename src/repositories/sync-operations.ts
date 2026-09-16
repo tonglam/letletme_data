@@ -438,22 +438,110 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .from(syncItemsInOps)
           .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
           .where(auditWhere);
-      const [allRows, recentRows, eventRows] = await Promise.all([
-        selectAuditRows(),
+      const eventRows = await db
+        .select({
+          finished: eventsInFpl.finished,
+          dataChecked: eventsInFpl.dataChecked,
+          dataCheckedAt: eventsInFpl.dataCheckedAt,
+        })
+        .from(eventsInFpl)
+        .where(
+          and(eq(eventsInFpl.seasonId, input.seasonId), eq(eventsInFpl.eventId, input.eventId)),
+        )
+        .limit(1);
+      const eventFinalized = eventRows[0]?.finished === true && eventRows[0]?.dataChecked === true;
+      const currentFinalizationRevision = eventRows[0]?.dataCheckedAt?.toISOString() ?? null;
+      const finalResourceId = `${resourcePrefix}final`;
+      const sourceRevisionAt = sql`
+        CASE
+          WHEN (${syncItemsInOps.normalizedPayload}->>'sourceRevision') ~
+            '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+          THEN (${syncItemsInOps.normalizedPayload}->>'sourceRevision')::timestamptz
+          ELSE NULL
+        END
+      `;
+      const finalEvidencePredicate = sql`
+        ${syncItemsInOps.resourceId} = ${finalResourceId}
+        AND ${syncItemsInOps.status} IN ('completed', 'skipped')
+        AND (${syncItemsInOps.normalizedPayload}->>'finalCompletion') = 'true'
+        AND ${
+          !eventFinalized
+            ? sql`true`
+            : currentFinalizationRevision === null
+              ? sql`false`
+              : sql`${sourceRevisionAt} >= ${currentFinalizationRevision}::timestamptz`
+        }
+      `;
+      const finalEvidenceComplete = !eventFinalized
+        ? sql<boolean>`true`
+        : currentFinalizationRevision === null
+          ? sql<boolean>`false`
+          : sql<boolean>`coalesce(bool_or(${finalEvidencePredicate}), false)`;
+      const [aggregateRows, recentRows] = await Promise.all([
+        db
+          .select({
+            totalRows: sql<number>`count(*)::int`,
+            executions: sql<number>`count(distinct ${syncRunsInOps.runId})::int`,
+            eventLiveRequests: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'eventLiveRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'eventLiveRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            picksRequests: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'picksRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'picksRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            transfers: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'transferRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'transferRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            unknownRequests: sql<number>`coalesce(sum(
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests') ~ '^[0-9]+([.][0-9]+)?$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests')::double precision
+                ELSE 0
+              END
+            ), 0)::double precision`,
+            factCommits: sql<number>`count(*) FILTER (
+              WHERE (${syncItemsInOps.normalizedPayload}->>'factCommit') = 'committed'
+            )::int`,
+            finalCompletions: sql<number>`count(*) FILTER (WHERE ${finalEvidencePredicate})::int`,
+            reusedSkips: sql<number>`count(*) FILTER (
+              WHERE ${syncItemsInOps.status} = 'skipped'
+                OR (${syncItemsInOps.normalizedPayload}->>'reused') = 'true'
+            )::int`,
+            failedItems: sql<number>`count(*) FILTER (
+              WHERE ${syncItemsInOps.status} = 'failed'
+            )::int`,
+            unaccountedItems: sql<number>`count(*) FILTER (
+              WHERE NOT (
+                ${syncItemsInOps.status} IN ('completed', 'skipped')
+                OR (${syncItemsInOps.normalizedPayload}->>'unknownRequests') ~ '^-?[0-9]+([.][0-9]+)?$'
+              )
+            )::int`,
+            finalEvidenceComplete,
+            coverageStartAt: sql<string | Date | null>`min(
+              coalesce(${syncItemsInOps.createdAt}, ${syncRunsInOps.createdAt})
+            )`,
+            triggers: sql<string[]>`coalesce(
+              array_agg(distinct ${syncRunsInOps.trigger}) FILTER (WHERE ${syncRunsInOps.trigger} IS NOT NULL),
+              ARRAY[]::text[]
+            )`,
+          })
+          .from(syncItemsInOps)
+          .innerJoin(syncRunsInOps, eq(syncRunsInOps.runId, syncItemsInOps.runId))
+          .where(auditWhere),
         selectAuditRows()
           .orderBy(desc(syncItemsInOps.updatedAt), desc(syncItemsInOps.runId))
           .limit(limit + 1),
-        db
-          .select({
-            finished: eventsInFpl.finished,
-            dataChecked: eventsInFpl.dataChecked,
-            dataCheckedAt: eventsInFpl.dataCheckedAt,
-          })
-          .from(eventsInFpl)
-          .where(
-            and(eq(eventsInFpl.seasonId, input.seasonId), eq(eventsInFpl.eventId, input.eventId)),
-          )
-          .limit(1),
       ]);
       const truncated = recentRows.length > limit;
       const observedRows = recentRows.slice(0, limit);
@@ -482,91 +570,42 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           observedAt: (row.itemUpdatedAt ?? row.itemCreatedAt ?? row.runCreatedAt).toISOString(),
         };
       });
-      const providerRequests = allRows.reduce(
-        (counts, row) => {
-          const payload = payloadFor(row.normalizedPayload);
-          counts.eventLive += numberValue(payload.eventLiveRequests);
-          counts.picks += numberValue(payload.picksRequests);
-          counts.transfers += numberValue(payload.transferRequests);
-          counts.unknown += numberValue(payload.unknownRequests);
-          return counts;
-        },
-        { eventLive: 0, picks: 0, transfers: 0, unknown: 0 },
-      );
-      const factCommits = allRows.filter(
-        (row) => stringValue(payloadFor(row.normalizedPayload).factCommit) === 'committed',
-      ).length;
-      const eventFinalized = eventRows[0]?.finished === true && eventRows[0]?.dataChecked === true;
-      const currentFinalizationRevision = eventRows[0]?.dataCheckedAt?.getTime() ?? null;
-      const matchesCurrentFinalization = (payload: Record<string, unknown>): boolean => {
-        if (!eventFinalized) return true;
-        if (currentFinalizationRevision === null) return false;
-        const sourceRevision = stringValue(payload.sourceRevision);
-        if (!sourceRevision) return false;
-        const parsed = new Date(sourceRevision);
-        return !Number.isNaN(parsed.getTime()) && parsed.getTime() >= currentFinalizationRevision;
-      };
-      const finalCompletions = allRows.filter(
-        (row) =>
-          componentFor(row.resourceId) === 'final' &&
-          (row.itemStatus === 'completed' || row.itemStatus === 'skipped') &&
-          boolValue(payloadFor(row.normalizedPayload).finalCompletion) &&
-          matchesCurrentFinalization(payloadFor(row.normalizedPayload)),
-      ).length;
-      const reusedSkips = allRows.filter(
-        (row) =>
-          row.itemStatus === 'skipped' || boolValue(payloadFor(row.normalizedPayload).reused),
-      ).length;
-      const failedItems = allRows.filter((row) => row.itemStatus === 'failed').length;
-      const finalEvidenceComplete =
-        !eventFinalized ||
-        allRows.some(
-          (row) =>
-            componentFor(row.resourceId) === 'final' &&
-            (row.itemStatus === 'completed' || row.itemStatus === 'skipped') &&
-            boolValue(payloadFor(row.normalizedPayload).finalCompletion) &&
-            matchesCurrentFinalization(payloadFor(row.normalizedPayload)),
-        );
+      const aggregate = aggregateRows[0];
+      const totalRows = Number(aggregate?.totalRows ?? 0);
+      const coverageStartAtValue = aggregate?.coverageStartAt;
+      const coverageStartAt =
+        coverageStartAtValue instanceof Date
+          ? coverageStartAtValue.toISOString()
+          : typeof coverageStartAtValue === 'string' &&
+              !Number.isNaN(Date.parse(coverageStartAtValue))
+            ? new Date(coverageStartAtValue).toISOString()
+            : null;
       const evidenceComplete =
-        allRows.length > 0 &&
-        finalEvidenceComplete &&
-        allRows.every((row) => {
-          const payload = payloadFor(row.normalizedPayload);
-          return (
-            row.itemStatus === 'completed' ||
-            row.itemStatus === 'skipped' ||
-            typeof payload.unknownRequests === 'number'
-          );
-        });
+        totalRows > 0 &&
+        aggregate?.finalEvidenceComplete === true &&
+        Number(aggregate?.unaccountedItems ?? 0) === 0;
       return {
         schemaVersion: 'entry-sync-audit-v1',
         seasonId: input.seasonId,
         eventId: input.eventId,
         entryId: input.entryId,
-        coverageStartAt:
-          allRows.length > 0
-            ? ((
-                allRows.reduce(
-                  (oldest, row) => {
-                    const candidate = row.runCreatedAt ?? row.itemCreatedAt;
-                    if (!candidate) return oldest;
-                    return !oldest || candidate < oldest ? candidate : oldest;
-                  },
-                  null as Date | null,
-                ) ?? null
-              )?.toISOString() ?? null)
-            : null,
+        coverageStartAt,
         observedAt: new Date().toISOString(),
-        available: allRows.length > 0,
-        reasonCodes: allRows.length > 0 ? [] : ['SYNC_AUDIT_EVIDENCE_MISSING'],
-        executions: new Set(allRows.map((row) => row.runId)).size,
-        providerRequests,
-        factCommits,
-        finalCompletions,
-        reusedSkips,
-        failedItems,
+        available: totalRows > 0,
+        reasonCodes: totalRows > 0 ? [] : ['SYNC_AUDIT_EVIDENCE_MISSING'],
+        executions: Number(aggregate?.executions ?? 0),
+        providerRequests: {
+          eventLive: Number(aggregate?.eventLiveRequests ?? 0),
+          picks: Number(aggregate?.picksRequests ?? 0),
+          transfers: Number(aggregate?.transfers ?? 0),
+          unknown: Number(aggregate?.unknownRequests ?? 0),
+        },
+        factCommits: Number(aggregate?.factCommits ?? 0),
+        finalCompletions: Number(aggregate?.finalCompletions ?? 0),
+        reusedSkips: Number(aggregate?.reusedSkips ?? 0),
+        failedItems: Number(aggregate?.failedItems ?? 0),
         evidenceComplete,
-        triggers: [...new Set(allRows.map((row) => row.trigger))],
+        triggers: aggregate?.triggers ?? [],
         recent,
         truncated,
       };

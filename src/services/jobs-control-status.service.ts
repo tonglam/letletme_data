@@ -284,21 +284,26 @@ async function readEntrySyncAudit(
   season: FplSeasonRecord,
   eventId: number | undefined,
   entryId: number | undefined,
+  requestedSeasonCode: string | undefined,
 ): Promise<Record<string, unknown>> {
-  if (eventId === undefined || entryId === undefined) {
+  if (requestedSeasonCode === undefined || eventId === undefined || entryId === undefined) {
     return {
       schemaVersion: 'entry-sync-audit-v1',
       available: false,
-      reasonCodes: ['ENTRY_AND_EVENT_REQUIRED'],
-      season: season.seasonCode,
+      reasonCodes: ['SEASON_EVENT_AND_ENTRY_REQUIRED'],
+      season: requestedSeasonCode ?? season.seasonCode,
       eventId: eventId ?? null,
       entryId: entryId ?? null,
     };
   }
+  const requestedSeason =
+    requestedSeasonCode === season.seasonCode
+      ? season
+      : await createSeasonRepository().requireByCode(requestedSeasonCode);
   return {
-    season: season.seasonCode,
+    season: requestedSeason.seasonCode,
     ...(await createSyncOperationsRepository().entrySyncAudit({
-      seasonId: season.seasonId,
+      seasonId: requestedSeason.seasonId,
       eventId,
       entryId,
     })),
@@ -317,6 +322,7 @@ export async function getJobsControlStatus(
   section?: JobsStatusSection,
   watchEntryId?: number,
   watchEventId?: number,
+  entryAuditSeason?: string,
 ): Promise<Record<string, unknown>> {
   const [databaseState, runtime, schedulerProgress, queuePause, orphanState] = await Promise.all([
     readControlDatabaseState(),
@@ -407,11 +413,12 @@ export async function getJobsControlStatus(
           databaseState.season,
           watchEventId,
           watchEntryId,
+          entryAuditSeason,
         ).catch(() => ({
           schemaVersion: 'entry-sync-audit-v1',
           available: false,
           reasonCodes: ['ENTRY_SYNC_AUDIT_UNAVAILABLE'],
-          season: databaseState.season.seasonCode,
+          season: entryAuditSeason ?? databaseState.season.seasonCode,
           eventId: watchEventId ?? null,
           entryId: watchEntryId ?? null,
         })),
