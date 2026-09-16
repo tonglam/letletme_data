@@ -841,6 +841,35 @@ describe('Live League V2 Classic finalized roster successor fence', () => {
     expect(isSafeFinalizedClassicRosterExpansion(insertedBeforeRead, fixture.persisted)).toBe(true);
   });
 
+  test('allows cohort-derived rank changes for existing rows', () => {
+    const fixture = successorFixture();
+    const previousRow = { ...fixture.read.index[0], lastOverallRank: 12 };
+    const rankedSuccessor: LeagueLiveRead = {
+      ...fixture.read,
+      index: [{ ...previousRow, overallRank: 9, lastOverallRank: 10 }, fixture.read.index[1]],
+    };
+    const persisted = {
+      ...fixture.persisted,
+      indexPayload: [previousRow],
+    };
+    expect(isSafeFinalizedClassicRosterExpansion(rankedSuccessor, persisted)).toBe(true);
+  });
+
+  test('rejects a rank disappearance or invalid rank transition', () => {
+    const fixture = successorFixture();
+    const missingRank: LeagueLiveRead = {
+      ...fixture.read,
+      index: [{ ...fixture.read.index[0], overallRank: null }, fixture.read.index[1]],
+    };
+    expect(isSafeFinalizedClassicRosterExpansion(missingRank, fixture.persisted)).toBe(false);
+
+    const newlyRanked: LeagueLiveRead = {
+      ...fixture.read,
+      index: [{ ...fixture.read.index[0], lastOverallRank: 11 }, fixture.read.index[1]],
+    };
+    expect(isSafeFinalizedClassicRosterExpansion(newlyRanked, fixture.persisted)).toBe(false);
+  });
+
   test('rejects changed, removed, or duplicate persisted rows', () => {
     const changed = successorFixture();
     const changedRead: LeagueLiveRead = {
