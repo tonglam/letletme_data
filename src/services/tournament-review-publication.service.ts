@@ -676,7 +676,7 @@ export function normalizeTournamentReviewPointsRow(
   };
 }
 
-async function buildPointsPayload(
+export async function buildPointsPayload(
   tx: postgres.TransactionSql,
   seasonId: number,
   tournament: TournamentRow,
@@ -970,34 +970,51 @@ async function buildPointsPayload(
   const canonicalGroupByEntry = new Map(
     canonicalGroupRows.map((row) => [row.entry_id, row.group_id]),
   );
+  // Drive from the expected finalized event/roster scope. Starting from
+  // existing projections hides missing historical rows and incorrectly sends
+  // a later review back to repair its already-complete current event.
   const historicalGroupRows = await tx<
-    Array<{ event_id: number; entry_id: number; group_id: number | null }>
+    Array<{ event_id: number; entry_id: number; group_id: number | null; source_ready: boolean }>
   >`
-    SELECT history.event_id, history.entry_id, history.group_id
-    FROM competition.tournament_points_group_results history
-    JOIN competition.tournament_entries roster
-      ON roster.season_id = history.season_id
-     AND roster.tournament_id = history.tournament_id
-     AND roster.entry_id = history.entry_id
+    SELECT history_event.event_id, roster.entry_id, history.group_id,
+           COALESCE(
+             result.event_points IS NOT NULL
+             AND result.event_net_points IS NOT NULL
+             AND result.rich_synced_at >= history_event.data_checked_at
+             AND history.event_points IS NOT DISTINCT FROM result.event_points
+             AND history.event_cost IS NOT DISTINCT FROM result.event_transfers_cost
+             AND history.event_net_points IS NOT DISTINCT FROM result.event_net_points
+             AND history.updated_at >= GREATEST(
+               result.updated_at, result.rich_synced_at, history_event.data_checked_at
+             ), false
+           ) AS source_ready
+    FROM competition.tournament_entries roster
     JOIN competition.entries entry
-      ON entry.season_id = history.season_id
-     AND entry.entry_id = history.entry_id
-    JOIN fpl.events history_event
-      ON history_event.season_id = history.season_id
-     AND history_event.event_id = history.event_id
+      ON entry.season_id = roster.season_id AND entry.entry_id = roster.entry_id
     JOIN competition.tournaments history_tournament
-      ON history_tournament.season_id = history.season_id
-     AND history_tournament.tournament_id = history.tournament_id
-    WHERE history.season_id = ${seasonId}
-      AND history.tournament_id = ${tournament.tournament_id}
-      AND history.event_id >= GREATEST(
-        COALESCE(history_tournament.group_started_event_id, 1),
-        COALESCE(entry.started_event, 1)
-      )
-      AND history.event_id <= ${event.event_id}
-      AND history_event.finished = true
-      AND history_event.data_checked = true
-      AND history_event.data_checked_at IS NOT NULL
+      ON history_tournament.season_id = roster.season_id
+     AND history_tournament.tournament_id = roster.tournament_id
+    JOIN fpl.events history_event
+      ON history_event.season_id = roster.season_id
+     AND history_event.event_id >= GREATEST(
+       COALESCE(history_tournament.group_started_event_id, 1),
+       COALESCE(entry.started_event, 1)
+     )
+     AND history_event.event_id <= ${event.event_id}
+     AND history_event.finished = true
+     AND history_event.data_checked = true
+     AND history_event.data_checked_at IS NOT NULL
+    LEFT JOIN competition.tournament_points_group_results history
+      ON history.season_id = roster.season_id
+     AND history.tournament_id = roster.tournament_id
+     AND history.entry_id = roster.entry_id
+     AND history.event_id = history_event.event_id
+    LEFT JOIN competition.entry_event_results result
+      ON result.season_id = roster.season_id
+     AND result.entry_id = roster.entry_id
+     AND result.event_id = history_event.event_id
+    WHERE roster.season_id = ${seasonId}
+      AND roster.tournament_id = ${tournament.tournament_id}
   `;
   const staleGroupEventIds = [
     ...new Set(
@@ -1013,6 +1030,15 @@ async function buildPointsPayload(
     throw new TournamentReviewSourceNotReadyError(
       'historical points group assignment is stale',
       staleGroupEventIds,
+    );
+  }
+  const staleResultEventIds = [
+    ...new Set(historicalGroupRows.filter((row) => !row.source_ready).map((row) => row.event_id)),
+  ].sort((left, right) => left - right);
+  if (staleResultEventIds.length > 0) {
+    throw new TournamentReviewSourceNotReadyError(
+      'historical points results are incomplete or inconsistent',
+      staleResultEventIds,
     );
   }
   const notApplicable = rows.filter(
@@ -1105,7 +1131,16 @@ async function buildPointsPayload(
         (historicalRankByEntry.get(row.entry_id) ?? null),
     )
   ) {
-    throw new TournamentReviewSourceNotReadyError('previous points group ranks are stale');
+    throw new TournamentReviewSourceNotReadyError(
+      'previous points group ranks are stale',
+      [
+        ...new Set(
+          historicalRankRows
+            .filter((row) => integerOrNull(row.stored_group_rank) !== row.expected_group_rank)
+            .map((row) => row.event_id),
+        ),
+      ].sort((left, right) => left - right),
+    );
   }
   if (
     applicable.some(

@@ -1858,6 +1858,8 @@ export async function observeDueFreshnessWindows(
 }
 
 export async function openGovernanceCase(input: {
+  /** Explicit operator corrections retain evidence without automatic dispatch. */
+  requiresReview?: boolean;
   caseKind: string;
   contractKey: string;
   lane: string;
@@ -1871,7 +1873,7 @@ export async function openGovernanceCase(input: {
   evidence?: Record<string, unknown>;
   repairTarget?: Record<string, unknown>;
   compensator: string;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }) {
   // Shadow mode records freshness breaches in the SLO ledger but must remain
   // observation-only.  Keep this invariant at the case boundary as well as
@@ -1886,6 +1888,7 @@ export async function openGovernanceCase(input: {
       .insert(dataGovernanceCasesInOps)
       .values({
         caseKind: input.caseKind,
+        ...(input.requiresReview ? { status: 'REQUIRES_REVIEW' } : {}),
         contractKey: input.contractKey,
         lane: input.lane,
         obligationId: input.obligationId,
@@ -2114,7 +2117,7 @@ export async function updateGovernanceCaseStatus(input: {
   status: Extract<GovernanceCaseStatus, 'RECOVERED' | 'REQUIRES_REVIEW'>;
   lastError?: string | null;
   recoveryRevision?: string | null;
-  db?: DbHandle;
+  db?: DbOrTransaction;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
   const [row] = await db

@@ -78,7 +78,11 @@ export async function enqueueLiveMatchCheckpoint(
   kind: 'desk' | 'detail',
   publicationId: string,
   generation: number,
-  options: { readonly successor?: boolean; readonly delayMs?: number } = {},
+  options: {
+    readonly successor?: boolean;
+    readonly delayMs?: number;
+    readonly allowFinalReplacement?: boolean;
+  } = {},
 ) {
   try {
     const queue = liveDataQueue;
@@ -138,6 +142,7 @@ export async function enqueueLiveMatchCheckpoint(
         checkpointKind: kind,
         checkpointPublicationId: publicationId,
         checkpointGeneration: generation,
+        checkpointAllowFinalReplacement: options.allowFinalReplacement === true,
       } satisfies LiveDataJobData,
       {
         jobId,
@@ -198,7 +203,11 @@ export async function enqueueRemainingLiveMatchCheckpoint(
     kind,
     desired.publicationId,
     desired.generation,
-    { successor: true, delayMs },
+    {
+      successor: true,
+      delayMs,
+      allowFinalReplacement: desired.allowFinalReplacement,
+    },
   );
 }
 

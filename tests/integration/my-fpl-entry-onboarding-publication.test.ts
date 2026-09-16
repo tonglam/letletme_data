@@ -1,10 +1,13 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+import { correctDeletedEntryFinal } from '../../src/services/entry-final-correction.service';
+import * as entryServices from '../../src/services/entries.service';
+import * as correctionGovernance from '../../src/services/data-governance.service';
 import * as globalCheckpoints from '../../src/services/live-publication-v2-checkpoint.service';
 import type { RawFPLEventLiveResponse } from '../../src/types';
 import { fplClient } from '../../src/clients/fpl';
 import { findMissingCoreResults } from '../../src/services/tournament-backfill.service';
 import { syncTournamentEventResultsForEntryIds } from '../../src/services/tournament-event-results.service';
 import { entryEventPicksRepository } from '../../src/repositories/entry-event-picks';
-import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
@@ -88,6 +91,7 @@ const liveRows: EventLive[] = PLAYER_IDS.map((elementId, index) => ({
 }));
 async function cleanup(): Promise<void> {
   const sql = await getDbClient();
+  await sql`DELETE FROM ops.data_governance_cases WHERE case_kind='entry-final-correction' AND scope_key LIKE ${`${SEASON.seasonCode}:event:${EVENT_ID}:entry:%`}`;
   await sql`
     DELETE FROM competition.my_fpl_snapshot_publications
     WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
@@ -1083,6 +1087,8 @@ test('historical manager input uses a verified FINAL global checkpoint when Redi
       skipTransfers: true,
       concurrency: 1,
       live: providerLive,
+      // Bind this fixture to one millisecond source/freshness boundary.
+      sourceCheckedAt: new Date(observedAt.getTime() + 1).toISOString(),
     });
     expect(redundantLive).not.toHaveBeenCalled();
     const [result] =
@@ -1232,4 +1238,227 @@ test('historical recovery preserves a durable provisional base and advances an o
   expect((await readEntryLiveInputV2(scope))?.publication.publicationId).toBe(
     microsecondAdvance.publication.publicationId,
   );
+});
+
+test('audited deleted-entry correction survives checkpoint failure without changing event authority', async () => {
+  await seedBase();
+  await seedEntry(ENTRY_IDS[0], true);
+  const sql = await getDbClient();
+  const redis = await redisSingleton.getClient();
+  const scope = { season: SEASON.seasonCode, eventId: EVENT_ID, entryId: ENTRY_IDS[0] };
+  const boundary = new Date(CAPTURE_NOW.getTime() - 1000).toISOString().replace('Z', '456Z');
+  await sql`UPDATE fpl.events SET finished=true,data_checked=true,data_checked_at=${boundary}::timestamptz WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+  await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0]);
+  const picks = {
+    active_chip: null,
+    automatic_subs: [],
+    picks: EVENT_PICKS,
+    entry_history: {
+      event: EVENT_ID,
+      points: 67,
+      total_points: 67,
+      rank: 1 as number | null,
+      overall_rank: 1000,
+      bank: 10,
+      value: 1000,
+      event_transfers: 0,
+      event_transfers_cost: 0,
+      points_on_bench: 0,
+    },
+  };
+  await checkpointFinalEntryFromProviderResponse(
+    SEASON,
+    ENTRY_IDS[0],
+    EVENT_ID,
+    picks,
+    CAPTURE_NOW,
+    boundary,
+  );
+  const original = (await readEntryLiveInputV2(scope))!;
+  await sql`UPDATE competition.entries SET entry_name='Deleted',player_name='Deleted Player',overall_rank=0 WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]}`;
+  await sql`UPDATE competition.entry_event_results SET overall_points=0,overall_rank=0,event_rank=0 WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID} AND entry_id=${ENTRY_IDS[0]}`;
+  picks.entry_history.total_points = 0;
+  picks.entry_history.rank = null;
+  picks.entry_history.overall_rank = 0;
+  const provider = spyOn(fplClient, 'getEntryEventPicks').mockResolvedValue(picks);
+  const history = spyOn(fplClient, 'getEntryHistory').mockResolvedValue({
+    current: [picks.entry_history],
+    past: [],
+    chips: [],
+  });
+  const target = {
+    season: SEASON,
+    entryId: ENTRY_IDS[0],
+    eventId: EVENT_ID,
+    expectedPublicationId: original.publication.publicationId,
+    expectedGeneration: original.publication.generation,
+    changeId: 'integration-final-correction',
+    apply: false,
+  };
+  const priorCurrentSeasons =
+    await sql`UPDATE fpl.seasons SET is_current=false WHERE is_current RETURNING season_id`;
+  await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${SEASON.seasonId}`;
+  try {
+    expect((await correctDeletedEntryFinal(target)).mode).toBe('inspect');
+    expect((await readEntryLiveInputV2(scope))!.publication.publicationId).toBe(
+      original.publication.publicationId,
+    );
+    const [before] =
+      await sql`SELECT count(*)::int AS n FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
+    expect(before!.n).toBe(0);
+    // Ordinary rebuilding must continue to refuse the historical conflict.
+    await expect(
+      checkpointFinalEntryFromProviderResponse(
+        SEASON,
+        ENTRY_IDS[0],
+        EVENT_ID,
+        picks,
+        new Date(),
+        boundary,
+      ),
+    ).rejects.toThrow('explicit correction');
+    history.mockImplementationOnce(async () => {
+      await sql`UPDATE fpl.seasons SET is_current=false WHERE season_id=${SEASON.seasonId}`;
+      return { current: [picks.entry_history], past: [], chips: [] };
+    });
+    await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+      'current season changed',
+    );
+    await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${SEASON.seasonId}`;
+    const [noAudit] =
+      await sql`SELECT count(*)::int AS n FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
+    expect(noAudit!.n).toBe(0);
+    // A canonical writer racing the provider read must stop promotion.
+    history.mockImplementationOnce(async () => {
+      await sql`UPDATE competition.entry_event_results SET overall_points=1 WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID} AND entry_id=${ENTRY_IDS[0]}`;
+      return { current: [picks.entry_history], past: [], chips: [] };
+    });
+    await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+      'changed during correction',
+    );
+    expect((await readEntryLiveInputV2(scope))!.publication.publicationId).toBe(
+      original.publication.publicationId,
+    );
+    await sql`UPDATE competition.entry_event_results SET overall_points=0 WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID} AND entry_id=${ENTRY_IDS[0]}`;
+    const checkpoint = spyOn(entryServices, 'checkpointEntryLiveInputV2').mockRejectedValueOnce(
+      new Error('injected checkpoint failure'),
+    );
+    try {
+      await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+        'injected checkpoint failure',
+      );
+    } finally {
+      checkpoint.mockRestore();
+    }
+    const published = (await readEntryLiveInputV2(scope))!;
+    expect(published.input.finalResult!.score).toEqual({ eventPoints: 67, totalPoints: 0 });
+    expect(published.input.picksBase).toEqual(original.input.picksBase);
+    expect(published.input.officialAdjustment).toEqual(original.input.officialAdjustment);
+    expect(
+      (await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID))!.publicationId,
+    ).toBe(original.publication.publicationId);
+    const [audit] =
+      await sql`SELECT evidence,status FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
+    expect(audit!.status).toBe('REQUIRES_REVIEW');
+    expect(audit!.evidence.originalInput).toEqual(original.input);
+    provider.mockRejectedValue(new Error('deleted account picks unavailable'));
+    history.mockRejectedValue(new Error('deleted account history unavailable'));
+    const providerCalls = provider.mock.calls.length,
+      historyCalls = history.mock.calls.length;
+    const realCheckpoint = entryServices.checkpointEntryLiveInputV2;
+    const changedIdentity = spyOn(
+      entryServices,
+      'checkpointEntryLiveInputV2',
+    ).mockImplementationOnce(async (...args) => {
+      const result = await realCheckpoint(...args);
+      await sql`UPDATE competition.entries SET player_name='Restored identity' WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]}`;
+      return result;
+    });
+    try {
+      await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+        'deleted-entry',
+      );
+    } finally {
+      changedIdentity.mockRestore();
+    }
+    await sql`UPDATE competition.entries SET player_name='Deleted Player' WHERE season_id=${SEASON.seasonId} AND entry_id=${ENTRY_IDS[0]}`;
+    const changedSeason = spyOn(entryServices, 'checkpointEntryLiveInputV2').mockImplementationOnce(
+      async (...args) => {
+        const result = await realCheckpoint(...args);
+        await sql`UPDATE fpl.seasons SET is_current=false WHERE season_id=${SEASON.seasonId}`;
+        return result;
+      },
+    );
+    try {
+      await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+        'current season changed',
+      );
+    } finally {
+      changedSeason.mockRestore();
+    }
+    await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${SEASON.seasonId}`;
+    const [notRecovered] =
+      await sql`SELECT status FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
+    expect(notRecovered!.status).toBe('REQUIRES_REVIEW');
+    const settlement = spyOn(
+      correctionGovernance,
+      'updateGovernanceCaseStatus',
+    ).mockResolvedValueOnce(false);
+    try {
+      await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+        'audit settlement',
+      );
+    } finally {
+      settlement.mockRestore();
+    }
+    expect(
+      (await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID))!.publicationId,
+    ).toBe(published.publication.publicationId);
+    const resumed = await correctDeletedEntryFinal({ ...target, apply: true });
+    expect(resumed.mode).toBe('applied');
+    expect(
+      (await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID))!.publicationId,
+    ).toBe(published.publication.publicationId);
+    expect((await correctDeletedEntryFinal({ ...target, apply: true })).alreadyPublished).toBe(
+      true,
+    );
+    expect(provider.mock.calls.length).toBe(providerCalls);
+    expect(history.mock.calls.length).toBe(historyCalls);
+    const [settled] =
+      await sql`SELECT status,recovery_revision FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
+    expect(settled!.status).toBe('RECOVERED');
+    expect(settled!.recovery_revision).toBe(published.publication.publicationId);
+    expect(JSON.parse((await redis.get(entryLiveV2Key(scope, 'previous')))!).publicationId).toBe(
+      published.publication.publicationId,
+    );
+    expect(await redis.exists(original.publication.item.key)).toBe(0);
+    const [event] =
+      await sql`SELECT to_char(data_checked_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS data_checked_at FROM fpl.events WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+    expect(event!.data_checked_at).toBe(boundary);
+    // An obsolete operator target cannot overwrite the replacement even with a newer source fence.
+    const later = new Date(Date.now() + 1000);
+    await expect(
+      publishEntryLiveInputV2({
+        ...scope,
+        input: original.input,
+        generationFloor: published.publication.generation,
+        sourceCheckedAt: later,
+        finalizationCorrectionBoundary: later,
+        expectedCurrentPublication: {
+          publicationId: original.publication.publicationId,
+          generation: original.publication.generation,
+          contentSha256: original.publication.item.sha256,
+        },
+      }),
+    ).rejects.toThrow('identity changed');
+    expect((await readEntryLiveInputV2(scope))!.publication.publicationId).toBe(
+      published.publication.publicationId,
+    );
+  } finally {
+    provider.mockRestore();
+    history.mockRestore();
+    await sql`UPDATE fpl.seasons SET is_current=false WHERE season_id=${SEASON.seasonId}`;
+    for (const row of priorCurrentSeasons)
+      await sql`UPDATE fpl.seasons SET is_current=true WHERE season_id=${row.season_id}`;
+  }
 });
