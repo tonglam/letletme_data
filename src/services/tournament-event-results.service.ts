@@ -1753,6 +1753,18 @@ export async function syncTournamentEventResults(
       new Set(requiredTransferEntryIds),
       options?.skipTransfers,
     );
+    if (!options?.skipTransfers && plan.requiredTransferEntryIds.length > 0) {
+      await syncOperationsRepository.upsertItems(
+        auditRunId,
+        plan.requiredTransferEntryIds.map((entryId) => ({
+          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+          resourceId: entryEventAuditResourceId(season, eventId, entryId, 'transfers'),
+          status: 'pending' as const,
+          attempts: auditAttempt,
+          normalizedPayload: { phase: 'entry-transfer-history' },
+        })),
+      );
+    }
     const finalizationRecoveryEntryIds = new Set<number>();
     if (finalizationDate && finalizationCutoff) {
       const finalHeads = await entryEventPicksRepository.findHeadsByEventAndEntryIds(

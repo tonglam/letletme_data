@@ -5,8 +5,20 @@ import {
   calcEntryWinningNum,
   shouldDeferNextRoundResultRehome,
 } from '../../src/services/tournament-knockout-results.service';
+import { resolveKnockoutLegEntrants } from '../../src/services/tournament-structure.service';
 
 describe('tournament knockout win counts', () => {
+  test('preserves the configured home/away reversal for even legs', () => {
+    expect(resolveKnockoutLegEntrants(101, 202, 1)).toEqual({
+      homeEntryId: 101,
+      awayEntryId: 202,
+    });
+    expect(resolveKnockoutLegEntrants(101, 202, 2)).toEqual({
+      homeEntryId: 202,
+      awayEntryId: 101,
+    });
+  });
+
   test('keeps persisted win counts integer when a leg is tied', () => {
     const results = [
       { homeEntryId: 101, awayEntryId: 202, homeNetPoints: 44, awayNetPoints: 31 },

@@ -437,10 +437,10 @@ export async function syncKnockoutForTournament(
       ? new Map<number, Pick<DbTournamentKnockout, 'homeEntryId' | 'awayEntryId'>>()
       : new Map(
           (
-            await tournamentKnockoutsRepository.findByTournamentAndEndedEvent(
+            await tournamentKnockoutsRepository.findByTournamentAndMatchIds(
               season,
               tournament.id,
-              eventId,
+              uniqueNumbers(options.candidateResults.map((result) => result.matchId)),
             )
           ).map((knockout) => [knockout.matchId, knockout]),
         );

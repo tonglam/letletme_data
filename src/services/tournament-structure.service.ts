@@ -39,6 +39,16 @@ export type TournamentStructureRepairCandidate = Readonly<{
   knockoutResults: ReadonlyArray<DbTournamentKnockoutResultInsert>;
 }>;
 
+export function resolveKnockoutLegEntrants(
+  homeEntryId: number | null,
+  awayEntryId: number | null,
+  playAgainstId: number,
+): { homeEntryId: number | null; awayEntryId: number | null } {
+  return playAgainstId % 2 === 0
+    ? { homeEntryId: awayEntryId, awayEntryId: homeEntryId }
+    : { homeEntryId, awayEntryId };
+}
+
 function groupInsert(row: Record<string, number | string | null>): DbTournamentGroupInsert {
   return {
     tournamentId: Number(row.tournament_id),
@@ -284,14 +294,17 @@ export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
       .filter((result) => {
         if (result.officialMatchId !== null) return false;
         const match = knockouts.find((candidate) => candidate.matchId === result.matchId);
+        const expectedLegEntrants = match
+          ? resolveKnockoutLegEntrants(match.homeEntryId, match.awayEntryId, result.playAgainstId)
+          : null;
         return (
           !match ||
           match.startedEventId === null ||
           result.eventId < match.startedEventId ||
           (match.endedEventId !== null && result.eventId > match.endedEventId) ||
           result.playAgainstId !== result.eventId - match.startedEventId + 1 ||
-          result.homeEntryId !== match.homeEntryId ||
-          result.awayEntryId !== match.awayEntryId
+          result.homeEntryId !== expectedLegEntrants?.homeEntryId ||
+          result.awayEntryId !== expectedLegEntrants?.awayEntryId
         );
       })
       .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
@@ -406,10 +419,20 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
               AND result.event_id >= knockout.started_event_id
               AND (knockout.ended_event_id IS NULL OR result.event_id <= knockout.ended_event_id)
               AND result.play_against_id = result.event_id - knockout.started_event_id + 1
-              AND result.home_entry_id IS NOT DISTINCT FROM knockout.home_entry_id
-              AND result.away_entry_id IS NOT DISTINCT FROM knockout.away_entry_id
+              AND result.home_entry_id IS NOT DISTINCT FROM (
+                CASE
+                  WHEN result.play_against_id % 2 = 0 THEN knockout.away_entry_id
+                  ELSE knockout.home_entry_id
+                END
+              )
+              AND result.away_entry_id IS NOT DISTINCT FROM (
+                CASE
+                  WHEN result.play_against_id % 2 = 0 THEN knockout.home_entry_id
+                  ELSE knockout.away_entry_id
+                END
+              )
         )
-    `);
+      `);
 
     const deleteUnchangedRows = async <T extends { sourceResultId: number; updatedAt: string }>(
       table:

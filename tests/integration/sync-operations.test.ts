@@ -130,13 +130,19 @@ function publicationManifest(
   };
 }
 
-async function startRun(runId: string, season: FplSeasonRef, lane = 'core'): Promise<string> {
+async function startRun(
+  runId: string,
+  season: FplSeasonRef,
+  lane = 'core',
+  eventId?: number,
+): Promise<string> {
   return syncOperationsRepository.startRun({
     runId,
     provider: 'fpl',
     lane,
     scope: 'integration-contract',
     season,
+    ...(eventId === undefined ? {} : { eventId }),
     mode: 'full',
     trigger: 'test',
     expectedItems: 1,
@@ -413,7 +419,7 @@ describe('ops sync state machine', () => {
 
   test('does not certify results while a transfer component is unresolved', async () => {
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
-    await startRun(RUN_IDS[1], season);
+    await startRun(RUN_IDS[1], season, 'entry', 1);
     await syncOperationsRepository.upsertItems(RUN_IDS[1], [
       {
         resourceType: 'entry-event',
