@@ -509,6 +509,7 @@ export async function persistEntryEventPicksResponse(
   }
   if (sameInput && !generationNeedsRepair) {
     let publication = existing!.publication;
+    let touchedPublication = false;
     // A successful source retry must leave an exact observation watermark for
     // the durable audit, even when the fifteen pick rows and input content are
     // unchanged. Touch only a current provisional publication; FINAL inputs
@@ -527,13 +528,14 @@ export async function persistEntryEventPicksResponse(
         );
       }
       publication = touched;
+      touchedPublication = true;
       desired = await readEntryCheckpointDesiredV2({
         season: season.seasonCode,
         eventId,
         entryId,
       });
     }
-    if (desired !== null || publication.checkpointedAt === null) {
+    if (touchedPublication || desired !== null || publication.checkpointedAt === null) {
       await ensureEntryLiveCheckpoint(season, eventId, entryId, publication, desired);
     }
     return { entryId, eventId, changed: false };
