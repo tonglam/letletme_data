@@ -45,6 +45,8 @@ export interface EntrySyncJobData {
   freshnessWindowId?: number;
   /** Stable source checkpoint retained across scan chunks and retries. */
   freshAfter?: string;
+  /** Original caller watermark used to audit retries of forced refreshes. */
+  requestWatermark?: string;
   queueKey?: string;
   /** Stable BullMQ single-flight identity for restart-sensitive fan-out jobs. */
   deduplicationId?: string;

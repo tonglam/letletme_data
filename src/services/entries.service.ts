@@ -666,6 +666,8 @@ export async function syncEntryEventResults(
   options?: {
     /** One validated event-live observation shared by the containing batch. */
     providerEventLive?: EventPointsPayload;
+    /** Exact database ordering timestamp captured with the shared event-live observation. */
+    providerEventLiveSourceCheckedAt?: Date | string;
   },
 ) {
   try {
@@ -673,7 +675,21 @@ export async function syncEntryEventResults(
     // This timestamp describes the evidence window, not database completion.
     // If the GW finalizes while either request is in flight, the persisted
     // marker remains before data_checked_at and the finalized scan refetches it.
-    const richSyncStartedAt = await readDatabaseOrderingTimestamp();
+    const richSyncStartedAt = options?.providerEventLiveSourceCheckedAt
+      ? (() => {
+          const date = new Date(options.providerEventLiveSourceCheckedAt!);
+          return {
+            date,
+            exact:
+              typeof options.providerEventLiveSourceCheckedAt === 'string'
+                ? options.providerEventLiveSourceCheckedAt
+                : date.toISOString(),
+          };
+        })()
+      : await readDatabaseOrderingTimestamp();
+    if (!Number.isFinite(richSyncStartedAt.date.getTime()) || !richSyncStartedAt.exact) {
+      throw new Error('A valid shared event-live source timestamp is required');
+    }
     const picksPromise = fplClient.getEntryEventPicks(entryId, eventId);
     const livePromise = options?.providerEventLive
       ? Promise.resolve(options.providerEventLive)
