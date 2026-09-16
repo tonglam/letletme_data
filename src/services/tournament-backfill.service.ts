@@ -754,9 +754,13 @@ export async function runTournamentEventBackfill(
       undefined,
       { requirePicksForEvents: [eventId] },
     );
+    const entryStartEvents = await loadEntryStartEvents(season, entryIds);
+    const eligibleEntryIds = entryIds.filter((entryId) =>
+      isEligibleForEvent(entryId, eventId, entryStartEvents),
+    );
     const missingTransfers = await entryEventTransfersRepository.findEntryIdsNeedingSync(
       season,
-      entryIds,
+      eligibleEntryIds,
       eventId,
     );
     if (missingTransfers.length > 0) {
@@ -801,6 +805,7 @@ export async function runTournamentEventBackfill(
     {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       entryIds,
+      freshAfter: finalCutoff ?? undefined,
     },
   );
   if (

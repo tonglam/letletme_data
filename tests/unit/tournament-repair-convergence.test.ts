@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 import type { TournamentConfig } from '../../src/domain/tournament';
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
+import * as resultRepositories from '../../src/repositories/entry-event-results';
+import * as transferRepositories from '../../src/repositories/entry-event-transfers';
 import { entryEventResultsRepository } from '../../src/repositories/entry-event-results';
 import { entryEventPicksRepository } from '../../src/repositories/entry-event-picks';
 import { entryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
@@ -77,7 +79,12 @@ describe('FINAL tournament repair convergence', () => {
     expect(await run()).toEqual([]);
     expect(eventResults.syncTournamentEventResultsForEntryIds).not.toHaveBeenCalled();
     expect(eventResults.syncEntryTransferHistories).not.toHaveBeenCalled();
-    expect(leagueResults.syncLeagueEventResultsByTournament).toHaveBeenCalledTimes(1);
+    expect(leagueResults.syncLeagueEventResultsByTournament).toHaveBeenCalledWith(
+      TEST_SEASON,
+      4,
+      3,
+      expect.objectContaining({ freshAfter: cutoff }),
+    );
   });
   test('retries only missing FINAL inputs and allows durable recovery first', async () => {
     complete.delete(7);
@@ -118,6 +125,24 @@ describe('FINAL tournament repair convergence', () => {
       expect.anything(),
     );
     expect(leagueResults.syncLeagueEventResultsByTournament).not.toHaveBeenCalled();
+  });
+  test('does not fetch transfers for managers who joined after the repaired round', async () => {
+    spyOn(entryInfoRepository, 'findByIds').mockResolvedValue(
+      ids.map((id) => ({ id, startedEvent: id === 9 ? 4 : 1 })) as never,
+    );
+    spyOn(transferRepositories, 'withEntrySeasonSyncTransaction').mockImplementation(
+      async (_season, _entryId, operation) => operation({} as never),
+    );
+    spyOn(resultRepositories, 'createEntryEventResultsRepository').mockReturnValue({
+      seedPreEntryBaselines: async () => 1,
+    } as never);
+    await run();
+    expect(entryEventTransfersRepository.findEntryIdsNeedingSync).toHaveBeenCalledWith(
+      TEST_SEASON,
+      ids.filter((id) => id !== 9),
+      3,
+    );
+    expect(eventResults.syncEntryTransferHistories).not.toHaveBeenCalled();
   });
   test('rejects a changed finalization boundary before deriving results', async () => {
     spyOn(eventRepository, 'findDataCheckedAtExact')
