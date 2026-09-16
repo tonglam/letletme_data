@@ -94,10 +94,12 @@ function groupInsert(row: Record<string, number | string | null>): DbTournamentG
  * Build the complete local battle schedule from the rebuilt group topology.
  *
  * Local battle fixtures are round-robin facts: the group slots, event window,
- * and round position determine the accepted matchup. Include both orientations
- * because home/away is a display direction, while the business identity is the
- * pair of slots. This whitelist is deliberately independent of the pre-repair
- * result rows, so a corrupt extra row cannot make itself part of the candidate.
+ * and round position determine the accepted matchup. Emit one canonical
+ * orientation per pairing: the persistence key includes home/away direction,
+ * and accepting both directions would let a corrupt reverse duplicate count the
+ * same match twice. This whitelist is deliberately independent of the
+ * pre-repair result rows, so a corrupt extra row cannot make itself part of the
+ * candidate.
  */
 export function buildBattleMatchupSchedule(
   groupRows: ReadonlyArray<BattleScheduleGroupRow>,
@@ -167,7 +169,6 @@ export function buildBattleMatchupSchedule(
         const right = ordered[ordered.length - pair - 1];
         if (left === null || right === null) continue;
         append(groupId, eventId, left, right);
-        append(groupId, eventId, right, left);
       }
     }
   }

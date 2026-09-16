@@ -99,6 +99,12 @@ describe('rebuilt battle schedule', () => {
     expect(keys).not.toContainEqual({
       groupId: 1,
       eventId: 1,
+      homeIndex: 4,
+      awayIndex: 1,
+    });
+    expect(keys).not.toContainEqual({
+      groupId: 1,
+      eventId: 1,
       homeIndex: 1,
       awayIndex: 3,
     });

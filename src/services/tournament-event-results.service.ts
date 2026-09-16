@@ -808,6 +808,8 @@ export async function syncTournamentEventResultsForEntryIds(
     }
     await mapWithConcurrency(providerEntryIds, concurrency, async (entryId) => {
       let accepted = false;
+      let resultNeeded = requiredResultEntryIds.includes(entryId);
+      let transferNeeded = !options?.skipTransfers && transferEntryIds.has(entryId);
       const picksRequest = { started: false, completed: false };
       const transferRequest = { started: false, completed: false };
       const trackedRequest = async <T>(
@@ -846,6 +848,8 @@ export async function syncTournamentEventResultsForEntryIds(
               (finalizationDate !== null && !durable.finalComplete);
             const needsTransfer =
               !options?.skipTransfers && transferEntryIds.has(entryId) && durable.transfersMissing;
+            resultNeeded = needsResult;
+            transferNeeded = needsTransfer;
 
             if (!options?.skipTransfers && transferEntryIds.has(entryId) && !needsTransfer) {
               // The initial planner created a transfer audit item, but another
@@ -1121,23 +1125,44 @@ export async function syncTournamentEventResultsForEntryIds(
           },
         );
       } catch (error) {
+        const transferOnlyFailure = transferNeeded && !resultNeeded;
         const auditFailureItems = [
-          {
-            resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
-            resourceId: entryEventAuditResourceId(season, eventId, entryId),
-            status: 'failed' as const,
-            attempts: auditAttempt,
-            normalizedPayload: {
-              phase: 'entry-event-results',
-              eventLiveRequests: eventLiveProviderRequestStarted ? 1 : 0,
-              picksRequests: picksRequest.started ? 1 : 0,
-              transferRequests: transferRequest.started ? 1 : 0,
-              unknownRequests:
-                (picksRequest.started && !picksRequest.completed ? 1 : 0) +
-                (transferRequest.started && !transferRequest.completed ? 1 : 0),
-            },
-            lastError: safeDataErrorCode(error),
-          },
+          ...(transferOnlyFailure
+            ? []
+            : [
+                {
+                  resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                  resourceId: entryEventAuditResourceId(season, eventId, entryId),
+                  status: 'failed' as const,
+                  attempts: auditAttempt,
+                  normalizedPayload: {
+                    phase: 'entry-event-results',
+                    eventLiveRequests: eventLiveProviderRequestStarted ? 1 : 0,
+                    picksRequests: picksRequest.started ? 1 : 0,
+                    transferRequests: transferRequest.started ? 1 : 0,
+                    unknownRequests:
+                      (picksRequest.started && !picksRequest.completed ? 1 : 0) +
+                      (transferRequest.started && !transferRequest.completed ? 1 : 0),
+                  },
+                  lastError: safeDataErrorCode(error),
+                },
+              ]),
+          ...(!transferNeeded
+            ? []
+            : [
+                {
+                  resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+                  resourceId: entryEventAuditResourceId(season, eventId, entryId, 'transfers'),
+                  status: 'failed' as const,
+                  attempts: auditAttempt,
+                  normalizedPayload: {
+                    phase: 'entry-transfer-history',
+                    transferRequests: transferRequest.started ? 1 : 0,
+                    unknownRequests: transferRequest.started && !transferRequest.completed ? 1 : 0,
+                  },
+                  lastError: safeDataErrorCode(error),
+                },
+              ]),
           ...(finalizationDate !== null && finalizationCutoff !== null && accepted
             ? [
                 {
