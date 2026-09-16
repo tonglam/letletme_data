@@ -217,9 +217,18 @@ async function repairTournamentSetupIssuePrepared(
         season,
         issue.tournamentId,
       );
-      await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), () =>
-        rebuildTournamentStructure(season, tournament, entrySeeds),
-      );
+      const rebuilt = await runPhase(tournamentSetupRebuildScopes(issue.tournamentId), async () => {
+        // Old review diagnostics may describe missing points projections rather
+        // than damaged canonical groups. Recheck under the same structure lock
+        // before a tournament-wide rebuild can delete accepted event results.
+        if (tournament.groupMode === 'points_races' && tournament.knockoutMode === 'no_knockout') {
+          const currentAudit = await auditTournamentSetup(season, tournament, null);
+          if (!currentAudit.requiresStructureRebuild) return false;
+        }
+        await rebuildTournamentStructure(season, tournament, entrySeeds);
+        return true;
+      });
+      if (!rebuilt) break;
       // A topology rebuild can change group membership, phase boundaries, or
       // bracket edges for every settled event. Defer the correction reset
       // until the post-repair audit succeeds, then fence the earliest head

@@ -119,13 +119,14 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
     findGroupSlots: async (
       season: FplSeasonRef,
       tournamentId: number,
-    ): Promise<Array<{ groupId: number; groupIndex: number }>> => {
+    ): Promise<Array<{ groupId: number; groupIndex: number; entryId: number }>> => {
       try {
         const db = await getDbInstance();
         const rows = await db
           .select({
             groupId: tournamentGroupsInCompetition.groupId,
             groupIndex: tournamentGroupsInCompetition.groupIndex,
+            entryId: tournamentGroupsInCompetition.entryId,
           })
           .from(tournamentGroupsInCompetition)
           .where(
@@ -149,6 +150,7 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
     upsertBatch: async (
       season: FplSeasonRef,
       groups: DbTournamentGroupInsert[],
+      options: { preserveLaterStandings?: boolean } = {},
     ): Promise<number> => {
       if (groups.length === 0) {
         return 0;
@@ -185,7 +187,9 @@ export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) =>
               updatedAt: sql`clock_timestamp()`,
             },
             where: sql`
-              (
+              (${!options.preserveLaterStandings}
+                OR COALESCE(${tournamentGroupsInCompetition.played}, 0) <= COALESCE(excluded.played, 0))
+              AND (
                 ROW(
                   ${tournamentGroupsInCompetition.groupName},
                   ${tournamentGroupsInCompetition.groupIndex},

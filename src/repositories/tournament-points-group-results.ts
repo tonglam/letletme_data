@@ -117,6 +117,7 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
           if (input.length === 0) return;
           const payloadChanged = sql`
             ROW(
+              ${tournamentPointsGroupResultsInCompetition.groupId},
               ${tournamentPointsGroupResultsInCompetition.eventGroupRank},
               ${tournamentPointsGroupResultsInCompetition.eventPoints},
               ${tournamentPointsGroupResultsInCompetition.eventCost},
@@ -127,6 +128,7 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
               ${tournamentPointsGroupResultsInCompetition.cumulativeBenchPoints},
               ${tournamentPointsGroupResultsInCompetition.cumulativeAutoSubPoints}
             ) IS DISTINCT FROM ROW(
+              excluded.group_id,
               excluded.event_group_rank,
               excluded.event_points,
               excluded.event_cost,
@@ -148,6 +150,7 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTr
                 tournamentPointsGroupResultsInCompetition.entryId,
               ],
               set: {
+                groupId: sql`excluded.group_id`,
                 eventGroupRank: sql`excluded.event_group_rank`,
                 eventPoints: sql`excluded.event_points`,
                 eventCost: sql`excluded.event_cost`,

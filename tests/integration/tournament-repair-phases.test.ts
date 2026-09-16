@@ -20,11 +20,14 @@ const tournamentId = 995_601;
 let issueId: number;
 const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
 async function cleanup() {
+  await sql`DELETE FROM competition.tournament_points_group_results WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  await sql`DELETE FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM ops.mutation_scopes WHERE scope_key IN (${`entry-core:${season.seasonId}:${tournamentId}`}, ${`entry-core:${season.seasonId}:${tournamentId + 1}`})`;
   await sql`DELETE FROM competition.tournament_entries WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM competition.tournament_setup_issues WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM competition.entries WHERE season_id=${season.seasonId} AND entry_id IN (${tournamentId}, ${tournamentId + 1})`;
+  await sql`DELETE FROM fpl.events WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM ops.mutation_scopes WHERE scope_key=${tournamentSetupLifecycleScope(tournamentId)}`;
 }
@@ -530,4 +533,233 @@ test('resolution and identical reappearance reject the prior occurrence without 
   await expect(
     withTournamentRepairPhase(season, issueId, owner, [], async () => {}),
   ).rejects.toMatchObject({ code: 'TOURNAMENT_REPAIR_STALE' });
+});
+
+for (const topology of ['valid', 'missing', 'wrong-member'] as const) {
+  test(`points structure repair rechecks ${topology} canonical groups before deleting results`, async () => {
+    const { repairTournamentSetupIssue } = await import(
+      '../../src/services/tournament-repair.service'
+    );
+    const review = await import('../../src/services/tournament-review-publication.service');
+    const jobs = await import('../../src/jobs/tournament-repair.jobs');
+    spyOn(jobs, 'enqueueTournamentRepair').mockResolvedValue({} as never);
+    const correction = spyOn(
+      review,
+      'requestTournamentReviewTournamentCorrection',
+    ).mockResolvedValue([]);
+    await sql`INSERT INTO fpl.events(season_id,event_id,name) VALUES (${season.seasonId},1,'Guard fixture')`;
+    await sql`UPDATE competition.tournaments SET total_team_num=1,group_mode='points_races',
+      group_num=1,group_team_num=1,group_started_event_id=1,group_ended_event_id=1,knockout_mode='no_knockout'
+      WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    await sql`INSERT INTO competition.tournament_entries(season_id,tournament_id,league_id,entry_id)
+      VALUES (${season.seasonId},${tournamentId},${tournamentId},${tournamentId})`;
+    await sql`INSERT INTO competition.entries(season_id,entry_id,entry_name,player_name)
+      VALUES (${season.seasonId},${tournamentId + 1},'Other','Other')`;
+    if (topology !== 'missing') {
+      await sql`INSERT INTO competition.tournament_groups(season_id,tournament_id,group_id,group_name,group_index,entry_id)
+        VALUES (${season.seasonId},${tournamentId},1,'A',1,${topology === 'valid' ? tournamentId : tournamentId + 1})`;
+    }
+    await sql`INSERT INTO competition.tournament_points_group_results(season_id,tournament_id,group_id,event_id,entry_id,event_points,event_net_points)
+      VALUES (${season.seasonId},${tournamentId},1,1,${tournamentId},42,42)`;
+    await tournamentSetupIssueRepository.sync(season, tournamentId, [
+      {
+        ...input,
+        issueKey: 'STRUCTURE_INTEGRITY_FAILED:all',
+        code: 'STRUCTURE_INTEGRITY_FAILED',
+        category: 'results',
+        diagnosticCode: 'TOURNAMENT_REVIEW_STRUCTURE_INTEGRITY',
+      },
+    ]);
+    issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!
+      .issueId;
+    await repairTournamentSetupIssue(season, issueId);
+    const results = await sql`SELECT event_points FROM competition.tournament_points_group_results
+      WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    expect(results).toHaveLength(topology === 'valid' ? 1 : 0);
+    if (topology === 'valid') expect(results[0]!.event_points).toBe(42);
+    expect(correction).toHaveBeenCalledTimes(topology === 'valid' ? 0 : 1);
+    const groups =
+      await sql`SELECT entry_id FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    expect(groups.map((row) => row.entry_id)).toEqual([tournamentId]);
+    expect(await tournamentSetupIssueRepository.findUnresolvedById(season, issueId)).toBeNull();
+  });
+}
+
+test('mixed points and knockout tournaments retain the existing structural repair path', async () => {
+  const { repairTournamentSetupIssue } = await import(
+    '../../src/services/tournament-repair.service'
+  );
+  const structure = await import('../../src/services/tournament-structure.service');
+  const review = await import('../../src/services/tournament-review-publication.service');
+  await sql`UPDATE competition.tournaments SET group_mode='points_races',knockout_mode='single_elimination'
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  await tournamentSetupIssueRepository.sync(season, tournamentId, [
+    {
+      ...input,
+      issueKey: 'STRUCTURE_INTEGRITY_FAILED:all',
+      code: 'STRUCTURE_INTEGRITY_FAILED',
+      category: 'results',
+    },
+  ]);
+  issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!.issueId;
+  await mockAudit([]);
+  const rebuild = spyOn(structure, 'rebuildTournamentStructure').mockResolvedValue(undefined);
+  spyOn(review, 'requestTournamentReviewTournamentCorrection').mockResolvedValue([]);
+  await repairTournamentSetupIssue(season, issueId);
+  expect(rebuild).toHaveBeenCalledTimes(1);
+});
+
+test('historical points repairs attach only the earliest missing scope on each validation', async () => {
+  const review = await import('../../src/services/tournament-review-publication.service');
+  const jobs = await import('../../src/jobs/tournament-repair.jobs');
+  const queued: number[] = [];
+  spyOn(jobs, 'enqueueTournamentRepair').mockImplementation(async (_season, issue) => {
+    queued.push(issue.eventId!);
+    return {} as never;
+  });
+  for (const eventId of [1, 2, 3])
+    await sql`INSERT INTO fpl.events(season_id,event_id,name) VALUES (${season.seasonId},${eventId},'Historical guard fixture')`;
+  const attached = await review.enqueueTournamentReviewRepair(
+    season,
+    {
+      tournament_id: tournamentId,
+      event_id: 3,
+    } as Parameters<typeof review.enqueueTournamentReviewRepair>[1],
+    new review.TournamentReviewSourceNotReadyError(
+      'historical points group assignment is stale',
+      [2, 1],
+    ),
+    new Date(),
+  );
+  expect(attached).not.toBeNull();
+  expect(queued).toEqual([1]);
+  const issues = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)).filter(
+    (i) => i.code === 'TOURNAMENT_RESULTS_INCOMPLETE',
+  );
+  expect(issues.map((i) => i.eventId)).toEqual([1]);
+  expect(issues.some((i) => i.issueId === attached)).toBe(true);
+  // The data for event 1 was repaired, but the worker exited before issue
+  // finalization. A fresh event-2 diagnostic must not orphan the attached issue.
+  const retained = await review.enqueueTournamentReviewRepair(
+    season,
+    { tournament_id: tournamentId, event_id: 3, repair_issue_id: attached } as Parameters<
+      typeof review.enqueueTournamentReviewRepair
+    >[1],
+    new review.TournamentReviewSourceNotReadyError('historical points group assignment is stale', [
+      2,
+    ]),
+    new Date(),
+  );
+  expect(retained).toBe(attached);
+  expect(queued).toEqual([1, 1]);
+  const unfinished = (
+    await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)
+  ).filter((candidate) => candidate.code === 'TOURNAMENT_RESULTS_INCOMPLETE');
+  expect(unfinished).toHaveLength(1);
+  expect(unfinished[0]!.issueId).toBe(attached!);
+  // Only after normal issue finalization may the next missing scope be attached.
+  await sql`UPDATE competition.tournament_setup_issues SET resolved_at=clock_timestamp()
+    WHERE issue_id=${attached!} AND season_id=${season.seasonId}`;
+  const nextAttached = await review.enqueueTournamentReviewRepair(
+    season,
+    { tournament_id: tournamentId, event_id: 3, repair_issue_id: attached } as Parameters<
+      typeof review.enqueueTournamentReviewRepair
+    >[1],
+    new review.TournamentReviewSourceNotReadyError('historical points group assignment is stale', [
+      2,
+    ]),
+    new Date(),
+  );
+  expect(queued).toEqual([1, 1, 2]);
+  const remaining = (
+    await tournamentSetupIssueRepository.listUnresolved(season, tournamentId)
+  ).filter((candidate) => candidate.code === 'TOURNAMENT_RESULTS_INCOMPLETE');
+  expect(remaining).toHaveLength(1);
+  expect(remaining[0]).toMatchObject({ eventId: 2, issueId: nextAttached });
+});
+
+test('points upsert corrects group-only changes without accepting an older source', async () => {
+  const { tournamentPointsGroupResultsRepository } = await import(
+    '../../src/repositories/tournament-points-group-results'
+  );
+  await sql`INSERT INTO fpl.events(season_id,event_id,name) VALUES (${season.seasonId},1,'Group update fixture')`;
+  const sourceUpdatedAt = new Date('2026-09-01T12:00:00Z');
+  const row = {
+    tournamentId,
+    entryId: tournamentId,
+    eventId: 1,
+    groupId: 2,
+    eventPoints: 42,
+    eventNetPoints: 42,
+    sourceUpdatedAt,
+  };
+  expect(await tournamentPointsGroupResultsRepository.upsertBatch(season, [row])).toBe(1);
+  expect(
+    await tournamentPointsGroupResultsRepository.upsertBatch(season, [{ ...row, groupId: 1 }]),
+  ).toBe(1);
+  expect(
+    await tournamentPointsGroupResultsRepository.upsertBatch(season, [
+      { ...row, groupId: 3, sourceUpdatedAt: new Date('2026-08-31T12:00:00Z') },
+    ]),
+  ).toBe(0);
+  const [stored] =
+    await sql`SELECT group_id,event_points FROM competition.tournament_points_group_results WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  expect(stored).toMatchObject({ group_id: 1, event_points: 42 });
+});
+
+test('late historical points standings cannot replace a newer cumulative window', async () => {
+  const { tournamentGroupRepository } = await import('../../src/repositories/tournament-groups');
+  const row = {
+    tournamentId,
+    groupId: 1,
+    groupName: 'A',
+    groupIndex: 1,
+    entryId: tournamentId,
+    played: 2,
+    totalNetPoints: 90,
+    groupPoints: 90,
+    totalPoints: 94,
+    totalTransfersCost: 4,
+    groupRank: 1,
+  };
+  const options = { preserveLaterStandings: true };
+  expect(await tournamentGroupRepository.upsertBatch(season, [row], options)).toBe(1);
+  expect(
+    await tournamentGroupRepository.upsertBatch(
+      season,
+      [
+        {
+          ...row,
+          played: 1,
+          totalNetPoints: 40,
+          groupPoints: 40,
+          totalPoints: 40,
+          totalTransfersCost: 0,
+          groupRank: 2,
+        },
+      ],
+      options,
+    ),
+  ).toBe(0);
+  const [current] =
+    await sql`SELECT played,group_points,total_points,total_transfers_cost,group_rank
+    FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  expect(current).toMatchObject({
+    played: 2,
+    group_points: 90,
+    total_points: 94,
+    total_transfers_cost: 4,
+    group_rank: 1,
+  });
+  // A genuine correction to the same current window still updates the totals.
+  expect(
+    await tournamentGroupRepository.upsertBatch(
+      season,
+      [{ ...row, groupPoints: 91, totalNetPoints: 91 }],
+      options,
+    ),
+  ).toBe(1);
+  const [corrected] = await sql`SELECT played,group_points FROM competition.tournament_groups
+    WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  expect(corrected).toMatchObject({ played: 2, group_points: 91 });
 });
