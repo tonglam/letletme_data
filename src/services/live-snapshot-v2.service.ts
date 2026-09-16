@@ -495,8 +495,10 @@ function isServingFinalMatchPair(
       detail?.publication.generation === expectedPair?.detail.publication.generation);
   const canonicalFactsMatch =
     expectedPair == null ||
-    (canonicalJson(desk?.fixtures) === canonicalJson(expectedPair.desk.fixtures) &&
-      canonicalJson(detail?.fixtures) === canonicalJson(expectedPair.detail.fixtures));
+    (desk != null &&
+      detail != null &&
+      canonicalJson(desk.fixtures) === canonicalJson(expectedPair.desk.fixtures) &&
+      canonicalJson(detail.fixtures) === canonicalJson(expectedPair.detail.fixtures));
   return Boolean(
     desk?.servedFrom === 'REDIS_CURRENT' &&
       detail?.servedFrom === 'REDIS_CURRENT' &&
