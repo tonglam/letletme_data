@@ -151,7 +151,7 @@ describe('launch monitor', () => {
     expect(redis.values.has(WARNING_KEY)).toBe(true);
   });
 
-  test('reports ordinary monitor no-ops as zero synchronization work', async () => {
+  test('reports ordinary monitor no-ops as zero synchronization work without Redis', async () => {
     let redisCalls = 0;
     const deps = dependencies({
       events: [{ id: 1, deadline_time: '2025-08-15T10:00:00Z' }],
@@ -170,10 +170,10 @@ describe('launch monitor', () => {
       succeededUnits: 0,
       failedUnits: 0,
     });
-    expect(redisCalls).toBe(1);
+    expect(redisCalls).toBe(0);
   });
 
-  test('skips bootstrap after the current season happening marker is confirmed', async () => {
+  test('checks the derived provider season before honoring an existing happening marker', async () => {
     const redis = new FakeRedis();
     redis.values.set(HAPPENING_KEY, '2026-08-15T10:00:01.000Z');
     let bootstrapCalls = 0;
@@ -182,6 +182,7 @@ describe('launch monitor', () => {
       onBootstrap: () => {
         bootstrapCalls += 1;
       },
+      events: [{ id: 1, deadline_time: '2026-08-15T10:00:00Z' }],
     });
 
     const result = await evaluateLaunchMonitor(deps);
@@ -191,7 +192,26 @@ describe('launch monitor', () => {
       delivery: 'already_sent',
       requiredUnits: 0,
     });
-    expect(bootstrapCalls).toBe(0);
+    expect(bootstrapCalls).toBe(1);
+  });
+
+  test('does not let an old marker suppress a newly derived provider season', async () => {
+    const redis = new FakeRedis();
+    redis.values.set('llm:queue:coordination:launch-notification:happening:2526', 'old');
+    const messages: string[] = [];
+    const result = await evaluateLaunchMonitor(
+      dependencies({
+        redis,
+        events: [{ id: 1, deadline_time: '2026-08-15T10:00:00Z' }],
+        send: async (message) => {
+          messages.push(message);
+        },
+      }),
+    );
+
+    expect(result.delivery).toBe('sent');
+    expect(messages).toEqual(['【NEW SEASON】ITS HAPPENING!!!']);
+    expect(redis.values.has(HAPPENING_KEY)).toBe(true);
   });
 
   test('serializes concurrent ticks so only one notification is delivered', async () => {
