@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
 import { classifyDataError, retryPolicyForError } from '../../src/domain/error-classification';
-import { planTournamentEventSync } from '../../src/services/tournament-event-results.service';
+import {
+  planEntrySyncAuditReuse,
+  planTournamentEventSync,
+} from '../../src/services/tournament-event-results.service';
 import { IncompleteDataSyncError } from '../../src/utils/errors';
 
 describe('entry/event terminal synchronization planning', () => {
@@ -33,6 +36,13 @@ describe('entry/event terminal synchronization planning', () => {
       retryable: true,
       maxAttempts: 3,
       createGovernanceCase: false,
+    });
+  });
+
+  test('terminalizes reused result and final components for transfer-only entries', () => {
+    expect(planEntrySyncAuditReuse([101, 102, 103], [103], [102])).toEqual({
+      reusedComponentEntryIds: [101, 102],
+      reusedRunEntryIds: [101],
     });
   });
 });

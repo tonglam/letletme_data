@@ -243,6 +243,23 @@ export function planTournamentEventSync(
   return { requiredResultEntryIds, requiredTransferEntryIds, reusedUnits };
 }
 
+export function planEntrySyncAuditReuse(
+  entryIds: readonly number[],
+  requiredResultEntryIds: ReadonlyArray<number>,
+  transferOnlyEntryIds: ReadonlyArray<number>,
+): {
+  reusedComponentEntryIds: number[];
+  reusedRunEntryIds: number[];
+} {
+  const requiredResultSet = new Set(requiredResultEntryIds);
+  const transferOnlySet = new Set(transferOnlyEntryIds);
+  const reusedComponentEntryIds = entryIds.filter((entryId) => !requiredResultSet.has(entryId));
+  return {
+    reusedComponentEntryIds,
+    reusedRunEntryIds: reusedComponentEntryIds.filter((entryId) => !transferOnlySet.has(entryId)),
+  };
+}
+
 async function resolveEventPointsPayload(
   season: FplSeasonRef,
   eventId: number,
@@ -595,9 +612,10 @@ export async function syncTournamentEventResultsForEntryIds(
     );
     const transferEntryIds = new Set(plannedMissingTransferEntryIds);
     let providerEntryIds = requiredResultEntryIds;
-    let reusableEntryIds = uniqueEntryIds.filter(
-      (entryId) =>
-        !requiredResultEntryIds.includes(entryId) && !transferOnlyEntryIds.includes(entryId),
+    let { reusedComponentEntryIds, reusedRunEntryIds: reusableEntryIds } = planEntrySyncAuditReuse(
+      uniqueEntryIds,
+      requiredResultEntryIds,
+      transferOnlyEntryIds,
     );
     let liveResolution: Awaited<ReturnType<typeof resolveEventPointsPayload>> | null = null;
     let eventLiveProviderRequestStarted = false;
@@ -698,15 +716,16 @@ export async function syncTournamentEventResultsForEntryIds(
         (entryId) => !requiredResultEntryIds.includes(entryId),
       );
       providerEntryIds = requiredResultEntryIds;
-      reusableEntryIds = uniqueEntryIds.filter(
-        (entryId) =>
-          !requiredResultEntryIds.includes(entryId) && !transferOnlyEntryIds.includes(entryId),
-      );
+      ({ reusedComponentEntryIds, reusedRunEntryIds: reusableEntryIds } = planEntrySyncAuditReuse(
+        uniqueEntryIds,
+        requiredResultEntryIds,
+        transferOnlyEntryIds,
+      ));
     }
-    if (reusableEntryIds.length > 0) {
+    if (reusedComponentEntryIds.length > 0) {
       const completedAt = new Date();
       await syncOperationsRepository.upsertItems(auditRunId, [
-        ...reusableEntryIds.map((entryId) => ({
+        ...reusedComponentEntryIds.map((entryId) => ({
           resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
           resourceId: entryEventAuditResourceId(season, eventId, entryId),
           status: 'skipped' as const,
@@ -724,7 +743,7 @@ export async function syncTournamentEventResultsForEntryIds(
         })),
         ...(finalizationDate === null
           ? []
-          : reusableEntryIds.map((entryId) => ({
+          : reusedComponentEntryIds.map((entryId) => ({
               resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
               resourceId: entryEventAuditResourceId(season, eventId, entryId, 'final'),
               status: 'skipped' as const,

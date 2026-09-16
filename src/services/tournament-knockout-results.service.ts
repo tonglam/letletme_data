@@ -57,7 +57,7 @@ export function applyCandidateKnockoutResults(
 ): DbTournamentKnockoutResult[] {
   const candidates = candidateResults.filter((result) => result.eventId === eventId);
   if (candidates.length === 0) {
-    return [...persistedResults];
+    return [];
   }
 
   const persistedKeys = new Set(persistedResults.map(knockoutResultBusinessKey));
@@ -75,21 +75,23 @@ export function applyCandidateKnockoutResults(
   const candidateByKey = new Map(
     candidates.map((candidate) => [knockoutResultBusinessKey(candidate), candidate]),
   );
-  return persistedResults.map((result) => {
-    const candidate = candidateByKey.get(knockoutResultBusinessKey(result));
-    // Later-round shells are intentionally unseeded. Their entrants are
-    // produced by the preceding round inside the same backfill and are now
-    // represented by the persisted row; do not overwrite those winners with
-    // the initial null candidate placeholders.
-    if (!candidate || (candidate.homeEntryId === null && candidate.awayEntryId === null)) {
-      return result;
-    }
-    return {
-      ...result,
-      homeEntryId: candidate.homeEntryId ?? null,
-      awayEntryId: candidate.awayEntryId ?? null,
-    };
-  });
+  return persistedResults
+    .filter((result) => candidateByKey.has(knockoutResultBusinessKey(result)))
+    .map((result) => {
+      const candidate = candidateByKey.get(knockoutResultBusinessKey(result));
+      // Later-round shells are intentionally unseeded. Their entrants are
+      // produced by the preceding round inside the same backfill and are now
+      // represented by the persisted row; do not overwrite those winners with
+      // the initial null candidate placeholders.
+      if (!candidate || (candidate.homeEntryId === null && candidate.awayEntryId === null)) {
+        return result;
+      }
+      return {
+        ...result,
+        homeEntryId: candidate.homeEntryId ?? null,
+        awayEntryId: candidate.awayEntryId ?? null,
+      };
+    });
 }
 
 function normalizePicks(raw: unknown): RawFPLEntryEventPickItem[] {
@@ -367,11 +369,14 @@ export async function syncKnockoutForTournament(
       tournament.id,
       eventId,
     );
-  const knockoutResults = applyCandidateKnockoutResults(
-    persistedKnockoutResults,
-    options.candidateResults ?? [],
-    eventId,
-  );
+  const candidateResultKeys =
+    options.candidateResults === undefined
+      ? null
+      : new Set(options.candidateResults.map(knockoutResultBusinessKey));
+  const knockoutResults =
+    options.candidateResults === undefined
+      ? persistedKnockoutResults
+      : applyCandidateKnockoutResults(persistedKnockoutResults, options.candidateResults, eventId);
   if (knockoutResults.length === 0) {
     logInfo('No knockout fixtures found for event', { tournamentId: tournament.id, eventId });
     return { updatedResults: 0, updatedKnockouts: 0, skipped: entryIds.length };
@@ -465,11 +470,16 @@ export async function syncKnockoutForTournament(
     const updatedResultsCount = await txKnockoutResults.upsertBatch(season, updatedResults);
 
     const matchIds = Array.from(new Set(updatedResults.map((result) => result.matchId)));
-    const allMatchResults = await txKnockoutResults.findByTournamentAndMatchIds(
+    const persistedMatchResults = await txKnockoutResults.findByTournamentAndMatchIds(
       season,
       tournament.id,
       matchIds,
     );
+    const allMatchResults = candidateResultKeys
+      ? persistedMatchResults.filter((result) =>
+          candidateResultKeys.has(knockoutResultBusinessKey(result)),
+        )
+      : persistedMatchResults;
 
     const matchResultsByMatch = new Map<number, typeof allMatchResults>();
     for (const result of allMatchResults) {
@@ -581,11 +591,16 @@ export async function syncKnockoutForTournament(
         await txKnockouts.upsertBatch(season, updatedNextKnockouts);
 
         const nextMatchIds = [...nextRoundMap.keys()];
-        const nextResults = await txKnockoutResults.findByTournamentAndMatchIds(
+        const persistedNextResults = await txKnockoutResults.findByTournamentAndMatchIds(
           season,
           tournament.id,
           nextMatchIds,
         );
+        const nextResults = candidateResultKeys
+          ? persistedNextResults.filter((result) =>
+              candidateResultKeys.has(knockoutResultBusinessKey(result)),
+            )
+          : persistedNextResults;
         const updatedNextResults = nextResults.map((result) => {
           const nextData = nextRoundMap.get(result.matchId);
           if (!nextData) {

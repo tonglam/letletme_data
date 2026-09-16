@@ -78,4 +78,44 @@ describe('tournament knockout win counts', () => {
       awayEntryId: 404,
     });
   });
+
+  test('drops persisted result rows outside the rebuilt candidate topology', () => {
+    const persisted = [
+      {
+        sourceResultId: 9,
+        tournamentId: 1,
+        seasonId: 1,
+        eventId: 36,
+        matchId: 3,
+        playAgainstId: 1,
+        homeEntryId: 101,
+        awayEntryId: 202,
+      },
+      {
+        sourceResultId: 10,
+        tournamentId: 1,
+        seasonId: 1,
+        eventId: 36,
+        matchId: 3,
+        playAgainstId: 2,
+        homeEntryId: 999,
+        awayEntryId: 888,
+      },
+    ] as never[];
+    const candidate = [
+      {
+        tournamentId: 1,
+        eventId: 36,
+        matchId: 3,
+        playAgainstId: 1,
+        homeEntryId: 303,
+        awayEntryId: 404,
+        sourceCheckedAt: null,
+      },
+    ] as never[];
+
+    expect(applyCandidateKnockoutResults(persisted, candidate, 36)).toMatchObject([
+      { sourceResultId: 9, homeEntryId: 303, awayEntryId: 404 },
+    ]);
+  });
 });
