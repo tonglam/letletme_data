@@ -770,8 +770,9 @@ describe('My FPL daily snapshot publication contract', () => {
     expect(publicationService).toContain('${nowIso}::timestamptz');
     expect(publicationService).toContain('${supersededBeforeIso}::timestamptz');
     expect(publicationService).toContain(
-      'WHERE publication.active = false\n        AND publication.updated_at < ${supersededBeforeIso}::timestamptz',
+      'WHERE publication.active = false\n        AND publication.updated_at < ${candidateBeforeIso}::timestamptz',
     );
+    expect(publicationService).toContain('AND updated_at < ${supersededBeforeIso}::timestamptz');
     expect(publicationService).not.toContain('${sourceCheckedAt}, ${now},');
     expect(publicationService).not.toContain('${new Date(now.getTime() - 24 * 60 * 60_000)}');
   });

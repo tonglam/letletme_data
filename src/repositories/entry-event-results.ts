@@ -538,12 +538,17 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       const autoSubs = validateAutomaticSubs(entryId, eventId, picks);
       try {
         const db = await getDbInstance();
-        const exactRichSyncedAt =
-          richSyncedAt instanceof Date ? richSyncedAt : new Date(richSyncedAt);
+        const richSyncedAtExact =
+          richSyncedAt instanceof Date ? richSyncedAt.toISOString() : richSyncedAt;
+        const exactRichSyncedAt = new Date(richSyncedAtExact);
         if (!Number.isFinite(exactRichSyncedAt.getTime())) {
           throw new Error('A valid rich-sync source timestamp is required');
         }
-        const richSyncedAtIso = exactRichSyncedAt.toISOString();
+        // Keep the database ordering timestamp at PostgreSQL precision. The
+        // Date view is still used for domain arithmetic, but a string from
+        // clock_timestamp() can carry microseconds that must survive the
+        // INSERT/ON CONFLICT fence and the subsequent audit query.
+        const richSyncedAtValue = sql`${richSyncedAtExact}::timestamptz`;
 
         const entryHistory = picks.entry_history;
         const eventRank = normalizeAuthoritativeUnrankedEventRank({
@@ -693,7 +698,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
             ],
             where: sql`
               ${entryEventResultsInCompetition.richSyncedAt} IS NULL
-              OR ${entryEventResultsInCompetition.richSyncedAt} < ${richSyncedAtIso}::timestamptz
+              OR ${entryEventResultsInCompetition.richSyncedAt} < ${richSyncedAtExact}::timestamptz
             `,
             set: {
               eventPoints: insert.eventPoints,
@@ -712,7 +717,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               overallRank: insert.overallRank,
               teamValue: insert.teamValue,
               bank: insert.bank,
-              richSyncedAt: exactRichSyncedAt,
+          richSyncedAt: richSyncedAtValue,
               updatedAt: new Date(),
             },
           })
