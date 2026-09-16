@@ -731,7 +731,10 @@ export function createEntrySyncWorker(
               season,
               'entry-picks',
               'entry picks sync',
-              (entryId) => syncEntryEventPicks(season, entryId, targetEventId!),
+              (entryId) =>
+                syncEntryEventPicks(season, entryId, targetEventId!, {
+                  sourceCheckedAt: requestWatermark,
+                }),
               effectiveJobData,
               {
                 afterComplete:
