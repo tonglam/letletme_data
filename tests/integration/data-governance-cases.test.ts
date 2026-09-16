@@ -96,6 +96,11 @@ async function cleanup(): Promise<void> {
     WHERE season_id IN (${NO_SOURCE_SEASON_ID}, ${LIVE_CHECKPOINT_SEASON_ID})
   `;
   await sql`
+    DELETE FROM ops.sync_runs
+    WHERE mode = 'batch-cost'
+      AND season_id IN (${NO_SOURCE_SEASON_ID}, ${EMPTY_COHORT_SEASON_ID}, ${LIVE_CHECKPOINT_SEASON_ID})
+  `;
+  await sql`
     DELETE FROM fpl.seasons
     WHERE season_id IN (
       ${NO_SOURCE_SEASON_ID}, ${EMPTY_COHORT_SEASON_ID}, ${LIVE_CHECKPOINT_SEASON_ID}

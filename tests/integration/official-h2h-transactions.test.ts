@@ -24,6 +24,7 @@ async function cleanup() {
   await sql`DELETE FROM competition.entry_event_results WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM competition.entries WHERE season_id=${season.seasonId}`;
   await sql`DELETE FROM fpl.events WHERE season_id=${season.seasonId}`;
+  await sql`DELETE FROM ops.sync_runs WHERE season_id=${season.seasonId} AND mode='batch-cost'`;
   await sql`DELETE FROM fpl.seasons WHERE season_id=${season.seasonId}`;
 }
 async function standings() {
