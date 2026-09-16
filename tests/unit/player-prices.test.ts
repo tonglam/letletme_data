@@ -92,6 +92,7 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260803')).resolves.toEqual({
       count: 2,
       changeDate: '20260803',
+      updatedRows: 2,
     });
     expect(findLatestForPlayerIds).toHaveBeenCalledWith(
       TEST_SEASON,
@@ -128,6 +129,7 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260802')).resolves.toEqual({
       count: 0,
       changeDate: '20260802',
+      updatedRows: 0,
     });
     expect(readOrderingTimestamp).not.toHaveBeenCalled();
     expect(getBootstrap).not.toHaveBeenCalled();
@@ -148,6 +150,7 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260803')).resolves.toEqual({
       count: 0,
       changeDate: '20260803',
+      updatedRows: 0,
     });
     expect(findLatestForPlayerIds).not.toHaveBeenCalled();
     expect(updatePrices).not.toHaveBeenCalled();
@@ -185,6 +188,7 @@ describe('player price reconciliation', () => {
     await expect(sync(TEST_SEASON, '20260803')).resolves.toEqual({
       count: 0,
       changeDate: '20260803',
+      updatedRows: 0,
     });
     expect(enqueueCoreSnapshot).not.toHaveBeenCalled();
   });
