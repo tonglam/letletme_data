@@ -147,7 +147,10 @@ The original input, head and source observations are retained in
 facts under the existing entry writer fence and compares the expected Redis
 publication identity atomically. The event finalization boundary is unchanged.
 The normal desired-checkpoint path persists the replacement; rerunning the same
-change ID resumes an interrupted checkpoint. Recovery is recorded only after
+change ID resumes an interrupted checkpoint from its archived official observations,
+even when the deleted account endpoints are unavailable. Canonical microseconds
+are preserved in revision hashes, and the durable chip must agree with both
+the frozen and provider chip. Recovery is recorded only after
 Redis and PostgreSQL identify the same corrected FINAL. Its previous pointer
 also names the corrected revision, so fallback cannot resurrect the old score.
 

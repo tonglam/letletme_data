@@ -1325,7 +1325,7 @@ function sourceDate(value: string | Date): string {
 }
 
 /** Preserve PostgreSQL microseconds for the correction fence sent to Redis. */
-function exactTimestamp(value: string | Date): string {
+export function exactTimestamp(value: string | Date): string {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime()))
     throw new CacheError('Invalid V2 correction timestamp', 'LIVE_V2_TIME_INVALID');

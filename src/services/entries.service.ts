@@ -29,6 +29,7 @@ import { logError, logInfo } from '../utils/logger';
 import { withMutationScopes } from '../utils/mutation-scopes';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import {
+  exactTimestamp,
   clearEntryCheckpointDesiredV2,
   entryLiveInputFromFplPicks,
   isEntryPublicationActiveAndCheckpointedV2,
@@ -1146,7 +1147,7 @@ function durableLiveInputContentHash(rows: readonly EntryLiveInputPickRow[]): st
 export function buildFinalEntryLiveInputFromBaseAndResult(
   baseInput: EntryLiveInputV2,
   result: DbEntryEventResult,
-  dataCheckedAt: Date,
+  dataCheckedAt: Date | string,
 ): EntryLiveInputV2 | null {
   if (
     baseInput.finalResult !== null ||
@@ -1154,7 +1155,7 @@ export function buildFinalEntryLiveInputFromBaseAndResult(
     !Number.isSafeInteger(result.overallPoints) ||
     !result.richSyncedAt ||
     !Number.isFinite(result.richSyncedAt.getTime()) ||
-    result.richSyncedAt.getTime() < dataCheckedAt.getTime()
+    result.richSyncedAt.getTime() < new Date(dataCheckedAt).getTime()
   ) {
     return null;
   }
@@ -1166,7 +1167,8 @@ export function buildFinalEntryLiveInputFromBaseAndResult(
       )
     : null;
   if (!finalPicks || !automaticSubs) return null;
-  const dataCheckedAtIso = dataCheckedAt.toISOString();
+  const dataCheckedAtIso =
+    typeof dataCheckedAt === 'string' ? exactTimestamp(dataCheckedAt) : dataCheckedAt.toISOString();
   const multipliers = finalPicks.map((pick) => ({
     element: pick.element,
     multiplier: pick.multiplier,

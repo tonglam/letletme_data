@@ -1,6 +1,7 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
 import { correctDeletedEntryFinal } from '../../src/services/entry-final-correction.service';
 import * as entryServices from '../../src/services/entries.service';
+import * as correctionGovernance from '../../src/services/data-governance.service';
 import * as globalCheckpoints from '../../src/services/live-publication-v2-checkpoint.service';
 import type { RawFPLEventLiveResponse } from '../../src/types';
 import { fplClient } from '../../src/clients/fpl';
@@ -1240,8 +1241,8 @@ test('audited deleted-entry correction survives checkpoint failure without chang
   const sql = await getDbClient();
   const redis = await redisSingleton.getClient();
   const scope = { season: SEASON.seasonCode, eventId: EVENT_ID, entryId: ENTRY_IDS[0] };
-  const boundary = new Date(CAPTURE_NOW.getTime() - 1000);
-  await sql`UPDATE fpl.events SET finished=true,data_checked=true,data_checked_at=${boundary.toISOString()}::timestamptz WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+  const boundary = new Date(CAPTURE_NOW.getTime() - 1000).toISOString().replace('Z', '456Z');
+  await sql`UPDATE fpl.events SET finished=true,data_checked=true,data_checked_at=${boundary}::timestamptz WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
   await checkpointEntryLiveInputV2(SEASON, EVENT_ID, ENTRY_IDS[0]);
   const picks = {
     active_chip: null,
@@ -1333,6 +1334,7 @@ test('audited deleted-entry correction survives checkpoint failure without chang
     const published = (await readEntryLiveInputV2(scope))!;
     expect(published.input.finalResult!.score).toEqual({ eventPoints: 67, totalPoints: 0 });
     expect(published.input.picksBase).toEqual(original.input.picksBase);
+    expect(published.input.officialAdjustment).toEqual(original.input.officialAdjustment);
     expect(
       (await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID))!.publicationId,
     ).toBe(original.publication.publicationId);
@@ -1340,6 +1342,24 @@ test('audited deleted-entry correction survives checkpoint failure without chang
       await sql`SELECT evidence,status FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
     expect(audit!.status).toBe('REQUIRES_REVIEW');
     expect(audit!.evidence.originalInput).toEqual(original.input);
+    provider.mockRejectedValue(new Error('deleted account picks unavailable'));
+    history.mockRejectedValue(new Error('deleted account history unavailable'));
+    const providerCalls = provider.mock.calls.length,
+      historyCalls = history.mock.calls.length;
+    const settlement = spyOn(
+      correctionGovernance,
+      'updateGovernanceCaseStatus',
+    ).mockResolvedValueOnce(false);
+    try {
+      await expect(correctDeletedEntryFinal({ ...target, apply: true })).rejects.toThrow(
+        'audit settlement',
+      );
+    } finally {
+      settlement.mockRestore();
+    }
+    expect(
+      (await entryEventPicksRepository.findHead(SEASON, ENTRY_IDS[0], EVENT_ID))!.publicationId,
+    ).toBe(published.publication.publicationId);
     const resumed = await correctDeletedEntryFinal({ ...target, apply: true });
     expect(resumed.mode).toBe('applied');
     expect(
@@ -1348,6 +1368,8 @@ test('audited deleted-entry correction survives checkpoint failure without chang
     expect((await correctDeletedEntryFinal({ ...target, apply: true })).alreadyPublished).toBe(
       true,
     );
+    expect(provider.mock.calls.length).toBe(providerCalls);
+    expect(history.mock.calls.length).toBe(historyCalls);
     const [settled] =
       await sql`SELECT status,recovery_revision FROM ops.data_governance_cases WHERE case_kind='entry-final-correction'`;
     expect(settled!.status).toBe('RECOVERED');
@@ -1357,8 +1379,8 @@ test('audited deleted-entry correction survives checkpoint failure without chang
     );
     expect(await redis.exists(original.publication.item.key)).toBe(0);
     const [event] =
-      await sql`SELECT data_checked_at FROM fpl.events WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
-    expect(new Date(event!.data_checked_at).toISOString()).toBe(boundary.toISOString());
+      await sql`SELECT to_char(data_checked_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS data_checked_at FROM fpl.events WHERE season_id=${SEASON.seasonId} AND event_id=${EVENT_ID}`;
+    expect(event!.data_checked_at).toBe(boundary);
     // An obsolete operator target cannot overwrite the replacement even with a newer source fence.
     const later = new Date(Date.now() + 1000);
     await expect(

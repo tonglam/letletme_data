@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { contentHash } from '../../src/utils/content-hash';
 import { parseCorrectionArgs } from '../../scripts/correct-deleted-entry-final';
 import { entryLiveInputFromFplPicks } from '../../src/cache/live-publication-v2';
 import type { DbEntryEventResult } from '../../src/db/schemas/platform.types';
@@ -38,6 +39,7 @@ function fixture() {
     eventRank: 0,
     overallRank: 0,
     eventTransfersCost: 0,
+    eventChip: null,
     richSyncedAt: new Date('2026-09-01T00:01:00Z'),
     eventPicks: picks.picks,
     eventAutoSub: [],
@@ -97,6 +99,38 @@ describe('explicit deleted-entry FINAL correction', () => {
     const e = fixture();
     e.result = { ...e.result, richSyncedAt: new Date('2026-08-31T00:00:00Z') };
     expect(() => buildDeletedEntryFinalCorrection(e)).toThrow();
+  });
+  test('preserves canonical microseconds in the FINAL and adjustment revisions', () => {
+    const input = fixture();
+    const boundary = '2026-09-01T00:00:00.001234Z';
+    const original = buildFinalEntryLiveInputFromBaseAndResult(
+      { ...input.original, finalResult: null },
+      { ...input.result, overallPoints: 56 },
+      boundary,
+    )!;
+    const corrected = buildDeletedEntryFinalCorrection({
+      ...input,
+      original,
+      dataCheckedAt: boundary,
+    });
+    expect(corrected.officialAdjustment).toEqual(original.officialAdjustment);
+    expect(corrected.finalResult!.revision).toBe(
+      contentHash({
+        dataCheckedAt: boundary,
+        score: { eventPoints: 56, totalPoints: 0 },
+        picks: corrected.finalResult!.picks,
+        automaticSubs: [],
+      }),
+    );
+  });
+  test('rejects a durable chip conflict even when frozen and provider chips agree', () => {
+    const input = fixture();
+    expect(() =>
+      buildDeletedEntryFinalCorrection({
+        ...input,
+        result: { ...input.result, eventChip: 'freehit' },
+      }),
+    ).toThrow('chip');
   });
   test('requires exact scope and defaults to read-only inspection', () => {
     const args = [

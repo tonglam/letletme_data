@@ -1,11 +1,12 @@
 import { and, desc, eq } from 'drizzle-orm';
-import { fplClient } from '../clients/fpl';
+import { fplClient, PicksResponseSchema, EntryHistoryCurrentItemSchema } from '../clients/fpl';
 import { getDb } from '../db/singleton';
 import { dataGovernanceCasesInOps } from '../db/schemas/index.schema';
 import type { DbEntryEventResult } from '../db/schemas/platform.types';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import {
+  exactTimestamp,
   publishEntryLiveInputV2,
   readEntryLiveInputV2,
   setEntryCheckpointDesiredV2,
@@ -41,7 +42,7 @@ export function buildDeletedEntryFinalCorrection(input: {
   identity: Identity;
   picks: RawFPLEntryEventPicksResponse;
   history: HistoryRow;
-  dataCheckedAt: Date;
+  dataCheckedAt: Date | string;
 }): EntryLiveInputV2 {
   const { original, result, identity, picks, history, dataCheckedAt } = input;
   const scope = { season: original.season, eventId: result.eventId, entryId: result.entryId };
@@ -73,6 +74,9 @@ export function buildDeletedEntryFinalCorrection(input: {
       throw new Error('Independent official sources do not confirm the zero-total correction');
     }
   }
+  const normalizeChip = (chip: string | null | undefined) =>
+    !chip || chip.toLowerCase() === 'n/a' ? null : chip.toLowerCase();
+  const frozenChip = normalizeChip(original.picksBase.chip);
   const expected = normalizeFinalPicks(result.eventPicks, result.entryId, result.eventId);
   const official = normalizeFinalPicks(picks.picks, result.entryId, result.eventId);
   const frozen = normalizeFinalPicks(original.finalResult.picks, result.entryId, result.eventId);
@@ -82,7 +86,8 @@ export function buildDeletedEntryFinalCorrection(input: {
     !frozen ||
     contentHash(expected) !== contentHash(official) ||
     contentHash(expected) !== contentHash(frozen) ||
-    (picks.active_chip?.toLowerCase() ?? null) !== (original.picksBase.chip?.toLowerCase() ?? null)
+    normalizeChip(picks.active_chip) !== frozenChip ||
+    normalizeChip(result.eventChip) !== frozenChip
   ) {
     throw new Error('FINAL correction cannot change picks or chip');
   }
@@ -187,21 +192,36 @@ export async function correctDeletedEntryFinal(input: {
   ) {
     throw new Error('Explicit correction target no longer matches the durable/current FINAL');
   }
-  // Provider waits precede all mutation and audit writes.
-  const source = await readDatabaseOrderingTimestamp();
-  const [picks, history] = await Promise.all([
-    fplClient.getEntryEventPicks(entryId, eventId),
-    fplClient.getEntryHistory(entryId),
-  ]);
-  const historyRow = history.current.find((row) => row.event === eventId);
-  if (!historyRow) throw new Error('Official history is missing the requested event');
+  // A persisted correction is its own source evidence. Retrying its checkpoint
+  // must not require the deleted account's endpoints to remain available.
+  let source: { exact: string };
+  let picks: RawFPLEntryEventPicksResponse;
+  let historyRow: HistoryRow;
+  if (evidence) {
+    if (evidence.dataCheckedAt !== boundary)
+      throw new Error('Audited finalization boundary changed');
+    source = { exact: exactTimestamp(String(evidence.observedAt)) };
+    picks = PicksResponseSchema.parse(evidence.providerPicks);
+    historyRow = EntryHistoryCurrentItemSchema.parse(evidence.providerHistory);
+  } else {
+    // Provider waits precede all mutation and audit writes.
+    source = await readDatabaseOrderingTimestamp();
+    const observed = await Promise.all([
+      fplClient.getEntryEventPicks(entryId, eventId),
+      fplClient.getEntryHistory(entryId),
+    ]);
+    picks = observed[0];
+    const history = observed[1].current.find((row) => row.event === eventId);
+    if (!history) throw new Error('Official history is missing the requested event');
+    historyRow = history;
+  }
   const corrected = buildDeletedEntryFinalCorrection({
     original,
     result: results[0],
     identity: identities[0],
     picks,
     history: historyRow,
-    dataCheckedAt: new Date(boundary),
+    dataCheckedAt: boundary,
   });
   const correctionHash = contentHash(corrected);
   const alreadyPublished = contentHash(current.input) === correctionHash;
@@ -349,11 +369,14 @@ export async function correctDeletedEntryFinal(input: {
         [entryId],
       );
       const acceptedInput = acceptedResult
-        ? buildFinalEntryLiveInputFromBaseAndResult(
-            { ...original, finalResult: null },
-            acceptedResult,
-            new Date(boundary),
-          )
+        ? buildDeletedEntryFinalCorrection({
+            original,
+            result: acceptedResult,
+            identity: identities[0]!,
+            picks,
+            history: historyRow,
+            dataCheckedAt: boundary,
+          })
         : null;
       if (
         acceptedBoundary !== boundary ||
