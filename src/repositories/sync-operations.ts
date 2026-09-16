@@ -364,6 +364,37 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       }
     },
 
+    failPendingItems: async (runId: string, error: unknown): Promise<void> => {
+      const db = await getDbInstance();
+      const summary = (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
+      await db
+        .update(syncItemsInOps)
+        .set({
+          status: 'failed',
+          normalizedPayload: sql`
+            coalesce(${syncItemsInOps.normalizedPayload}, '{}'::jsonb)
+            || jsonb_build_object(
+              'setupFailure', true,
+              'unknownRequests',
+              CASE
+                WHEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests') ~ '^[0-9]+$'
+                THEN (${syncItemsInOps.normalizedPayload}->>'unknownRequests')::integer
+                ELSE 0
+              END
+            )
+          `,
+          lastError: summary,
+          completedAt: sql`clock_timestamp()`,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(syncItemsInOps.runId, runId),
+            inArray(syncItemsInOps.status, ['pending', 'running']),
+          ),
+        );
+    },
+
     entrySyncAudit: async (input: {
       seasonId: number;
       eventId: number;

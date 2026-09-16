@@ -222,6 +222,72 @@ describe('ops sync state machine', () => {
     expect(new Date(String(rows[0]?.completed_at)).toISOString()).toBe('2026-08-09T00:02:00.000Z');
   });
 
+  test('terminalizes only pending audit items and preserves failed request evidence', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[0], season);
+
+    await syncOperationsRepository.upsertItems(RUN_IDS[0], [
+      {
+        resourceType: 'entry-event',
+        resourceId: 'pending',
+        status: 'pending',
+        attempts: 1,
+        normalizedPayload: { phase: 'entry-event-results' },
+      },
+      {
+        resourceType: 'entry-event',
+        resourceId: 'failed',
+        status: 'failed',
+        attempts: 1,
+        normalizedPayload: {
+          phase: 'entry-event-results',
+          picksRequests: 1,
+          unknownRequests: 1,
+        },
+        lastError: 'provider timeout',
+      },
+    ]);
+
+    await syncOperationsRepository.failPendingItems(RUN_IDS[0], new Error('planning failed'));
+
+    const rows = await sql<
+      Array<{
+        resource_id: string;
+        status: string;
+        normalized_payload: Record<string, unknown> | null;
+        last_error: string | null;
+      }>
+    >`
+      SELECT resource_id, status, normalized_payload, last_error
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+      ORDER BY resource_id
+    `;
+    expect(Array.from(rows)).toEqual([
+      {
+        resource_id: 'failed',
+        status: 'failed',
+        normalized_payload: {
+          phase: 'entry-event-results',
+          picksRequests: 1,
+          unknownRequests: 1,
+        },
+        last_error: 'provider timeout',
+      },
+      {
+        resource_id: 'pending',
+        status: 'failed',
+        normalized_payload: {
+          phase: 'entry-event-results',
+          setupFailure: true,
+          unknownRequests: 0,
+        },
+        last_error: 'planning failed',
+      },
+    ]);
+  });
+
   test('keeps terminal run transitions idempotent and rejects a different terminal state', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);

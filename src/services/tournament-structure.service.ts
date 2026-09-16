@@ -142,6 +142,7 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
             AND group_row.tournament_id = result.tournament_id
             AND group_row.group_id = result.group_id
             AND group_row.entry_id = result.entry_id
+            AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
         )
     `);
     await tx.execute(sql`
@@ -155,16 +156,18 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
             WHERE group_row.season_id = result.season_id
               AND group_row.tournament_id = result.tournament_id
               AND group_row.group_id = result.group_id
+              AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
           )
           OR (
             result.home_entry_id IS NOT NULL
             AND NOT EXISTS (
               SELECT 1
               FROM ${tournamentGroupsInCompetition} AS group_row
-              WHERE group_row.season_id = result.season_id
-                AND group_row.tournament_id = result.tournament_id
-                AND group_row.group_id = result.group_id
-                AND group_row.entry_id = result.home_entry_id
+                WHERE group_row.season_id = result.season_id
+                  AND group_row.tournament_id = result.tournament_id
+                  AND group_row.group_id = result.group_id
+                  AND group_row.entry_id = result.home_entry_id
+                  AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
             )
           )
           OR (
@@ -172,10 +175,11 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
             AND NOT EXISTS (
               SELECT 1
               FROM ${tournamentGroupsInCompetition} AS group_row
-              WHERE group_row.season_id = result.season_id
-                AND group_row.tournament_id = result.tournament_id
-                AND group_row.group_id = result.group_id
-                AND group_row.entry_id = result.away_entry_id
+                WHERE group_row.season_id = result.season_id
+                  AND group_row.tournament_id = result.tournament_id
+                  AND group_row.group_id = result.group_id
+                  AND group_row.entry_id = result.away_entry_id
+                  AND result.event_id BETWEEN group_row.started_event_id AND group_row.ended_event_id
             )
           )
         )
@@ -186,10 +190,14 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
         AND result.tournament_id = ${tournamentId}
         AND NOT EXISTS (
           SELECT 1
-          FROM ${tournamentKnockoutsInCompetition} AS knockout
-          WHERE knockout.season_id = result.season_id
-            AND knockout.tournament_id = result.tournament_id
-            AND knockout.match_id = result.match_id
+            FROM ${tournamentKnockoutsInCompetition} AS knockout
+            WHERE knockout.season_id = result.season_id
+              AND knockout.tournament_id = result.tournament_id
+              AND knockout.match_id = result.match_id
+              AND knockout.started_event_id IS NOT NULL
+              AND result.event_id >= knockout.started_event_id
+              AND (knockout.ended_event_id IS NULL OR result.event_id <= knockout.ended_event_id)
+              AND result.play_against_id = result.event_id - knockout.started_event_id + 1
         )
     `);
   });
