@@ -17,6 +17,7 @@ import {
 import {
   readLiveMatchDeskFenceV3,
   readLiveMatchDetailFenceV3,
+  restoreLiveMatchEquivalentFinalPairV3,
   type MatchDeskActiveFence,
   type MatchDetailActiveFence,
 } from '../cache/live-match-publication-v3';
@@ -107,6 +108,7 @@ export interface LiveSnapshotV2Dependencies {
   readonly readCheckpointDesired?: typeof readLiveCheckpointDesiredV2;
   readonly clearCheckpointDesired?: typeof clearLiveCheckpointDesiredV2;
   readonly readFinalMatchCheckpoints?: typeof readFinalLiveMatchCheckpointPairV3;
+  readonly restoreFinalMatchPair?: typeof restoreLiveMatchEquivalentFinalPairV3;
   readonly hasFinalMatchCheckpoints?: typeof hasFinalLiveMatchCheckpointsV3;
   readonly checkpointPublication: (request: {
     readonly season: FplSeasonRef;
@@ -659,6 +661,45 @@ export async function syncLiveSnapshotV2(
       return;
     }
 
+    if (durableMatchPair && canProbeServingPair) {
+      // A complete durable pair can repair a missing/corrupt Redis serving
+      // namespace without any provider dependency. Restore both siblings in
+      // one fenced CAS, then capture the resulting pointers for any later
+      // observation path.
+      await (dependencies.restoreFinalMatchPair ?? restoreLiveMatchEquivalentFinalPairV3)({
+        deskCheckpoint: durableMatchPair.desk,
+        detailCheckpoint: durableMatchPair.detail,
+        observedDesk: observedMatchDesk!,
+        observedDetail: observedMatchDetail!,
+        redis: undefined,
+      });
+      [observedMatchDesk, observedMatchDetail] = await Promise.all([
+        dependencies.readObservedMatchDesk!({
+          season: season.seasonCode,
+          eventId,
+        }),
+        dependencies.readObservedMatchDetail!({
+          season: season.seasonCode,
+          eventId,
+        }),
+      ]);
+      if (
+        !isServingFinalMatchPair(
+          observedMatchDesk,
+          observedMatchDetail,
+          season,
+          eventId,
+          durableMatchPair,
+        )
+      ) {
+        throw new CacheError(
+          `Live Match final pair restore did not produce the durable identity for event ${eventId}`,
+          'LIVE_MATCH_EQUIVALENT_PAIR_FAILED',
+        );
+      }
+      return;
+    }
+
     // Live Points is already immutable here. Rebuild only the missing Match
     // sibling from a fresh observation; this preserves the final publication
     // without repeating its global fact preparation or checkpoint write.
@@ -707,6 +748,36 @@ export async function syncLiveSnapshotV2(
     if (fixturesResult.status === 'rejected') throw fixturesResult.reason;
     if (expectedFixtureIdsResult.status === 'rejected') throw expectedFixtureIdsResult.reason;
     if (referenceDataResult.status === 'rejected') throw referenceDataResult.reason;
+
+    if (dependencies.syncLiveMatches === undefined) {
+      let preparedObservation: PreparedLiveSnapshot;
+      try {
+        preparedObservation = prepareCoherentLiveSnapshot(
+          eventId,
+          liveResult.value,
+          fixturesResult.value,
+          referenceDataResult.value,
+          expectedFixtureIdsResult.value,
+          durableFinal.eventLives.map((row) => row.elementId),
+        );
+      } catch (error) {
+        throw new CacheError(
+          `Live Match recovery observation is not coherent with the durable Live Points FINAL for event ${eventId}`,
+          'LIVE_MATCH_FINAL_FACTS_UNAVAILABLE',
+          error instanceof Error ? error : undefined,
+        );
+      }
+      if (
+        canonicalJson(preparedObservation.eventLives.eventLives) !==
+          canonicalJson(durableFinal.eventLives) ||
+        canonicalJson(preparedObservation.fixtures) !== canonicalJson(durableFinal.fixtures)
+      ) {
+        throw new CacheError(
+          `Live Match recovery observation differs from the durable Live Points FINAL for event ${eventId}`,
+          'LIVE_MATCH_FINAL_FACTS_MISMATCH',
+        );
+      }
+    }
 
     const match = await (dependencies.syncLiveMatches ?? syncLiveMatchesV3FromObservation)({
       season,
