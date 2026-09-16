@@ -782,6 +782,19 @@ async function refreshPostMatchObligationAuthority(input: {
       ? { reactivatedForFinalization: true }
       : { reactivatedForScheduleAuthority: true }),
   };
+  // A permanent final checkpoint may be observed after the provisional retry
+  // horizon has already closed the same scheduler identity as irrecoverable.
+  // Reopen only the explicit missing-checkpoint failure once the scheduler has
+  // independently proved the finalized V2 checkpoint. Other terminal errors
+  // remain terminal until their own recovery path supplies a new identity.
+  const finalCheckpointRecovery =
+    resultSlot === 'final-checkpoint' && input.plan.evidence?.finalCheckpointReady === true;
+  const finalCheckpointRecoverySql = finalCheckpointRecovery
+    ? sql`(
+        ${schedulerObligationsInOps.status} = 'irrecoverable'
+        AND ${schedulerObligationsInOps.lastError} LIKE 'Final event-live V2 checkpoint is missing%'
+      )`
+    : sql`false`;
   const liveFinalizationNeedsRetry =
     resultSlot === 'final-checkpoint'
       ? sql`(
@@ -856,7 +869,7 @@ async function refreshPostMatchObligationAuthority(input: {
       and(
         eq(schedulerObligationsInOps.obligationId, input.obligation.obligationId),
         sql`(
-          ${liveFinalizationNeedsRetry} OR (
+          ${finalCheckpointRecoverySql} OR ${liveFinalizationNeedsRetry} OR (
             (
               ${schedulerObligationsInOps.status} = 'succeeded'
               AND ${/^(provisional|final)-\d+$/.test(resultSlot)}
@@ -868,7 +881,7 @@ async function refreshPostMatchObligationAuthority(input: {
             )
           )
         )`,
-        sql`(${liveFinalizationNeedsRetry} OR ${newerAuthority})`,
+        sql`(${finalCheckpointRecoverySql} OR ${liveFinalizationNeedsRetry} OR ${newerAuthority})`,
       ),
     )
     .returning();

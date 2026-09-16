@@ -2294,6 +2294,89 @@ describe('scheduler obligation generation fencing', () => {
     });
   });
 
+  test('reopens an irrecoverable final slot after the missing V2 checkpoint appears', async () => {
+    const sql = await getDbClient();
+    const dueAt = new Date('2026-08-23T12:00:00Z');
+    const authorityAtMs = Date.parse('2026-08-23T11:00:00Z');
+    await sql`
+      INSERT INTO ops.scheduler_obligations (
+        obligation_id, job_name, scope_key, period_key, cadence, timezone,
+        status, source, due_at, generation, attempts, completed_at, last_error, evidence
+      )
+      VALUES (
+        ${OBLIGATION_ID}::uuid,
+        'tournament-event-results',
+        'integration:event:terminal-final-recovery',
+        'event-1-final',
+        'hourly post-match',
+        'UTC',
+        'irrecoverable',
+        'catchup',
+        ${dueAt.toISOString()}::timestamptz,
+        3,
+        3,
+        ${new Date('2026-08-23T12:05:00Z').toISOString()}::timestamptz,
+        'Final event-live V2 checkpoint is missing for event 1; wait for final repair',
+        jsonb_build_object(
+          'scheduledDueAtMs', ${dueAt.getTime()}::bigint,
+          'resultSlot', 'final-checkpoint',
+          'resultAuthorityAtMs', ${authorityAtMs}::bigint,
+          'resultScheduleAnchorMs', ${dueAt.getTime()}::bigint
+        )
+      )
+    `;
+
+    const result = await reconcilePostMatchSchedulerObligations({
+      reservations: [
+        {
+          definition: {
+            name: 'tournament-event-results',
+            cadence: 'hourly post-match',
+            timezone: 'UTC',
+          },
+          plan: {
+            scopeKey: 'integration:event:terminal-final-recovery',
+            periodKey: 'event-1-final',
+            dueAt,
+            source: 'catchup',
+            eventId: 1,
+            evidence: {
+              resultSlot: 'final-checkpoint',
+              resultAuthorityAtMs: authorityAtMs,
+              resultScheduleAnchorMs: dueAt.getTime(),
+              finalCheckpointReady: true,
+            },
+          },
+        },
+      ],
+      boundaries: [
+        {
+          jobName: 'tournament-event-results',
+          scopeKey: 'integration:event:terminal-final-recovery',
+          periodKey: 'event-1-final',
+          resultSlot: 'final-checkpoint',
+          resultAuthorityAtMs: authorityAtMs,
+          resultScheduleAnchorMs: dueAt.getTime(),
+          beforeDueAt: dueAt,
+        },
+      ],
+    });
+
+    expect(result.reservations[0]).toMatchObject({
+      obligationId: OBLIGATION_ID,
+      status: 'pending',
+      generation: 4,
+      attempts: 3,
+      runId: null,
+      lastError: null,
+      evidence: expect.objectContaining({
+        resultSlot: 'final-checkpoint',
+        finalCheckpointReady: true,
+        reactivatedForFinalization: true,
+      }),
+    });
+  });
+
   test('preserves failed backoff for authority-only refresh and resets it for a schedule change', async () => {
     const sql = await getDbClient();
     const originalAuthorityAtMs = Date.parse('2026-08-23T10:00:00Z');

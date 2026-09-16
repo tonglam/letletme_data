@@ -10,6 +10,7 @@ import {
   deferSchedulerObligationByIdentity,
   deferSchedulerObligationForAdmission,
   findDueSchedulerObligationCandidates,
+  getSchedulerObligationByIdentity,
   hasEarlierInFlightSchedulerObligation,
   markSchedulerObligationIrrecoverable,
   mergeSchedulerObligationEvidence,
@@ -78,6 +79,7 @@ import {
 } from './scheduler-enqueue-recovery';
 import { getQueueConnection } from '../utils/queue';
 import { notifyTwoBots } from '../utils/notify';
+import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
 
 // Definitions intentionally resolve the same durable checkpoint on every
 // 30-second pass. Once this process has successfully reserved a plan, repeated
@@ -111,6 +113,66 @@ const POST_MATCH_LATEST_AUTHORITATIVE_JOBS = [
 // remains the only admission gate for the next real readiness check.
 const FINAL_DEPENDENCY_REVISIT_JOBS = new Set(['my-fpl-finalization']);
 const observedPlanKeys = new Map<string, true>();
+const FINAL_EVENT_LIVE_CHECKPOINT_MISSING_PREFIX = 'Final event-live V2 checkpoint is missing';
+
+/**
+ * A permanent post-match checkpoint can outlive the provisional retry window.
+ * If an earlier generation exhausted its retries while the finalized event
+ * snapshot was absent, the durable row is terminal by design. Once the exact
+ * finalized V2 checkpoint is present, carry an explicit recovery fact into the
+ * atomic post-match reservation so the repository can reopen that one terminal
+ * row. A merely finished event is insufficient evidence: this read is the
+ * same checkpoint that the tournament worker requires before opening its
+ * derived cascade.
+ */
+async function prepareTournamentFinalCheckpointRecoveryPlan(
+  context: SchedulerContext,
+  plan: SchedulerObligationPlan,
+  definition: Pick<ScheduledJobDefinition, 'name'>,
+): Promise<SchedulerObligationPlan> {
+  if (
+    definition.name !== 'tournament-event-results' ||
+    plan.eventId === undefined ||
+    plan.evidence?.resultSlot !== 'final-checkpoint'
+  ) {
+    return plan;
+  }
+
+  const existing = await getSchedulerObligationByIdentity({
+    jobName: definition.name,
+    scopeKey: plan.scopeKey,
+    periodKey: plan.periodKey,
+  });
+  if (
+    existing?.status !== 'irrecoverable' ||
+    !existing.lastError?.startsWith(FINAL_EVENT_LIVE_CHECKPOINT_MISSING_PREFIX)
+  ) {
+    return plan;
+  }
+
+  try {
+    const checkpoint = await readLivePublicationV2Checkpoint(context.season, plan.eventId);
+    const ready =
+      checkpoint?.publication.state === 'FINALIZED' &&
+      checkpoint.eventLives.length > 0 &&
+      checkpoint.fixtures.length > 0;
+    if (!ready) return plan;
+    return {
+      ...plan,
+      evidence: {
+        ...(plan.evidence ?? {}),
+        finalCheckpointReady: true,
+      },
+    };
+  } catch (error) {
+    logError('Could not inspect finalized checkpoint for tournament recovery', error, {
+      eventId: plan.eventId,
+      scopeKey: plan.scopeKey,
+      periodKey: plan.periodKey,
+    });
+    return plan;
+  }
+}
 
 export function shouldRevisitSchedulerPlan(
   definition: Pick<ScheduledJobDefinition, 'name' | 'executionPolicy'>,
@@ -1659,17 +1721,30 @@ async function runSchedulerPassUnsafe(now = new Date()): Promise<SchedulerPassRe
         // publication proves every required durable checkpoint. Revisit this
         // one plan on every pass so a worker that deferred while evidence was
         // incomplete can be reclaimed as soon as the next retry is due.
-        const revisitUntilFinalized = definition.name === 'live-finalization';
+        const revisitUntilFinalized =
+          definition.name === 'live-finalization' ||
+          (definition.name === 'tournament-event-results' &&
+            plan.evidence?.resultSlot === 'final-checkpoint');
         if (!wasPlanObserved(planKey)) {
+          const recoveryPlan = await prepareTournamentFinalCheckpointRecoveryPlan(
+            context,
+            plan,
+            definition,
+          );
           postMatchReservations.push({
             definition: { ...definition, queueName: schedulerLaneName(definition) },
-            plan,
+            plan: recoveryPlan,
             planKey,
           });
         } else if (revisitUntilFinalized) {
+          const recoveryPlan = await prepareTournamentFinalCheckpointRecoveryPlan(
+            context,
+            plan,
+            definition,
+          );
           postMatchReservations.push({
             definition: { ...definition, queueName: schedulerLaneName(definition) },
-            plan,
+            plan: recoveryPlan,
             planKey,
           });
         }
