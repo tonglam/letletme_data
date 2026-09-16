@@ -2753,6 +2753,8 @@ export async function verifyMyFplSnapshotScopeGeneration(input: {
   eventId: number;
   revision: number;
   generation: MyFplSnapshotScopeGeneration;
+  /** Optional immutable FPL data_checked fence captured by the job. */
+  expectedFinalDataCheckedAt?: string;
 }): Promise<boolean> {
   if (
     !Number.isSafeInteger(input.revision) ||
@@ -2764,7 +2766,14 @@ export async function verifyMyFplSnapshotScopeGeneration(input: {
   ) {
     throw new Error('My FPL scope generation verification input is invalid');
   }
+  if (
+    input.expectedFinalDataCheckedAt !== undefined &&
+    !Number.isFinite(Date.parse(input.expectedFinalDataCheckedAt))
+  ) {
+    throw new Error('My FPL final data_checked fence must be a valid timestamp');
+  }
   const client = await getDbClient();
+  const expectedFinalDataCheckedAt = input.expectedFinalDataCheckedAt ?? null;
   return client.begin(async (tx) => {
     await tx`SET LOCAL statement_timeout = '2s'`;
     const rows = await tx<{ event_id: number }[]>`
@@ -2784,6 +2793,8 @@ export async function verifyMyFplSnapshotScopeGeneration(input: {
             AND event.event_id = scope.event_id
             AND event.finished
             AND event.data_checked
+            AND (${expectedFinalDataCheckedAt}::timestamptz IS NULL
+              OR event.data_checked_at = ${expectedFinalDataCheckedAt}::timestamptz)
         )
         AND EXISTS (
           SELECT 1

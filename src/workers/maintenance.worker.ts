@@ -585,6 +585,8 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
               active &&
               active.kind === 'FINAL' &&
               finalizationControl &&
+              finalizationControl.finished &&
+              finalizationControl.dataChecked &&
               finalizationControl.activeRevision === active.revision &&
               finalizationControl.entryScopeGeneration !== null &&
               finalizationControl.entryScopeGeneration ===
@@ -660,6 +662,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                   entry: entryScopeGeneration,
                   tournament: tournamentScopeGeneration,
                 },
+                ...(expectedFinalDataCheckedAt === undefined ? {} : { expectedFinalDataCheckedAt }),
               }))
             ) {
               await recordMyFplOutboxRedisEvidence({

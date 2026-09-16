@@ -316,7 +316,12 @@ async function enqueueEntrySyncJobWithOutcome(
     const removeOnSettle = source === 'manual' && options.removeOnSettle !== false;
 
     const triggeredAt = new Date().toISOString();
-    const requestWatermark = options.requestWatermark ?? triggeredAt;
+    // A request watermark is a PostgreSQL ordering boundary, not an
+    // application-host timestamp.  Force/retry jobs without an inherited
+    // watermark capture the boundary in the worker immediately before their
+    // freshness audit; continuations and explicit callers retain the exact
+    // value here.
+    const requestWatermark = options.requestWatermark;
     const jobData = {
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,

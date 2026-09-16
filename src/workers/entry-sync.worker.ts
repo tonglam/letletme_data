@@ -629,7 +629,14 @@ export function createEntrySyncWorker(
       attempt: attempt.attempt,
       targetEventId: job.data?.eventId,
       queueWaitMs: context.queueWaitMs,
-      executionIntent: job.data?.executionIntent,
+      // Resolve this before runDataSyncAttempt emits the attempt report.  A
+      // Bull automatic retry has no new payload, so reporting the raw intent
+      // would claim a force/refresh execution even though the worker applies
+      // the retry branch below.
+      executionIntent:
+        attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
+          ? 'retry'
+          : (job.data?.executionIntent ?? resolveEntrySyncExecutionIntent(job.data?.source)),
     };
 
     return runDataSyncAttempt(attemptContext, async () => {
@@ -638,14 +645,25 @@ export function createEntrySyncWorker(
         job.data?.eventId,
         async () => (await getCurrentEvent(season))?.id ?? null,
       );
-      const effectiveExecutionIntent =
-        attempt.attempt > 1 || (job.data?.retryCount ?? 0) > 0
-          ? 'retry'
-          : (job.data?.executionIntent ?? resolveEntrySyncExecutionIntent(job.data?.source));
+      const effectiveExecutionIntent = attemptContext.executionIntent!;
+      const requestWatermark =
+        job.data?.requestWatermark ??
+        (effectiveExecutionIntent === 'force' || effectiveExecutionIntent === 'retry'
+          ? (await readDatabaseOrderingTimestamp()).exact
+          : undefined);
       const effectiveJobData =
         targetEventId !== undefined
-          ? { ...job.data, eventId: targetEventId, executionIntent: effectiveExecutionIntent }
-          : { ...job.data, executionIntent: effectiveExecutionIntent };
+          ? {
+              ...job.data,
+              eventId: targetEventId,
+              executionIntent: effectiveExecutionIntent,
+              ...(requestWatermark === undefined ? {} : { requestWatermark }),
+            }
+          : {
+              ...job.data,
+              executionIntent: effectiveExecutionIntent,
+              ...(requestWatermark === undefined ? {} : { requestWatermark }),
+            };
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
       const runMutation = async (): Promise<EntrySyncMutationResult> => {

@@ -273,7 +273,11 @@ async function retireSupersededFreshnessWindows(
     .where(
       and(
         inArray(freshnessSloWindowsInOps.windowId, windowIds),
-        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
+        // A stale scope may already have crossed the SLO boundary. Retire the
+        // exact attached window even when it is BREACHED; the newer scope is
+        // the authoritative obligation and the breach must not keep its case
+        // open after supersession.
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID', 'BREACHED']),
       ),
     );
   await db
@@ -1149,8 +1153,23 @@ export async function supersedeMyFplFinalizationObligations(input: {
       WHERE slo_window.contract_key = 'my-fpl'
         AND slo_window.scope_key = ${input.scopeKey}
         AND slo_window.period_key = retired.period_key
-        AND slo_window.status IN ('PENDING', 'INVALID')
+        AND slo_window.status IN ('PENDING', 'INVALID', 'BREACHED')
       RETURNING slo_window.window_id
+    ), dismissed_cases AS (
+      UPDATE ops.data_governance_cases AS governance_case
+      SET status = 'DISMISSED',
+          last_error = NULL,
+          repair_job_id = NULL,
+          repair_deadline_at = NULL,
+          evidence = governance_case.evidence || jsonb_build_object(
+            'reason', ${SUPERSEDED_BY_LATEST_AUTHORITATIVE}::text,
+            'supersededByPeriodKey', ${input.periodKey}::text,
+            'supersededByObligationId', ${input.successorObligationId}::text
+          ),
+          updated_at = clock_timestamp()
+      WHERE governance_case.slo_window_id IN (SELECT window_id FROM retired_windows)
+        AND governance_case.status IN ('OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW')
+      RETURNING governance_case.case_id
     )
     SELECT obligation_id FROM retired
   `);
@@ -2335,7 +2354,7 @@ export async function markSchedulerObligationIrrecoverable(input: {
   const db = input.db ?? (await getDb());
   return db.transaction(async (tx) => {
     const closeableStatuses: SchedulerObligationStatus[] = input.includeInFlight
-      ? ['pending', 'failed', 'enqueued', 'running']
+      ? ['pending', 'failed', 'retrying', 'enqueued', 'running']
       : ['pending', 'failed'];
     const status = input.status ?? 'irrecoverable';
     const updated = await tx
