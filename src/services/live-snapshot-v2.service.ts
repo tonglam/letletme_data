@@ -1156,7 +1156,9 @@ export async function syncLiveSnapshotV2(
       // observation path.
       const preserveEquivalentPrevious =
         observedDeskRead?.publication.state === 'FINALIZED' &&
-        observedDetailRead?.publication.finalized === true;
+        observedDeskRead.publication.checkpointedAt !== null &&
+        observedDetailRead?.publication.finalized === true &&
+        observedDetailRead.publication.checkpointedAt !== null;
       await (dependencies.restoreFinalMatchPair ?? restoreLiveMatchEquivalentFinalPairV3)({
         deskCheckpoint: durableMatchPair.desk,
         detailCheckpoint: durableMatchPair.detail,
