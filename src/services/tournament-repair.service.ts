@@ -30,7 +30,10 @@ import {
 import { auditTournamentSetup } from './tournament-audit.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
-import { rebuildTournamentStructure } from './tournament-structure.service';
+import {
+  pruneTournamentDerivedResultsOutsideStructure,
+  rebuildTournamentStructure,
+} from './tournament-structure.service';
 import {
   requestTournamentReviewCorrection,
   requestTournamentReviewTournamentCorrection,
@@ -237,6 +240,7 @@ async function repairTournamentSetupIssuePrepared(
       );
       repairIssues.push(...historyIssues);
       if (historyIssues.length === 0) {
+        await pruneTournamentDerivedResultsOutsideStructure(season, issue.tournamentId);
         // A topology rebuild can change group membership, phase boundaries, or
         // bracket edges for every settled event. Defer the correction reset
         // until the post-repair audit succeeds, then fence the earliest head

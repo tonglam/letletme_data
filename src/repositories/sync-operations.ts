@@ -60,6 +60,8 @@ export type EntrySyncAuditStatus = Readonly<{
   seasonId: number;
   eventId: number;
   entryId: number;
+  available: boolean;
+  reasonCodes: readonly string[];
   coverageStartAt: string | null;
   observedAt: string;
   executions: number;
@@ -449,7 +451,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       ).length;
       const failedItems = allRows.filter((row) => row.itemStatus === 'failed').length;
       const evidenceComplete =
-        allRows.length === 0 ||
+        allRows.length > 0 &&
         allRows.every((row) => {
           const payload = payloadFor(row.normalizedPayload);
           return (
@@ -477,17 +479,9 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               )?.toISOString() ?? null)
             : null,
         observedAt: new Date().toISOString(),
-        executions: [
-          ...allRows
-            .reduce((attemptsByRun, row) => {
-              attemptsByRun.set(
-                row.runId,
-                Math.max(attemptsByRun.get(row.runId) ?? 0, Math.max(1, row.attempts)),
-              );
-              return attemptsByRun;
-            }, new Map<string, number>())
-            .values(),
-        ].reduce((sum, attempts) => sum + attempts, 0),
+        available: allRows.length > 0,
+        reasonCodes: allRows.length > 0 ? [] : ['SYNC_AUDIT_EVIDENCE_MISSING'],
+        executions: new Set(allRows.map((row) => row.runId)).size,
         providerRequests,
         factCommits,
         finalCompletions,

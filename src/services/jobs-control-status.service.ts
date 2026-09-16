@@ -296,7 +296,6 @@ async function readEntrySyncAudit(
     };
   }
   return {
-    available: true,
     season: season.seasonCode,
     ...(await createSyncOperationsRepository().entrySyncAudit({
       seasonId: season.seasonId,

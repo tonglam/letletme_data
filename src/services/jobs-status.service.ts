@@ -557,19 +557,43 @@ export async function getLiveFinalRetentionOperationalStatus(
   const nextEvent = currentFinalizedEvent
     ? (allEvents.find((event) => event.id > currentFinalizedEvent.id) ?? null)
     : null;
-  const [currentFixtures, nextFixtures] = await Promise.all([
-    currentFinalizedEvent
-      ? fixtureRepository.findByEvent(season, currentFinalizedEvent.id).catch(() => [])
-      : Promise.resolve([]),
-    nextEvent
-      ? fixtureRepository.findByEvent(season, nextEvent.id).catch(() => [])
-      : Promise.resolve([]),
+  const readFixtureEvidence = async (eventId: number | null) => {
+    if (eventId === null) return { fixtures: [], errorType: null as string | null };
+    try {
+      return { fixtures: await fixtureRepository.findByEvent(season, eventId), errorType: null };
+    } catch (error) {
+      return {
+        fixtures: [],
+        errorType: error instanceof Error ? error.name : 'UnknownError',
+      };
+    }
+  };
+  const [currentFixtureEvidence, nextFixtureEvidence] = await Promise.all([
+    readFixtureEvidence(currentFinalizedEvent?.id ?? null),
+    readFixtureEvidence(nextEvent?.id ?? null),
   ]);
-  const alertContext =
-    currentFinalizedEvent && nextEvent
+  const currentFixtures = currentFixtureEvidence.fixtures;
+  const nextFixtures = nextFixtureEvidence.fixtures;
+  const fixtureStatusUnavailable =
+    currentFixtureEvidence.errorType !== null || nextFixtureEvidence.errorType !== null;
+  const alertContext = fixtureStatusUnavailable
+    ? {
+        source: 'canonical-events-and-fixtures',
+        phase: 'UNKNOWN',
+        fixtureStatusAvailable: false,
+        reasonCodes: ['FIXTURE_STATUS_UNAVAILABLE'],
+        currentEventId: currentFinalizedEvent?.id ?? null,
+        nextEventId: nextEvent?.id ?? null,
+        currentFixtureCount: currentFixtures.length,
+        nextFixtureCount: nextFixtures.length,
+        currentEventAllFixturesFinished: false,
+        nextEventStarted: false,
+      }
+    : currentFinalizedEvent && nextEvent
       ? {
           source: 'canonical-events-and-fixtures',
           phase: 'POST_EVENT_PRE_NEXT',
+          fixtureStatusAvailable: true,
           currentEventId: currentFinalizedEvent.id,
           nextEventId: nextEvent.id,
           currentFixtureCount: currentFixtures.length,
@@ -581,6 +605,7 @@ export async function getLiveFinalRetentionOperationalStatus(
       : {
           source: 'canonical-events-and-fixtures',
           phase: 'UNKNOWN',
+          fixtureStatusAvailable: true,
           currentEventId: currentFinalizedEvent?.id ?? null,
           nextEventId: nextEvent?.id ?? null,
           currentFixtureCount: currentFixtures.length,

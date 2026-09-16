@@ -3,6 +3,14 @@ import type {
   DbTournamentKnockoutInsert,
   DbTournamentKnockoutResultInsert,
 } from '../db/schemas/index.schema';
+import { sql } from 'drizzle-orm';
+import {
+  tournamentBattleGroupResultsInCompetition,
+  tournamentGroupsInCompetition,
+  tournamentKnockoutResultsInCompetition,
+  tournamentKnockoutsInCompetition,
+  tournamentPointsGroupResultsInCompetition,
+} from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
@@ -108,5 +116,81 @@ export async function rebuildTournamentStructure(
     await groups.upsertBatch(season, groupRows);
     await knockouts.upsertBatch(season, knockoutMatches);
     await knockoutResultsRepository.upsertBatch(season, publishedKnockoutResults);
+  });
+}
+
+/**
+ * Remove only derived rows that no longer have a canonical topology owner.
+ * Structure repair keeps the old derived set while the history backfill runs;
+ * this cleanup is called only after that backfill converges, so a failed
+ * candidate never turns a visible history into an empty set.
+ */
+export async function pruneTournamentDerivedResultsOutsideStructure(
+  season: FplSeasonRef,
+  tournamentId: number,
+): Promise<void> {
+  const db = await getDb();
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`
+      DELETE FROM ${tournamentPointsGroupResultsInCompetition} AS result
+      WHERE result.season_id = ${season.seasonId}
+        AND result.tournament_id = ${tournamentId}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${tournamentGroupsInCompetition} AS group_row
+          WHERE group_row.season_id = result.season_id
+            AND group_row.tournament_id = result.tournament_id
+            AND group_row.group_id = result.group_id
+            AND group_row.entry_id = result.entry_id
+        )
+    `);
+    await tx.execute(sql`
+      DELETE FROM ${tournamentBattleGroupResultsInCompetition} AS result
+      WHERE result.season_id = ${season.seasonId}
+        AND result.tournament_id = ${tournamentId}
+        AND (
+          NOT EXISTS (
+            SELECT 1
+            FROM ${tournamentGroupsInCompetition} AS group_row
+            WHERE group_row.season_id = result.season_id
+              AND group_row.tournament_id = result.tournament_id
+              AND group_row.group_id = result.group_id
+          )
+          OR (
+            result.home_entry_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM ${tournamentGroupsInCompetition} AS group_row
+              WHERE group_row.season_id = result.season_id
+                AND group_row.tournament_id = result.tournament_id
+                AND group_row.group_id = result.group_id
+                AND group_row.entry_id = result.home_entry_id
+            )
+          )
+          OR (
+            result.away_entry_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM ${tournamentGroupsInCompetition} AS group_row
+              WHERE group_row.season_id = result.season_id
+                AND group_row.tournament_id = result.tournament_id
+                AND group_row.group_id = result.group_id
+                AND group_row.entry_id = result.away_entry_id
+            )
+          )
+        )
+    `);
+    await tx.execute(sql`
+      DELETE FROM ${tournamentKnockoutResultsInCompetition} AS result
+      WHERE result.season_id = ${season.seasonId}
+        AND result.tournament_id = ${tournamentId}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${tournamentKnockoutsInCompetition} AS knockout
+          WHERE knockout.season_id = result.season_id
+            AND knockout.tournament_id = result.tournament_id
+            AND knockout.match_id = result.match_id
+        )
+    `);
   });
 }

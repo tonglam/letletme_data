@@ -935,7 +935,25 @@ export async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) 
     const fence = inspectSchedulerObligationFence(job.data);
     if (fence.kind === 'complete') {
       try {
-        await persistTournamentTerminalFailureBeforeSettlement(job, error);
+        const dependencyNotReady = classifyDataError(error) === 'SOURCE_NOT_READY';
+        if (dependencyNotReady && isTerminalJobAttemptFailure(job, error, job.attemptsMade + 1)) {
+          // Dependency waits must win the pre-settlement race. Persisting a
+          // terminal failure first changes the obligation state so the defer
+          // transition is rejected and a missing FINAL checkpoint becomes a
+          // false terminal failure.
+          await deferSchedulerObligationForWorker({
+            obligationId: fence.obligationId,
+            generation: fence.generation,
+            dependencyWait: { reasonCodes: [safeDataErrorCode(error, 'SOURCE_NOT_READY')] },
+            evidence: {
+              dependencyPhase: 'tournament-event-results',
+              eventId: job.data.eventId,
+              status: 'waiting-for-final-checkpoint',
+            },
+          });
+        } else {
+          await persistTournamentTerminalFailureBeforeSettlement(job, error);
+        }
       } catch (bookkeepingError) {
         // The BullMQ failed listener remains an idempotent fallback, but the
         // main path attempts durable failure bookkeeping before settlement so
