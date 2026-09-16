@@ -16,6 +16,7 @@ import {
 import { logError, logInfo } from './logger';
 import { parseStrictBooleanEnvValue } from './config';
 import { isPlayerValuesWindowPendingError } from '../domain/player-values-window';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { runtimeReleaseRevision } from './runtime-heartbeat';
 
@@ -45,6 +46,8 @@ export interface DataSyncAttemptContext {
   source?: string;
   attempt?: number;
   targetEventId?: number;
+  /** Canonical season scope for the batch-cost ledger. */
+  season?: FplSeasonRef;
   queueWaitMs?: number | null;
   /** Stable parent/batch identity for persisted cost accounting. */
   parentRunId?: string;
@@ -121,6 +124,8 @@ export interface DataSyncAttemptReport {
   source: DataSyncAttemptSource;
   attempt: number;
   targetEventId?: number;
+  seasonId?: number;
+  seasonCode?: string;
   outcome: DataSyncAttemptOutcome;
   queueWaitMs: number;
   durationMs: number;
@@ -363,6 +368,8 @@ function batchCostPayload(
     job: context.jobName,
     queue: context.queue,
     eventId: context.targetEventId ?? null,
+    seasonId: context.season?.seasonId ?? null,
+    seasonCode: context.season?.seasonCode ?? null,
     executionId,
     executionIntent: executionIntent(context),
     startedAt: startedAtIso,
@@ -431,6 +438,8 @@ async function ensureBatchCostLedgerRun(
     provider: 'fpl',
     lane: context.queue,
     scope: context.jobName,
+    season: context.season,
+    eventId: context.targetEventId,
     mode: 'batch-cost',
     // Keep this identity constant across Bull retries. The original source
     // and run IDs remain in metadata/payload and never participate in the
@@ -443,6 +452,9 @@ async function ensureBatchCostLedgerRun(
       parentRunId: context.parentRunId ?? null,
       source: context.source ?? null,
       releaseSha,
+      seasonId: context.season?.seasonId ?? null,
+      seasonCode: context.season?.seasonCode ?? null,
+      eventId: context.targetEventId ?? null,
     },
   });
 }
@@ -498,6 +510,8 @@ async function persistBatchCostStart(
       job: context.jobName,
       queue: context.queue,
       eventId: context.targetEventId ?? null,
+      seasonId: context.season?.seasonId ?? null,
+      seasonCode: context.season?.seasonCode ?? null,
       executionId,
       executionIntent: executionIntent(context),
       startedAt: startedAtIso,
@@ -537,6 +551,11 @@ export async function runDataSyncAttempt<T>(
       try {
         if (!nestedMetricsContext) {
           try {
+            // Compute the deterministic ledger identity before the first
+            // database call. If that call writes the running marker and then
+            // fails with an ambiguous response, the finally block can still
+            // fence and close the marker.
+            batchCostRunId = batchCostLedgerRunId(context);
             batchCostRunId = await persistBatchCostStart(
               context,
               attemptKey,
@@ -611,6 +630,9 @@ export async function runDataSyncAttempt<T>(
           source: normalizeSource(context),
           attempt: boundedAttempt(context.attempt),
           ...(targetEventId !== undefined ? { targetEventId } : {}),
+          ...(context.season
+            ? { seasonId: context.season.seasonId, seasonCode: context.season.seasonCode }
+            : {}),
           outcome,
           queueWaitMs: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),
           durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
@@ -650,9 +672,24 @@ export async function runDataSyncAttempt<T>(
               executionId,
             );
           } catch (error) {
-            // Cost accounting is observability. Never turn an already-settled
-            // business result into a retry because the optional ops ledger is
-            // unavailable; the log carries the explicit persistence gap.
+            // Cost accounting is observability. Close the durable running
+            // marker when settlement itself fails, then keep the business
+            // result unchanged. The marker records an incomplete accounting
+            // outcome instead of leaving queue quiescence blocked forever.
+            if (batchCostRunId) {
+              await syncOperationsRepository
+                .markBatchCostSettlementFailure(batchCostRunId, {
+                  attemptKey,
+                  attempt: boundedAttempt(context.attempt),
+                  error,
+                })
+                .catch((recoveryError) => {
+                  logError('Failed to close data sync batch cost marker', recoveryError, {
+                    runId: context.runId,
+                    attemptKey,
+                  });
+                });
+            }
             logError('Failed to persist data sync batch cost', error, {
               runId: context.runId,
               attemptKey,

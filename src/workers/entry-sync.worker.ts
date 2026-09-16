@@ -643,6 +643,7 @@ export function createEntrySyncWorker(
       source: attempt.source,
       attempt: attempt.attempt,
       targetEventId: job.data?.eventId,
+      season,
       queueWaitMs: context.queueWaitMs,
       // Resolve this before runDataSyncAttempt emits the attempt report.  A
       // Bull automatic retry has no new payload, so reporting the raw intent

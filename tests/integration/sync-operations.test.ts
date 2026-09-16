@@ -929,6 +929,51 @@ describe('ops sync state machine', () => {
     ).toBe(false);
   });
 
+  test('closes a running marker when batch-cost settlement fails', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[2], season);
+    const attemptKey = 'data-sync|player-stats|settlement-failure|1|none|execution-1';
+
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[2], {
+      attemptKey,
+      batchId: 'settlement-failure',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: 1,
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    });
+    expect(
+      await syncOperationsRepository.markBatchCostSettlementFailure(RUN_IDS[2], {
+        attemptKey,
+        attempt: 1,
+        error: new Error('ledger write unavailable'),
+      }),
+    ).toBe(true);
+
+    const [item] = await sql<Array<{ status: string; phase: string; incompleteReason: string }>>`
+      SELECT status,
+             normalized_payload->>'phase' AS phase,
+             normalized_payload->>'incompleteReason' AS "incompleteReason"
+      FROM ops.sync_items
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+        AND resource_type = 'batch-cost'
+        AND resource_id = ${attemptKey}
+    `;
+    expect(item).toEqual({
+      status: 'failed',
+      phase: 'settlement_failed',
+      incompleteReason: 'batch_cost_persistence_failed',
+    });
+    const [run] = await sql<Array<{ status: string; error_summary: string | null }>>`
+      SELECT status, error_summary
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[2]}::uuid
+    `;
+    expect(run?.status).toBe('failed');
+    expect(run?.error_summary).toContain('batch-cost settlement');
+  });
+
   test('fences a late failure behind a newer batch attempt', async () => {
     const sql = await getDbClient();
     const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
