@@ -249,6 +249,40 @@ function checkpointValues(read: LeagueLiveRead, checkpointedAt: Date) {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sameFinalizedPublicationContent(
+  read: LeagueLiveRead,
+  persisted: {
+    readonly state: string;
+    readonly manifest: unknown;
+    readonly rowCount: number;
+  },
+): boolean {
+  // A Redis rebuild may allocate a fresh publication identity. FINALIZED is
+  // still immutable: a newer identity may advance the durable pointer only
+  // when it carries the same scope, global vector, revision vector, counts,
+  // and semantic content identity. A structurally valid but semantically
+  // different publication is a new result and must not replace history here.
+  if (persisted.state !== 'FINALIZED' || persisted.rowCount !== read.index.length) return false;
+  if (!isRecord(persisted.manifest)) return false;
+  const stable = (manifest: Record<string, unknown>) => ({
+    contractVersion: manifest.contractVersion,
+    season: manifest.season,
+    eventId: manifest.eventId,
+    tournamentId: manifest.tournamentId,
+    scope: manifest.scope,
+    matchId: manifest.matchId,
+    state: manifest.state,
+    globalRef: manifest.globalRef,
+    revisions: manifest.revisions,
+    counts: manifest.counts,
+  });
+  return canonicalJson(stable(persisted.manifest)) === canonicalJson(stable(read.publication));
+}
+
 function storedFinalizedCheckpointIsValid(
   scope: LeagueLiveScope,
   current: {
@@ -355,19 +389,30 @@ export async function checkpointLiveLeaguePublicationV2(
         }
         const candidateGeneration = read.publication.generation;
         const currentGeneration = Number(current.generation);
-        const generationCompatible = currentIsValidFinalized
-          ? isLiveLeagueCheckpointGenerationCompatible(
-              {
-                generation: currentGeneration,
-                publicationId: current.publicationId,
-              },
-              {
-                generation: candidateGeneration,
-                publicationId: read.publication.publicationId,
-              },
-            )
-          : Number.isSafeInteger(candidateGeneration) && candidateGeneration >= currentGeneration;
+        const generationCompatible = isLiveLeagueCheckpointGenerationCompatible(
+          {
+            generation: currentGeneration,
+            publicationId: current.publicationId,
+          },
+          {
+            generation: candidateGeneration,
+            publicationId: read.publication.publicationId,
+          },
+        );
         if (!generationCompatible) return false;
+        if (
+          currentIsValidFinalized &&
+          current.publicationId === read.publication.publicationId &&
+          currentGeneration === candidateGeneration
+        ) {
+          // FINALIZED retries are common after the Redis marker is written.
+          // Treat an exact identity replay as idempotent and avoid rewriting
+          // the complete JSONB checkpoint payload.
+          return true;
+        }
+        if (currentIsValidFinalized && !sameFinalizedPublicationContent(read, current)) {
+          return false;
+        }
         if (!currentIsValidFinalized) {
           // A corrupt FINALIZED row may be repaired by the same validated
           // monotonic successor. It can never be replaced by provisional data

@@ -718,7 +718,11 @@ describe('Live League V2 checkpoint transaction contract', () => {
     expect(checkpointServiceSource).toContain('candidateIsValidFinalized');
     expect(checkpointServiceSource).toContain(String.raw`excluded.state = 'FINALIZED'`);
     expect(checkpointServiceSource).toContain('generationCompatible');
-    expect(checkpointServiceSource).toContain('candidateGeneration >= currentGeneration');
+    expect(checkpointServiceSource).toContain('isLiveLeagueCheckpointGenerationCompatible');
+    expect(checkpointServiceSource).toContain('sameFinalizedPublicationContent');
+    expect(checkpointServiceSource).toContain(
+      'current.publicationId === read.publication.publicationId',
+    );
   });
 });
 
