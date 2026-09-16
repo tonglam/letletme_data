@@ -1118,7 +1118,12 @@ export function createEntrySyncWorker(
           jobName: job.name,
           runId: job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
           batchId: String(job.id ?? `${job.name}-${job.timestamp}`),
-          attempt: Math.max(1, job.attemptsMade),
+          // Delayed full-batch retries reset BullMQ's attemptsMade while
+          // retaining retryCount in the payload. Reconstruct the same
+          // logical attempt identity used by the processor so an orphaned
+          // marker is always fenced and closed.
+          attempt: resolveDataSyncAttempt(job.data?.source, job.attemptsMade, job.data?.retryCount)
+            .attempt,
           error,
         }).catch((reconciliationError) => {
           logError('Failed to reconcile terminal entry batch cost marker', reconciliationError, {
