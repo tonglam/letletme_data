@@ -353,6 +353,7 @@ async function myFplFinalScopeIsCurrent(input: {
       evidence: {
         eventId: input.eventId,
         reason: 'superseded-by-scope-generation',
+        freshnessWindowId: input.job.data.freshnessWindowId ?? null,
         phase: input.phase,
         expectedEntryScopeGeneration: input.expectedEntryScopeGeneration,
         expectedTournamentScopeGeneration: input.expectedTournamentScopeGeneration,
@@ -556,6 +557,7 @@ async function processMaintenanceJob(job: Job<MaintenanceJobData>): Promise<unkn
                 evidence: {
                   eventId,
                   reason: 'superseded-by-scope-generation',
+                  freshnessWindowId: job.data.freshnessWindowId ?? null,
                   expectedEntryScopeGeneration,
                   expectedTournamentScopeGeneration,
                   expectedFinalDataCheckedAt: expectedFinalDataCheckedAt ?? null,

@@ -249,6 +249,51 @@ async function retireAcceptedLivePicksBackoffWindows(
     );
 }
 
+async function retireSupersededFreshnessWindows(
+  db: DbOrTransaction,
+  obligationId: string,
+  evidence: unknown,
+): Promise<void> {
+  const windowIds = freshnessWindowIdsFromEvidence(evidence);
+  if (windowIds.length === 0) return;
+  const retirementEvidence = JSON.stringify({
+    reason: 'superseded-by-scope-generation',
+    notApplicableReason: 'superseded-by-scope-generation',
+    schedulerObligationId: obligationId,
+  });
+  await db
+    .update(freshnessSloWindowsInOps)
+    .set({
+      status: 'NOT_APPLICABLE',
+      completenessStatus: 'NOT_APPLICABLE',
+      breachCode: null,
+      evidence: sql`${freshnessSloWindowsInOps.evidence} || ${retirementEvidence}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        inArray(freshnessSloWindowsInOps.windowId, windowIds),
+        inArray(freshnessSloWindowsInOps.status, ['PENDING', 'INVALID']),
+      ),
+    );
+  await db
+    .update(dataGovernanceCasesInOps)
+    .set({
+      status: 'DISMISSED',
+      lastError: null,
+      repairJobId: null,
+      repairDeadlineAt: null,
+      evidence: sql`${dataGovernanceCasesInOps.evidence} || ${retirementEvidence}::jsonb`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        inArray(dataGovernanceCasesInOps.sloWindowId, windowIds),
+        inArray(dataGovernanceCasesInOps.status, ['OPEN', 'AUTO_REPAIRING', 'REQUIRES_REVIEW']),
+      ),
+    );
+}
+
 function mapRow(row: typeof schedulerObligationsInOps.$inferSelect): SchedulerObligation {
   return {
     obligationId: row.obligationId,
@@ -2287,32 +2332,41 @@ export async function markSchedulerObligationIrrecoverable(input: {
   db?: DbHandle;
 }): Promise<boolean> {
   const db = input.db ?? (await getDb());
-  const closeableStatuses: SchedulerObligationStatus[] = input.includeInFlight
-    ? ['pending', 'failed', 'enqueued', 'running']
-    : ['pending', 'failed'];
-  const updated = await db
-    .update(schedulerObligationsInOps)
-    .set({
-      status: input.status ?? 'irrecoverable',
-      evidence: terminalSchedulerEvidence(input.evidence),
-      completedAt: sql`clock_timestamp()`,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      lastError:
-        (input.status ?? 'irrecoverable') === 'irrecoverable' ? (input.lastError ?? null) : null,
-      updatedAt: sql`clock_timestamp()`,
-    })
-    .where(
-      and(
-        eq(schedulerObligationsInOps.obligationId, input.obligationId),
-        input.generation === undefined
-          ? undefined
-          : eq(schedulerObligationsInOps.generation, input.generation),
-        inArray(schedulerObligationsInOps.status, closeableStatuses),
-      ),
-    )
-    .returning({ obligationId: schedulerObligationsInOps.obligationId });
-  return updated.length === 1;
+  return db.transaction(async (tx) => {
+    const closeableStatuses: SchedulerObligationStatus[] = input.includeInFlight
+      ? ['pending', 'failed', 'enqueued', 'running']
+      : ['pending', 'failed'];
+    const status = input.status ?? 'irrecoverable';
+    const updated = await tx
+      .update(schedulerObligationsInOps)
+      .set({
+        status,
+        evidence: terminalSchedulerEvidence(input.evidence),
+        completedAt: sql`clock_timestamp()`,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastError: status === 'irrecoverable' ? (input.lastError ?? null) : null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(schedulerObligationsInOps.obligationId, input.obligationId),
+          input.generation === undefined
+            ? undefined
+            : eq(schedulerObligationsInOps.generation, input.generation),
+          inArray(schedulerObligationsInOps.status, closeableStatuses),
+        ),
+      )
+      .returning({ obligationId: schedulerObligationsInOps.obligationId });
+    if (
+      updated.length === 1 &&
+      status === 'skipped' &&
+      input.evidence?.reason === 'superseded-by-scope-generation'
+    ) {
+      await retireSupersededFreshnessWindows(tx, input.obligationId, input.evidence);
+    }
+    return updated.length === 1;
+  });
 }
 
 export async function completeSchedulerObligationByBullJobId(input: {
