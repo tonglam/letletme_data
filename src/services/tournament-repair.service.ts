@@ -33,6 +33,7 @@ import { syncTournamentSelectionStats } from './tournament-selection-stats.servi
 import {
   pruneTournamentDerivedResultsOutsideStructure,
   rebuildTournamentStructure,
+  snapshotDerivedResultsInvalidBeforeStructureRepair,
 } from './tournament-structure.service';
 import {
   requestTournamentReviewCorrection,
@@ -229,12 +230,16 @@ async function repairTournamentSetupIssuePrepared(
           const currentAudit = await auditTournamentSetup(season, tournament, null);
           if (!currentAudit.requiresStructureRebuild) return false;
         }
+        const staleDerivedResults = await snapshotDerivedResultsInvalidBeforeStructureRepair(
+          season,
+          issue.tournamentId,
+        );
         await rebuildTournamentStructure(season, tournament, entrySeeds, {
           preserveDerivedResults: true,
         });
-        return true;
+        return staleDerivedResults;
       });
-      if (!rebuilt) break;
+      if (rebuilt === false) break;
       // Rebuild every finalized event from the same canonical inputs before
       // requesting a review correction. Existing derived rows remain present
       // while this phase runs; a failed event backfill therefore cannot leave
@@ -249,7 +254,7 @@ async function repairTournamentSetupIssuePrepared(
       );
       repairIssues.push(...historyIssues);
       if (historyIssues.length === 0) {
-        await pruneTournamentDerivedResultsOutsideStructure(season, issue.tournamentId);
+        await pruneTournamentDerivedResultsOutsideStructure(season, issue.tournamentId, rebuilt);
         // A topology rebuild can change group membership, phase boundaries, or
         // bracket edges for every settled event. Defer the correction reset
         // until the post-repair audit succeeds, then fence the earliest head

@@ -28,6 +28,12 @@ import { createTournamentKnockoutResultsRepository } from '../repositories/tourn
 import { createTournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
 import { createTournamentPointsGroupResultsRepository } from '../repositories/tournament-points-group-results';
 
+export type DerivedResultRepairSnapshot = {
+  points: Array<{ sourceResultId: number; updatedAt: Date }>;
+  battle: Array<{ sourceResultId: number; updatedAt: Date }>;
+  knockout: Array<{ sourceResultId: number; updatedAt: Date }>;
+};
+
 function groupInsert(row: Record<string, number | string | null>): DbTournamentGroupInsert {
   return {
     tournamentId: Number(row.tournament_id),
@@ -120,6 +126,132 @@ export async function rebuildTournamentStructure(
 }
 
 /**
+ * Capture only derived rows that were already invalid against the canonical
+ * topology before a structure repair. The snapshot is used after the
+ * replacement/backfill phase so a failed repair never clears visible history,
+ * and a row rewritten by the new calculation is not mistaken for stale data.
+ */
+export async function snapshotDerivedResultsInvalidBeforeStructureRepair(
+  season: FplSeasonRef,
+  tournamentId: number,
+): Promise<DerivedResultRepairSnapshot> {
+  const db = await getDb();
+  const [groups, points, battles, knockoutResults, knockouts] = await Promise.all([
+    db
+      .select({
+        groupId: tournamentGroupsInCompetition.groupId,
+        entryId: tournamentGroupsInCompetition.entryId,
+        startedEventId: tournamentGroupsInCompetition.startedEventId,
+        endedEventId: tournamentGroupsInCompetition.endedEventId,
+      })
+      .from(tournamentGroupsInCompetition)
+      .where(
+        sql`${tournamentGroupsInCompetition.seasonId} = ${season.seasonId}
+          AND ${tournamentGroupsInCompetition.tournamentId} = ${tournamentId}`,
+      ),
+    db
+      .select({
+        sourceResultId: tournamentPointsGroupResultsInCompetition.sourceResultId,
+        groupId: tournamentPointsGroupResultsInCompetition.groupId,
+        eventId: tournamentPointsGroupResultsInCompetition.eventId,
+        entryId: tournamentPointsGroupResultsInCompetition.entryId,
+        updatedAt: tournamentPointsGroupResultsInCompetition.updatedAt,
+      })
+      .from(tournamentPointsGroupResultsInCompetition)
+      .where(
+        sql`${tournamentPointsGroupResultsInCompetition.seasonId} = ${season.seasonId}
+          AND ${tournamentPointsGroupResultsInCompetition.tournamentId} = ${tournamentId}`,
+      ),
+    db
+      .select({
+        sourceResultId: tournamentBattleGroupResultsInCompetition.sourceResultId,
+        groupId: tournamentBattleGroupResultsInCompetition.groupId,
+        eventId: tournamentBattleGroupResultsInCompetition.eventId,
+        homeEntryId: tournamentBattleGroupResultsInCompetition.homeEntryId,
+        awayEntryId: tournamentBattleGroupResultsInCompetition.awayEntryId,
+        updatedAt: tournamentBattleGroupResultsInCompetition.updatedAt,
+      })
+      .from(tournamentBattleGroupResultsInCompetition)
+      .where(
+        sql`${tournamentBattleGroupResultsInCompetition.seasonId} = ${season.seasonId}
+          AND ${tournamentBattleGroupResultsInCompetition.tournamentId} = ${tournamentId}`,
+      ),
+    db
+      .select({
+        sourceResultId: tournamentKnockoutResultsInCompetition.sourceResultId,
+        eventId: tournamentKnockoutResultsInCompetition.eventId,
+        matchId: tournamentKnockoutResultsInCompetition.matchId,
+        playAgainstId: tournamentKnockoutResultsInCompetition.playAgainstId,
+        updatedAt: tournamentKnockoutResultsInCompetition.updatedAt,
+      })
+      .from(tournamentKnockoutResultsInCompetition)
+      .where(
+        sql`${tournamentKnockoutResultsInCompetition.seasonId} = ${season.seasonId}
+          AND ${tournamentKnockoutResultsInCompetition.tournamentId} = ${tournamentId}`,
+      ),
+    db
+      .select({
+        matchId: tournamentKnockoutsInCompetition.matchId,
+        startedEventId: tournamentKnockoutsInCompetition.startedEventId,
+        endedEventId: tournamentKnockoutsInCompetition.endedEventId,
+      })
+      .from(tournamentKnockoutsInCompetition)
+      .where(
+        sql`${tournamentKnockoutsInCompetition.seasonId} = ${season.seasonId}
+          AND ${tournamentKnockoutsInCompetition.tournamentId} = ${tournamentId}`,
+      ),
+  ]);
+
+  const ownsGroupEntry = (groupId: number, entryId: number, eventId: number): boolean =>
+    groups.some(
+      (group) =>
+        group.groupId === groupId &&
+        group.entryId === entryId &&
+        group.startedEventId !== null &&
+        group.endedEventId !== null &&
+        eventId >= group.startedEventId &&
+        eventId <= group.endedEventId,
+    );
+  const ownsGroup = (groupId: number, eventId: number): boolean =>
+    groups.some(
+      (group) =>
+        group.groupId === groupId &&
+        group.startedEventId !== null &&
+        group.endedEventId !== null &&
+        eventId >= group.startedEventId &&
+        eventId <= group.endedEventId,
+    );
+
+  return {
+    points: points
+      .filter((result) => !ownsGroupEntry(result.groupId, result.entryId, result.eventId))
+      .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
+    battle: battles
+      .filter(
+        (result) =>
+          !ownsGroup(result.groupId, result.eventId) ||
+          (result.homeEntryId !== null &&
+            !ownsGroupEntry(result.groupId, result.homeEntryId, result.eventId)) ||
+          (result.awayEntryId !== null &&
+            !ownsGroupEntry(result.groupId, result.awayEntryId, result.eventId)),
+      )
+      .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
+    knockout: knockoutResults
+      .filter((result) => {
+        const match = knockouts.find((candidate) => candidate.matchId === result.matchId);
+        return (
+          !match ||
+          match.startedEventId === null ||
+          result.eventId < match.startedEventId ||
+          (match.endedEventId !== null && result.eventId > match.endedEventId) ||
+          result.playAgainstId !== result.eventId - match.startedEventId + 1
+        );
+      })
+      .map(({ sourceResultId, updatedAt }) => ({ sourceResultId, updatedAt })),
+  };
+}
+
+/**
  * Remove only derived rows that no longer have a canonical topology owner.
  * Structure repair keeps the old derived set while the history backfill runs;
  * this cleanup is called only after that backfill converges, so a failed
@@ -128,6 +260,7 @@ export async function rebuildTournamentStructure(
 export async function pruneTournamentDerivedResultsOutsideStructure(
   season: FplSeasonRef,
   tournamentId: number,
+  snapshot: DerivedResultRepairSnapshot = { points: [], battle: [], knockout: [] },
 ): Promise<void> {
   const db = await getDb();
   await db.transaction(async (tx) => {
@@ -200,5 +333,27 @@ export async function pruneTournamentDerivedResultsOutsideStructure(
               AND result.play_against_id = result.event_id - knockout.started_event_id + 1
         )
     `);
+
+    const deleteUnchangedRows = async <T extends { sourceResultId: number; updatedAt: Date }>(
+      table:
+        | typeof tournamentPointsGroupResultsInCompetition
+        | typeof tournamentBattleGroupResultsInCompetition
+        | typeof tournamentKnockoutResultsInCompetition,
+      rows: T[],
+    ) => {
+      for (const row of rows) {
+        await tx.execute(sql`
+          DELETE FROM ${table}
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournamentId}
+            AND source_result_id = ${row.sourceResultId}
+            AND updated_at = ${row.updatedAt}
+        `);
+      }
+    };
+
+    await deleteUnchangedRows(tournamentPointsGroupResultsInCompetition, snapshot.points);
+    await deleteUnchangedRows(tournamentBattleGroupResultsInCompetition, snapshot.battle);
+    await deleteUnchangedRows(tournamentKnockoutResultsInCompetition, snapshot.knockout);
   });
 }
