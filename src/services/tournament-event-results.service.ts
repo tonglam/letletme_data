@@ -629,6 +629,18 @@ export async function syncTournamentEventResultsForEntryIds(
       (entryId) => !requiredResultEntryIds.includes(entryId),
     );
     const transferEntryIds = new Set(plannedMissingTransferEntryIds);
+    if (!options?.skipTransfers && plannedMissingTransferEntryIds.length > 0) {
+      await syncOperationsRepository.upsertItems(
+        auditRunId,
+        plannedMissingTransferEntryIds.map((entryId) => ({
+          resourceType: ENTRY_EVENT_AUDIT_RESOURCE_TYPE,
+          resourceId: entryEventAuditResourceId(season, eventId, entryId, 'transfers'),
+          status: 'pending' as const,
+          attempts: auditAttempt,
+          normalizedPayload: { phase: 'entry-transfer-history' },
+        })),
+      );
+    }
     let providerEntryIds = requiredResultEntryIds;
     let { reusedComponentEntryIds, reusedRunEntryIds: reusableEntryIds } = planEntrySyncAuditReuse(
       uniqueEntryIds,
@@ -1568,7 +1580,7 @@ export async function syncEntryTransferHistories(
     requiredUnits: uniqueEntryIds.length,
     reusedUnits: reusedTransferEntryIds.size,
     reusedEntryIds: [...reusedTransferEntryIds],
-    succeededUnits: synced,
+    succeededUnits: Math.max(0, synced - reusedTransferEntryIds.size),
     failedUnits: failedEntryIds.length,
   };
 }

@@ -143,6 +143,52 @@ describe('tournament knockout win counts', () => {
     });
   });
 
+  test('swaps the repaired bracket seed for an even-leg candidate', () => {
+    const persisted = [
+      {
+        sourceResultId: 8,
+        tournamentId: 1,
+        seasonId: 1,
+        eventId: 36,
+        matchId: 2,
+        playAgainstId: 2,
+        homeEntryId: 101,
+        awayEntryId: 202,
+      },
+    ] as never[];
+    const candidate = [
+      {
+        tournamentId: 1,
+        eventId: 36,
+        matchId: 2,
+        playAgainstId: 2,
+        homeEntryId: null,
+        awayEntryId: null,
+        sourceCheckedAt: null,
+      },
+    ] as never[];
+
+    expect(
+      applyCandidateKnockoutResults(
+        persisted,
+        candidate,
+        36,
+        new Map([
+          [
+            2,
+            {
+              homeEntryId: 303,
+              awayEntryId: 404,
+            },
+          ],
+        ]),
+      )[0],
+    ).toMatchObject({
+      homeEntryId: 404,
+      awayEntryId: 303,
+    });
+  });
+
   test('defers rehoming accepted next-round facts until replacement scores exist', () => {
     const accepted = [
       {

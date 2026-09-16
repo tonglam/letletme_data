@@ -25,6 +25,7 @@ import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { readLivePublicationV2Checkpoint } from './live-publication-v2-checkpoint.service';
+import { resolveKnockoutLegEntrants } from './tournament-structure.service';
 
 type KnockoutRoundSummary = {
   matchId: number;
@@ -140,11 +141,16 @@ export function applyCandidateKnockoutResults(
       // calculation; never copy the null candidate over it.
       if (!candidate || (candidate.homeEntryId === null && candidate.awayEntryId === null)) {
         const bracket = bracketEntriesByMatchId.get(result.matchId);
-        if (candidate && bracket && bracket.homeEntryId !== null && bracket.awayEntryId !== null) {
+        if (candidate && bracket) {
+          const bracketEntrants = resolveKnockoutLegEntrants(
+            bracket.homeEntryId,
+            bracket.awayEntryId,
+            candidate.playAgainstId,
+          );
           return {
             ...result,
-            homeEntryId: bracket.homeEntryId,
-            awayEntryId: bracket.awayEntryId,
+            homeEntryId: bracketEntrants.homeEntryId,
+            awayEntryId: bracketEntrants.awayEntryId,
           };
         }
         return result;

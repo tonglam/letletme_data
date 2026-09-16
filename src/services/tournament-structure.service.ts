@@ -120,6 +120,8 @@ export async function rebuildTournamentStructure(
     sourceCheckedAt: null,
   }));
   const publishedKnockoutResults = isOfficialH2HTournament(tournament) ? [] : knockoutResults;
+  const preserveProviderOwnedKnockouts =
+    options.preserveDerivedResults === true && isOfficialH2HTournament(tournament);
 
   const db = await getDb();
   await db.transaction(async (tx) => {
@@ -129,7 +131,9 @@ export async function rebuildTournamentStructure(
     const knockouts = createTournamentKnockoutsRepository(tx);
     const knockoutResultsRepository = createTournamentKnockoutResultsRepository(tx);
 
-    await knockouts.deleteByTournament(season, tournament.id);
+    if (!preserveProviderOwnedKnockouts) {
+      await knockouts.deleteByTournament(season, tournament.id);
+    }
     if (!options.preserveDerivedResults) {
       await knockoutResultsRepository.deleteByTournament(season, tournament.id);
       await points.deleteByTournament(season, tournament.id);
@@ -138,7 +142,9 @@ export async function rebuildTournamentStructure(
     await groups.deleteByTournament(season, tournament.id);
 
     await groups.upsertBatch(season, groupRows);
-    await knockouts.upsertBatch(season, knockoutMatches);
+    if (!preserveProviderOwnedKnockouts) {
+      await knockouts.upsertBatch(season, knockoutMatches);
+    }
     // A repair transaction may replace the bracket before event backfill has
     // proved the candidate entrants. Insert only missing result shells in
     // that mode: an existing scored row remains attributed to its accepted
