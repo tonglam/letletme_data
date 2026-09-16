@@ -498,11 +498,39 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
         const currentAttempts = isRecord(currentCost.attempts) ? currentCost.attempts : {};
         const currentTotals = isRecord(currentCost.totals) ? currentCost.totals : {};
+        const currentLatestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? currentCost.latestAttempt
+            : 0;
+        const currentTerminalAttempt =
+          typeof currentCost.terminalAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.terminalAttempt) &&
+          currentCost.terminalAttempt >= 1
+            ? currentCost.terminalAttempt
+            : 0;
+        const attempt = Math.max(1, Math.floor(input.attempt));
+        const latestAttempt = Math.max(currentLatestAttempt, attempt);
+        // A terminal transition is owned by the newest attempt that has
+        // reached the ledger. A late failure therefore cannot turn a newer
+        // running/successful attempt back into failed; a newer success can
+        // still reopen and complete a run that an older failure closed first.
+        const terminalAllowed =
+          attempt >= latestAttempt &&
+          (currentTerminalAttempt === 0 || attempt >= currentTerminalAttempt);
+        const terminalStatus = input.complete
+          ? terminalAllowed
+            ? ('completed' as const)
+            : undefined
+          : terminalAllowed
+            ? ('failed' as const)
+            : undefined;
         const nextAttempt = {
           batchId: input.batchId,
           parentRunId: input.parentRunId ?? null,
           releaseSha: input.releaseSha,
-          attempt: Math.max(1, Math.floor(input.attempt)),
+          attempt,
           complete: input.complete,
           ...input.payload,
         };
@@ -583,21 +611,52 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               ? 'reported'
               : 'unknown';
 
+        const nextMetadata = {
+          ...currentMetadata,
+          batchCost: {
+            schemaVersion: 1,
+            attempts: { ...currentAttempts, [input.attemptKey]: nextAttempt },
+            totals: nextTotals,
+            latestAttempt,
+            ...(terminalStatus ? { terminalAttempt: attempt } : {}),
+            lastSettledAt: new Date().toISOString(),
+          },
+        };
+        // Keep the aggregate update unconditional. A run may already be
+        // terminal because another attempt settled first, but this attempt is
+        // still real cost and must remain visible in the immutable item/totals.
         await tx
           .update(syncRunsInOps)
-          .set({
-            metadata: {
-              ...currentMetadata,
-              batchCost: {
-                schemaVersion: 1,
-                attempts: { ...currentAttempts, [input.attemptKey]: nextAttempt },
-                totals: nextTotals,
-                lastSettledAt: new Date().toISOString(),
-              },
-            },
-            updatedAt: sql`clock_timestamp()`,
-          })
+          .set({ metadata: nextMetadata, updatedAt: sql`clock_timestamp()` })
           .where(eq(syncRunsInOps.runId, runId));
+        if (terminalStatus) {
+          await tx
+            .update(syncRunsInOps)
+            .set({
+              status: terminalStatus,
+              ...(terminalStatus === 'completed'
+                ? {
+                    completedItems: 1,
+                    failedItems: 0,
+                    skippedItems: 0,
+                    dataChanged: false,
+                    errorSummary: null,
+                  }
+                : {
+                    errorSummary: 'Data sync attempt did not settle successfully',
+                  }),
+              completedAt: sql`clock_timestamp()`,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(syncRunsInOps.runId, runId),
+                terminalStatus === 'completed'
+                  ? inArray(syncRunsInOps.status, [...NON_TERMINAL_RUN_STATUSES, 'failed'])
+                  : inArray(syncRunsInOps.status, NON_TERMINAL_RUN_STATUSES),
+              ),
+            );
+        }
         return 'recorded';
       });
     },
@@ -617,7 +676,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       const db = await getDbInstance();
       return db.transaction(async (tx) => {
         const runRows = await tx
-          .select({ runId: syncRunsInOps.runId })
+          .select({ runId: syncRunsInOps.runId, metadata: syncRunsInOps.metadata })
           .from(syncRunsInOps)
           .where(eq(syncRunsInOps.runId, runId))
           .for('update');
@@ -643,6 +702,28 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             target: [syncItemsInOps.runId, syncItemsInOps.resourceType, syncItemsInOps.resourceId],
           })
           .returning({ resourceId: syncItemsInOps.resourceId });
+        const currentMetadata = isRecord(runRows[0]?.metadata) ? runRows[0].metadata : {};
+        const currentCost = isRecord(currentMetadata.batchCost) ? currentMetadata.batchCost : {};
+        const latestAttempt =
+          typeof currentCost.latestAttempt === 'number' &&
+          Number.isSafeInteger(currentCost.latestAttempt) &&
+          currentCost.latestAttempt >= 1
+            ? Math.max(currentCost.latestAttempt, Math.floor(input.attempt))
+            : Math.max(1, Math.floor(input.attempt));
+        await tx
+          .update(syncRunsInOps)
+          .set({
+            metadata: {
+              ...currentMetadata,
+              batchCost: {
+                schemaVersion: 1,
+                ...currentCost,
+                latestAttempt,
+              },
+            },
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(syncRunsInOps.runId, runId));
         return inserted.length === 1 ? 'recorded' : 'duplicate';
       });
     },

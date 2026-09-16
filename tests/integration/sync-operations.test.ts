@@ -869,6 +869,51 @@ describe('ops sync state machine', () => {
     });
   });
 
+  test('fences a late failure behind a newer batch attempt', async () => {
+    const sql = await getDbClient();
+    const season = await seasonRepository.requireByCode(TEST_SEASON_CODE);
+    await startRun(RUN_IDS[0], season);
+
+    const attempt = (number: number) => ({
+      attemptKey: `entry-sync|entry-results|fenced-batch|${number}|4`,
+      batchId: 'fenced-batch',
+      parentRunId: null,
+      releaseSha: 'test-release',
+      attempt: number,
+    });
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+      ...attempt(1),
+      payload: { startedAt: '2026-08-09T00:00:00.000Z' },
+    });
+    await syncOperationsRepository.recordBatchCostStart(RUN_IDS[0], {
+      ...attempt(2),
+      payload: { startedAt: '2026-08-09T00:00:01.000Z' },
+    });
+
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+      ...attempt(1),
+      complete: false,
+      payload: { logicalRequests: 1 },
+    });
+    const [running] = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(running?.status).toBe('running');
+
+    await syncOperationsRepository.recordBatchCost(RUN_IDS[0], {
+      ...attempt(2),
+      complete: true,
+      payload: { logicalRequests: 1 },
+    });
+    const [completed] = await sql<Array<{ status: string }>>`
+      SELECT status
+      FROM ops.sync_runs
+      WHERE run_id = ${RUN_IDS[0]}::uuid
+    `;
+    expect(completed?.status).toBe('completed');
+  });
 
   test('uses wall-clock completion time inside a long mutation transaction', async () => {
     const sql = await getDbClient();

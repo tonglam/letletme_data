@@ -565,7 +565,13 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             timings: result.timings,
           });
         }
-        return result;
+        return {
+          ...result,
+          publicationsCreated:
+            marketPublication?.status === 'published' ? 1 : (result.publicationsCreated ?? 0),
+          publicationsReused:
+            marketPublication?.status === 'unchanged' ? 1 : (result.publicationsReused ?? 0),
+        };
       });
     }
 

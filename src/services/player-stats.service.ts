@@ -198,6 +198,12 @@ export async function syncCurrentPlayerStats(
   count: number;
   eventId: EventId;
   errors: number;
+  submittedRows?: number;
+  insertedRows?: number;
+  updatedRows?: number;
+  deletedRows?: number;
+  publicationsCreated?: number;
+  publicationsReused?: number;
 }> {
   logInfo('Starting player stats sync for current gameweek');
   const runtimeDependencies: PlayerStatsSyncDependencies = {
@@ -270,6 +276,12 @@ export async function syncCurrentPlayerStats(
     count: persisted.count,
     eventId: syncEvent.event.id,
     errors,
+    submittedRows: persisted.count,
+    insertedRows: persisted.insertedRows,
+    updatedRows: persisted.updatedRows,
+    deletedRows: persisted.deletedRows,
+    publicationsCreated: persisted.publicationsCreated,
+    publicationsReused: persisted.publicationsReused,
   };
 
   logInfo('Player stats sync completed', result);
@@ -279,7 +291,16 @@ export async function syncCurrentPlayerStats(
 export async function syncPlayerStatsForEvent(
   season: FplSeasonRef,
   eventId: EventId,
-): Promise<{ count: number; errors: number }> {
+): Promise<{
+  count: number;
+  errors: number;
+  submittedRows?: number;
+  insertedRows?: number;
+  updatedRows?: number;
+  deletedRows?: number;
+  publicationsCreated?: number;
+  publicationsReused?: number;
+}> {
   logInfo('Starting player stats sync for specific event', { eventId });
 
   const sourceCheckedAt = new Date();
@@ -333,6 +354,12 @@ export async function syncPlayerStatsForEvent(
   const result = {
     count: replaceResult.count,
     errors,
+    submittedRows: replaceResult.count,
+    insertedRows: replaceResult.insertedRows,
+    updatedRows: replaceResult.updatedRows,
+    deletedRows: replaceResult.deletedRows,
+    publicationsCreated: replaceResult.publicationsCreated,
+    publicationsReused: replaceResult.publicationsReused,
   };
 
   logInfo('Player stats sync for event completed', { ...result, eventId });

@@ -464,18 +464,9 @@ async function persistBatchCost(
     },
   });
   if (recorded === 'missing') throw new Error(`Batch cost ledger run ${ledgerRunId} disappeared`);
-  if (complete) {
-    await syncOperationsRepository.finishRun(ledgerRunId, {
-      status: 'completed',
-      completedItems: 1,
-      dataChanged: false,
-    });
-  } else {
-    await syncOperationsRepository.failRun(
-      ledgerRunId,
-      new Error('Data sync attempt did not settle successfully'),
-    );
-  }
+  // recordBatchCost settles the dedicated ledger run in the same transaction
+  // as the attempt item and aggregate totals. Its attempt fence prevents a
+  // late failure from overwriting a newer attempt's completion.
   return ledgerRunId;
 }
 
