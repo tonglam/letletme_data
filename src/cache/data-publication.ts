@@ -383,7 +383,11 @@ for index, item in ipairs(candidate.items) do
   redis.call('PERSIST', key)
 end
 redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
-if redis.call('GET', KEYS[2]) == ARGV[3] then
+local failure_type = redis.call('TYPE', KEYS[2])
+local failure_type_name = type(failure_type) == 'table' and failure_type['ok'] or failure_type
+if failure_type_name ~= 'string' then
+  redis.call('DEL', KEYS[2])
+elseif redis.call('GET', KEYS[2]) == ARGV[3] then
   redis.call('DEL', KEYS[2])
 end
 return {'repaired'}
@@ -411,7 +415,11 @@ for index, item in ipairs(candidate.items) do
 end
 redis.call('SET', KEYS[1], ARGV[3])
 redis.call('SET', KEYS[3], ARGV[4], 'EX', ARGV[5])
-if redis.call('GET', KEYS[2]) == ARGV[4] then
+local failure_type = redis.call('TYPE', KEYS[2])
+local failure_type_name = type(failure_type) == 'table' and failure_type['ok'] or failure_type
+if failure_type_name ~= 'string' then
+  redis.call('DEL', KEYS[2])
+elseif redis.call('GET', KEYS[2]) == ARGV[4] then
   redis.call('DEL', KEYS[2])
 end
 return {'replaced'}
@@ -430,7 +438,14 @@ if ARGV[1] ~= '*' then
     end
   end
 end
-local existing = redis.call('GET', KEYS[1])
+local existing_type = redis.call('TYPE', KEYS[1])
+local existing_type_name = type(existing_type) == 'table' and existing_type['ok'] or existing_type
+local existing = nil
+if existing_type_name == 'string' then
+  existing = redis.call('GET', KEYS[1])
+elseif existing_type_name ~= 'none' then
+  redis.call('DEL', KEYS[1])
+end
 if existing and existing ~= ARGV[1] and not active_matches then return 0 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
 redis.call('DEL', KEYS[2])
@@ -443,7 +458,11 @@ return 1
 `;
 
 const CLEAR_INTEGRITY_FAILURE_SCRIPT = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
+local marker_type = redis.call('TYPE', KEYS[1])
+local marker_type_name = type(marker_type) == 'table' and marker_type['ok'] or marker_type
+if marker_type_name ~= 'string' then
+  redis.call('DEL', KEYS[1])
+elseif redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('DEL', KEYS[1])
 end
 return 1
