@@ -169,6 +169,7 @@ const LEGACY_CORE_ITEM_NAMES = [
  */
 const publicationIntegrityFailures = new Map<string, string>();
 const INTEGRITY_FAILURE_TTL_SECONDS = 15 * 60;
+const INTEGRITY_PROOF_TTL_SECONDS = 15 * 60;
 const INTEGRITY_FAILURE_SUFFIX = ':integrity-failure';
 const INTEGRITY_PROOF_SUFFIX = ':integrity-proof';
 
@@ -504,7 +505,12 @@ export async function markDataPublicationIntegrityProof(
   const persist = async (): Promise<void> => {
     try {
       const redis = await getRedisForIntegrityMarker(redisClient);
-      await redis.set(integrityProofKey(scope), publicationIntegrityToken(manifest));
+      await redis.set(
+        integrityProofKey(scope),
+        publicationIntegrityToken(manifest),
+        'EX',
+        String(INTEGRITY_PROOF_TTL_SECONDS),
+      );
       await redis.del(integrityFailureKey(scope));
     } catch {
       // A proof marker is an optimization. The next selected read will perform

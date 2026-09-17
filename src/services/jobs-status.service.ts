@@ -6,6 +6,7 @@ import {
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
   type DataPublicationReadResult,
+  type DataPublicationScope,
 } from '../cache/data-publication';
 import { loadActivePriceChangeContextForSchedule } from '../repositories/data-publication-outbox';
 import {
@@ -54,6 +55,7 @@ import { calculateBurnRate } from '../domain/freshness-slo';
 import { safePersistedDataErrorCode } from '../domain/error-classification';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
+import { mapWithConcurrency } from '../utils/async';
 import {
   effectiveLiveFinalRetentionTtl,
   LIVE_FINAL_RETENTION_CRITICAL_TTL_MS,
@@ -748,6 +750,18 @@ export type PublicationAuditRequest = Readonly<{
   readonly maxConcurrency: number;
 }>;
 
+type PublicationStatusEntry = {
+  readonly dataset: PublicationAuditDataset;
+  readonly dbActive: Awaited<ReturnType<typeof syncOperationsRepository.findActivePublication>>;
+  readonly publicationScope: DataPublicationScope;
+  readonly redisControlManifest: DataPublicationManifest | null;
+  redisDelivery: PublicationIdentityRead | null;
+};
+
+type PublicationAuditCandidate = {
+  readonly entry: PublicationStatusEntry;
+};
+
 type PublicationAuditSkip = Readonly<{
   readonly dataset: PublicationAuditDataset;
   readonly reason: 'NO_MANIFEST' | 'BYTES_BUDGET' | 'TIME_BUDGET' | 'READ_FAILED';
@@ -974,10 +988,6 @@ export async function getJobsStatus(
     { dataset: 'fpl:market' as const, eventId: undefined },
     { dataset: PRICE_CHANGE_DATASET, eventId: undefined },
   ];
-  let priceChangeDbActive: Awaited<
-    ReturnType<typeof syncOperationsRepository.findActivePublication>
-  > = null;
-  let priceChangeRedisActive: PublicationIdentityRead | null = null;
   const publicationAuditStartedAt = Date.now();
   const publicationAuditDeadlineAt = publicationAudit
     ? publicationAuditStartedAt + publicationAudit.maxMs
@@ -986,6 +996,9 @@ export async function getJobsStatus(
   const publicationAuditScopes = new Set(publicationAudit?.scopes ?? []);
   const publicationAuditCompleted: PublicationAuditDataset[] = [];
   const publicationAuditSkipped: PublicationAuditSkip[] = [];
+  const publicationAuditCandidates: PublicationAuditCandidate[] = [];
+  let publicationAuditConcurrencyUsed = 0;
+  const publicationEntries: PublicationStatusEntry[] = [];
   for (const scope of publicationScopes) {
     const dbActive = await syncOperationsRepository.findActivePublication(
       scope.dataset,
@@ -1003,7 +1016,14 @@ export async function getJobsStatus(
     const redisControlManifest = await readActiveDataPublicationManifestWithItemBounds(
       publicationScope,
     ).catch(() => null);
-    let redisDelivery: PublicationIdentityRead | null = redisControlManifest;
+    const entry: PublicationStatusEntry = {
+      dataset: scope.dataset,
+      dbActive,
+      publicationScope,
+      redisControlManifest,
+      redisDelivery: redisControlManifest,
+    };
+    publicationEntries.push(entry);
     if (publicationAuditScopes.has(scope.dataset)) {
       const declaredBytes =
         redisControlManifest?.items.reduce((total, item) => total + item.bytes, 0) ?? 0;
@@ -1014,42 +1034,71 @@ export async function getJobsStatus(
       } else if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
       } else {
-        redisDelivery = await readActiveDataPublication(
-          publicationScope,
-          undefined,
-          publicationAuditDeadlineAt ?? undefined,
-          redisControlManifest,
-        ).catch(() => null);
         publicationAuditBytes += declaredBytes;
-        const fullReadExceededDeadline =
-          publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
-        if (fullReadExceededDeadline) {
-          // The audit reader applies the remaining deadline to each Redis
-          // command. A read that nevertheless settles after the deadline is
-          // evidence of budget exhaustion, not a completed audit; retain the
-          // proof-only result.
-          redisDelivery = redisControlManifest;
-          publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
-        } else if (redisDelivery) {
-          publicationAuditCompleted.push(scope.dataset);
-        } else {
-          publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'READ_FAILED' });
-        }
+        publicationAuditCandidates.push({ entry });
       }
     }
-    const redisManifest = publicationManifest(redisDelivery);
-    if (scope.dataset === PRICE_CHANGE_DATASET) {
-      priceChangeDbActive = dbActive;
-      priceChangeRedisActive = redisDelivery;
-    }
-    const key = scope.eventId === undefined ? scope.dataset : `${scope.dataset}:e${scope.eventId}`;
-    publicationConsistency[key] =
-      Boolean(dbActive) === Boolean(redisManifest) &&
-      (!dbActive ||
-        !redisManifest ||
-        (dbActive.publicationId === redisManifest.publicationId &&
-          dbActive.revision === redisManifest.revision));
   }
+
+  const setPublicationConsistency = (entry: PublicationStatusEntry): void => {
+    const redisManifest = publicationManifest(entry.redisDelivery);
+    publicationConsistency[entry.dataset] =
+      Boolean(entry.dbActive) === Boolean(redisManifest) &&
+      (!entry.dbActive ||
+        !redisManifest ||
+        (entry.dbActive.publicationId === redisManifest.publicationId &&
+          entry.dbActive.revision === redisManifest.revision));
+  };
+  for (const entry of publicationEntries) setPublicationConsistency(entry);
+
+  if (publicationAudit && publicationAuditCandidates.length > 0) {
+    // Reserve the byte budget in deterministic scope order above. Only the
+    // already-admitted payload reads run in parallel, so maxConcurrency limits
+    // in-flight Redis downloads without letting concurrent starts overspend
+    // the audit budget.
+    publicationAuditConcurrencyUsed = Math.min(
+      publicationAudit.maxConcurrency,
+      publicationAuditCandidates.length,
+    );
+    const auditResults = await mapWithConcurrency(
+      publicationAuditCandidates,
+      publicationAuditConcurrencyUsed,
+      async ({ entry }) => {
+        if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
+          return { delivery: entry.redisControlManifest, reason: 'TIME_BUDGET' as const };
+        }
+        const delivery = await readActiveDataPublication(
+          entry.publicationScope,
+          undefined,
+          publicationAuditDeadlineAt ?? undefined,
+          entry.redisControlManifest ?? undefined,
+        ).catch(() => null);
+        if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
+          return { delivery: entry.redisControlManifest, reason: 'TIME_BUDGET' as const };
+        }
+        return delivery
+          ? { delivery, reason: null }
+          : { delivery: null, reason: 'READ_FAILED' as const };
+      },
+    );
+    for (let index = 0; index < auditResults.length; index += 1) {
+      const result = auditResults[index]!;
+      const entry = publicationAuditCandidates[index]!.entry;
+      entry.redisDelivery = result.delivery;
+      if (result.reason === null) {
+        publicationAuditCompleted.push(entry.dataset);
+      } else {
+        publicationAuditSkipped.push({ dataset: entry.dataset, reason: result.reason });
+      }
+      setPublicationConsistency(entry);
+    }
+  }
+
+  const priceChangeEntry = publicationEntries.find(
+    (entry) => entry.dataset === PRICE_CHANGE_DATASET,
+  );
+  const priceChangeDbActive = priceChangeEntry?.dbActive ?? null;
+  const priceChangeRedisActive = priceChangeEntry?.redisDelivery ?? null;
 
   const priceChangeDbDelivery = priceChangeDbActive
     ? await loadActivePriceChangeContextForSchedule(season).catch(() => null)
@@ -1443,7 +1492,7 @@ export async function getJobsStatus(
       maxBytes: publicationAudit?.maxBytes ?? null,
       maxMs: publicationAudit?.maxMs ?? null,
       maxConcurrency: publicationAudit?.maxConcurrency ?? null,
-      concurrencyUsed: publicationAudit ? 1 : 0,
+      concurrencyUsed: publicationAudit ? publicationAuditConcurrencyUsed : 0,
       declaredBytesRead: publicationAuditBytes,
       completedScopes: publicationAuditCompleted,
       skippedScopes: publicationAuditSkipped,
