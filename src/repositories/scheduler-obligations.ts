@@ -2593,17 +2593,20 @@ export async function schedulerOrphanState(input: { db?: DbHandle } = {}): Promi
     registeredJobs.map((jobName) => sql`${jobName}`),
     sql`, `,
   );
-  const rows = await db.execute<{
-    orphaned_non_terminal: number | string;
-    orphaned_job_names: string[] | null;
-  }>(sql`
-    SELECT
-      count(*)::integer AS orphaned_non_terminal,
-      COALESCE(array_agg(DISTINCT job_name ORDER BY job_name), ARRAY[]::text[]) AS orphaned_job_names
-    FROM ops.scheduler_obligations
-    WHERE status NOT IN ('succeeded', 'skipped', 'irrecoverable')
-      AND job_name NOT IN (${registeredSql})
-  `);
+  const rows = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT set_config('statement_timeout', '2000ms', true)`);
+    return tx.execute<{
+      orphaned_non_terminal: number | string;
+      orphaned_job_names: string[] | null;
+    }>(sql`
+      SELECT
+        count(*)::integer AS orphaned_non_terminal,
+        COALESCE(array_agg(DISTINCT job_name ORDER BY job_name), ARRAY[]::text[]) AS orphaned_job_names
+      FROM ops.scheduler_obligations
+      WHERE status NOT IN ('succeeded', 'skipped', 'irrecoverable')
+        AND job_name NOT IN (${registeredSql})
+    `);
+  });
   const row = rows[0];
   return {
     orphanedNonTerminal: Number(row?.orphaned_non_terminal ?? 0),
