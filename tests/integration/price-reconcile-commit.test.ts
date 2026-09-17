@@ -89,7 +89,7 @@ beforeEach(async () => {
     return { state: 'enqueued', bullJobId: 'fixture' };
   });
   spyOn(delivery, 'dispatchDataPublicationOutbox').mockResolvedValue({ delivered: 1 } as never);
-  spyOn(cache, 'readActiveDataPublication').mockResolvedValue({
+  spyOn(cache, 'readActiveDataPublicationManifest').mockResolvedValue({
     manifest: { publicationId: result.publicationId, revision: 1 },
   } as never);
   spyOn(syncOperationsRepository, 'failRun').mockResolvedValue(undefined);

@@ -119,19 +119,19 @@ test('new Classic scope invalidates readiness and missing semantic input blocks 
   await sql`INSERT INTO competition.live_league_checkpoints (
     season_id,event_id,tournament_id,scope_kind,publication_id,generation,state,
     manifest,index_payload,payload,row_count,payload_bytes,payload_sha256,
-    source_checked_at,content_updated_at,published_at,checkpointed_at
+    source_checked_at,content_updated_at,published_at,checkpointed_at,validation_version
   ) VALUES (
     ${season.seasonId},1,89001,'CLASSIC','already-finalized',1,'FINALIZED',
     '{}'::jsonb,'[]'::jsonb,'{}'::jsonb,0,
     ${Buffer.byteLength(JSON.stringify(checkpointPayload))},
     ${contentHash(checkpointPayload)},
     '2089-09-02T00:00:00Z','2089-09-02T00:00:00Z',
-    '2089-09-02T00:00:00Z','2089-09-02T00:00:00Z'
+    '2089-09-02T00:00:00Z','2089-09-02T00:00:00Z',1
   )`;
   expect(await readLiveFinalizationPrerequisites(season, 1)).toEqual({ blocked: false });
 });
 
-test('validated checkpoint payloads are reused until identity changes or five minutes elapse', async () => {
+test('validated checkpoint proof is reused without payload reads', async () => {
   const sql = await getDbClient();
   const db = await getDb();
   // The preceding readiness test deliberately inserts a malformed checkpoint
@@ -277,12 +277,14 @@ test('validated checkpoint payloads are reused until identity changes or five mi
   });
   expect(Number(advanced.generation)).toBe(successor.generation);
 
-  // A corrupt final row still fences a different publication at the same
-  // generation. The exact identity may repair its payload after validation.
-  await sql`UPDATE competition.live_league_checkpoints
+  // A validated final row is protected at the database boundary. A direct
+  // payload mutation is rejected, so a different publication cannot use an
+  // in-place rewrite to bypass the proof.
+  await expect(sql`UPDATE competition.live_league_checkpoints
     SET payload_sha256=${'b'.repeat(64)}
     WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
-      AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`;
+      AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`
+  ).rejects.toThrow('validated live league checkpoint is immutable');
   const conflictingRepair: LeagueLiveManifest = {
     ...successor,
     publicationId: '30000000-0000-4000-8000-000000000102',
@@ -323,9 +325,9 @@ test('validated checkpoint payloads are reused until identity changes or five mi
   const fullReads = () => selection.mock.calls.filter((call) => call[0] === undefined).length;
   try {
     expect(await hasFinalLiveLeagueCheckpointsV2(season, 1)).toBe(true);
-    expect(fullReads()).toBe(1);
+    expect(fullReads()).toBe(0);
     expect(await hasFinalLiveLeagueCheckpointsV2(season, 1)).toBe(true);
-    expect(fullReads()).toBe(1);
+    expect(fullReads()).toBe(0);
     const now = Date.now();
     const time = spyOn(Date, 'now').mockReturnValue(now + 5 * 60_000 + 1);
     try {
@@ -333,11 +335,10 @@ test('validated checkpoint payloads are reused until identity changes or five mi
     } finally {
       time.mockRestore();
     }
-    expect(fullReads()).toBe(2);
-    // A corrupt replacement with changed identity is rejected immediately.
-    await sql`UPDATE competition.live_league_checkpoints SET payload_sha256=${'b'.repeat(64)} WHERE season_id=${season.seasonId}`;
-    expect(await hasFinalLiveLeagueCheckpointsV2(season, 1)).toBe(false);
-    expect(fullReads()).toBe(3);
+    expect(fullReads()).toBe(0);
+    // Proof-only control checks do not download the payload, even after the
+    // old five-minute window has elapsed.
+    expect(fullReads()).toBe(0);
   } finally {
     selection.mockRestore();
   }
