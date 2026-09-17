@@ -1018,6 +1018,7 @@ export async function getJobsStatus(
           publicationScope,
           undefined,
           publicationAuditDeadlineAt ?? undefined,
+          redisControlManifest,
         ).catch(() => null);
         publicationAuditBytes += declaredBytes;
         const fullReadExceededDeadline =

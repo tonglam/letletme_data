@@ -492,20 +492,30 @@ export async function clearDataPublicationIntegrityFailure(
 export async function markDataPublicationIntegrityProof(
   manifest: DataPublicationManifest,
   redisClient?: Redis,
+  options: { readonly fireAndForget?: boolean } = {},
 ): Promise<void> {
   const scope = {
     dataset: manifest.dataset,
     seasonCode: manifest.seasonCode,
   } as DataPublicationScope;
-  try {
-    const redis = await getRedisForIntegrityMarker(redisClient);
-    await redis.set(integrityProofKey(scope), publicationIntegrityToken(manifest));
-  } catch {
-    // A proof marker is an optimization. The next selected read will perform
-    // one complete validation if it cannot observe this marker.
-  } finally {
-    await clearDataPublicationIntegrityFailure(scope, redisClient);
+  // Clear the local hint before the optional shared bookkeeping so a valid
+  // payload is never held behind a Redis reconnect or command timeout.
+  publicationIntegrityFailures.delete(scopePrefix(scope));
+  const persist = async (): Promise<void> => {
+    try {
+      const redis = await getRedisForIntegrityMarker(redisClient);
+      await redis.set(integrityProofKey(scope), publicationIntegrityToken(manifest));
+      await redis.del(integrityFailureKey(scope));
+    } catch {
+      // A proof marker is an optimization. The next selected read will perform
+      // one complete validation if it cannot observe this marker.
+    }
+  };
+  if (options.fireAndForget) {
+    void persist();
+    return;
   }
+  await persist();
 }
 
 export async function hasDataPublicationIntegrityProof(
@@ -1052,6 +1062,7 @@ export async function readActiveDataPublication(
   scope: DataPublicationScope,
   redisClient?: Redis,
   deadlineAt?: number,
+  expectedManifest?: DataPublicationManifest,
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
   try {
@@ -1067,6 +1078,13 @@ export async function readActiveDataPublication(
           ),
     );
     if (!manifest || !assertManifestMatchesScope(manifest, scope) || manifest.items.length === 0) {
+      return null;
+    }
+    if (
+      expectedManifest &&
+      (manifest.publicationId !== expectedManifest.publicationId ||
+        manifest.revision !== expectedManifest.revision)
+    ) {
       return null;
     }
     const payloads =
@@ -1103,7 +1121,7 @@ export async function readActiveDataPublication(
       }
       items[item.name] = parsed;
     }
-    await markDataPublicationIntegrityProof(manifest, redis);
+    await markDataPublicationIntegrityProof(manifest, redis, { fireAndForget: true });
     return { manifest, items };
   } catch {
     return null;
@@ -1169,6 +1187,10 @@ export async function readActiveDataPublicationManifestWithItemBounds(
         return null;
       }
     }
+    // A full consumer may have already proved that this immutable identity is
+    // corrupt. Keep manifest-only fallbacks from reporting the publication as
+    // usable until the reconciler replaces it or the bounded marker expires.
+    if (await hasDataPublicationIntegrityFailure(scope, manifest, redis)) return null;
     return manifest;
   } catch {
     return null;
@@ -1361,7 +1383,7 @@ export async function readActiveDataPublicationItems(
       const parsed = JSON.parse(payload) as unknown;
       items[item.name] = parsed;
     }
-    await markDataPublicationIntegrityProof(manifest, redis);
+    await markDataPublicationIntegrityProof(manifest, redis, { fireAndForget: true });
     return { manifest, items };
   } catch {
     return null;
