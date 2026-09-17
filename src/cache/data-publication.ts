@@ -483,23 +483,32 @@ function publicationIntegrityToken(manifest: DataPublicationManifest): string {
   return `${manifest.publicationId}:${manifest.revision}`;
 }
 
+function localIntegrityFailureKey(prefix: string, token: string): string {
+  return `${prefix}:${token}`;
+}
+
+function localIntegrityFailureEntries(prefix: string): Array<[string, IntegrityFailureMarker]> {
+  const markerPrefix = `${prefix}:`;
+  return [...publicationIntegrityFailures.entries()].filter(([key]) =>
+    key.startsWith(markerPrefix),
+  );
+}
+
 function clearLocalIntegrityFailureAfterRepair(
   scope: DataPublicationScope,
   manifest: DataPublicationManifest,
   repairFence: number,
 ): void {
-  const current = publicationIntegrityFailures.get(scopePrefix(scope));
-  if (
-    !current ||
-    current.token !== publicationIntegrityToken(manifest) ||
-    current.sequence > repairFence
-  ) {
-    return;
-  }
+  const prefix = scopePrefix(scope);
+  const expected = publicationIntegrityToken(manifest);
+  const exactKey = localIntegrityFailureKey(prefix, expected);
+  const exact = publicationIntegrityFailures.get(exactKey);
+  if (exact && exact.sequence <= repairFence) publicationIntegrityFailures.delete(exactKey);
   // The sequence fence includes markers recorded after the repair caller read
   // the map but before Redis entered its atomic transaction. A marker allocated
-  // after that fence is evidence from a later read and remains sticky.
-  publicationIntegrityFailures.delete(scopePrefix(scope));
+  // after that fence is evidence from a later read and remains sticky. Keep the
+  // exact identity check above so a different publication cannot be cleared
+  // while repairing this one.
 }
 
 async function getRedisForIntegrityMarker(
@@ -533,9 +542,8 @@ export async function markDataPublicationIntegrityFailure(
   const prefix = scopePrefix(scope);
   const token = manifest ? publicationIntegrityToken(manifest) : '*';
   const now = Date.now();
-  const local = publicationIntegrityFailures.get(prefix);
-  if (local && local.expiresAt > now && local.token !== token) return;
-  publicationIntegrityFailures.set(prefix, {
+  const localKey = localIntegrityFailureKey(prefix, token);
+  publicationIntegrityFailures.set(localKey, {
     token,
     expiresAt: now + INTEGRITY_FAILURE_TTL_SECONDS * 1_000,
     sequence: ++integrityFailureSequence,
@@ -596,17 +604,19 @@ export async function hasDataPublicationIntegrityFailure(
 ): Promise<boolean> {
   const prefix = scopePrefix(scope);
   const expected = manifest ? publicationIntegrityToken(manifest) : null;
-  const local = publicationIntegrityFailures.get(prefix);
-  const localMatches = Boolean(
-    local &&
-      local.expiresAt > Date.now() &&
-      (!expected || local.token === '*' || local.token === expected),
-  );
-  if (local) {
-    if (local.expiresAt <= Date.now()) {
-      publicationIntegrityFailures.delete(prefix);
-    }
+  const localEntries = localIntegrityFailureEntries(prefix);
+  for (const [key, marker] of localEntries) {
+    if (marker.expiresAt <= Date.now()) publicationIntegrityFailures.delete(key);
   }
+  const localCandidates = expected
+    ? [
+        publicationIntegrityFailures.get(localIntegrityFailureKey(prefix, '*')),
+        publicationIntegrityFailures.get(localIntegrityFailureKey(prefix, expected)),
+      ]
+    : localIntegrityFailureEntries(prefix).map(([, marker]) => marker);
+  const localMatches = localCandidates.some(
+    (marker) => marker !== undefined && marker.expiresAt > Date.now(),
+  );
   try {
     const redis = await getRedisForIntegrityMarker(redisClient, deadlineAt);
     const shared =
@@ -630,8 +640,10 @@ export async function hasDataPublicationIntegrityFailure(
               deadlineAt,
             );
       if (proof === expected) {
-        if (publicationIntegrityFailures.get(prefix) === local) {
-          publicationIntegrityFailures.delete(prefix);
+        const localKey = localIntegrityFailureKey(prefix, expected);
+        const local = publicationIntegrityFailures.get(localKey);
+        if (local && local.expiresAt > Date.now()) {
+          publicationIntegrityFailures.delete(localKey);
         }
         return false;
       }
@@ -650,10 +662,14 @@ export async function clearDataPublicationIntegrityFailure(
   manifest?: DataPublicationManifest,
 ): Promise<void> {
   const prefix = scopePrefix(scope);
-  const expected = manifest ? publicationIntegrityToken(manifest) : null;
-  const local = publicationIntegrityFailures.get(prefix);
-  if (!manifest || !local || local.expiresAt <= Date.now() || local.token === expected) {
-    publicationIntegrityFailures.delete(prefix);
+  if (!manifest) {
+    for (const [key] of localIntegrityFailureEntries(prefix)) {
+      publicationIntegrityFailures.delete(key);
+    }
+  } else {
+    publicationIntegrityFailures.delete(
+      localIntegrityFailureKey(prefix, publicationIntegrityToken(manifest)),
+    );
   }
   try {
     const redis = await getRedisForIntegrityMarker(redisClient);
@@ -661,7 +677,12 @@ export async function clearDataPublicationIntegrityFailure(
       await redis.del(integrityFailureKey(scope));
       return;
     }
-    await redis.eval(CLEAR_INTEGRITY_FAILURE_SCRIPT, 1, integrityFailureKey(scope), expected!);
+    await redis.eval(
+      CLEAR_INTEGRITY_FAILURE_SCRIPT,
+      1,
+      integrityFailureKey(scope),
+      publicationIntegrityToken(manifest),
+    );
   } catch {
     // A failed cleanup is harmless; the shared marker is TTL bounded and a
     // subsequent full proof can clear it when Redis is healthy again.
@@ -682,9 +703,8 @@ export async function markDataPublicationIntegrityProof(
   // Never clear a non-expired local failure here. A concurrent reader may have
   // recorded corruption for this same revision after this read completed, and
   // only the atomic repair path may remove that evidence.
-  const local = publicationIntegrityFailures.get(prefix);
-  if (local?.expiresAt !== undefined && local.expiresAt <= Date.now()) {
-    publicationIntegrityFailures.delete(prefix);
+  for (const [key, local] of localIntegrityFailureEntries(prefix)) {
+    if (local.expiresAt <= Date.now()) publicationIntegrityFailures.delete(key);
   }
   const persist = async (): Promise<void> => {
     try {

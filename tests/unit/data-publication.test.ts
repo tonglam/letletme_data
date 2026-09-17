@@ -8,6 +8,7 @@ import {
   dataPublicationIntegrityProofKey,
   dataPublicationItemKey,
   hasDataPublicationIntegrityFailure,
+  markDataPublicationIntegrityFailure,
   parseDataPublicationManifest,
   prepareDataPublication,
   readActiveDataPublication,
@@ -443,5 +444,47 @@ describe('data publication contract', () => {
     await expect(
       hasDataPublicationIntegrityFailure(priceScope, prepared.manifest, redis),
     ).resolves.toBe(false);
+  });
+
+  test('keeps local integrity failures isolated by publication identity', async () => {
+    const identityScope = { dataset: 'fpl:core' as const, seasonCode: '9797' };
+    const items = [
+      { name: 'events', value: [] },
+      { name: 'teams', value: [] },
+      { name: 'players', value: [] },
+      { name: 'phases', value: [] },
+      { name: 'fixtures', value: [] },
+      { name: 'currentEventId', value: null },
+      { name: 'selectionRules', value: null },
+    ];
+    const first = prepareDataPublication({
+      ...identityScope,
+      revision: 1,
+      publicationId: '00000000-0000-4000-8000-000000000101',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items,
+    });
+    const second = prepareDataPublication({
+      ...identityScope,
+      revision: 2,
+      publicationId: '00000000-0000-4000-8000-000000000102',
+      sourceCheckedAt: new Date('2026-08-09T01:00:01.000Z'),
+      state: 'active',
+      items,
+    });
+    const redis = {
+      del: async () => 1,
+      eval: async () => 1,
+      get: async () => null,
+    } as unknown as Redis;
+
+    await markDataPublicationIntegrityFailure(identityScope, first.manifest, redis);
+    await markDataPublicationIntegrityFailure(identityScope, second.manifest, redis);
+
+    await expect(
+      hasDataPublicationIntegrityFailure(identityScope, second.manifest, redis),
+    ).resolves.toBe(true);
+    await clearDataPublicationIntegrityFailure(identityScope, redis);
   });
 });
