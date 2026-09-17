@@ -114,6 +114,11 @@ BEGIN
         RAISE EXCEPTION 'validated publication identity is immutable' USING ERRCODE = '55000';
       END IF;
     ELSIF TG_TABLE_NAME = 'live_points_publication_checkpoints' THEN
+      IF NEW.season_id IS DISTINCT FROM OLD.season_id OR
+        NEW.event_id IS DISTINCT FROM OLD.event_id
+      THEN
+        RAISE EXCEPTION 'validated live points checkpoint scope is immutable' USING ERRCODE = '55000';
+      END IF;
       IF NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
@@ -134,6 +139,13 @@ BEGIN
       -- committed. Provisional rows also refresh the two bounded heartbeat
       -- fields between observations; every other manifest field remains
       -- immutable, so a same-identity retry cannot replace its proof.
+      IF NEW.season_id IS DISTINCT FROM OLD.season_id OR
+        NEW.event_id IS DISTINCT FROM OLD.event_id OR
+        NEW.tournament_id IS DISTINCT FROM OLD.tournament_id OR
+        NEW.scope_kind IS DISTINCT FROM OLD.scope_kind
+      THEN
+        RAISE EXCEPTION 'validated live league checkpoint scope is immutable' USING ERRCODE = '55000';
+      END IF;
       IF NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
