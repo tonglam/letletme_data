@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { databaseSingleton } from '../src/db/singleton';
+import { readActiveDataPublication } from '../src/cache/data-publication';
 import {
   loadDataPublicationDeliveryManifest,
   validateAndMarkDataPublicationProof,
@@ -26,6 +27,24 @@ async function main(): Promise<void> {
     if (!active) {
       results.push({ dataset, publicationId: null, status: 'missing' });
       continue;
+    }
+
+    // Deployment acceptance is the one bounded rollout-time consumer read.
+    // Normal health and reconcile probes stay metadata-only, while this gate
+    // proves that the current Redis publication still passes the same full
+    // manifest/item validation used by delivery consumers.
+    const cached = await readActiveDataPublication({
+      dataset,
+      seasonCode: season.seasonCode,
+    }).catch(() => null);
+    if (
+      !cached ||
+      cached.manifest.publicationId !== active.publicationId ||
+      cached.manifest.revision !== active.revision
+    ) {
+      throw new Error(
+        `Active ${dataset} publication ${active.publicationId} failed Redis payload validation`,
+      );
     }
 
     const durableManifest = await loadDataPublicationDeliveryManifest(active.publicationId);
