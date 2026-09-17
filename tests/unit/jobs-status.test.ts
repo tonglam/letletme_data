@@ -286,6 +286,12 @@ describe('jobs status hot-path isolation', () => {
     expect(control).toContain('unavailable: true');
     expect(control).toContain('readQueueHealthSnapshot(name)');
     expect(control).not.toContain('new Queue(name');
+    expect(control).toContain('const TOURNAMENT_STATUS_STATEMENT_TIMEOUT_MS = 5_000');
+    expect(control).toContain('const CONTROL_PROJECTION_CACHE_MS = 30_000');
+    expect(control).toContain('controlProjectionFlight');
+    expect(control).toContain(
+      'reasonCodes: [' + quote + 'TOURNAMENT_REVIEW_STATUS_UNAVAILABLE' + quote + ']',
+    );
   });
 
   test('uses full publication proof only on explicit governance evidence', () => {
