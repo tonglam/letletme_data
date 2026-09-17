@@ -374,11 +374,14 @@ for index, item in ipairs(current.items) do
   end
 end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[3 + ((index - 1) * 2)]
-  local payload = ARGV[4 + ((index - 1) * 2)]
+  local key = ARGV[4 + ((index - 1) * 2)]
+  local payload = ARGV[5 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
   redis.call('SET', key, payload)
   redis.call('PERSIST', key)
+end
+if redis.call('GET', KEYS[2]) == ARGV[3] then
+  redis.call('DEL', KEYS[2])
 end
 return {'repaired'}
 `;
@@ -394,16 +397,19 @@ end
 local candidate_decoded, candidate = pcall(cjson.decode, ARGV[3])
 if not candidate_decoded or not candidate or not candidate.items then return {'conflict'} end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[4 + ((index - 1) * 2)]
+  local key = ARGV[5 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
 end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[4 + ((index - 1) * 2)]
-  local payload = ARGV[5 + ((index - 1) * 2)]
+  local key = ARGV[5 + ((index - 1) * 2)]
+  local payload = ARGV[6 + ((index - 1) * 2)]
   redis.call('SET', key, payload)
   redis.call('PERSIST', key)
 end
 redis.call('SET', KEYS[1], ARGV[3])
+if redis.call('GET', KEYS[2]) == ARGV[4] then
+  redis.call('DEL', KEYS[2])
+end
 return {'replaced'}
 `;
 
@@ -415,8 +421,12 @@ return 1
 
 const MARK_INTEGRITY_PROOF_SCRIPT = `
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
-if redis.call('GET', KEYS[2]) == ARGV[1] then
-  redis.call('DEL', KEYS[2])
+return 1
+`;
+
+const CLEAR_INTEGRITY_FAILURE_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('DEL', KEYS[1])
 end
 return 1
 `;
@@ -553,12 +563,21 @@ export async function hasDataPublicationIntegrityFailure(
 export async function clearDataPublicationIntegrityFailure(
   scope: DataPublicationScope,
   redisClient?: Redis,
+  manifest?: DataPublicationManifest,
 ): Promise<void> {
   const prefix = scopePrefix(scope);
-  publicationIntegrityFailures.delete(prefix);
+  const expected = manifest ? publicationIntegrityToken(manifest) : null;
+  const local = publicationIntegrityFailures.get(prefix);
+  if (!manifest || !local || local.expiresAt <= Date.now() || local.token === expected) {
+    publicationIntegrityFailures.delete(prefix);
+  }
   try {
     const redis = await getRedisForIntegrityMarker(redisClient);
-    await redis.del(integrityFailureKey(scope));
+    if (!manifest) {
+      await redis.del(integrityFailureKey(scope));
+      return;
+    }
+    await redis.eval(CLEAR_INTEGRITY_FAILURE_SCRIPT, 1, integrityFailureKey(scope), expected!);
   } catch {
     // A failed cleanup is harmless; the shared marker is TTL bounded and a
     // subsequent full proof can clear it when Redis is healthy again.
@@ -576,10 +595,11 @@ export async function markDataPublicationIntegrityProof(
   } as DataPublicationScope;
   const prefix = scopePrefix(scope);
   const token = publicationIntegrityToken(manifest);
-  // Clear only a local hint for the revision just proven. A concurrent reader
-  // may already have recorded a newer revision's corruption for this scope.
+  // Never clear a non-expired local failure here. A concurrent reader may have
+  // recorded corruption for this same revision after this read completed, and
+  // only the atomic repair path may remove that evidence.
   const local = publicationIntegrityFailures.get(prefix);
-  if (local && (local.expiresAt <= Date.now() || local.token === token)) {
+  if (local?.expiresAt !== undefined && local.expiresAt <= Date.now()) {
     publicationIntegrityFailures.delete(prefix);
   }
   const persist = async (): Promise<void> => {
@@ -587,9 +607,8 @@ export async function markDataPublicationIntegrityProof(
       const redis = await getRedisForIntegrityMarker(redisClient);
       await redis.eval(
         MARK_INTEGRITY_PROOF_SCRIPT,
-        2,
+        1,
         integrityProofKey(scope),
-        integrityFailureKey(scope),
         token,
         String(INTEGRITY_PROOF_TTL_SECONDS),
       );
@@ -888,15 +907,18 @@ export async function repairDataPublicationItems(
   const args = [
     expectedPublicationId,
     JSON.stringify(prepared.manifest),
+    publicationIntegrityToken(prepared.manifest),
     ...prepared.items.flatMap((item) => [item.manifest.key, item.payload]),
   ];
+  const scope = {
+    dataset: prepared.manifest.dataset,
+    seasonCode: prepared.manifest.seasonCode,
+  } as DataPublicationScope;
   const result = (await redis.eval(
     REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT,
-    1,
-    activeDataPublicationKey({
-      dataset: prepared.manifest.dataset,
-      seasonCode: prepared.manifest.seasonCode,
-    }),
+    2,
+    activeDataPublicationKey(scope),
+    integrityFailureKey(scope),
     ...args,
   )) as [string, string?];
   if (result[0] !== 'repaired') {
@@ -927,15 +949,18 @@ export async function replaceMalformedActiveDataPublication(
     observed.type,
     observed.raw ?? '',
     JSON.stringify(prepared.manifest),
+    publicationIntegrityToken(prepared.manifest),
     ...prepared.items.flatMap((item) => [item.manifest.key, item.payload]),
   ];
+  const scope = {
+    dataset: prepared.manifest.dataset,
+    seasonCode: prepared.manifest.seasonCode,
+  } as DataPublicationScope;
   const result = (await redis.eval(
     REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT,
-    1,
-    activeDataPublicationKey({
-      dataset: prepared.manifest.dataset,
-      seasonCode: prepared.manifest.seasonCode,
-    }),
+    2,
+    activeDataPublicationKey(scope),
+    integrityFailureKey(scope),
     ...args,
   )) as [string, string?];
   if (result[0] !== 'replaced') {

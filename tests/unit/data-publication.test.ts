@@ -435,6 +435,13 @@ describe('data publication contract', () => {
     });
     await expect(
       hasDataPublicationIntegrityFailure(priceScope, prepared.manifest, redis),
+    ).resolves.toBe(true);
+
+    // A later ordinary proof cannot erase same-revision corruption evidence;
+    // only the explicit repair boundary may clear that marker.
+    await clearDataPublicationIntegrityFailure(priceScope, redis, prepared.manifest);
+    await expect(
+      hasDataPublicationIntegrityFailure(priceScope, prepared.manifest, redis),
     ).resolves.toBe(false);
   });
 });

@@ -11,6 +11,8 @@ import {
   DATA_PUBLICATION_STAGING_TTL_MS,
   dataPublicationItemKey,
   activateDataPublicationPointer,
+  hasDataPublicationIntegrityFailure,
+  markDataPublicationIntegrityFailure,
   prepareDataPublication,
   publishDataRevision,
   repairDataPublicationItems,
@@ -858,10 +860,17 @@ describe('immutable Redis publication', () => {
       DATA_PUBLICATION_STAGING_TTL_MS,
     );
     const prepared = prepareDataPublication(candidate);
+    await markDataPublicationIntegrityFailure(CORE_SCOPE, prepared.manifest, redis);
+    expect(await hasDataPublicationIntegrityFailure(CORE_SCOPE, prepared.manifest, redis)).toBe(
+      true,
+    );
     await repairDataPublicationItems(prepared, prepared.manifest.publicationId, redis);
     await activateDataPublicationPointer(prepared.manifest, redis);
 
     expect((await readActiveDataPublication(CORE_SCOPE, redis))?.items.events).toEqual([{ id: 1 }]);
+    expect(await hasDataPublicationIntegrityFailure(CORE_SCOPE, prepared.manifest, redis)).toBe(
+      false,
+    );
     await expectPermanent(redis, events.key);
   });
 
