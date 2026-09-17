@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import { databaseSingleton } from '../src/db/singleton';
 import { readActiveDataPublication } from '../src/cache/data-publication';
+import { redisSingleton } from '../src/cache/singleton';
 import {
   loadDataPublicationDeliveryManifest,
   validateAndMarkDataPublicationProof,
@@ -91,5 +92,5 @@ async function main(): Promise<void> {
 try {
   await main();
 } finally {
-  await databaseSingleton.disconnect();
+  await Promise.allSettled([databaseSingleton.disconnect(), redisSingleton.disconnect()]);
 }
