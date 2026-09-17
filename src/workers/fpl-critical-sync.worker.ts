@@ -417,7 +417,7 @@ async function verifyPricePublication(
       dataset: 'fpl:price-changes',
       seasonCode: season.seasonCode,
     });
-    if (active?.manifest.publicationId !== publicationId || active.manifest.revision !== revision) {
+    if (active?.publicationId !== publicationId || active.revision !== revision) {
       throw new Error(
         `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
       );
@@ -427,7 +427,7 @@ async function verifyPricePublication(
     dataset: 'fpl:price-changes',
     seasonCode: season.seasonCode,
   });
-  if (active?.manifest.publicationId !== publicationId || active.manifest.revision !== revision) {
+  if (active?.publicationId !== publicationId || active.revision !== revision) {
     throw new Error('Price-change DB and Redis publication identities do not match');
   }
 }
