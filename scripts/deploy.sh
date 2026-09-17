@@ -1028,6 +1028,18 @@ deploy() {
     log_error "Migration LOGIN contract failed after migrations."
     exit 1
   fi
+  # Existing active publications predate the proof columns introduced by the
+  # rollout. Validate only the current active scope before services start so
+  # the readiness grace window cannot expire while the five-minute
+  # reconciler is waiting. This is bounded to the three known datasets and
+  # never scans historical publications.
+  if ! DATABASE_URL="$data_runtime_database_url" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL api \
+    bun run db:validate-active-publication-proofs; then
+    log_error "Active publication proof validation failed; services remain stopped for a forward fix."
+    exit 1
+  fi
   finish_stage
   start_stage reviewBackfill
   review_backfill_pending=false
