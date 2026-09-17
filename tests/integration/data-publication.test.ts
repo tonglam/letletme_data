@@ -15,6 +15,8 @@ import {
   publishDataRevision,
   repairDataPublicationItems,
   readActiveDataPublication,
+  readActiveDataPublicationPointerState,
+  replaceMalformedActiveDataPublication,
   retireActiveDataPublication,
   type PublishDataRevisionInput,
 } from '../../src/cache/data-publication';
@@ -861,6 +863,20 @@ describe('immutable Redis publication', () => {
 
     expect((await readActiveDataPublication(CORE_SCOPE, redis))?.items.events).toEqual([{ id: 1 }]);
     await expectPermanent(redis, events.key);
+  });
+
+  test('replaces a malformed active pointer with the canonical publication atomically', async () => {
+    const candidate = input(1, PUBLICATION_IDS.one, '2026-08-09T01:00:00.000Z');
+    const prepared = prepareDataPublication(candidate);
+    await redis.set(activeDataPublicationKey(CORE_SCOPE), 'not-json');
+    const observed = await readActiveDataPublicationPointerState(CORE_SCOPE, redis);
+
+    await replaceMalformedActiveDataPublication(prepared, observed, redis);
+
+    expect((await readActiveDataPublication(CORE_SCOPE, redis))?.manifest.publicationId).toBe(
+      PUBLICATION_IDS.one,
+    );
+    for (const item of prepared.manifest.items) await expectPermanent(redis, item.key);
   });
 
   test('readers fail closed for missing, corrupted, or wrongly typed data', async () => {

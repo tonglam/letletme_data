@@ -4,6 +4,8 @@ import {
   repairDataPublicationItems,
   readActiveDataPublication,
   readActiveDataPublicationManifest,
+  readActiveDataPublicationPointerState,
+  replaceMalformedActiveDataPublication,
   stageDataPublication,
   type DataPublicationScope,
 } from '../cache/data-publication';
@@ -61,6 +63,9 @@ export async function reconcileDataPublication(
   const redisActive = redisActiveRead?.manifest ?? null;
   const redisManifest =
     redisActive ?? (await readActiveDataPublicationManifest(scope).catch(() => null));
+  const redisPointerState = redisManifest
+    ? null
+    : await readActiveDataPublicationPointerState(scope).catch(() => null);
   let staging = await syncOperationsRepository.findStagingPublication(
     scope.dataset,
     season,
@@ -167,17 +172,17 @@ export async function reconcileDataPublication(
     }
   }
   if (!dbActive) {
-    if (redisActive) {
+    if (redisManifest || (redisPointerState && redisPointerState.type !== 'none')) {
       logWarn('Redis data publication has no canonical DB publication', {
         dataset: scope.dataset,
         season: scope.seasonCode,
         eventId: scope.eventId,
-        publicationId: redisActive.publicationId,
+        ...(redisManifest?.publicationId ? { publicationId: redisManifest.publicationId } : {}),
       });
       return {
         status: 'ghost',
         dataset: scope.dataset,
-        publicationId: redisActive.publicationId,
+        ...(redisManifest?.publicationId ? { publicationId: redisManifest.publicationId } : {}),
       };
     }
     return { status: 'missing', dataset: scope.dataset };
@@ -235,7 +240,9 @@ export async function reconcileDataPublication(
   // outbox does not cause this reconciler to download the same siblings again.
   const canonical = await loadDataPublicationDelivery(dbActive.publicationId);
 
-  if (!redisManifest) {
+  if (redisPointerState && redisPointerState.type !== 'none') {
+    await replaceMalformedActiveDataPublication(canonical, redisPointerState);
+  } else if (!redisManifest) {
     await stageDataPublication(canonical);
     const activated = await activateDataPublicationPointer(canonical.manifest);
     if (activated.status === 'stale') {
