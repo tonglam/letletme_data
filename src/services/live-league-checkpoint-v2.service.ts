@@ -515,8 +515,35 @@ export async function checkpointLiveLeaguePublicationV2(
         return rows[0] ?? null;
       };
       if (current && current.state === 'FINALIZED') {
-        const currentIsValidFinalized =
+        let currentIsValidFinalized =
           current.validationVersion === LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION;
+        if (!currentIsValidFinalized) {
+          // Legacy FINAL rows have no proof marker yet. Validate the complete
+          // durable row under the scope lock before allowing a successor; a
+          // valid row is upgraded in place, while a corrupt row remains
+          // repairable only through the existing validated successor path.
+          const legacyFinal = await readLiveLeagueCheckpointV2(scope, tx);
+          if (
+            legacyFinal?.publication.publicationId === current.publicationId &&
+            legacyFinal.publication.generation === Number(current.generation)
+          ) {
+            await tx
+              .update(liveLeagueCheckpointsInCompetition)
+              .set({ validationVersion: LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION })
+              .where(
+                and(
+                  eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
+                  eq(liveLeagueCheckpointsInCompetition.eventId, read.publication.eventId),
+                  eq(
+                    liveLeagueCheckpointsInCompetition.tournamentId,
+                    read.publication.tournamentId,
+                  ),
+                  eq(liveLeagueCheckpointsInCompetition.scopeKind, read.publication.scope),
+                ),
+              );
+            currentIsValidFinalized = true;
+          }
+        }
         // FINALIZED remains a fence against provisional data, stale
         // generations, and same-generation identity conflicts. A Redis
         // rebuild may nevertheless create a newer complete FINAL publication

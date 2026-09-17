@@ -1,8 +1,7 @@
 import { Queue } from 'bullmq';
 
 import {
-  readActiveDataPublicationManifestWithItemBounds,
-  readActiveDataPublicationItem,
+  readActiveDataPublication,
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
   type DataPublicationReadResult,
@@ -970,21 +969,15 @@ export async function getJobsStatus(
       seasonCode: season.seasonCode,
       ...(scope.eventId === undefined ? {} : { eventId: scope.eventId }),
     } as const;
-    const redisControl = await readActiveDataPublicationManifestWithItemBounds(publicationScope);
-    const redisContext =
-      scope.dataset === PRICE_CHANGE_DATASET
-        ? await readActiveDataPublicationItem(publicationScope, 'context')
-        : null;
-    const redisManifest = publicationManifest(redisControl);
+    // This is the explicit deep-governance endpoint. It may perform one
+    // bounded full consumer validation per dataset so parity cannot report a
+    // same-sized but corrupted Redis item as healthy. The frequent jobs
+    // control/status path remains identity-only.
+    const redisDelivery = await readActiveDataPublication(publicationScope);
+    const redisManifest = publicationManifest(redisDelivery);
     if (scope.dataset === PRICE_CHANGE_DATASET) {
       priceChangeDbActive = dbActive;
-      priceChangeRedisActive =
-        redisContext &&
-        redisManifest &&
-        redisContext.manifest.publicationId === redisManifest.publicationId &&
-        redisContext.manifest.revision === redisManifest.revision
-          ? redisContext
-          : null;
+      priceChangeRedisActive = redisDelivery;
     }
     const key = scope.eventId === undefined ? scope.dataset : `${scope.dataset}:e${scope.eventId}`;
     publicationConsistency[key] =
