@@ -37,6 +37,7 @@ import {
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { canonicalJson, contentHash } from '../utils/content-hash';
+import { boundedDb } from '../utils/live-snapshot-db-budget';
 
 export type SyncRunStatus =
   | 'pending'
@@ -263,6 +264,7 @@ function sourceCheckedAtFromManifest(value: unknown): Date | null {
 
 export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance ?? (await getDb());
+  const publicationControlQueryTimeoutMs = 5_000;
 
   return {
     startRun: async (input: StartSyncRunInput): Promise<string> => {
@@ -2521,9 +2523,22 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
       dataset: DataPublicationDataset,
       season: FplSeasonRef,
       eventId?: number,
+      deadlineAt?: number,
     ): Promise<PreparedDatasetPublication | null> => {
       const db = await getDbInstance();
-      const rows = await db
+      // Explicit governance audits share one absolute wall-clock budget with
+      // their Redis evidence reads. The bounded Drizzle handle cancels and
+      // awaits a queued or running PostgreSQL statement instead of racing a
+      // promise and leaving a pool slot occupied after the audit returns.
+      const queryDb =
+        deadlineAt === undefined
+          ? db
+          : boundedDb(
+              db as Parameters<typeof boundedDb>[0],
+              publicationControlQueryTimeoutMs,
+              deadlineAt,
+            );
+      const rows = await queryDb
         .select({
           publicationId: datasetPublicationsInOps.publicationId,
           revision: datasetPublicationsInOps.revision,

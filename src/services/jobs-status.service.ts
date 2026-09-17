@@ -753,6 +753,7 @@ export type PublicationAuditRequest = Readonly<{
 type PublicationStatusEntry = {
   readonly dataset: PublicationAuditDataset;
   readonly dbActive: Awaited<ReturnType<typeof syncOperationsRepository.findActivePublication>>;
+  readonly dbControlReadFailed: boolean;
   readonly publicationScope: DataPublicationScope;
   readonly redisControlManifest: DataPublicationManifest | null;
   redisDelivery: PublicationIdentityRead | null;
@@ -1013,11 +1014,25 @@ export async function getJobsStatus(
   );
   for (const scope of publicationScopesInReadOrder) {
     const auditRequested = publicationAuditScopes.has(scope.dataset);
-    const dbActive = await syncOperationsRepository.findActivePublication(
-      scope.dataset,
-      season,
-      scope.eventId,
-    );
+    const dbControlReadAlreadyTimedOut =
+      auditRequested &&
+      publicationAuditDeadlineAt !== null &&
+      Date.now() >= publicationAuditDeadlineAt;
+    let dbActive: Awaited<ReturnType<typeof syncOperationsRepository.findActivePublication>> = null;
+    let dbControlReadFailed = false;
+    if (!dbControlReadAlreadyTimedOut) {
+      try {
+        dbActive = await syncOperationsRepository.findActivePublication(
+          scope.dataset,
+          season,
+          scope.eventId,
+          auditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
+        );
+      } catch (error) {
+        if (!auditRequested) throw error;
+        dbControlReadFailed = true;
+      }
+    }
     const publicationScope = {
       dataset: scope.dataset,
       seasonCode: season.seasonCode,
@@ -1026,11 +1041,13 @@ export async function getJobsStatus(
     // The default status projection is proof-only. A complete Redis payload
     // read is allowed only for an explicitly requested scope and only after
     // its declared byte and wall-clock budgets have been checked.
-    const controlReadAlreadyTimedOut =
-      auditRequested &&
-      publicationAuditDeadlineAt !== null &&
-      Date.now() >= publicationAuditDeadlineAt;
-    const redisControlManifest = controlReadAlreadyTimedOut
+    const controlReadBlocked =
+      dbControlReadAlreadyTimedOut ||
+      dbControlReadFailed ||
+      (auditRequested &&
+        publicationAuditDeadlineAt !== null &&
+        Date.now() >= publicationAuditDeadlineAt);
+    const redisControlManifest = controlReadBlocked
       ? null
       : await readActiveDataPublicationManifestWithItemBounds(
           publicationScope,
@@ -1038,13 +1055,14 @@ export async function getJobsStatus(
           auditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
         ).catch(() => null);
     const controlReadTimedOut =
-      controlReadAlreadyTimedOut ||
+      dbControlReadAlreadyTimedOut ||
       (auditRequested &&
         publicationAuditDeadlineAt !== null &&
         Date.now() >= publicationAuditDeadlineAt);
     const entry: PublicationStatusEntry = {
       dataset: scope.dataset,
       dbActive,
+      dbControlReadFailed,
       publicationScope,
       redisControlManifest,
       redisDelivery: redisControlManifest,
@@ -1055,6 +1073,8 @@ export async function getJobsStatus(
         redisControlManifest?.items.reduce((total, item) => total + item.bytes, 0) ?? 0;
       if (controlReadTimedOut) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
+      } else if (dbControlReadFailed) {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'READ_FAILED' });
       } else if (!redisControlManifest) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'NO_MANIFEST' });
       } else if (publicationAuditBytes + declaredBytes > publicationAudit!.maxBytes) {
@@ -1073,6 +1093,10 @@ export async function getJobsStatus(
   );
 
   const setPublicationConsistency = (entry: PublicationStatusEntry): void => {
+    if (entry.dbControlReadFailed) {
+      publicationConsistency[entry.dataset] = false;
+      return;
+    }
     const redisManifest = publicationManifest(entry.redisDelivery);
     publicationConsistency[entry.dataset] =
       Boolean(entry.dbActive) === Boolean(redisManifest) &&

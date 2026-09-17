@@ -176,8 +176,10 @@ const INTEGRITY_PROOF_SUFFIX = ':integrity-proof';
 type IntegrityFailureMarker = Readonly<{
   token: string;
   expiresAt: number;
+  sequence: number;
 }>;
 const publicationIntegrityFailures = new Map<string, IntegrityFailureMarker>();
+let integrityFailureSequence = 0;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -484,17 +486,20 @@ function publicationIntegrityToken(manifest: DataPublicationManifest): string {
 function clearLocalIntegrityFailureAfterRepair(
   scope: DataPublicationScope,
   manifest: DataPublicationManifest,
-  markerBeforeRepair: IntegrityFailureMarker | undefined,
+  repairFence: number,
 ): void {
-  if (!markerBeforeRepair || markerBeforeRepair.token !== publicationIntegrityToken(manifest)) {
+  const current = publicationIntegrityFailures.get(scopePrefix(scope));
+  if (
+    !current ||
+    current.token !== publicationIntegrityToken(manifest) ||
+    current.sequence > repairFence
+  ) {
     return;
   }
-  // A same-process reader may have recorded a fresh failure while the Redis
-  // repair transaction was running. Clear only the exact marker observed
-  // before that transaction; a newer object remains sticky.
-  if (publicationIntegrityFailures.get(scopePrefix(scope)) === markerBeforeRepair) {
-    publicationIntegrityFailures.delete(scopePrefix(scope));
-  }
+  // The sequence fence includes markers recorded after the repair caller read
+  // the map but before Redis entered its atomic transaction. A marker allocated
+  // after that fence is evidence from a later read and remains sticky.
+  publicationIntegrityFailures.delete(scopePrefix(scope));
 }
 
 async function getRedisForIntegrityMarker(
@@ -533,6 +538,7 @@ export async function markDataPublicationIntegrityFailure(
   publicationIntegrityFailures.set(prefix, {
     token,
     expiresAt: now + INTEGRITY_FAILURE_TTL_SECONDS * 1_000,
+    sequence: ++integrityFailureSequence,
   });
   const persist = async (): Promise<void> => {
     try {
@@ -993,7 +999,7 @@ export async function repairDataPublicationItems(
     dataset: prepared.manifest.dataset,
     seasonCode: prepared.manifest.seasonCode,
   } as DataPublicationScope;
-  const markerBeforeRepair = publicationIntegrityFailures.get(scopePrefix(scope));
+  const repairFence = integrityFailureSequence;
   const result = (await redis.eval(
     REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT,
     3,
@@ -1008,7 +1014,7 @@ export async function repairDataPublicationItems(
       'DATA_PUBLICATION_REPAIR_CONFLICT',
     );
   }
-  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, markerBeforeRepair);
+  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, repairFence);
 }
 
 /** Replace a malformed Data-owned active pointer and its canonical items atomically. */
@@ -1039,7 +1045,7 @@ export async function replaceMalformedActiveDataPublication(
     dataset: prepared.manifest.dataset,
     seasonCode: prepared.manifest.seasonCode,
   } as DataPublicationScope;
-  const markerBeforeRepair = publicationIntegrityFailures.get(scopePrefix(scope));
+  const repairFence = integrityFailureSequence;
   const result = (await redis.eval(
     REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT,
     3,
@@ -1054,7 +1060,7 @@ export async function replaceMalformedActiveDataPublication(
       'DATA_PUBLICATION_REPAIR_CONFLICT',
     );
   }
-  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, markerBeforeRepair);
+  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, repairFence);
 }
 
 export async function activateDataPublicationPointer(
