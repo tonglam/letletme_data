@@ -110,6 +110,73 @@ describe('data API readiness', () => {
     expect(Date.now() - started).toBeLessThan(250);
   });
 
+  test('coalesces overlapping slow probes until the original work settles', async () => {
+    let calls = 0;
+    let release!: (value: boolean) => void;
+    const postgres = () => {
+      calls += 1;
+      if (calls > 1) return Promise.resolve(true);
+      return new Promise<boolean>((resolve) => {
+        release = resolve;
+      });
+    };
+    const common = {
+      postgres,
+      cacheRedis: async () => true,
+      queueRedis: async () => true,
+      activeSeason: async () => true,
+      screenshotRetentionConfigured: async () => true,
+      strict: true,
+      probeTimeoutMs: 10,
+    };
+
+    const [first, second] = await Promise.all([checkReadiness(common), checkReadiness(common)]);
+    expect(first.dependencies.postgres).toBe(false);
+    expect(second.dependencies.postgres).toBe(false);
+    expect(calls).toBe(1);
+
+    release(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(checkReadiness(common)).resolves.toMatchObject({
+      ready: true,
+      dependencies: { postgres: true },
+    });
+    expect(calls).toBe(2);
+  });
+
+  test('does not pin a non-cancellable fallback probe after its deadline', async () => {
+    let calls = 0;
+    const activeSeason = async () => {
+      calls += 1;
+      if (calls === 1) {
+        await Bun.sleep(50);
+        return false;
+      }
+      return true;
+    };
+    const common = {
+      postgres: async () => true,
+      cacheRedis: async () => true,
+      queueRedis: async () => true,
+      activeSeason,
+      screenshotRetentionConfigured: async () => true,
+      strict: true,
+      probeTimeoutMs: 10,
+    };
+
+    await expect(checkReadiness(common)).resolves.toMatchObject({
+      ready: false,
+      dependencies: { activeSeason: false },
+    });
+    await expect(checkReadiness(common)).resolves.toMatchObject({
+      ready: true,
+      dependencies: { activeSeason: true },
+    });
+    expect(calls).toBe(2);
+  });
+
   test('allows strict readiness while the separately rolled out media worker is absent', async () => {
     const previous = process.env.RUNTIME_INCLUDE_MEDIA_WORKER;
     const previousRequired = process.env.RUNTIME_MEDIA_WORKER_REQUIRED;
