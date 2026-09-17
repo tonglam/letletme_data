@@ -1153,6 +1153,10 @@ export async function getJobsStatus(
     }
   }
 
+  // Stop the audit clock before running unrequested status projections. Those
+  // projections remain useful for the response, but they are outside the
+  // operator's explicitly budgeted evidence interval.
+  const publicationAuditCompletedAt = publicationAudit ? Date.now() : null;
   if (publicationAudit) {
     for (const scope of unrequestedPublicationScopes) {
       await readPublicationScope(scope, false);
@@ -1580,7 +1584,10 @@ export async function getJobsStatus(
       declaredBytesRead: publicationAuditBytes,
       completedScopes: publicationAuditCompleted,
       skippedScopes: publicationAuditSkipped,
-      elapsedMs: Date.now() - publicationAuditStartedAt,
+      elapsedMs:
+        publicationAuditCompletedAt === null
+          ? 0
+          : publicationAuditCompletedAt - publicationAuditStartedAt,
     },
     fplAdmission,
     priceChanges,

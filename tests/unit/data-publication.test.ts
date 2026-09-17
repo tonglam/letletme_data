@@ -521,4 +521,20 @@ describe('data publication contract', () => {
     ).resolves.toBe(true);
     await clearDataPublicationIntegrityFailure(proofScope, redis);
   });
+
+  test('fails closed when the shared integrity marker cannot be read', async () => {
+    const unreadableScope = scope;
+    const cleanupRedis = { del: async () => 1 } as unknown as Redis;
+    await clearDataPublicationIntegrityFailure(unreadableScope, cleanupRedis);
+
+    const redis = {
+      get: async () => {
+        throw new Error('integrity marker unavailable');
+      },
+    } as unknown as Redis;
+
+    await expect(
+      hasDataPublicationIntegrityFailure(unreadableScope, validManifest(), redis),
+    ).resolves.toBe(true);
+  });
 });

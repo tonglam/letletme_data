@@ -649,9 +649,11 @@ export async function hasDataPublicationIntegrityFailure(
     }
     return localMatches;
   } catch {
-    // Keep process-local evidence when Redis cannot confirm a cross-process
-    // repair. A reachable shared proof is required before clearing it.
-    return localMatches;
+    // Redis is the cross-process source of integrity evidence. If its marker
+    // cannot be read, absence of a local marker is not proof that another
+    // process has not recorded corruption; fail closed until the marker path
+    // is readable again.
+    return true;
   }
 }
 
