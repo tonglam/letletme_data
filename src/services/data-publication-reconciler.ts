@@ -247,7 +247,7 @@ export async function reconcileDataPublication(
   ) {
     // The pointer already identifies this immutable publication, so replacing
     // its damaged siblings is safe and stays inside the Data-owned scope.
-    await repairDataPublicationItems(canonical);
+    await repairDataPublicationItems(canonical, redisManifest.publicationId);
     const repaired = await compareAndSwapDataPublicationPointer(
       scope,
       redisManifest.publicationId,

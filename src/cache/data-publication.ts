@@ -331,6 +331,39 @@ redis.call('SET', KEYS[1], candidate_raw)
 return {'replaced', current_raw}
 `;
 
+const REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT = `
+local current_raw = redis.call('GET', KEYS[1])
+if not current_raw then return {'missing'} end
+local decoded, current = pcall(cjson.decode, current_raw)
+if not decoded or not current or not current.items then return {'invalid'} end
+if current.publicationId ~= ARGV[1] then return {'changed'} end
+local candidate_decoded, candidate = pcall(cjson.decode, ARGV[2])
+if not candidate_decoded or not candidate or current.revision ~= candidate.revision then
+  return {'conflict'}
+end
+if #current.items ~= #candidate.items then return {'conflict'} end
+for index, item in ipairs(current.items) do
+  local candidate_item = candidate.items[index]
+  if not candidate_item
+    or item.name ~= candidate_item.name
+    or item.key ~= candidate_item.key
+    or item.type ~= candidate_item.type
+    or item.count ~= candidate_item.count
+    or item.bytes ~= candidate_item.bytes
+    or item.sha256 ~= candidate_item.sha256 then
+    return {'conflict'}
+  end
+end
+for index, item in ipairs(candidate.items) do
+  local key = ARGV[3 + ((index - 1) * 2)]
+  local payload = ARGV[4 + ((index - 1) * 2)]
+  if key ~= item.key then return {'conflict'} end
+  redis.call('SET', key, payload)
+  redis.call('PERSIST', key)
+end
+return {'repaired'}
+`;
+
 function assertScope(scope: DataPublicationScope): void {
   if (!/^\d{4}$/.test(scope.seasonCode)) {
     throw new CacheError('Invalid publication season', 'DATA_PUBLICATION_SEASON_INVALID');
@@ -505,15 +538,10 @@ async function stageDataPublicationItems(
   manifest: DataPublicationManifest,
   items: readonly DataPublicationDeliveryItem[],
   redis: Redis,
-  options: { readonly replaceExisting?: boolean } = {},
 ): Promise<void> {
   const stage = redis.pipeline();
   for (const item of items) {
-    if (options.replaceExisting) {
-      stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS);
-    } else {
-      stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS, 'NX');
-    }
+    stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS, 'NX');
   }
   const stageResults = await stage.exec();
   if (!stageResults) {
@@ -568,12 +596,36 @@ export async function repairDataPublicationItems(
     readonly manifest: DataPublicationManifest;
     readonly items: readonly DataPublicationDeliveryItem[];
   },
+  expectedPublicationId: string,
   redisClient?: Redis,
 ): Promise<void> {
   const redis = redisClient ?? (await redisSingleton.getClient());
-  await stageDataPublicationItems(prepared.manifest, prepared.items, redis, {
-    replaceExisting: true,
-  });
+  if (prepared.manifest.publicationId !== expectedPublicationId) {
+    throw new CacheError(
+      'Repair publication identity does not match the active pointer',
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
+  const args = [
+    expectedPublicationId,
+    JSON.stringify(prepared.manifest),
+    ...prepared.items.flatMap((item) => [item.manifest.key, item.payload]),
+  ];
+  const result = (await redis.eval(
+    REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT,
+    1,
+    activeDataPublicationKey({
+      dataset: prepared.manifest.dataset,
+      seasonCode: prepared.manifest.seasonCode,
+    }),
+    ...args,
+  )) as [string, string?];
+  if (result[0] !== 'repaired') {
+    throw new CacheError(
+      `Atomic publication item repair failed: ${result[0] ?? 'unknown'}`,
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
 }
 
 export async function activateDataPublicationPointer(

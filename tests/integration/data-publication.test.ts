@@ -856,7 +856,7 @@ describe('immutable Redis publication', () => {
       DATA_PUBLICATION_STAGING_TTL_MS,
     );
     const prepared = prepareDataPublication(candidate);
-    await repairDataPublicationItems(prepared, redis);
+    await repairDataPublicationItems(prepared, prepared.manifest.publicationId, redis);
     await activateDataPublicationPointer(prepared.manifest, redis);
 
     expect((await readActiveDataPublication(CORE_SCOPE, redis))?.items.events).toEqual([{ id: 1 }]);
