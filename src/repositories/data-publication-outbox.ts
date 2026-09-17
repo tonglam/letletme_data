@@ -15,7 +15,7 @@ import {
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
 } from '../cache/data-publication';
-import type { FplSeasonRef } from '../domain/fpl-season';
+import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
 import { canonicalJson } from '../utils/content-hash';
 
 type DatabaseClock = Date | string;
@@ -324,6 +324,10 @@ export async function validateAndMarkDataPublicationProof(
     const publicationRows = await tx
       .select({
         status: datasetPublicationsInOps.status,
+        dataset: datasetPublicationsInOps.dataset,
+        seasonId: datasetPublicationsInOps.seasonId,
+        eventId: datasetPublicationsInOps.eventId,
+        revision: datasetPublicationsInOps.revision,
         manifest: datasetPublicationsInOps.manifest,
         validationVersion: datasetPublicationsInOps.validationVersion,
       })
@@ -334,6 +338,21 @@ export async function validateAndMarkDataPublicationProof(
     if (!publication || publication.status !== 'active') return null;
     const manifest = parseDataPublicationManifest(JSON.stringify(publication.manifest));
     if (!manifest) return null;
+    let manifestSeason;
+    try {
+      manifestSeason = explicitSeasonRef(manifest.seasonCode);
+    } catch {
+      return null;
+    }
+    if (
+      publication.dataset !== manifest.dataset ||
+      publication.seasonId !== manifestSeason.seasonId ||
+      publication.eventId !== manifest.eventId ||
+      publication.revision !== manifest.revision ||
+      manifest.publicationId !== publicationId
+    ) {
+      return null;
+    }
     await tx
       .select({ publicationId: datasetPublicationItemsInOps.publicationId })
       .from(datasetPublicationItemsInOps)

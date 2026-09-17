@@ -1122,6 +1122,18 @@ parse_migration_plan_fields() {
   '
 }
 
+migration_plan_requires_live_points_seed() {
+  perl -MJSON::PP -e '
+    my $raw = do { local $/; <STDIN> };
+    my $plan = decode_json($raw);
+    die "migration plan is not an object\n" unless ref($plan) eq "HASH";
+    die "migration plan pending is not an array\n" unless ref($plan->{pending}) eq "ARRAY";
+    exit scalar(grep {
+      ref($_) eq "HASH" && ($_->{filename} // "") eq "0104_publication_validation_proof.sql"
+    } @{$plan->{pending}}) ? 0 : 1;
+  '
+}
+
 release_sha_for_image() {
   local image=${1:-}
   local release_sha

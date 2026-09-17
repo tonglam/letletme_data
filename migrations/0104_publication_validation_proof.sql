@@ -92,11 +92,24 @@ BEGIN
       NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
-        -- A marker retry may refresh only checkpointedAt after the durable
-        -- row committed. All other manifest identity/timing fields remain
+        -- A marker retry may refresh checkpointedAt after the durable row
+        -- committed. Provisional rows also refresh the two bounded heartbeat
+        -- fields between observations; every other manifest field remains
         -- immutable, so a same-identity retry cannot replace its proof.
-        (NEW.manifest #- ARRAY['times', 'checkpointedAt']) IS DISTINCT FROM
-          (OLD.manifest #- ARRAY['times', 'checkpointedAt']) OR
+        (
+          NEW.manifest #- ARRAY[
+            'times', 'checkpointedAt', 'sourceCheckedAt', 'expectedNextCheckAt'
+          ]
+        ) IS DISTINCT FROM (
+          OLD.manifest #- ARRAY[
+            'times', 'checkpointedAt', 'sourceCheckedAt', 'expectedNextCheckAt'
+          ]
+        ) OR
+        (
+          OLD.state = 'FINALIZED' AND
+          (NEW.manifest #- ARRAY['times', 'checkpointedAt']) IS DISTINCT FROM
+            (OLD.manifest #- ARRAY['times', 'checkpointedAt'])
+        ) OR
         NEW.index_payload IS DISTINCT FROM OLD.index_payload OR
         NEW.payload IS DISTINCT FROM OLD.payload OR
         NEW.row_count IS DISTINCT FROM OLD.row_count OR
@@ -129,19 +142,19 @@ END;
 $$;
 
 CREATE TRIGGER dataset_publication_items_validation_immutable
-  BEFORE UPDATE ON ops.dataset_publication_items
+  BEFORE UPDATE OR DELETE ON ops.dataset_publication_items
   FOR EACH ROW EXECUTE FUNCTION ops.prevent_validated_publication_mutation();
 
 CREATE TRIGGER dataset_publications_validation_immutable
-  BEFORE UPDATE ON ops.dataset_publications
+  BEFORE UPDATE OR DELETE ON ops.dataset_publications
   FOR EACH ROW EXECUTE FUNCTION ops.prevent_validated_publication_mutation();
 
 CREATE TRIGGER live_league_checkpoints_validation_immutable
-  BEFORE UPDATE ON competition.live_league_checkpoints
+  BEFORE UPDATE OR DELETE ON competition.live_league_checkpoints
   FOR EACH ROW EXECUTE FUNCTION ops.prevent_validated_publication_mutation();
 
 CREATE TRIGGER live_points_publication_checkpoints_validation_immutable
-  BEFORE UPDATE ON competition.live_points_publication_checkpoints
+  BEFORE UPDATE OR DELETE ON competition.live_points_publication_checkpoints
   FOR EACH ROW EXECUTE FUNCTION ops.prevent_validated_publication_mutation();
 
 REVOKE ALL ON FUNCTION ops.prevent_validated_publication_mutation() FROM PUBLIC;

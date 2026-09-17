@@ -189,6 +189,7 @@ async function main(): Promise<void> {
       revision: publication.revision,
       publicationId: publication.publicationId,
       sourceCheckedAt: new Date(canonicalManifest.sourceCheckedAt),
+      publishedAt: new Date(canonicalManifest.publishedAt),
       afterStage: async (candidate) => {
         assertCoreCacheRebuildCandidate(canonicalManifest, candidate);
       },
@@ -223,11 +224,8 @@ async function main(): Promise<void> {
     throw new Error('Published core cache failed its exact read-back verification');
   }
 
-  // The PostgreSQL manifest is the immutable canonical identity. The Redis
-  // rebuild may carry a new cache publication timestamp, but persisting that
-  // timestamp back would turn a recovery into an in-place proof mutation.
-  // Keep the database manifest untouched and verify parity by publication ID,
-  // revision, and the complete Redis payload above.
+  // The PostgreSQL manifest is the immutable canonical identity. Rebuild Redis
+  // with its timestamp so the next deploy can reuse the exact same proof.
 
   console.log(
     JSON.stringify(

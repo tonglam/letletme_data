@@ -44,8 +44,10 @@ import {
   reclaimAbandonedLivePublicationV2SeedClaim,
   reclaimAbandonedPromotedLivePublicationV2SeedClaim,
   readLivePublicationV2Checkpoint,
+  readLivePublicationV2CheckpointMetadata,
   readLivePublicationV2SeedClaim,
   releaseLivePublicationV2SeedClaim,
+  validateAndMarkLivePublicationV2Checkpoint,
   type LivePublicationV2SeedClaim,
 } from '../src/services/live-publication-v2-checkpoint.service';
 import { checkpointEntryLiveInputV2 } from '../src/services/entries.service';
@@ -2294,7 +2296,13 @@ async function checkpointSeededLive(
   // repaired.  If PostgreSQL has a different durable winner, restore that
   // exact publication instead of silently accepting the conflicting Redis
   // pointer.
-  const durable = await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
+  const durableMetadata = await readLivePublicationV2CheckpointMetadata(
+    seed.season,
+    seed.source.event_id,
+  );
+  const durable = durableMetadata
+    ? await readLivePublicationV2Checkpoint(seed.season, seed.source.event_id)
+    : await validateAndMarkLivePublicationV2Checkpoint(seed.season, seed.source.event_id);
   if (publication.checkpointedAt !== null) {
     if (
       durable &&

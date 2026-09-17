@@ -79,6 +79,8 @@ export interface PublishDataRevisionInput extends DataPublicationScope {
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
+  /** Preserve an immutable canonical timestamp when rebuilding a cache. */
+  readonly publishedAt?: Date;
   readonly lastSuccessfulFetchAt?: Date;
   /** Exact freshness window that requested this publication, when applicable. */
   readonly freshnessWindowId?: number;
@@ -465,7 +467,7 @@ function createManifest(
     ...(freshnessWindowIds === undefined || freshnessWindowIds.length === 0
       ? {}
       : { freshnessWindowIds }),
-    publishedAt: new Date().toISOString(),
+    publishedAt: (input.publishedAt ?? new Date()).toISOString(),
     state: input.state,
     items: items.map((item) => item.manifest),
   };

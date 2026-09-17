@@ -998,6 +998,64 @@ export async function readLivePublicationV2CheckpointMetadata(
 }
 
 /**
+ * Validate one explicitly requested durable checkpoint and persist its proof.
+ * Rollout callers use this only for the current seed scope; it never scans
+ * historical events or turns the readiness path into a payload reader.
+ */
+export async function validateAndMarkLivePublicationV2Checkpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  expected?: Readonly<{ publicationId?: string; generation?: number }>,
+): Promise<LivePublicationRead | null> {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const locked = (
+      await tx
+        .select({
+          publicationId: livePointsPublicationCheckpointsInCompetition.publicationId,
+          generation: livePointsPublicationCheckpointsInCompetition.generation,
+        })
+        .from(livePointsPublicationCheckpointsInCompetition)
+        .where(
+          and(
+            eq(livePointsPublicationCheckpointsInCompetition.seasonId, season.seasonId),
+            eq(livePointsPublicationCheckpointsInCompetition.eventId, eventId),
+          ),
+        )
+        .for('update')
+        .limit(1)
+    )[0];
+    if (!locked) return null;
+    if (
+      (expected?.publicationId !== undefined && locked.publicationId !== expected.publicationId) ||
+      (expected?.generation !== undefined && locked.generation !== expected.generation)
+    ) {
+      return null;
+    }
+
+    const checkpoint = await readLivePublicationV2Checkpoint(season, eventId, tx);
+    if (
+      !checkpoint ||
+      checkpoint.publication.publicationId !== locked.publicationId ||
+      checkpoint.publication.generation !== locked.generation
+    ) {
+      return null;
+    }
+
+    await tx
+      .update(livePointsPublicationCheckpointsInCompetition)
+      .set({ validationVersion: LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION })
+      .where(
+        and(
+          eq(livePointsPublicationCheckpointsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationCheckpointsInCompetition.eventId, eventId),
+        ),
+      );
+    return checkpoint;
+  });
+}
+
+/**
  * PostgreSQL is the cold fallback only.  It returns the same complete
  * publication shape as Redis and validates the stored byte/hash/count proof
  * before exposing it to a caller.
