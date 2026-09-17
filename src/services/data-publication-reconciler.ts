@@ -140,6 +140,14 @@ export async function reconcileDataPublication(
         await activate();
       }
       stagingWasActivated = true;
+      // The outbox dispatcher normally activates the Redis pointer. If the
+      // observed active key is malformed, that activation would fail before
+      // the dispatcher can deliver the already-loaded staging payload. Repair
+      // the exact malformed key now that the canonical DB activation has
+      // committed; the dispatcher then closes the durable receipt idempotently.
+      if (redisPointerState && redisPointerState.type !== 'none') {
+        await replaceMalformedActiveDataPublication(prepared, redisPointerState);
+      }
       if (stagingWasActivated) {
         await dispatchDataPublicationOutbox({
           limit: 1,
