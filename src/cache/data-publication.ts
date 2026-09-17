@@ -182,6 +182,8 @@ type IntegrityFailureMarker = Readonly<{
   token: string;
   expiresAt: number;
   observedAt: number;
+  /** Caller-supplied timestamps are only used by direct diagnostics/tests. */
+  observationDomain: 'redis-epoch' | 'wall-clock';
 }>;
 const publicationIntegrityFailures = new Map<string, IntegrityFailureMarker>();
 const publicationIntegrityProofRefreshes = new Map<string, number>();
@@ -613,7 +615,9 @@ function clearLocalIntegrityFailureAfterRepair(
   const expected = publicationIntegrityToken(manifest);
   const exactKey = localIntegrityFailureKey(prefix, expected);
   const exact = publicationIntegrityFailures.get(exactKey);
-  if (exact && exact.observedAt <= repairEpoch) publicationIntegrityFailures.delete(exactKey);
+  if (exact && (exact.observationDomain === 'wall-clock' || exact.observedAt <= repairEpoch)) {
+    publicationIntegrityFailures.delete(exactKey);
+  }
   // A full read records the Redis epoch at which it atomically captured the
   // immutable payload. A read ordered before this repair is stale evidence and
   // may be cleared; a read ordered afterwards stays sticky for a new repair.
@@ -646,16 +650,19 @@ export async function markDataPublicationIntegrityFailure(
   manifest?: DataPublicationManifest,
   redisClient?: Redis,
   deadlineAt?: number,
-  observedAt = Date.now(),
+  observedAt?: number,
 ): Promise<void> {
   const prefix = scopePrefix(scope);
   const token = manifest ? publicationIntegrityToken(manifest) : '*';
   const now = Date.now();
+  const observedValue = observedAt ?? now;
+  const observationDomain = observedAt === undefined ? 'wall-clock' : 'redis-epoch';
   const localKey = localIntegrityFailureKey(prefix, token);
   publicationIntegrityFailures.set(localKey, {
     token,
     expiresAt: now + INTEGRITY_FAILURE_TTL_SECONDS * 1_000,
-    observedAt,
+    observedAt: observedValue,
+    observationDomain,
   });
   const persist = async (): Promise<void> => {
     try {
@@ -672,7 +679,7 @@ export async function markDataPublicationIntegrityFailure(
             integrityRepairKey(scope),
             token,
             String(INTEGRITY_FAILURE_TTL_SECONDS),
-            String(observedAt),
+            String(observedValue),
           ),
         );
       } else {
@@ -693,7 +700,7 @@ export async function markDataPublicationIntegrityFailure(
               integrityRepairKey(scope),
               token,
               String(INTEGRITY_FAILURE_TTL_SECONDS),
-              String(observedAt),
+              String(observedValue),
             ],
             markerDeadlineAt,
           ),
@@ -704,7 +711,11 @@ export async function markDataPublicationIntegrityFailure(
       // conflict (return 0), which may be fresh evidence for another identity.
       if (outcome === -1) {
         const current = publicationIntegrityFailures.get(localKey);
-        if (current && current.observedAt <= observedAt) {
+        if (
+          current &&
+          current.observationDomain === observationDomain &&
+          current.observedAt <= observedValue
+        ) {
           publicationIntegrityFailures.delete(localKey);
         }
       }
