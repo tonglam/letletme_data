@@ -10,8 +10,13 @@ import {
   DATA_PUBLICATION_RETIRED_TTL_MS,
   DATA_PUBLICATION_STAGING_TTL_MS,
   dataPublicationItemKey,
+  activateDataPublicationPointer,
+  prepareDataPublication,
   publishDataRevision,
+  repairDataPublicationItems,
   readActiveDataPublication,
+  readActiveDataPublicationPointerState,
+  replaceMalformedActiveDataPublication,
   retireActiveDataPublication,
   type PublishDataRevisionInput,
 } from '../../src/cache/data-publication';
@@ -826,6 +831,52 @@ describe('immutable Redis publication', () => {
     ).rejects.toMatchObject({ code: 'DATA_PUBLICATION_STAGE_CONFLICT' });
     expect((await readActiveDataPublication(CORE_SCOPE, redis))?.items.events).toEqual([{ id: 1 }]);
     for (const item of first.manifest.items) await expectPermanent(redis, item.key);
+  });
+
+  test('an idempotent retry persists an item that was re-staged with a TTL', async () => {
+    const candidate = input(1, PUBLICATION_IDS.one, '2026-08-09T01:00:00.000Z');
+    const first = await publishDataRevision(candidate, { redis });
+    const events = first.manifest.items.find((item) => item.name === 'events');
+    if (!events) throw new Error('events key missing from test publication');
+
+    await redis.pexpire(events.key, DATA_PUBLICATION_STAGING_TTL_MS);
+    await publishDataRevision(candidate, { redis });
+
+    await expectPermanent(redis, events.key);
+  });
+
+  test('repairs a corrupt item only for its identified publication', async () => {
+    const candidate = input(1, PUBLICATION_IDS.one, '2026-08-09T01:00:00.000Z');
+    const first = await publishDataRevision(candidate, { redis });
+    const events = first.manifest.items.find((item) => item.name === 'events');
+    if (!events) throw new Error('events key missing from test publication');
+
+    await redis.set(
+      events.key,
+      JSON.stringify([{ id: 999 }]),
+      'PX',
+      DATA_PUBLICATION_STAGING_TTL_MS,
+    );
+    const prepared = prepareDataPublication(candidate);
+    await repairDataPublicationItems(prepared, prepared.manifest.publicationId, redis);
+    await activateDataPublicationPointer(prepared.manifest, redis);
+
+    expect((await readActiveDataPublication(CORE_SCOPE, redis))?.items.events).toEqual([{ id: 1 }]);
+    await expectPermanent(redis, events.key);
+  });
+
+  test('replaces a malformed active pointer with the canonical publication atomically', async () => {
+    const candidate = input(1, PUBLICATION_IDS.one, '2026-08-09T01:00:00.000Z');
+    const prepared = prepareDataPublication(candidate);
+    await redis.set(activeDataPublicationKey(CORE_SCOPE), 'not-json');
+    const observed = await readActiveDataPublicationPointerState(CORE_SCOPE, redis);
+
+    await replaceMalformedActiveDataPublication(prepared, observed, redis);
+
+    expect((await readActiveDataPublication(CORE_SCOPE, redis))?.manifest.publicationId).toBe(
+      PUBLICATION_IDS.one,
+    );
+    for (const item of prepared.manifest.items) await expectPermanent(redis, item.key);
   });
 
   test('readers fail closed for missing, corrupted, or wrongly typed data', async () => {

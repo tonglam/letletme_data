@@ -1,7 +1,11 @@
 import {
   activateDataPublicationPointer,
   compareAndSwapDataPublicationPointer,
+  repairDataPublicationItems,
   readActiveDataPublication,
+  readActiveDataPublicationManifest,
+  readActiveDataPublicationPointerState,
+  replaceMalformedActiveDataPublication,
   stageDataPublication,
   type DataPublicationScope,
 } from '../cache/data-publication';
@@ -57,6 +61,11 @@ export async function reconcileDataPublication(
   // the payload hashes/counts in Redis; it does not reread PostgreSQL data.
   const redisActiveRead = await readActiveDataPublication(scope);
   const redisActive = redisActiveRead?.manifest ?? null;
+  const redisManifest =
+    redisActive ?? (await readActiveDataPublicationManifest(scope).catch(() => null));
+  const redisPointerState = redisManifest
+    ? null
+    : await readActiveDataPublicationPointerState(scope).catch(() => null);
   let staging = await syncOperationsRepository.findStagingPublication(
     scope.dataset,
     season,
@@ -131,6 +140,14 @@ export async function reconcileDataPublication(
         await activate();
       }
       stagingWasActivated = true;
+      // The outbox dispatcher normally activates the Redis pointer. If the
+      // observed active key is malformed, that activation would fail before
+      // the dispatcher can deliver the already-loaded staging payload. Repair
+      // the exact malformed key now that the canonical DB activation has
+      // committed; the dispatcher then closes the durable receipt idempotently.
+      if (redisPointerState && redisPointerState.type !== 'none') {
+        await replaceMalformedActiveDataPublication(prepared, redisPointerState);
+      }
       if (stagingWasActivated) {
         await dispatchDataPublicationOutbox({
           limit: 1,
@@ -163,17 +180,17 @@ export async function reconcileDataPublication(
     }
   }
   if (!dbActive) {
-    if (redisActive) {
+    if (redisManifest || (redisPointerState && redisPointerState.type !== 'none')) {
       logWarn('Redis data publication has no canonical DB publication', {
         dataset: scope.dataset,
         season: scope.seasonCode,
         eventId: scope.eventId,
-        publicationId: redisActive.publicationId,
+        ...(redisManifest?.publicationId ? { publicationId: redisManifest.publicationId } : {}),
       });
       return {
         status: 'ghost',
         dataset: scope.dataset,
-        publicationId: redisActive.publicationId,
+        ...(redisManifest?.publicationId ? { publicationId: redisManifest.publicationId } : {}),
       };
     }
     return { status: 'missing', dataset: scope.dataset };
@@ -231,16 +248,34 @@ export async function reconcileDataPublication(
   // outbox does not cause this reconciler to download the same siblings again.
   const canonical = await loadDataPublicationDelivery(dbActive.publicationId);
 
-  await stageDataPublication(canonical);
-  if (!redisActive) {
+  if (redisPointerState && redisPointerState.type !== 'none') {
+    await replaceMalformedActiveDataPublication(canonical, redisPointerState);
+  } else if (!redisManifest) {
+    await stageDataPublication(canonical);
     const activated = await activateDataPublicationPointer(canonical.manifest);
     if (activated.status === 'stale') {
       throw new Error(`Redis publication changed while repairing ${scope.dataset}`);
     }
+  } else if (
+    redisManifest.publicationId === canonical.manifest.publicationId &&
+    redisManifest.revision === canonical.manifest.revision
+  ) {
+    // The pointer already identifies this immutable publication, so replacing
+    // its damaged siblings is safe and stays inside the Data-owned scope.
+    await repairDataPublicationItems(canonical, redisManifest.publicationId);
+    const repaired = await compareAndSwapDataPublicationPointer(
+      scope,
+      redisManifest.publicationId,
+      canonical.manifest,
+    );
+    if (repaired !== 'replaced') {
+      throw new Error(`Redis publication changed while repairing ${scope.dataset}: ${repaired}`);
+    }
   } else {
+    await stageDataPublication(canonical);
     const result = await compareAndSwapDataPublicationPointer(
       scope,
-      redisActive.publicationId,
+      redisManifest.publicationId,
       canonical.manifest,
     );
     if (result !== 'replaced') {

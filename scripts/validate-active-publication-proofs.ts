@@ -1,5 +1,7 @@
 /* eslint-disable no-console */
 import { databaseSingleton } from '../src/db/singleton';
+import { readActiveDataPublication } from '../src/cache/data-publication';
+import { redisSingleton } from '../src/cache/singleton';
 import {
   loadDataPublicationDeliveryManifest,
   validateAndMarkDataPublicationProof,
@@ -7,6 +9,7 @@ import {
 import { seasonRepository } from '../src/repositories/seasons';
 import { syncOperationsRepository } from '../src/repositories/sync-operations';
 import type { DataPublicationDataset } from '../src/cache/data-publication';
+import { reconcileDataPublication } from '../src/services/data-publication-reconciler';
 
 const DATASETS: readonly DataPublicationDataset[] = ['fpl:core', 'fpl:market', 'fpl:price-changes'];
 
@@ -22,10 +25,50 @@ async function main(): Promise<void> {
   const results: ProofResult[] = [];
 
   for (const dataset of DATASETS) {
-    const active = await syncOperationsRepository.findActivePublication(dataset, season);
-    if (!active) {
+    let active = await syncOperationsRepository.findActivePublication(dataset, season);
+    // Deployment acceptance is the one bounded rollout-time consumer read.
+    // Normal health probes stay metadata-only, while this gate lets the
+    // existing bounded reconciler repair a rebuildable Redis cache before the
+    // full manifest/item validation used by delivery consumers.
+    const reconciliation = await reconcileDataPublication(
+      {
+        dataset,
+        seasonCode: season.seasonCode,
+      },
+      season,
+    );
+    if (reconciliation.status === 'missing') {
       results.push({ dataset, publicationId: null, status: 'missing' });
       continue;
+    }
+    if (reconciliation.status === 'ghost' || reconciliation.status === 'failed') {
+      throw new Error(
+        `Active ${dataset} publication cache reconciliation failed with ${reconciliation.status}`,
+      );
+    }
+
+    if (reconciliation.status === 'repaired') {
+      // A staged publication may have become active as part of repair, so
+      // refresh the canonical identity before checking the repaired cache.
+      active = await syncOperationsRepository.findActivePublication(dataset, season);
+      const cached = await readActiveDataPublication({
+        dataset,
+        seasonCode: season.seasonCode,
+      }).catch(() => null);
+      if (
+        !cached ||
+        !active ||
+        cached.manifest.publicationId !== active.publicationId ||
+        cached.manifest.revision !== active.revision
+      ) {
+        throw new Error(
+          `Active ${dataset} publication ${active?.publicationId ?? 'unknown'} failed Redis payload validation after repair`,
+        );
+      }
+    }
+
+    if (!active) {
+      throw new Error(`Active ${dataset} publication reconciliation returned an invalid state`);
     }
 
     const durableManifest = await loadDataPublicationDeliveryManifest(active.publicationId);
@@ -39,9 +82,9 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // This is the only rollout-time payload read. It is limited to the
-    // current active publication for each known dataset; historical rows are
-    // neither scanned nor marked.
+    // The matched path above already performed the bounded Redis consumer
+    // read. This database proof upgrade is limited to the current active
+    // publication; historical rows are neither scanned nor marked.
     const validated = await validateAndMarkDataPublicationProof(active.publicationId);
     if (!validated) {
       throw new Error(
@@ -72,5 +115,5 @@ async function main(): Promise<void> {
 try {
   await main();
 } finally {
-  await databaseSingleton.disconnect();
+  await Promise.allSettled([databaseSingleton.disconnect(), redisSingleton.disconnect()]);
 }

@@ -239,6 +239,20 @@ if current_raw then
         return {'publication_id_conflict'}
       end
     end
+    for _, item in ipairs(candidate.items) do
+      if redis.call('EXISTS', item.key) ~= 1 then
+        return {'missing_stage', item.key}
+      end
+      local type_result = redis.call('TYPE', item.key)
+      local actual_type = type(type_result) == 'table' and type_result['ok'] or type_result
+      if actual_type ~= item.type then
+        return {'wrong_stage_type', item.key}
+      end
+      if redis.call('STRLEN', item.key) ~= item.bytes then
+        return {'wrong_stage_size', item.key}
+      end
+      redis.call('PERSIST', item.key)
+    end
     return {'idempotent', current_raw}
   end
   if current.sourceCheckedAt > candidate.sourceCheckedAt then
@@ -317,6 +331,63 @@ redis.call('SET', KEYS[1], candidate_raw)
 return {'replaced', current_raw}
 `;
 
+const REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT = `
+local current_raw = redis.call('GET', KEYS[1])
+if not current_raw then return {'missing'} end
+local decoded, current = pcall(cjson.decode, current_raw)
+if not decoded or not current or not current.items then return {'invalid'} end
+if current.publicationId ~= ARGV[1] then return {'changed'} end
+local candidate_decoded, candidate = pcall(cjson.decode, ARGV[2])
+if not candidate_decoded or not candidate or current.revision ~= candidate.revision then
+  return {'conflict'}
+end
+if #current.items ~= #candidate.items then return {'conflict'} end
+for index, item in ipairs(current.items) do
+  local candidate_item = candidate.items[index]
+  if not candidate_item
+    or item.name ~= candidate_item.name
+    or item.key ~= candidate_item.key
+    or item.type ~= candidate_item.type
+    or item.count ~= candidate_item.count
+    or item.bytes ~= candidate_item.bytes
+    or item.sha256 ~= candidate_item.sha256 then
+    return {'conflict'}
+  end
+end
+for index, item in ipairs(candidate.items) do
+  local key = ARGV[3 + ((index - 1) * 2)]
+  local payload = ARGV[4 + ((index - 1) * 2)]
+  if key ~= item.key then return {'conflict'} end
+  redis.call('SET', key, payload)
+  redis.call('PERSIST', key)
+end
+return {'repaired'}
+`;
+
+const REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT = `
+local type_result = redis.call('TYPE', KEYS[1])
+local current_type = type(type_result) == 'table' and type_result['ok'] or type_result
+if current_type ~= ARGV[1] then return {'changed'} end
+if current_type == 'none' then return {'missing'} end
+if current_type == 'string' and redis.call('GET', KEYS[1]) ~= ARGV[2] then
+  return {'changed'}
+end
+local candidate_decoded, candidate = pcall(cjson.decode, ARGV[3])
+if not candidate_decoded or not candidate or not candidate.items then return {'conflict'} end
+for index, item in ipairs(candidate.items) do
+  local key = ARGV[4 + ((index - 1) * 2)]
+  if key ~= item.key then return {'conflict'} end
+end
+for index, item in ipairs(candidate.items) do
+  local key = ARGV[4 + ((index - 1) * 2)]
+  local payload = ARGV[5 + ((index - 1) * 2)]
+  redis.call('SET', key, payload)
+  redis.call('PERSIST', key)
+end
+redis.call('SET', KEYS[1], ARGV[3])
+return {'replaced'}
+`;
+
 function assertScope(scope: DataPublicationScope): void {
   if (!/^\d{4}$/.test(scope.seasonCode)) {
     throw new CacheError('Invalid publication season', 'DATA_PUBLICATION_SEASON_INVALID');
@@ -336,6 +407,26 @@ function scopePrefix(scope: DataPublicationScope): string {
 
 export function activeDataPublicationKey(scope: DataPublicationScope): string {
   return `${scopePrefix(scope)}:active`;
+}
+
+export type ActiveDataPublicationPointerState = Readonly<{
+  type: string;
+  raw: string | null;
+}>;
+
+/** Read the exact active-key state without decoding or fetching item payloads. */
+export async function readActiveDataPublicationPointerState(
+  scope: DataPublicationScope,
+  redisClient?: Redis,
+): Promise<ActiveDataPublicationPointerState> {
+  assertScope(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const type = await redis.type(activeDataPublicationKey(scope));
+  if (type === 'none') return { type, raw: null };
+  if (type === 'string') {
+    return { type, raw: await redis.get(activeDataPublicationKey(scope)) };
+  }
+  return { type, raw: null };
 }
 
 export function dataPublicationItemKey(
@@ -536,6 +627,88 @@ export async function stageDataPublication(
 ): Promise<void> {
   const redis = redisClient ?? (await redisSingleton.getClient());
   await stageDataPublicationItems(prepared.manifest, prepared.items, redis);
+}
+
+/**
+ * Replace only the immutable items for an already identified publication.
+ * Reconciliation uses this after the active pointer proves that the keys
+ * belong to the same publication; ordinary producers must continue to use
+ * the NX staging path above.
+ */
+export async function repairDataPublicationItems(
+  prepared: {
+    readonly manifest: DataPublicationManifest;
+    readonly items: readonly DataPublicationDeliveryItem[];
+  },
+  expectedPublicationId: string,
+  redisClient?: Redis,
+): Promise<void> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  if (prepared.manifest.publicationId !== expectedPublicationId) {
+    throw new CacheError(
+      'Repair publication identity does not match the active pointer',
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
+  const args = [
+    expectedPublicationId,
+    JSON.stringify(prepared.manifest),
+    ...prepared.items.flatMap((item) => [item.manifest.key, item.payload]),
+  ];
+  const result = (await redis.eval(
+    REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT,
+    1,
+    activeDataPublicationKey({
+      dataset: prepared.manifest.dataset,
+      seasonCode: prepared.manifest.seasonCode,
+    }),
+    ...args,
+  )) as [string, string?];
+  if (result[0] !== 'repaired') {
+    throw new CacheError(
+      `Atomic publication item repair failed: ${result[0] ?? 'unknown'}`,
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
+}
+
+/** Replace a malformed Data-owned active pointer and its canonical items atomically. */
+export async function replaceMalformedActiveDataPublication(
+  prepared: {
+    readonly manifest: DataPublicationManifest;
+    readonly items: readonly DataPublicationDeliveryItem[];
+  },
+  observed: ActiveDataPublicationPointerState,
+  redisClient?: Redis,
+): Promise<void> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  if (observed.type === 'none') {
+    throw new CacheError(
+      'Malformed publication replacement requires an observed active key',
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
+  const args = [
+    observed.type,
+    observed.raw ?? '',
+    JSON.stringify(prepared.manifest),
+    ...prepared.items.flatMap((item) => [item.manifest.key, item.payload]),
+  ];
+  const result = (await redis.eval(
+    REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT,
+    1,
+    activeDataPublicationKey({
+      dataset: prepared.manifest.dataset,
+      seasonCode: prepared.manifest.seasonCode,
+    }),
+    ...args,
+  )) as [string, string?];
+  if (result[0] !== 'replaced') {
+    throw new CacheError(
+      `Malformed publication replacement failed: ${result[0] ?? 'unknown'}`,
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
 }
 
 export async function activateDataPublicationPointer(

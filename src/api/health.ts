@@ -124,11 +124,6 @@ export function isMediaWorkerRequired(): boolean {
 
 const PUBLICATION_MISMATCH_GRACE_MS = 120_000;
 const publicationMismatchSince = new Map<string, number>();
-const REDIS_PAYLOAD_PROOF_RECHECK_MS = 5 * 60_000;
-const redisPayloadProof = new Map<
-  string,
-  { publicationId: string; revision: number; validatedAt: number }
->();
 
 /**
  * Mutable Live Points score revisions deliberately checkpoint at most once per
@@ -198,44 +193,12 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       scope.eventId,
     );
     const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope);
-    const proof = redisPayloadProof.get(key);
-    const redisIdentityMatchesProof = Boolean(
-      redisActive &&
-        proof &&
-        proof.publicationId === redisActive.publicationId &&
-        proof.revision === redisActive.revision &&
-        Date.now() - proof.validatedAt < REDIS_PAYLOAD_PROOF_RECHECK_MS,
-    );
-    if (redisActive && !redisIdentityMatchesProof) {
-      // A control manifest and STRLEN checks catch loss/truncation cheaply;
-      // revalidate the complete Redis payload only once per identity and
-      // bounded interval so readiness cannot become a continuous audit.
-      const validated = await readActiveDataPublication(scope).catch(() => null);
-      if (
-        validated?.manifest.publicationId === redisActive.publicationId &&
-        validated.manifest.revision === redisActive.revision
-      ) {
-        redisPayloadProof.set(key, {
-          publicationId: redisActive.publicationId,
-          revision: redisActive.revision,
-          validatedAt: Date.now(),
-        });
-      }
-    }
-    const redisPayloadValidated = Boolean(
-      redisActive &&
-        redisPayloadProof.get(key)?.publicationId === redisActive.publicationId &&
-        redisPayloadProof.get(key)?.revision === redisActive.revision &&
-        Date.now() - (redisPayloadProof.get(key)?.validatedAt ?? 0) <
-          REDIS_PAYLOAD_PROOF_RECHECK_MS,
-    );
     const durableEvidence = dbActive
       ? await loadDataPublicationDeliveryManifest(dbActive.publicationId).catch(() => null)
       : null;
     const matches =
       Boolean(dbActive) === Boolean(durableEvidence) &&
       Boolean(dbActive) === Boolean(redisActive) &&
-      Boolean(dbActive) === redisPayloadValidated &&
       (!dbActive ||
         !redisActive ||
         (dbActive.publicationId === redisActive.publicationId &&
