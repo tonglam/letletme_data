@@ -1097,6 +1097,11 @@ deploy() {
   finish_stage
   start_stage v2Seed
   if [[ "$DEPLOY_LIVE_POINTS_SEED_MUTATION_REQUIRED" = true ]]; then
+    if [[ "${LIVE_POINTS_V2_SEED_FORCE:-NO}" = YES ]] && ! reset_live_cutover_seed_state \
+      "$data_runtime_database_url" "$LIVE_POINTS_V2_SEED_SEASON"; then
+      log_error "Could not reset the forced Live Points V2 cutover marker; services remain stopped."
+      exit 1
+    fi
     log_info "Seeding and verifying the Live Points V2 global and entry publications"
     # The cutover seed is a one-shot operation: use the migration LOGIN's
     # direct/session URL, while compose supplies the runtime database and Redis

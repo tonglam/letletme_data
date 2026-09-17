@@ -499,6 +499,8 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
 
   test('keeps the V2 seed connection separate from the runtime connection', () => {
     const v2Seed = deployScript.slice(deployScript.indexOf('start_stage v2Seed'));
+    expect(deployStateMachine).toContain('reset_live_cutover_seed_state');
+    expect(v2Seed).toContain('LIVE_POINTS_V2_SEED_FORCE:-NO');
     expect(v2Seed).toContain('LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url"');
     expect(v2Seed).toContain('-e LIVE_POINTS_V2_SEED_DATABASE_URL');
     expect(v2Seed).not.toContain('-e "LIVE_POINTS_V2_SEED_DATABASE_URL=${migration_database_url}"');

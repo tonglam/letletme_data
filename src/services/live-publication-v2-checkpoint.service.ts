@@ -560,6 +560,27 @@ function isLivePublicationState(value: unknown): value is LivePublicationState {
   );
 }
 
+function hasValidEventLiveRows(value: unknown, eventId: number): value is EventLive[] {
+  if (!Array.isArray(value)) return false;
+  if (
+    !value.every(
+      (row) =>
+        row !== null &&
+        typeof row === 'object' &&
+        Number.isSafeInteger((row as { eventId?: unknown }).eventId) &&
+        (row as { eventId: number }).eventId === eventId &&
+        Number.isSafeInteger((row as { elementId?: unknown }).elementId) &&
+        (row as { elementId: number }).elementId > 0 &&
+        Number.isSafeInteger((row as { totalPoints?: unknown }).totalPoints),
+    )
+  ) {
+    return false;
+  }
+  return (
+    new Set(value.map((row) => (row as { elementId: number }).elementId)).size === value.length
+  );
+}
+
 export function livePublicationSeedClaimAllowsCheckpoint(
   persistedClaimId: string | null,
   requestedClaimId: string | undefined,
@@ -1080,7 +1101,7 @@ export async function readLivePublicationV2Checkpoint(
   )[0];
   if (!row || !isLivePublicationState(row.state) || !Number.isSafeInteger(row.generation))
     return null;
-  if (!Array.isArray(row.eventLive) || !Array.isArray(row.fixtures)) return null;
+  if (!hasValidEventLiveRows(row.eventLive, eventId) || !Array.isArray(row.fixtures)) return null;
 
   const eventLivePayload = canonicalJson(row.eventLive);
   const fixturePayload = canonicalJson(row.fixtures);

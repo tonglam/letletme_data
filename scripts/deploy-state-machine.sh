@@ -1520,6 +1520,42 @@ live_cutover_seed_pending() {
   esac
 }
 
+reset_live_cutover_seed_state() {
+  local runtime_database_url=${1:-${DATA_RUNTIME_DATABASE_URL:-}}
+  local season_code=${2:-${LIVE_POINTS_V2_SEED_SEASON:-}}
+  if [[ -z "$runtime_database_url" || -z "$season_code" ]]; then
+    echo 'deploy live cutover: runtime DATABASE_URL and seed season are required to reset durable state' >&2
+    return 1
+  fi
+  DATABASE_URL="$runtime_database_url" \
+    LIVE_CUTOVER_SEED_SEASON="$season_code" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL -e LIVE_CUTOVER_SEED_SEASON api bun -e '
+      import postgres from "postgres";
+      const db = postgres(process.env.DATABASE_URL, { max: 1 });
+      try {
+        const seasonRows = await db`
+          SELECT season_id
+          FROM fpl.seasons
+          WHERE season_code = ${process.env.LIVE_CUTOVER_SEED_SEASON}
+            AND is_current = TRUE
+        `;
+        if (seasonRows.length !== 1) throw new Error("current seed season is missing or ambiguous");
+        await db`
+          UPDATE ops.live_publication_cutover_status
+          SET live_points_completed_at = NULL,
+              live_matches_completed_at = NULL,
+              updated_at = clock_timestamp()
+          WHERE season_id = ${seasonRows[0].season_id}
+            AND scope_kind = ${"all_finalized"}
+            AND event_id = 0
+        `;
+      } finally {
+        await db.end();
+      }
+    '
+}
+
 mark_live_cutover_seed_stage() {
   local runtime_database_url=${1:-${DATA_RUNTIME_DATABASE_URL:-}}
   local season_code=${2:-${LIVE_POINTS_V2_SEED_SEASON:-}}

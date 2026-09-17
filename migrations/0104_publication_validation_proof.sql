@@ -122,6 +122,7 @@ BEGIN
       IF NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
+        NEW.published_at IS DISTINCT FROM OLD.published_at OR
         NEW.revisions IS DISTINCT FROM OLD.revisions OR
         NEW.event_live IS DISTINCT FROM OLD.event_live OR
         NEW.fixtures IS DISTINCT FROM OLD.fixtures OR
