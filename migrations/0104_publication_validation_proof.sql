@@ -70,7 +70,11 @@ BEGIN
       NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
-        NEW.manifest IS DISTINCT FROM OLD.manifest OR
+        -- A marker retry may refresh only checkpointedAt after the durable
+        -- row committed. All other manifest identity/timing fields remain
+        -- immutable, so a same-identity retry cannot replace its proof.
+        (NEW.manifest #- ARRAY['times', 'checkpointedAt']) IS DISTINCT FROM
+          (OLD.manifest #- ARRAY['times', 'checkpointedAt']) OR
         NEW.index_payload IS DISTINCT FROM OLD.index_payload OR
         NEW.payload IS DISTINCT FROM OLD.payload OR
         NEW.row_count IS DISTINCT FROM OLD.row_count OR

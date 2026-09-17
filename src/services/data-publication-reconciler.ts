@@ -1,7 +1,7 @@
 import {
   activateDataPublicationPointer,
   compareAndSwapDataPublicationPointer,
-  readActiveDataPublicationManifestWithItemBounds,
+  readActiveDataPublication,
   stageDataPublication,
   type DataPublicationScope,
 } from '../cache/data-publication';
@@ -51,7 +51,11 @@ export async function reconcileDataPublication(
     season,
     scope.eventId,
   );
-  const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope);
+  // Reconciliation is the repair boundary, so it must detect same-length
+  // Redis corruption before declaring a publication matched. This validates
+  // the payload hashes/counts in Redis; it does not reread PostgreSQL data.
+  const redisActiveRead = await readActiveDataPublication(scope);
+  const redisActive = redisActiveRead?.manifest ?? null;
   let staging = await syncOperationsRepository.findStagingPublication(
     scope.dataset,
     season,

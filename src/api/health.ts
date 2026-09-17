@@ -8,7 +8,7 @@ import {
   readActiveDataPublicationManifest,
   readActiveDataPublicationManifestWithItemBounds,
 } from '../cache/data-publication';
-import { readLivePublicationV2Manifest } from '../cache/live-publication-v2';
+import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
 import { eventRepository } from '../repositories/events';
@@ -230,8 +230,12 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   }
   if (currentEvent && !currentEventBeforeDeadline) {
     const liveKey = currentLiveKey as string;
-    const [redisLive, checkpointLive, desiredLive, canonicalFixtures] = await Promise.all([
-      readLivePublicationV2Manifest({ season: season.seasonCode, eventId: currentEvent.id }).catch(
+    const [redisLiveRead, checkpointLive, desiredLive, canonicalFixtures] = await Promise.all([
+      // Read and validate both Redis payloads before using the candidate for
+      // readiness. A manifest plus same-sized strings cannot detect a
+      // same-length corruption, and readiness must not report a damaged live
+      // publication as coherent.
+      readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(
         () => null,
       ),
       readLivePublicationV2CheckpointMetadata(season, currentEvent.id).catch(() => null),
@@ -241,6 +245,7 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       }).catch(() => null),
       fixtureRepository.findByEvent(season, currentEvent.id).catch(() => null),
     ]);
+    const redisLive = redisLiveRead?.publication ?? null;
     // The FPL deadline is a picks cutoff, not the first kickoff. During the
     // gap between those moments event-live may legitimately return 503 while
     // the scheduler remains in PICKS_PROBE. Do not age that expected absence

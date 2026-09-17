@@ -235,6 +235,10 @@ export const datasetPublicationsInOps = ops.table(
       sql`(status <> 'retired'::text) OR (retired_at IS NOT NULL)`,
     ),
     check('dataset_publications_manifest_object', sql`jsonb_typeof(manifest) = 'object'::text`),
+    check(
+      'dataset_publications_validation_version_nonnegative',
+      sql`validation_version IS NULL OR validation_version >= 0`,
+    ),
   ],
 );
 
@@ -266,6 +270,10 @@ export const datasetPublicationItemsInOps = ops.table(
       sql`item_name = ANY (ARRAY['context'::text, 'events'::text, 'teams'::text, 'players'::text, 'phases'::text, 'fixtures'::text, 'currentEventId'::text, 'selectionRules'::text, 'eventLive'::text])`,
     ),
     check('dataset_publication_items_count_nonnegative', sql`item_count >= 0`),
+    check(
+      'dataset_publication_items_validation_version_nonnegative',
+      sql`validation_version IS NULL OR validation_version >= 0`,
+    ),
     check('dataset_publication_items_checksum_nonempty', sql`btrim(checksum) <> ''::text`),
     check(
       'dataset_publication_items_payload_shape',

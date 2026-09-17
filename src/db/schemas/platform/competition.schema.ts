@@ -940,6 +940,10 @@ export const liveLeagueCheckpointsInCompetition = competition.table(
       'live_league_checkpoints_payload_valid',
       sql`jsonb_typeof(manifest) = 'object' AND jsonb_typeof(index_payload) = 'array' AND jsonb_typeof(payload) = 'object' AND row_count >= 0 AND payload_bytes >= 0 AND payload_sha256 ~ '^[0-9a-f]{64}$'`,
     ),
+    check(
+      'live_league_checkpoints_validation_version_nonnegative',
+      sql`validation_version IS NULL OR validation_version >= 0`,
+    ),
   ],
 );
 

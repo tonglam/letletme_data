@@ -283,8 +283,9 @@ test('validated checkpoint proof is reused without payload reads', async () => {
   await expect(sql`UPDATE competition.live_league_checkpoints
     SET payload_sha256=${'b'.repeat(64)}
     WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
-      AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`
-  ).rejects.toThrow('validated live league checkpoint is immutable');
+      AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`).rejects.toThrow(
+    'validated live league checkpoint is immutable',
+  );
   const conflictingRepair: LeagueLiveManifest = {
     ...successor,
     publicationId: '30000000-0000-4000-8000-000000000102',
