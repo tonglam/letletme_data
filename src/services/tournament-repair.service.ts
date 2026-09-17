@@ -40,6 +40,7 @@ import {
 import {
   requestTournamentReviewCorrection,
   requestTournamentReviewTournamentCorrection,
+  wakeTournamentReviewsAfterResolvedRepair,
 } from './tournament-review-publication.service';
 import { syncOfficialH2HTournament } from './tournament-official-h2h.service';
 import { uniqueNumbers } from '../utils/async';
@@ -340,6 +341,14 @@ async function repairTournamentSetupIssuePrepared(
         { issueId, owner },
       );
       repairIssues.push(...resultIssues);
+      if (resultIssues.length === 0 && isOfficialH2HTournament(tournament)) {
+        const official = await syncOfficialH2HTournament(season, tournament, eventId, {
+          finalizedThroughEventId: finalizedEvent?.id ?? null,
+        });
+        if (official.skipped > 0) {
+          throw new Error('Official H2H results repair remains incomplete');
+        }
+      }
       if (resultIssues.length === 0) {
         reviewCorrection = {
           kind: 'event',
@@ -402,6 +411,12 @@ async function repairTournamentSetupIssuePrepared(
       season,
       issue.tournamentId,
     );
+    if (!remainingIssues.some((remaining) => remaining.issueId === issueId)) {
+      const resumedEventIds = await wakeTournamentReviewsAfterResolvedRepair(season, {
+        tournamentId: issue.tournamentId,
+      });
+      correctionEventIds = uniqueNumbers([...(correctionEventIds ?? []), ...resumedEventIds]);
+    }
     const settledState = await tournamentSetupIssueRepository.lockRepairState(season, issueId);
     if (settledState)
       registerDatabasePostCommit(async () => {
