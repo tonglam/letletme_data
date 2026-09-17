@@ -374,12 +374,13 @@ for index, item in ipairs(current.items) do
   end
 end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[4 + ((index - 1) * 2)]
-  local payload = ARGV[5 + ((index - 1) * 2)]
+  local key = ARGV[5 + ((index - 1) * 2)]
+  local payload = ARGV[6 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
   redis.call('SET', key, payload)
   redis.call('PERSIST', key)
 end
+redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
 if redis.call('GET', KEYS[2]) == ARGV[3] then
   redis.call('DEL', KEYS[2])
 end
@@ -397,16 +398,17 @@ end
 local candidate_decoded, candidate = pcall(cjson.decode, ARGV[3])
 if not candidate_decoded or not candidate or not candidate.items then return {'conflict'} end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[5 + ((index - 1) * 2)]
+  local key = ARGV[6 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
 end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[5 + ((index - 1) * 2)]
-  local payload = ARGV[6 + ((index - 1) * 2)]
+  local key = ARGV[6 + ((index - 1) * 2)]
+  local payload = ARGV[7 + ((index - 1) * 2)]
   redis.call('SET', key, payload)
   redis.call('PERSIST', key)
 end
 redis.call('SET', KEYS[1], ARGV[3])
+redis.call('SET', KEYS[3], ARGV[4], 'EX', ARGV[5])
 if redis.call('GET', KEYS[2]) == ARGV[4] then
   redis.call('DEL', KEYS[2])
 end
@@ -414,6 +416,20 @@ return {'replaced'}
 `;
 
 const MARK_INTEGRITY_FAILURE_SCRIPT = `
+local active_matches = false
+if ARGV[1] ~= '*' then
+  local active_raw = redis.call('GET', KEYS[3])
+  if active_raw then
+    local decoded, active = pcall(cjson.decode, active_raw)
+    if decoded and active and active.publicationId and active.revision then
+      local active_token = tostring(active.publicationId) .. ':' .. tostring(active.revision)
+      if active_token ~= ARGV[1] then return 0 end
+      active_matches = true
+    end
+  end
+end
+local existing = redis.call('GET', KEYS[1])
+if existing and existing ~= ARGV[1] and not active_matches then return 0 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
 redis.call('DEL', KEYS[2])
 return 1
@@ -481,8 +497,26 @@ function clearLocalIntegrityFailureAfterRepair(
   }
 }
 
-async function getRedisForIntegrityMarker(redisClient?: Redis): Promise<Redis> {
-  return redisClient ?? (await redisSingleton.getClient());
+async function getRedisForIntegrityMarker(
+  redisClient?: Redis,
+  deadlineAt?: number,
+): Promise<Redis> {
+  if (redisClient) return redisClient;
+  if (deadlineAt === undefined) return redisSingleton.getClient();
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) throw new Error('Publication audit deadline exceeded');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('Publication audit deadline exceeded')),
+        remainingMs,
+      );
+    });
+    return await Promise.race([redisSingleton.getClient(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function markDataPublicationIntegrityFailure(
@@ -493,9 +527,12 @@ export async function markDataPublicationIntegrityFailure(
 ): Promise<void> {
   const prefix = scopePrefix(scope);
   const token = manifest ? publicationIntegrityToken(manifest) : '*';
+  const now = Date.now();
+  const local = publicationIntegrityFailures.get(prefix);
+  if (local && local.expiresAt > now && local.token !== token) return;
   publicationIntegrityFailures.set(prefix, {
     token,
-    expiresAt: Date.now() + INTEGRITY_FAILURE_TTL_SECONDS * 1_000,
+    expiresAt: now + INTEGRITY_FAILURE_TTL_SECONDS * 1_000,
   });
   const persist = async (): Promise<void> => {
     try {
@@ -503,9 +540,10 @@ export async function markDataPublicationIntegrityFailure(
       if (deadlineAt === undefined) {
         await redis.eval(
           MARK_INTEGRITY_FAILURE_SCRIPT,
-          2,
+          3,
           integrityFailureKey(scope),
           integrityProofKey(scope),
+          activeDataPublicationKey(scope),
           token,
           String(INTEGRITY_FAILURE_TTL_SECONDS),
         );
@@ -520,9 +558,10 @@ export async function markDataPublicationIntegrityFailure(
         'eval',
         [
           MARK_INTEGRITY_FAILURE_SCRIPT,
-          '2',
+          '3',
           integrityFailureKey(scope),
           integrityProofKey(scope),
+          activeDataPublicationKey(scope),
           token,
           String(INTEGRITY_FAILURE_TTL_SECONDS),
         ],
@@ -552,15 +591,18 @@ export async function hasDataPublicationIntegrityFailure(
   const prefix = scopePrefix(scope);
   const expected = manifest ? publicationIntegrityToken(manifest) : null;
   const local = publicationIntegrityFailures.get(prefix);
+  const localMatches = Boolean(
+    local &&
+      local.expiresAt > Date.now() &&
+      (!expected || local.token === '*' || local.token === expected),
+  );
   if (local) {
     if (local.expiresAt <= Date.now()) {
       publicationIntegrityFailures.delete(prefix);
-    } else if (!expected || local.token === '*' || local.token === expected) {
-      return true;
     }
   }
   try {
-    const redis = await getRedisForIntegrityMarker(redisClient);
+    const redis = await getRedisForIntegrityMarker(redisClient, deadlineAt);
     const shared =
       deadlineAt === undefined
         ? await redis.get(integrityFailureKey(scope))
@@ -570,9 +612,29 @@ export async function hasDataPublicationIntegrityFailure(
             [integrityFailureKey(scope)],
             deadlineAt,
           );
-    return Boolean(shared && (!expected || shared === '*' || shared === expected));
+    if (shared && (!expected || shared === '*' || shared === expected)) return true;
+    if (localMatches && expected) {
+      const proof =
+        deadlineAt === undefined
+          ? await redis.get(integrityProofKey(scope))
+          : await redisCommandWithDeadline<string | null>(
+              redis,
+              'get',
+              [integrityProofKey(scope)],
+              deadlineAt,
+            );
+      if (proof === expected) {
+        if (publicationIntegrityFailures.get(prefix) === local) {
+          publicationIntegrityFailures.delete(prefix);
+        }
+        return false;
+      }
+    }
+    return localMatches;
   } catch {
-    return false;
+    // Keep process-local evidence when Redis cannot confirm a cross-process
+    // repair. A reachable shared proof is required before clearing it.
+    return localMatches;
   }
 }
 
@@ -924,6 +986,7 @@ export async function repairDataPublicationItems(
     expectedPublicationId,
     JSON.stringify(prepared.manifest),
     publicationIntegrityToken(prepared.manifest),
+    String(INTEGRITY_PROOF_TTL_SECONDS),
     ...prepared.items.flatMap((item) => [item.manifest.key, item.payload]),
   ];
   const scope = {
@@ -933,9 +996,10 @@ export async function repairDataPublicationItems(
   const markerBeforeRepair = publicationIntegrityFailures.get(scopePrefix(scope));
   const result = (await redis.eval(
     REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT,
-    2,
+    3,
     activeDataPublicationKey(scope),
     integrityFailureKey(scope),
+    integrityProofKey(scope),
     ...args,
   )) as [string, string?];
   if (result[0] !== 'repaired') {
@@ -968,6 +1032,7 @@ export async function replaceMalformedActiveDataPublication(
     observed.raw ?? '',
     JSON.stringify(prepared.manifest),
     publicationIntegrityToken(prepared.manifest),
+    String(INTEGRITY_PROOF_TTL_SECONDS),
     ...prepared.items.flatMap((item) => [item.manifest.key, item.payload]),
   ];
   const scope = {
@@ -977,9 +1042,10 @@ export async function replaceMalformedActiveDataPublication(
   const markerBeforeRepair = publicationIntegrityFailures.get(scopePrefix(scope));
   const result = (await redis.eval(
     REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT,
-    2,
+    3,
     activeDataPublicationKey(scope),
     integrityFailureKey(scope),
+    integrityProofKey(scope),
     ...args,
   )) as [string, string?];
   if (result[0] !== 'replaced') {
@@ -1204,7 +1270,7 @@ export async function readActiveDataPublication(
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
   try {
-    const redis = redisClient ?? (await redisSingleton.getClient());
+    const redis = await getRedisForIntegrityMarker(redisClient, deadlineAt);
     const manifest = parseDataPublicationManifest(
       deadlineAt === undefined
         ? await redis.get(activeDataPublicationKey(scope))
@@ -1281,7 +1347,7 @@ export async function readActiveDataPublicationManifest(
 ): Promise<DataPublicationManifest | null> {
   assertScope(scope);
   try {
-    const redis = redisClient ?? (await redisSingleton.getClient());
+    const redis = await getRedisForIntegrityMarker(redisClient, deadlineAt);
     const manifest = parseDataPublicationManifest(
       deadlineAt === undefined
         ? await redis.get(activeDataPublicationKey(scope))
@@ -1314,7 +1380,7 @@ export async function readActiveDataPublicationManifestWithItemBounds(
   const manifest = await readActiveDataPublicationManifest(scope, redisClient, deadlineAt);
   if (!manifest) return null;
   try {
-    const redis = redisClient ?? (await redisSingleton.getClient());
+    const redis = await getRedisForIntegrityMarker(redisClient, deadlineAt);
     const results =
       deadlineAt === undefined
         ? await (async () => {

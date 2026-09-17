@@ -999,7 +999,20 @@ export async function getJobsStatus(
   const publicationAuditCandidates: PublicationAuditCandidate[] = [];
   let publicationAuditConcurrencyUsed = 0;
   const publicationEntries: PublicationStatusEntry[] = [];
-  for (const scope of publicationScopes) {
+  // Requested audit scopes run first and own the explicit audit deadline.
+  // Unrequested status projections stay outside that budget so a slow
+  // unrelated read cannot consume the operator's requested evidence window.
+  const publicationScopesInReadOrder = publicationAudit
+    ? [
+        ...publicationScopes.filter((scope) => publicationAuditScopes.has(scope.dataset)),
+        ...publicationScopes.filter((scope) => !publicationAuditScopes.has(scope.dataset)),
+      ]
+    : publicationScopes;
+  const publicationScopeOrder = new Map(
+    publicationScopes.map((scope, index) => [scope.dataset, index] as const),
+  );
+  for (const scope of publicationScopesInReadOrder) {
+    const auditRequested = publicationAuditScopes.has(scope.dataset);
     const dbActive = await syncOperationsRepository.findActivePublication(
       scope.dataset,
       season,
@@ -1014,17 +1027,21 @@ export async function getJobsStatus(
     // read is allowed only for an explicitly requested scope and only after
     // its declared byte and wall-clock budgets have been checked.
     const controlReadAlreadyTimedOut =
-      publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
+      auditRequested &&
+      publicationAuditDeadlineAt !== null &&
+      Date.now() >= publicationAuditDeadlineAt;
     const redisControlManifest = controlReadAlreadyTimedOut
       ? null
       : await readActiveDataPublicationManifestWithItemBounds(
           publicationScope,
           undefined,
-          publicationAuditDeadlineAt ?? undefined,
+          auditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
         ).catch(() => null);
     const controlReadTimedOut =
       controlReadAlreadyTimedOut ||
-      (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt);
+      (auditRequested &&
+        publicationAuditDeadlineAt !== null &&
+        Date.now() >= publicationAuditDeadlineAt);
     const entry: PublicationStatusEntry = {
       dataset: scope.dataset,
       dbActive,
@@ -1033,7 +1050,7 @@ export async function getJobsStatus(
       redisDelivery: redisControlManifest,
     };
     publicationEntries.push(entry);
-    if (publicationAuditScopes.has(scope.dataset)) {
+    if (auditRequested) {
       const declaredBytes =
         redisControlManifest?.items.reduce((total, item) => total + item.bytes, 0) ?? 0;
       if (controlReadTimedOut) {
@@ -1050,6 +1067,10 @@ export async function getJobsStatus(
       }
     }
   }
+  publicationEntries.sort(
+    (left, right) =>
+      publicationScopeOrder.get(left.dataset)! - publicationScopeOrder.get(right.dataset)!,
+  );
 
   const setPublicationConsistency = (entry: PublicationStatusEntry): void => {
     const redisManifest = publicationManifest(entry.redisDelivery);
