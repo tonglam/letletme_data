@@ -370,6 +370,43 @@ describe('My Tournament Review V2 format and retry policy', () => {
     expect(tournamentReviewScoreMatchesEntryResult(70, null, null, null)).toBe(false);
   });
 
+  test('independent official observations must agree and both cover finalization', () => {
+    const cutoff = '2026-09-01T00:00:00Z';
+    const officialAt = '2026-09-01T01:00:00Z';
+    const result = {
+      event_net_points: 70,
+      updated_at: '2026-09-02T00:00:00Z',
+      rich_synced_at: '2026-09-02T00:00:00Z',
+    };
+    expect(
+      tournamentReviewScoreMatchesEntryResult(70, officialAt, officialAt, result, cutoff),
+    ).toBe(true);
+    expect(
+      tournamentReviewScoreMatchesEntryResult(69, officialAt, officialAt, result, cutoff),
+    ).toBe(false);
+    expect(tournamentReviewScoreMatchesEntryResult(70, officialAt, officialAt, result)).toBe(false);
+    for (const stale of [null, 'invalid', '2026-08-31T23:59:59Z']) {
+      expect(tournamentReviewScoreMatchesEntryResult(70, stale, officialAt, result, cutoff)).toBe(
+        false,
+      );
+      expect(tournamentReviewScoreMatchesEntryResult(70, officialAt, stale, result, cutoff)).toBe(
+        false,
+      );
+      expect(
+        tournamentReviewScoreMatchesEntryResult(
+          70,
+          officialAt,
+          officialAt,
+          { ...result, rich_synced_at: stale },
+          cutoff,
+        ),
+      ).toBe(false);
+    }
+    expect(tournamentReviewScoreMatchesEntryResult(70, officialAt, officialAt, result, null)).toBe(
+      false,
+    );
+  });
+
   test('reconciles incrementally and retires scopes under the publication lock', () => {
     const entryMetadataCte = publicationSource.slice(
       publicationSource.indexOf('WITH entry_metadata AS MATERIALIZED'),

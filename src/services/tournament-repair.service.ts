@@ -341,6 +341,14 @@ async function repairTournamentSetupIssuePrepared(
         { issueId, owner },
       );
       repairIssues.push(...resultIssues);
+      if (resultIssues.length === 0 && isOfficialH2HTournament(tournament)) {
+        const official = await syncOfficialH2HTournament(season, tournament, eventId, {
+          finalizedThroughEventId: finalizedEvent?.id ?? null,
+        });
+        if (official.skipped > 0) {
+          throw new Error('Official H2H results repair remains incomplete');
+        }
+      }
       if (resultIssues.length === 0) {
         reviewCorrection = {
           kind: 'event',

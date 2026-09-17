@@ -1517,9 +1517,18 @@ export function tournamentReviewScoreMatchesEntryResult(
   matchSourceCheckedAt: Date | string | null | undefined,
   matchUpdatedAt: Date | string | null | undefined,
   result: TournamentReviewEntryResultEvidence | null | undefined,
+  officialFinalizedAt?: Date | string | null,
 ): boolean {
   if (!result || matchNetPoints === null || result.event_net_points === null) return false;
   if (matchNetPoints !== result.event_net_points) return false;
+  // Official match scores and entry results are independent FPL observations.
+  // Both must cover finalization and agree; an unrelated later entry refresh
+  // does not invalidate an already-final official match with the same score.
+  if (officialFinalizedAt !== undefined) {
+    const cutoff = asDate(officialFinalizedAt);
+    const evidence = [matchSourceCheckedAt, matchUpdatedAt, result.rich_synced_at].map(asDate);
+    return cutoff !== null && evidence.every((date) => date !== null && date >= cutoff);
+  }
   const matchWatermark = Math.max(
     ...[matchSourceCheckedAt, matchUpdatedAt]
       .map(asDate)
@@ -1724,6 +1733,7 @@ export async function buildH2HPayload(
                   rich_synced_at: home.rich_synced_at,
                 }
               : null,
+            match.source_order != null ? event.data_checked_at : undefined,
           )) ||
         (match.away_entry_id !== null &&
           !match.away_is_average &&
@@ -1738,6 +1748,7 @@ export async function buildH2HPayload(
                   rich_synced_at: away.rich_synced_at,
                 }
               : null,
+            match.source_order != null ? event.data_checked_at : undefined,
           ))
       ) {
         throw new TournamentReviewSourceNotReadyError(
@@ -2127,6 +2138,7 @@ export async function buildH2HPayload(
                 updated_at: match.home_result_updated_at,
                 rich_synced_at: match.home_result_rich_synced_at,
               },
+          match.source_order != null ? historyCheckpoint : undefined,
         )) ||
       (match.away_entry_id !== null &&
         !match.away_is_average &&
@@ -2141,6 +2153,7 @@ export async function buildH2HPayload(
                 updated_at: match.away_result_updated_at,
                 rich_synced_at: match.away_result_rich_synced_at,
               },
+          match.source_order != null ? historyCheckpoint : undefined,
         ))
     ) {
       throw new TournamentReviewSourceNotReadyError(

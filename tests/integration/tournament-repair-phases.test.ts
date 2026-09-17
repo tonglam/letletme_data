@@ -718,6 +718,59 @@ test('mixed points and knockout tournaments retain the existing structural repai
   expect(rebuild).toHaveBeenCalledTimes(1);
 });
 
+for (const outcome of ['complete', 'failed', 'skipped'] as const) {
+  test(`official result repair ${outcome} uses the exact event outside the database transaction`, async () => {
+    const { repairTournamentSetupIssue } = await import(
+      '../../src/services/tournament-repair.service'
+    );
+    const official = await import('../../src/services/tournament-official-h2h.service');
+    const backfill = await import('../../src/services/tournament-backfill.service');
+    const review = await import('../../src/services/tournament-review-publication.service');
+    const { databaseTransactionStorage } = await import('../../src/db/singleton');
+    await sql`INSERT INTO fpl.events(season_id,event_id,name,finished,data_checked,data_checked_at)
+      VALUES (${season.seasonId},1,'Official repair',true,true,'2026-09-01')`;
+    await sql`UPDATE competition.tournaments SET league_type='h2h',group_mode='battle_races',roster_mode='official_sync',group_started_event_id=1,group_ended_event_id=1
+      WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+    await sql`INSERT INTO competition.tournament_entries(season_id,tournament_id,league_id,entry_id)
+      VALUES (${season.seasonId},${tournamentId},${tournamentId},${tournamentId})`;
+    await tournamentSetupIssueRepository.sync(season, tournamentId, [
+      {
+        ...input,
+        issueKey: 'TOURNAMENT_RESULTS_INCOMPLETE:1',
+        code: 'TOURNAMENT_RESULTS_INCOMPLETE',
+        category: 'results',
+        eventId: 1,
+      },
+    ]);
+    issueId = (await tournamentSetupIssueRepository.listUnresolved(season, tournamentId))[0]!
+      .issueId;
+    await mockAudit([]);
+    spyOn(backfill, 'runTournamentEventBackfill').mockResolvedValue([]);
+    spyOn(review, 'requestTournamentReviewCorrection').mockResolvedValue([]);
+    const refresh = spyOn(official, 'syncOfficialH2HTournament').mockImplementation(async () => {
+      expect(databaseTransactionStorage.getStore()).toBeUndefined();
+      if (outcome === 'failed') throw new Error('official provider unavailable');
+      return { updatedGroups: 2, updatedResults: 1, skipped: outcome === 'skipped' ? 1 : 0 };
+    });
+    if (outcome === 'complete') {
+      await repairTournamentSetupIssue(season, issueId);
+      expect(await tournamentSetupIssueRepository.findUnresolvedById(season, issueId)).toBeNull();
+    } else {
+      await expect(repairTournamentSetupIssue(season, issueId)).rejects.toThrow(
+        outcome === 'failed'
+          ? 'official provider unavailable'
+          : 'Official H2H results repair remains incomplete',
+      );
+      expect(
+        await tournamentSetupIssueRepository.findUnresolvedById(season, issueId),
+      ).not.toBeNull();
+    }
+    expect(refresh).toHaveBeenCalledWith(season, expect.objectContaining({ id: tournamentId }), 1, {
+      finalizedThroughEventId: 1,
+    });
+  });
+}
+
 test('historical points repairs attach only the earliest missing scope on each validation', async () => {
   const review = await import('../../src/services/tournament-review-publication.service');
   const jobs = await import('../../src/jobs/tournament-repair.jobs');
@@ -947,6 +1000,9 @@ for (const gap of [
 
 for (const gap of [
   'missing-history',
+  'official-watermark',
+  'official-score',
+  'official-stale',
   'score',
   'watermark',
   'rank',
@@ -984,6 +1040,18 @@ for (const gap of [
       await sql`UPDATE competition.tournament_battle_group_results SET home_net_points=43 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
     if (gap === 'watermark')
       await sql`UPDATE competition.entry_event_results SET updated_at='2026-09-02' WHERE season_id=${season.seasonId} AND event_id=1`;
+    if (gap.startsWith('official-')) {
+      await sql`UPDATE competition.tournament_battle_group_results SET source_order=0,official_match_id=event_id
+        WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+      await sql`UPDATE competition.entry_event_results SET updated_at='2026-09-02',rich_synced_at='2026-09-02'
+        WHERE season_id=${season.seasonId}`;
+      if (gap === 'official-score')
+        await sql`UPDATE competition.tournament_battle_group_results SET home_net_points=43
+        WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+      if (gap === 'official-stale')
+        await sql`UPDATE competition.tournament_battle_group_results SET source_checked_at='2026-08-31'
+        WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+    }
     if (gap === 'rank')
       await sql`UPDATE competition.tournament_battle_group_results SET home_rank=99 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
     if (gap === 'match-points')
@@ -1002,7 +1070,7 @@ for (const gap of [
           {},
         ),
       );
-    if (gap === 'complete') {
+    if (gap === 'complete' || gap === 'official-watermark') {
       expect((await run()).readySubjectCount).toBe(2);
     } else {
       const failure = await run().then(
