@@ -2197,8 +2197,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
                 (row) =>
                   row.itemName === item.name &&
                   row.itemCount === item.count &&
-                  row.checksum === item.sha256 &&
-                  row.validationVersion === DATA_PUBLICATION_VALIDATION_VERSION,
+                  row.checksum === item.sha256,
               ),
           )
         ) {
