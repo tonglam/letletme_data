@@ -1098,6 +1098,7 @@ migration_ledger_fingerprint() {
   [[ "$valid" == true ]] || return 1
   [[ "$backup_required" == true || "$backup_required" == false ]] || return 1
   [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$hard_cut" == true || "$hard_cut" == false ]] || return 1
   printf '%s\n' "$fingerprint"
 }
 
