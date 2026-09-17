@@ -4,9 +4,12 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   activeDataPublicationKey,
+  clearDataPublicationIntegrityFailure,
   dataPublicationItemKey,
+  hasDataPublicationIntegrityFailure,
   parseDataPublicationManifest,
   prepareDataPublication,
+  readActiveDataPublication,
   readActiveDataPublicationItem,
   readActiveDataPublicationManifest,
   readActiveDataPublicationManifestWithItemBounds,
@@ -343,5 +346,41 @@ describe('data publication contract', () => {
       items: { context: { deadline: '2026-08-09T02:00:00.000Z' } },
     });
     expect(requested).toEqual([dataPublicationItemKey(priceScope, 13, 'context')]);
+  });
+
+  test('full integrity reads flag same-sized corruption for targeted repair', async () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const prepared = prepareDataPublication({
+      ...priceScope,
+      revision: 14,
+      publicationId: '00000000-0000-4000-8000-000000000014',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items: [
+        { name: 'context', value: { value: 1 } },
+        { name: 'players', value: [{ id: 1 }] },
+      ],
+    });
+    const values = new Map<string, string>([
+      [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+      ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
+    ]);
+    const contextKey = dataPublicationItemKey(priceScope, 14, 'context');
+    const originalContext = values.get(contextKey)!;
+    values.set(contextKey, JSON.stringify({ value: 2 }));
+    const redis = {
+      get: async (key: string) => values.get(key) ?? null,
+      mget: async (...keys: string[]) => keys.map((key) => values.get(key) ?? null),
+    } as unknown as Redis;
+
+    clearDataPublicationIntegrityFailure(priceScope);
+    await expect(readActiveDataPublication(priceScope, redis)).resolves.toBeNull();
+    expect(hasDataPublicationIntegrityFailure(priceScope)).toBe(true);
+
+    values.set(contextKey, originalContext);
+    await expect(readActiveDataPublication(priceScope, redis)).resolves.toMatchObject({
+      manifest: prepared.manifest,
+    });
+    expect(hasDataPublicationIntegrityFailure(priceScope)).toBe(false);
   });
 });

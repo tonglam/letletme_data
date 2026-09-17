@@ -979,6 +979,9 @@ export async function getJobsStatus(
   > = null;
   let priceChangeRedisActive: PublicationIdentityRead | null = null;
   const publicationAuditStartedAt = Date.now();
+  const publicationAuditDeadlineAt = publicationAudit
+    ? publicationAuditStartedAt + publicationAudit.maxMs
+    : null;
   let publicationAuditBytes = 0;
   const publicationAuditScopes = new Set(publicationAudit?.scopes ?? []);
   const publicationAuditCompleted: PublicationAuditDataset[] = [];
@@ -1008,12 +1011,20 @@ export async function getJobsStatus(
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'NO_MANIFEST' });
       } else if (publicationAuditBytes + declaredBytes > publicationAudit!.maxBytes) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'BYTES_BUDGET' });
-      } else if (Date.now() - publicationAuditStartedAt >= publicationAudit!.maxMs) {
+      } else if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
       } else {
         redisDelivery = await readActiveDataPublication(publicationScope).catch(() => null);
         publicationAuditBytes += declaredBytes;
-        if (redisDelivery) {
+        const fullReadExceededDeadline =
+          publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
+        if (fullReadExceededDeadline) {
+          // Redis commands are bounded by the shared five-second timeout. A
+          // read that settles after the audit deadline is evidence of budget
+          // exhaustion, not a completed audit; retain the proof-only result.
+          redisDelivery = redisControlManifest;
+          publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
+        } else if (redisDelivery) {
           publicationAuditCompleted.push(scope.dataset);
         } else {
           publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'READ_FAILED' });

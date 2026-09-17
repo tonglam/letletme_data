@@ -160,6 +160,14 @@ const LEGACY_CORE_ITEM_NAMES = [
   'currentEventId',
 ];
 
+/**
+ * Full consumer reads are the integrity boundary for immutable Redis items.
+ * Keep a process-local repair hint when one detects a checksum/count failure;
+ * the reconciler can then repair that exact publication without turning every
+ * control pass into a full payload download.
+ */
+const publicationIntegrityFailures = new Set<string>();
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -403,6 +411,18 @@ function assertScope(scope: DataPublicationScope): void {
 function scopePrefix(scope: DataPublicationScope): string {
   assertScope(scope);
   return `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}`;
+}
+
+export function markDataPublicationIntegrityFailure(scope: DataPublicationScope): void {
+  publicationIntegrityFailures.add(scopePrefix(scope));
+}
+
+export function hasDataPublicationIntegrityFailure(scope: DataPublicationScope): boolean {
+  return publicationIntegrityFailures.has(scopePrefix(scope));
+}
+
+export function clearDataPublicationIntegrityFailure(scope: DataPublicationScope): void {
+  publicationIntegrityFailures.delete(scopePrefix(scope));
 }
 
 export function activeDataPublicationKey(scope: DataPublicationScope): string {
@@ -913,8 +933,8 @@ export async function readActiveDataPublication(
   redisClient?: Redis,
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
-  const redis = redisClient ?? (await redisSingleton.getClient());
   try {
+    const redis = redisClient ?? (await redisSingleton.getClient());
     const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
     if (!manifest || !assertManifestMatchesScope(manifest, scope) || manifest.items.length === 0) {
       return null;
@@ -929,12 +949,23 @@ export async function readActiveDataPublication(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
+        markDataPublicationIntegrityFailure(scope);
         return null;
       }
-      const parsed = JSON.parse(payload) as unknown;
-      if (itemCount(parsed) !== item.count) return null;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(payload) as unknown;
+      } catch {
+        markDataPublicationIntegrityFailure(scope);
+        return null;
+      }
+      if (itemCount(parsed) !== item.count) {
+        markDataPublicationIntegrityFailure(scope);
+        return null;
+      }
       items[item.name] = parsed;
     }
+    clearDataPublicationIntegrityFailure(scope);
     return { manifest, items };
   } catch {
     return null;
@@ -954,8 +985,8 @@ export async function readActiveDataPublicationManifest(
   redisClient?: Redis,
 ): Promise<DataPublicationManifest | null> {
   assertScope(scope);
-  const redis = redisClient ?? (await redisSingleton.getClient());
   try {
+    const redis = redisClient ?? (await redisSingleton.getClient());
     const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
     return manifest && assertManifestMatchesScope(manifest, scope) && manifest.items.length > 0
       ? manifest
@@ -1026,12 +1057,12 @@ export async function readActiveDataPublicationItemsWithBounds(
   ) {
     return null;
   }
-  const manifest = await readActiveDataPublicationManifestWithItemBounds(scope, redisClient);
-  if (!manifest) return null;
-  const selected = itemNames.map((name) => manifest.items.find((item) => item.name === name));
-  if (selected.some((item): item is undefined => item === undefined)) return null;
-  const selectedItems = selected as DataPublicationManifest['items'];
   try {
+    const manifest = await readActiveDataPublicationManifestWithItemBounds(scope, redisClient);
+    if (!manifest) return null;
+    const selected = itemNames.map((name) => manifest.items.find((item) => item.name === name));
+    if (selected.some((item): item is undefined => item === undefined)) return null;
+    const selectedItems = selected as DataPublicationManifest['items'];
     const redis = redisClient ?? (await redisSingleton.getClient());
     const payloads = await redis.mget(...selectedItems.map((item) => item.key));
     if (payloads.length !== selectedItems.length) return null;
@@ -1044,10 +1075,20 @@ export async function readActiveDataPublicationItemsWithBounds(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
+        markDataPublicationIntegrityFailure(scope);
         return null;
       }
-      const parsed = JSON.parse(payload) as unknown;
-      if (itemCount(parsed) !== item.count) return null;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(payload) as unknown;
+      } catch {
+        markDataPublicationIntegrityFailure(scope);
+        return null;
+      }
+      if (itemCount(parsed) !== item.count) {
+        markDataPublicationIntegrityFailure(scope);
+        return null;
+      }
       items[item.name] = parsed;
     }
     return { manifest, items };
@@ -1082,10 +1123,20 @@ export async function readActiveDataPublicationItem(
       Buffer.byteLength(payload, 'utf8') !== item.bytes ||
       sha256(payload) !== item.sha256
     ) {
+      markDataPublicationIntegrityFailure(scope);
       return null;
     }
-    const parsed = JSON.parse(payload) as unknown;
-    if (itemCount(parsed) !== item.count) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload) as unknown;
+    } catch {
+      markDataPublicationIntegrityFailure(scope);
+      return null;
+    }
+    if (itemCount(parsed) !== item.count) {
+      markDataPublicationIntegrityFailure(scope);
+      return null;
+    }
     return { manifest, items: { [itemName]: parsed } };
   } catch {
     return null;
@@ -1133,10 +1184,20 @@ export async function readActiveDataPublicationItems(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
+        markDataPublicationIntegrityFailure(scope);
         return null;
       }
-      const parsed = JSON.parse(payload) as unknown;
-      if (itemCount(parsed) !== item.count) return null;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(payload) as unknown;
+      } catch {
+        markDataPublicationIntegrityFailure(scope);
+        return null;
+      }
+      if (itemCount(parsed) !== item.count) {
+        markDataPublicationIntegrityFailure(scope);
+        return null;
+      }
       payloadByName.set(item.name, payload);
     }
     const items: Record<string, unknown> = {};
@@ -1147,6 +1208,7 @@ export async function readActiveDataPublicationItems(
       const parsed = JSON.parse(payload) as unknown;
       items[item.name] = parsed;
     }
+    clearDataPublicationIntegrityFailure(scope);
     return { manifest, items };
   } catch {
     return null;

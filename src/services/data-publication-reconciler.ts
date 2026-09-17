@@ -1,7 +1,9 @@
 import {
   activateDataPublicationPointer,
   compareAndSwapDataPublicationPointer,
+  clearDataPublicationIntegrityFailure,
   repairDataPublicationItems,
+  hasDataPublicationIntegrityFailure,
   readActiveDataPublicationManifest,
   readActiveDataPublicationManifestWithItemBounds,
   readActiveDataPublicationPointerState,
@@ -63,6 +65,7 @@ export async function reconcileDataPublication(
   const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope).catch(
     () => null,
   );
+  const integrityRepairRequired = hasDataPublicationIntegrityFailure(scope);
   const redisManifest =
     redisActive ?? (await readActiveDataPublicationManifest(scope).catch(() => null));
   const redisPointerState = redisManifest
@@ -214,6 +217,7 @@ export async function reconcileDataPublication(
     );
   }
   if (
+    !integrityRepairRequired &&
     redisActive?.publicationId === dbActive.publicationId &&
     redisActive.revision === dbActive.revision &&
     durableManifest?.publicationId === dbActive.publicationId &&
@@ -233,10 +237,12 @@ export async function reconcileDataPublication(
   // This is the normal crash-recovery path after Redis staging or CAS was
   // interrupted; the fallback below is only for legacy publications that have
   // no outbox row yet.
-  const outboxDelivery = await dispatchDataPublicationOutbox({
-    limit: 1,
-    publicationId: dbActive.publicationId,
-  });
+  const outboxDelivery = integrityRepairRequired
+    ? { delivered: 0 }
+    : await dispatchDataPublicationOutbox({
+        limit: 1,
+        publicationId: dbActive.publicationId,
+      });
   if (outboxDelivery.delivered === 1) {
     return {
       status: 'repaired',
@@ -290,6 +296,7 @@ export async function reconcileDataPublication(
   // otherwise readiness would remain stuck on a row that is already canonical
   // in both stores.
   await markDataPublicationOutboxReconciled({ publicationId: dbActive.publicationId });
+  clearDataPublicationIntegrityFailure(scope);
   logInfo('Repaired Redis data publication pointer from canonical DB', {
     dataset: scope.dataset,
     season: scope.seasonCode,
