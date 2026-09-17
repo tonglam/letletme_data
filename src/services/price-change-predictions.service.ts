@@ -4,7 +4,6 @@ import {
   prepareDataPublication,
   readActiveDataPublication,
   readActiveDataPublicationItem,
-  readActiveDataPublicationManifest,
   type DataPublicationReadResult,
 } from '../cache/data-publication';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
@@ -1507,11 +1506,12 @@ async function ensurePriceChangePublicationDelivered(
 ): Promise<void> {
   const delivered = await dispatchDataPublicationOutbox({ limit: 1, publicationId });
   if (delivered.delivered === 1) return;
-  const active = await readActiveDataPublicationManifest({
+  const active = await readActiveDataPublication({
     dataset: PRICE_CHANGE_DATASET,
     seasonCode: season.seasonCode,
   });
-  if (active?.publicationId === publicationId && active.revision === revision) return;
+  if (active?.manifest.publicationId === publicationId && active.manifest.revision === revision)
+    return;
   throw new Error(
     `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
   );
