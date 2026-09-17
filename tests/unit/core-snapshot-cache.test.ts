@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   activeDataPublicationKey,
   dataPublicationIntegrityProofKey,
+  dataPublicationIntegrityProofToken,
   prepareDataPublication,
 } from '../../src/cache/data-publication';
 import {
@@ -55,7 +56,7 @@ describe('core snapshot current-event authority', () => {
       [activeDataPublicationKey(scope), JSON.stringify(prepared.manifest)],
       [
         dataPublicationIntegrityProofKey(scope),
-        `${prepared.manifest.publicationId}:${prepared.manifest.revision}`,
+        dataPublicationIntegrityProofToken(prepared.manifest),
       ],
       ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
     ]);

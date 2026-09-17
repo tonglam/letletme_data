@@ -5,9 +5,11 @@ import { describe, expect, test } from 'bun:test';
 import {
   activeDataPublicationKey,
   clearDataPublicationIntegrityFailure,
+  dataPublicationIntegrityProofToken,
   dataPublicationIntegrityProofKey,
   dataPublicationItemKey,
   hasDataPublicationIntegrityFailure,
+  hasDataPublicationIntegrityProof,
   markDataPublicationIntegrityProof,
   markDataPublicationIntegrityFailure,
   parseDataPublicationManifest,
@@ -16,6 +18,7 @@ import {
   readActiveDataPublicationItem,
   readActiveDataPublicationManifest,
   readActiveDataPublicationManifestWithItemBounds,
+  readActiveDataPublicationManifestWithItemBoundsStatus,
   readActiveDataPublicationItemsWithBounds,
   readActiveDataPublicationItems,
   type DataPublicationManifest,
@@ -192,7 +195,7 @@ describe('data publication contract', () => {
       [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
       [
         dataPublicationIntegrityProofKey(priceScope),
-        `${prepared.manifest.publicationId}:${prepared.manifest.revision}`,
+        dataPublicationIntegrityProofToken(prepared.manifest),
       ],
       ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
     ]);
@@ -328,6 +331,62 @@ describe('data publication contract', () => {
     expect(values.has(dataPublicationItemKey(priceScope, 12, 'players'))).toBe(false);
   });
 
+  test('distinguishes a missing active pointer from an invalid publication', async () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const prepared = prepareDataPublication({
+      ...priceScope,
+      revision: 14,
+      publicationId: '00000000-0000-4000-8000-000000000014',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items: [
+        { name: 'context', value: { deadline: '2026-08-09T02:00:00.000Z' } },
+        { name: 'players', value: [{ id: 1 }] },
+      ],
+    });
+    const values = new Map<string, string>([
+      [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+      ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
+    ]);
+    let pointerType = 'string';
+    let invalidItems = false;
+    const redis = {
+      type: async () => pointerType,
+      get: async (key: string) => values.get(key) ?? null,
+      pipeline: () => {
+        const pipeline = {
+          exists: () => pipeline,
+          strlen: () => pipeline,
+          exec: async () =>
+            prepared.manifest.items.flatMap((item) => [
+              [null, invalidItems ? 0 : 1],
+              [null, item.bytes],
+            ]),
+        };
+        return pipeline;
+      },
+    } as unknown as Redis;
+
+    await expect(
+      readActiveDataPublicationManifestWithItemBoundsStatus(priceScope, redis),
+    ).resolves.toEqual({ status: 'valid', manifest: prepared.manifest });
+
+    invalidItems = true;
+    await expect(
+      readActiveDataPublicationManifestWithItemBoundsStatus(priceScope, redis),
+    ).resolves.toEqual({ status: 'invalid', manifest: null });
+
+    pointerType = 'hash';
+    await expect(
+      readActiveDataPublicationManifestWithItemBoundsStatus(priceScope, redis),
+    ).resolves.toEqual({ status: 'invalid', manifest: null });
+
+    pointerType = 'none';
+    await expect(
+      readActiveDataPublicationManifestWithItemBoundsStatus(priceScope, redis),
+    ).resolves.toEqual({ status: 'missing', manifest: null });
+  });
+
   test('bounded selected reads validate siblings but fetch only requested payloads', async () => {
     const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
     const prepared = prepareDataPublication({
@@ -345,7 +404,7 @@ describe('data publication contract', () => {
       [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
       [
         dataPublicationIntegrityProofKey(priceScope),
-        `${prepared.manifest.publicationId}:${prepared.manifest.revision}`,
+        dataPublicationIntegrityProofToken(prepared.manifest),
       ],
       ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
     ]);
@@ -527,7 +586,7 @@ describe('data publication contract', () => {
         { name: 'selectionRules', value: null },
       ],
     });
-    const token = `${prepared.manifest.publicationId}:${prepared.manifest.revision}`;
+    const token = dataPublicationIntegrityProofToken(prepared.manifest);
     const redis = {
       del: async () => 1,
       eval: async () => 1,
@@ -541,6 +600,23 @@ describe('data publication contract', () => {
       hasDataPublicationIntegrityFailure(proofScope, prepared.manifest, redis),
     ).resolves.toBe(true);
     await clearDataPublicationIntegrityFailure(proofScope, redis);
+  });
+
+  test('does not reuse a proof when the complete manifest changes', async () => {
+    const proofScope = { dataset: 'fpl:core' as const, seasonCode: '9997' };
+    const manifest = { ...validManifest(), seasonCode: proofScope.seasonCode };
+    const changedManifest = { ...manifest, sourceCheckedAt: '2026-08-10T01:00:00.000Z' };
+    const values = new Map<string, string>([
+      [dataPublicationIntegrityProofKey(proofScope), dataPublicationIntegrityProofToken(manifest)],
+    ]);
+    const redis = {
+      get: async (key: string) => values.get(key) ?? null,
+    } as unknown as Redis;
+
+    await expect(hasDataPublicationIntegrityProof(proofScope, manifest, redis)).resolves.toBe(true);
+    await expect(
+      hasDataPublicationIntegrityProof(proofScope, changedManifest, redis),
+    ).resolves.toBe(false);
   });
 
   test('does not look up a proof after a matching local failure is known', async () => {

@@ -2,8 +2,9 @@ import { Queue } from 'bullmq';
 
 import {
   readActiveDataPublication,
-  readActiveDataPublicationManifestWithItemBounds,
+  readActiveDataPublicationManifestWithItemBoundsStatus,
   type DataPublicationDeliveryItem,
+  type DataPublicationManifestWithItemBoundsResult,
   type DataPublicationManifest,
   type DataPublicationReadResult,
   type DataPublicationScope,
@@ -1054,13 +1055,15 @@ export async function getJobsStatus(
       (auditRequested &&
         publicationAuditDeadlineAt !== null &&
         Date.now() >= publicationAuditDeadlineAt);
-    const redisControlManifest = controlReadBlocked
-      ? null
-      : await readActiveDataPublicationManifestWithItemBounds(
+    const redisControlResult: DataPublicationManifestWithItemBoundsResult = controlReadBlocked
+      ? { status: 'unavailable', manifest: null }
+      : await readActiveDataPublicationManifestWithItemBoundsStatus(
           publicationScope,
           undefined,
           auditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
-        ).catch(() => null);
+        ).catch(() => ({ status: 'unavailable', manifest: null }) as const);
+    const redisControlManifest =
+      redisControlResult.status === 'valid' ? redisControlResult.manifest : null;
     const controlReadTimedOut =
       dbControlReadAlreadyTimedOut ||
       (auditRequested &&
@@ -1083,8 +1086,10 @@ export async function getJobsStatus(
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
       } else if (dbControlReadFailed) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'READ_FAILED' });
-      } else if (!redisControlManifest) {
+      } else if (redisControlResult.status === 'missing') {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'NO_MANIFEST' });
+      } else if (redisControlResult.status !== 'valid') {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'READ_FAILED' });
       } else if (publicationAuditBytes + declaredBytes > publicationAudit!.maxBytes) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'BYTES_BUDGET' });
       } else if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
