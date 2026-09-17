@@ -239,6 +239,20 @@ if current_raw then
         return {'publication_id_conflict'}
       end
     end
+    for _, item in ipairs(candidate.items) do
+      if redis.call('EXISTS', item.key) ~= 1 then
+        return {'missing_stage', item.key}
+      end
+      local type_result = redis.call('TYPE', item.key)
+      local actual_type = type(type_result) == 'table' and type_result['ok'] or type_result
+      if actual_type ~= item.type then
+        return {'wrong_stage_type', item.key}
+      end
+      if redis.call('STRLEN', item.key) ~= item.bytes then
+        return {'wrong_stage_size', item.key}
+      end
+      redis.call('PERSIST', item.key)
+    end
     return {'idempotent', current_raw}
   end
   if current.sourceCheckedAt > candidate.sourceCheckedAt then
@@ -491,10 +505,15 @@ async function stageDataPublicationItems(
   manifest: DataPublicationManifest,
   items: readonly DataPublicationDeliveryItem[],
   redis: Redis,
+  options: { readonly replaceExisting?: boolean } = {},
 ): Promise<void> {
   const stage = redis.pipeline();
   for (const item of items) {
-    stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS, 'NX');
+    if (options.replaceExisting) {
+      stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS);
+    } else {
+      stage.set(item.manifest.key, item.payload, 'PX', DATA_PUBLICATION_STAGING_TTL_MS, 'NX');
+    }
   }
   const stageResults = await stage.exec();
   if (!stageResults) {
@@ -536,6 +555,25 @@ export async function stageDataPublication(
 ): Promise<void> {
   const redis = redisClient ?? (await redisSingleton.getClient());
   await stageDataPublicationItems(prepared.manifest, prepared.items, redis);
+}
+
+/**
+ * Replace only the immutable items for an already identified publication.
+ * Reconciliation uses this after the active pointer proves that the keys
+ * belong to the same publication; ordinary producers must continue to use
+ * the NX staging path above.
+ */
+export async function repairDataPublicationItems(
+  prepared: {
+    readonly manifest: DataPublicationManifest;
+    readonly items: readonly DataPublicationDeliveryItem[];
+  },
+  redisClient?: Redis,
+): Promise<void> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  await stageDataPublicationItems(prepared.manifest, prepared.items, redis, {
+    replaceExisting: true,
+  });
 }
 
 export async function activateDataPublicationPointer(
