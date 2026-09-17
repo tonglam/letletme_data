@@ -1013,11 +1013,18 @@ export async function getJobsStatus(
     // The default status projection is proof-only. A complete Redis payload
     // read is allowed only for an explicitly requested scope and only after
     // its declared byte and wall-clock budgets have been checked.
-    const redisControlManifest = await readActiveDataPublicationManifestWithItemBounds(
-      publicationScope,
-      undefined,
-      publicationAuditDeadlineAt ?? undefined,
-    ).catch(() => null);
+    const controlReadAlreadyTimedOut =
+      publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
+    const redisControlManifest = controlReadAlreadyTimedOut
+      ? null
+      : await readActiveDataPublicationManifestWithItemBounds(
+          publicationScope,
+          undefined,
+          publicationAuditDeadlineAt ?? undefined,
+        ).catch(() => null);
+    const controlReadTimedOut =
+      controlReadAlreadyTimedOut ||
+      (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt);
     const entry: PublicationStatusEntry = {
       dataset: scope.dataset,
       dbActive,
@@ -1029,7 +1036,9 @@ export async function getJobsStatus(
     if (publicationAuditScopes.has(scope.dataset)) {
       const declaredBytes =
         redisControlManifest?.items.reduce((total, item) => total + item.bytes, 0) ?? 0;
-      if (!redisControlManifest) {
+      if (controlReadTimedOut) {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
+      } else if (!redisControlManifest) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'NO_MANIFEST' });
       } else if (publicationAuditBytes + declaredBytes > publicationAudit!.maxBytes) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'BYTES_BUDGET' });

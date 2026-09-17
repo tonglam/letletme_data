@@ -169,6 +169,8 @@ const LEGACY_CORE_ITEM_NAMES = [
  */
 const INTEGRITY_FAILURE_TTL_SECONDS = 15 * 60;
 const INTEGRITY_PROOF_TTL_SECONDS = 15 * 60;
+/** Shared marker bookkeeping must remain bounded even after an audit expires. */
+const INTEGRITY_MARKER_PERSIST_TIMEOUT_MS = 1_000;
 const INTEGRITY_FAILURE_SUFFIX = ':integrity-failure';
 const INTEGRITY_PROOF_SUFFIX = ':integrity-proof';
 type IntegrityFailureMarker = Readonly<{
@@ -405,6 +407,20 @@ redis.call('SET', KEYS[1], ARGV[3])
 return {'replaced'}
 `;
 
+const MARK_INTEGRITY_FAILURE_SCRIPT = `
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+redis.call('DEL', KEYS[2])
+return 1
+`;
+
+const MARK_INTEGRITY_PROOF_SCRIPT = `
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+  redis.call('DEL', KEYS[2])
+end
+return 1
+`;
+
 function assertScope(scope: DataPublicationScope): void {
   if (!/^\d{4}$/.test(scope.seasonCode)) {
     throw new CacheError('Invalid publication season', 'DATA_PUBLICATION_SEASON_INVALID');
@@ -458,19 +474,34 @@ export async function markDataPublicationIntegrityFailure(
   const persist = async (): Promise<void> => {
     try {
       const redis = await getRedisForIntegrityMarker(redisClient);
-      const setArgs = [
-        integrityFailureKey(scope),
-        token,
-        'EX',
-        String(INTEGRITY_FAILURE_TTL_SECONDS),
-      ] as const;
       if (deadlineAt === undefined) {
-        await redis.set(...setArgs);
-        await redis.del(integrityProofKey(scope));
+        await redis.eval(
+          MARK_INTEGRITY_FAILURE_SCRIPT,
+          2,
+          integrityFailureKey(scope),
+          integrityProofKey(scope),
+          token,
+          String(INTEGRITY_FAILURE_TTL_SECONDS),
+        );
         return;
       }
-      await redisCommandWithDeadline<string>(redis, 'set', setArgs, deadlineAt);
-      await redisCommandWithDeadline<number>(redis, 'del', [integrityProofKey(scope)], deadlineAt);
+      // The request deadline may already be exhausted when corruption is
+      // detected. Keep shared evidence durable with its own short bound while
+      // leaving the audit response path completely asynchronous.
+      const markerDeadlineAt = Date.now() + INTEGRITY_MARKER_PERSIST_TIMEOUT_MS;
+      await redisCommandWithDeadline<number>(
+        redis,
+        'eval',
+        [
+          MARK_INTEGRITY_FAILURE_SCRIPT,
+          '2',
+          integrityFailureKey(scope),
+          integrityProofKey(scope),
+          token,
+          String(INTEGRITY_FAILURE_TTL_SECONDS),
+        ],
+        markerDeadlineAt,
+      );
     } catch {
       // The local marker still protects this process when the shared marker
       // cannot be written during the same Redis incident.
@@ -543,19 +574,25 @@ export async function markDataPublicationIntegrityProof(
     dataset: manifest.dataset,
     seasonCode: manifest.seasonCode,
   } as DataPublicationScope;
-  // Clear the local hint before the optional shared bookkeeping so a valid
-  // payload is never held behind a Redis reconnect or command timeout.
-  publicationIntegrityFailures.delete(scopePrefix(scope));
+  const prefix = scopePrefix(scope);
+  const token = publicationIntegrityToken(manifest);
+  // Clear only a local hint for the revision just proven. A concurrent reader
+  // may already have recorded a newer revision's corruption for this scope.
+  const local = publicationIntegrityFailures.get(prefix);
+  if (local && (local.expiresAt <= Date.now() || local.token === token)) {
+    publicationIntegrityFailures.delete(prefix);
+  }
   const persist = async (): Promise<void> => {
     try {
       const redis = await getRedisForIntegrityMarker(redisClient);
-      await redis.set(
+      await redis.eval(
+        MARK_INTEGRITY_PROOF_SCRIPT,
+        2,
         integrityProofKey(scope),
-        publicationIntegrityToken(manifest),
-        'EX',
+        integrityFailureKey(scope),
+        token,
         String(INTEGRITY_PROOF_TTL_SECONDS),
       );
-      await redis.del(integrityFailureKey(scope));
     } catch {
       // A proof marker is an optimization. The next selected read will perform
       // one complete validation if it cannot observe this marker.
