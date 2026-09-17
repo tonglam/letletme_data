@@ -56,25 +56,31 @@ BEGIN
   END IF;
 
   IF TG_OP = 'UPDATE' AND OLD.validation_version >= 1 THEN
-    IF TG_TABLE_NAME = 'dataset_publication_items' AND (
-      NEW.publication_id IS DISTINCT FROM OLD.publication_id OR
-      NEW.item_name IS DISTINCT FROM OLD.item_name OR
-      NEW.payload IS DISTINCT FROM OLD.payload OR
-      NEW.item_count IS DISTINCT FROM OLD.item_count OR
-      NEW.checksum IS DISTINCT FROM OLD.checksum
-    ) THEN
-      RAISE EXCEPTION 'validated publication item is immutable' USING ERRCODE = '55000';
-    ELSIF TG_TABLE_NAME = 'dataset_publications' AND (
-      NEW.publication_id IS DISTINCT FROM OLD.publication_id OR
-      NEW.dataset IS DISTINCT FROM OLD.dataset OR
-      NEW.season_id IS DISTINCT FROM OLD.season_id OR
-      NEW.event_id IS DISTINCT FROM OLD.event_id OR
-      NEW.revision IS DISTINCT FROM OLD.revision OR
-      NEW.manifest IS DISTINCT FROM OLD.manifest
-    ) THEN
-      RAISE EXCEPTION 'validated publication identity is immutable' USING ERRCODE = '55000';
-    ELSIF TG_TABLE_NAME = 'live_points_publication_checkpoints' AND
-      NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
+    -- Keep each table's record fields inside its own branch. PL/pgSQL resolves
+    -- NEW/OLD record fields when the branch expression is compiled; combining
+    -- table-specific fields with an `AND TG_TABLE_NAME = ...` guard still
+    -- raises "record NEW has no field" on the other tables.
+    IF TG_TABLE_NAME = 'dataset_publication_items' THEN
+      IF NEW.publication_id IS DISTINCT FROM OLD.publication_id OR
+        NEW.item_name IS DISTINCT FROM OLD.item_name OR
+        NEW.payload IS DISTINCT FROM OLD.payload OR
+        NEW.item_count IS DISTINCT FROM OLD.item_count OR
+        NEW.checksum IS DISTINCT FROM OLD.checksum
+      THEN
+        RAISE EXCEPTION 'validated publication item is immutable' USING ERRCODE = '55000';
+      END IF;
+    ELSIF TG_TABLE_NAME = 'dataset_publications' THEN
+      IF NEW.publication_id IS DISTINCT FROM OLD.publication_id OR
+        NEW.dataset IS DISTINCT FROM OLD.dataset OR
+        NEW.season_id IS DISTINCT FROM OLD.season_id OR
+        NEW.event_id IS DISTINCT FROM OLD.event_id OR
+        NEW.revision IS DISTINCT FROM OLD.revision OR
+        NEW.manifest IS DISTINCT FROM OLD.manifest
+      THEN
+        RAISE EXCEPTION 'validated publication identity is immutable' USING ERRCODE = '55000';
+      END IF;
+    ELSIF TG_TABLE_NAME = 'live_points_publication_checkpoints' THEN
+      IF NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
         NEW.revisions IS DISTINCT FROM OLD.revisions OR
@@ -87,15 +93,16 @@ BEGIN
         NEW.event_live_count IS DISTINCT FROM OLD.event_live_count OR
         NEW.fixtures_count IS DISTINCT FROM OLD.fixtures_count
       ) THEN
-      RAISE EXCEPTION 'validated live points checkpoint is immutable' USING ERRCODE = '55000';
-    ELSIF TG_TABLE_NAME = 'live_league_checkpoints' AND
-      NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
+        RAISE EXCEPTION 'validated live points checkpoint is immutable' USING ERRCODE = '55000';
+      END IF;
+    ELSIF TG_TABLE_NAME = 'live_league_checkpoints' THEN
+      -- A marker retry may refresh checkpointedAt after the durable row
+      -- committed. Provisional rows also refresh the two bounded heartbeat
+      -- fields between observations; every other manifest field remains
+      -- immutable, so a same-identity retry cannot replace its proof.
+      IF NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
-        -- A marker retry may refresh checkpointedAt after the durable row
-        -- committed. Provisional rows also refresh the two bounded heartbeat
-        -- fields between observations; every other manifest field remains
-        -- immutable, so a same-identity retry cannot replace its proof.
         (
           NEW.manifest #- ARRAY[
             'times', 'checkpointedAt', 'sourceCheckedAt', 'expectedNextCheckAt'
@@ -116,7 +123,8 @@ BEGIN
         NEW.payload_bytes IS DISTINCT FROM OLD.payload_bytes OR
         NEW.payload_sha256 IS DISTINCT FROM OLD.payload_sha256
       ) THEN
-      RAISE EXCEPTION 'validated live league checkpoint is immutable' USING ERRCODE = '55000';
+        RAISE EXCEPTION 'validated live league checkpoint is immutable' USING ERRCODE = '55000';
+      END IF;
     END IF;
   END IF;
   IF TG_OP = 'DELETE' AND OLD.validation_version >= 1 THEN
