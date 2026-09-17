@@ -21,11 +21,21 @@ import { singleTransformedEventLiveFixture } from '../fixtures/event-lives.fixtu
 const season = { seasonId: 2089, seasonCode: '8990' };
 const obligationId = '30000000-0000-4000-8000-000000000089';
 
+async function forceDeleteCheckpoints(sql: Awaited<ReturnType<typeof getDbClient>>) {
+  // The production proof fence deliberately forbids deleting a validated
+  // checkpoint. This fixture owns an isolated season, so bypass the row
+  // trigger only inside this test transaction when resetting it.
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = 'replica'`;
+    await tx`DELETE FROM competition.live_league_checkpoints WHERE season_id = ${season.seasonId}`;
+  });
+}
+
 async function cleanup() {
   const sql = await getDbClient();
   await sql`DELETE FROM ops.scheduler_obligations WHERE obligation_id = ${obligationId}`;
   await sql`DELETE FROM competition.tournament_entries WHERE season_id = ${season.seasonId}`;
-  await sql`DELETE FROM competition.live_league_checkpoints WHERE season_id = ${season.seasonId}`;
+  await forceDeleteCheckpoints(sql);
   await sql`DELETE FROM competition.tournaments WHERE season_id = ${season.seasonId}`;
   await sql`DELETE FROM competition.entries WHERE season_id = ${season.seasonId}`;
   await sql`DELETE FROM competition.my_fpl_snapshot_scope_state WHERE season_id = ${season.seasonId}`;
@@ -137,9 +147,7 @@ test('validated checkpoint proof is reused without payload reads', async () => {
   // The preceding readiness test deliberately inserts a malformed checkpoint
   // to prove the read path fails closed. Start this persistence test from an
   // empty scope so its generation and identity assertions are independent.
-  await sql`DELETE FROM competition.live_league_checkpoints
-    WHERE season_id=${season.seasonId} AND event_id=1
-      AND tournament_id=89001 AND scope_kind='CLASSIC'`;
+  await forceDeleteCheckpoints(sql);
   const scope = {
     season: season.seasonCode,
     eventId: 1,
@@ -280,12 +288,16 @@ test('validated checkpoint proof is reused without payload reads', async () => {
   // A validated final row is protected at the database boundary. A direct
   // payload mutation is rejected, so a different publication cannot use an
   // in-place rewrite to bypass the proof.
-  await expect(sql`UPDATE competition.live_league_checkpoints
-    SET payload_sha256=${'b'.repeat(64)}
-    WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
-      AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`).rejects.toThrow(
-    'validated live league checkpoint is immutable',
-  );
+  let mutationError: unknown;
+  try {
+    await sql`UPDATE competition.live_league_checkpoints
+      SET payload_sha256=${'b'.repeat(64)}
+      WHERE season_id=${season.seasonId} AND event_id=${scope.eventId}
+        AND tournament_id=${scope.tournamentId} AND scope_kind=${scope.scope}`;
+  } catch (caught) {
+    mutationError = caught;
+  }
+  expect(String(mutationError)).toContain('validated live league checkpoint is immutable');
   const conflictingRepair: LeagueLiveManifest = {
     ...successor,
     publicationId: '30000000-0000-4000-8000-000000000102',

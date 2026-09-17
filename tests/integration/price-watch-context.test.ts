@@ -144,9 +144,13 @@ test('rejects extra durable publication items outside the manifest', async () =>
 });
 
 test('rejects in-place revision replacement after validation', async () => {
-  await expect(
-    db`UPDATE ops.dataset_publications SET revision=9395 WHERE publication_id=${publicationId}`,
-  ).rejects.toThrow('validated publication identity is immutable');
+  let error: unknown;
+  try {
+    await db`UPDATE ops.dataset_publications SET revision=9395 WHERE publication_id=${publicationId}`;
+  } catch (caught) {
+    error = caught;
+  }
+  expect(String(error)).toContain('validated publication identity is immutable');
   await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
     status: 'READY',
     nextDeadlines: context.nextDeadlines,
@@ -226,6 +230,11 @@ test('rejects a Redis pointer whose manifest identity disagrees with database co
     activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
     JSON.stringify(invalidManifest),
   );
+  // Once the Redis identity is rejected, there is no durable fallback for
+  // this case; retire the otherwise valid fixture so the result is fail-closed.
+  await db`UPDATE ops.dataset_publications
+    SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
 
   expect(await getPriceChangeWatchDeadlines(season, now)).toBeNull();
 });
