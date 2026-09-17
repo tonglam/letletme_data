@@ -99,6 +99,7 @@ DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
 DEPLOY_MIGRATION_BACKUP_REQUIRED=false
 DEPLOY_REVIEW_HARD_CUT_PENDING=false
+DEPLOY_REVIEW_BACKFILL_PENDING=false
 DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=false
 DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
@@ -808,6 +809,29 @@ deploy() {
   fi
   if [[ "$migration_plan_hard_cut" = true ]]; then
     DEPLOY_REVIEW_HARD_CUT_PENDING=true
+    DEPLOY_REVIEW_BACKFILL_PENDING=true
+  elif [[ "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ]]; then
+    # A retry marker represents a previously incomplete destructive review
+    # operation. Preserve the pre-operation snapshot even when this release
+    # has no SQL migration to apply.
+    DEPLOY_REVIEW_BACKFILL_PENDING=true
+  elif [[ "$migration_plan_backup_required" = false ]]; then
+    # A ledgered migration can be complete while the bounded review backfill
+    # remains pending. Probe that durable marker before the backup decision so
+    # a retry cannot run without a fresh restore point.
+    if review_backfill_marker_pending "$data_runtime_database_url"; then
+      DEPLOY_REVIEW_BACKFILL_PENDING=true
+    else
+      review_backfill_marker_status=$?
+      if [[ "$review_backfill_marker_status" -eq 2 ]]; then
+        log_error "Unable to inspect My Tournament Review V2.1 backfill marker; refusing deploy."
+        exit 1
+      fi
+    fi
+  fi
+  if [[ "$DEPLOY_REVIEW_BACKFILL_PENDING" = true ]]; then
+    DEPLOY_MIGRATION_BACKUP_REQUIRED=true
+    log_info "Pending My Tournament Review V2.1 backfill requires a pre-operation PostgreSQL dump"
   fi
   DEPLOY_LEDGER_BEFORE="$migration_plan_fingerprint"
   log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"

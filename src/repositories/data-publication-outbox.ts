@@ -274,7 +274,7 @@ export async function loadDataPublicationDeliveryManifest(
   publicationId: string,
 ): Promise<DataPublicationManifest | null> {
   const db = await getDb();
-  const rows = await db
+  const publicationRows = await db
     .select({
       manifest: datasetPublicationsInOps.manifest,
       validationVersion: datasetPublicationsInOps.validationVersion,
@@ -282,9 +282,79 @@ export async function loadDataPublicationDeliveryManifest(
     .from(datasetPublicationsInOps)
     .where(eq(datasetPublicationsInOps.publicationId, publicationId))
     .limit(1);
-  const row = rows[0];
+  const row = publicationRows[0];
   if (!row || row.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION) return null;
-  return parseDataPublicationManifest(JSON.stringify(row.manifest));
+  const manifest = parseDataPublicationManifest(JSON.stringify(row.manifest));
+  if (!manifest || manifest.publicationId !== publicationId) return null;
+  const itemRows = await db
+    .select({
+      itemName: datasetPublicationItemsInOps.itemName,
+      itemCount: datasetPublicationItemsInOps.itemCount,
+      checksum: datasetPublicationItemsInOps.checksum,
+      validationVersion: datasetPublicationItemsInOps.validationVersion,
+    })
+    .from(datasetPublicationItemsInOps)
+    .where(eq(datasetPublicationItemsInOps.publicationId, publicationId));
+  if (itemRows.length !== manifest.items.length) return null;
+  for (const item of manifest.items) {
+    const itemRow = itemRows.find((candidate) => candidate.itemName === item.name);
+    if (
+      !itemRow ||
+      itemRow.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION ||
+      itemRow.itemCount !== item.count ||
+      itemRow.checksum !== item.sha256
+    ) {
+      return null;
+    }
+  }
+  return manifest;
+}
+
+/**
+ * Upgrade one legacy active publication after its complete durable payload has
+ * been validated. This is deliberately scope-bound and lazy: rollout does not
+ * scan or mark historical rows, while the reconciler can establish the proof
+ * before returning to its metadata-only hot path.
+ */
+export async function validateAndMarkDataPublicationProof(
+  publicationId: string,
+): Promise<DataPublicationManifest | null> {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const publicationRows = await tx
+      .select({
+        status: datasetPublicationsInOps.status,
+        manifest: datasetPublicationsInOps.manifest,
+        validationVersion: datasetPublicationsInOps.validationVersion,
+      })
+      .from(datasetPublicationsInOps)
+      .where(eq(datasetPublicationsInOps.publicationId, publicationId))
+      .for('update');
+    const publication = publicationRows[0];
+    if (!publication || publication.status !== 'active') return null;
+    const manifest = parseDataPublicationManifest(JSON.stringify(publication.manifest));
+    if (!manifest) return null;
+    await tx
+      .select({ publicationId: datasetPublicationItemsInOps.publicationId })
+      .from(datasetPublicationItemsInOps)
+      .where(eq(datasetPublicationItemsInOps.publicationId, publicationId))
+      .for('update');
+    const prepared = await loadPreparedPublication(tx, publicationId, publication.manifest).catch(
+      () => null,
+    );
+    if (!prepared || prepared.manifest.publicationId !== publicationId) return null;
+    await tx
+      .update(datasetPublicationItemsInOps)
+      .set({ validationVersion: DATA_PUBLICATION_VALIDATION_VERSION })
+      .where(eq(datasetPublicationItemsInOps.publicationId, publicationId));
+    if (publication.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION) {
+      await tx
+        .update(datasetPublicationsInOps)
+        .set({ validationVersion: DATA_PUBLICATION_VALIDATION_VERSION })
+        .where(eq(datasetPublicationsInOps.publicationId, publicationId));
+    }
+    return prepared.manifest;
+  });
 }
 
 function createSha256(value: string): string {

@@ -223,22 +223,11 @@ async function main(): Promise<void> {
     throw new Error('Published core cache failed its exact read-back verification');
   }
 
-  const persistedManifest = await db
-    .update(datasetPublicationsInOps)
-    .set({ manifest: verified.manifest, updatedAt: new Date() })
-    .where(
-      and(
-        eq(datasetPublicationsInOps.publicationId, publication.publicationId),
-        eq(datasetPublicationsInOps.status, 'active'),
-        eq(datasetPublicationsInOps.dataset, 'fpl:core'),
-        eq(datasetPublicationsInOps.seasonId, season.seasonId),
-        isNull(datasetPublicationsInOps.eventId),
-      ),
-    )
-    .returning({ publicationId: datasetPublicationsInOps.publicationId });
-  if (persistedManifest.length !== 1) {
-    throw new Error('Canonical core manifest could not be persisted to PostgreSQL');
-  }
+  // The PostgreSQL manifest is the immutable canonical identity. The Redis
+  // rebuild may carry a new cache publication timestamp, but persisting that
+  // timestamp back would turn a recovery into an in-place proof mutation.
+  // Keep the database manifest untouched and verify parity by publication ID,
+  // revision, and the complete Redis payload above.
 
   console.log(
     JSON.stringify(

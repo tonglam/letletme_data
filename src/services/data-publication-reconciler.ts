@@ -9,6 +9,7 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   loadDataPublicationDelivery,
   loadDataPublicationDeliveryManifest,
+  validateAndMarkDataPublicationProof,
 } from '../repositories/data-publication-outbox';
 import {
   dispatchDataPublicationOutbox,
@@ -182,9 +183,17 @@ export async function reconcileDataPublication(
   // publication carries the producer-side proof. Legacy rows remain
   // consumable through the full delivery validator, but they must not be
   // reported as permanently verified by a high-frequency reconciler.
-  const durableManifest = await loadDataPublicationDeliveryManifest(dbActive.publicationId).catch(
+  let durableManifest = await loadDataPublicationDeliveryManifest(dbActive.publicationId).catch(
     () => null,
   );
+  if (!durableManifest) {
+    // Legacy active rows are upgraded only after this explicit scope has been
+    // fully validated. No historical scan or high-frequency payload read is
+    // introduced; subsequent reconciliation returns to the proof-only path.
+    durableManifest = await validateAndMarkDataPublicationProof(dbActive.publicationId).catch(
+      () => null,
+    );
+  }
   if (
     redisActive?.publicationId === dbActive.publicationId &&
     redisActive.revision === dbActive.revision &&

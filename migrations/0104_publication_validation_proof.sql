@@ -28,10 +28,17 @@ ALTER TABLE ops.dataset_publication_items
   ADD CONSTRAINT dataset_publication_items_validation_version_check
   CHECK (validation_version IS NULL OR validation_version >= 0);
 
+ALTER TABLE competition.live_points_publication_checkpoints
+  ADD COLUMN validation_version integer;
+
+ALTER TABLE competition.live_points_publication_checkpoints
+  ADD CONSTRAINT live_points_publication_checkpoints_validation_version_check
+  CHECK (validation_version IS NULL OR validation_version >= 0);
+
 -- Application locks and semantic checks are the normal write boundary. Keep a
--- database fence as well so a direct writer cannot replace a payload after it
--- has been marked as validated. Retiring/deleting old rows remains allowed;
--- only an in-place content mutation is rejected.
+-- database fence as well so a direct writer cannot replace or delete a
+-- payload after it has been marked as validated. Retiring a dataset
+-- publication remains allowed; its retired items may then be cascaded away.
 CREATE OR REPLACE FUNCTION ops.prevent_validated_publication_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -66,6 +73,21 @@ BEGIN
       NEW.manifest IS DISTINCT FROM OLD.manifest
     ) THEN
       RAISE EXCEPTION 'validated publication identity is immutable' USING ERRCODE = '55000';
+    ELSIF TG_TABLE_NAME = 'live_points_publication_checkpoints' AND
+      NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
+        NEW.generation IS DISTINCT FROM OLD.generation OR
+        NEW.state IS DISTINCT FROM OLD.state OR
+        NEW.revisions IS DISTINCT FROM OLD.revisions OR
+        NEW.event_live IS DISTINCT FROM OLD.event_live OR
+        NEW.fixtures IS DISTINCT FROM OLD.fixtures OR
+        NEW.event_live_bytes IS DISTINCT FROM OLD.event_live_bytes OR
+        NEW.fixtures_bytes IS DISTINCT FROM OLD.fixtures_bytes OR
+        NEW.event_live_sha256 IS DISTINCT FROM OLD.event_live_sha256 OR
+        NEW.fixtures_sha256 IS DISTINCT FROM OLD.fixtures_sha256 OR
+        NEW.event_live_count IS DISTINCT FROM OLD.event_live_count OR
+        NEW.fixtures_count IS DISTINCT FROM OLD.fixtures_count
+      ) THEN
+      RAISE EXCEPTION 'validated live points checkpoint is immutable' USING ERRCODE = '55000';
     ELSIF TG_TABLE_NAME = 'live_league_checkpoints' AND
       NEW.publication_id IS NOT DISTINCT FROM OLD.publication_id AND (
         NEW.generation IS DISTINCT FROM OLD.generation OR
@@ -84,6 +106,24 @@ BEGIN
       RAISE EXCEPTION 'validated live league checkpoint is immutable' USING ERRCODE = '55000';
     END IF;
   END IF;
+  IF TG_OP = 'DELETE' AND OLD.validation_version >= 1 THEN
+    IF TG_TABLE_NAME = 'dataset_publications' AND OLD.status = 'active' THEN
+      RAISE EXCEPTION 'validated active publication cannot be deleted' USING ERRCODE = '55000';
+    ELSIF TG_TABLE_NAME = 'dataset_publication_items' AND EXISTS (
+      SELECT 1
+      FROM ops.dataset_publications AS publication
+      WHERE publication.publication_id = OLD.publication_id
+        AND publication.status = 'active'
+        AND publication.validation_version >= 1
+    ) THEN
+      RAISE EXCEPTION 'validated active publication item cannot be deleted' USING ERRCODE = '55000';
+    ELSIF TG_TABLE_NAME = 'live_points_publication_checkpoints' THEN
+      RAISE EXCEPTION 'validated live points checkpoint cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
   RETURN NEW;
 END;
 $$;
@@ -98,6 +138,10 @@ CREATE TRIGGER dataset_publications_validation_immutable
 
 CREATE TRIGGER live_league_checkpoints_validation_immutable
   BEFORE UPDATE ON competition.live_league_checkpoints
+  FOR EACH ROW EXECUTE FUNCTION ops.prevent_validated_publication_mutation();
+
+CREATE TRIGGER live_points_publication_checkpoints_validation_immutable
+  BEFORE UPDATE ON competition.live_points_publication_checkpoints
   FOR EACH ROW EXECUTE FUNCTION ops.prevent_validated_publication_mutation();
 
 REVOKE ALL ON FUNCTION ops.prevent_validated_publication_mutation() FROM PUBLIC;

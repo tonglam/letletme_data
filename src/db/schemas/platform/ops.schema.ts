@@ -236,7 +236,7 @@ export const datasetPublicationsInOps = ops.table(
     ),
     check('dataset_publications_manifest_object', sql`jsonb_typeof(manifest) = 'object'::text`),
     check(
-      'dataset_publications_validation_version_nonnegative',
+      'dataset_publications_validation_version_check',
       sql`validation_version IS NULL OR validation_version >= 0`,
     ),
   ],
@@ -271,7 +271,7 @@ export const datasetPublicationItemsInOps = ops.table(
     ),
     check('dataset_publication_items_count_nonnegative', sql`item_count >= 0`),
     check(
-      'dataset_publication_items_validation_version_nonnegative',
+      'dataset_publication_items_validation_version_check',
       sql`validation_version IS NULL OR validation_version >= 0`,
     ),
     check('dataset_publication_items_checksum_nonempty', sql`btrim(checksum) <> ''::text`),

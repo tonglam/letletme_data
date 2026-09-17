@@ -43,6 +43,7 @@ import {
 } from '../repositories/scheduler-lanes';
 
 const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
+export const LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION = 1;
 
 // Keep the complete required scope set for each recently checked event. A
 // global per-scope cap can evict early scopes while a large event is being
@@ -927,6 +928,7 @@ export async function readLivePublicationV2CheckpointMetadata(
         fixturesSha256: livePointsPublicationCheckpointsInCompetition.fixturesSha256,
         eventLiveCount: livePointsPublicationCheckpointsInCompetition.eventLiveCount,
         fixturesCount: livePointsPublicationCheckpointsInCompetition.fixturesCount,
+        validationVersion: livePointsPublicationCheckpointsInCompetition.validationVersion,
       })
       .from(livePointsPublicationCheckpointsInCompetition)
       .where(
@@ -950,6 +952,7 @@ export async function readLivePublicationV2CheckpointMetadata(
     row.eventLiveBytes < 0 ||
     !Number.isSafeInteger(row.fixturesBytes) ||
     row.fixturesBytes < 0 ||
+    row.validationVersion !== LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION ||
     !/^[0-9a-f]{64}$/.test(row.eventLiveSha256) ||
     !/^[0-9a-f]{64}$/.test(row.fixturesSha256) ||
     row.revisions === null ||
@@ -1509,6 +1512,7 @@ export async function checkpointLivePublicationV2(
           fixturesSha256: publication.items.fixtures.sha256,
           eventLiveCount: eventLives.length,
           fixturesCount: fixtures.length,
+          validationVersion: LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION,
         })
         .onConflictDoUpdate({
           target: [
@@ -1532,6 +1536,7 @@ export async function checkpointLivePublicationV2(
             fixturesSha256: sql`excluded.fixtures_sha256`,
             eventLiveCount: sql`excluded.event_live_count`,
             fixturesCount: sql`excluded.fixtures_count`,
+            validationVersion: sql`excluded.validation_version`,
           },
         });
 
