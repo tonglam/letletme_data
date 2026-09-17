@@ -581,6 +581,50 @@ function hasValidEventLiveRows(value: unknown, eventId: number): value is EventL
   );
 }
 
+function hasValidLivePublicationRevisions(value: unknown): value is LivePublicationV2['revisions'] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const revisions = value as Record<string, unknown>;
+  return (
+    ['lifecycle', 'fixtureIdentity', 'scoreCore', 'displayStats', 'explain', 'rules'].every(
+      (name) => {
+        const revision = revisions[name];
+        return (
+          revision !== null &&
+          typeof revision === 'object' &&
+          !Array.isArray(revision) &&
+          typeof (revision as { revision?: unknown }).revision === 'string' &&
+          /^[0-9a-f]{64}$/.test((revision as { revision: string }).revision) &&
+          typeof (revision as { contentUpdatedAt?: unknown }).contentUpdatedAt === 'string' &&
+          Number.isFinite(Date.parse((revision as { contentUpdatedAt: string }).contentUpdatedAt))
+        );
+      },
+    ) && Object.keys(revisions).length === 6
+  );
+}
+
+function hasValidFixtureRows(value: unknown, eventId: number): value is Fixture[] {
+  if (!Array.isArray(value)) return false;
+  if (
+    !value.every(
+      (fixture) =>
+        fixture !== null &&
+        typeof fixture === 'object' &&
+        !Array.isArray(fixture) &&
+        Number.isSafeInteger((fixture as { id?: unknown }).id) &&
+        (fixture as { id: number }).id > 0 &&
+        Number.isSafeInteger((fixture as { teamH?: unknown }).teamH) &&
+        (fixture as { teamH: number }).teamH > 0 &&
+        Number.isSafeInteger((fixture as { teamA?: unknown }).teamA) &&
+        (fixture as { teamA: number }).teamA > 0 &&
+        ((fixture as { event?: unknown }).event === null ||
+          (fixture as { event?: unknown }).event === eventId),
+    )
+  ) {
+    return false;
+  }
+  return new Set(value.map((fixture) => (fixture as { id: number }).id)).size === value.length;
+}
+
 export function livePublicationSeedClaimAllowsCheckpoint(
   persistedClaimId: string | null,
   requestedClaimId: string | undefined,
@@ -1101,7 +1145,13 @@ export async function readLivePublicationV2Checkpoint(
   )[0];
   if (!row || !isLivePublicationState(row.state) || !Number.isSafeInteger(row.generation))
     return null;
-  if (!hasValidEventLiveRows(row.eventLive, eventId) || !Array.isArray(row.fixtures)) return null;
+  if (
+    !hasValidEventLiveRows(row.eventLive, eventId) ||
+    !hasValidFixtureRows(row.fixtures, eventId) ||
+    !hasValidLivePublicationRevisions(row.revisions)
+  ) {
+    return null;
+  }
 
   const eventLivePayload = canonicalJson(row.eventLive);
   const fixturePayload = canonicalJson(row.fixtures);

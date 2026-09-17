@@ -102,6 +102,7 @@ export async function publishCoreSnapshotCache(
       revision: options.revision,
       publicationId: options.publicationId,
       sourceCheckedAt: options.sourceCheckedAt,
+      publishedAt: options.publishedAt,
       freshnessWindowId: options.freshnessWindowId,
       state: 'active',
       items: prepared.items.map((item) => ({
