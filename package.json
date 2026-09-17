@@ -41,6 +41,7 @@
     "db:migrate": "bun scripts/apply-sql-migrations.ts",
     "db:studio": "bunx drizzle-kit studio",
     "db:migration-contract": "bun scripts/migration-login-contract.ts",
+    "db:validate-active-publication-proofs": "bun scripts/validate-active-publication-proofs.ts",
     "db:verify-runtime-logins": "bun scripts/verify-runtime-logins.ts",
     "db:bootstrap-runtime-login": "bun scripts/bootstrap-runtime-login.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",

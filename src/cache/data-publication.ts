@@ -9,6 +9,8 @@ import { redisSingleton } from './singleton';
 export const DATA_CACHE_NAMESPACE = 'llm:data';
 export const DATA_PUBLICATION_STAGING_TTL_MS = 15 * 60 * 1_000;
 export const DATA_PUBLICATION_RETIRED_TTL_MS = 24 * 60 * 60 * 1_000;
+/** Producer-side proof version required by durable publication readers. */
+export const DATA_PUBLICATION_VALIDATION_VERSION = 1;
 
 export function isDataPublicationId(value: unknown): value is string {
   return (
@@ -77,6 +79,8 @@ export interface PublishDataRevisionInput extends DataPublicationScope {
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
+  /** Preserve an immutable canonical timestamp when rebuilding a cache. */
+  readonly publishedAt?: Date;
   readonly lastSuccessfulFetchAt?: Date;
   /** Exact freshness window that requested this publication, when applicable. */
   readonly freshnessWindowId?: number;
@@ -463,7 +467,7 @@ function createManifest(
     ...(freshnessWindowIds === undefined || freshnessWindowIds.length === 0
       ? {}
       : { freshnessWindowIds }),
-    publishedAt: new Date().toISOString(),
+    publishedAt: (input.publishedAt ?? new Date()).toISOString(),
     state: input.state,
     items: items.map((item) => item.manifest),
   };
@@ -783,6 +787,83 @@ export async function readActiveDataPublicationManifest(
     return manifest && assertManifestMatchesScope(manifest, scope) && manifest.items.length > 0
       ? manifest
       : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a control manifest and check that every declared Redis string still
+ * exists with its bounded declared size. Hash validation remains on the
+ * consumer read path; this keeps a frequent reconciler from downloading every
+ * payload while still detecting missing or truncated siblings.
+ */
+export async function readActiveDataPublicationManifestWithItemBounds(
+  scope: DataPublicationScope,
+  redisClient?: Redis,
+): Promise<DataPublicationManifest | null> {
+  const manifest = await readActiveDataPublicationManifest(scope, redisClient);
+  if (!manifest) return null;
+  try {
+    const redis = redisClient ?? (await redisSingleton.getClient());
+    const pipeline = redis.pipeline();
+    for (const item of manifest.items) {
+      pipeline.exists(item.key);
+      pipeline.strlen(item.key);
+    }
+    const results = await pipeline.exec();
+    if (!results || results.length !== manifest.items.length * 2) return null;
+    for (let index = 0; index < manifest.items.length; index += 1) {
+      const exists = results[index * 2];
+      const length = results[index * 2 + 1];
+      if (
+        !exists ||
+        exists[0] ||
+        Number(exists[1]) !== 1 ||
+        !length ||
+        length[0] ||
+        Number(length[1]) !== manifest.items[index].bytes
+      ) {
+        return null;
+      }
+    }
+    return manifest;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one bounded item from the active publication. Control-plane callers
+ * should use this when they need a small semantic input (for example the
+ * current event fixtures) without downloading every sibling payload.
+ */
+export async function readActiveDataPublicationItem(
+  scope: DataPublicationScope,
+  itemName: string,
+  redisClient?: Redis,
+): Promise<DataPublicationReadResult | null> {
+  assertScope(scope);
+  if (!/^[a-z][a-zA-Z0-9]*$/.test(itemName)) return null;
+  try {
+    const redis = redisClient ?? (await redisSingleton.getClient());
+    const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
+    if (!manifest || !assertManifestMatchesScope(manifest, scope) || manifest.items.length === 0) {
+      return null;
+    }
+    const item = manifest.items.find((candidate) => candidate.name === itemName);
+    if (!item) return null;
+    const payload = await redis.get(item.key);
+    if (
+      payload === null ||
+      Buffer.byteLength(payload, 'utf8') !== item.bytes ||
+      sha256(payload) !== item.sha256
+    ) {
+      return null;
+    }
+    const parsed = JSON.parse(payload) as unknown;
+    if (itemCount(parsed) !== item.count) return null;
+    return { manifest, items: { [itemName]: parsed } };
   } catch {
     return null;
   }

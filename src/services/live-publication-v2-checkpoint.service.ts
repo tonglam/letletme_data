@@ -23,7 +23,10 @@ import { createEventLiveRepository } from '../repositories/event-lives';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
 import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
 import { CORE_SNAPSHOT_WRITE_LOCK_KEY } from './core-snapshot-persistence.service';
-import { listRequiredLiveLeagueFinalCheckpointScopesV2 } from './live-league-checkpoint-v2.service';
+import {
+  listRequiredLiveLeagueFinalCheckpointScopesV2,
+  LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION,
+} from './live-league-checkpoint-v2.service';
 import { hasFinalLiveMatchCheckpointsV3 } from './live-match-v3-checkpoint.service';
 import { refreshPlayerSeasonSummaries } from './player-season-summaries.service';
 import {
@@ -32,7 +35,6 @@ import {
   type LivePublicationV2,
   type LivePublicationState,
 } from '../cache/live-publication-v2';
-import { validateLiveLeaguePublicationV2Checkpoint } from '../cache/live-league-publication-v2';
 import { canonicalJson, contentHash } from '../utils/content-hash';
 import { logDebug, logError } from '../utils/logger';
 import {
@@ -41,6 +43,7 @@ import {
 } from '../repositories/scheduler-lanes';
 
 const LIVE_FINAL_CHECKPOINT_VALIDATION_CACHE_LIMIT = 128;
+export const LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION = 1;
 
 // Keep the complete required scope set for each recently checked event. A
 // global per-scope cap can evict early scopes while a large event is being
@@ -114,9 +117,9 @@ const rememberFinalCheckpointValidation = (
 };
 
 /**
- * State columns are only a cheap fence. Validate every active tournament's
- * FINALIZED league checkpoint with the same self-contained contract used by
- * readers before treating the event as durably complete.
+ * FINALIZED league checkpoints are authenticated at the producer write
+ * boundary. The control path reads only their identity and proof version;
+ * payload validation remains on the explicit delivery/repair path.
  */
 export async function hasFinalLiveLeagueCheckpointsV2(
   season: FplSeasonRef,
@@ -136,6 +139,7 @@ export async function hasFinalLiveLeagueCheckpointsV2(
       rowCount: liveLeagueCheckpointsInCompetition.rowCount,
       payloadBytes: liveLeagueCheckpointsInCompetition.payloadBytes,
       payloadSha256: liveLeagueCheckpointsInCompetition.payloadSha256,
+      validationVersion: liveLeagueCheckpointsInCompetition.validationVersion,
       checkpointedAt: liveLeagueCheckpointsInCompetition.checkpointedAt,
     })
     .from(liveLeagueCheckpointsInCompetition)
@@ -179,57 +183,14 @@ export async function hasFinalLiveLeagueCheckpointsV2(
     const scopeKey = `${scope.tournamentId}:${scope.scope}`;
     const identity = canonicalJson(metadataRow);
     const cached = eventCache.entries.get(scopeKey);
-    if (
-      cached?.identity === identity &&
-      Date.now() - cached.validatedAtMs < LIVE_FINAL_CHECKPOINT_VALIDATION_RECHECK_MS
-    )
-      continue;
+    if (cached?.identity === identity) continue;
     eventCache.entries.delete(scopeKey);
-    const [row] = await db
-      .select()
-      .from(liveLeagueCheckpointsInCompetition)
-      .where(
-        and(
-          eq(liveLeagueCheckpointsInCompetition.seasonId, season.seasonId),
-          eq(liveLeagueCheckpointsInCompetition.eventId, eventId),
-          eq(liveLeagueCheckpointsInCompetition.tournamentId, scope.tournamentId),
-          eq(liveLeagueCheckpointsInCompetition.scopeKind, scope.scope),
-        ),
-      );
-    // A concurrent replacement must be retried, never cached under the old identity.
+    // Historical rows have proof version zero. Do not turn a completion
+    // check into a full JSON download or silently backfill old data; the
+    // producer must write a fresh, validated successor first.
     if (
-      !row ||
-      row.state !== 'FINALIZED' ||
-      canonicalJson({
-        tournamentId: row.tournamentId,
-        scopeKind: row.scopeKind,
-        state: row.state,
-        publicationId: row.publicationId,
-        generation: row.generation,
-        rowCount: row.rowCount,
-        payloadBytes: row.payloadBytes,
-        payloadSha256: row.payloadSha256,
-        checkpointedAt: row.checkpointedAt,
-      }) !== identity ||
-      !validateLiveLeaguePublicationV2Checkpoint(
-        {
-          season: season.seasonCode,
-          eventId,
-          tournamentId: scope.tournamentId,
-          scope: scope.scope,
-        },
-        row.manifest,
-        row.indexPayload,
-        row.payload,
-        {
-          publicationId: row.publicationId,
-          generation: row.generation,
-          state: row.state,
-          rowCount: row.rowCount,
-          payloadBytes: row.payloadBytes,
-          payloadSha256: row.payloadSha256,
-        },
-      )
+      metadataRow.state !== 'FINALIZED' ||
+      metadataRow.validationVersion !== LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION
     )
       return false;
     eventCache.entries.set(scopeKey, { identity, validatedAtMs: Date.now() });
@@ -599,6 +560,71 @@ function isLivePublicationState(value: unknown): value is LivePublicationState {
   );
 }
 
+function hasValidEventLiveRows(value: unknown, eventId: number): value is EventLive[] {
+  if (!Array.isArray(value)) return false;
+  if (
+    !value.every(
+      (row) =>
+        row !== null &&
+        typeof row === 'object' &&
+        Number.isSafeInteger((row as { eventId?: unknown }).eventId) &&
+        (row as { eventId: number }).eventId === eventId &&
+        Number.isSafeInteger((row as { elementId?: unknown }).elementId) &&
+        (row as { elementId: number }).elementId > 0 &&
+        Number.isSafeInteger((row as { totalPoints?: unknown }).totalPoints),
+    )
+  ) {
+    return false;
+  }
+  return (
+    new Set(value.map((row) => (row as { elementId: number }).elementId)).size === value.length
+  );
+}
+
+function hasValidLivePublicationRevisions(value: unknown): value is LivePublicationV2['revisions'] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const revisions = value as Record<string, unknown>;
+  return (
+    ['lifecycle', 'fixtureIdentity', 'scoreCore', 'displayStats', 'explain', 'rules'].every(
+      (name) => {
+        const revision = revisions[name];
+        return (
+          revision !== null &&
+          typeof revision === 'object' &&
+          !Array.isArray(revision) &&
+          typeof (revision as { revision?: unknown }).revision === 'string' &&
+          /^[0-9a-f]{64}$/.test((revision as { revision: string }).revision) &&
+          typeof (revision as { contentUpdatedAt?: unknown }).contentUpdatedAt === 'string' &&
+          Number.isFinite(Date.parse((revision as { contentUpdatedAt: string }).contentUpdatedAt))
+        );
+      },
+    ) && Object.keys(revisions).length === 6
+  );
+}
+
+function hasValidFixtureRows(value: unknown, eventId: number): value is Fixture[] {
+  if (!Array.isArray(value)) return false;
+  if (
+    !value.every(
+      (fixture) =>
+        fixture !== null &&
+        typeof fixture === 'object' &&
+        !Array.isArray(fixture) &&
+        Number.isSafeInteger((fixture as { id?: unknown }).id) &&
+        (fixture as { id: number }).id > 0 &&
+        Number.isSafeInteger((fixture as { teamH?: unknown }).teamH) &&
+        (fixture as { teamH: number }).teamH > 0 &&
+        Number.isSafeInteger((fixture as { teamA?: unknown }).teamA) &&
+        (fixture as { teamA: number }).teamA > 0 &&
+        ((fixture as { event?: unknown }).event === null ||
+          (fixture as { event?: unknown }).event === eventId),
+    )
+  ) {
+    return false;
+  }
+  return new Set(value.map((fixture) => (fixture as { id: number }).id)).size === value.length;
+}
+
 export function livePublicationSeedClaimAllowsCheckpoint(
   persistedClaimId: string | null,
   requestedClaimId: string | undefined,
@@ -939,6 +965,162 @@ export async function reclaimAbandonedPromotedLivePublicationV2SeedClaim(
 }
 
 /**
+ * Read only the durable Live Points identity and bounded proof columns. This
+ * is for readiness and other control paths; serving callers must continue to
+ * use readLivePublicationV2Checkpoint so the stored payload is checked before
+ * it is consumed.
+ */
+export async function readLivePublicationV2CheckpointMetadata(
+  season: FplSeasonRef,
+  eventId: number,
+  dbInstance?: DbOrTransaction,
+): Promise<Pick<LivePublicationRead, 'publication' | 'servedFrom'> | null> {
+  const db = dbInstance ?? (await getDb());
+  const row = (
+    await db
+      .select({
+        publicationId: livePointsPublicationCheckpointsInCompetition.publicationId,
+        generation: livePointsPublicationCheckpointsInCompetition.generation,
+        state: livePointsPublicationCheckpointsInCompetition.state,
+        sourceCheckedAt: livePointsPublicationCheckpointsInCompetition.sourceCheckedAt,
+        publishedAt: livePointsPublicationCheckpointsInCompetition.publishedAt,
+        checkpointedAt: livePointsPublicationCheckpointsInCompetition.checkpointedAt,
+        expectedNextCheckAt: livePointsPublicationCheckpointsInCompetition.expectedNextCheckAt,
+        revisions: livePointsPublicationCheckpointsInCompetition.revisions,
+        eventLiveBytes: livePointsPublicationCheckpointsInCompetition.eventLiveBytes,
+        fixturesBytes: livePointsPublicationCheckpointsInCompetition.fixturesBytes,
+        eventLiveSha256: livePointsPublicationCheckpointsInCompetition.eventLiveSha256,
+        fixturesSha256: livePointsPublicationCheckpointsInCompetition.fixturesSha256,
+        eventLiveCount: livePointsPublicationCheckpointsInCompetition.eventLiveCount,
+        fixturesCount: livePointsPublicationCheckpointsInCompetition.fixturesCount,
+        validationVersion: livePointsPublicationCheckpointsInCompetition.validationVersion,
+      })
+      .from(livePointsPublicationCheckpointsInCompetition)
+      .where(
+        and(
+          eq(livePointsPublicationCheckpointsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationCheckpointsInCompetition.eventId, eventId),
+        ),
+      )
+      .limit(1)
+  )[0];
+  if (
+    !row ||
+    !isLivePublicationState(row.state) ||
+    !Number.isSafeInteger(row.generation) ||
+    row.generation <= 0 ||
+    !Number.isSafeInteger(row.eventLiveCount) ||
+    row.eventLiveCount < 0 ||
+    !Number.isSafeInteger(row.fixturesCount) ||
+    row.fixturesCount < 0 ||
+    !Number.isSafeInteger(row.eventLiveBytes) ||
+    row.eventLiveBytes < 0 ||
+    !Number.isSafeInteger(row.fixturesBytes) ||
+    row.fixturesBytes < 0 ||
+    row.validationVersion !== LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION ||
+    !/^[0-9a-f]{64}$/.test(row.eventLiveSha256) ||
+    !/^[0-9a-f]{64}$/.test(row.fixturesSha256) ||
+    row.revisions === null ||
+    typeof row.revisions !== 'object' ||
+    Array.isArray(row.revisions)
+  ) {
+    return null;
+  }
+  return {
+    publication: {
+      contractVersion: 'live-points-v2',
+      publicationId: row.publicationId,
+      generation: row.generation,
+      season: season.seasonCode,
+      eventId,
+      state: row.state,
+      sourceCheckedAt: row.sourceCheckedAt.toISOString(),
+      publishedAt: row.publishedAt.toISOString(),
+      checkpointedAt: row.checkpointedAt.toISOString(),
+      expectedNextCheckAt: row.expectedNextCheckAt?.toISOString() ?? null,
+      revisions: row.revisions as LivePublicationV2['revisions'],
+      items: {
+        eventLive: {
+          name: 'eventLive',
+          key: liveV2ItemKey({ season: season.seasonCode, eventId }, row.generation, 'eventLive'),
+          type: 'string',
+          count: row.eventLiveCount,
+          bytes: row.eventLiveBytes,
+          sha256: row.eventLiveSha256,
+        },
+        fixtures: {
+          name: 'fixtures',
+          key: liveV2ItemKey({ season: season.seasonCode, eventId }, row.generation, 'fixtures'),
+          type: 'string',
+          count: row.fixturesCount,
+          bytes: row.fixturesBytes,
+          sha256: row.fixturesSha256,
+        },
+      },
+    },
+    servedFrom: 'POSTGRES_CHECKPOINT',
+  };
+}
+
+/**
+ * Validate one explicitly requested durable checkpoint and persist its proof.
+ * Rollout callers use this only for the current seed scope; it never scans
+ * historical events or turns the readiness path into a payload reader.
+ */
+export async function validateAndMarkLivePublicationV2Checkpoint(
+  season: FplSeasonRef,
+  eventId: number,
+  expected?: Readonly<{ publicationId?: string; generation?: number }>,
+): Promise<LivePublicationRead | null> {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const locked = (
+      await tx
+        .select({
+          publicationId: livePointsPublicationCheckpointsInCompetition.publicationId,
+          generation: livePointsPublicationCheckpointsInCompetition.generation,
+        })
+        .from(livePointsPublicationCheckpointsInCompetition)
+        .where(
+          and(
+            eq(livePointsPublicationCheckpointsInCompetition.seasonId, season.seasonId),
+            eq(livePointsPublicationCheckpointsInCompetition.eventId, eventId),
+          ),
+        )
+        .for('update')
+        .limit(1)
+    )[0];
+    if (!locked) return null;
+    if (
+      (expected?.publicationId !== undefined && locked.publicationId !== expected.publicationId) ||
+      (expected?.generation !== undefined && locked.generation !== expected.generation)
+    ) {
+      return null;
+    }
+
+    const checkpoint = await readLivePublicationV2Checkpoint(season, eventId, tx);
+    if (
+      !checkpoint ||
+      checkpoint.publication.publicationId !== locked.publicationId ||
+      checkpoint.publication.generation !== locked.generation
+    ) {
+      return null;
+    }
+
+    await tx
+      .update(livePointsPublicationCheckpointsInCompetition)
+      .set({ validationVersion: LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION })
+      .where(
+        and(
+          eq(livePointsPublicationCheckpointsInCompetition.seasonId, season.seasonId),
+          eq(livePointsPublicationCheckpointsInCompetition.eventId, eventId),
+        ),
+      );
+    return checkpoint;
+  });
+}
+
+/**
  * PostgreSQL is the cold fallback only.  It returns the same complete
  * publication shape as Redis and validates the stored byte/hash/count proof
  * before exposing it to a caller.
@@ -963,7 +1145,13 @@ export async function readLivePublicationV2Checkpoint(
   )[0];
   if (!row || !isLivePublicationState(row.state) || !Number.isSafeInteger(row.generation))
     return null;
-  if (!Array.isArray(row.eventLive) || !Array.isArray(row.fixtures)) return null;
+  if (
+    !hasValidEventLiveRows(row.eventLive, eventId) ||
+    !hasValidFixtureRows(row.fixtures, eventId) ||
+    !hasValidLivePublicationRevisions(row.revisions)
+  ) {
+    return null;
+  }
 
   const eventLivePayload = canonicalJson(row.eventLive);
   const fixturePayload = canonicalJson(row.fixtures);
@@ -1453,6 +1641,7 @@ export async function checkpointLivePublicationV2(
           fixturesSha256: publication.items.fixtures.sha256,
           eventLiveCount: eventLives.length,
           fixturesCount: fixtures.length,
+          validationVersion: LIVE_POINTS_PUBLICATION_CHECKPOINT_VALIDATION_VERSION,
         })
         .onConflictDoUpdate({
           target: [
@@ -1476,6 +1665,7 @@ export async function checkpointLivePublicationV2(
             fixturesSha256: sql`excluded.fixtures_sha256`,
             eventLiveCount: sql`excluded.event_live_count`,
             fixturesCount: sql`excluded.fixtures_count`,
+            validationVersion: sql`excluded.validation_version`,
           },
         });
 

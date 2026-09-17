@@ -22,6 +22,8 @@ import { logError } from '../utils/logger';
 import { mapWithConcurrency } from '../utils/async';
 import type { FplSeasonRef } from '../domain/fpl-season';
 
+export const LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION = 1;
+
 const CHECKPOINT_INTERVAL_MS = 10 * 60_000;
 
 function seasonIdFromCode(season: string): number {
@@ -421,36 +423,6 @@ export function isSafeFinalizedClassicRosterExpansion(
   }
 }
 
-function storedFinalizedCheckpointIsValid(
-  scope: LeagueLiveScope,
-  current: {
-    readonly publicationId: string;
-    readonly generation: number;
-    readonly state: string;
-    readonly manifest: unknown;
-    readonly indexPayload: unknown;
-    readonly payload: unknown;
-    readonly rowCount: number;
-    readonly payloadBytes: number;
-    readonly payloadSha256: string;
-  },
-): boolean {
-  return validateLiveLeaguePublicationV2Checkpoint(
-    scope,
-    current.manifest,
-    current.indexPayload,
-    current.payload,
-    {
-      publicationId: current.publicationId,
-      generation: current.generation,
-      state: current.state,
-      rowCount: current.rowCount,
-      payloadBytes: current.payloadBytes,
-      payloadSha256: current.payloadSha256,
-    },
-  );
-}
-
 /** Persist one self-contained latest publication without blocking its Redis promotion. */
 export type LiveLeagueCheckpointOptions = Readonly<{
   /** Observe database failures so callers can preserve retryable classification. */
@@ -502,10 +474,9 @@ export async function checkpointLiveLeaguePublicationV2(
           state: liveLeagueCheckpointsInCompetition.state,
           manifest: liveLeagueCheckpointsInCompetition.manifest,
           rowCount: liveLeagueCheckpointsInCompetition.rowCount,
-          indexPayload: liveLeagueCheckpointsInCompetition.indexPayload,
-          payload: liveLeagueCheckpointsInCompetition.payload,
           payloadBytes: liveLeagueCheckpointsInCompetition.payloadBytes,
           payloadSha256: liveLeagueCheckpointsInCompetition.payloadSha256,
+          validationVersion: liveLeagueCheckpointsInCompetition.validationVersion,
         })
         .from(liveLeagueCheckpointsInCompetition)
         .where(
@@ -522,8 +493,57 @@ export async function checkpointLiveLeaguePublicationV2(
       const current = existing[0];
       let currentIsInvalidFinalized = false;
       let allowFinalizedRosterExpansion = false;
+      const loadCurrentPayload = async () => {
+        const rows = await tx
+          .select({
+            state: liveLeagueCheckpointsInCompetition.state,
+            manifest: liveLeagueCheckpointsInCompetition.manifest,
+            rowCount: liveLeagueCheckpointsInCompetition.rowCount,
+            indexPayload: liveLeagueCheckpointsInCompetition.indexPayload,
+            payload: liveLeagueCheckpointsInCompetition.payload,
+          })
+          .from(liveLeagueCheckpointsInCompetition)
+          .where(
+            and(
+              eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
+              eq(liveLeagueCheckpointsInCompetition.eventId, read.publication.eventId),
+              eq(liveLeagueCheckpointsInCompetition.tournamentId, read.publication.tournamentId),
+              eq(liveLeagueCheckpointsInCompetition.scopeKind, read.publication.scope),
+            ),
+          )
+          .limit(1);
+        return rows[0] ?? null;
+      };
       if (current && current.state === 'FINALIZED') {
-        const currentIsValidFinalized = storedFinalizedCheckpointIsValid(scope, current);
+        let currentIsValidFinalized =
+          current.validationVersion === LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION;
+        if (!currentIsValidFinalized) {
+          // Legacy FINAL rows have no proof marker yet. Validate the complete
+          // durable row under the scope lock before allowing a successor; a
+          // valid row is upgraded in place, while a corrupt row remains
+          // repairable only through the existing validated successor path.
+          const legacyFinal = await readLiveLeagueCheckpointV2(scope, tx);
+          if (
+            legacyFinal?.publication.publicationId === current.publicationId &&
+            legacyFinal.publication.generation === Number(current.generation)
+          ) {
+            await tx
+              .update(liveLeagueCheckpointsInCompetition)
+              .set({ validationVersion: LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION })
+              .where(
+                and(
+                  eq(liveLeagueCheckpointsInCompetition.seasonId, seasonId),
+                  eq(liveLeagueCheckpointsInCompetition.eventId, read.publication.eventId),
+                  eq(
+                    liveLeagueCheckpointsInCompetition.tournamentId,
+                    read.publication.tournamentId,
+                  ),
+                  eq(liveLeagueCheckpointsInCompetition.scopeKind, read.publication.scope),
+                ),
+              );
+            currentIsValidFinalized = true;
+          }
+        }
         // FINALIZED remains a fence against provisional data, stale
         // generations, and same-generation identity conflicts. A Redis
         // rebuild may nevertheless create a newer complete FINAL publication
@@ -551,12 +571,21 @@ export async function checkpointLiveLeaguePublicationV2(
           currentGeneration === candidateGeneration
         ) {
           // FINALIZED retries are common after the Redis marker is written.
-          // Treat an exact identity replay as idempotent and avoid rewriting
-          // the complete JSONB checkpoint payload.
-          return true;
+          // Treat a byte-identical identity replay as idempotent and avoid
+          // rewriting the complete JSONB checkpoint payload. A caller that
+          // reuses the identity for different content must be rejected rather
+          // than silently retaining the old proof.
+          return (
+            sameFinalizedPublicationContent(read, current) &&
+            current.payloadBytes === values.payloadBytes &&
+            current.payloadSha256 === values.payloadSha256
+          );
         }
         if (currentIsValidFinalized && !sameFinalizedPublicationContent(read, current)) {
-          allowFinalizedRosterExpansion = isSafeFinalizedClassicRosterExpansion(read, current);
+          const currentPayload = await loadCurrentPayload();
+          allowFinalizedRosterExpansion = Boolean(
+            currentPayload && isSafeFinalizedClassicRosterExpansion(read, currentPayload),
+          );
           if (!allowFinalizedRosterExpansion) return false;
         }
         if (!currentIsValidFinalized) {
@@ -608,6 +637,7 @@ export async function checkpointLiveLeaguePublicationV2(
           rowCount: values.rowCount,
           payloadBytes: values.payloadBytes,
           payloadSha256: values.payloadSha256,
+          validationVersion: LIVE_LEAGUE_CHECKPOINT_VALIDATION_VERSION,
           sourceCheckedAt: values.sourceCheckedAt,
           contentUpdatedAt: values.contentUpdatedAt,
           publishedAt: values.publishedAt,
@@ -632,6 +662,7 @@ export async function checkpointLiveLeaguePublicationV2(
             rowCount: sql`excluded.row_count`,
             payloadBytes: sql`excluded.payload_bytes`,
             payloadSha256: sql`excluded.payload_sha256`,
+            validationVersion: sql`excluded.validation_version`,
             sourceCheckedAt: sql`excluded.source_checked_at`,
             contentUpdatedAt: sql`excluded.content_updated_at`,
             publishedAt: sql`excluded.published_at`,

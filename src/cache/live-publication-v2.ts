@@ -1974,6 +1974,20 @@ export async function readLivePublicationV2(
   );
 }
 
+/** Read only the active/previous publication manifest for control paths. */
+export async function readLivePublicationV2Manifest(
+  scope: LiveScope,
+  redisClient?: Redis,
+): Promise<LivePublicationV2 | null> {
+  assertSeasonEvent(scope);
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  for (const pointer of ['active', 'previous'] as const) {
+    const publication = parseLiveManifest(await redis.get(liveV2Key(scope, pointer)), scope);
+    if (publication) return publication;
+  }
+  return null;
+}
+
 /** Preserve the exact active bytes for cutover eligibility and Lua CAS. */
 export async function readLivePublicationV2ActiveRaw(
   scope: LiveScope,

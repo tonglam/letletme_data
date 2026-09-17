@@ -189,6 +189,7 @@ async function main(): Promise<void> {
       revision: publication.revision,
       publicationId: publication.publicationId,
       sourceCheckedAt: new Date(canonicalManifest.sourceCheckedAt),
+      publishedAt: new Date(canonicalManifest.publishedAt),
       afterStage: async (candidate) => {
         assertCoreCacheRebuildCandidate(canonicalManifest, candidate);
       },
@@ -223,22 +224,8 @@ async function main(): Promise<void> {
     throw new Error('Published core cache failed its exact read-back verification');
   }
 
-  const persistedManifest = await db
-    .update(datasetPublicationsInOps)
-    .set({ manifest: verified.manifest, updatedAt: new Date() })
-    .where(
-      and(
-        eq(datasetPublicationsInOps.publicationId, publication.publicationId),
-        eq(datasetPublicationsInOps.status, 'active'),
-        eq(datasetPublicationsInOps.dataset, 'fpl:core'),
-        eq(datasetPublicationsInOps.seasonId, season.seasonId),
-        isNull(datasetPublicationsInOps.eventId),
-      ),
-    )
-    .returning({ publicationId: datasetPublicationsInOps.publicationId });
-  if (persistedManifest.length !== 1) {
-    throw new Error('Canonical core manifest could not be persisted to PostgreSQL');
-  }
+  // The PostgreSQL manifest is the immutable canonical identity. Rebuild Redis
+  // with its timestamp so the next deploy can reuse the exact same proof.
 
   console.log(
     JSON.stringify(

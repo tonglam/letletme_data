@@ -30,11 +30,13 @@ import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   isDataPublicationId,
   parseDataPublicationManifest,
+  DATA_PUBLICATION_VALIDATION_VERSION,
   type DataPublicationDataset,
   type DataPublicationManifest,
 } from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
+import { canonicalJson, contentHash } from '../utils/content-hash';
 
 export type SyncRunStatus =
   | 'pending'
@@ -207,6 +209,12 @@ const SYNC_BATCH_COST_RESOURCE_TYPE = 'batch-cost';
 
 function nullableValue<T>(value: T | undefined): T | null {
   return value ?? null;
+}
+
+function publicationItemCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (value !== null && typeof value === 'object') return Object.keys(value).length;
+  return value === null || value === undefined ? 0 : 1;
 }
 
 function assertPublicationManifest(
@@ -1968,28 +1976,96 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         );
       }
       const db = await getDbInstance();
-      await db
-        .insert(datasetPublicationItemsInOps)
-        .values(
-          items.map((item) => ({
-            publicationId,
-            itemName: item.name,
-            payload: item.payload,
-            itemCount: item.count,
-            checksum: item.checksum,
-          })),
-        )
-        .onConflictDoUpdate({
-          target: [
-            datasetPublicationItemsInOps.publicationId,
-            datasetPublicationItemsInOps.itemName,
-          ],
-          set: {
-            payload: sql`excluded.payload`,
-            itemCount: sql`excluded.item_count`,
-            checksum: sql`excluded.checksum`,
-          },
-        });
+      await db.transaction(async (tx) => {
+        const publicationRows = await tx
+          .select({
+            status: datasetPublicationsInOps.status,
+          })
+          .from(datasetPublicationsInOps)
+          .where(eq(datasetPublicationsInOps.publicationId, publicationId))
+          .for('update');
+        const publication = publicationRows[0];
+        if (!publication) {
+          throw new DatabaseError(
+            'Dataset publication does not exist',
+            'DATASET_PUBLICATION_NOT_FOUND',
+          );
+        }
+        if (publication.status !== 'staging') {
+          throw new DatabaseError(
+            `Dataset publication cannot stage items from ${publication.status}`,
+            'DATASET_PUBLICATION_STATE_CONFLICT',
+          );
+        }
+        const existingRows = await tx
+          .select({
+            itemName: datasetPublicationItemsInOps.itemName,
+            itemCount: datasetPublicationItemsInOps.itemCount,
+            checksum: datasetPublicationItemsInOps.checksum,
+            validationVersion: datasetPublicationItemsInOps.validationVersion,
+          })
+          .from(datasetPublicationItemsInOps)
+          .where(eq(datasetPublicationItemsInOps.publicationId, publicationId))
+          .for('update');
+        const existingByName = new Map(existingRows.map((row) => [row.itemName, row]));
+
+        for (const item of items) {
+          let expectedCount: number;
+          let expectedChecksum: string;
+          try {
+            expectedCount = publicationItemCount(item.payload);
+            expectedChecksum = contentHash(item.payload);
+          } catch {
+            throw new DatabaseError(
+              'Publication item payload is not JSON serializable',
+              'DATASET_PUBLICATION_ITEM_PROOF_INVALID',
+            );
+          }
+          if (expectedCount !== item.count || expectedChecksum !== item.checksum) {
+            throw new DatabaseError(
+              `Publication item proof is invalid for ${item.name}`,
+              'DATASET_PUBLICATION_ITEM_PROOF_INVALID',
+            );
+          }
+
+          const existing = existingByName.get(item.name);
+          if (existing?.validationVersion === DATA_PUBLICATION_VALIDATION_VERSION) {
+            if (existing.itemCount !== item.count || existing.checksum !== item.checksum) {
+              throw new DatabaseError(
+                `Publication item ${item.name} is immutable after validation`,
+                'DATASET_PUBLICATION_ITEM_IMMUTABLE',
+              );
+            }
+            continue;
+          }
+
+          if (existing) {
+            await tx
+              .update(datasetPublicationItemsInOps)
+              .set({
+                payload: item.payload,
+                itemCount: item.count,
+                checksum: item.checksum,
+                validationVersion: DATA_PUBLICATION_VALIDATION_VERSION,
+              })
+              .where(
+                and(
+                  eq(datasetPublicationItemsInOps.publicationId, publicationId),
+                  eq(datasetPublicationItemsInOps.itemName, item.name),
+                ),
+              );
+          } else {
+            await tx.insert(datasetPublicationItemsInOps).values({
+              publicationId,
+              itemName: item.name,
+              payload: item.payload,
+              itemCount: item.count,
+              checksum: item.checksum,
+              validationVersion: DATA_PUBLICATION_VALIDATION_VERSION,
+            });
+          }
+        }
+      });
     },
 
     assertPublicationItemsComplete: async (
@@ -2002,6 +2078,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           itemName: datasetPublicationItemsInOps.itemName,
           itemCount: datasetPublicationItemsInOps.itemCount,
           checksum: datasetPublicationItemsInOps.checksum,
+          validationVersion: datasetPublicationItemsInOps.validationVersion,
         })
         .from(datasetPublicationItemsInOps)
         .where(eq(datasetPublicationItemsInOps.publicationId, publicationId));
@@ -2013,7 +2090,8 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
               (row) =>
                 row.itemName === item.name &&
                 row.itemCount === item.count &&
-                row.checksum === item.checksum,
+                row.checksum === item.checksum &&
+                row.validationVersion === DATA_PUBLICATION_VALIDATION_VERSION,
             ),
         )
       ) {
@@ -2052,7 +2130,9 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             seasonId: datasetPublicationsInOps.seasonId,
             eventId: datasetPublicationsInOps.eventId,
             revision: datasetPublicationsInOps.revision,
+            manifest: datasetPublicationsInOps.manifest,
             sourceRunId: datasetPublicationsInOps.sourceRunId,
+            validationVersion: datasetPublicationsInOps.validationVersion,
           })
           .from(datasetPublicationsInOps)
           .where(eq(datasetPublicationsInOps.publicationId, input.publicationId))
@@ -2088,37 +2168,89 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           eventId: input.eventId,
           revision: targetRow.revision,
         });
+        if (
+          targetRow.validationVersion === DATA_PUBLICATION_VALIDATION_VERSION &&
+          canonicalJson(targetRow.manifest) !== canonicalJson(input.manifest)
+        ) {
+          throw new DatabaseError(
+            'Validated publication identity cannot replace its manifest',
+            'DATASET_PUBLICATION_IMMUTABLE',
+          );
+        }
 
         const itemRows = await tx
           .select({
             itemName: datasetPublicationItemsInOps.itemName,
+            payload: datasetPublicationItemsInOps.payload,
             itemCount: datasetPublicationItemsInOps.itemCount,
             checksum: datasetPublicationItemsInOps.checksum,
+            validationVersion: datasetPublicationItemsInOps.validationVersion,
           })
           .from(datasetPublicationItemsInOps)
           .where(eq(datasetPublicationItemsInOps.publicationId, input.publicationId));
         const manifestItems = input.manifest.items;
-        // New production publication paths always provide an outbox receipt;
-        // those paths must prove every immutable payload before DB activation.
-        // Keep the no-outbox form compatible with legacy repair/import callers
-        // while they are migrated to the durable delivery contract.
-        if (input.outbox) {
-          if (
-            itemRows.length !== manifestItems.length ||
-            manifestItems.some(
-              (item) =>
-                !itemRows.some(
-                  (row) =>
-                    row.itemName === item.name &&
-                    row.itemCount === item.count &&
-                    row.checksum === item.sha256,
+        if (
+          itemRows.length !== manifestItems.length ||
+          manifestItems.some(
+            (item) =>
+              !itemRows.some(
+                (row) =>
+                  row.itemName === item.name &&
+                  row.itemCount === item.count &&
+                  row.checksum === item.sha256,
+              ),
+          )
+        ) {
+          throw new DatabaseError(
+            `${input.dataset} publication item proof is incomplete`,
+            'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
+          );
+        }
+
+        // A deployment can resume a publication staged by an older release
+        // whose nullable proof columns are still empty.  Upgrade that one
+        // bounded staging scope while it is locked, and only then activate it;
+        // otherwise the activation would create a parent proof over unproved
+        // item rows and the next metadata-only reader would fail closed.
+        if (itemRows.some((row) => row.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION)) {
+          for (const item of manifestItems) {
+            const row = itemRows.find((candidate) => candidate.itemName === item.name);
+            if (!row) {
+              throw new DatabaseError(
+                `${input.dataset} publication item proof is incomplete`,
+                'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
+              );
+            }
+            let serializedPayload: string;
+            try {
+              serializedPayload = canonicalJson(row.payload);
+            } catch {
+              throw new DatabaseError(
+                `Publication item ${item.name} payload is not JSON serializable`,
+                'DATASET_PUBLICATION_ITEM_PROOF_INVALID',
+              );
+            }
+            if (
+              publicationItemCount(row.payload) !== item.count ||
+              row.itemCount !== item.count ||
+              Buffer.byteLength(serializedPayload, 'utf8') !== item.bytes ||
+              row.checksum !== item.sha256 ||
+              contentHash(row.payload) !== item.sha256
+            ) {
+              throw new DatabaseError(
+                `Publication item ${item.name} proof is invalid`,
+                'DATASET_PUBLICATION_ITEM_PROOF_INVALID',
+              );
+            }
+            await tx
+              .update(datasetPublicationItemsInOps)
+              .set({ validationVersion: DATA_PUBLICATION_VALIDATION_VERSION })
+              .where(
+                and(
+                  eq(datasetPublicationItemsInOps.publicationId, input.publicationId),
+                  eq(datasetPublicationItemsInOps.itemName, item.name),
                 ),
-            )
-          ) {
-            throw new DatabaseError(
-              `${input.dataset} publication item proof is incomplete`,
-              'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
-            );
+              );
           }
         }
 
@@ -2228,6 +2360,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           .set({
             status: 'active',
             manifest: input.manifest,
+            validationVersion: DATA_PUBLICATION_VALIDATION_VERSION,
             activatedAt: sql`clock_timestamp()`,
             retiredAt: null,
             expiresAt: null,

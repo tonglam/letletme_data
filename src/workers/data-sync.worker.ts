@@ -539,7 +539,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
               });
               if (
                 active?.manifest.publicationId !== marketPublication.publicationId ||
-                active.manifest.revision !== marketPublication.revision
+                active?.manifest.revision !== marketPublication.revision
               ) {
                 throw new Error(
                   `Market publication ${marketPublication.publicationId} is canonical but Redis delivery is pending`,

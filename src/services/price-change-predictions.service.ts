@@ -9,7 +9,7 @@ import {
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
-  loadActivePriceChangeContext,
+  loadActivePriceChangeContextForSchedule,
   loadDataPublicationDelivery,
 } from '../repositories/data-publication-outbox';
 import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
@@ -1104,10 +1104,11 @@ export function parsePriceChangeWatchDeadlines(
 
 export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Date) {
   const scope = { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode } as const;
-  // Deadline discovery is a scheduler control-plane read. Use the active
-  // consumer publication in Redis and retain only its small context item. The
-  // cache helper validates every sibling before returning, so a partial board
-  // cannot create a scheduler obligation.
+  // Deadline discovery consumes only the small context item, but the Redis
+  // publication reader still validates every immutable sibling before it is
+  // allowed to derive a scheduler obligation.  A missing or same-length
+  // corrupted players item must fall back to the durable publication instead
+  // of making a partial Redis snapshot look usable.
   const redisPublication = await readActiveDataPublicationItems(scope, ['context']);
   if (redisPublication) {
     let canonicalManifest: Awaited<
@@ -1147,7 +1148,7 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
   // an active publication is waiting for outbox delivery or Redis has been
   // rebuilt. Keep the existing loader as a bounded fallback so a missing cache
   // cannot silently drop a time-sensitive watch plan.
-  const publication = await loadActivePriceChangeContext(season).catch(() => null);
+  const publication = await loadActivePriceChangeContextForSchedule(season).catch(() => null);
   return publication ? parsePriceChangeWatchDeadlines(publication, now) : null;
 }
 

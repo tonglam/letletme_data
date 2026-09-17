@@ -97,6 +97,14 @@ async function cleanup(): Promise<void> {
     WHERE season_id = ${SEASON.seasonId} AND event_id = ${EVENT_ID}
   `;
   await sql`
+    UPDATE ops.dataset_publications
+    SET status = 'retired', retired_at = coalesce(retired_at, clock_timestamp())
+    WHERE dataset = 'redis:v2:fpl:live'
+      AND season_id = ${SEASON.seasonId}
+      AND event_id = ${EVENT_ID}
+      AND status = 'active'
+  `;
+  await sql`
     DELETE FROM ops.dataset_publications
     WHERE dataset = 'redis:v2:fpl:live'
       AND season_id = ${SEASON.seasonId}

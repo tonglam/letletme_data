@@ -97,7 +97,10 @@ load_v2_seed_scope() {
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
+DEPLOY_MIGRATION_BACKUP_REQUIRED=false
+DEPLOY_LIVE_POINTS_SEED_MUTATION_REQUIRED=false
 DEPLOY_REVIEW_HARD_CUT_PENDING=false
+DEPLOY_REVIEW_BACKFILL_PENDING=false
 DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=false
 DEPLOY_COMMITTED=false
 DEPLOY_OLD_IMAGE=''
@@ -782,11 +785,77 @@ deploy() {
     exit 1
   }
   printf '%s\n' "$migration_plan_output"
-  if printf '%s\n' "$migration_plan_output" | grep -Fq '0090_my_tournament_review_v2_1_hard_cut.sql'; then
-    DEPLOY_REVIEW_HARD_CUT_PENDING=true
+  # The migration runner emits a machine-readable plan. A valid empty plan
+  # does not need a logical dump; an invalid or unreadable plan must stop
+  # before services are stopped rather than being treated as "no migrations".
+  migration_plan_fields=$(parse_migration_plan_fields <<<"$migration_plan_output") || {
+    log_error "Migration plan was invalid or not machine-readable; refusing deploy."
+    exit 1
+  }
+  IFS=$'\t' read -r migration_plan_valid migration_plan_backup_required \
+    migration_plan_fingerprint migration_plan_hard_cut <<<"$migration_plan_fields"
+  if [[ "$migration_plan_valid" != true ]]; then
+    log_error "Migration plan was invalid or not machine-readable; refusing deploy."
+    exit 1
   fi
-  DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)
-  [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
+  if [[ "$migration_plan_backup_required" != true && "$migration_plan_backup_required" != false ]]; then
+    log_error "Migration plan did not contain a valid pending migration list; refusing deploy."
+    exit 1
+  fi
+  DEPLOY_MIGRATION_BACKUP_REQUIRED="$migration_plan_backup_required"
+  log_info "Migration plan parsed migrationBackupRequired=${DEPLOY_MIGRATION_BACKUP_REQUIRED}"
+  if [[ ! "$migration_plan_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+    log_error "Migration plan did not contain a usable ledger fingerprint; refusing deploy."
+    exit 1
+  fi
+  if [[ "$migration_plan_hard_cut" = true ]]; then
+    DEPLOY_REVIEW_HARD_CUT_PENDING=true
+    DEPLOY_REVIEW_BACKFILL_PENDING=true
+  elif [[ "${MY_TOURNAMENT_REVIEW_BACKFILL_RETRY:-NO}" = YES ]]; then
+    # A retry marker represents a previously incomplete destructive review
+    # operation. Preserve the pre-operation snapshot even when this release
+    # has no SQL migration to apply.
+    DEPLOY_REVIEW_BACKFILL_PENDING=true
+  elif [[ "$migration_plan_backup_required" = false ]]; then
+    # A ledgered migration can be complete while the bounded review backfill
+    # remains pending. Probe that durable marker before the backup decision so
+    # a retry cannot run without a fresh restore point.
+    if review_backfill_marker_pending "$data_runtime_database_url"; then
+      DEPLOY_REVIEW_BACKFILL_PENDING=true
+    else
+      review_backfill_marker_status=$?
+      if [[ "$review_backfill_marker_status" -eq 2 ]]; then
+        log_error "Unable to inspect My Tournament Review V2.1 backfill marker; refusing deploy."
+        exit 1
+      fi
+    fi
+  fi
+  if [[ "$DEPLOY_REVIEW_BACKFILL_PENDING" = true ]]; then
+    DEPLOY_MIGRATION_BACKUP_REQUIRED=true
+    log_info "Pending My Tournament Review V2.1 backfill requires a pre-operation PostgreSQL dump"
+  fi
+  cutover_seed_required=false
+  if [[ "${LIVE_POINTS_V2_SEED_FORCE:-NO}" = YES ]] ||
+    migration_plan_requires_live_points_seed <<<"$migration_plan_output"; then
+    cutover_seed_required=true
+  elif live_cutover_seed_pending "$data_runtime_database_url" "$LIVE_POINTS_V2_SEED_SEASON"; then
+    cutover_seed_required=true
+  else
+    cutover_seed_status=$?
+    if [[ "$cutover_seed_status" -eq 2 ]]; then
+      log_error "Unable to inspect Live Points V2 cutover marker; refusing deploy."
+      exit 1
+    fi
+  fi
+  if [[ "$cutover_seed_required" = true ]]; then
+    DEPLOY_LIVE_POINTS_SEED_MUTATION_REQUIRED=true
+    # The cutover seed writes durable Live Points and Live Matches checkpoints.
+    # Treat that explicit mutation like a migration so a failed seed always
+    # has a pre-operation restore point; ordinary code releases skip the seed.
+    DEPLOY_MIGRATION_BACKUP_REQUIRED=true
+    log_info "Live Points V2 cutover seed requires a pre-operation PostgreSQL dump"
+  fi
+  DEPLOY_LEDGER_BEFORE="$migration_plan_fingerprint"
   log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"
   # Pause every queue consumed by content-worker before accepting the scoped
   # result so delayed and prioritized content jobs cannot become active in the
@@ -888,11 +957,25 @@ deploy() {
   fi
   cat "$final_queue_probe_output"
   rm -f "$final_queue_probe_output"
-  log_info "Creating and validating the pre-migration PostgreSQL dump"
-  if ! compose --profile migration run --rm -T --interactive=false backup; then
-    log_error "Pre-migration backup failed; migration was not started."
+  if ! migration_ledger_at_quiescence=$(migration_ledger_fingerprint); then
+    log_error "Could not re-read the migration ledger after quiescence; refusing to run migrations."
     restore_stopped_services
     exit 1
+  fi
+  if [[ "$migration_ledger_at_quiescence" != "$DEPLOY_LEDGER_BEFORE" ]]; then
+    log_error "Migration ledger changed after the plan; refusing to run migrations."
+    restore_stopped_services
+    exit 1
+  fi
+  if [[ "$DEPLOY_MIGRATION_BACKUP_REQUIRED" = true ]]; then
+    log_info "Creating and validating the pre-migration PostgreSQL dump"
+    if ! compose --profile migration run --rm -T --interactive=false backup; then
+      log_error "Pre-migration backup failed; migration was not started."
+      restore_stopped_services
+      exit 1
+    fi
+  else
+    log_info "No pending migrations; skipping pre-migration PostgreSQL dump"
   fi
   if [[ "$DEPLOY_REVIEW_HARD_CUT_PENDING" = true ]]; then
     if ! run_tournament_review_restore_rehearsal \
@@ -967,6 +1050,18 @@ deploy() {
     log_error "Migration LOGIN contract failed after migrations."
     exit 1
   fi
+  # Existing active publications predate the proof columns introduced by the
+  # rollout. Validate only the current active scope before services start so
+  # the readiness grace window cannot expire while the five-minute
+  # reconciler is waiting. This is bounded to the three known datasets and
+  # never scans historical publications.
+  if ! DATABASE_URL="$data_runtime_database_url" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL api \
+    bun run db:validate-active-publication-proofs; then
+    log_error "Active publication proof validation failed; services remain stopped for a forward fix."
+    exit 1
+  fi
   finish_stage
   start_stage reviewBackfill
   review_backfill_pending=false
@@ -1001,37 +1096,56 @@ deploy() {
   fi
   finish_stage
   start_stage v2Seed
-  log_info "Seeding and verifying the Live Points V2 global and entry publications"
-  # The cutover seed is a one-shot operation: use the migration LOGIN's
-  # direct/session URL, while compose supplies the runtime database and Redis
-  # credentials to checkpoint services.
-  if ! LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url" \
-    LIVE_POINTS_SEED_CONFIRM=YES \
-    compose run --rm -T --interactive=false \
-    -e LIVE_POINTS_V2_SEED_DATABASE_URL \
-    -e LIVE_POINTS_SEED_CONFIRM api \
-    bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
-    --season "$LIVE_POINTS_V2_SEED_SEASON" \
-    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
-    log_error "Live Points V2 seed failed; services remain stopped for a forward fix."
-    exit 1
-  fi
-  if ! compose run --rm -T --interactive=false \
-    api \
-    bun run verify:live-points-v2 -- \
-    --season "$LIVE_POINTS_V2_SEED_SEASON" \
-    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
-    --all-finalized; then
-    log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
-    exit 1
-  fi
-  if ! compose run --rm -T --interactive=false \
-    api \
-    bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized \
-    --season "$LIVE_POINTS_V2_SEED_SEASON" \
-    --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
-    log_error "Live Matches V3 seed failed; services remain stopped for a forward fix."
-    exit 1
+  if [[ "$DEPLOY_LIVE_POINTS_SEED_MUTATION_REQUIRED" = true ]]; then
+    if [[ "${LIVE_POINTS_V2_SEED_FORCE:-NO}" = YES ]] && ! reset_live_cutover_seed_state \
+      "$data_runtime_database_url" "$LIVE_POINTS_V2_SEED_SEASON"; then
+      log_error "Could not reset the forced Live Points V2 cutover marker; services remain stopped."
+      exit 1
+    fi
+    log_info "Seeding and verifying the Live Points V2 global and entry publications"
+    # The cutover seed is a one-shot operation: use the migration LOGIN's
+    # direct/session URL, while compose supplies the runtime database and Redis
+    # credentials to checkpoint services.
+    if ! LIVE_POINTS_V2_SEED_DATABASE_URL="$migration_database_url" \
+      LIVE_POINTS_SEED_CONFIRM=YES \
+      compose run --rm -T --interactive=false \
+      -e LIVE_POINTS_V2_SEED_DATABASE_URL \
+      -e LIVE_POINTS_SEED_CONFIRM api \
+      bun run db:cutover-seed-live-points-v2 -- --execute --cache --all-finalized \
+      --season "$LIVE_POINTS_V2_SEED_SEASON" \
+      --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+      log_error "Live Points V2 seed failed; services remain stopped for a forward fix."
+      exit 1
+    fi
+    if ! compose run --rm -T --interactive=false \
+      api \
+      bun run verify:live-points-v2 -- \
+      --season "$LIVE_POINTS_V2_SEED_SEASON" \
+      --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID" \
+      --all-finalized; then
+      log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
+      exit 1
+    fi
+    if ! mark_live_cutover_seed_stage "$data_runtime_database_url" \
+      "$LIVE_POINTS_V2_SEED_SEASON" live_points; then
+      log_error "Could not record the completed Live Points V2 cutover stage; services remain stopped."
+      exit 1
+    fi
+    if ! compose run --rm -T --interactive=false \
+      api \
+      bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized \
+      --season "$LIVE_POINTS_V2_SEED_SEASON" \
+      --event-id "$LIVE_POINTS_V2_SEED_EVENT_ID"; then
+      log_error "Live Matches V3 seed failed; services remain stopped for a forward fix."
+      exit 1
+    fi
+    if ! mark_live_cutover_seed_stage "$data_runtime_database_url" \
+      "$LIVE_POINTS_V2_SEED_SEASON" live_matches; then
+      log_error "Could not record the completed Live Matches V3 cutover stage; services remain stopped."
+      exit 1
+    fi
+  else
+    log_info "Live Points V2 cutover marker is complete; skipping seed writes"
   fi
   finish_stage
   start_stage cachePublish

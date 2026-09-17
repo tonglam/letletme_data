@@ -47,19 +47,35 @@ const prepared = prepareDataPublication({
     { name: 'players', value: [{ unused: 'x'.repeat(400000) }] },
   ],
 });
+async function seedDurablePublication(validationVersion: number | null) {
+  await db`INSERT INTO ops.dataset_publications
+    (publication_id, dataset, season_id, revision, status, activated_at, manifest, validation_version)
+    VALUES (${publicationId}, 'fpl:price-changes', 2093, 9394, 'active', now(),
+      ${db.json(prepared.manifest as never)}, ${validationVersion})`;
+  for (const item of prepared.items) {
+    await db`INSERT INTO ops.dataset_publication_items
+      (publication_id,item_name,payload,item_count,checksum,validation_version)
+      VALUES (${publicationId},${item.manifest.name},${db.json(JSON.parse(item.payload))},
+        ${item.manifest.count},${item.manifest.sha256},${validationVersion})`;
+  }
+}
+
+async function seedLegacyDurablePublication() {
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
+  await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
+  await seedDurablePublication(null);
+}
 beforeAll(async () => {
   await redis.connect();
   await db`INSERT INTO fpl.seasons (season_id, season_code, display_name, start_year, end_year, lifecycle_state)
     VALUES (2093, '9394', '2093/94', 2093, 2094, 'reference_only')`;
 });
 beforeEach(async () => {
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
   await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
-  await db`INSERT INTO ops.dataset_publications (publication_id, dataset, season_id, revision, status, activated_at, manifest)
-    VALUES (${publicationId}, 'fpl:price-changes', 2093, 9394, 'active', now(), ${db.json(prepared.manifest as never)})`;
-  for (const item of prepared.items) {
-    await db`INSERT INTO ops.dataset_publication_items (publication_id,item_name,payload,item_count,checksum)
-      VALUES (${publicationId},${item.manifest.name},${db.json(JSON.parse(item.payload))},${item.manifest.count},${item.manifest.sha256})`;
-  }
+  await seedDurablePublication(1);
   await redis.set(
     activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
     JSON.stringify(prepared.manifest),
@@ -72,6 +88,8 @@ afterAll(async () => {
   );
   await Promise.all(prepared.items.map((item) => redis.del(item.manifest.key)));
   redis.disconnect();
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
   await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
   await db`DELETE FROM ops.sync_runs WHERE season_id=2093 AND mode='batch-cost'`;
   await db`DELETE FROM fpl.seasons WHERE season_id=2093`;
@@ -125,34 +143,17 @@ test('rejects extra durable publication items outside the manifest', async () =>
   expect(await loadActivePriceChangeContext(season)).toBeNull();
 });
 
-test('falls back to the canonical revision when Redis still points at the previous one', async () => {
-  const newerContext = {
-    ...context,
-    deadline: '2093-08-22T02:30:00.000Z',
-    nextDeadlines: ['2093-08-22T02:30:00.000Z'],
-  };
-  const newer = prepareDataPublication({
-    ...season,
-    dataset: 'fpl:price-changes',
-    revision: 9395,
-    publicationId,
-    sourceCheckedAt: now,
-    state: 'active',
-    items: [
-      { name: 'context', value: newerContext },
-      { name: 'players', value: [{ unused: 'x'.repeat(400000) }] },
-    ],
-  });
-  await db`UPDATE ops.dataset_publications SET revision=9395, manifest=${db.json(newer.manifest as never)} WHERE publication_id=${publicationId}`;
-  await db`DELETE FROM ops.dataset_publication_items WHERE publication_id=${publicationId}`;
-  for (const item of newer.items) {
-    await db`INSERT INTO ops.dataset_publication_items (publication_id,item_name,payload,item_count,checksum)
-      VALUES (${publicationId},${item.manifest.name},${db.json(JSON.parse(item.payload))},${item.manifest.count},${item.manifest.sha256})`;
+test('rejects in-place revision replacement after validation', async () => {
+  let error: unknown;
+  try {
+    await db`UPDATE ops.dataset_publications SET revision=9395 WHERE publication_id=${publicationId}`;
+  } catch (caught) {
+    error = caught;
   }
-
+  expect(String(error)).toContain('validated publication identity is immutable');
   await expect(getPriceChangeWatchDeadlines(season, now)).resolves.toEqual({
     status: 'READY',
-    nextDeadlines: newerContext.nextDeadlines,
+    nextDeadlines: context.nextDeadlines,
   });
 });
 
@@ -225,12 +226,15 @@ test('falls back when a canonical Redis context is semantically unusable', async
 test('rejects a Redis pointer whose manifest identity disagrees with database columns', async () => {
   const foreignPublicationId = '00000000-0000-4000-8000-000000009395';
   const invalidManifest = { ...prepared.manifest, publicationId: foreignPublicationId };
-  await db`UPDATE ops.dataset_publications SET manifest=${db.json(invalidManifest as never)}
-    WHERE publication_id=${publicationId}`;
   await redis.set(
     activeDataPublicationKey({ dataset: 'fpl:price-changes', seasonCode: season.seasonCode }),
     JSON.stringify(invalidManifest),
   );
+  // Once the Redis identity is rejected, there is no durable fallback for
+  // this case; retire the otherwise valid fixture so the result is fail-closed.
+  await db`UPDATE ops.dataset_publications
+    SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
 
   expect(await getPriceChangeWatchDeadlines(season, now)).toBeNull();
 });
@@ -239,12 +243,18 @@ test('does not accept a missing or retired active context', async () => {
   await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();
   await db`UPDATE ops.dataset_publications SET status='active', retired_at=null WHERE publication_id=${publicationId}`;
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
   await db`DELETE FROM ops.dataset_publication_items WHERE publication_id=${publicationId} AND item_name='context'`;
+  await db`UPDATE ops.dataset_publications SET status='active', retired_at=null WHERE publication_id=${publicationId}`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();
 });
 test.each(['payload', 'checksum', 'count', 'payload-count', 'bytes', 'identity', 'revision'])(
   'rejects corrupted %s',
   async (field) => {
+    // Validated rows are immutable. Use an explicitly legacy row to exercise
+    // the consumer's existing full-payload corruption checks without
+    // weakening the producer-side database fence.
+    await seedLegacyDurablePublication();
     if (field === 'payload')
       await db`UPDATE ops.dataset_publication_items SET payload=jsonb_set(payload,'{deadline}','"2093-08-22T02:00:00Z"') WHERE publication_id=${publicationId} AND item_name='context'`;
     if (field === 'checksum')

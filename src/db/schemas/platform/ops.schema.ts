@@ -160,6 +160,8 @@ export const datasetPublicationsInOps = ops.table(
     expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    /** Version of the producer-side semantic validation proof; NULL is legacy. */
+    validationVersion: integer('validation_version'),
   },
   (table) => [
     index('dataset_publications_event_fk_idx').using(
@@ -233,6 +235,10 @@ export const datasetPublicationsInOps = ops.table(
       sql`(status <> 'retired'::text) OR (retired_at IS NOT NULL)`,
     ),
     check('dataset_publications_manifest_object', sql`jsonb_typeof(manifest) = 'object'::text`),
+    check(
+      'dataset_publications_validation_version_check',
+      sql`validation_version IS NULL OR validation_version >= 0`,
+    ),
   ],
 );
 
@@ -245,6 +251,8 @@ export const datasetPublicationItemsInOps = ops.table(
     itemCount: integer('item_count').notNull(),
     checksum: text().notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    /** Version of the producer-side payload proof; NULL is legacy. */
+    validationVersion: integer('validation_version'),
   },
   (table) => [
     primaryKey({ columns: [table.publicationId, table.itemName] }),
@@ -262,10 +270,53 @@ export const datasetPublicationItemsInOps = ops.table(
       sql`item_name = ANY (ARRAY['context'::text, 'events'::text, 'teams'::text, 'players'::text, 'phases'::text, 'fixtures'::text, 'currentEventId'::text, 'selectionRules'::text, 'eventLive'::text])`,
     ),
     check('dataset_publication_items_count_nonnegative', sql`item_count >= 0`),
+    check(
+      'dataset_publication_items_validation_version_check',
+      sql`validation_version IS NULL OR validation_version >= 0`,
+    ),
     check('dataset_publication_items_checksum_nonempty', sql`btrim(checksum) <> ''::text`),
     check(
       'dataset_publication_items_payload_shape',
       sql`jsonb_typeof(payload) = ANY (ARRAY['array'::text, 'object'::text, 'number'::text, 'null'::text, 'boolean'::text, 'string'::text])`,
+    ),
+  ],
+);
+
+export const livePublicationCutoverStatusInOps = ops.table(
+  'live_publication_cutover_status',
+  {
+    seasonId: smallint('season_id').notNull(),
+    scopeKind: text('scope_kind').notNull(),
+    eventId: integer('event_id').default(0).notNull(),
+    livePointsCompletedAt: timestamp('live_points_completed_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    liveMatchesCompletedAt: timestamp('live_matches_completed_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.scopeKind, table.eventId],
+      name: 'live_publication_cutover_status_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'live_publication_cutover_status_season_fk',
+    }),
+    check(
+      'live_publication_cutover_status_scope_check',
+      sql`(scope_kind = 'all_finalized'::text AND event_id = 0) OR (scope_kind = 'event'::text AND event_id > 0)`,
+    ),
+    check(
+      'live_publication_cutover_status_completion_order_check',
+      sql`live_matches_completed_at IS NULL OR live_points_completed_at IS NOT NULL`,
     ),
   ],
 );

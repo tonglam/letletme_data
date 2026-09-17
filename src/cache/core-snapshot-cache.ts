@@ -40,6 +40,7 @@ export interface CoreSnapshotCachePublishOptions
   readonly revision: number;
   readonly publicationId: string;
   readonly sourceCheckedAt: Date;
+  readonly publishedAt?: Date;
   readonly freshnessWindowId?: number;
   readonly redis?: Redis;
 }
@@ -48,7 +49,7 @@ export function prepareCoreSnapshotCache(
   snapshot: CoreSnapshot,
   options: Pick<
     CoreSnapshotCachePublishOptions,
-    'revision' | 'publicationId' | 'sourceCheckedAt' | 'freshnessWindowId'
+    'revision' | 'publicationId' | 'sourceCheckedAt' | 'publishedAt' | 'freshnessWindowId'
   >,
 ): PreparedCoreSnapshotCachePublication {
   return prepareDataPublication({
@@ -57,6 +58,7 @@ export function prepareCoreSnapshotCache(
     revision: options.revision,
     publicationId: options.publicationId,
     sourceCheckedAt: options.sourceCheckedAt,
+    ...(options.publishedAt ? { publishedAt: options.publishedAt } : {}),
     freshnessWindowId: options.freshnessWindowId,
     state: 'active',
     items: [
@@ -100,6 +102,7 @@ export async function publishCoreSnapshotCache(
       revision: options.revision,
       publicationId: options.publicationId,
       sourceCheckedAt: options.sourceCheckedAt,
+      publishedAt: options.publishedAt,
       freshnessWindowId: options.freshnessWindowId,
       state: 'active',
       items: prepared.items.map((item) => ({

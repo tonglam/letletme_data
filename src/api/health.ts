@@ -4,13 +4,16 @@ import { queueRedisSingleton } from '../queues/redis';
 import { seasonRepository } from '../repositories/seasons';
 import { getConfig, isBugReportScreenshotStorageConfigured } from '../utils/config';
 import { checkRuntimeHeartbeat, isRuntimeRoleRequired } from '../utils/runtime-heartbeat';
-import { readActiveDataPublication } from '../cache/data-publication';
+import {
+  readActiveDataPublication,
+  readActiveDataPublicationManifestWithItemBounds,
+} from '../cache/data-publication';
 import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
-import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
-import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
+import { readLivePublicationV2CheckpointMetadata } from '../services/live-publication-v2-checkpoint.service';
 import { readLiveCheckpointDesiredV2 } from '../cache/live-publication-v2';
 import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../domain/job-schedules';
 
@@ -121,6 +124,11 @@ export function isMediaWorkerRequired(): boolean {
 
 const PUBLICATION_MISMATCH_GRACE_MS = 120_000;
 const publicationMismatchSince = new Map<string, number>();
+const REDIS_PAYLOAD_PROOF_RECHECK_MS = 5 * 60_000;
+const redisPayloadProof = new Map<
+  string,
+  { publicationId: string; revision: number; validatedAt: number }
+>();
 
 /**
  * Mutable Live Points score revisions deliberately checkpoint at most once per
@@ -177,7 +185,6 @@ export const hasStartedOrFinishedFixture = (value: unknown, eventId: number): bo
 const publicationConsistencyProbe: DependencyProbe = async () => {
   const season = await seasonRepository.findCurrent();
   let consistent = true;
-  let coreRedisActive: Awaited<ReturnType<typeof readActiveDataPublication>> = null;
   const currentEvent = await eventRepository.findCurrent(season);
   const scopes = [
     { dataset: 'fpl:core' as const, seasonCode: season.seasonCode, eventId: undefined },
@@ -190,18 +197,49 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       season,
       scope.eventId,
     );
-    const redisActive = await readActiveDataPublication(scope);
-    if (scope.dataset === 'fpl:core') coreRedisActive = redisActive;
+    const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope);
+    const proof = redisPayloadProof.get(key);
+    const redisIdentityMatchesProof = Boolean(
+      redisActive &&
+        proof &&
+        proof.publicationId === redisActive.publicationId &&
+        proof.revision === redisActive.revision &&
+        Date.now() - proof.validatedAt < REDIS_PAYLOAD_PROOF_RECHECK_MS,
+    );
+    if (redisActive && !redisIdentityMatchesProof) {
+      // A control manifest and STRLEN checks catch loss/truncation cheaply;
+      // revalidate the complete Redis payload only once per identity and
+      // bounded interval so readiness cannot become a continuous audit.
+      const validated = await readActiveDataPublication(scope).catch(() => null);
+      if (
+        validated?.manifest.publicationId === redisActive.publicationId &&
+        validated.manifest.revision === redisActive.revision
+      ) {
+        redisPayloadProof.set(key, {
+          publicationId: redisActive.publicationId,
+          revision: redisActive.revision,
+          validatedAt: Date.now(),
+        });
+      }
+    }
+    const redisPayloadValidated = Boolean(
+      redisActive &&
+        redisPayloadProof.get(key)?.publicationId === redisActive.publicationId &&
+        redisPayloadProof.get(key)?.revision === redisActive.revision &&
+        Date.now() - (redisPayloadProof.get(key)?.validatedAt ?? 0) <
+          REDIS_PAYLOAD_PROOF_RECHECK_MS,
+    );
     const durableEvidence = dbActive
-      ? await loadDataPublicationDelivery(dbActive.publicationId).catch(() => null)
+      ? await loadDataPublicationDeliveryManifest(dbActive.publicationId).catch(() => null)
       : null;
     const matches =
       Boolean(dbActive) === Boolean(durableEvidence) &&
       Boolean(dbActive) === Boolean(redisActive) &&
+      Boolean(dbActive) === redisPayloadValidated &&
       (!dbActive ||
         !redisActive ||
-        (dbActive.publicationId === redisActive.manifest.publicationId &&
-          dbActive.revision === redisActive.manifest.revision));
+        (dbActive.publicationId === redisActive.publicationId &&
+          dbActive.revision === redisActive.revision));
     if (!matches) {
       consistent = false;
       publicationMismatchSince.set(key, publicationMismatchSince.get(key) ?? Date.now());
@@ -229,25 +267,31 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   }
   if (currentEvent && !currentEventBeforeDeadline) {
     const liveKey = currentLiveKey as string;
-    const [redisLive, checkpointLive, desiredLive, canonicalFixtures] = await Promise.all([
+    const [redisLiveRead, checkpointLive, desiredLive, canonicalFixtures] = await Promise.all([
+      // Read and validate both Redis payloads before using the candidate for
+      // readiness. A manifest plus same-sized strings cannot detect a
+      // same-length corruption, and readiness must not report a damaged live
+      // publication as coherent.
       readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(
         () => null,
       ),
-      readLivePublicationV2Checkpoint(season, currentEvent.id).catch(() => null),
+      readLivePublicationV2CheckpointMetadata(season, currentEvent.id).catch(() => null),
       readLiveCheckpointDesiredV2({
         season: season.seasonCode,
         eventId: currentEvent.id,
       }).catch(() => null),
       fixtureRepository.findByEvent(season, currentEvent.id).catch(() => null),
     ]);
+    const redisLive = redisLiveRead?.publication ?? null;
     // The FPL deadline is a picks cutoff, not the first kickoff. During the
     // gap between those moments event-live may legitimately return 503 while
     // the scheduler remains in PICKS_PROBE. Do not age that expected absence
     // into a deploy failure; once fixture state or a V2 obligation exists, the
     // normal publication/checkpoint fence below applies.
-    const liveWindowStarted =
-      hasStartedOrFinishedFixture(canonicalFixtures, currentEvent.id) ||
-      hasStartedOrFinishedFixture(coreRedisActive?.items.fixtures, currentEvent.id);
+    // Readiness uses canonical fixture rows for this bounded timing decision.
+    // It must not download the core publication's fixtures item just to decide
+    // whether the live window has started; the serving path validates payloads.
+    const liveWindowStarted = hasStartedOrFinishedFixture(canonicalFixtures, currentEvent.id);
     const liveConsistencyRequired = Boolean(
       redisLive || desiredLive || checkpointLive || liveWindowStarted || canonicalFixtures === null,
     );
@@ -263,7 +307,7 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       // broken checkpoint path green indefinitely. If the obligation pointer was
       // itself unavailable, the current publication is the only bounded anchor.
       const pendingCheckpointStartedAt = Date.parse(
-        desiredLive?.requestedAt ?? redisLive?.publication.publishedAt ?? '',
+        desiredLive?.requestedAt ?? redisLive?.publishedAt ?? '',
       );
       const pendingCheckpointWithinGrace =
         Number.isFinite(pendingCheckpointStartedAt) &&
@@ -271,11 +315,11 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       const liveMatches =
         Boolean(redisLive) &&
         redisLive !== null &&
-        (redisLive.publication.checkpointedAt === null
+        (redisLive.checkpointedAt === null
           ? pendingCheckpointWithinGrace
           : checkpointLive !== null &&
-            checkpointLive.publication.publicationId === redisLive.publication.publicationId &&
-            checkpointLive.publication.generation === redisLive.publication.generation);
+            checkpointLive.publication.publicationId === redisLive.publicationId &&
+            checkpointLive.publication.generation === redisLive.generation);
       if (!liveMatches) {
         consistent = false;
         publicationMismatchSince.set(
