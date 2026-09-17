@@ -13,7 +13,10 @@ import {
 import { getDbClient } from '../../src/db/singleton';
 import type { FplSeasonRef } from '../../src/domain/fpl-season';
 import { seasonRepository } from '../../src/repositories/seasons';
-import { syncOperationsRepository } from '../../src/repositories/sync-operations';
+import {
+  syncOperationsRepository,
+  type DatasetPublicationItemInput,
+} from '../../src/repositories/sync-operations';
 import { DatabaseError } from '../../src/utils/errors';
 import { runDataSyncAttempt, type DataSyncAttemptContext } from '../../src/utils/data-sync-attempt';
 import { withMutationScopes } from '../../src/utils/mutation-scopes';
@@ -72,6 +75,12 @@ async function cleanup(): Promise<void> {
     UPDATE ops.sync_runs
     SET publication_id = NULL
     WHERE run_id = ANY(${[...RUN_IDS]}::uuid[])
+  `;
+  await sql`
+    UPDATE ops.dataset_publications
+    SET status = 'retired', retired_at = coalesce(retired_at, clock_timestamp())
+    WHERE publication_id = ANY(${[...PUBLICATION_IDS]}::uuid[])
+      AND status = 'active'
   `;
   await sql`
     DELETE FROM ops.dataset_publications
@@ -134,6 +143,15 @@ function publicationManifest(
       sha256: createHash('sha256').update(payload, 'utf8').digest('hex'),
     })),
   };
+}
+
+function publicationItems(manifest: DataPublicationManifest): DatasetPublicationItemInput[] {
+  return manifest.items.map((item) => ({
+    name: item.name as DatasetPublicationItemInput['name'],
+    payload: [],
+    count: item.count,
+    checksum: item.sha256,
+  }));
 }
 
 async function startRun(
@@ -1763,12 +1781,17 @@ describe('ops sync state machine', () => {
       'DATASET_PUBLICATION_ID_CONFLICT',
     );
 
+    const firstManifest = publicationManifest(first.publicationId, first.revision, season);
+    await syncOperationsRepository.stagePublicationItems(
+      first.publicationId,
+      publicationItems(firstManifest),
+    );
     await syncOperationsRepository.activatePublication({
       publicationId: first.publicationId,
       dataset: 'fpl:core',
       season,
       sourceRunId: RUN_IDS[0],
-      manifest: publicationManifest(first.publicationId, first.revision, season),
+      manifest: firstManifest,
     });
     expect(await syncOperationsRepository.findActivePublication('fpl:core', season)).toEqual({
       publicationId: first.publicationId,
@@ -1784,6 +1807,10 @@ describe('ops sync state machine', () => {
     });
     expect(second.revision).toBeGreaterThan(first.revision);
     const secondManifest = publicationManifest(second.publicationId, second.revision, season);
+    await syncOperationsRepository.stagePublicationItems(
+      second.publicationId,
+      publicationItems(secondManifest),
+    );
     await syncOperationsRepository.activatePublication({
       publicationId: second.publicationId,
       dataset: 'fpl:core',
@@ -1883,17 +1910,22 @@ describe('ops sync state machine', () => {
       season,
       sourceRunId: RUN_IDS[0],
     });
+    const currentManifest = publicationManifest(
+      current.publicationId,
+      current.revision,
+      season,
+      '2026-08-09T01:05:00.000Z',
+    );
+    await syncOperationsRepository.stagePublicationItems(
+      current.publicationId,
+      publicationItems(currentManifest),
+    );
     await syncOperationsRepository.activatePublication({
       publicationId: current.publicationId,
       dataset: 'fpl:core',
       season,
       sourceRunId: RUN_IDS[0],
-      manifest: publicationManifest(
-        current.publicationId,
-        current.revision,
-        season,
-        '2026-08-09T01:05:00.000Z',
-      ),
+      manifest: currentManifest,
     });
 
     const delayed = await syncOperationsRepository.preparePublication({
@@ -1902,18 +1934,23 @@ describe('ops sync state machine', () => {
       season,
       sourceRunId: RUN_IDS[1],
     });
+    const delayedManifest = publicationManifest(
+      delayed.publicationId,
+      delayed.revision,
+      season,
+      '2026-08-09T01:04:00.000Z',
+    );
+    await syncOperationsRepository.stagePublicationItems(
+      delayed.publicationId,
+      publicationItems(delayedManifest),
+    );
     await expectDatabaseErrorCode(
       syncOperationsRepository.activatePublication({
         publicationId: delayed.publicationId,
         dataset: 'fpl:core',
         season,
         sourceRunId: RUN_IDS[1],
-        manifest: publicationManifest(
-          delayed.publicationId,
-          delayed.revision,
-          season,
-          '2026-08-09T01:04:00.000Z',
-        ),
+        manifest: delayedManifest,
       }),
       'CORE_SNAPSHOT_STALE_SOURCE',
     );

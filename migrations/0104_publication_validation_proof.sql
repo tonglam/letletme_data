@@ -120,16 +120,20 @@ BEGIN
     END IF;
   END IF;
   IF TG_OP = 'DELETE' AND OLD.validation_version >= 1 THEN
-    IF TG_TABLE_NAME = 'dataset_publications' AND OLD.status = 'active' THEN
-      RAISE EXCEPTION 'validated active publication cannot be deleted' USING ERRCODE = '55000';
-    ELSIF TG_TABLE_NAME = 'dataset_publication_items' AND EXISTS (
-      SELECT 1
-      FROM ops.dataset_publications AS publication
-      WHERE publication.publication_id = OLD.publication_id
-        AND publication.status = 'active'
-        AND publication.validation_version >= 1
-    ) THEN
-      RAISE EXCEPTION 'validated active publication item cannot be deleted' USING ERRCODE = '55000';
+    IF TG_TABLE_NAME = 'dataset_publications' THEN
+      IF OLD.status = 'active' THEN
+        RAISE EXCEPTION 'validated active publication cannot be deleted' USING ERRCODE = '55000';
+      END IF;
+    ELSIF TG_TABLE_NAME = 'dataset_publication_items' THEN
+      IF EXISTS (
+        SELECT 1
+        FROM ops.dataset_publications AS publication
+        WHERE publication.publication_id = OLD.publication_id
+          AND publication.status = 'active'
+          AND publication.validation_version >= 1
+      ) THEN
+        RAISE EXCEPTION 'validated active publication item cannot be deleted' USING ERRCODE = '55000';
+      END IF;
     ELSIF TG_TABLE_NAME = 'live_points_publication_checkpoints' THEN
       RAISE EXCEPTION 'validated live points checkpoint cannot be deleted' USING ERRCODE = '55000';
     END IF;

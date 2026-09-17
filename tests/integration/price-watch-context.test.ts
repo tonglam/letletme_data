@@ -61,6 +61,8 @@ async function seedDurablePublication(validationVersion: number | null) {
 }
 
 async function seedLegacyDurablePublication() {
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
   await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
   await seedDurablePublication(null);
 }
@@ -70,6 +72,8 @@ beforeAll(async () => {
     VALUES (2093, '9394', '2093/94', 2093, 2094, 'reference_only')`;
 });
 beforeEach(async () => {
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
   await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
   await seedDurablePublication(1);
   await redis.set(
@@ -84,6 +88,8 @@ afterAll(async () => {
   );
   await Promise.all(prepared.items.map((item) => redis.del(item.manifest.key)));
   redis.disconnect();
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now()
+    WHERE publication_id=${publicationId} AND status='active'`;
   await db`DELETE FROM ops.dataset_publications WHERE publication_id=${publicationId}`;
   await db`DELETE FROM ops.sync_runs WHERE season_id=2093 AND mode='batch-cost'`;
   await db`DELETE FROM fpl.seasons WHERE season_id=2093`;
@@ -228,7 +234,9 @@ test('does not accept a missing or retired active context', async () => {
   await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();
   await db`UPDATE ops.dataset_publications SET status='active', retired_at=null WHERE publication_id=${publicationId}`;
+  await db`UPDATE ops.dataset_publications SET status='retired', retired_at=now() WHERE publication_id=${publicationId}`;
   await db`DELETE FROM ops.dataset_publication_items WHERE publication_id=${publicationId} AND item_name='context'`;
+  await db`UPDATE ops.dataset_publications SET status='active', retired_at=null WHERE publication_id=${publicationId}`;
   expect(await loadActivePriceChangeContext(season)).toBeNull();
 });
 test.each(['payload', 'checksum', 'count', 'payload-count', 'bytes', 'identity', 'revision'])(
