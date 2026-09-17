@@ -365,7 +365,8 @@ return {'repaired'}
 `;
 
 const REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT = `
-local current_type = redis.call('TYPE', KEYS[1])
+local type_result = redis.call('TYPE', KEYS[1])
+local current_type = type(type_result) == 'table' and type_result['ok'] or type_result
 if current_type ~= ARGV[1] then return {'changed'} end
 if current_type == 'none' then return {'missing'} end
 if current_type == 'string' and redis.call('GET', KEYS[1]) ~= ARGV[2] then
