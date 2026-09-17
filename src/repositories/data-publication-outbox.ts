@@ -17,6 +17,7 @@ import {
 } from '../cache/data-publication';
 import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
 import { canonicalJson } from '../utils/content-hash';
+import { boundedDb } from '../utils/live-snapshot-db-budget';
 
 type DatabaseClock = Date | string;
 
@@ -100,9 +101,22 @@ export async function loadActivePriceChangeContext(season: FplSeasonRef) {
  * sibling rows are checked through their bounded proof columns, while the
  * complete payload loader remains reserved for delivery and consumer paths.
  */
-export async function loadActivePriceChangeContextForSchedule(season: FplSeasonRef) {
+const PRICE_CHANGE_SCHEDULE_QUERY_TIMEOUT_MS = 5_000;
+
+export async function loadActivePriceChangeContextForSchedule(
+  season: FplSeasonRef,
+  deadlineAt?: number,
+) {
   const db = await getDb();
-  return db.transaction(
+  const queryDb =
+    deadlineAt === undefined
+      ? db
+      : boundedDb(
+          db as Parameters<typeof boundedDb>[0],
+          PRICE_CHANGE_SCHEDULE_QUERY_TIMEOUT_MS,
+          deadlineAt,
+        );
+  return queryDb.transaction(
     async (tx) => {
       const rows = await tx
         .select({

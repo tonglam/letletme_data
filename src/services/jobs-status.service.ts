@@ -1155,10 +1155,25 @@ export async function getJobsStatus(
   );
   const priceChangeDbActive = priceChangeEntry?.dbActive ?? null;
   const priceChangeRedisActive = priceChangeEntry?.redisDelivery ?? null;
-
-  const priceChangeDbDelivery = priceChangeDbActive
-    ? await loadActivePriceChangeContextForSchedule(season).catch(() => null)
-    : null;
+  const priceChangeRedisContext =
+    priceChangeRedisActive && 'manifest' in priceChangeRedisActive
+      ? asContext(priceChangeRedisActive.items.context)
+      : null;
+  const priceChangeRedisUsable =
+    redisMatchesActivePublication(priceChangeDbActive, priceChangeRedisActive) &&
+    priceChangeRedisContext !== null;
+  const priceChangeAuditRequested = publicationAuditScopes.has(PRICE_CHANGE_DATASET);
+  const priceChangeAuditExpired =
+    priceChangeAuditRequested &&
+    publicationAuditDeadlineAt !== null &&
+    Date.now() >= publicationAuditDeadlineAt;
+  const priceChangeDbDelivery =
+    priceChangeDbActive && !priceChangeRedisUsable && !priceChangeAuditExpired
+      ? await loadActivePriceChangeContextForSchedule(
+          season,
+          priceChangeAuditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
+        ).catch(() => null)
+      : null;
   const priceChangeSelection = selectCanonicalPriceChangeContext({
     dbActive: priceChangeDbActive,
     redisActive: priceChangeRedisActive,
