@@ -21,11 +21,35 @@ IFS=' ' read -r -a compose_cmd <<<"$compose_bin"
 compose() { (cd "$project_dir" && "${compose_cmd[@]}" -f "$compose_file" "$@"); }
 
 config=$(compose config)
-required_services=(api worker scheduler content-worker live-picks-worker official-h2h-worker)
+runtime_services=(api worker scheduler content-worker live-picks-worker official-h2h-worker media-worker)
 services=$(compose config --services)
-for service in "${required_services[@]}"; do
+for service in "${runtime_services[@]}"; do
   if ! grep -Fxq "$service" <<<"$services"; then
+    if [ "$service" = media-worker ]; then
+      continue
+    fi
     echo "Compose runtime inventory is missing required service: $service" >&2
+    exit 1
+  fi
+  if ! awk -v target="$service" '
+    /^  [A-Za-z0-9_-]+:$/ {
+      current=$1
+      sub(/:$/, "", current)
+    }
+    current == target && $0 ~ /DATABASE_POOL_MAX([=:])/ {
+      value=$0
+      sub(/^.*DATABASE_POOL_MAX[=:]/, "", value)
+      gsub(/[[:space:]]/, "", value)
+      gsub(/"/, "", value)
+      count += 1
+      found=value
+    }
+    END {
+      if (count != 1 || found !~ /^[0-9]+$/ || found < 1) exit 1
+      print found
+    }
+  ' <<<"$config" >/dev/null; then
+    echo "Runtime service ${service} must declare exactly one positive DATABASE_POOL_MAX" >&2
     exit 1
   fi
 done

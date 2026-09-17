@@ -58,7 +58,7 @@ class DatabaseSingleton {
   /**
    * Initialize database connection (lazy initialization)
    */
-  public async connect(): Promise<void> {
+  public async connect(timeoutMs?: number): Promise<void> {
     if (this.isConnected) {
       return; // Already connected
     }
@@ -67,7 +67,7 @@ class DatabaseSingleton {
       return this.connectPromise;
     }
 
-    const attempt = this.establishConnection();
+    const attempt = this.establishConnection(timeoutMs);
     const sharedAttempt = attempt.finally(() => {
       if (this.connectPromise === sharedAttempt) this.connectPromise = null;
     });
@@ -75,7 +75,7 @@ class DatabaseSingleton {
     return sharedAttempt;
   }
 
-  private async establishConnection(): Promise<void> {
+  private async establishConnection(timeoutMs?: number): Promise<void> {
     try {
       logInfo('Initializing database connection...');
 
@@ -96,9 +96,12 @@ class DatabaseSingleton {
       // Test the connection before exposing it. Production must use the
       // dedicated least-privilege writer LOGIN, never the migration or owner
       // role. CLI and test connections validate their own narrower contracts.
-      await this.client`SELECT 1`;
+      const validationClient = timeoutMs
+        ? withPostgresQueryTimeout(this.client, timeoutMs)
+        : this.client;
+      await validationClient`SELECT 1`;
       if (config.NODE_ENV === 'production') {
-        await assertDataRuntimeRole(this.client);
+        await assertDataRuntimeRole(validationClient);
       }
 
       this.db = drizzle(this.client, { schema });
@@ -162,13 +165,13 @@ class DatabaseSingleton {
   /**
    * Test database connection
    */
-  public async healthCheck(): Promise<boolean> {
+  public async healthCheck(timeoutMs = 5_000): Promise<boolean> {
     try {
       if (!this.isConnected || !this.client) {
         return false;
       }
 
-      await this.client`SELECT 1`;
+      await withPostgresQueryTimeout(this.client, timeoutMs)`SELECT 1`;
       return true;
     } catch (error) {
       logError('Database health check failed', error);

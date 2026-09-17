@@ -35,12 +35,14 @@ export type ReadinessResult = {
   };
 };
 
-type DependencyProbe = () => Promise<boolean>;
+type DependencyProbe = (timeoutMs?: number) => Promise<boolean>;
 export const READINESS_PROBE_TIMEOUT_MS = 5000;
 
-const postgresProbe: DependencyProbe = async () => {
-  await databaseSingleton.connect();
-  return databaseSingleton.healthCheck();
+const postgresProbe: DependencyProbe = async (timeoutMs = READINESS_PROBE_TIMEOUT_MS) => {
+  const deadlineAt = Date.now() + timeoutMs;
+  const remaining = () => Math.max(1, deadlineAt - Date.now());
+  await databaseSingleton.connect(remaining());
+  return databaseSingleton.healthCheck(remaining());
 };
 
 const cacheRedisProbe: DependencyProbe = async () => {
@@ -304,14 +306,36 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   );
 };
 
+const inFlightProbes = new WeakMap<DependencyProbe, Promise<boolean>>();
+
+/**
+ * Readiness is called by both the container healthcheck and the control-plane
+ * endpoint. Only the PostgreSQL probe opts into persistent coalescing because
+ * it applies a server-side query timeout. Other probes may have fallbacks that
+ * must run again after a caller timeout; caching their unresolved promise could
+ * pin readiness false until process restart.
+ */
 async function safeProbe(
   probe: DependencyProbe,
   timeoutMs = READINESS_PROBE_TIMEOUT_MS,
+  coalesce = false,
 ): Promise<boolean> {
+  let work = coalesce ? inFlightProbes.get(probe) : undefined;
+  if (!work) {
+    work = Promise.resolve().then(() => probe(timeoutMs));
+    if (coalesce) {
+      inFlightProbes.set(probe, work);
+      void work
+        .finally(() => {
+          if (inFlightProbes.get(probe) === work) inFlightProbes.delete(probe);
+        })
+        .catch(() => undefined);
+    }
+  }
   let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
     return await Promise.race([
-      probe(),
+      work,
       new Promise<boolean>((resolve) => {
         timeout = setTimeout(() => resolve(false), timeoutMs);
       }),
@@ -362,7 +386,7 @@ export async function checkReadiness(
   const probeTimeoutMs = probes?.probeTimeoutMs ?? READINESS_PROBE_TIMEOUT_MS;
   const [postgres, cacheRedis, queueRedis, activeSeason, screenshotRetentionConfigured] =
     await Promise.all([
-      safeProbe(configured.postgres, probeTimeoutMs),
+      safeProbe(configured.postgres, probeTimeoutMs, true),
       safeProbe(configured.cacheRedis, probeTimeoutMs),
       safeProbe(configured.queueRedis, probeTimeoutMs),
       safeProbe(configured.activeSeason, probeTimeoutMs),
