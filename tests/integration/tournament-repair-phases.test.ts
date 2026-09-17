@@ -20,7 +20,9 @@ const tournamentId = 995_601;
 let issueId: number;
 const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
 async function cleanup() {
-  await sql`DELETE FROM competition.entry_event_results WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+  await sql`DELETE FROM competition.tournament_battle_group_results WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  await sql`DELETE FROM competition.tournament_review_obligations WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
+  await sql`DELETE FROM competition.entry_event_results WHERE season_id=${season.seasonId} AND entry_id IN (${tournamentId}, ${tournamentId + 1})`;
   await sql`DELETE FROM competition.tournament_points_group_results WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM competition.tournament_groups WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   await sql`DELETE FROM ops.mutation_scopes WHERE scope_key IN (${`entry-core:${season.seasonId}:${tournamentId}`}, ${`entry-core:${season.seasonId}:${tournamentId + 1}`})`;
@@ -193,6 +195,99 @@ test('successful repair commits issue resolution before returning', async () => 
   const [row] =
     await sql`SELECT setup_warning_count FROM competition.tournaments WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId}`;
   expect(row!.setup_warning_count).toBe(0);
+});
+
+test('resolved repair wakes headless reviews and preserves failure history and retry budgets', async () => {
+  const { repairTournamentSetupIssue } = await import(
+    '../../src/services/tournament-repair.service'
+  );
+  const { wakeTournamentReviewsAfterResolvedRepair } = await import(
+    '../../src/services/tournament-review-publication.service'
+  );
+  const jobs = await import('../../src/jobs/maintenance.jobs');
+  const enqueue = spyOn(jobs, 'enqueueTournamentReview').mockResolvedValue({} as never);
+  for (const [eventId, state] of [
+    [1, 'WAITING_SOURCE'],
+    [2, 'DEGRADED'],
+    [3, 'PROCESSING'],
+    [4, 'DEGRADED'],
+  ] as const) {
+    await sql`INSERT INTO fpl.events(season_id,event_id,name) VALUES (${season.seasonId},${eventId},'Wake fixture')`;
+    await sql`INSERT INTO competition.tournament_review_obligations
+      (season_id,tournament_id,event_id,format,state,eligible_at,first_eligible_at,
+       next_attempt_at,last_attempt_at,execution_attempts,source_rechecks,degraded_at,last_error_code,repair_issue_id)
+      VALUES (${season.seasonId},${tournamentId},${eventId},'POINTS',${state},'2026-09-01','2026-09-01',
+        clock_timestamp()+interval '1 hour','2026-09-02',2,39,'2026-09-03',
+        ${eventId === 4 ? 'EXECUTION_FAILED' : 'TOURNAMENT_REVIEW_SOURCE_NOT_READY'},${issueId})`;
+  }
+  expect(await wakeTournamentReviewsAfterResolvedRepair(season)).toEqual([]);
+  await mockAudit([]);
+  await repairTournamentSetupIssue(season, issueId);
+  expect(enqueue).toHaveBeenCalledTimes(2);
+  const rows = await sql`SELECT event_id,state,execution_attempts,source_rechecks,
+    first_eligible_at,degraded_at,repair_issue_id,next_attempt_at <= clock_timestamp() AS due
+    FROM competition.tournament_review_obligations WHERE season_id=${season.seasonId} ORDER BY event_id`;
+  expect(rows.map((row) => row.due)).toEqual([true, true, false, false]);
+  expect(rows.map((row) => row.state)).toEqual([
+    'WAITING_SOURCE',
+    'DEGRADED',
+    'PROCESSING',
+    'DEGRADED',
+  ]);
+  for (const row of rows) {
+    expect(row.execution_attempts).toBe(2);
+    expect(row.source_rechecks).toBe(39);
+    expect(new Date(row.first_eligible_at).toISOString()).toBe('2026-09-01T00:00:00.000Z');
+    expect(new Date(row.degraded_at).toISOString()).toBe('2026-09-03T00:00:00.000Z');
+    expect(Number(row.repair_issue_id)).toBe(issueId);
+  }
+  expect(await wakeTournamentReviewsAfterResolvedRepair(season)).toEqual([]);
+  // Another failed validation after the repair must retain its new backoff.
+  await sql`UPDATE competition.tournament_review_obligations
+    SET last_attempt_at=clock_timestamp(),next_attempt_at=clock_timestamp()+interval '1 hour'
+    WHERE season_id=${season.seasonId} AND event_id=2`;
+  expect(await wakeTournamentReviewsAfterResolvedRepair(season)).toEqual([]);
+});
+
+test('repair wake is scoped, survives a missed enqueue, and rolls back with settlement', async () => {
+  const { wakeTournamentReviewsAfterResolvedRepair } = await import(
+    '../../src/services/tournament-review-publication.service'
+  );
+  await sql`INSERT INTO fpl.events(season_id,event_id,name) VALUES (${season.seasonId},1,'Wake rollback fixture')`;
+  await sql`INSERT INTO competition.tournament_review_obligations
+    (season_id,tournament_id,event_id,format,state,eligible_at,next_attempt_at,last_attempt_at,last_error_code,repair_issue_id)
+    VALUES (${season.seasonId},${tournamentId},1,'POINTS','DEGRADED','2026-09-01',
+      clock_timestamp()+interval '1 hour','2026-09-02','TOURNAMENT_REVIEW_SOURCE_NOT_READY',${issueId})`;
+  await expect(
+    withMutationScopes(
+      {
+        queueName: 'tournament-repair',
+        jobName: 'wake-rollback',
+        tournamentId,
+        scopes: [tournamentSetupLifecycleScope(tournamentId)],
+      },
+      async () => {
+        const tx = await getDbClient();
+        await tx`UPDATE competition.tournament_setup_issues SET resolved_at=clock_timestamp() WHERE issue_id=${issueId}`;
+        expect(await wakeTournamentReviewsAfterResolvedRepair(season, { tournamentId })).toEqual([
+          1,
+        ]);
+        throw new Error('rollback wake');
+      },
+    ),
+  ).rejects.toThrow('rollback wake');
+  expect(await wakeTournamentReviewsAfterResolvedRepair(season)).toEqual([]);
+  const [waiting] = await sql`SELECT next_attempt_at > clock_timestamp() AS waiting
+    FROM competition.tournament_review_obligations WHERE season_id=${season.seasonId}`;
+  expect(waiting.waiting).toBe(true);
+  await sql`UPDATE competition.tournament_setup_issues SET resolved_at=clock_timestamp() WHERE issue_id=${issueId}`;
+  expect(
+    await wakeTournamentReviewsAfterResolvedRepair(season, { tournamentId: tournamentId + 1 }),
+  ).toEqual([]);
+  expect(await wakeTournamentReviewsAfterResolvedRepair(season, { eventId: 2 })).toEqual([]);
+  expect(
+    await wakeTournamentReviewsAfterResolvedRepair(season, { tournamentId, eventId: 1 }),
+  ).toEqual([1]);
 });
 
 test('incomplete repair commits diagnostics and reports the new retry revision before throwing', async () => {
@@ -839,6 +934,76 @@ for (const gap of [
       const result = await run();
       expect(result.rowCount).toBe(1);
       expect(result.readySubjectCount).toBe(1);
+    } else {
+      const failure = await run().then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(TournamentReviewSourceNotReadyError);
+      expect(failure).toMatchObject({ repairEventIds: [1] });
+    }
+  });
+}
+
+for (const gap of [
+  'missing-history',
+  'score',
+  'watermark',
+  'rank',
+  'match-points',
+  'complete',
+] as const) {
+  test(`H2H review routes ${gap} to the historical round instead of the current review`, async () => {
+    const { buildH2HPayload, TournamentReviewSourceNotReadyError } = await import(
+      '../../src/services/tournament-review-publication.service'
+    );
+    const checkedAt = new Date('2026-09-01T00:00:00Z');
+    await sql`INSERT INTO competition.entries(season_id,entry_id,entry_name,player_name,started_event)
+      VALUES (${season.seasonId},${tournamentId + 1},'Opponent','Fixture',1)`;
+    await sql`UPDATE competition.entries SET started_event=1 WHERE season_id=${season.seasonId} AND entry_id=${tournamentId}`;
+    for (const [index, entryId] of [tournamentId, tournamentId + 1].entries()) {
+      await sql`INSERT INTO competition.tournament_entries(season_id,tournament_id,league_id,entry_id)
+        VALUES (${season.seasonId},${tournamentId},${tournamentId},${entryId})`;
+      await sql`INSERT INTO competition.tournament_groups(season_id,tournament_id,group_id,group_name,group_index,entry_id)
+        VALUES (${season.seasonId},${tournamentId},1,'A',${index + 1},${entryId})`;
+    }
+    for (const eventId of [1, 2]) {
+      await sql`INSERT INTO fpl.events(season_id,event_id,name,finished,data_checked,data_checked_at)
+        VALUES (${season.seasonId},${eventId},'H2H history fixture',true,true,${checkedAt})`;
+      for (const [index, entryId] of [tournamentId, tournamentId + 1].entries()) {
+        await sql`INSERT INTO competition.entry_event_results(season_id,entry_id,event_id,event_points,event_transfers_cost,event_net_points,event_rank,overall_points,overall_rank,rich_synced_at,updated_at)
+          VALUES (${season.seasonId},${entryId},${eventId},${42 - index * 2},0,${42 - index * 2},${index + 1},100,${index + 1},${checkedAt},${checkedAt})`;
+      }
+      if (eventId === 1 && gap === 'missing-history') continue;
+      await sql`INSERT INTO competition.tournament_battle_group_results
+        (season_id,tournament_id,group_id,event_id,home_index,home_entry_id,home_net_points,home_rank,home_match_points,
+         away_index,away_entry_id,away_net_points,away_rank,away_match_points,source_checked_at,updated_at)
+        VALUES (${season.seasonId},${tournamentId},1,${eventId},1,${tournamentId},42,1,3,2,${tournamentId + 1},40,2,0,${checkedAt},${checkedAt})`;
+    }
+    if (gap === 'score')
+      await sql`UPDATE competition.tournament_battle_group_results SET home_net_points=43 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+    if (gap === 'watermark')
+      await sql`UPDATE competition.entry_event_results SET updated_at='2026-09-02' WHERE season_id=${season.seasonId} AND event_id=1`;
+    if (gap === 'rank')
+      await sql`UPDATE competition.tournament_battle_group_results SET home_rank=99 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+    if (gap === 'match-points')
+      await sql`UPDATE competition.tournament_battle_group_results SET home_match_points=0 WHERE season_id=${season.seasonId} AND tournament_id=${tournamentId} AND event_id=1`;
+    const run = () =>
+      sql.begin((tx) =>
+        buildH2HPayload(
+          tx,
+          season.seasonId,
+          {
+            tournament_id: tournamentId,
+            total_team_num: 2,
+            group_started_event_id: 1,
+          } as Parameters<typeof buildH2HPayload>[2],
+          { event_id: 2, data_checked_at: checkedAt } as Parameters<typeof buildH2HPayload>[3],
+          {},
+        ),
+      );
+    if (gap === 'complete') {
+      expect((await run()).readySubjectCount).toBe(2);
     } else {
       const failure = await run().then(
         () => null,

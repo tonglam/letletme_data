@@ -1572,7 +1572,7 @@ function resolveTournamentReviewKnockoutWinner(input: {
   return Math.min(input.homeEntryId, input.awayEntryId);
 }
 
-async function buildH2HPayload(
+export async function buildH2HPayload(
   tx: postgres.TransactionSql,
   seasonId: number,
   tournament: TournamentRow,
@@ -1903,8 +1903,14 @@ async function buildH2HPayload(
     ORDER BY event.event_id
   `;
   const historyEventIds = new Set(history.map((match) => match.event_id));
-  if (expectedHistoryEvents.some((row) => !historyEventIds.has(row.event_id))) {
-    throw new TournamentReviewSourceNotReadyError('H2H history event coverage is incomplete');
+  const missingHistoryEventIds = expectedHistoryEvents
+    .filter((row) => !historyEventIds.has(row.event_id))
+    .map((row) => row.event_id);
+  if (missingHistoryEventIds.length > 0) {
+    throw new TournamentReviewSourceNotReadyError(
+      'H2H history event coverage is incomplete',
+      missingHistoryEventIds,
+    );
   }
   const historyByEvent = new Map<number, BattleSourceRow[]>();
   for (const match of history) {
@@ -1938,11 +1944,14 @@ async function buildH2HPayload(
         if (entryId === null || !eventParticipantIds.has(entryId) || seenEntries.has(entryId)) {
           throw new TournamentReviewSourceNotReadyError(
             'H2H history participant coverage is invalid',
+            [expectedEvent.event_id],
           );
         }
         const existingGroupId = entryGroupIds.get(entryId);
         if (existingGroupId !== undefined && existingGroupId !== match.group_id) {
-          throw new TournamentReviewSourceNotReadyError('H2H history entry changed groups');
+          throw new TournamentReviewSourceNotReadyError('H2H history entry changed groups', [
+            expectedEvent.event_id,
+          ]);
         }
         entryGroupIds.set(entryId, match.group_id);
         seenEntries.add(entryId);
@@ -1959,6 +1968,7 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError(
         'H2H history participant coverage is incomplete',
+        [expectedEvent.event_id],
       );
     }
   }
@@ -2002,7 +2012,9 @@ async function buildH2HPayload(
   for (const match of history) {
     const historyCheckpoint = asDate(match.event_data_checked_at);
     if (!historyCheckpoint || match.event_finished !== true || match.event_data_checked !== true) {
-      throw new TournamentReviewSourceNotReadyError('H2H history event is not finalized');
+      throw new TournamentReviewSourceNotReadyError('H2H history event is not finalized', [
+        match.event_id,
+      ]);
     }
     const historySourceCheckedAt = battleSourceCheckedAt(match);
     const historySourceDates = [historySourceCheckedAt, match.updated_at]
@@ -2012,11 +2024,15 @@ async function buildH2HPayload(
       historySourceDates.length === 0 ||
       historySourceDates.some((date) => date.getTime() < historyCheckpoint.getTime())
     ) {
-      throw new TournamentReviewSourceNotReadyError('H2H history source rows are stale');
+      throw new TournamentReviewSourceNotReadyError('H2H history source rows are stale', [
+        match.event_id,
+      ]);
     }
     sourceTimes.push(...historySourceDates);
     if (!historySourceCheckedAt) {
-      throw new TournamentReviewSourceNotReadyError('H2H history source timestamp is missing');
+      throw new TournamentReviewSourceNotReadyError('H2H history source timestamp is missing', [
+        match.event_id,
+      ]);
     }
     if (
       (match.home_entry_id !== null &&
@@ -2024,14 +2040,18 @@ async function buildH2HPayload(
         !scores.has(match.home_entry_id)) ||
       (match.away_entry_id !== null && !match.away_is_average && !scores.has(match.away_entry_id))
     ) {
-      throw new TournamentReviewSourceNotReadyError('H2H history entry is outside the roster');
+      throw new TournamentReviewSourceNotReadyError('H2H history entry is outside the roster', [
+        match.event_id,
+      ]);
     }
     if (
       (match.home_entry_id === null) !== match.home_is_average ||
       (match.away_entry_id === null) !== match.away_is_average ||
       (match.home_entry_id === null && match.away_entry_id === null)
     ) {
-      throw new TournamentReviewSourceNotReadyError('H2H history side contract is invalid');
+      throw new TournamentReviewSourceNotReadyError('H2H history side contract is invalid', [
+        match.event_id,
+      ]);
     }
 
     // Backfilled zero-score rows before a late entry joined the tournament
@@ -2062,7 +2082,9 @@ async function buildH2HPayload(
       match.away_match_points === null
     ) {
       if (match.is_bye) continue;
-      throw new TournamentReviewSourceNotReadyError('H2H history score is incomplete');
+      throw new TournamentReviewSourceNotReadyError('H2H history score is incomplete', [
+        match.event_id,
+      ]);
     }
     if (
       !h2hMatchPointsMatchScore(
@@ -2074,6 +2096,7 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError(
         'H2H history match points are inconsistent with scores',
+        [match.event_id],
       );
     }
     if (
@@ -2087,6 +2110,7 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError(
         'Local H2H history ranks do not match entry event results',
+        [match.event_id],
       );
     }
     if (
@@ -2121,6 +2145,7 @@ async function buildH2HPayload(
     ) {
       throw new TournamentReviewSourceNotReadyError(
         'H2H history scores do not match entry event results',
+        [match.event_id],
       );
     }
 
@@ -3240,6 +3265,35 @@ export async function requestTournamentReviewTournamentCorrection(
   );
 }
 
+/** A resolved dependency wakes its existing wait without opening a correction
+ * budget or erasing the original failure clocks. Compare the resolution with
+ * the last attempt so an unrelated remaining gap retains its normal backoff. */
+export async function wakeTournamentReviewsAfterResolvedRepair(
+  season: FplSeasonRef,
+  target: { tournamentId?: number; eventId?: number } = {},
+): Promise<number[]> {
+  const db = await getDbClient();
+  const rows = await db<Array<{ event_id: number }>>`
+    UPDATE competition.tournament_review_obligations obligation
+    SET next_attempt_at = clock_timestamp(), updated_at = clock_timestamp()
+    FROM competition.tournament_setup_issues issue
+    WHERE obligation.season_id = ${season.seasonId}
+      AND (${target.tournamentId ?? null}::integer IS NULL
+        OR obligation.tournament_id = ${target.tournamentId ?? null})
+      AND (${target.eventId ?? null}::integer IS NULL
+        OR obligation.event_id = ${target.eventId ?? null})
+      AND obligation.state IN ('WAITING_SOURCE', 'DEGRADED')
+      AND obligation.last_error_code = 'TOURNAMENT_REVIEW_SOURCE_NOT_READY'
+      AND obligation.next_attempt_at > clock_timestamp()
+      AND issue.season_id = obligation.season_id
+      AND issue.tournament_id = obligation.tournament_id
+      AND issue.issue_id = obligation.repair_issue_id
+      AND issue.resolved_at > COALESCE(obligation.last_attempt_at, '-infinity'::timestamptz)
+    RETURNING obligation.event_id
+  `;
+  return rows.map((row) => row.event_id);
+}
+
 export async function reconcileTournamentReviewObligations(
   season: FplSeasonRef,
   now = new Date(),
@@ -4056,10 +4110,13 @@ export async function reconcileTournamentReviewObligations(
   `;
   });
   const counts = rows[0];
+  // Also recover a process exit after the repair commit but before enqueue.
+  const resumed = await wakeTournamentReviewsAfterResolvedRepair(season, target);
   return (
     Number(counts?.upserted_count ?? 0) +
     Number(counts?.retired_head_count ?? 0) +
-    Number(counts?.retired_obligation_count ?? 0)
+    Number(counts?.retired_obligation_count ?? 0) +
+    resumed.length
   );
 }
 

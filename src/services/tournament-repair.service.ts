@@ -40,6 +40,7 @@ import {
 import {
   requestTournamentReviewCorrection,
   requestTournamentReviewTournamentCorrection,
+  wakeTournamentReviewsAfterResolvedRepair,
 } from './tournament-review-publication.service';
 import { syncOfficialH2HTournament } from './tournament-official-h2h.service';
 import { uniqueNumbers } from '../utils/async';
@@ -402,6 +403,12 @@ async function repairTournamentSetupIssuePrepared(
       season,
       issue.tournamentId,
     );
+    if (!remainingIssues.some((remaining) => remaining.issueId === issueId)) {
+      const resumedEventIds = await wakeTournamentReviewsAfterResolvedRepair(season, {
+        tournamentId: issue.tournamentId,
+      });
+      correctionEventIds = uniqueNumbers([...(correctionEventIds ?? []), ...resumedEventIds]);
+    }
     const settledState = await tournamentSetupIssueRepository.lockRepairState(season, issueId);
     if (settledState)
       registerDatabasePostCommit(async () => {
