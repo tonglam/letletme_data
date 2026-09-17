@@ -48,7 +48,8 @@ export const JOBS_STATUS_SECTIONS = [
 export type JobsStatusSection = (typeof JOBS_STATUS_SECTIONS)[number];
 
 const CONTROL_STATEMENT_TIMEOUT_MS = 2_000;
-const TOURNAMENT_STATUS_STATEMENT_TIMEOUT_MS = 25_000;
+const TOURNAMENT_STATUS_STATEMENT_TIMEOUT_MS = 5_000;
+const CONTROL_PROJECTION_CACHE_MS = 30_000;
 
 const PUBLICATION_SCOPES: readonly Readonly<{
   dataset: DataPublicationDataset;
@@ -64,6 +65,19 @@ type ControlDatabaseState = Readonly<{
   season: FplSeasonRecord;
   publications: ReadonlyMap<DataPublicationDataset, PublicationIdentity>;
 }>;
+
+type ControlProjection = Readonly<{
+  databaseState: ControlDatabaseState;
+  runtime: Awaited<ReturnType<typeof readRuntimeControlStatus>>;
+  schedulerProgress: Awaited<ReturnType<typeof readSchedulerProgress>>;
+  queuePause: Awaited<ReturnType<typeof readQueuePauseStatus>>;
+  orphanState: Awaited<ReturnType<typeof schedulerOrphanState>>;
+  publicationConsistency: Record<string, boolean>;
+  observedAt: Date;
+}>;
+
+let controlProjectionCache: { value: ControlProjection; expiresAtMs: number } | undefined;
+let controlProjectionFlight: Promise<ControlProjection> | undefined;
 
 async function readControlDatabaseState(): Promise<ControlDatabaseState> {
   const db = await getDb();
@@ -253,6 +267,47 @@ async function readMyFplIntegrity(
   };
 }
 
+async function readControlProjection(): Promise<ControlProjection> {
+  const observedAt = new Date();
+  const [databaseState, runtime, schedulerProgress, queuePause, orphanState] = await Promise.all([
+    readControlDatabaseState(),
+    readRuntimeControlStatus(),
+    readSchedulerProgress(),
+    readQueuePauseStatus(),
+    schedulerOrphanState(),
+  ]);
+  const publicationConsistency = await readPublicationIdentityParity(databaseState);
+  return {
+    databaseState,
+    runtime,
+    schedulerProgress,
+    queuePause,
+    orphanState,
+    publicationConsistency,
+    observedAt,
+  };
+}
+
+async function getControlProjection(): Promise<ControlProjection> {
+  const now = Date.now();
+  if (controlProjectionCache && controlProjectionCache.expiresAtMs > now) {
+    return controlProjectionCache.value;
+  }
+  if (!controlProjectionFlight) {
+    controlProjectionFlight = readControlProjection();
+  }
+  try {
+    const value = await controlProjectionFlight;
+    controlProjectionCache = {
+      value,
+      expiresAtMs: Date.now() + CONTROL_PROJECTION_CACHE_MS,
+    };
+    return value;
+  } finally {
+    controlProjectionFlight = undefined;
+  }
+}
+
 const WINDOW_MS: Record<JobsStatusWindow, number> = {
   '15m': 15 * 60_000,
   '1h': 60 * 60_000,
@@ -324,16 +379,19 @@ export async function getJobsControlStatus(
   watchEventId?: number,
   entryAuditSeason?: string,
 ): Promise<Record<string, unknown>> {
-  const [databaseState, runtime, schedulerProgress, queuePause, orphanState] = await Promise.all([
-    readControlDatabaseState(),
-    readRuntimeControlStatus(),
-    readSchedulerProgress(),
-    readQueuePauseStatus(),
-    schedulerOrphanState(),
-  ]);
-  const publicationConsistency = await readPublicationIdentityParity(databaseState);
+  const projection = await getControlProjection();
+  const {
+    databaseState,
+    runtime,
+    schedulerProgress,
+    queuePause,
+    orphanState,
+    publicationConsistency,
+    observedAt,
+  } = projection;
   const base: Record<string, unknown> = {
     generatedAt: new Date().toISOString(),
+    controlObservedAt: observedAt.toISOString(),
     season: databaseState.season.seasonCode,
     window,
     section: section ?? 'control',
@@ -369,12 +427,14 @@ export async function getJobsControlStatus(
           metricVersion: 'settled-review-v2',
           season: databaseState.season.seasonCode,
           checkedAt: new Date().toISOString(),
-          eligibleCount: 0,
-          stateCounts: { pending: 0, waitingSource: 0, processing: 0, ready: 0, degraded: 0 },
+          unavailable: true,
+          reasonCodes: ['TOURNAMENT_REVIEW_STATUS_UNAVAILABLE'],
+          eligibleCount: null,
+          stateCounts: null,
           publication: {
-            readyWithCoherentHead: 0,
-            readyWithIncoherentHead: 0,
-            readyWithIncompleteChunks: 0,
+            readyWithCoherentHead: null,
+            readyWithIncoherentHead: null,
+            readyWithIncompleteChunks: null,
           },
           oldestActiveEligibleAt: null,
           oldestPendingAt: null,
@@ -383,7 +443,6 @@ export async function getJobsControlStatus(
           oldestDegradedAt: null,
           latestUpdatedAt: null,
           watch: null,
-          unavailable: true,
         })),
       };
     case 'liveFinalRetention':

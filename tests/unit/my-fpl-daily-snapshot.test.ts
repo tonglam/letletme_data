@@ -350,6 +350,17 @@ describe('My FPL daily snapshot publication contract', () => {
         singleQuote +
         ')',
     );
+    expect(orphanProjection).toContain(
+      'set_config(' +
+        singleQuote +
+        'statement_timeout' +
+        singleQuote +
+        ', ' +
+        singleQuote +
+        '2000ms' +
+        singleQuote +
+        ', true)',
+    );
   });
 
   test('keeps pre-migration queue pause evidence unknown', () => {
