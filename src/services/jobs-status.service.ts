@@ -1107,6 +1107,7 @@ export async function getJobsStatus(
   const unrequestedPublicationScopes = publicationScopes.filter(
     (scope) => !publicationAuditScopes.has(scope.dataset),
   );
+  const priceChangeAuditRequested = publicationAuditScopes.has(PRICE_CHANGE_DATASET);
   // Requested control reads own the explicit audit deadline. When an audit is
   // present, complete the already-admitted payload reads before touching an
   // unrelated control scope, so a slow unrequested read cannot consume the
@@ -1158,6 +1159,36 @@ export async function getJobsStatus(
     }
   }
 
+  let priceChangeDbDelivery: PublicationDelivery | DataPublicationReadResult | null = null;
+  let priceChangeAuditExpired = false;
+  // If price changes are the requested audit scope, resolve the durable
+  // fallback before running any unrelated control reads. Otherwise a slow
+  // core/market status read could consume the price audit's deadline and make
+  // an available PostgreSQL context appear unavailable.
+  if (publicationAudit && priceChangeAuditRequested) {
+    const priceChangeEntry = publicationEntries.find(
+      (entry) => entry.dataset === PRICE_CHANGE_DATASET,
+    );
+    const priceChangeDbActive = priceChangeEntry?.dbActive ?? null;
+    const priceChangeRedisActive = priceChangeEntry?.redisDelivery ?? null;
+    const priceChangeRedisContext =
+      priceChangeRedisActive && 'manifest' in priceChangeRedisActive
+        ? asContext(priceChangeRedisActive.items.context)
+        : null;
+    const priceChangeRedisUsable =
+      redisMatchesActivePublication(priceChangeDbActive, priceChangeRedisActive) &&
+      priceChangeRedisContext !== null;
+    priceChangeAuditExpired =
+      publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
+    if (priceChangeDbActive && !priceChangeRedisUsable && !priceChangeAuditExpired) {
+      priceChangeDbDelivery = await loadActivePriceChangeContextForSchedule(
+        season,
+        publicationAuditDeadlineAt ?? undefined,
+      ).catch(() => null);
+      priceChangeAuditExpired =
+        publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
+    }
+  }
   // Stop the audit clock before running unrequested status projections. Those
   // projections remain useful for the response, but they are outside the
   // operator's explicitly budgeted evidence interval.
@@ -1184,18 +1215,19 @@ export async function getJobsStatus(
   const priceChangeRedisUsable =
     redisMatchesActivePublication(priceChangeDbActive, priceChangeRedisActive) &&
     priceChangeRedisContext !== null;
-  const priceChangeAuditRequested = publicationAuditScopes.has(PRICE_CHANGE_DATASET);
-  const priceChangeAuditExpired =
-    priceChangeAuditRequested &&
-    publicationAuditDeadlineAt !== null &&
-    Date.now() >= publicationAuditDeadlineAt;
-  const priceChangeDbDelivery =
-    priceChangeDbActive && !priceChangeRedisUsable && !priceChangeAuditExpired
-      ? await loadActivePriceChangeContextForSchedule(
-          season,
-          priceChangeAuditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
-        ).catch(() => null)
-      : null;
+  if (!publicationAudit || !priceChangeAuditRequested) {
+    priceChangeAuditExpired =
+      priceChangeAuditRequested &&
+      publicationAuditDeadlineAt !== null &&
+      Date.now() >= publicationAuditDeadlineAt;
+    priceChangeDbDelivery =
+      priceChangeDbActive && !priceChangeRedisUsable && !priceChangeAuditExpired
+        ? await loadActivePriceChangeContextForSchedule(
+            season,
+            priceChangeAuditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
+          ).catch(() => null)
+        : null;
+  }
   const priceChangeSelection = selectCanonicalPriceChangeContext({
     dbActive: priceChangeDbActive,
     redisActive: priceChangeRedisActive,

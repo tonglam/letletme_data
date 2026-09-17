@@ -176,7 +176,7 @@ const INTEGRITY_PROOF_REFRESH_COOLDOWN_MS = 60 * 1_000;
 const INTEGRITY_MARKER_PERSIST_TIMEOUT_MS = 1_000;
 const INTEGRITY_FAILURE_SUFFIX = ':integrity-failure';
 const INTEGRITY_PROOF_SUFFIX = ':integrity-proof';
-/** Timestamp fence used to discard stale failure writes that race a repair. */
+/** Monotonic Redis epoch used to discard stale failure writes that race a repair. */
 const INTEGRITY_REPAIR_SUFFIX = ':integrity-repair';
 type IntegrityFailureMarker = Readonly<{
   token: string;
@@ -382,14 +382,25 @@ for index, item in ipairs(current.items) do
   end
 end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[7 + ((index - 1) * 2)]
-  local payload = ARGV[8 + ((index - 1) * 2)]
+  local key = ARGV[6 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
+end
+local repair_type = redis.call('TYPE', KEYS[4])
+local repair_type_name = type(repair_type) == 'table' and repair_type['ok'] or repair_type
+if repair_type_name == 'string' and tonumber(redis.call('GET', KEYS[4])) == nil then
+  redis.call('DEL', KEYS[4])
+elseif repair_type_name ~= 'none' and repair_type_name ~= 'string' then
+  redis.call('DEL', KEYS[4])
+end
+local repair_epoch = redis.call('INCR', KEYS[4])
+redis.call('PERSIST', KEYS[4])
+for index, item in ipairs(candidate.items) do
+  local key = ARGV[6 + ((index - 1) * 2)]
+  local payload = ARGV[7 + ((index - 1) * 2)]
   redis.call('SET', key, payload)
   redis.call('PERSIST', key)
 end
 redis.call('SET', KEYS[3], ARGV[4], 'EX', ARGV[5])
-redis.call('SET', KEYS[4], ARGV[6], 'EX', ARGV[5])
 local failure_type = redis.call('TYPE', KEYS[2])
 local failure_type_name = type(failure_type) == 'table' and failure_type['ok'] or failure_type
 if failure_type_name ~= 'string' then
@@ -397,7 +408,7 @@ if failure_type_name ~= 'string' then
 elseif redis.call('GET', KEYS[2]) == ARGV[3] then
   redis.call('DEL', KEYS[2])
 end
-return {'repaired'}
+return {'repaired', tostring(repair_epoch)}
 `;
 
 const REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT = `
@@ -411,18 +422,26 @@ end
 local candidate_decoded, candidate = pcall(cjson.decode, ARGV[3])
 if not candidate_decoded or not candidate or not candidate.items then return {'conflict'} end
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[8 + ((index - 1) * 2)]
+  local key = ARGV[7 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
 end
+local repair_type = redis.call('TYPE', KEYS[4])
+local repair_type_name = type(repair_type) == 'table' and repair_type['ok'] or repair_type
+if repair_type_name == 'string' and tonumber(redis.call('GET', KEYS[4])) == nil then
+  redis.call('DEL', KEYS[4])
+elseif repair_type_name ~= 'none' and repair_type_name ~= 'string' then
+  redis.call('DEL', KEYS[4])
+end
+local repair_epoch = redis.call('INCR', KEYS[4])
+redis.call('PERSIST', KEYS[4])
 for index, item in ipairs(candidate.items) do
-  local key = ARGV[8 + ((index - 1) * 2)]
-  local payload = ARGV[9 + ((index - 1) * 2)]
+  local key = ARGV[7 + ((index - 1) * 2)]
+  local payload = ARGV[8 + ((index - 1) * 2)]
   redis.call('SET', key, payload)
   redis.call('PERSIST', key)
 end
 redis.call('SET', KEYS[1], ARGV[3])
 redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[6])
-redis.call('SET', KEYS[4], ARGV[7], 'EX', ARGV[6])
 local failure_type = redis.call('TYPE', KEYS[2])
 local failure_type_name = type(failure_type) == 'table' and failure_type['ok'] or failure_type
 if failure_type_name ~= 'string' then
@@ -430,7 +449,28 @@ if failure_type_name ~= 'string' then
 elseif redis.call('GET', KEYS[2]) == ARGV[4] then
   redis.call('DEL', KEYS[2])
 end
-return {'replaced'}
+return {'replaced', tostring(repair_epoch)}
+`;
+
+/**
+ * Read all immutable payloads and advance the per-scope epoch in one Redis
+ * transaction. A repair EVAL advances the same epoch immediately before it
+ * writes items, so a failure can be ordered against the payload read by the
+ * Redis server rather than by caller wall-clock timestamps.
+ */
+const READ_DATA_PUBLICATION_PAYLOADS_WITH_EPOCH_SCRIPT = `
+local epoch_type = redis.call('TYPE', KEYS[1])
+local epoch_type_name = type(epoch_type) == 'table' and epoch_type['ok'] or epoch_type
+if epoch_type_name == 'string' and tonumber(redis.call('GET', KEYS[1])) == nil then
+  redis.call('DEL', KEYS[1])
+elseif epoch_type_name ~= 'none' and epoch_type_name ~= 'string' then
+  redis.call('DEL', KEYS[1])
+end
+local epoch = redis.call('INCR', KEYS[1])
+redis.call('PERSIST', KEYS[1])
+local payloads = redis.call('MGET', unpack(ARGV, 1, #ARGV))
+table.insert(payloads, 1, tostring(epoch))
+return payloads
 `;
 
 const MARK_INTEGRITY_FAILURE_SCRIPT = `
@@ -443,7 +483,7 @@ elseif repair_type_name ~= 'none' then
   redis.call('DEL', KEYS[4])
 end
 local observed_at = tonumber(ARGV[3]) or 0
-if observed_at <= repair_at then return 0 end
+if observed_at <= repair_at then return -1 end
 local active_matches = false
 if ARGV[1] ~= '*' then
   local active_raw = redis.call('GET', KEYS[3])
@@ -567,17 +607,16 @@ function localIntegrityFailureEntries(prefix: string): Array<[string, IntegrityF
 function clearLocalIntegrityFailureAfterRepair(
   scope: DataPublicationScope,
   manifest: DataPublicationManifest,
-  repairStartedAt: number,
+  repairEpoch: number,
 ): void {
   const prefix = scopePrefix(scope);
   const expected = publicationIntegrityToken(manifest);
   const exactKey = localIntegrityFailureKey(prefix, expected);
   const exact = publicationIntegrityFailures.get(exactKey);
-  if (exact && exact.observedAt <= repairStartedAt) publicationIntegrityFailures.delete(exactKey);
-  // A full read records when it started observing the immutable payload. This
-  // lets a failure that completes while the repair transaction is in flight be
-  // cleared as pre-repair evidence, while a read that started afterwards stays
-  // sticky for a subsequent repair pass.
+  if (exact && exact.observedAt <= repairEpoch) publicationIntegrityFailures.delete(exactKey);
+  // A full read records the Redis epoch at which it atomically captured the
+  // immutable payload. A read ordered before this repair is stale evidence and
+  // may be cleared; a read ordered afterwards stays sticky for a new repair.
 }
 
 async function getRedisForIntegrityMarker(
@@ -621,40 +660,54 @@ export async function markDataPublicationIntegrityFailure(
   const persist = async (): Promise<void> => {
     try {
       const redis = await getRedisForIntegrityMarker(redisClient);
+      let outcome: number;
       if (deadlineAt === undefined) {
-        await redis.eval(
-          MARK_INTEGRITY_FAILURE_SCRIPT,
-          4,
-          integrityFailureKey(scope),
-          integrityProofKey(scope),
-          activeDataPublicationKey(scope),
-          integrityRepairKey(scope),
-          token,
-          String(INTEGRITY_FAILURE_TTL_SECONDS),
-          String(observedAt),
+        outcome = Number(
+          await redis.eval(
+            MARK_INTEGRITY_FAILURE_SCRIPT,
+            4,
+            integrityFailureKey(scope),
+            integrityProofKey(scope),
+            activeDataPublicationKey(scope),
+            integrityRepairKey(scope),
+            token,
+            String(INTEGRITY_FAILURE_TTL_SECONDS),
+            String(observedAt),
+          ),
         );
-        return;
+      } else {
+        // The request deadline may already be exhausted when corruption is
+        // detected. Keep shared evidence durable with its own short bound while
+        // leaving the audit response path completely asynchronous.
+        const markerDeadlineAt = Date.now() + INTEGRITY_MARKER_PERSIST_TIMEOUT_MS;
+        outcome = Number(
+          await redisCommandWithDeadline<number>(
+            redis,
+            'eval',
+            [
+              MARK_INTEGRITY_FAILURE_SCRIPT,
+              '4',
+              integrityFailureKey(scope),
+              integrityProofKey(scope),
+              activeDataPublicationKey(scope),
+              integrityRepairKey(scope),
+              token,
+              String(INTEGRITY_FAILURE_TTL_SECONDS),
+              String(observedAt),
+            ],
+            markerDeadlineAt,
+          ),
+        );
       }
-      // The request deadline may already be exhausted when corruption is
-      // detected. Keep shared evidence durable with its own short bound while
-      // leaving the audit response path completely asynchronous.
-      const markerDeadlineAt = Date.now() + INTEGRITY_MARKER_PERSIST_TIMEOUT_MS;
-      await redisCommandWithDeadline<number>(
-        redis,
-        'eval',
-        [
-          MARK_INTEGRITY_FAILURE_SCRIPT,
-          '4',
-          integrityFailureKey(scope),
-          integrityProofKey(scope),
-          activeDataPublicationKey(scope),
-          integrityRepairKey(scope),
-          token,
-          String(INTEGRITY_FAILURE_TTL_SECONDS),
-          String(observedAt),
-        ],
-        markerDeadlineAt,
-      );
+      // MARK_INTEGRITY_FAILURE_SCRIPT returns -1 only when the payload read
+      // was ordered before a repair. Do not clear a marker for an active-pointer
+      // conflict (return 0), which may be fresh evidence for another identity.
+      if (outcome === -1) {
+        const current = publicationIntegrityFailures.get(localKey);
+        if (current && current.observedAt <= observedAt) {
+          publicationIntegrityFailures.delete(localKey);
+        }
+      }
     } catch {
       // The local marker still protects this process when the shared marker
       // cannot be written during the same Redis incident.
@@ -837,6 +890,70 @@ async function redisCommandWithDeadline<T>(
   const command = new RedisCommand(name, [...args], { replyEncoding: 'utf8' });
   command.setTimeout(remainingMs);
   return (await redis.sendCommand(command)) as T;
+}
+
+type DataPublicationPayloadsWithEpoch = Readonly<{
+  observedEpoch: number;
+  payloads: Array<string | null>;
+}>;
+
+/**
+ * Capture the ordering epoch and payloads in one Redis EVAL. The fallback is
+ * only for the small in-memory Redis fakes used by unit tests; ioredis always
+ * exposes EVAL in production.
+ */
+async function readDataPublicationPayloadsWithEpoch(
+  scope: DataPublicationScope,
+  keys: readonly string[],
+  redis: Redis,
+  deadlineAt?: number,
+): Promise<DataPublicationPayloadsWithEpoch> {
+  if (keys.length === 0) throw new Error('Publication payload keys are required');
+  const evalMethod = (redis as unknown as { eval?: (...args: unknown[]) => Promise<unknown> }).eval;
+  const mgetMethod = (
+    redis as unknown as {
+      mget?: (...args: string[]) => Promise<Array<string | null>>;
+    }
+  ).mget;
+  const raw =
+    typeof evalMethod === 'function'
+      ? deadlineAt === undefined
+        ? await evalMethod.call(
+            redis,
+            READ_DATA_PUBLICATION_PAYLOADS_WITH_EPOCH_SCRIPT,
+            1,
+            integrityRepairKey(scope),
+            ...keys,
+          )
+        : await redisCommandWithDeadline<unknown>(
+            redis,
+            'eval',
+            [
+              READ_DATA_PUBLICATION_PAYLOADS_WITH_EPOCH_SCRIPT,
+              '1',
+              integrityRepairKey(scope),
+              ...keys,
+            ],
+            deadlineAt,
+          )
+      : typeof mgetMethod === 'function'
+        ? await mgetMethod.call(redis, ...keys)
+        : await Promise.all(keys.map((key) => redis.get(key)));
+  if (typeof evalMethod !== 'function') {
+    return { observedEpoch: Date.now(), payloads: raw as Array<string | null> };
+  }
+  if (!Array.isArray(raw) || raw.length !== keys.length + 1) {
+    throw new Error('Publication payload epoch read returned an invalid result');
+  }
+  const observedEpoch = Number(raw[0]);
+  if (!Number.isSafeInteger(observedEpoch) || observedEpoch <= 0) {
+    throw new Error('Publication payload epoch is invalid');
+  }
+  const payloads = raw.slice(1).map((payload) => (payload === false ? null : payload));
+  if (payloads.some((payload) => payload !== null && typeof payload !== 'string')) {
+    throw new Error('Publication payload epoch read returned a non-string payload');
+  }
+  return { observedEpoch, payloads: payloads as Array<string | null> };
 }
 
 export function activeDataPublicationKey(scope: DataPublicationScope): string {
@@ -1091,15 +1208,12 @@ export async function repairDataPublicationItems(
     publicationIntegrityToken(prepared.manifest),
     publicationIntegrityProofToken(prepared.manifest),
     String(INTEGRITY_PROOF_TTL_SECONDS),
-    '',
     ...itemArgs,
   ];
   const scope = {
     dataset: prepared.manifest.dataset,
     seasonCode: prepared.manifest.seasonCode,
   } as DataPublicationScope;
-  const repairStartedAt = Date.now();
-  args[5] = String(repairStartedAt);
   const result = (await redis.eval(
     REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT,
     4,
@@ -1115,7 +1229,14 @@ export async function repairDataPublicationItems(
       'DATA_PUBLICATION_REPAIR_CONFLICT',
     );
   }
-  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, repairStartedAt);
+  const repairEpoch = Number(result[1]);
+  if (!Number.isSafeInteger(repairEpoch) || repairEpoch <= 0) {
+    throw new CacheError(
+      'Atomic publication item repair returned an invalid epoch',
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
+  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, repairEpoch);
 }
 
 /** Replace a malformed Data-owned active pointer and its canonical items atomically. */
@@ -1142,15 +1263,12 @@ export async function replaceMalformedActiveDataPublication(
     publicationIntegrityToken(prepared.manifest),
     publicationIntegrityProofToken(prepared.manifest),
     String(INTEGRITY_PROOF_TTL_SECONDS),
-    '',
     ...itemArgs,
   ];
   const scope = {
     dataset: prepared.manifest.dataset,
     seasonCode: prepared.manifest.seasonCode,
   } as DataPublicationScope;
-  const repairStartedAt = Date.now();
-  args[6] = String(repairStartedAt);
   const result = (await redis.eval(
     REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT,
     4,
@@ -1166,7 +1284,14 @@ export async function replaceMalformedActiveDataPublication(
       'DATA_PUBLICATION_REPAIR_CONFLICT',
     );
   }
-  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, repairStartedAt);
+  const repairEpoch = Number(result[1]);
+  if (!Number.isSafeInteger(repairEpoch) || repairEpoch <= 0) {
+    throw new CacheError(
+      'Malformed publication replacement returned an invalid epoch',
+      'DATA_PUBLICATION_REPAIR_CONFLICT',
+    );
+  }
+  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, repairEpoch);
 }
 
 export async function activateDataPublicationPointer(
@@ -1381,7 +1506,6 @@ export async function readActiveDataPublication(
   expectedManifest?: DataPublicationManifest,
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
-  const observedAt = Date.now();
   const deadlineExceeded = (): boolean => deadlineAt !== undefined && Date.now() >= deadlineAt;
   try {
     const redis = await getRedisForIntegrityMarker(redisClient, deadlineAt);
@@ -1402,15 +1526,12 @@ export async function readActiveDataPublication(
       return null;
     }
     if (deadlineExceeded()) return null;
-    const payloads =
-      deadlineAt === undefined
-        ? await redis.mget(...manifest.items.map((item) => item.key))
-        : await redisCommandWithDeadline<(string | null)[]>(
-            redis,
-            'mget',
-            manifest.items.map((item) => item.key),
-            deadlineAt,
-          );
+    const { observedEpoch, payloads } = await readDataPublicationPayloadsWithEpoch(
+      scope,
+      manifest.items.map((item) => item.key),
+      redis,
+      deadlineAt,
+    );
     const items: Record<string, unknown> = {};
     for (let index = 0; index < manifest.items.length; index += 1) {
       if (deadlineExceeded()) return null;
@@ -1427,7 +1548,13 @@ export async function readActiveDataPublication(
         payloadDigest !== item.sha256
       ) {
         if (deadlineExceeded()) return null;
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, deadlineAt, observedAt);
+        await markDataPublicationIntegrityFailure(
+          scope,
+          manifest,
+          redis,
+          deadlineAt,
+          observedEpoch,
+        );
         return null;
       }
       if (deadlineExceeded()) return null;
@@ -1436,13 +1563,25 @@ export async function readActiveDataPublication(
         parsed = JSON.parse(payload) as unknown;
       } catch {
         if (deadlineExceeded()) return null;
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, deadlineAt, observedAt);
+        await markDataPublicationIntegrityFailure(
+          scope,
+          manifest,
+          redis,
+          deadlineAt,
+          observedEpoch,
+        );
         return null;
       }
       if (deadlineExceeded()) return null;
       if (itemCount(parsed) !== item.count) {
         if (deadlineExceeded()) return null;
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, deadlineAt, observedAt);
+        await markDataPublicationIntegrityFailure(
+          scope,
+          manifest,
+          redis,
+          deadlineAt,
+          observedEpoch,
+        );
         return null;
       }
       if (deadlineExceeded()) return null;
@@ -1615,7 +1754,6 @@ export async function readActiveDataPublicationItemsWithBounds(
   redisClient?: Redis,
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
-  const observedAt = Date.now();
   if (
     itemNames.length === 0 ||
     new Set(itemNames).size !== itemNames.length ||
@@ -1643,7 +1781,11 @@ export async function readActiveDataPublicationItemsWithBounds(
         items: Object.fromEntries(itemNames.map((name) => [name, full.items[name]])),
       };
     }
-    const payloads = await redis.mget(...selectedItems.map((item) => item.key));
+    const { observedEpoch, payloads } = await readDataPublicationPayloadsWithEpoch(
+      scope,
+      selectedItems.map((item) => item.key),
+      redis,
+    );
     if (payloads.length !== selectedItems.length) return null;
     const items: Record<string, unknown> = {};
     for (let index = 0; index < selectedItems.length; index += 1) {
@@ -1654,18 +1796,18 @@ export async function readActiveDataPublicationItemsWithBounds(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
         return null;
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(payload) as unknown;
       } catch {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
         return null;
       }
       if (itemCount(parsed) !== item.count) {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
         return null;
       }
       items[item.name] = parsed;
@@ -1687,7 +1829,6 @@ export async function readActiveDataPublicationItem(
   redisClient?: Redis,
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
-  const observedAt = Date.now();
   if (!/^[a-z][a-zA-Z0-9]*$/.test(itemName)) return null;
   try {
     const redis = redisClient ?? (await redisSingleton.getClient());
@@ -1697,24 +1838,29 @@ export async function readActiveDataPublicationItem(
     }
     const item = manifest.items.find((candidate) => candidate.name === itemName);
     if (!item) return null;
-    const payload = await redis.get(item.key);
+    const { observedEpoch, payloads } = await readDataPublicationPayloadsWithEpoch(
+      scope,
+      [item.key],
+      redis,
+    );
+    const payload = payloads[0] ?? null;
     if (
       payload === null ||
       Buffer.byteLength(payload, 'utf8') !== item.bytes ||
       sha256(payload) !== item.sha256
     ) {
-      await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+      await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
       return null;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(payload) as unknown;
     } catch {
-      await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+      await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
       return null;
     }
     if (itemCount(parsed) !== item.count) {
-      await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+      await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
       return null;
     }
     return { manifest, items: { [itemName]: parsed } };
@@ -1736,7 +1882,6 @@ export async function readActiveDataPublicationItems(
   redisClient?: Redis,
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
-  const observedAt = Date.now();
   if (
     itemNames.length === 0 ||
     new Set(itemNames).size !== itemNames.length ||
@@ -1755,7 +1900,11 @@ export async function readActiveDataPublicationItems(
     }
     const selected = itemNames.map((name) => manifest.items.find((item) => item.name === name));
     if (selected.some((item): item is undefined => item === undefined)) return null;
-    const payloads = await redis.mget(...manifest.items.map((item) => item.key));
+    const { observedEpoch, payloads } = await readDataPublicationPayloadsWithEpoch(
+      scope,
+      manifest.items.map((item) => item.key),
+      redis,
+    );
     const payloadByName = new Map<string, string>();
     for (let index = 0; index < manifest.items.length; index += 1) {
       const item = manifest.items[index];
@@ -1765,18 +1914,18 @@ export async function readActiveDataPublicationItems(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
         return null;
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(payload) as unknown;
       } catch {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
         return null;
       }
       if (itemCount(parsed) !== item.count) {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedAt);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, undefined, observedEpoch);
         return null;
       }
       payloadByName.set(item.name, payload);

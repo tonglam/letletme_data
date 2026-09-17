@@ -65,7 +65,12 @@ export async function reconcileDataPublication(
   const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope).catch(
     () => null,
   );
-  const integrityRepairRequired = await hasDataPublicationIntegrityFailure(scope, redisActive);
+  // The bounded reader already checked the shared failure marker on its
+  // healthy path. Avoid a second marker GET when it returned a usable
+  // manifest; only a null result needs the marker to distinguish a known
+  // corruption from a missing/invalid pointer.
+  const integrityRepairRequired =
+    redisActive === null ? await hasDataPublicationIntegrityFailure(scope, null) : false;
   const redisManifest =
     redisActive ?? (await readActiveDataPublicationManifest(scope).catch(() => null));
   const redisPointerState = redisManifest
