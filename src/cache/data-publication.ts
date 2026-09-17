@@ -465,6 +465,22 @@ function publicationIntegrityToken(manifest: DataPublicationManifest): string {
   return `${manifest.publicationId}:${manifest.revision}`;
 }
 
+function clearLocalIntegrityFailureAfterRepair(
+  scope: DataPublicationScope,
+  manifest: DataPublicationManifest,
+  markerBeforeRepair: IntegrityFailureMarker | undefined,
+): void {
+  if (!markerBeforeRepair || markerBeforeRepair.token !== publicationIntegrityToken(manifest)) {
+    return;
+  }
+  // A same-process reader may have recorded a fresh failure while the Redis
+  // repair transaction was running. Clear only the exact marker observed
+  // before that transaction; a newer object remains sticky.
+  if (publicationIntegrityFailures.get(scopePrefix(scope)) === markerBeforeRepair) {
+    publicationIntegrityFailures.delete(scopePrefix(scope));
+  }
+}
+
 async function getRedisForIntegrityMarker(redisClient?: Redis): Promise<Redis> {
   return redisClient ?? (await redisSingleton.getClient());
 }
@@ -914,6 +930,7 @@ export async function repairDataPublicationItems(
     dataset: prepared.manifest.dataset,
     seasonCode: prepared.manifest.seasonCode,
   } as DataPublicationScope;
+  const markerBeforeRepair = publicationIntegrityFailures.get(scopePrefix(scope));
   const result = (await redis.eval(
     REPAIR_ACTIVE_DATA_PUBLICATION_ITEMS_SCRIPT,
     2,
@@ -927,6 +944,7 @@ export async function repairDataPublicationItems(
       'DATA_PUBLICATION_REPAIR_CONFLICT',
     );
   }
+  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, markerBeforeRepair);
 }
 
 /** Replace a malformed Data-owned active pointer and its canonical items atomically. */
@@ -956,6 +974,7 @@ export async function replaceMalformedActiveDataPublication(
     dataset: prepared.manifest.dataset,
     seasonCode: prepared.manifest.seasonCode,
   } as DataPublicationScope;
+  const markerBeforeRepair = publicationIntegrityFailures.get(scopePrefix(scope));
   const result = (await redis.eval(
     REPLACE_MALFORMED_ACTIVE_DATA_PUBLICATION_SCRIPT,
     2,
@@ -969,6 +988,7 @@ export async function replaceMalformedActiveDataPublication(
       'DATA_PUBLICATION_REPAIR_CONFLICT',
     );
   }
+  clearLocalIntegrityFailureAfterRepair(scope, prepared.manifest, markerBeforeRepair);
 }
 
 export async function activateDataPublicationPointer(
