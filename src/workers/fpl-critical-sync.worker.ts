@@ -40,7 +40,7 @@ import {
   readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
-import { readActiveDataPublication } from '../cache/data-publication';
+import { readActiveDataPublicationManifest } from '../cache/data-publication';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   attachDataSyncCostEvidence,
@@ -413,7 +413,7 @@ async function verifyPricePublication(
 ): Promise<void> {
   const delivered = await dispatchDataPublicationOutbox({ limit: 1, publicationId });
   if (delivered.delivered !== 1) {
-    const active = await readActiveDataPublication({
+    const active = await readActiveDataPublicationManifest({
       dataset: 'fpl:price-changes',
       seasonCode: season.seasonCode,
     });
@@ -423,7 +423,7 @@ async function verifyPricePublication(
       );
     }
   }
-  const active = await readActiveDataPublication({
+  const active = await readActiveDataPublicationManifest({
     dataset: 'fpl:price-changes',
     seasonCode: season.seasonCode,
   });

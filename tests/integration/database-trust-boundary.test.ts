@@ -343,6 +343,7 @@ describe('database trust boundary', () => {
       'fpl_source_artifacts',
       'freshness_slo_windows',
       'live_lifecycle_status',
+      'live_publication_cutover_status',
       'mutation_scopes',
       'queue_health_windows',
       'scheduler_lanes',
