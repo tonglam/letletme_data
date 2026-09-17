@@ -487,4 +487,38 @@ describe('data publication contract', () => {
     ).resolves.toBe(true);
     await clearDataPublicationIntegrityFailure(identityScope, redis);
   });
+
+  test('does not let an older proof clear a fresh local integrity failure', async () => {
+    const proofScope = { dataset: 'fpl:core' as const, seasonCode: '9798' };
+    const prepared = prepareDataPublication({
+      ...proofScope,
+      revision: 1,
+      publicationId: '00000000-0000-4000-8000-000000000103',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items: [
+        { name: 'events', value: [] },
+        { name: 'teams', value: [] },
+        { name: 'players', value: [] },
+        { name: 'phases', value: [] },
+        { name: 'fixtures', value: [] },
+        { name: 'currentEventId', value: null },
+        { name: 'selectionRules', value: null },
+      ],
+    });
+    const token = `${prepared.manifest.publicationId}:${prepared.manifest.revision}`;
+    const redis = {
+      del: async () => 1,
+      eval: async () => 1,
+      get: async (key: string) =>
+        key === dataPublicationIntegrityProofKey(proofScope) ? token : null,
+    } as unknown as Redis;
+
+    await markDataPublicationIntegrityFailure(proofScope, prepared.manifest, redis);
+
+    await expect(
+      hasDataPublicationIntegrityFailure(proofScope, prepared.manifest, redis),
+    ).resolves.toBe(true);
+    await clearDataPublicationIntegrityFailure(proofScope, redis);
+  });
 });

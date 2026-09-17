@@ -1000,20 +1000,27 @@ export async function getJobsStatus(
   const publicationAuditCandidates: PublicationAuditCandidate[] = [];
   let publicationAuditConcurrencyUsed = 0;
   const publicationEntries: PublicationStatusEntry[] = [];
-  // Requested audit scopes run first and own the explicit audit deadline.
-  // Unrequested status projections stay outside that budget so a slow
-  // unrelated read cannot consume the operator's requested evidence window.
-  const publicationScopesInReadOrder = publicationAudit
-    ? [
-        ...publicationScopes.filter((scope) => publicationAuditScopes.has(scope.dataset)),
-        ...publicationScopes.filter((scope) => !publicationAuditScopes.has(scope.dataset)),
-      ]
-    : publicationScopes;
   const publicationScopeOrder = new Map(
     publicationScopes.map((scope, index) => [scope.dataset, index] as const),
   );
-  for (const scope of publicationScopesInReadOrder) {
-    const auditRequested = publicationAuditScopes.has(scope.dataset);
+  const setPublicationConsistency = (entry: PublicationStatusEntry): void => {
+    if (entry.dbControlReadFailed) {
+      publicationConsistency[entry.dataset] = false;
+      return;
+    }
+    const redisManifest = publicationManifest(entry.redisDelivery);
+    publicationConsistency[entry.dataset] =
+      Boolean(entry.dbActive) === Boolean(redisManifest) &&
+      (!entry.dbActive ||
+        !redisManifest ||
+        (entry.dbActive.publicationId === redisManifest.publicationId &&
+          entry.dbActive.revision === redisManifest.revision));
+  };
+
+  const readPublicationScope = async (
+    scope: (typeof publicationScopes)[number],
+    auditRequested: boolean,
+  ): Promise<void> => {
     const dbControlReadAlreadyTimedOut =
       auditRequested &&
       publicationAuditDeadlineAt !== null &&
@@ -1068,6 +1075,7 @@ export async function getJobsStatus(
       redisDelivery: redisControlManifest,
     };
     publicationEntries.push(entry);
+    setPublicationConsistency(entry);
     if (auditRequested) {
       const declaredBytes =
         redisControlManifest?.items.reduce((total, item) => total + item.bytes, 0) ?? 0;
@@ -1086,26 +1094,21 @@ export async function getJobsStatus(
         publicationAuditCandidates.push({ entry });
       }
     }
-  }
-  publicationEntries.sort(
-    (left, right) =>
-      publicationScopeOrder.get(left.dataset)! - publicationScopeOrder.get(right.dataset)!,
-  );
-
-  const setPublicationConsistency = (entry: PublicationStatusEntry): void => {
-    if (entry.dbControlReadFailed) {
-      publicationConsistency[entry.dataset] = false;
-      return;
-    }
-    const redisManifest = publicationManifest(entry.redisDelivery);
-    publicationConsistency[entry.dataset] =
-      Boolean(entry.dbActive) === Boolean(redisManifest) &&
-      (!entry.dbActive ||
-        !redisManifest ||
-        (entry.dbActive.publicationId === redisManifest.publicationId &&
-          entry.dbActive.revision === redisManifest.revision));
   };
-  for (const entry of publicationEntries) setPublicationConsistency(entry);
+
+  const requestedPublicationScopes = publicationScopes.filter((scope) =>
+    publicationAuditScopes.has(scope.dataset),
+  );
+  const unrequestedPublicationScopes = publicationScopes.filter(
+    (scope) => !publicationAuditScopes.has(scope.dataset),
+  );
+  // Requested control reads own the explicit audit deadline. When an audit is
+  // present, complete the already-admitted payload reads before touching an
+  // unrelated control scope, so a slow unrequested read cannot consume the
+  // requested evidence window.
+  for (const scope of publicationAudit ? requestedPublicationScopes : publicationScopes) {
+    await readPublicationScope(scope, publicationAuditScopes.has(scope.dataset));
+  }
 
   if (publicationAudit && publicationAuditCandidates.length > 0) {
     // Reserve the byte budget in deterministic scope order above. Only the
@@ -1149,6 +1152,16 @@ export async function getJobsStatus(
       setPublicationConsistency(entry);
     }
   }
+
+  if (publicationAudit) {
+    for (const scope of unrequestedPublicationScopes) {
+      await readPublicationScope(scope, false);
+    }
+  }
+  publicationEntries.sort(
+    (left, right) =>
+      publicationScopeOrder.get(left.dataset)! - publicationScopeOrder.get(right.dataset)!,
+  );
 
   const priceChangeEntry = publicationEntries.find(
     (entry) => entry.dataset === PRICE_CHANGE_DATASET,

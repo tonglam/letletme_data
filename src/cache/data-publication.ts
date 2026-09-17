@@ -640,12 +640,11 @@ export async function hasDataPublicationIntegrityFailure(
               deadlineAt,
             );
       if (proof === expected) {
-        const localKey = localIntegrityFailureKey(prefix, expected);
-        const local = publicationIntegrityFailures.get(localKey);
-        if (local && local.expiresAt > Date.now()) {
-          publicationIntegrityFailures.delete(localKey);
-        }
-        return false;
+        // A proof stores only publication identity, so it cannot establish
+        // that validation happened after a local failure was recorded. Keep
+        // the local marker sticky until the atomic repair fence or its TTL
+        // clears it; otherwise a stale proof could mask fresh corruption.
+        return localMatches;
       }
     }
     return localMatches;
