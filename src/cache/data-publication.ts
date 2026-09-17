@@ -447,6 +447,7 @@ export async function markDataPublicationIntegrityFailure(
   scope: DataPublicationScope,
   manifest?: DataPublicationManifest,
   redisClient?: Redis,
+  deadlineAt?: number,
 ): Promise<void> {
   const prefix = scopePrefix(scope);
   const token = manifest ? publicationIntegrityToken(manifest) : '*';
@@ -454,14 +455,35 @@ export async function markDataPublicationIntegrityFailure(
     token,
     expiresAt: Date.now() + INTEGRITY_FAILURE_TTL_SECONDS * 1_000,
   });
-  try {
-    const redis = await getRedisForIntegrityMarker(redisClient);
-    await redis.set(integrityFailureKey(scope), token, 'EX', String(INTEGRITY_FAILURE_TTL_SECONDS));
-    await redis.del(integrityProofKey(scope));
-  } catch {
-    // The local marker still protects this process when the shared marker
-    // cannot be written during the same Redis incident.
+  const persist = async (): Promise<void> => {
+    try {
+      const redis = await getRedisForIntegrityMarker(redisClient);
+      const setArgs = [
+        integrityFailureKey(scope),
+        token,
+        'EX',
+        String(INTEGRITY_FAILURE_TTL_SECONDS),
+      ] as const;
+      if (deadlineAt === undefined) {
+        await redis.set(...setArgs);
+        await redis.del(integrityProofKey(scope));
+        return;
+      }
+      await redisCommandWithDeadline<string>(redis, 'set', setArgs, deadlineAt);
+      await redisCommandWithDeadline<number>(redis, 'del', [integrityProofKey(scope)], deadlineAt);
+    } catch {
+      // The local marker still protects this process when the shared marker
+      // cannot be written during the same Redis incident.
+    }
+  };
+  if (deadlineAt !== undefined) {
+    // An explicit audit has a hard wall-clock budget. Local evidence is enough
+    // for this request; shared bookkeeping must not consume the remaining
+    // budget or turn a detected corruption into a hung audit.
+    void persist();
+    return;
   }
+  await persist();
 }
 
 export async function hasDataPublicationIntegrityFailure(
@@ -1139,18 +1161,18 @@ export async function readActiveDataPublication(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, deadlineAt);
         return null;
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(payload) as unknown;
       } catch {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, deadlineAt);
         return null;
       }
       if (itemCount(parsed) !== item.count) {
-        await markDataPublicationIntegrityFailure(scope, manifest, redis);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis, deadlineAt);
         return null;
       }
       items[item.name] = parsed;
@@ -1288,7 +1310,6 @@ export async function readActiveDataPublicationItemsWithBounds(
     if (selected.some((item): item is undefined => item === undefined)) return null;
     const selectedItems = selected as DataPublicationManifest['items'];
     const redis = redisClient ?? (await redisSingleton.getClient());
-    if (await hasDataPublicationIntegrityFailure(scope, manifest, redis)) return null;
     if (!(await hasDataPublicationIntegrityProof(scope, manifest, redis))) {
       // Existing active publications may predate the shared proof marker. Pay
       // the complete validation cost once, then keep all steady-state control

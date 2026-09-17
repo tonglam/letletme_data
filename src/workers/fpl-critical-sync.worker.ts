@@ -416,24 +416,22 @@ async function verifyPricePublication(
   revision: number,
 ): Promise<void> {
   const delivered = await dispatchDataPublicationOutbox({ limit: 1, publicationId });
+  if (delivered.delivered === 1) return;
   const scope = {
     dataset: 'fpl:price-changes' as const,
     seasonCode: season.seasonCode,
   };
   const active = await readActiveDataPublicationManifestWithItemBounds(scope);
   if (!active || active.publicationId !== publicationId || active.revision !== revision) {
-    if (delivered.delivered !== 1) {
-      throw new Error(
-        `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
-      );
-    }
-    throw new Error('Price-change DB and Redis publication identities do not match');
+    throw new Error(
+      `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
+    );
   }
   // A newly delivered outbox row was validated while staging and activating
   // its immutable payload. When a retry finds the row already delivered, the
   // shared proof is the cheap evidence path; after its TTL expires, perform a
   // full read before recording durable lane completion.
-  if (delivered.delivered !== 1 && !(await hasDataPublicationIntegrityProof(scope, active))) {
+  if (!(await hasDataPublicationIntegrityProof(scope, active))) {
     const verified = await readActiveDataPublication(scope, undefined, undefined, active);
     if (!verified) throw new Error('Price-change Redis publication failed integrity verification');
   }

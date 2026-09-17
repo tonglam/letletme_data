@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  hasDataPublicationIntegrityProof,
   prepareDataPublication,
+  readActiveDataPublication,
   readActiveDataPublicationItemsWithBounds,
   readActiveDataPublicationManifestWithItemBounds,
   type MarketSnapshotContextPayload,
@@ -80,16 +82,30 @@ async function ensureMarketPublicationDelivered(
     publicationId,
   });
   if (delivered.delivered === 1) return;
-
   // A retry may observe an already-delivered receipt (or a legacy active
   // publication created before the outbox migration).  Re-read the active
-  // pointer before reporting a delivery failure; DB and Redis parity is the
-  // success evidence, not whether this particular dispatch claimed a row.
+  // pointer before reporting a delivery failure; DB and Redis parity plus a
+  // current integrity proof is the success evidence, not whether this
+  // particular dispatch claimed a row.
   const active = await readActiveDataPublicationManifestWithItemBounds(marketScope(season));
-  if (active?.publicationId === publicationId && active.revision === revision) {
-    return;
+  if (!active || active.publicationId !== publicationId || active.revision !== revision) {
+    throw new Error(
+      `Market publication ${publicationId} is canonical but Redis delivery is pending`,
+    );
   }
-  throw new Error(`Market publication ${publicationId} is canonical but Redis delivery is pending`);
+  // A newly delivered outbox row was validated while staging and activating
+  // its immutable payload. An already-delivered receipt must have a current
+  // proof, or pay one full read before the caller reports delivery success.
+  if (!(await hasDataPublicationIntegrityProof(marketScope(season), active))) {
+    const verified = await readActiveDataPublication(
+      marketScope(season),
+      undefined,
+      undefined,
+      active,
+    );
+    if (!verified)
+      throw new Error(`Market publication ${publicationId} failed integrity verification`);
+  }
 }
 
 export async function ensureMarketPublication(

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
+  hasDataPublicationIntegrityProof,
   prepareDataPublication,
   readActiveDataPublication,
   readActiveDataPublicationManifestWithItemBounds,
@@ -1509,14 +1510,24 @@ async function ensurePriceChangePublicationDelivered(
 ): Promise<void> {
   const delivered = await dispatchDataPublicationOutbox({ limit: 1, publicationId });
   if (delivered.delivered === 1) return;
-  const active = await readActiveDataPublicationManifestWithItemBounds({
+  const scope = {
     dataset: PRICE_CHANGE_DATASET,
     seasonCode: season.seasonCode,
-  });
-  if (active?.publicationId === publicationId && active.revision === revision) return;
-  throw new Error(
-    `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
-  );
+  } as const;
+  const active = await readActiveDataPublicationManifestWithItemBounds(scope);
+  if (!active || active.publicationId !== publicationId || active.revision !== revision) {
+    throw new Error(
+      `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
+    );
+  }
+  // A newly delivered outbox row was validated while staging and activating
+  // its immutable payload. An already-delivered receipt must have a current
+  // proof, or pay one full read before the caller reports delivery success.
+  if (!(await hasDataPublicationIntegrityProof(scope, active))) {
+    const verified = await readActiveDataPublication(scope, undefined, undefined, active);
+    if (!verified)
+      throw new Error(`Price-change publication ${publicationId} failed integrity verification`);
+  }
 }
 
 export async function persistPriceChangePublication(

@@ -18,7 +18,12 @@ import {
   preparePlayerValuesSync,
 } from '../services/player-values.service';
 import { ensureMarketPublication } from '../services/market-publication.service';
-import { readActiveDataPublicationManifestWithItemBounds } from '../cache/data-publication';
+import {
+  hasDataPublicationIntegrityProof,
+  readActiveDataPublication,
+  readActiveDataPublicationManifestWithItemBounds,
+  type DataPublicationScope,
+} from '../cache/data-publication';
 import { dispatchDataPublicationOutbox } from '../services/data-publication-delivery.service';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
@@ -92,6 +97,27 @@ function priceSingleFlightEnabled(): boolean {
     process.env.NODE_ENV !== 'production',
     'PRICE_CHANGE_SINGLE_FLIGHT_ENABLED',
   );
+}
+
+async function verifyPublicationDelivery(
+  scope: DataPublicationScope,
+  publicationId: string,
+  revision: number | undefined,
+  delivered: number,
+): Promise<void> {
+  if (delivered === 1) return;
+  const active = await readActiveDataPublicationManifestWithItemBounds(scope);
+  if (!active || active.publicationId !== publicationId || active.revision !== revision) {
+    throw new Error(`Publication ${publicationId} is canonical but Redis delivery is pending`);
+  }
+  // A newly delivered outbox row was validated while staging and activating
+  // its immutable payload. When a retry finds the row already delivered, the
+  // shared proof is the cheap evidence path; after its TTL expires, perform a
+  // full read before reporting the lane complete.
+  if (!(await hasDataPublicationIntegrityProof(scope, active))) {
+    const verified = await readActiveDataPublication(scope, undefined, undefined, active);
+    if (!verified) throw new Error(`Publication ${publicationId} failed integrity verification`);
+  }
 }
 
 async function enqueueNewerHotPriceEvent(
@@ -532,20 +558,12 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
               limit: 1,
               publicationId: marketPublication.publicationId,
             });
-            if (delivered.delivered !== 1) {
-              const active = await readActiveDataPublicationManifestWithItemBounds({
-                dataset: 'fpl:market',
-                seasonCode: season.seasonCode,
-              });
-              if (
-                active?.publicationId !== marketPublication.publicationId ||
-                active?.revision !== marketPublication.revision
-              ) {
-                throw new Error(
-                  `Market publication ${marketPublication.publicationId} is canonical but Redis delivery is pending`,
-                );
-              }
-            }
+            await verifyPublicationDelivery(
+              { dataset: 'fpl:market', seasonCode: season.seasonCode },
+              marketPublication.publicationId,
+              marketPublication.revision,
+              delivered.delivered,
+            );
           }
           if (result.notificationMessage) {
             await notifyTwoBots(result.notificationMessage, {
@@ -701,24 +719,19 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           await reconcilePriceChangeAfterCommit(prepared, readLatestHotEvent, (evidence) =>
             enqueueNewerHotPriceEvent(season, evidence),
           );
+          const publicationId = persisted.publicationId;
+          if (!publicationId)
+            throw new Error('Price-change publication did not return durable identity');
           const delivered = await dispatchDataPublicationOutbox({
             limit: 1,
-            publicationId: persisted.publicationId,
+            publicationId,
           });
-          if (delivered.delivered !== 1) {
-            const active = await readActiveDataPublicationManifestWithItemBounds({
-              dataset: 'fpl:price-changes',
-              seasonCode: season.seasonCode,
-            });
-            if (
-              active?.publicationId !== persisted.publicationId ||
-              active?.revision !== persisted.revision
-            ) {
-              throw new Error(
-                `Price-change publication ${persisted.publicationId} is canonical but Redis delivery is pending`,
-              );
-            }
-          }
+          await verifyPublicationDelivery(
+            { dataset: 'fpl:price-changes', seasonCode: season.seasonCode },
+            publicationId,
+            persisted.revision,
+            delivered.delivered,
+          );
           await markHotPriceReconciled(
             job,
             persisted.publicationId,
