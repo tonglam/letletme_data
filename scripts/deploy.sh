@@ -834,8 +834,20 @@ deploy() {
     DEPLOY_MIGRATION_BACKUP_REQUIRED=true
     log_info "Pending My Tournament Review V2.1 backfill requires a pre-operation PostgreSQL dump"
   fi
+  cutover_seed_required=false
   if [[ "${LIVE_POINTS_V2_SEED_FORCE:-NO}" = YES ]] ||
     migration_plan_requires_live_points_seed <<<"$migration_plan_output"; then
+    cutover_seed_required=true
+  elif live_cutover_seed_pending "$data_runtime_database_url" "$LIVE_POINTS_V2_SEED_SEASON"; then
+    cutover_seed_required=true
+  else
+    cutover_seed_status=$?
+    if [[ "$cutover_seed_status" -eq 2 ]]; then
+      log_error "Unable to inspect Live Points V2 cutover marker; refusing deploy."
+      exit 1
+    fi
+  fi
+  if [[ "$cutover_seed_required" = true ]]; then
     DEPLOY_LIVE_POINTS_SEED_MUTATION_REQUIRED=true
     # The cutover seed writes durable Live Points and Live Matches checkpoints.
     # Treat that explicit mutation like a migration so a failed seed always
@@ -1109,6 +1121,11 @@ deploy() {
       log_error "Live Points V2 verification failed; services remain stopped for a forward fix."
       exit 1
     fi
+    if ! mark_live_cutover_seed_stage "$data_runtime_database_url" \
+      "$LIVE_POINTS_V2_SEED_SEASON" live_points; then
+      log_error "Could not record the completed Live Points V2 cutover stage; services remain stopped."
+      exit 1
+    fi
     if ! compose run --rm -T --interactive=false \
       api \
       bun run db:cutover-seed-live-match-v3 -- --execute --all-finalized \
@@ -1117,8 +1134,13 @@ deploy() {
       log_error "Live Matches V3 seed failed; services remain stopped for a forward fix."
       exit 1
     fi
+    if ! mark_live_cutover_seed_stage "$data_runtime_database_url" \
+      "$LIVE_POINTS_V2_SEED_SEASON" live_matches; then
+      log_error "Could not record the completed Live Matches V3 cutover stage; services remain stopped."
+      exit 1
+    fi
   else
-    log_info "No Live Points V2 cutover is pending; skipping seed writes"
+    log_info "Live Points V2 cutover marker is complete; skipping seed writes"
   fi
   finish_stage
   start_stage cachePublish

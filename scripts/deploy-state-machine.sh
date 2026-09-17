@@ -1128,9 +1128,10 @@ migration_plan_requires_live_points_seed() {
     my $plan = decode_json($raw);
     die "migration plan is not an object\n" unless ref($plan) eq "HASH";
     die "migration plan pending is not an array\n" unless ref($plan->{pending}) eq "ARRAY";
-    exit scalar(grep {
+    my $requires_seed = scalar(grep {
       ref($_) eq "HASH" && ($_->{filename} // "") eq "0104_publication_validation_proof.sql"
-    } @{$plan->{pending}}) ? 0 : 1;
+    } @{$plan->{pending}});
+    exit($requires_seed > 0 ? 0 : 1);
   '
 }
 
@@ -1459,6 +1460,131 @@ review_backfill_marker_pending() {
       return 2
       ;;
   esac
+}
+
+live_cutover_seed_pending() {
+  local runtime_database_url=${1:-${DATA_RUNTIME_DATABASE_URL:-}}
+  local season_code=${2:-${LIVE_POINTS_V2_SEED_SEASON:-}}
+  if [[ -z "$runtime_database_url" || -z "$season_code" ]]; then
+    echo 'deploy live cutover: runtime DATABASE_URL and seed season are required to inspect durable state' >&2
+    return 2
+  fi
+  local marker_output marker_state
+  if ! marker_output=$(DATABASE_URL="$runtime_database_url" \
+    LIVE_CUTOVER_SEED_SEASON="$season_code" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL -e LIVE_CUTOVER_SEED_SEASON migration bun -e '
+      import postgres from "postgres";
+      const db = postgres(process.env.DATABASE_URL, { max: 1 });
+      try {
+        const rows = await db`
+          SELECT status.live_points_completed_at, status.live_matches_completed_at
+          FROM ops.live_publication_cutover_status AS status
+          JOIN fpl.seasons AS season ON season.season_id = status.season_id
+          WHERE season.season_code = ${process.env.LIVE_CUTOVER_SEED_SEASON}
+            AND season.is_current = TRUE
+            AND status.scope_kind = 'all_finalized'
+            AND status.event_id = 0
+        `;
+        if (rows.length === 0) {
+          process.stdout.write("pending");
+        } else {
+          const row = rows[0];
+          process.stdout.write(
+            row.live_points_completed_at !== null && row.live_matches_completed_at !== null
+              ? "complete"
+              : "pending",
+          );
+        }
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "42P01") {
+          process.stdout.write("missing");
+        } else {
+          throw error;
+        }
+      } finally {
+        await db.end();
+      }
+    ' 2>/dev/null); then
+    echo 'deploy live cutover: durable seed marker probe failed; refusing to skip the seed' >&2
+    return 2
+  fi
+  marker_state=$(printf '%s\n' "$marker_output" | tail -n 1)
+  case "$marker_state" in
+    pending|missing) return 0 ;;
+    complete) return 1 ;;
+    *)
+      echo "deploy live cutover: unexpected durable marker state '$marker_state'" >&2
+      return 2
+      ;;
+  esac
+}
+
+mark_live_cutover_seed_stage() {
+  local runtime_database_url=${1:-${DATA_RUNTIME_DATABASE_URL:-}}
+  local season_code=${2:-${LIVE_POINTS_V2_SEED_SEASON:-}}
+  local stage=${3:-}
+  if [[ -z "$runtime_database_url" || -z "$season_code" ]]; then
+    echo 'deploy live cutover: runtime DATABASE_URL and seed season are required to record durable state' >&2
+    return 1
+  fi
+  case "$stage" in
+    live_points|live_matches) ;;
+    *) echo "deploy live cutover: invalid seed stage '$stage'" >&2; return 1 ;;
+  esac
+  DATABASE_URL="$runtime_database_url" \
+    LIVE_CUTOVER_SEED_SEASON="$season_code" \
+    LIVE_CUTOVER_SEED_STAGE="$stage" \
+    compose run --rm -T --interactive=false \
+    -e DATABASE_URL -e LIVE_CUTOVER_SEED_SEASON -e LIVE_CUTOVER_SEED_STAGE api bun -e '
+      import postgres from "postgres";
+      const db = postgres(process.env.DATABASE_URL, { max: 1 });
+      try {
+        const seasonRows = await db`
+          SELECT season_id
+          FROM fpl.seasons
+          WHERE season_code = ${process.env.LIVE_CUTOVER_SEED_SEASON}
+            AND is_current = TRUE
+        `;
+        if (seasonRows.length !== 1) throw new Error("current seed season is missing or ambiguous");
+        const seasonId = seasonRows[0].season_id;
+        const stage = process.env.LIVE_CUTOVER_SEED_STAGE;
+        if (stage === "live_points") {
+          await db`
+            INSERT INTO ops.live_publication_cutover_status
+              (season_id, scope_kind, event_id, live_points_completed_at, updated_at)
+            VALUES (${seasonId}, 'all_finalized', 0, clock_timestamp(), clock_timestamp())
+            ON CONFLICT (season_id, scope_kind, event_id) DO UPDATE
+            SET live_points_completed_at = COALESCE(
+                  ops.live_publication_cutover_status.live_points_completed_at,
+                  EXCLUDED.live_points_completed_at
+                ),
+                updated_at = clock_timestamp()
+          `;
+        } else if (stage === "live_matches") {
+          await db`
+            UPDATE ops.live_publication_cutover_status
+            SET live_matches_completed_at = clock_timestamp(), updated_at = clock_timestamp()
+            WHERE season_id = ${seasonId}
+              AND scope_kind = 'all_finalized'
+              AND event_id = 0
+              AND live_points_completed_at IS NOT NULL
+          `;
+          const rows = await db`
+            SELECT live_matches_completed_at
+            FROM ops.live_publication_cutover_status
+            WHERE season_id = ${seasonId}
+              AND scope_kind = 'all_finalized'
+              AND event_id = 0
+          `;
+          if (rows.length !== 1 || rows[0].live_matches_completed_at === null) {
+            throw new Error("Live Points cutover marker is missing before Live Matches completion");
+          }
+        }
+      } finally {
+        await db.end();
+      }
+    '
 }
 
 run_tournament_review_restore_rehearsal() {

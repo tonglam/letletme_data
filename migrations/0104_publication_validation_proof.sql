@@ -35,6 +35,40 @@ ALTER TABLE competition.live_points_publication_checkpoints
   ADD CONSTRAINT live_points_publication_checkpoints_validation_version_check
   CHECK (validation_version IS NULL OR validation_version >= 0);
 
+-- A cutover can commit the Live Points stage and fail before the Live Matches
+-- stage (or be interrupted after either stage). Keep that state in a tiny
+-- durable row so the next deployment resumes the explicit all-finalized
+-- scope automatically instead of inferring completion from a process exit or
+-- from the SQL migration ledger alone.
+CREATE TABLE ops.live_publication_cutover_status (
+  season_id smallint NOT NULL,
+  scope_kind text NOT NULL,
+  event_id integer NOT NULL DEFAULT 0,
+  live_points_completed_at timestamptz,
+  live_matches_completed_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT live_publication_cutover_status_pkey
+    PRIMARY KEY (season_id, scope_kind, event_id),
+  CONSTRAINT live_publication_cutover_status_season_fk
+    FOREIGN KEY (season_id) REFERENCES fpl.seasons(season_id),
+  CONSTRAINT live_publication_cutover_status_scope_check
+    CHECK (
+      (scope_kind = 'all_finalized' AND event_id = 0)
+      OR (scope_kind = 'event' AND event_id > 0)
+    ),
+  CONSTRAINT live_publication_cutover_status_completion_order_check
+    CHECK (
+      live_matches_completed_at IS NULL
+      OR live_points_completed_at IS NOT NULL
+    )
+);
+
+REVOKE ALL ON TABLE ops.live_publication_cutover_status FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE ON TABLE ops.live_publication_cutover_status
+  TO letletme_data_writer;
+GRANT SELECT ON TABLE ops.live_publication_cutover_status
+  TO letletme_graphql_reader;
+
 -- Application locks and semantic checks are the normal write boundary. Keep a
 -- database fence as well so a direct writer cannot replace or delete a
 -- payload after it has been marked as validated. Retiring a dataset
@@ -104,13 +138,15 @@ BEGIN
         NEW.generation IS DISTINCT FROM OLD.generation OR
         NEW.state IS DISTINCT FROM OLD.state OR
         (
-          NEW.manifest #- ARRAY[
-            'times', 'checkpointedAt', 'sourceCheckedAt', 'expectedNextCheckAt'
-          ]
+          NEW.manifest
+            #- ARRAY['times', 'checkpointedAt']
+            #- ARRAY['times', 'sourceCheckedAt']
+            #- ARRAY['times', 'expectedNextCheckAt']
         ) IS DISTINCT FROM (
-          OLD.manifest #- ARRAY[
-            'times', 'checkpointedAt', 'sourceCheckedAt', 'expectedNextCheckAt'
-          ]
+          OLD.manifest
+            #- ARRAY['times', 'checkpointedAt']
+            #- ARRAY['times', 'sourceCheckedAt']
+            #- ARRAY['times', 'expectedNextCheckAt']
         ) OR
         (
           OLD.state = 'FINALIZED' AND
@@ -144,6 +180,8 @@ BEGIN
       END IF;
     ELSIF TG_TABLE_NAME = 'live_points_publication_checkpoints' THEN
       RAISE EXCEPTION 'validated live points checkpoint cannot be deleted' USING ERRCODE = '55000';
+    ELSIF TG_TABLE_NAME = 'live_league_checkpoints' THEN
+      RAISE EXCEPTION 'validated live league checkpoint cannot be deleted' USING ERRCODE = '55000';
     END IF;
   END IF;
   IF TG_OP = 'DELETE' THEN

@@ -45,7 +45,9 @@ export const seasonImportsInOps = ops.table(
     completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
     errorSummary: text('error_summary'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
   },
   (table) => [
     foreignKey({
@@ -278,6 +280,43 @@ export const datasetPublicationItemsInOps = ops.table(
     check(
       'dataset_publication_items_payload_shape',
       sql`jsonb_typeof(payload) = ANY (ARRAY['array'::text, 'object'::text, 'number'::text, 'null'::text, 'boolean'::text, 'string'::text])`,
+    ),
+  ],
+);
+
+export const livePublicationCutoverStatusInOps = ops.table(
+  'live_publication_cutover_status',
+  {
+    seasonId: smallint('season_id').notNull(),
+    scopeKind: text('scope_kind').notNull(),
+    eventId: integer('event_id').default(0).notNull(),
+    livePointsCompletedAt: timestamp('live_points_completed_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    liveMatchesCompletedAt: timestamp('live_matches_completed_at', {
+      withTimezone: true,
+      mode: 'date',
+    }),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.seasonId, table.scopeKind, table.eventId],
+      name: 'live_publication_cutover_status_pkey',
+    }),
+    foreignKey({
+      columns: [table.seasonId],
+      foreignColumns: [seasonsInFpl.seasonId],
+      name: 'live_publication_cutover_status_season_fk',
+    }),
+    check(
+      'live_publication_cutover_status_scope_check',
+      sql`(scope_kind = 'all_finalized'::text AND event_id = 0) OR (scope_kind = 'event'::text AND event_id > 0)`,
+    ),
+    check(
+      'live_publication_cutover_status_completion_order_check',
+      sql`live_matches_completed_at IS NULL OR live_points_completed_at IS NOT NULL`,
     ),
   ],
 );
