@@ -169,6 +169,9 @@ const LEGACY_CORE_ITEM_NAMES = [
  */
 const INTEGRITY_FAILURE_TTL_SECONDS = 15 * 60;
 const INTEGRITY_PROOF_TTL_SECONDS = 15 * 60;
+/** Keep a healthy proof stable without turning every consumer read into a Redis command. */
+const INTEGRITY_PROOF_REFRESH_THRESHOLD_SECONDS = 5 * 60;
+const INTEGRITY_PROOF_REFRESH_COOLDOWN_MS = 60 * 1_000;
 /** Shared marker bookkeeping must remain bounded even after an audit expires. */
 const INTEGRITY_MARKER_PERSIST_TIMEOUT_MS = 1_000;
 const INTEGRITY_FAILURE_SUFFIX = ':integrity-failure';
@@ -179,7 +182,9 @@ type IntegrityFailureMarker = Readonly<{
   sequence: number;
 }>;
 const publicationIntegrityFailures = new Map<string, IntegrityFailureMarker>();
+const publicationIntegrityProofRefreshes = new Map<string, number>();
 let integrityFailureSequence = 0;
+let lastIntegrityProofRefreshPruneAt = 0;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -453,6 +458,15 @@ return 1
 `;
 
 const MARK_INTEGRITY_PROOF_SCRIPT = `
+local marker_type = redis.call('TYPE', KEYS[1])
+local marker_type_name = type(marker_type) == 'table' and marker_type['ok'] or marker_type
+local current = nil
+local ttl = -1
+if marker_type_name == 'string' then
+  current = redis.call('GET', KEYS[1])
+  ttl = redis.call('PTTL', KEYS[1])
+end
+if current == ARGV[1] and ttl > tonumber(ARGV[3]) then return 0 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
 return 1
 `;
@@ -500,6 +514,17 @@ export function dataPublicationIntegrityProofKey(scope: DataPublicationScope): s
 
 function publicationIntegrityToken(manifest: DataPublicationManifest): string {
   return `${manifest.publicationId}:${manifest.revision}`;
+}
+
+function publicationManifestsMatch(
+  left: DataPublicationManifest,
+  right: DataPublicationManifest,
+): boolean {
+  try {
+    return canonicalJson(left) === canonicalJson(right);
+  } catch {
+    return false;
+  }
 }
 
 function localIntegrityFailureKey(prefix: string, token: string): string {
@@ -648,24 +673,10 @@ export async function hasDataPublicationIntegrityFailure(
             deadlineAt,
           );
     if (shared && (!expected || shared === '*' || shared === expected)) return true;
-    if (localMatches && expected) {
-      const proof =
-        deadlineAt === undefined
-          ? await redis.get(integrityProofKey(scope))
-          : await redisCommandWithDeadline<string | null>(
-              redis,
-              'get',
-              [integrityProofKey(scope)],
-              deadlineAt,
-            );
-      if (proof === expected) {
-        // A proof stores only publication identity, so it cannot establish
-        // that validation happened after a local failure was recorded. Keep
-        // the local marker sticky until the atomic repair fence or its TTL
-        // clears it; otherwise a stale proof could mask fresh corruption.
-        return localMatches;
-      }
-    }
+    // A matching local marker is already sufficient evidence for this process.
+    // Do not perform a second proof lookup that cannot change the result; during
+    // a Redis incident that redundant command would only add latency to every
+    // control-path caller until the local marker expires.
     return localMatches;
   } catch {
     // Redis is the cross-process source of integrity evidence. If its marker
@@ -720,6 +731,20 @@ export async function markDataPublicationIntegrityProof(
   } as DataPublicationScope;
   const prefix = scopePrefix(scope);
   const token = publicationIntegrityToken(manifest);
+  const refreshKey = localIntegrityFailureKey(prefix, token);
+  const now = Date.now();
+  if (now - lastIntegrityProofRefreshPruneAt >= INTEGRITY_PROOF_REFRESH_COOLDOWN_MS) {
+    lastIntegrityProofRefreshPruneAt = now;
+    for (const [key, expiresAt] of publicationIntegrityProofRefreshes) {
+      if (expiresAt <= now) publicationIntegrityProofRefreshes.delete(key);
+    }
+  }
+  if (options.fireAndForget && (publicationIntegrityProofRefreshes.get(refreshKey) ?? 0) > now) {
+    return;
+  }
+  if (options.fireAndForget) {
+    publicationIntegrityProofRefreshes.set(refreshKey, now + INTEGRITY_PROOF_REFRESH_COOLDOWN_MS);
+  }
   // Never clear a non-expired local failure here. A concurrent reader may have
   // recorded corruption for this same revision after this read completed, and
   // only the atomic repair path may remove that evidence.
@@ -735,6 +760,7 @@ export async function markDataPublicationIntegrityProof(
         integrityProofKey(scope),
         token,
         String(INTEGRITY_PROOF_TTL_SECONDS),
+        String(INTEGRITY_PROOF_REFRESH_THRESHOLD_SECONDS * 1_000),
       );
     } catch {
       // A proof marker is an optimization. The next selected read will perform
@@ -1330,11 +1356,7 @@ export async function readActiveDataPublication(
     if (!manifest || !assertManifestMatchesScope(manifest, scope) || manifest.items.length === 0) {
       return null;
     }
-    if (
-      expectedManifest &&
-      (manifest.publicationId !== expectedManifest.publicationId ||
-        manifest.revision !== expectedManifest.revision)
-    ) {
+    if (expectedManifest && !publicationManifestsMatch(manifest, expectedManifest)) {
       return null;
     }
     const payloads =

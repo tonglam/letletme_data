@@ -8,6 +8,7 @@ import {
   dataPublicationIntegrityProofKey,
   dataPublicationItemKey,
   hasDataPublicationIntegrityFailure,
+  markDataPublicationIntegrityProof,
   markDataPublicationIntegrityFailure,
   parseDataPublicationManifest,
   prepareDataPublication,
@@ -257,6 +258,26 @@ describe('data publication contract', () => {
       activeDataPublicationKey(priceScope),
       dataPublicationItemKey(priceScope, 12, 'context'),
     ]);
+  });
+
+  test('fences an audited payload read to the complete captured manifest', async () => {
+    const captured = validManifest();
+    const rewritten = {
+      ...captured,
+      items: captured.items.map((item, index) =>
+        index === 0 ? { ...item, bytes: item.bytes + 1 } : item,
+      ),
+    };
+    const mget = async () => {
+      throw new Error('payload read must not start after the manifest fence changes');
+    };
+    const redis = {
+      get: async (key: string) =>
+        key === activeDataPublicationKey(scope) ? JSON.stringify(rewritten) : null,
+      mget,
+    } as unknown as Redis;
+
+    await expect(readActiveDataPublication(scope, redis, undefined, captured)).resolves.toBeNull();
   });
 
   test('reconciliation checks Redis item presence and size without downloading payloads', async () => {
@@ -520,6 +541,46 @@ describe('data publication contract', () => {
       hasDataPublicationIntegrityFailure(proofScope, prepared.manifest, redis),
     ).resolves.toBe(true);
     await clearDataPublicationIntegrityFailure(proofScope, redis);
+  });
+
+  test('does not look up a proof after a matching local failure is known', async () => {
+    const localScope = { dataset: 'fpl:core' as const, seasonCode: '9898' };
+    const manifest = { ...validManifest(), seasonCode: localScope.seasonCode };
+    const gets: string[] = [];
+    const redis = {
+      get: async (key: string) => {
+        gets.push(key);
+        return null;
+      },
+      eval: async () => 1,
+      del: async () => 1,
+    } as unknown as Redis;
+
+    await markDataPublicationIntegrityFailure(localScope, manifest, redis);
+    await expect(hasDataPublicationIntegrityFailure(localScope, manifest, redis)).resolves.toBe(
+      true,
+    );
+    expect(gets).toHaveLength(1);
+    expect(gets[0]).not.toBe(dataPublicationIntegrityProofKey(localScope));
+    await clearDataPublicationIntegrityFailure(localScope, redis);
+  });
+
+  test('coalesces fire-and-forget proof refreshes for one publication', async () => {
+    const proofScope = { dataset: 'fpl:core' as const, seasonCode: '9899' };
+    const manifest = { ...validManifest(), seasonCode: proofScope.seasonCode };
+    const calls: unknown[][] = [];
+    const redis = {
+      eval: async (...args: unknown[]) => {
+        calls.push(args);
+        return 1;
+      },
+    } as unknown as Redis;
+
+    await markDataPublicationIntegrityProof(manifest, redis, { fireAndForget: true });
+    await markDataPublicationIntegrityProof(manifest, redis, { fireAndForget: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toHaveLength(1);
   });
 
   test('fails closed when the shared integrity marker cannot be read', async () => {
