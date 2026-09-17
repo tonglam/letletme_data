@@ -1015,6 +1015,8 @@ export async function getJobsStatus(
     // its declared byte and wall-clock budgets have been checked.
     const redisControlManifest = await readActiveDataPublicationManifestWithItemBounds(
       publicationScope,
+      undefined,
+      publicationAuditDeadlineAt ?? undefined,
     ).catch(() => null);
     const entry: PublicationStatusEntry = {
       dataset: scope.dataset,

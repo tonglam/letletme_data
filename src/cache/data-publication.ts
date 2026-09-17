@@ -1145,11 +1145,21 @@ export async function readActiveDataPublication(
 export async function readActiveDataPublicationManifest(
   scope: DataPublicationScope,
   redisClient?: Redis,
+  deadlineAt?: number,
 ): Promise<DataPublicationManifest | null> {
   assertScope(scope);
   try {
     const redis = redisClient ?? (await redisSingleton.getClient());
-    const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
+    const manifest = parseDataPublicationManifest(
+      deadlineAt === undefined
+        ? await redis.get(activeDataPublicationKey(scope))
+        : await redisCommandWithDeadline<string | null>(
+            redis,
+            'get',
+            [activeDataPublicationKey(scope)],
+            deadlineAt,
+          ),
+    );
     return manifest && assertManifestMatchesScope(manifest, scope) && manifest.items.length > 0
       ? manifest
       : null;
@@ -1167,17 +1177,36 @@ export async function readActiveDataPublicationManifest(
 export async function readActiveDataPublicationManifestWithItemBounds(
   scope: DataPublicationScope,
   redisClient?: Redis,
+  deadlineAt?: number,
 ): Promise<DataPublicationManifest | null> {
-  const manifest = await readActiveDataPublicationManifest(scope, redisClient);
+  const manifest = await readActiveDataPublicationManifest(scope, redisClient, deadlineAt);
   if (!manifest) return null;
   try {
     const redis = redisClient ?? (await redisSingleton.getClient());
-    const pipeline = redis.pipeline();
-    for (const item of manifest.items) {
-      pipeline.exists(item.key);
-      pipeline.strlen(item.key);
-    }
-    const results = await pipeline.exec();
+    const results =
+      deadlineAt === undefined
+        ? await (async () => {
+            const pipeline = redis.pipeline();
+            for (const item of manifest.items) {
+              pipeline.exists(item.key);
+              pipeline.strlen(item.key);
+            }
+            return pipeline.exec();
+          })()
+        : await (async () => {
+            const bounded: Array<[null, number]> = [];
+            for (const item of manifest.items) {
+              bounded.push([
+                null,
+                await redisCommandWithDeadline<number>(redis, 'exists', [item.key], deadlineAt),
+              ]);
+              bounded.push([
+                null,
+                await redisCommandWithDeadline<number>(redis, 'strlen', [item.key], deadlineAt),
+              ]);
+            }
+            return bounded;
+          })();
     if (!results || results.length !== manifest.items.length * 2) return null;
     for (let index = 0; index < manifest.items.length; index += 1) {
       const exists = results[index * 2];
