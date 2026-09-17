@@ -1,7 +1,7 @@
 import {
   activateDataPublicationPointer,
   compareAndSwapDataPublicationPointer,
-  clearDataPublicationIntegrityFailure,
+  markDataPublicationIntegrityProof,
   repairDataPublicationItems,
   hasDataPublicationIntegrityFailure,
   readActiveDataPublicationManifest,
@@ -65,7 +65,7 @@ export async function reconcileDataPublication(
   const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope).catch(
     () => null,
   );
-  const integrityRepairRequired = hasDataPublicationIntegrityFailure(scope);
+  const integrityRepairRequired = await hasDataPublicationIntegrityFailure(scope, redisActive);
   const redisManifest =
     redisActive ?? (await readActiveDataPublicationManifest(scope).catch(() => null));
   const redisPointerState = redisManifest
@@ -296,7 +296,7 @@ export async function reconcileDataPublication(
   // otherwise readiness would remain stuck on a row that is already canonical
   // in both stores.
   await markDataPublicationOutboxReconciled({ publicationId: dbActive.publicationId });
-  clearDataPublicationIntegrityFailure(scope);
+  await markDataPublicationIntegrityProof(canonical.manifest);
   logInfo('Repaired Redis data publication pointer from canonical DB', {
     dataset: scope.dataset,
     season: scope.seasonCode,

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type Redis from 'ioredis';
+import Redis, { Command as RedisCommand } from 'ioredis';
 
 import { canonicalJson } from '../utils/content-hash';
 import { CacheError } from '../utils/errors';
@@ -162,11 +162,15 @@ const LEGACY_CORE_ITEM_NAMES = [
 
 /**
  * Full consumer reads are the integrity boundary for immutable Redis items.
- * Keep a process-local repair hint when one detects a checksum/count failure;
- * the reconciler can then repair that exact publication without turning every
- * control pass into a full payload download.
+ * Keep the repair hint in the publication Redis as well as locally so a read
+ * in the API process can wake a reconciler running in another worker or slot.
+ * The marker is scoped to one immutable publication identity and expires if a
+ * process is terminated before the normal repair path can clear it.
  */
-const publicationIntegrityFailures = new Set<string>();
+const publicationIntegrityFailures = new Map<string, string>();
+const INTEGRITY_FAILURE_TTL_SECONDS = 15 * 60;
+const INTEGRITY_FAILURE_SUFFIX = ':integrity-failure';
+const INTEGRITY_PROOF_SUFFIX = ':integrity-proof';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -413,16 +417,130 @@ function scopePrefix(scope: DataPublicationScope): string {
   return `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}`;
 }
 
-export function markDataPublicationIntegrityFailure(scope: DataPublicationScope): void {
-  publicationIntegrityFailures.add(scopePrefix(scope));
+function integrityFailureKey(scope: DataPublicationScope): string {
+  return `${scopePrefix(scope)}${INTEGRITY_FAILURE_SUFFIX}`;
 }
 
-export function hasDataPublicationIntegrityFailure(scope: DataPublicationScope): boolean {
-  return publicationIntegrityFailures.has(scopePrefix(scope));
+function integrityProofKey(scope: DataPublicationScope): string {
+  return `${scopePrefix(scope)}${INTEGRITY_PROOF_SUFFIX}`;
 }
 
-export function clearDataPublicationIntegrityFailure(scope: DataPublicationScope): void {
-  publicationIntegrityFailures.delete(scopePrefix(scope));
+/** Internal Redis key used by tests and control-path diagnostics. */
+export function dataPublicationIntegrityProofKey(scope: DataPublicationScope): string {
+  return integrityProofKey(scope);
+}
+
+function publicationIntegrityToken(manifest: DataPublicationManifest): string {
+  return `${manifest.publicationId}:${manifest.revision}`;
+}
+
+async function getRedisForIntegrityMarker(redisClient?: Redis): Promise<Redis> {
+  return redisClient ?? (await redisSingleton.getClient());
+}
+
+export async function markDataPublicationIntegrityFailure(
+  scope: DataPublicationScope,
+  manifest?: DataPublicationManifest,
+  redisClient?: Redis,
+): Promise<void> {
+  const prefix = scopePrefix(scope);
+  const token = manifest ? publicationIntegrityToken(manifest) : '*';
+  publicationIntegrityFailures.set(prefix, token);
+  try {
+    const redis = await getRedisForIntegrityMarker(redisClient);
+    await redis.set(integrityFailureKey(scope), token, 'EX', String(INTEGRITY_FAILURE_TTL_SECONDS));
+    await redis.del(integrityProofKey(scope));
+  } catch {
+    // The local marker still protects this process when the shared marker
+    // cannot be written during the same Redis incident.
+  }
+}
+
+export async function hasDataPublicationIntegrityFailure(
+  scope: DataPublicationScope,
+  manifest?: DataPublicationManifest | null,
+  redisClient?: Redis,
+): Promise<boolean> {
+  const prefix = scopePrefix(scope);
+  const expected = manifest ? publicationIntegrityToken(manifest) : null;
+  const local = publicationIntegrityFailures.get(prefix);
+  if (local && (!expected || local === '*' || local === expected)) return true;
+  try {
+    const redis = await getRedisForIntegrityMarker(redisClient);
+    const shared = await redis.get(integrityFailureKey(scope));
+    return Boolean(shared && (!expected || shared === '*' || shared === expected));
+  } catch {
+    return false;
+  }
+}
+
+export async function clearDataPublicationIntegrityFailure(
+  scope: DataPublicationScope,
+  redisClient?: Redis,
+): Promise<void> {
+  const prefix = scopePrefix(scope);
+  publicationIntegrityFailures.delete(prefix);
+  try {
+    const redis = await getRedisForIntegrityMarker(redisClient);
+    await redis.del(integrityFailureKey(scope));
+  } catch {
+    // A failed cleanup is harmless; the shared marker is TTL bounded and a
+    // subsequent full proof can clear it when Redis is healthy again.
+  }
+}
+
+export async function markDataPublicationIntegrityProof(
+  manifest: DataPublicationManifest,
+  redisClient?: Redis,
+): Promise<void> {
+  const scope = {
+    dataset: manifest.dataset,
+    seasonCode: manifest.seasonCode,
+  } as DataPublicationScope;
+  try {
+    const redis = await getRedisForIntegrityMarker(redisClient);
+    await redis.set(integrityProofKey(scope), publicationIntegrityToken(manifest));
+  } catch {
+    // A proof marker is an optimization. The next selected read will perform
+    // one complete validation if it cannot observe this marker.
+  } finally {
+    await clearDataPublicationIntegrityFailure(scope, redisClient);
+  }
+}
+
+export async function hasDataPublicationIntegrityProof(
+  scope: DataPublicationScope,
+  manifest: DataPublicationManifest,
+  redisClient?: Redis,
+): Promise<boolean> {
+  try {
+    const redis = await getRedisForIntegrityMarker(redisClient);
+    return (await redis.get(integrityProofKey(scope))) === publicationIntegrityToken(manifest);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run one Redis command with the audit's remaining deadline. ioredis applies
+ * the shared five-second command timeout when a command has no timer; setting
+ * the timer before sending this command gives an explicit audit read the
+ * smaller remaining budget without racing and abandoning a live promise.
+ */
+async function redisCommandWithDeadline<T>(
+  redis: Redis,
+  name: string,
+  args: readonly string[],
+  deadlineAt?: number,
+): Promise<T> {
+  if (deadlineAt === undefined) {
+    return (await redis.call(name, ...args)) as T;
+  }
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) throw new Error('Publication audit deadline exceeded');
+  const command = new RedisCommand(name, [...args], { replyEncoding: 'utf8' });
+  command.setTimeout(remainingMs);
+  return (await redis.sendCommand(command)) as T;
 }
 
 export function activeDataPublicationKey(scope: DataPublicationScope): string {
@@ -756,6 +874,7 @@ export async function activateDataPublicationPointer(
         'DATA_PUBLICATION_ACTIVATION_FAILED',
       );
     }
+    await markDataPublicationIntegrityProof(activeManifest, redis);
     return { status: 'published', manifest: activeManifest, previousManifest: null };
   }
   if (status === 'stale') {
@@ -771,6 +890,7 @@ export async function activateDataPublicationPointer(
       'DATA_PUBLICATION_ACTIVATION_FAILED',
     );
   }
+  await markDataPublicationIntegrityProof(manifest, redis);
   return {
     status: 'published',
     manifest,
@@ -931,15 +1051,33 @@ export async function publishDataRevision(
 export async function readActiveDataPublication(
   scope: DataPublicationScope,
   redisClient?: Redis,
+  deadlineAt?: number,
 ): Promise<DataPublicationReadResult | null> {
   assertScope(scope);
   try {
     const redis = redisClient ?? (await redisSingleton.getClient());
-    const manifest = parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)));
+    const manifest = parseDataPublicationManifest(
+      deadlineAt === undefined
+        ? await redis.get(activeDataPublicationKey(scope))
+        : await redisCommandWithDeadline<string | null>(
+            redis,
+            'get',
+            [activeDataPublicationKey(scope)],
+            deadlineAt,
+          ),
+    );
     if (!manifest || !assertManifestMatchesScope(manifest, scope) || manifest.items.length === 0) {
       return null;
     }
-    const payloads = await redis.mget(...manifest.items.map((item) => item.key));
+    const payloads =
+      deadlineAt === undefined
+        ? await redis.mget(...manifest.items.map((item) => item.key))
+        : await redisCommandWithDeadline<(string | null)[]>(
+            redis,
+            'mget',
+            manifest.items.map((item) => item.key),
+            deadlineAt,
+          );
     const items: Record<string, unknown> = {};
     for (let index = 0; index < manifest.items.length; index += 1) {
       const item = manifest.items[index];
@@ -949,23 +1087,23 @@ export async function readActiveDataPublication(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(payload) as unknown;
       } catch {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       if (itemCount(parsed) !== item.count) {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       items[item.name] = parsed;
     }
-    clearDataPublicationIntegrityFailure(scope);
+    await markDataPublicationIntegrityProof(manifest, redis);
     return { manifest, items };
   } catch {
     return null;
@@ -1039,10 +1177,11 @@ export async function readActiveDataPublicationManifestWithItemBounds(
 
 /**
  * Read a selected set of active items after checking every sibling's Redis
- * existence and declared size. This is for control paths that need one or two
- * semantic inputs while keeping large immutable siblings out of the response.
- * The complete consumer reader above remains the integrity boundary when all
- * publication data is actually needed.
+ * existence and declared size. A publication without the shared full-integrity
+ * proof pays one complete validation first; after that proof is tied to the
+ * immutable identity, control paths need only the selected payloads. This keeps
+ * unselected same-sized corruption from being silently accepted on first use
+ * without making every steady-state control pass download the full snapshot.
  */
 export async function readActiveDataPublicationItemsWithBounds(
   scope: DataPublicationScope,
@@ -1064,6 +1203,20 @@ export async function readActiveDataPublicationItemsWithBounds(
     if (selected.some((item): item is undefined => item === undefined)) return null;
     const selectedItems = selected as DataPublicationManifest['items'];
     const redis = redisClient ?? (await redisSingleton.getClient());
+    if (await hasDataPublicationIntegrityFailure(scope, manifest, redis)) return null;
+    if (!(await hasDataPublicationIntegrityProof(scope, manifest, redis))) {
+      // Existing active publications may predate the shared proof marker. Pay
+      // the complete validation cost once, then keep all steady-state control
+      // reads bounded by the marker tied to this immutable identity. This also
+      // catches corruption in an unselected sibling before a partial control
+      // projection can be used.
+      const full = await readActiveDataPublication(scope, redis);
+      if (!full) return null;
+      return {
+        manifest: full.manifest,
+        items: Object.fromEntries(itemNames.map((name) => [name, full.items[name]])),
+      };
+    }
     const payloads = await redis.mget(...selectedItems.map((item) => item.key));
     if (payloads.length !== selectedItems.length) return null;
     const items: Record<string, unknown> = {};
@@ -1075,18 +1228,18 @@ export async function readActiveDataPublicationItemsWithBounds(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(payload) as unknown;
       } catch {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       if (itemCount(parsed) !== item.count) {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       items[item.name] = parsed;
@@ -1123,18 +1276,18 @@ export async function readActiveDataPublicationItem(
       Buffer.byteLength(payload, 'utf8') !== item.bytes ||
       sha256(payload) !== item.sha256
     ) {
-      markDataPublicationIntegrityFailure(scope);
+      await markDataPublicationIntegrityFailure(scope, manifest, redis);
       return null;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(payload) as unknown;
     } catch {
-      markDataPublicationIntegrityFailure(scope);
+      await markDataPublicationIntegrityFailure(scope, manifest, redis);
       return null;
     }
     if (itemCount(parsed) !== item.count) {
-      markDataPublicationIntegrityFailure(scope);
+      await markDataPublicationIntegrityFailure(scope, manifest, redis);
       return null;
     }
     return { manifest, items: { [itemName]: parsed } };
@@ -1184,18 +1337,18 @@ export async function readActiveDataPublicationItems(
         Buffer.byteLength(payload, 'utf8') !== item.bytes ||
         sha256(payload) !== item.sha256
       ) {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(payload) as unknown;
       } catch {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       if (itemCount(parsed) !== item.count) {
-        markDataPublicationIntegrityFailure(scope);
+        await markDataPublicationIntegrityFailure(scope, manifest, redis);
         return null;
       }
       payloadByName.set(item.name, payload);
@@ -1208,7 +1361,7 @@ export async function readActiveDataPublicationItems(
       const parsed = JSON.parse(payload) as unknown;
       items[item.name] = parsed;
     }
-    clearDataPublicationIntegrityFailure(scope);
+    await markDataPublicationIntegrityProof(manifest, redis);
     return { manifest, items };
   } catch {
     return null;

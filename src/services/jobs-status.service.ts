@@ -1014,14 +1014,19 @@ export async function getJobsStatus(
       } else if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
         publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
       } else {
-        redisDelivery = await readActiveDataPublication(publicationScope).catch(() => null);
+        redisDelivery = await readActiveDataPublication(
+          publicationScope,
+          undefined,
+          publicationAuditDeadlineAt ?? undefined,
+        ).catch(() => null);
         publicationAuditBytes += declaredBytes;
         const fullReadExceededDeadline =
           publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
         if (fullReadExceededDeadline) {
-          // Redis commands are bounded by the shared five-second timeout. A
-          // read that settles after the audit deadline is evidence of budget
-          // exhaustion, not a completed audit; retain the proof-only result.
+          // The audit reader applies the remaining deadline to each Redis
+          // command. A read that nevertheless settles after the deadline is
+          // evidence of budget exhaustion, not a completed audit; retain the
+          // proof-only result.
           redisDelivery = redisControlManifest;
           publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
         } else if (redisDelivery) {

@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   activeDataPublicationKey,
   clearDataPublicationIntegrityFailure,
+  dataPublicationIntegrityProofKey,
   dataPublicationItemKey,
   hasDataPublicationIntegrityFailure,
   parseDataPublicationManifest,
@@ -187,6 +188,10 @@ describe('data publication contract', () => {
     });
     const values = new Map<string, string>([
       [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+      [
+        dataPublicationIntegrityProofKey(priceScope),
+        `${prepared.manifest.publicationId}:${prepared.manifest.revision}`,
+      ],
       ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
     ]);
     const requested: string[] = [];
@@ -316,6 +321,10 @@ describe('data publication contract', () => {
     });
     const values = new Map<string, string>([
       [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+      [
+        dataPublicationIntegrityProofKey(priceScope),
+        `${prepared.manifest.publicationId}:${prepared.manifest.revision}`,
+      ],
       ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
     ]);
     const requested: string[] = [];
@@ -348,6 +357,47 @@ describe('data publication contract', () => {
     expect(requested).toEqual([dataPublicationItemKey(priceScope, 13, 'context')]);
   });
 
+  test('bootstraps a full proof before accepting a selected item', async () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const prepared = prepareDataPublication({
+      ...priceScope,
+      revision: 15,
+      publicationId: '00000000-0000-4000-8000-000000000015',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items: [
+        { name: 'context', value: { deadline: '2026-08-09T02:00:00.000Z' } },
+        { name: 'players', value: [{ id: 1 }] },
+      ],
+    });
+    const corruptedPlayers = JSON.stringify([{ id: 2 }]);
+    const values = new Map<string, string>([
+      [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+      [prepared.items[0]!.manifest.key, prepared.items[0]!.payload],
+      [prepared.items[1]!.manifest.key, corruptedPlayers],
+    ]);
+    const redis = {
+      get: async (key: string) => values.get(key) ?? null,
+      mget: async (...keys: string[]) => keys.map((key) => values.get(key) ?? null),
+      pipeline: () => {
+        const pipeline = {
+          exists: () => pipeline,
+          strlen: () => pipeline,
+          exec: async () =>
+            prepared.manifest.items.flatMap((item) => [
+              [null, 1],
+              [null, item.bytes],
+            ]),
+        };
+        return pipeline;
+      },
+    } as unknown as Redis;
+
+    await expect(
+      readActiveDataPublicationItemsWithBounds(priceScope, ['context'], redis),
+    ).resolves.toBeNull();
+  });
+
   test('full integrity reads flag same-sized corruption for targeted repair', async () => {
     const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
     const prepared = prepareDataPublication({
@@ -373,14 +423,18 @@ describe('data publication contract', () => {
       mget: async (...keys: string[]) => keys.map((key) => values.get(key) ?? null),
     } as unknown as Redis;
 
-    clearDataPublicationIntegrityFailure(priceScope);
+    await clearDataPublicationIntegrityFailure(priceScope, redis);
     await expect(readActiveDataPublication(priceScope, redis)).resolves.toBeNull();
-    expect(hasDataPublicationIntegrityFailure(priceScope)).toBe(true);
+    await expect(
+      hasDataPublicationIntegrityFailure(priceScope, prepared.manifest, redis),
+    ).resolves.toBe(true);
 
     values.set(contextKey, originalContext);
     await expect(readActiveDataPublication(priceScope, redis)).resolves.toMatchObject({
       manifest: prepared.manifest,
     });
-    expect(hasDataPublicationIntegrityFailure(priceScope)).toBe(false);
+    await expect(
+      hasDataPublicationIntegrityFailure(priceScope, prepared.manifest, redis),
+    ).resolves.toBe(false);
   });
 });

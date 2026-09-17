@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { activeDataPublicationKey, prepareDataPublication } from '../../src/cache/data-publication';
+import {
+  activeDataPublicationKey,
+  dataPublicationIntegrityProofKey,
+  prepareDataPublication,
+} from '../../src/cache/data-publication';
 import {
   readCoreSnapshotLifecycle,
   selectCurrentEventIdByDeadline,
@@ -49,6 +53,10 @@ describe('core snapshot current-event authority', () => {
     });
     const values = new Map<string, string>([
       [activeDataPublicationKey(scope), JSON.stringify(prepared.manifest)],
+      [
+        dataPublicationIntegrityProofKey(scope),
+        `${prepared.manifest.publicationId}:${prepared.manifest.revision}`,
+      ],
       ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
     ]);
     const gets: string[] = [];

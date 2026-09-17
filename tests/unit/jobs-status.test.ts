@@ -290,7 +290,8 @@ describe('jobs status hot-path isolation', () => {
 
   test('uses full publication proof only on explicit governance evidence', () => {
     const source = readFileSync('src/services/jobs-status.service.ts', 'utf8');
-    expect(source).toContain('readActiveDataPublication(publicationScope)');
+    expect(source).toContain('readActiveDataPublication(\n');
+    expect(source).toContain('publicationAuditDeadlineAt');
     expect(source).toContain('loadActivePriceChangeContextForSchedule');
     expect(source).not.toContain('loadDataPublicationDelivery(priceChangeDbActive.publicationId)');
   });
