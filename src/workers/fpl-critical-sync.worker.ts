@@ -40,7 +40,11 @@ import {
   readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
-import { readActiveDataPublicationManifestWithItemBounds } from '../cache/data-publication';
+import {
+  hasDataPublicationIntegrityProof,
+  readActiveDataPublication,
+  readActiveDataPublicationManifestWithItemBounds,
+} from '../cache/data-publication';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   attachDataSyncCostEvidence,
@@ -412,23 +416,26 @@ async function verifyPricePublication(
   revision: number,
 ): Promise<void> {
   const delivered = await dispatchDataPublicationOutbox({ limit: 1, publicationId });
-  if (delivered.delivered !== 1) {
-    const active = await readActiveDataPublicationManifestWithItemBounds({
-      dataset: 'fpl:price-changes',
-      seasonCode: season.seasonCode,
-    });
-    if (active?.publicationId !== publicationId || active.revision !== revision) {
+  const scope = {
+    dataset: 'fpl:price-changes' as const,
+    seasonCode: season.seasonCode,
+  };
+  const active = await readActiveDataPublicationManifestWithItemBounds(scope);
+  if (!active || active.publicationId !== publicationId || active.revision !== revision) {
+    if (delivered.delivered !== 1) {
       throw new Error(
         `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
       );
     }
-  }
-  const active = await readActiveDataPublicationManifestWithItemBounds({
-    dataset: 'fpl:price-changes',
-    seasonCode: season.seasonCode,
-  });
-  if (active?.publicationId !== publicationId || active.revision !== revision) {
     throw new Error('Price-change DB and Redis publication identities do not match');
+  }
+  // A newly delivered outbox row was validated while staging and activating
+  // its immutable payload. When a retry finds the row already delivered, the
+  // shared proof is the cheap evidence path; after its TTL expires, perform a
+  // full read before recording durable lane completion.
+  if (delivered.delivered !== 1 && !(await hasDataPublicationIntegrityProof(scope, active))) {
+    const verified = await readActiveDataPublication(scope, undefined, undefined, active);
+    if (!verified) throw new Error('Price-change Redis publication failed integrity verification');
   }
 }
 

@@ -167,11 +167,15 @@ const LEGACY_CORE_ITEM_NAMES = [
  * The marker is scoped to one immutable publication identity and expires if a
  * process is terminated before the normal repair path can clear it.
  */
-const publicationIntegrityFailures = new Map<string, string>();
 const INTEGRITY_FAILURE_TTL_SECONDS = 15 * 60;
 const INTEGRITY_PROOF_TTL_SECONDS = 15 * 60;
 const INTEGRITY_FAILURE_SUFFIX = ':integrity-failure';
 const INTEGRITY_PROOF_SUFFIX = ':integrity-proof';
+type IntegrityFailureMarker = Readonly<{
+  token: string;
+  expiresAt: number;
+}>;
+const publicationIntegrityFailures = new Map<string, IntegrityFailureMarker>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -446,7 +450,10 @@ export async function markDataPublicationIntegrityFailure(
 ): Promise<void> {
   const prefix = scopePrefix(scope);
   const token = manifest ? publicationIntegrityToken(manifest) : '*';
-  publicationIntegrityFailures.set(prefix, token);
+  publicationIntegrityFailures.set(prefix, {
+    token,
+    expiresAt: Date.now() + INTEGRITY_FAILURE_TTL_SECONDS * 1_000,
+  });
   try {
     const redis = await getRedisForIntegrityMarker(redisClient);
     await redis.set(integrityFailureKey(scope), token, 'EX', String(INTEGRITY_FAILURE_TTL_SECONDS));
@@ -461,14 +468,29 @@ export async function hasDataPublicationIntegrityFailure(
   scope: DataPublicationScope,
   manifest?: DataPublicationManifest | null,
   redisClient?: Redis,
+  deadlineAt?: number,
 ): Promise<boolean> {
   const prefix = scopePrefix(scope);
   const expected = manifest ? publicationIntegrityToken(manifest) : null;
   const local = publicationIntegrityFailures.get(prefix);
-  if (local && (!expected || local === '*' || local === expected)) return true;
+  if (local) {
+    if (local.expiresAt <= Date.now()) {
+      publicationIntegrityFailures.delete(prefix);
+    } else if (!expected || local.token === '*' || local.token === expected) {
+      return true;
+    }
+  }
   try {
     const redis = await getRedisForIntegrityMarker(redisClient);
-    const shared = await redis.get(integrityFailureKey(scope));
+    const shared =
+      deadlineAt === undefined
+        ? await redis.get(integrityFailureKey(scope))
+        : await redisCommandWithDeadline<string | null>(
+            redis,
+            'get',
+            [integrityFailureKey(scope)],
+            deadlineAt,
+          );
     return Boolean(shared && (!expected || shared === '*' || shared === expected));
   } catch {
     return false;
@@ -890,7 +912,10 @@ export async function activateDataPublicationPointer(
         'DATA_PUBLICATION_ACTIVATION_FAILED',
       );
     }
-    await markDataPublicationIntegrityProof(activeManifest, redis);
+    // The Lua activation already committed the immutable pointer. Proof
+    // bookkeeping is best-effort and must not delay or turn a successful
+    // idempotent delivery into a retry when Redis is reconnecting.
+    void markDataPublicationIntegrityProof(activeManifest, redis, { fireAndForget: true });
     return { status: 'published', manifest: activeManifest, previousManifest: null };
   }
   if (status === 'stale') {
@@ -906,7 +931,10 @@ export async function activateDataPublicationPointer(
       'DATA_PUBLICATION_ACTIVATION_FAILED',
     );
   }
-  await markDataPublicationIntegrityProof(manifest, redis);
+  // The Lua activation already committed the immutable pointer. Proof
+  // bookkeeping is best-effort and must not delay or turn a successful
+  // delivery into a retry when Redis is reconnecting.
+  void markDataPublicationIntegrityProof(manifest, redis, { fireAndForget: true });
   return {
     status: 'published',
     manifest,
@@ -1225,7 +1253,7 @@ export async function readActiveDataPublicationManifestWithItemBounds(
     // A full consumer may have already proved that this immutable identity is
     // corrupt. Keep manifest-only fallbacks from reporting the publication as
     // usable until the reconciler replaces it or the bounded marker expires.
-    if (await hasDataPublicationIntegrityFailure(scope, manifest, redis)) return null;
+    if (await hasDataPublicationIntegrityFailure(scope, manifest, redis, deadlineAt)) return null;
     return manifest;
   } catch {
     return null;
