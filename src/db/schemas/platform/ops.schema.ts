@@ -154,6 +154,8 @@ export const datasetPublicationsInOps = ops.table(
       .notNull(),
     status: text().default('staging').notNull(),
     manifest: jsonb().default({}).notNull(),
+    /** Version of the producer-side semantic validation proof; NULL is legacy. */
+    validationVersion: integer('validation_version'),
     sourceRunId: uuid('source_run_id'),
     activatedAt: timestamp('activated_at', { withTimezone: true, mode: 'date' }),
     retiredAt: timestamp('retired_at', { withTimezone: true, mode: 'date' }),
@@ -244,6 +246,8 @@ export const datasetPublicationItemsInOps = ops.table(
     payload: jsonb().notNull(),
     itemCount: integer('item_count').notNull(),
     checksum: text().notNull(),
+    /** Version of the producer-side payload proof; NULL is legacy. */
+    validationVersion: integer('validation_version'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [

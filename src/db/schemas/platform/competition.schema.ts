@@ -884,6 +884,8 @@ export const liveLeagueCheckpointsInCompetition = competition.table(
     rowCount: integer('row_count').notNull(),
     payloadBytes: integer('payload_bytes').notNull(),
     payloadSha256: text('payload_sha256').notNull(),
+    /** Version of the producer-side semantic validation proof; NULL is legacy. */
+    validationVersion: integer('validation_version'),
     sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true, mode: 'date' }).notNull(),
     contentUpdatedAt: timestamp('content_updated_at', {
       withTimezone: true,

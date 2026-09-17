@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   prepareDataPublication,
   readActiveDataPublication,
+  readActiveDataPublicationManifest,
   type MarketSnapshotContextPayload,
 } from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -84,8 +85,8 @@ async function ensureMarketPublicationDelivered(
   // publication created before the outbox migration).  Re-read the active
   // pointer before reporting a delivery failure; DB and Redis parity is the
   // success evidence, not whether this particular dispatch claimed a row.
-  const active = await readActiveDataPublication(marketScope(season));
-  if (active?.manifest.publicationId === publicationId && active.manifest.revision === revision) {
+  const active = await readActiveDataPublicationManifest(marketScope(season));
+  if (active?.publicationId === publicationId && active.revision === revision) {
     return;
   }
   throw new Error(`Market publication ${publicationId} is canonical but Redis delivery is pending`);

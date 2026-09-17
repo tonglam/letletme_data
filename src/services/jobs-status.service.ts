@@ -1,12 +1,13 @@
 import { Queue } from 'bullmq';
 
 import {
-  readActiveDataPublication,
+  readActiveDataPublicationManifestWithItemBounds,
+  readActiveDataPublicationItem,
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
   type DataPublicationReadResult,
 } from '../cache/data-publication';
-import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { loadActivePriceChangeContextForSchedule } from '../repositories/data-publication-outbox';
 import {
   PRICE_CHANGE_DATASET,
   PRICE_CHANGE_MAX_AGE_MS,
@@ -660,8 +661,15 @@ function priceChangeEventSummary(
   };
 }
 
-function readDeliveryContext(delivery: PublicationDelivery | null): Record<string, unknown> | null {
-  const contextItem = delivery?.items.find((item) => item.manifest.name === 'context');
+function readDeliveryContext(
+  delivery: PublicationDelivery | DataPublicationReadResult | null,
+): Record<string, unknown> | null {
+  if (!delivery) return null;
+  const items = delivery.items;
+  if (!Array.isArray(items)) {
+    return asContext((items as Readonly<Record<string, unknown>>).context);
+  }
+  const contextItem = items.find((item) => item.manifest.name === 'context');
   if (!contextItem) return null;
   try {
     return asContext(JSON.parse(contextItem.payload));
@@ -670,22 +678,30 @@ function readDeliveryContext(delivery: PublicationDelivery | null): Record<strin
   }
 }
 
+type PublicationIdentityRead = DataPublicationReadResult | DataPublicationManifest;
+
+function publicationManifest(read: PublicationIdentityRead | null): DataPublicationManifest | null {
+  if (!read) return null;
+  return 'manifest' in read ? read.manifest : read;
+}
+
 function redisMatchesActivePublication(
   dbActive: ActivePublication | null,
-  redisActive: Pick<DataPublicationReadResult, 'manifest'> | null,
+  redisActive: PublicationIdentityRead | null,
 ): boolean {
+  const manifest = publicationManifest(redisActive);
   return Boolean(
     dbActive &&
-      redisActive &&
-      redisActive.manifest.publicationId === dbActive.publicationId &&
-      redisActive.manifest.revision === dbActive.revision,
+      manifest &&
+      manifest.publicationId === dbActive.publicationId &&
+      manifest.revision === dbActive.revision,
   );
 }
 
 export function selectCanonicalPriceChangeContext(input: {
   dbActive: ActivePublication | null;
   redisActive: DataPublicationReadResult | null;
-  dbDelivery: PublicationDelivery | null;
+  dbDelivery: PublicationDelivery | DataPublicationReadResult | null;
 }): PriceChangeContextSelection {
   if (redisMatchesActivePublication(input.dbActive, input.redisActive)) {
     return {
@@ -942,29 +958,41 @@ export async function getJobsStatus(
   let priceChangeDbActive: Awaited<
     ReturnType<typeof syncOperationsRepository.findActivePublication>
   > = null;
-  let priceChangeRedisActive: Awaited<ReturnType<typeof readActiveDataPublication>> = null;
+  let priceChangeRedisActive: DataPublicationReadResult | null = null;
   for (const scope of publicationScopes) {
     const dbActive = await syncOperationsRepository.findActivePublication(
       scope.dataset,
       season,
       scope.eventId,
     );
-    const redisActive = await readActiveDataPublication({
+    const publicationScope = {
       dataset: scope.dataset,
       seasonCode: season.seasonCode,
       ...(scope.eventId === undefined ? {} : { eventId: scope.eventId }),
-    });
+    } as const;
+    const redisControl = await readActiveDataPublicationManifestWithItemBounds(publicationScope);
+    const redisContext =
+      scope.dataset === PRICE_CHANGE_DATASET
+        ? await readActiveDataPublicationItem(publicationScope, 'context')
+        : null;
+    const redisManifest = publicationManifest(redisControl);
     if (scope.dataset === PRICE_CHANGE_DATASET) {
       priceChangeDbActive = dbActive;
-      priceChangeRedisActive = redisActive;
+      priceChangeRedisActive =
+        redisContext &&
+        redisManifest &&
+        redisContext.manifest.publicationId === redisManifest.publicationId &&
+        redisContext.manifest.revision === redisManifest.revision
+          ? redisContext
+          : null;
     }
     const key = scope.eventId === undefined ? scope.dataset : `${scope.dataset}:e${scope.eventId}`;
     publicationConsistency[key] =
-      Boolean(dbActive) === Boolean(redisActive) &&
+      Boolean(dbActive) === Boolean(redisManifest) &&
       (!dbActive ||
-        !redisActive ||
-        (dbActive.publicationId === redisActive.manifest.publicationId &&
-          dbActive.revision === redisActive.manifest.revision));
+        !redisManifest ||
+        (dbActive.publicationId === redisManifest.publicationId &&
+          dbActive.revision === redisManifest.revision));
   }
 
   const priceChangeRedisMatches = redisMatchesActivePublication(
@@ -973,7 +1001,7 @@ export async function getJobsStatus(
   );
   const priceChangeDbDelivery =
     priceChangeDbActive && !priceChangeRedisMatches
-      ? await loadDataPublicationDelivery(priceChangeDbActive.publicationId).catch(() => null)
+      ? await loadActivePriceChangeContextForSchedule(season).catch(() => null)
       : null;
   const priceChangeSelection = selectCanonicalPriceChangeContext({
     dbActive: priceChangeDbActive,

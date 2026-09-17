@@ -287,6 +287,14 @@ describe('jobs status hot-path isolation', () => {
     expect(control).toContain('readQueueHealthSnapshot(name)');
     expect(control).not.toContain('new Queue(name');
   });
+
+  test('keeps explicit governance publication evidence bounded', () => {
+    const source = readFileSync('src/services/jobs-status.service.ts', 'utf8');
+    expect(source).toContain('readActiveDataPublicationManifestWithItemBounds');
+    expect(source).toContain('loadActivePriceChangeContextForSchedule');
+    expect(source).not.toContain('readActiveDataPublication({');
+    expect(source).not.toContain('loadDataPublicationDelivery(priceChangeDbActive.publicationId)');
+  });
 });
 
 describe('live final retention status evidence', () => {

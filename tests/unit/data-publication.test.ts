@@ -7,6 +7,9 @@ import {
   dataPublicationItemKey,
   parseDataPublicationManifest,
   prepareDataPublication,
+  readActiveDataPublicationItem,
+  readActiveDataPublicationManifest,
+  readActiveDataPublicationManifestWithItemBounds,
   readActiveDataPublicationItems,
   type DataPublicationManifest,
 } from '../../src/cache/data-publication';
@@ -204,5 +207,93 @@ describe('data publication contract', () => {
     await expect(
       readActiveDataPublicationItems(priceScope, ['context'], redis),
     ).resolves.toBeNull();
+  });
+
+  test('control reads fetch only the manifest or selected item', async () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const prepared = prepareDataPublication({
+      ...priceScope,
+      revision: 12,
+      publicationId: '00000000-0000-4000-8000-000000000012',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items: [
+        { name: 'context', value: { deadline: '2026-08-09T02:00:00.000Z' } },
+        { name: 'players', value: [{ id: 1 }, { id: 2 }] },
+      ],
+    });
+    const values = new Map<string, string>([
+      [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+      ...prepared.items.map((item) => [item.manifest.key, item.payload] as const),
+    ]);
+    const gets: string[] = [];
+    const redis = {
+      get: async (key: string) => {
+        gets.push(key);
+        return values.get(key) ?? null;
+      },
+    } as unknown as Redis;
+
+    await expect(readActiveDataPublicationManifest(priceScope, redis)).resolves.toEqual(
+      prepared.manifest,
+    );
+    expect(gets).toEqual([activeDataPublicationKey(priceScope)]);
+    gets.length = 0;
+    await expect(readActiveDataPublicationItem(priceScope, 'context', redis)).resolves.toEqual({
+      manifest: prepared.manifest,
+      items: { context: { deadline: '2026-08-09T02:00:00.000Z' } },
+    });
+    expect(gets).toEqual([
+      activeDataPublicationKey(priceScope),
+      dataPublicationItemKey(priceScope, 12, 'context'),
+    ]);
+  });
+
+  test('reconciliation checks Redis item presence and size without downloading payloads', async () => {
+    const priceScope = { dataset: 'fpl:price-changes' as const, seasonCode: '2627' };
+    const prepared = prepareDataPublication({
+      ...priceScope,
+      revision: 12,
+      publicationId: '00000000-0000-4000-8000-000000000012',
+      sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
+      state: 'active',
+      items: [
+        { name: 'context', value: { deadline: '2026-08-09T02:00:00.000Z' } },
+        { name: 'players', value: [{ id: 1 }, { id: 2 }] },
+      ],
+    });
+    const values = new Map<string, string>([
+      [activeDataPublicationKey(priceScope), JSON.stringify(prepared.manifest)],
+    ]);
+    const commands: string[] = [];
+    const redis = {
+      get: async (key: string) => values.get(key) ?? null,
+      pipeline: () => {
+        const pipeline = {
+          exists: (key: string) => {
+            commands.push(`exists:${key}`);
+            return pipeline;
+          },
+          strlen: (key: string) => {
+            commands.push(`strlen:${key}`);
+            return pipeline;
+          },
+          exec: async () =>
+            prepared.manifest.items.flatMap((item) => [
+              [null, 1],
+              [null, item.bytes],
+            ]),
+        };
+        return pipeline;
+      },
+    } as unknown as Redis;
+
+    await expect(
+      readActiveDataPublicationManifestWithItemBounds(priceScope, redis),
+    ).resolves.toEqual(prepared.manifest);
+    expect(commands).toEqual(
+      prepared.manifest.items.flatMap((item) => [`exists:${item.key}`, `strlen:${item.key}`]),
+    );
+    expect(values.has(dataPublicationItemKey(priceScope, 12, 'players'))).toBe(false);
   });
 });

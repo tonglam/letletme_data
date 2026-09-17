@@ -10,6 +10,7 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import {
+  DATA_PUBLICATION_VALIDATION_VERSION,
   parseDataPublicationManifest,
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
@@ -49,6 +50,7 @@ export async function loadActivePriceChangeContext(season: FplSeasonRef) {
           publicationId: datasetPublicationsInOps.publicationId,
           revision: datasetPublicationsInOps.revision,
           manifest: datasetPublicationsInOps.manifest,
+          validationVersion: datasetPublicationsInOps.validationVersion,
         })
         .from(datasetPublicationsInOps)
         .where(
@@ -62,10 +64,10 @@ export async function loadActivePriceChangeContext(season: FplSeasonRef) {
         .limit(1);
       const row = rows[0];
       if (!row) return null;
-      // The Redis fast path validates every sibling itself. This durable fallback
-      // must enforce the same boundary so a context row cannot create an
-      // obligation when the active publication is missing or has a bad players
-      // sibling.
+      // The Redis fast path validates every sibling itself. This durable
+      // fallback retains the same full-payload validation for legacy rows;
+      // missing proof only prevents a control path from calling the row
+      // verified, it does not make an already stored consumer payload vanish.
       const prepared = await loadPreparedPublication(tx, row.publicationId, row.manifest).catch(
         () => null,
       );
@@ -92,8 +94,100 @@ export async function loadActivePriceChangeContext(season: FplSeasonRef) {
   );
 }
 
+/**
+ * Read the scheduler's deadline context without downloading the players item.
+ * The context is the only payload needed to calculate a watch deadline; all
+ * sibling rows are checked through their bounded proof columns, while the
+ * complete payload loader remains reserved for delivery and consumer paths.
+ */
+export async function loadActivePriceChangeContextForSchedule(season: FplSeasonRef) {
+  const db = await getDb();
+  return db.transaction(
+    async (tx) => {
+      const rows = await tx
+        .select({
+          publicationId: datasetPublicationsInOps.publicationId,
+          revision: datasetPublicationsInOps.revision,
+          manifest: datasetPublicationsInOps.manifest,
+          validationVersion: datasetPublicationsInOps.validationVersion,
+        })
+        .from(datasetPublicationsInOps)
+        .where(
+          and(
+            eq(datasetPublicationsInOps.dataset, 'fpl:price-changes'),
+            eq(datasetPublicationsInOps.seasonId, season.seasonId),
+            isNull(datasetPublicationsInOps.eventId),
+            eq(datasetPublicationsInOps.status, 'active'),
+          ),
+        )
+        .limit(1);
+      const row = rows[0];
+      if (!row || row.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION) return null;
+      const manifest = parseDataPublicationManifest(JSON.stringify(row.manifest));
+      if (
+        !manifest ||
+        manifest.publicationId !== row.publicationId ||
+        manifest.revision !== row.revision ||
+        manifest.dataset !== 'fpl:price-changes' ||
+        manifest.seasonCode !== season.seasonCode ||
+        manifest.eventId !== null
+      ) {
+        return null;
+      }
+      const itemRows = await tx
+        .select({
+          itemName: datasetPublicationItemsInOps.itemName,
+          itemCount: datasetPublicationItemsInOps.itemCount,
+          checksum: datasetPublicationItemsInOps.checksum,
+          validationVersion: datasetPublicationItemsInOps.validationVersion,
+        })
+        .from(datasetPublicationItemsInOps)
+        .where(eq(datasetPublicationItemsInOps.publicationId, row.publicationId));
+      if (itemRows.length !== manifest.items.length) return null;
+      for (const item of manifest.items) {
+        const itemRow = itemRows.find((candidate) => candidate.itemName === item.name);
+        if (
+          !itemRow ||
+          itemRow.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION ||
+          itemRow.itemCount !== item.count ||
+          itemRow.checksum !== item.sha256
+        )
+          return null;
+      }
+      const contextManifest = manifest.items.find((item) => item.name === 'context');
+      if (!contextManifest) return null;
+      const contextRows = await tx
+        .select({
+          payload: datasetPublicationItemsInOps.payload,
+          itemCount: datasetPublicationItemsInOps.itemCount,
+          checksum: datasetPublicationItemsInOps.checksum,
+          validationVersion: datasetPublicationItemsInOps.validationVersion,
+        })
+        .from(datasetPublicationItemsInOps)
+        .where(
+          and(
+            eq(datasetPublicationItemsInOps.publicationId, row.publicationId),
+            eq(datasetPublicationItemsInOps.itemName, 'context'),
+          ),
+        )
+        .limit(1);
+      const contextRow = contextRows[0];
+      if (!contextRow) return null;
+      const payload = verifiedItemPayload(contextRow, contextManifest);
+      if (!payload) return null;
+      return { manifest, items: { context: JSON.parse(payload) as unknown } };
+    },
+    { isolationLevel: 'repeatable read' },
+  );
+}
+
 function verifiedItemPayload(
-  row: { payload: unknown; itemCount: number; checksum: string },
+  row: {
+    payload: unknown;
+    itemCount: number;
+    checksum: string;
+    validationVersion: number | null;
+  },
   item: DataPublicationManifest['items'][number],
 ): string | undefined {
   return [canonicalJson(row.payload), JSON.stringify(row.payload)].find((candidate) => {
@@ -133,6 +227,7 @@ async function loadPreparedPublication(
       payload: datasetPublicationItemsInOps.payload,
       itemCount: datasetPublicationItemsInOps.itemCount,
       checksum: datasetPublicationItemsInOps.checksum,
+      validationVersion: datasetPublicationItemsInOps.validationVersion,
     })
     .from(datasetPublicationItemsInOps)
     .where(eq(datasetPublicationItemsInOps.publicationId, publicationId));
@@ -162,13 +257,34 @@ export async function loadDataPublicationDelivery(publicationId: string): Promis
 }> {
   const db = await getDb();
   const rows = await db
-    .select({ manifest: datasetPublicationsInOps.manifest })
+    .select({
+      manifest: datasetPublicationsInOps.manifest,
+      validationVersion: datasetPublicationsInOps.validationVersion,
+    })
     .from(datasetPublicationsInOps)
     .where(eq(datasetPublicationsInOps.publicationId, publicationId))
     .limit(1);
   const row = rows[0];
   if (!row) throw new Error(`Publication ${publicationId} does not exist`);
   return loadPreparedPublication(db, publicationId, row.manifest);
+}
+
+/** Read only the durable publication identity and validation proof. */
+export async function loadDataPublicationDeliveryManifest(
+  publicationId: string,
+): Promise<DataPublicationManifest | null> {
+  const db = await getDb();
+  const rows = await db
+    .select({
+      manifest: datasetPublicationsInOps.manifest,
+      validationVersion: datasetPublicationsInOps.validationVersion,
+    })
+    .from(datasetPublicationsInOps)
+    .where(eq(datasetPublicationsInOps.publicationId, publicationId))
+    .limit(1);
+  const row = rows[0];
+  if (!row || row.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION) return null;
+  return parseDataPublicationManifest(JSON.stringify(row.manifest));
 }
 
 function createSha256(value: string): string {

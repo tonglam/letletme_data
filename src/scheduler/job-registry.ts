@@ -57,7 +57,7 @@ import {
 } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
-import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
 import { getSchedulerObligationByIdentity } from '../repositories/scheduler-obligations';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { isMatchDayTime } from '../utils/conditions';
@@ -1423,7 +1423,7 @@ function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
         context.season,
       );
       const durablePublication = active
-        ? await loadDataPublicationDelivery(active.publicationId).catch(() => null)
+        ? await loadDataPublicationDeliveryManifest(active.publicationId).catch(() => null)
         : null;
       const reason = durablePublication
         ? coreSnapshotRefreshReason(current, fixtures, publication, context.now)

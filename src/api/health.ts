@@ -4,13 +4,16 @@ import { queueRedisSingleton } from '../queues/redis';
 import { seasonRepository } from '../repositories/seasons';
 import { getConfig, isBugReportScreenshotStorageConfigured } from '../utils/config';
 import { checkRuntimeHeartbeat, isRuntimeRoleRequired } from '../utils/runtime-heartbeat';
-import { readActiveDataPublication } from '../cache/data-publication';
-import { readLivePublicationV2 } from '../cache/live-publication-v2';
+import {
+  readActiveDataPublicationManifest,
+  readActiveDataPublicationManifestWithItemBounds,
+} from '../cache/data-publication';
+import { readLivePublicationV2Manifest } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
-import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
-import { readLivePublicationV2Checkpoint } from '../services/live-publication-v2-checkpoint.service';
+import { readLivePublicationV2CheckpointMetadata } from '../services/live-publication-v2-checkpoint.service';
 import { readLiveCheckpointDesiredV2 } from '../cache/live-publication-v2';
 import { LIVE_SCORE_CHECKPOINT_INTERVAL_MS } from '../domain/job-schedules';
 
@@ -52,7 +55,7 @@ let lastKnownActiveSeasonCode: string | null = null;
 async function activeSeasonFromRedis(): Promise<string | null> {
   const redis = await redisSingleton.getClient();
   if (lastKnownActiveSeasonCode) {
-    const active = await readActiveDataPublication({
+    const active = await readActiveDataPublicationManifest({
       dataset: 'fpl:core',
       seasonCode: lastKnownActiveSeasonCode,
     }).catch(() => null);
@@ -72,7 +75,7 @@ async function activeSeasonFromRedis(): Promise<string | null> {
     for (const key of keys) {
       const match = key.match(/^llm:data:fpl:core:(\d{4}):active$/);
       if (!match) continue;
-      const active = await readActiveDataPublication({
+      const active = await readActiveDataPublicationManifest({
         dataset: 'fpl:core',
         seasonCode: match[1]!,
       }).catch(() => null);
@@ -177,7 +180,6 @@ export const hasStartedOrFinishedFixture = (value: unknown, eventId: number): bo
 const publicationConsistencyProbe: DependencyProbe = async () => {
   const season = await seasonRepository.findCurrent();
   let consistent = true;
-  let coreRedisActive: Awaited<ReturnType<typeof readActiveDataPublication>> = null;
   const currentEvent = await eventRepository.findCurrent(season);
   const scopes = [
     { dataset: 'fpl:core' as const, seasonCode: season.seasonCode, eventId: undefined },
@@ -190,18 +192,17 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       season,
       scope.eventId,
     );
-    const redisActive = await readActiveDataPublication(scope);
-    if (scope.dataset === 'fpl:core') coreRedisActive = redisActive;
+    const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope);
     const durableEvidence = dbActive
-      ? await loadDataPublicationDelivery(dbActive.publicationId).catch(() => null)
+      ? await loadDataPublicationDeliveryManifest(dbActive.publicationId).catch(() => null)
       : null;
     const matches =
       Boolean(dbActive) === Boolean(durableEvidence) &&
       Boolean(dbActive) === Boolean(redisActive) &&
       (!dbActive ||
         !redisActive ||
-        (dbActive.publicationId === redisActive.manifest.publicationId &&
-          dbActive.revision === redisActive.manifest.revision));
+        (dbActive.publicationId === redisActive.publicationId &&
+          dbActive.revision === redisActive.revision));
     if (!matches) {
       consistent = false;
       publicationMismatchSince.set(key, publicationMismatchSince.get(key) ?? Date.now());
@@ -230,10 +231,10 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
   if (currentEvent && !currentEventBeforeDeadline) {
     const liveKey = currentLiveKey as string;
     const [redisLive, checkpointLive, desiredLive, canonicalFixtures] = await Promise.all([
-      readLivePublicationV2({ season: season.seasonCode, eventId: currentEvent.id }).catch(
+      readLivePublicationV2Manifest({ season: season.seasonCode, eventId: currentEvent.id }).catch(
         () => null,
       ),
-      readLivePublicationV2Checkpoint(season, currentEvent.id).catch(() => null),
+      readLivePublicationV2CheckpointMetadata(season, currentEvent.id).catch(() => null),
       readLiveCheckpointDesiredV2({
         season: season.seasonCode,
         eventId: currentEvent.id,
@@ -245,9 +246,10 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
     // the scheduler remains in PICKS_PROBE. Do not age that expected absence
     // into a deploy failure; once fixture state or a V2 obligation exists, the
     // normal publication/checkpoint fence below applies.
-    const liveWindowStarted =
-      hasStartedOrFinishedFixture(canonicalFixtures, currentEvent.id) ||
-      hasStartedOrFinishedFixture(coreRedisActive?.items.fixtures, currentEvent.id);
+    // Readiness uses canonical fixture rows for this bounded timing decision.
+    // It must not download the core publication's fixtures item just to decide
+    // whether the live window has started; the serving path validates payloads.
+    const liveWindowStarted = hasStartedOrFinishedFixture(canonicalFixtures, currentEvent.id);
     const liveConsistencyRequired = Boolean(
       redisLive || desiredLive || checkpointLive || liveWindowStarted || canonicalFixtures === null,
     );
@@ -263,7 +265,7 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       // broken checkpoint path green indefinitely. If the obligation pointer was
       // itself unavailable, the current publication is the only bounded anchor.
       const pendingCheckpointStartedAt = Date.parse(
-        desiredLive?.requestedAt ?? redisLive?.publication.publishedAt ?? '',
+        desiredLive?.requestedAt ?? redisLive?.publishedAt ?? '',
       );
       const pendingCheckpointWithinGrace =
         Number.isFinite(pendingCheckpointStartedAt) &&
@@ -271,11 +273,11 @@ const publicationConsistencyProbe: DependencyProbe = async () => {
       const liveMatches =
         Boolean(redisLive) &&
         redisLive !== null &&
-        (redisLive.publication.checkpointedAt === null
+        (redisLive.checkpointedAt === null
           ? pendingCheckpointWithinGrace
           : checkpointLive !== null &&
-            checkpointLive.publication.publicationId === redisLive.publication.publicationId &&
-            checkpointLive.publication.generation === redisLive.publication.generation);
+            checkpointLive.publication.publicationId === redisLive.publicationId &&
+            checkpointLive.publication.generation === redisLive.generation);
       if (!liveMatches) {
         consistent = false;
         publicationMismatchSince.set(

@@ -1,12 +1,15 @@
 import {
   activateDataPublicationPointer,
   compareAndSwapDataPublicationPointer,
-  readActiveDataPublication,
+  readActiveDataPublicationManifestWithItemBounds,
   stageDataPublication,
   type DataPublicationScope,
 } from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { loadDataPublicationDelivery } from '../repositories/data-publication-outbox';
+import {
+  loadDataPublicationDelivery,
+  loadDataPublicationDeliveryManifest,
+} from '../repositories/data-publication-outbox';
 import {
   dispatchDataPublicationOutbox,
   markDataPublicationOutboxReconciled,
@@ -48,7 +51,7 @@ export async function reconcileDataPublication(
     season,
     scope.eventId,
   );
-  const redisActive = await readActiveDataPublication(scope);
+  const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope);
   let staging = await syncOperationsRepository.findStagingPublication(
     scope.dataset,
     season,
@@ -160,29 +163,40 @@ export async function reconcileDataPublication(
         dataset: scope.dataset,
         season: scope.seasonCode,
         eventId: scope.eventId,
-        publicationId: redisActive.manifest.publicationId,
+        publicationId: redisActive.publicationId,
       });
       return {
         status: 'ghost',
         dataset: scope.dataset,
-        publicationId: redisActive.manifest.publicationId,
+        publicationId: redisActive.publicationId,
       };
     }
     return { status: 'missing', dataset: scope.dataset };
   }
 
-  const canonical = await loadDataPublicationDelivery(dbActive.publicationId);
+  // A Redis identity match is only a control match when the durable
+  // publication carries the producer-side proof. Legacy rows remain
+  // consumable through the full delivery validator, but they must not be
+  // reported as permanently verified by a high-frequency reconciler.
+  const durableManifest = await loadDataPublicationDeliveryManifest(dbActive.publicationId).catch(
+    () => null,
+  );
   if (
-    redisActive?.manifest.publicationId === canonical.manifest.publicationId &&
-    redisActive.manifest.revision === canonical.manifest.revision
+    redisActive?.publicationId === dbActive.publicationId &&
+    redisActive.revision === dbActive.revision &&
+    durableManifest?.publicationId === dbActive.publicationId &&
+    durableManifest.revision === dbActive.revision
   ) {
     return {
       status: 'matched',
       dataset: scope.dataset,
-      publicationId: canonical.manifest.publicationId,
+      publicationId: dbActive.publicationId,
     };
   }
 
+  // Only a missing or mismatched identity enters the delivery path. This is
+  // where the full payload is needed to repair Redis; normal reconciliation
+  // above remains manifest-only.
   // Prefer the durable receipt created in the same DB activation transaction.
   // This is the normal crash-recovery path after Redis staging or CAS was
   // interrupted; the fallback below is only for legacy publications that have
@@ -195,9 +209,14 @@ export async function reconcileDataPublication(
     return {
       status: 'repaired',
       dataset: scope.dataset,
-      publicationId: canonical.manifest.publicationId,
+      publicationId: dbActive.publicationId,
     };
   }
+
+  // Only the fallback repair path needs the complete payload. The dispatcher
+  // above already loaded and delivered its own claimed receipt, so a healthy
+  // outbox does not cause this reconciler to download the same siblings again.
+  const canonical = await loadDataPublicationDelivery(dbActive.publicationId);
 
   await stageDataPublication(canonical);
   if (!redisActive) {
@@ -208,7 +227,7 @@ export async function reconcileDataPublication(
   } else {
     const result = await compareAndSwapDataPublicationPointer(
       scope,
-      redisActive.manifest.publicationId,
+      redisActive.publicationId,
       canonical.manifest,
     );
     if (result !== 'replaced') {

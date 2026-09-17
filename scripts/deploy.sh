@@ -97,6 +97,7 @@ load_v2_seed_scope() {
 ACTIVE_DEPLOY_STAGE=''
 DEPLOY_STAGE_STARTED_AT=0
 DEPLOY_MIGRATION_STARTED=false
+DEPLOY_MIGRATION_BACKUP_REQUIRED=false
 DEPLOY_REVIEW_HARD_CUT_PENDING=false
 DEPLOY_REVIEW_RESTORE_REHEARSAL_PASSED=false
 DEPLOY_COMMITTED=false
@@ -782,11 +783,33 @@ deploy() {
     exit 1
   }
   printf '%s\n' "$migration_plan_output"
-  if printf '%s\n' "$migration_plan_output" | grep -Fq '0090_my_tournament_review_v2_1_hard_cut.sql'; then
+  # The migration runner emits a machine-readable plan. A valid empty plan
+  # does not need a logical dump; an invalid or unreadable plan must stop
+  # before services are stopped rather than being treated as "no migrations".
+  migration_plan_fields=$(parse_migration_plan_fields <<<"$migration_plan_output") || {
+    log_error "Migration plan was invalid or not machine-readable; refusing deploy."
+    exit 1
+  }
+  IFS=$'\t' read -r migration_plan_valid migration_plan_backup_required \
+    migration_plan_fingerprint migration_plan_hard_cut <<<"$migration_plan_fields"
+  if [[ "$migration_plan_valid" != true ]]; then
+    log_error "Migration plan was invalid or not machine-readable; refusing deploy."
+    exit 1
+  fi
+  if [[ "$migration_plan_backup_required" != true && "$migration_plan_backup_required" != false ]]; then
+    log_error "Migration plan did not contain a valid pending migration list; refusing deploy."
+    exit 1
+  fi
+  DEPLOY_MIGRATION_BACKUP_REQUIRED="$migration_plan_backup_required"
+  log_info "Migration plan parsed migrationBackupRequired=${DEPLOY_MIGRATION_BACKUP_REQUIRED}"
+  if [[ ! "$migration_plan_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+    log_error "Migration plan did not contain a usable ledger fingerprint; refusing deploy."
+    exit 1
+  fi
+  if [[ "$migration_plan_hard_cut" = true ]]; then
     DEPLOY_REVIEW_HARD_CUT_PENDING=true
   fi
-  DEPLOY_LEDGER_BEFORE=$(migration_ledger_fingerprint)
-  [[ -n "$DEPLOY_LEDGER_BEFORE" ]] || { log_error "Could not capture migration ledger fingerprint"; exit 1; }
+  DEPLOY_LEDGER_BEFORE="$migration_plan_fingerprint"
   log_info "Migration ledger before=${DEPLOY_LEDGER_BEFORE}"
   # Pause every queue consumed by content-worker before accepting the scoped
   # result so delayed and prioritized content jobs cannot become active in the
@@ -888,11 +911,25 @@ deploy() {
   fi
   cat "$final_queue_probe_output"
   rm -f "$final_queue_probe_output"
-  log_info "Creating and validating the pre-migration PostgreSQL dump"
-  if ! compose --profile migration run --rm -T --interactive=false backup; then
-    log_error "Pre-migration backup failed; migration was not started."
+  if ! migration_ledger_at_quiescence=$(migration_ledger_fingerprint); then
+    log_error "Could not re-read the migration ledger after quiescence; refusing to run migrations."
     restore_stopped_services
     exit 1
+  fi
+  if [[ "$migration_ledger_at_quiescence" != "$DEPLOY_LEDGER_BEFORE" ]]; then
+    log_error "Migration ledger changed after the plan; refusing to run migrations."
+    restore_stopped_services
+    exit 1
+  fi
+  if [[ "$DEPLOY_MIGRATION_BACKUP_REQUIRED" = true ]]; then
+    log_info "Creating and validating the pre-migration PostgreSQL dump"
+    if ! compose --profile migration run --rm -T --interactive=false backup; then
+      log_error "Pre-migration backup failed; migration was not started."
+      restore_stopped_services
+      exit 1
+    fi
+  else
+    log_info "No pending migrations; skipping pre-migration PostgreSQL dump"
   fi
   if [[ "$DEPLOY_REVIEW_HARD_CUT_PENDING" = true ]]; then
     if ! run_tournament_review_restore_rehearsal \

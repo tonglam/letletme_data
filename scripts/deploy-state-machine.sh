@@ -1086,13 +1086,39 @@ wait_for_scoped_queue_quiescence() {
 }
 
 migration_ledger_fingerprint() {
-  # --plan is read-only and emits a JSON ledger fingerprint.  Keep parsing
+  # --plan is read-only and emits a JSON ledger fingerprint. Keep the parser
   # deliberately dependency-light for VPS images that do not ship jq.
   # Callers may execute this state machine from an SSH `bash -s` stream, so
   # Compose must not attach to the shell's stdin.
   local plan_output
   plan_output=$(compose run --rm -T --interactive=false migration bun scripts/apply-sql-migrations.ts --plan)
-  printf '%s\n' "$plan_output" | awk -F'"' '/"ledgerFingerprint"[[:space:]]*:/ { print $4; exit }'
+  local fields valid backup_required fingerprint hard_cut
+  fields=$(parse_migration_plan_fields <<<"$plan_output") || return 1
+  IFS=$'\t' read -r valid backup_required fingerprint hard_cut <<<"$fields"
+  [[ "$valid" == true ]] || return 1
+  [[ "$backup_required" == true || "$backup_required" == false ]] || return 1
+  [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$fingerprint"
+}
+
+parse_migration_plan_fields() {
+  # Parse the runner's JSON object rather than searching log text. The
+  # migration image already emits a machine-readable plan; accepting a
+  # substring here could mistake an error message or a migration filename for
+  # an empty plan and skip its backup gate.
+  perl -MJSON::PP -e '
+    my $raw = do { local $/; <STDIN> };
+    my $plan = decode_json($raw);
+    die "migration plan is not an object\n" unless ref($plan) eq "HASH";
+    die "migration plan pending is not an array\n" unless ref($plan->{pending}) eq "ARRAY";
+    my $valid = $plan->{valid} ? "true" : "false";
+    my $backup = @{$plan->{pending}} ? "true" : "false";
+    my $fingerprint = defined($plan->{ledgerFingerprint}) ? $plan->{ledgerFingerprint} : "";
+    my $hard_cut = scalar(grep {
+      ref($_) eq "HASH" && ($_->{filename} // "") eq "0090_my_tournament_review_v2_1_hard_cut.sql"
+    } @{$plan->{pending}}) ? "true" : "false";
+    print join("\t", $valid, $backup, $fingerprint, $hard_cut), "\n";
+  '
 }
 
 release_sha_for_image() {

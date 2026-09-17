@@ -3,13 +3,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   prepareDataPublication,
   readActiveDataPublication,
-  readActiveDataPublicationItems,
+  readActiveDataPublicationItem,
+  readActiveDataPublicationManifest,
   type DataPublicationReadResult,
 } from '../cache/data-publication';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import {
-  loadActivePriceChangeContext,
+  loadActivePriceChangeContextForSchedule,
   loadDataPublicationDelivery,
 } from '../repositories/data-publication-outbox';
 import { dispatchDataPublicationOutbox } from './data-publication-delivery.service';
@@ -1105,10 +1106,9 @@ export function parsePriceChangeWatchDeadlines(
 export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Date) {
   const scope = { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode } as const;
   // Deadline discovery is a scheduler control-plane read. Use the active
-  // consumer publication in Redis and retain only its small context item. The
-  // cache helper validates every sibling before returning, so a partial board
-  // cannot create a scheduler obligation.
-  const redisPublication = await readActiveDataPublicationItems(scope, ['context']);
+  // consumer publication in Redis and retain only its small context item;
+  // full sibling payload validation belongs to delivery and serving paths.
+  const redisPublication = await readActiveDataPublicationItem(scope, 'context');
   if (redisPublication) {
     let canonicalManifest: Awaited<
       ReturnType<typeof syncOperationsRepository.findActivePublicationManifest>
@@ -1147,7 +1147,7 @@ export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Da
   // an active publication is waiting for outbox delivery or Redis has been
   // rebuilt. Keep the existing loader as a bounded fallback so a missing cache
   // cannot silently drop a time-sensitive watch plan.
-  const publication = await loadActivePriceChangeContext(season).catch(() => null);
+  const publication = await loadActivePriceChangeContextForSchedule(season).catch(() => null);
   return publication ? parsePriceChangeWatchDeadlines(publication, now) : null;
 }
 
@@ -1507,12 +1507,11 @@ async function ensurePriceChangePublicationDelivered(
 ): Promise<void> {
   const delivered = await dispatchDataPublicationOutbox({ limit: 1, publicationId });
   if (delivered.delivered === 1) return;
-  const active = await readActiveDataPublication({
+  const active = await readActiveDataPublicationManifest({
     dataset: PRICE_CHANGE_DATASET,
     seasonCode: season.seasonCode,
   });
-  if (active?.manifest.publicationId === publicationId && active.manifest.revision === revision)
-    return;
+  if (active?.publicationId === publicationId && active.revision === revision) return;
   throw new Error(
     `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
   );
