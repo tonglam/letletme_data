@@ -2181,6 +2181,7 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
         const itemRows = await tx
           .select({
             itemName: datasetPublicationItemsInOps.itemName,
+            payload: datasetPublicationItemsInOps.payload,
             itemCount: datasetPublicationItemsInOps.itemCount,
             checksum: datasetPublicationItemsInOps.checksum,
             validationVersion: datasetPublicationItemsInOps.validationVersion,
@@ -2205,6 +2206,53 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
             `${input.dataset} publication item proof is incomplete`,
             'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
           );
+        }
+
+        // A deployment can resume a publication staged by an older release
+        // whose nullable proof columns are still empty.  Upgrade that one
+        // bounded staging scope while it is locked, and only then activate it;
+        // otherwise the activation would create a parent proof over unproved
+        // item rows and the next metadata-only reader would fail closed.
+        if (itemRows.some((row) => row.validationVersion !== DATA_PUBLICATION_VALIDATION_VERSION)) {
+          for (const item of manifestItems) {
+            const row = itemRows.find((candidate) => candidate.itemName === item.name);
+            if (!row) {
+              throw new DatabaseError(
+                `${input.dataset} publication item proof is incomplete`,
+                'DATASET_PUBLICATION_ITEMS_INCOMPLETE',
+              );
+            }
+            let serializedPayload: string;
+            try {
+              serializedPayload = canonicalJson(row.payload);
+            } catch {
+              throw new DatabaseError(
+                `Publication item ${item.name} payload is not JSON serializable`,
+                'DATASET_PUBLICATION_ITEM_PROOF_INVALID',
+              );
+            }
+            if (
+              publicationItemCount(row.payload) !== item.count ||
+              row.itemCount !== item.count ||
+              Buffer.byteLength(serializedPayload, 'utf8') !== item.bytes ||
+              row.checksum !== item.sha256 ||
+              contentHash(row.payload) !== item.sha256
+            ) {
+              throw new DatabaseError(
+                `Publication item ${item.name} proof is invalid`,
+                'DATASET_PUBLICATION_ITEM_PROOF_INVALID',
+              );
+            }
+            await tx
+              .update(datasetPublicationItemsInOps)
+              .set({ validationVersion: DATA_PUBLICATION_VALIDATION_VERSION })
+              .where(
+                and(
+                  eq(datasetPublicationItemsInOps.publicationId, input.publicationId),
+                  eq(datasetPublicationItemsInOps.itemName, item.name),
+                ),
+              );
+          }
         }
 
         const activeRows = await tx

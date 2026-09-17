@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   prepareDataPublication,
   readActiveDataPublication,
-  readActiveDataPublicationItem,
+  readActiveDataPublicationItems,
   type DataPublicationReadResult,
 } from '../cache/data-publication';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
@@ -1104,10 +1104,12 @@ export function parsePriceChangeWatchDeadlines(
 
 export async function getPriceChangeWatchDeadlines(season: FplSeasonRef, now: Date) {
   const scope = { dataset: PRICE_CHANGE_DATASET, seasonCode: season.seasonCode } as const;
-  // Deadline discovery is a scheduler control-plane read. Use the active
-  // consumer publication in Redis and retain only its small context item;
-  // full sibling payload validation belongs to delivery and serving paths.
-  const redisPublication = await readActiveDataPublicationItem(scope, 'context');
+  // Deadline discovery consumes only the small context item, but the Redis
+  // publication reader still validates every immutable sibling before it is
+  // allowed to derive a scheduler obligation.  A missing or same-length
+  // corrupted players item must fall back to the durable publication instead
+  // of making a partial Redis snapshot look usable.
+  const redisPublication = await readActiveDataPublicationItems(scope, ['context']);
   if (redisPublication) {
     let canonicalManifest: Awaited<
       ReturnType<typeof syncOperationsRepository.findActivePublicationManifest>

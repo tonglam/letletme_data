@@ -45,9 +45,7 @@ export const seasonImportsInOps = ops.table(
     completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
     errorSummary: text('error_summary'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
-      .default(sql`clock_timestamp()`)
-      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
   },
   (table) => [
     foreignKey({
@@ -298,7 +296,9 @@ export const livePublicationCutoverStatusInOps = ops.table(
       withTimezone: true,
       mode: 'date',
     }),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
   },
   (table) => [
     primaryKey({
