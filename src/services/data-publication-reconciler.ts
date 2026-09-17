@@ -2,8 +2,8 @@ import {
   activateDataPublicationPointer,
   compareAndSwapDataPublicationPointer,
   repairDataPublicationItems,
-  readActiveDataPublication,
   readActiveDataPublicationManifest,
+  readActiveDataPublicationManifestWithItemBounds,
   readActiveDataPublicationPointerState,
   replaceMalformedActiveDataPublication,
   stageDataPublication,
@@ -56,11 +56,13 @@ export async function reconcileDataPublication(
     season,
     scope.eventId,
   );
-  // Reconciliation is the repair boundary, so it must detect same-length
-  // Redis corruption before declaring a publication matched. This validates
-  // the payload hashes/counts in Redis; it does not reread PostgreSQL data.
-  const redisActiveRead = await readActiveDataPublication(scope);
-  const redisActive = redisActiveRead?.manifest ?? null;
+  // Reconciliation is the repair boundary, so it must detect missing or
+  // truncated Redis siblings before declaring a publication matched. The
+  // bounded control read checks manifest identity plus EXISTS/STRLEN only; it
+  // never downloads or hashes item payloads on the normal path.
+  const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope).catch(
+    () => null,
+  );
   const redisManifest =
     redisActive ?? (await readActiveDataPublicationManifest(scope).catch(() => null));
   const redisPointerState = redisManifest

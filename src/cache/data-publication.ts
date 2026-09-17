@@ -1007,6 +1007,56 @@ export async function readActiveDataPublicationManifestWithItemBounds(
 }
 
 /**
+ * Read a selected set of active items after checking every sibling's Redis
+ * existence and declared size. This is for control paths that need one or two
+ * semantic inputs while keeping large immutable siblings out of the response.
+ * The complete consumer reader above remains the integrity boundary when all
+ * publication data is actually needed.
+ */
+export async function readActiveDataPublicationItemsWithBounds(
+  scope: DataPublicationScope,
+  itemNames: readonly string[],
+  redisClient?: Redis,
+): Promise<DataPublicationReadResult | null> {
+  assertScope(scope);
+  if (
+    itemNames.length === 0 ||
+    new Set(itemNames).size !== itemNames.length ||
+    itemNames.some((name) => !/^[a-z][a-zA-Z0-9]*$/.test(name))
+  ) {
+    return null;
+  }
+  const manifest = await readActiveDataPublicationManifestWithItemBounds(scope, redisClient);
+  if (!manifest) return null;
+  const selected = itemNames.map((name) => manifest.items.find((item) => item.name === name));
+  if (selected.some((item): item is undefined => item === undefined)) return null;
+  const selectedItems = selected as DataPublicationManifest['items'];
+  try {
+    const redis = redisClient ?? (await redisSingleton.getClient());
+    const payloads = await redis.mget(...selectedItems.map((item) => item.key));
+    if (payloads.length !== selectedItems.length) return null;
+    const items: Record<string, unknown> = {};
+    for (let index = 0; index < selectedItems.length; index += 1) {
+      const item = selectedItems[index];
+      const payload = payloads[index];
+      if (
+        payload === null ||
+        Buffer.byteLength(payload, 'utf8') !== item.bytes ||
+        sha256(payload) !== item.sha256
+      ) {
+        return null;
+      }
+      const parsed = JSON.parse(payload) as unknown;
+      if (itemCount(parsed) !== item.count) return null;
+      items[item.name] = parsed;
+    }
+    return { manifest, items };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read one bounded item from the active publication. Control-plane callers
  * should use this when they need a small semantic input (for example the
  * current event fixtures) without downloading every sibling payload.

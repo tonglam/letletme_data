@@ -4,10 +4,7 @@ import { queueRedisSingleton } from '../queues/redis';
 import { seasonRepository } from '../repositories/seasons';
 import { getConfig, isBugReportScreenshotStorageConfigured } from '../utils/config';
 import { checkRuntimeHeartbeat, isRuntimeRoleRequired } from '../utils/runtime-heartbeat';
-import {
-  readActiveDataPublication,
-  readActiveDataPublicationManifestWithItemBounds,
-} from '../cache/data-publication';
+import { readActiveDataPublicationManifestWithItemBounds } from '../cache/data-publication';
 import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
@@ -57,7 +54,7 @@ let lastKnownActiveSeasonCode: string | null = null;
 async function activeSeasonFromRedis(): Promise<string | null> {
   const redis = await redisSingleton.getClient();
   if (lastKnownActiveSeasonCode) {
-    const active = await readActiveDataPublication({
+    const active = await readActiveDataPublicationManifestWithItemBounds({
       dataset: 'fpl:core',
       seasonCode: lastKnownActiveSeasonCode,
     }).catch(() => null);
@@ -77,7 +74,7 @@ async function activeSeasonFromRedis(): Promise<string | null> {
     for (const key of keys) {
       const match = key.match(/^llm:data:fpl:core:(\d{4}):active$/);
       if (!match) continue;
-      const active = await readActiveDataPublication({
+      const active = await readActiveDataPublicationManifestWithItemBounds({
         dataset: 'fpl:core',
         seasonCode: match[1]!,
       }).catch(() => null);

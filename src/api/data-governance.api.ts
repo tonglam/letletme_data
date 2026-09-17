@@ -12,7 +12,11 @@ import {
   setQueueAdmission,
   type QueueAdmissionMode,
 } from '../services/queue-governance.service';
-import { getJobsStatus, type JobsStatusWindow } from '../services/jobs-status.service';
+import {
+  getJobsStatus,
+  type JobsStatusWindow,
+  type PublicationAuditRequest,
+} from '../services/jobs-status.service';
 import { runLiveMatchesV3Repair } from '../services/live-match-v3-repair.service';
 import {
   getHttpStatusFromError,
@@ -46,6 +50,61 @@ function opaqueScopeKey(value: string): string {
 function boundedLimit(value: unknown, fallback: number, max: number): number {
   const parsed = typeof value === 'string' ? Number(value) : Number.NaN;
   return Number.isSafeInteger(parsed) ? Math.min(max, Math.max(1, parsed)) : fallback;
+}
+
+const PUBLICATION_AUDIT_DATASETS = new Set(['fpl:core', 'fpl:market', 'fpl:price-changes']);
+
+function parseAuditInteger(
+  value: unknown,
+  name: string,
+  minimum: number,
+  maximum: number,
+): { value?: number; error?: string } {
+  const parsed = typeof value === 'string' ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    return { error: `${name} must be an integer between ${minimum} and ${maximum}` };
+  }
+  return { value: parsed };
+}
+
+function parsePublicationAudit(query: Record<string, unknown>): {
+  request?: PublicationAuditRequest;
+  error?: string;
+} {
+  const rawScope = typeof query.auditScope === 'string' ? query.auditScope.trim() : '';
+  const hasBudgetField = ['auditMaxBytes', 'auditMaxMs', 'auditMaxConcurrency'].some(
+    (field) => query[field] !== undefined,
+  );
+  if (!rawScope && !hasBudgetField) return {};
+  if (!rawScope) return { error: 'auditScope is required when an audit budget is provided' };
+  const scopes = [
+    ...new Set(
+      rawScope
+        .split(',')
+        .map((scope) => scope.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (scopes.length === 0 || scopes.some((scope) => !PUBLICATION_AUDIT_DATASETS.has(scope))) {
+    return { error: 'auditScope must contain only fpl:core, fpl:market, or fpl:price-changes' };
+  }
+  const maxBytes = parseAuditInteger(query.auditMaxBytes, 'auditMaxBytes', 1, 100_000_000);
+  if (maxBytes.error) return { error: maxBytes.error };
+  // Redis commands have a five-second command deadline. Requiring the audit
+  // budget to be at least that long prevents a caller from declaring a hard
+  // wall-clock budget shorter than the underlying bounded operation.
+  const maxMs = parseAuditInteger(query.auditMaxMs, 'auditMaxMs', 5_000, 60_000);
+  if (maxMs.error) return { error: maxMs.error };
+  const maxConcurrency = parseAuditInteger(query.auditMaxConcurrency, 'auditMaxConcurrency', 1, 3);
+  if (maxConcurrency.error) return { error: maxConcurrency.error };
+  return {
+    request: {
+      scopes: scopes as PublicationAuditRequest['scopes'],
+      maxBytes: maxBytes.value!,
+      maxMs: maxMs.value!,
+      maxConcurrency: maxConcurrency.value!,
+    },
+  };
 }
 
 function safeFreshnessWindow(row: Record<string, unknown>) {
@@ -123,7 +182,14 @@ export const dataGovernanceAPI = new Elysia({ prefix: '/ops' })
       return { success: false, error: 'window must be one of 1h, 6h, 3d, 28d' };
     }
     const window = requestedWindow as JobsStatusWindow;
-    const status = await getJobsStatus(window);
+    const audit = parsePublicationAudit(
+      Object.fromEntries(new URL(request.url).searchParams.entries()),
+    );
+    if (audit.error) {
+      set.status = 400;
+      return { success: false, error: audit.error };
+    }
+    const status = await getJobsStatus(window, undefined, audit.request);
     return {
       success: true,
       generatedAt: new Date().toISOString(),

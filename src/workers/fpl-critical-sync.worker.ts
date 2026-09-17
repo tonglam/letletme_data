@@ -40,7 +40,7 @@ import {
   readPriceChangeHotSnapshotAtRevision,
 } from '../services/price-change-hot.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
-import { readActiveDataPublication } from '../cache/data-publication';
+import { readActiveDataPublicationManifestWithItemBounds } from '../cache/data-publication';
 import { triggerPriceChangeLane } from '../scheduler/scheduler.service';
 import {
   attachDataSyncCostEvidence,
@@ -413,21 +413,21 @@ async function verifyPricePublication(
 ): Promise<void> {
   const delivered = await dispatchDataPublicationOutbox({ limit: 1, publicationId });
   if (delivered.delivered !== 1) {
-    const active = await readActiveDataPublication({
+    const active = await readActiveDataPublicationManifestWithItemBounds({
       dataset: 'fpl:price-changes',
       seasonCode: season.seasonCode,
     });
-    if (active?.manifest.publicationId !== publicationId || active.manifest.revision !== revision) {
+    if (active?.publicationId !== publicationId || active.revision !== revision) {
       throw new Error(
         `Price-change publication ${publicationId} is canonical but Redis delivery is pending`,
       );
     }
   }
-  const active = await readActiveDataPublication({
+  const active = await readActiveDataPublicationManifestWithItemBounds({
     dataset: 'fpl:price-changes',
     seasonCode: season.seasonCode,
   });
-  if (active?.manifest.publicationId !== publicationId || active.manifest.revision !== revision) {
+  if (active?.publicationId !== publicationId || active.revision !== revision) {
     throw new Error('Price-change DB and Redis publication identities do not match');
   }
 }

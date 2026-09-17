@@ -18,7 +18,7 @@ import {
   preparePlayerValuesSync,
 } from '../services/player-values.service';
 import { ensureMarketPublication } from '../services/market-publication.service';
-import { readActiveDataPublication } from '../cache/data-publication';
+import { readActiveDataPublicationManifestWithItemBounds } from '../cache/data-publication';
 import { dispatchDataPublicationOutbox } from '../services/data-publication-delivery.service';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
@@ -533,13 +533,13 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
               publicationId: marketPublication.publicationId,
             });
             if (delivered.delivered !== 1) {
-              const active = await readActiveDataPublication({
+              const active = await readActiveDataPublicationManifestWithItemBounds({
                 dataset: 'fpl:market',
                 seasonCode: season.seasonCode,
               });
               if (
-                active?.manifest.publicationId !== marketPublication.publicationId ||
-                active?.manifest.revision !== marketPublication.revision
+                active?.publicationId !== marketPublication.publicationId ||
+                active?.revision !== marketPublication.revision
               ) {
                 throw new Error(
                   `Market publication ${marketPublication.publicationId} is canonical but Redis delivery is pending`,
@@ -706,13 +706,13 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             publicationId: persisted.publicationId,
           });
           if (delivered.delivered !== 1) {
-            const active = await readActiveDataPublication({
+            const active = await readActiveDataPublicationManifestWithItemBounds({
               dataset: 'fpl:price-changes',
               seasonCode: season.seasonCode,
             });
             if (
-              active?.manifest.publicationId !== persisted.publicationId ||
-              active?.manifest.revision !== persisted.revision
+              active?.publicationId !== persisted.publicationId ||
+              active?.revision !== persisted.revision
             ) {
               throw new Error(
                 `Price-change publication ${persisted.publicationId} is canonical but Redis delivery is pending`,

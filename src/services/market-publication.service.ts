@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import {
   prepareDataPublication,
-  readActiveDataPublication,
+  readActiveDataPublicationItemsWithBounds,
+  readActiveDataPublicationManifestWithItemBounds,
   type MarketSnapshotContextPayload,
 } from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -48,7 +49,7 @@ export type MarketPublicationOptions = Readonly<{
 
 async function recordUnchangedMarketEvidence(
   season: FplSeasonRef,
-  active: NonNullable<Awaited<ReturnType<typeof readActiveDataPublication>>>,
+  active: NonNullable<Awaited<ReturnType<typeof readActiveDataPublicationItemsWithBounds>>>,
   source: { capturedAt: Date },
   options: MarketPublicationOptions,
 ): Promise<void> {
@@ -84,8 +85,8 @@ async function ensureMarketPublicationDelivered(
   // publication created before the outbox migration).  Re-read the active
   // pointer before reporting a delivery failure; DB and Redis parity is the
   // success evidence, not whether this particular dispatch claimed a row.
-  const active = await readActiveDataPublication(marketScope(season));
-  if (active?.manifest.publicationId === publicationId && active.manifest.revision === revision) {
+  const active = await readActiveDataPublicationManifestWithItemBounds(marketScope(season));
+  if (active?.publicationId === publicationId && active.revision === revision) {
     return;
   }
   throw new Error(`Market publication ${publicationId} is canonical but Redis delivery is pending`);
@@ -107,7 +108,7 @@ export async function ensureMarketPublication(
     rowCount: source.rowCount,
     expectedRowCount: source.rowCount,
   };
-  const active = await readActiveDataPublication(marketScope(season));
+  const active = await readActiveDataPublicationItemsWithBounds(marketScope(season), ['context']);
   const opsActive = await syncOperationsRepository.findActivePublication('fpl:market', season);
   if (!opsActive && active && context.snapshotDate.replaceAll('-', '') !== formatCronDateKey()) {
     // A Redis-only publication for a past UTC+8 date is a ghost. Do not

@@ -1,7 +1,7 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
+import { readCoreSnapshotLifecycle } from '../cache/core-snapshot-cache';
 import { coreSnapshotRefreshReason } from '../domain/core-snapshot-refresh';
 import { eventRepository } from '../repositories/events';
 import { fixtureRepository } from '../repositories/fixtures';
@@ -23,7 +23,7 @@ async function readCurrentLifecycle() {
   const current = await eventRepository.findCurrent(season);
   const [currentFixtures, publication] = await Promise.all([
     current ? fixtureRepository.findByEvent(season, current.id) : Promise.resolve([]),
-    readCoreSnapshotCache(season.seasonCode),
+    readCoreSnapshotLifecycle(season.seasonCode),
   ]);
   return { season, current, currentFixtures, publication };
 }
