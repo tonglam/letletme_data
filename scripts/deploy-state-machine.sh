@@ -1483,7 +1483,7 @@ live_cutover_seed_pending() {
           JOIN fpl.seasons AS season ON season.season_id = status.season_id
           WHERE season.season_code = ${process.env.LIVE_CUTOVER_SEED_SEASON}
             AND season.is_current = TRUE
-            AND status.scope_kind = 'all_finalized'
+            AND status.scope_kind = ${"all_finalized"}
             AND status.event_id = 0
         `;
         if (rows.length === 0) {
@@ -1553,7 +1553,7 @@ mark_live_cutover_seed_stage() {
           await db`
             INSERT INTO ops.live_publication_cutover_status
               (season_id, scope_kind, event_id, live_points_completed_at, updated_at)
-            VALUES (${seasonId}, 'all_finalized', 0, clock_timestamp(), clock_timestamp())
+            VALUES (${seasonId}, ${"all_finalized"}, 0, clock_timestamp(), clock_timestamp())
             ON CONFLICT (season_id, scope_kind, event_id) DO UPDATE
             SET live_points_completed_at = COALESCE(
                   ops.live_publication_cutover_status.live_points_completed_at,
@@ -1566,7 +1566,7 @@ mark_live_cutover_seed_stage() {
             UPDATE ops.live_publication_cutover_status
             SET live_matches_completed_at = clock_timestamp(), updated_at = clock_timestamp()
             WHERE season_id = ${seasonId}
-              AND scope_kind = 'all_finalized'
+              AND scope_kind = ${"all_finalized"}
               AND event_id = 0
               AND live_points_completed_at IS NOT NULL
           `;
@@ -1574,7 +1574,7 @@ mark_live_cutover_seed_stage() {
             SELECT live_matches_completed_at
             FROM ops.live_publication_cutover_status
             WHERE season_id = ${seasonId}
-              AND scope_kind = 'all_finalized'
+              AND scope_kind = ${"all_finalized"}
               AND event_id = 0
           `;
           if (rows.length !== 1 || rows[0].live_matches_completed_at === null) {
