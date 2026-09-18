@@ -110,7 +110,8 @@ export function shouldRequireLivePicksCompletionGate(state: LiveLifecycleState):
     state === 'LIVE_ACTIVE' ||
     state === 'BETWEEN_FIXTURES' ||
     state === 'DAY_SETTLING' ||
-    state === 'GW_REVIEW'
+    state === 'GW_REVIEW' ||
+    state === 'FINALIZED'
   );
 }
 
@@ -125,13 +126,13 @@ export function shouldRunDirectLivePicksRepair(
   picksComplete: boolean,
   standaloneSchedulerEnabled: boolean,
   probeDue: boolean,
-  managerRepairRequired = false,
+  repairRequired = false,
 ): boolean {
   return (
     !standaloneSchedulerEnabled &&
     !decision.shouldProbePicks &&
     shouldRequireLivePicksCompletionGate(decision.state) &&
-    (!picksComplete || managerRepairRequired) &&
+    (!picksComplete || repairRequired) &&
     probeDue
   );
 }
@@ -1036,34 +1037,37 @@ export async function readLivePicksDurableFreshnessEvidence(
     (latest, head) => (!latest || head.checkpointedAt > latest ? head.checkpointedAt : latest),
     null,
   );
-  let managerRepairRequired = false;
+  let repairRequired = false;
   if (options.includeManagerRepair === true && expectedEntryIds.length > 0) {
     const liveObservation = await readLivePublicationV2({
       season: season.seasonCode,
       eventId,
     });
+    const inputReads = await readEntryLiveInputsV2(
+      expectedEntryIds.map((entryId) => ({
+        season: season.seasonCode,
+        eventId,
+        entryId,
+      })),
+    );
+    repairRequired = inputReads.size !== expectedEntryIds.length;
     if (liveObservation !== null) {
-      const inputReads = await readEntryLiveInputsV2(
-        expectedEntryIds.map((entryId) => ({
-          season: season.seasonCode,
-          eventId,
-          entryId,
-        })),
-      );
       const livePublication = liveObservation.publication;
-      managerRepairRequired = expectedEntryIds.some((entryId) => {
-        const input = inputReads.get(entryId)?.input;
-        if (!input) return false;
-        const chip = input.picksBase.chip;
-        if (chip !== 'manager' && chip !== 'MANAGER') return false;
-        const managerFact = input.picksBase.assistantManagerPoints;
-        return (
-          managerFact === undefined ||
-          managerFact.livePublicationId !== livePublication.publicationId ||
-          managerFact.liveGeneration !== livePublication.generation ||
-          managerFact.liveScoreCoreRevision !== livePublication.revisions.scoreCore.revision
-        );
-      });
+      repairRequired =
+        repairRequired ||
+        expectedEntryIds.some((entryId) => {
+          const input = inputReads.get(entryId)?.input;
+          if (!input) return true;
+          const chip = input.picksBase.chip;
+          if (chip !== 'manager' && chip !== 'MANAGER') return false;
+          const managerFact = input.picksBase.assistantManagerPoints;
+          return (
+            managerFact === undefined ||
+            managerFact.livePublicationId !== livePublication.publicationId ||
+            managerFact.liveGeneration !== livePublication.generation ||
+            managerFact.liveScoreCoreRevision !== livePublication.revisions.scoreCore.revision
+          );
+        });
     }
   }
   return {
@@ -1075,10 +1079,10 @@ export async function readLivePicksDurableFreshnessEvidence(
     // An empty eligible cohort is not a completed publication. It is retired
     // as NOT_APPLICABLE by persistLivePicksDurableFreshnessEvidence instead.
     complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length,
-    // This mutable fact is intentionally separate from immutable picks
-    // coverage: it must not delay the first publication, but it does create a
-    // bounded repair root after a live score revision exists.
-    managerRepairRequired,
+    // Redis input loss/corruption and the mutable manager fact are separate
+    // from immutable PostgreSQL picks coverage: neither can delay the first
+    // publication, but either creates a bounded repair root.
+    repairRequired,
   } as const;
 }
 
@@ -1838,11 +1842,11 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
     const picksComplete = Boolean(
       picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
     );
-    const managerRepairRequired = picksEvidence?.managerRepairRequired === true;
+    const repairRequired = picksEvidence?.repairRequired === true;
     const directRepairProbeDue =
       !isStandaloneSchedulerEnabled() &&
       !decision.shouldProbePicks &&
-      (!picksComplete || managerRepairRequired) &&
+      (!picksComplete || repairRequired) &&
       (await isLivePicksProbeDue(season.seasonCode, currentEvent.id, now));
     if (
       shouldRunDirectLivePicksRepair(
@@ -1850,7 +1854,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         picksComplete,
         isStandaloneSchedulerEnabled(),
         directRepairProbeDue,
-        managerRepairRequired,
+        repairRequired,
       )
     ) {
       await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {

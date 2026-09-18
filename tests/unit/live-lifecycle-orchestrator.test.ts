@@ -28,6 +28,7 @@ describe('live lifecycle decisions', () => {
     expect(shouldRequireLivePicksCompletionGate('BETWEEN_FIXTURES')).toBe(true);
     expect(shouldRequireLivePicksCompletionGate('DAY_SETTLING')).toBe(true);
     expect(shouldRequireLivePicksCompletionGate('GW_REVIEW')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('FINALIZED')).toBe(true);
   });
 
   test('repairs an incomplete picks cohort from the direct timer only when due', () => {
@@ -36,6 +37,7 @@ describe('live lifecycle decisions', () => {
     expect(shouldRunDirectLivePicksRepair(decision, false, false, false)).toBe(false);
     expect(shouldRunDirectLivePicksRepair(decision, true, false, true)).toBe(false);
     expect(shouldRunDirectLivePicksRepair(decision, false, true, true)).toBe(false);
+    expect(shouldRunDirectLivePicksRepair(decision, true, false, true, true)).toBe(true);
     expect(
       shouldRunDirectLivePicksRepair(
         { state: 'PICKS_PROBE', shouldProbePicks: true },

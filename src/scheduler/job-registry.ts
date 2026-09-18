@@ -1344,7 +1344,8 @@ function livePicksDefinition(): ScheduledJobDefinition {
         (decision.state === 'LIVE_ACTIVE' ||
           decision.state === 'BETWEEN_FIXTURES' ||
           decision.state === 'DAY_SETTLING' ||
-          decision.state === 'GW_REVIEW')
+          decision.state === 'GW_REVIEW' ||
+          decision.state === 'FINALIZED')
       ) {
         const picksEvidence = await readLivePicksDurableFreshnessEvidence(
           context.season,
@@ -1359,7 +1360,7 @@ function livePicksDefinition(): ScheduledJobDefinition {
         needsPicksRefresh =
           picksEvidence === null ||
           (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true) ||
-          picksEvidence.managerRepairRequired === true;
+          picksEvidence.repairRequired === true;
       }
       if (!needsPicksRefresh) return [];
       if (!(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))) return [];
