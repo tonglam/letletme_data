@@ -457,6 +457,12 @@ async function mergeLifecycleQuietState(
 local currentRaw = redis.call('GET', KEYS[1])
 local current = currentRaw and cjson.decode(currentRaw) or {}
 local patch = cjson.decode(ARGV[1])
+if type(current['revision']) ~= 'number' and type(current['revision']) ~= 'string' and current['revision'] ~= cjson.null then
+  current['revision'] = cjson.null
+end
+if type(current['unchangedSince']) ~= 'number' or current['unchangedSince'] <= 0 then
+  current['unchangedSince'] = tonumber(ARGV[3])
+end
 local currentReady = current['bootstrapStatus'] == 'ready' and current['bootstrapReadyAt'] ~= cjson.null and current['bootstrapReadyAt'] ~= nil
 local patchReady = patch['bootstrapStatus'] == 'ready'
 if currentReady and not patchReady then
@@ -474,7 +480,14 @@ return 1
 `;
   try {
     const redis = await redisSingleton.getClient();
-    await redis.eval(script, 1, key, JSON.stringify(patch), String(COORDINATOR_STATE_TTL_SECONDS));
+    await redis.eval(
+      script,
+      1,
+      key,
+      JSON.stringify(patch),
+      String(COORDINATOR_STATE_TTL_SECONDS),
+      String(Date.now()),
+    );
   } catch (error) {
     logError('Failed to merge shared live lifecycle state', error, { seasonCode, eventId });
   }

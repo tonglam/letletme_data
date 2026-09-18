@@ -1417,24 +1417,30 @@ export function officialH2HDefinition(
       // an event finished and data_checked, reserve one durable obligation so
       // the final H2H publication receives its own freshness evidence. Manual
       // repair/governance jobs remain the second explicit entry point.
-      return context.events
-        .filter((event) => event.finished === true && event.dataChecked === true)
-        .map((event) => {
-          const finalizationAt = event.dataCheckedAt ?? event.updatedAt ?? event.deadlineTime;
-          const periodSuffix = finalizationAt?.toISOString() ?? 'unknown';
-          return {
+      return context.events.flatMap((event) => {
+        // `finished` and `data_checked` are provisional until FPL supplies the
+        // ordering timestamp. Do not create a one-shot final obligation from
+        // updated_at/deadline: that would bless a provider snapshot which
+        // predates the authoritative finalization boundary.
+        if (event.finished !== true || event.dataChecked !== true || event.dataCheckedAt == null) {
+          return [];
+        }
+        const finalizationAt = event.dataCheckedAt;
+        return [
+          {
             scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-            periodKey: `official-h2h-final-${event.id}-${periodSuffix}`,
-            dueAt: finalizationAt ?? context.now,
+            periodKey: `official-h2h-final-${event.id}-${finalizationAt.toISOString()}`,
+            dueAt: finalizationAt,
             eventId: event.id,
             source: 'reconcile' as const,
             evidence: {
               lifecycleState: 'FINALIZED',
               trigger: 'event-data-checked',
-              ...(finalizationAt ? { freshAfter: finalizationAt.toISOString() } : {}),
+              freshAfter: finalizationAt.toISOString(),
             },
-          };
-        });
+          },
+        ];
+      });
     },
     enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;

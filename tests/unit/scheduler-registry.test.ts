@@ -1061,6 +1061,13 @@ describe('standalone scheduler registry', () => {
           dataChecked: true,
           dataCheckedAt: new Date('2026-08-23T19:00:00.000Z'),
         },
+        {
+          id: 2,
+          deadlineTime: new Date('2026-08-23T13:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: null,
+        },
       ],
     });
 
@@ -1075,6 +1082,26 @@ describe('standalone scheduler registry', () => {
         },
       },
     ]);
+  });
+
+  test('does not schedule final official H2H without dataCheckedAt', async () => {
+    const definition = officialH2HDefinition();
+    const plans = await definition.resolve({
+      season: TEST_SEASON,
+      currentEventId: 2,
+      now: new Date('2026-08-24T00:00:00.000Z'),
+      events: [
+        {
+          id: 2,
+          deadlineTime: new Date('2026-08-23T12:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: null,
+        },
+      ],
+    });
+
+    expect(plans).toEqual([]);
   });
 
   test('catches up an hourly maintenance bucket after its scheduled minute', async () => {

@@ -26,6 +26,7 @@ import {
   resolveOfficialH2HSyncOptionsFromEventState,
   type OfficialH2HSyncOptions,
 } from './tournament-official-h2h.service';
+import { ensureLiveAverageReadyForPublication } from './live-average-refresh.service';
 
 const officialH2HRecoveryTargets = new WeakMap<IncompleteDataSyncError, number[]>();
 export type OfficialH2HFullReconcileTarget = Readonly<{
@@ -572,6 +573,24 @@ export async function syncOfficialH2HTournaments(
     );
   const scoreOptions =
     tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
+  const isFinalOfficialH2HSync =
+    scoreOptions.provisionalEventId === null &&
+    scoreOptions.finalizedThroughEventId !== null &&
+    scoreOptions.finalizedThroughEventId !== undefined &&
+    scoreOptions.finalizedThroughEventId >= eventId;
+  if (isFinalOfficialH2HSync) {
+    const averageReady = await ensureLiveAverageReadyForPublication(season, eventId, 'FINALIZED');
+    if (!averageReady.ready) {
+      throw new IncompleteDataSyncError(
+        'Official H2H waits for the canonical Average Team publication',
+        1,
+        0,
+        0,
+        1,
+        'LIVE_AVERAGE_NOT_READY',
+      );
+    }
+  }
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
