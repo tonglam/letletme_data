@@ -30,7 +30,7 @@ RUN bun run build
 # hermetic unit suite with Docker networking disabled.
 FROM deps AS test
 ENV NODE_ENV=test
-RUN apk add --no-cache bash coreutils
+RUN apk add --no-cache bash coreutils curl
 COPY . ./
 CMD ["bun", "test", "tests/unit"]
 
