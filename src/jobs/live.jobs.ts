@@ -74,6 +74,7 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
     // asked to publish a final event checkpoint until FPL marks data checked.
     finalizeEvent: resultSlot.startsWith('final-'),
     lifecycleState: resultSlot.startsWith('final-') ? 'FINALIZED' : 'GW_REVIEW',
+    bootstrapGateRequired: true,
     jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
   });
   if (job) {

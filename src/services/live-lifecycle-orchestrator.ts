@@ -788,11 +788,10 @@ export function decideLiveLifecycle(
       // not manufacture FINALIZED before the event is explicitly marked
       // finished and data-checked.
       state: 'GW_REVIEW',
-      // The active match window is over. A final Live Points refresh is owned
-      // by the explicit finalization checkpoint once the canonical event is
-      // data-checked; do not keep fetching event-live every few minutes while
-      // FPL is doing post-match settlement.
-      shouldFetchLive: false,
+      // Keep a lower-cadence full observation while FPL is settling late
+      // bonus/automatic-sub corrections. The final checkpoint remains the
+      // only terminal write once the event is data-checked.
+      shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: false,
       shouldSyncPicks: false,
@@ -1742,22 +1741,16 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   }
   let livePointsEligible = true;
   if (shouldRequireLivePicksCompletionGate(decision.state)) {
-    const bootstrap = await readLiveBootstrapGate(season.seasonCode, currentEvent.id);
-    // LIVE_ACTIVE jobs carry the worker-side bootstrap gate. Only the
-    // pre-start states need the Redis projection to be ready before a plan is
-    // created; otherwise an expired projection could strand an active event.
-    const bootstrapReady = decision.state === 'LIVE_ACTIVE' || bootstrap.status === 'ready';
-    if (bootstrapReady) {
-      const picksEvidence = await readLivePicksDurableFreshnessEvidence(
-        season,
-        currentEvent.id,
-      ).catch(() => null);
-      livePointsEligible =
-        picksEvidence !== null &&
-        (picksEvidence.expectedCount === 0 || picksEvidence.complete === true);
-    } else {
-      livePointsEligible = false;
-    }
+    const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+      season,
+      currentEvent.id,
+    ).catch(() => null);
+    // The durable picks cohort decides whether the full producer may be
+    // planned. Bootstrap HTTP-200 admission belongs to the worker so a lost
+    // Redis projection cannot strand an otherwise recoverable live event.
+    livePointsEligible =
+      picksEvidence !== null &&
+      (picksEvidence.expectedCount === 0 || picksEvidence.complete === true);
   }
   const shouldFetchLiveNow = decision.shouldFetchLive && livePointsEligible;
   if (shouldFetchLiveNow || decision.shouldObserveMatches) {
@@ -1783,6 +1776,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
           ...(decision.shouldObserveMatches && !shouldFetchLiveNow
             ? { promoteActiveEvent: decision.state !== 'PRE_DEADLINE' }
             : {}),
+          ...(shouldFetchLiveNow ? { bootstrapGateRequired: true } : {}),
         });
       }
     }

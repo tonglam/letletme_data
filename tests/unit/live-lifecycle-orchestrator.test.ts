@@ -479,7 +479,7 @@ describe('live lifecycle decisions', () => {
 
     expect(decision).toMatchObject({
       state: 'GW_REVIEW',
-      shouldFetchLive: false,
+      shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldSyncPicks: false,
       finalizeEvent: false,
@@ -492,7 +492,7 @@ describe('live lifecycle decisions', () => {
         1,
         new Date('2026-08-17T12:00:01.000Z'),
       ),
-    ).toBe(10 * 60_000);
+    ).toBe(60 * 60_000);
   });
 
   test('uses an independent per-entry single-flight identity', () => {

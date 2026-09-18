@@ -8,21 +8,22 @@ import type { LiveLifecycleState } from './live-lifecycle-orchestrator';
 import { logError, logInfo } from '../utils/logger';
 
 /**
- * Average Team is a bootstrap/core fact. Refresh it only while a fixture is
- * active, and at a deliberately lower cadence than the 30-second event-live
- * publication. Between fixtures and after settlement keep the last accepted
- * core publication; the next active fixture will refresh it if necessary.
+ * Average Team is a bootstrap/core fact. Refresh it at a lower cadence than
+ * the 30-second event-live publication while the event is settling, then do
+ * one forced canonical refresh for the terminal final publication.
  */
 export const LIVE_AVERAGE_REFRESH_INTERVAL_MS = 5 * 60_000;
 const LIVE_AVERAGE_REFRESH_LOCK_TTL_MS = 120_000;
+const LIVE_AVERAGE_FINAL_REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export type LiveAverageRefreshResult = Readonly<{
   ready: boolean;
   refreshed: boolean;
   reason:
-    | 'not-live-active'
+    | 'outside-refresh-window'
     | 'fresh'
     | 'refresh-complete'
+    | 'final-refresh-complete'
     | 'refresh-in-flight'
     | 'core-unavailable'
     | 'refresh-failed';
@@ -41,6 +42,10 @@ export function shouldRefreshLiveAverage(
 
 function refreshLockKey(seasonCode: string): string {
   return `llm:data:v2:fpl:core:${seasonCode}:live-average-refresh`;
+}
+
+function finalRefreshKey(seasonCode: string, eventId: number): string {
+  return `llm:data:v2:fpl:core:${seasonCode}:live-average-final:${eventId}`;
 }
 
 async function releaseRefreshLock(key: string, token: string): Promise<void> {
@@ -82,11 +87,47 @@ export async function ensureLiveAverageReadyForPublication(
   lifecycleState: LiveLifecycleState | null | undefined,
   now = new Date(),
 ): Promise<LiveAverageRefreshResult> {
-  if (lifecycleState !== 'LIVE_ACTIVE') {
+  const periodicRefreshWindow =
+    lifecycleState === 'LIVE_ACTIVE' ||
+    lifecycleState === 'BETWEEN_FIXTURES' ||
+    lifecycleState === 'DAY_SETTLING' ||
+    lifecycleState === 'GW_REVIEW';
+  const finalRefresh = lifecycleState === 'FINALIZED';
+  if (!periodicRefreshWindow && !finalRefresh) {
     return {
       ready: true,
       refreshed: false,
-      reason: 'not-live-active',
+      reason: 'outside-refresh-window',
+      sourceCheckedAt: null,
+    };
+  }
+
+  let redis: Awaited<ReturnType<typeof redisSingleton.getClient>>;
+  try {
+    redis = await redisSingleton.getClient();
+    if (finalRefresh) {
+      const marker = await redis.get(finalRefreshKey(season.seasonCode, eventId));
+      if (marker !== null) {
+        const current = await readFreshCoreSource(season.seasonCode, now);
+        if (current.sourceCheckedAt !== null) {
+          return {
+            ready: true,
+            refreshed: false,
+            reason: 'final-refresh-complete',
+            sourceCheckedAt: current.sourceCheckedAt,
+          };
+        }
+      }
+    }
+  } catch (error) {
+    logError('Live Average Team refresh coordination unavailable', error, {
+      season: season.seasonCode,
+      eventId,
+    });
+    return {
+      ready: false,
+      refreshed: false,
+      reason: 'core-unavailable',
       sourceCheckedAt: null,
     };
   }
@@ -106,7 +147,7 @@ export async function ensureLiveAverageReadyForPublication(
       sourceCheckedAt: null,
     };
   }
-  if (current.fresh) {
+  if (!finalRefresh && current.fresh) {
     return {
       ready: true,
       refreshed: false,
@@ -115,21 +156,6 @@ export async function ensureLiveAverageReadyForPublication(
     };
   }
 
-  let redis: Awaited<ReturnType<typeof redisSingleton.getClient>>;
-  try {
-    redis = await redisSingleton.getClient();
-  } catch (error) {
-    logError('Live Average Team refresh lock unavailable', error, {
-      season: season.seasonCode,
-      eventId,
-    });
-    return {
-      ready: false,
-      refreshed: false,
-      reason: 'core-unavailable',
-      sourceCheckedAt: current.sourceCheckedAt,
-    };
-  }
   const lockKey = refreshLockKey(season.seasonCode);
   const lockToken = randomUUID();
   const acquired =
@@ -138,11 +164,14 @@ export async function ensureLiveAverageReadyForPublication(
   if (!acquired) {
     try {
       const afterLock = await readFreshCoreSource(season.seasonCode, now);
-      if (afterLock.fresh) {
+      const finalMarker = finalRefresh
+        ? await redis.get(finalRefreshKey(season.seasonCode, eventId))
+        : null;
+      if (afterLock.fresh && (!finalRefresh || finalMarker !== null)) {
         return {
           ready: true,
           refreshed: false,
-          reason: 'fresh',
+          reason: finalRefresh ? 'final-refresh-complete' : 'fresh',
           sourceCheckedAt: afterLock.sourceCheckedAt,
         };
       }
@@ -174,6 +203,14 @@ export async function ensureLiveAverageReadyForPublication(
         sourceCheckedAt: afterRefresh.sourceCheckedAt,
       };
     }
+    if (finalRefresh) {
+      await redis.set(
+        finalRefreshKey(season.seasonCode, eventId),
+        afterRefresh.sourceCheckedAt ?? new Date().toISOString(),
+        'EX',
+        String(LIVE_AVERAGE_FINAL_REFRESH_TTL_SECONDS),
+      );
+    }
     logInfo('Live Average Team core refresh completed before H2H publication', {
       season: season.seasonCode,
       eventId,
@@ -182,7 +219,7 @@ export async function ensureLiveAverageReadyForPublication(
     return {
       ready: true,
       refreshed: true,
-      reason: 'refresh-complete',
+      reason: finalRefresh ? 'final-refresh-complete' : 'refresh-complete',
       sourceCheckedAt: afterRefresh.sourceCheckedAt,
     };
   } catch (error) {

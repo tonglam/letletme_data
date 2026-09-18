@@ -63,6 +63,7 @@ export async function enqueueLiveActiveSnapshot(
     now,
     lifecycleState,
     expectedNextCheckAt,
+    bootstrapGateRequired: true,
   });
 }
 

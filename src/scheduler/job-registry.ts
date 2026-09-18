@@ -65,7 +65,6 @@ import {
   decideLiveLifecycle,
   isLivePicksProbeDue,
   readLifecycleQuietState,
-  readLiveBootstrapGate,
   readLivePicksDurableFreshnessEvidence,
   resolveLiveLifecycleDelay,
   shouldRequireLivePicksCompletionGate,
@@ -1211,7 +1210,6 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       const picksCompletionGateRequired = shouldRequireLivePicksCompletionGate(decision.state);
       let livePointsEligible = true;
       if (picksCompletionGateRequired) {
-        const bootstrap = await readLiveBootstrapGate(context.season.seasonCode, event.id);
         const picksEvidence = await readLivePicksDurableFreshnessEvidence(
           context.season,
           event.id,
@@ -1219,7 +1217,11 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         const picksComplete = Boolean(
           picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
         );
-        livePointsEligible = bootstrap.status === 'ready' && picksComplete;
+        // Redis bootstrap state is an admission optimization, not scheduler
+        // authority. Keep the durable plan alive when that projection is
+        // missing; the worker performs the status-only HTTP-200 gate and
+        // defers the obligation if the provider is not ready.
+        livePointsEligible = picksComplete;
       }
       const matchObservationOnly =
         decision.shouldObserveMatches && (!decision.shouldFetchLive || !livePointsEligible);
@@ -1579,6 +1581,8 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         jobId: `scheduler-${obligationId}-g${generation}`,
         finalizeEvent: true,
         reuseExisting: true,
+        lifecycleState: 'FINALIZED',
+        bootstrapGateRequired: true,
         obligationId,
         obligationGeneration: generation,
         freshnessWindowId,
