@@ -714,6 +714,34 @@ function localIntegrityFailureEntries(prefix: string): Array<[string, IntegrityF
   );
 }
 
+/**
+ * Check process-local corruption evidence without another Redis round trip.
+ *
+ * A full reader records this marker before it attempts to persist the shared
+ * marker. Selected reads must fence against that local evidence as well: a
+ * delayed or failed shared write must not make the same process accept a
+ * selected item from an identity it already knows to be corrupt.
+ */
+function hasLocalDataPublicationIntegrityFailure(
+  scope: DataPublicationScope,
+  manifest?: DataPublicationManifest | null,
+): boolean {
+  const prefix = scopePrefix(scope);
+  const expected = manifest ? publicationIntegrityToken(manifest) : null;
+  const now = Date.now();
+  const localEntries = localIntegrityFailureEntries(prefix);
+  for (const [key, marker] of localEntries) {
+    if (marker.expiresAt <= now) publicationIntegrityFailures.delete(key);
+  }
+  const localCandidates = expected
+    ? [
+        publicationIntegrityFailures.get(localIntegrityFailureKey(prefix, '*')),
+        publicationIntegrityFailures.get(localIntegrityFailureKey(prefix, expected)),
+      ]
+    : localIntegrityFailureEntries(prefix).map(([, marker]) => marker);
+  return localCandidates.some((marker) => marker !== undefined && marker.expiresAt > now);
+}
+
 function clearLocalIntegrityFailureAfterRepair(
   scope: DataPublicationScope,
   manifest: DataPublicationManifest,
@@ -848,21 +876,8 @@ export async function hasDataPublicationIntegrityFailure(
   redisClient?: Redis,
   deadlineAt?: number,
 ): Promise<boolean> {
-  const prefix = scopePrefix(scope);
   const expected = manifest ? publicationIntegrityToken(manifest) : null;
-  const localEntries = localIntegrityFailureEntries(prefix);
-  for (const [key, marker] of localEntries) {
-    if (marker.expiresAt <= Date.now()) publicationIntegrityFailures.delete(key);
-  }
-  const localCandidates = expected
-    ? [
-        publicationIntegrityFailures.get(localIntegrityFailureKey(prefix, '*')),
-        publicationIntegrityFailures.get(localIntegrityFailureKey(prefix, expected)),
-      ]
-    : localIntegrityFailureEntries(prefix).map(([, marker]) => marker);
-  const localMatches = localCandidates.some(
-    (marker) => marker !== undefined && marker.expiresAt > Date.now(),
-  );
+  const localMatches = hasLocalDataPublicationIntegrityFailure(scope, manifest);
   try {
     const redis = await getRedisForIntegrityMarker(redisClient, deadlineAt);
     const shared =
@@ -1091,6 +1106,13 @@ async function readVerifiedDataPublicationPayloads(
   redis: Redis,
 ): Promise<VerifiedDataPublicationPayloads> {
   if (keys.length === 0) throw new Error('Publication payload keys are required');
+  // The bounded manifest read checks both the shared marker and this process's
+  // local marker. Recheck immediately before the selected read so a concurrent
+  // full reader that has already found corruption cannot be bypassed while its
+  // shared-marker persistence is still pending.
+  if (hasLocalDataPublicationIntegrityFailure(scope, manifest)) {
+    return { status: 'failure' };
+  }
   const evalMethod = (redis as unknown as { eval?: (...args: unknown[]) => Promise<unknown> }).eval;
   if (typeof evalMethod !== 'function') {
     if (await hasDataPublicationIntegrityFailure(scope, manifest, redis)) {
@@ -1108,6 +1130,9 @@ async function readVerifiedDataPublicationPayloads(
       typeof mgetMethod === 'function'
         ? await mgetMethod.call(redis, ...keys)
         : await Promise.all(keys.map((key) => redis.get(key)));
+    if (hasLocalDataPublicationIntegrityFailure(scope, manifest)) {
+      return { status: 'failure' };
+    }
     return { status: 'ok', observedEpoch: Date.now(), payloads };
   }
   const raw = await evalMethod.call(
@@ -1128,6 +1153,12 @@ async function readVerifiedDataPublicationPayloads(
   if (status === 'failure' || status === 'proof_missing') return { status };
   if (status !== 'ok' || raw.length !== keys.length + 2) {
     throw new Error('Verified publication payload read returned an invalid result');
+  }
+  // A concurrent full reader may have recorded process-local corruption while
+  // this EVAL was in flight. Do not accept the selected result after that
+  // evidence appears, even when the shared Redis marker has not landed yet.
+  if (hasLocalDataPublicationIntegrityFailure(scope, manifest)) {
+    return { status: 'failure' };
   }
   const observedEpoch = Number(raw[1]);
   if (!Number.isSafeInteger(observedEpoch) || observedEpoch < 0) {

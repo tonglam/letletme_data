@@ -4,7 +4,10 @@ import { queueRedisSingleton } from '../queues/redis';
 import { seasonRepository } from '../repositories/seasons';
 import { getConfig, isBugReportScreenshotStorageConfigured } from '../utils/config';
 import { checkRuntimeHeartbeat, isRuntimeRoleRequired } from '../utils/runtime-heartbeat';
-import { readActiveDataPublicationManifestWithItemBounds } from '../cache/data-publication';
+import {
+  readActiveDataPublication,
+  readActiveDataPublicationManifestWithItemBounds,
+} from '../cache/data-publication';
 import { readLivePublicationV2 } from '../cache/live-publication-v2';
 import { syncOperationsRepository } from '../repositories/sync-operations';
 import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
@@ -54,7 +57,11 @@ let lastKnownActiveSeasonCode: string | null = null;
 async function activeSeasonFromRedis(): Promise<string | null> {
   const redis = await redisSingleton.getClient();
   if (lastKnownActiveSeasonCode) {
-    const active = await readActiveDataPublicationManifestWithItemBounds({
+    // This path is reached only after PostgreSQL failed. Validate the complete
+    // Redis publication before using it as the season authority; a same-sized
+    // payload corruption must not make readiness admit traffic that consumers
+    // will later reject.
+    const active = await readActiveDataPublication({
       dataset: 'fpl:core',
       seasonCode: lastKnownActiveSeasonCode,
     }).catch(() => null);
@@ -74,7 +81,7 @@ async function activeSeasonFromRedis(): Promise<string | null> {
     for (const key of keys) {
       const match = key.match(/^llm:data:fpl:core:(\d{4}):active$/);
       if (!match) continue;
-      const active = await readActiveDataPublicationManifestWithItemBounds({
+      const active = await readActiveDataPublication({
         dataset: 'fpl:core',
         seasonCode: match[1]!,
       }).catch(() => null);
