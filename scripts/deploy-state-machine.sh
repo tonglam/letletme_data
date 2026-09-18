@@ -384,6 +384,19 @@ append_content_worker_owned_queue() {
   fi
 }
 
+assert_consumer_pause_has_owner() {
+  local queue_name=$1 status_output=$2
+  if ! printf '%s\n' "$status_output" | grep -Eq '"paused":(true|false)'; then
+    echo "deploy admission: $queue_name consumer status was not machine-readable" >&2
+    return 1
+  fi
+  if printf '%s\n' "$status_output" | grep -F '"paused":true' >/dev/null &&
+    ! printf '%s\n' "$status_output" | grep -Eq '"owner":"(DEPLOYMENT|ACQUIRING|OPERATOR|RELEASING)"'; then
+    echo "deploy admission: $queue_name consumer is paused without a recognized owner; explicit operator recovery is required" >&2
+    return 1
+  fi
+}
+
 reconcile_failed_content_worker_pause() {
   local queue_name=${1:-}
   local status_output
@@ -562,6 +575,7 @@ pause_content_worker_consumers_for_deploy() {
       return 1
     fi
     if printf '%s\n' "$status_output" | grep -F '"paused":true' >/dev/null; then
+      assert_consumer_pause_has_owner "$queue_name" "$status_output" || return 1
       append_content_worker_paused_queue "$queue_name"
       if printf '%s\n' "$status_output" | grep -F '"owned":true' >/dev/null; then
         append_content_worker_owned_queue "$queue_name"
@@ -585,6 +599,7 @@ pause_content_worker_consumers_for_deploy() {
       return 1
     fi
     append_content_worker_paused_queue "$queue_name"
+    assert_consumer_pause_has_owner "$queue_name" "$output" || return 1
     # The mutating command establishes ownership from its own
     # previousPaused/changed result. If an operator paused the queue after
     # STATUS but before PAUSE, changed=false and the deployment must not resume
@@ -696,6 +711,23 @@ restore_content_deploy_controls() {
     echo 'deploy admission: deployment-owned content-worker consumers remain paused for forward recovery' >&2
     return 1
   fi
+  # A previous deployment's lease can expire while this deployment is running.
+  # Recheck every consumer, including entry-sync (which has no admission gate).
+  # Never adopt or resume an unknown/external pause to make acceptance pass.
+  local consumer_queue consumer_status
+  for consumer_queue in "${DEPLOY_QUIESCENCE_CONSUMER_QUEUE_NAMES[@]}"; do
+    if ! consumer_status=$(set_content_worker_consumer_mode STATUS "$consumer_queue") ||
+      ! assert_consumer_pause_has_owner "$consumer_queue" "$consumer_status"; then
+      echo "deploy admission: $consumer_queue final consumer ownership check failed" >&2
+      # Once producer admission has been touched, its TTL must not be the
+      # only protection for forward recovery. A preflight-only refusal has
+      # not touched admission and must not stop the existing producer.
+      if [[ -n "$DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES" ]]; then
+        stop_content_worker_for_forward_recovery || true
+      fi
+      return 1
+    fi
+  done
   local queue_name
   for queue_name in $DEPLOY_CONTENT_WORKER_ADMISSION_ATTEMPTED_QUEUES; do
     local status_output

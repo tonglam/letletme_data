@@ -33,12 +33,28 @@ if [ -n "$expected_deploy_sha" ] && ! [[ "$expected_deploy_sha" =~ ^[0-9a-f]{40}
   exit 2
 fi
 
-api_payload_file=/dev/null
-if [ -n "$expected_deploy_sha" ]; then
-  api_payload_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-health.XXXXXX")
-  cleanup_health_payload() { rm -f -- "$api_payload_file"; }
-  trap cleanup_health_payload EXIT
-fi
+api_payload_file=$(mktemp "${TMPDIR:-/tmp}/letletme-data-health.XXXXXX")
+cleanup_health_payload() { rm -f -- "$api_payload_file"; }
+trap cleanup_health_payload EXIT
+last_health_failure='endpoint=/health/live unavailable=deadline'
+last_health_observed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+# Emit only known field names and constrained values, never dependency error
+# strings, URLs or arbitrary response text. Keep the last probe, not a history.
+summarize_deploy_failure() {
+  local field value
+  printf 'curl_exit=%s' "$1"
+  for field in status deploySha postgres cacheRedis queueRedis activeSeason \
+    screenshotRetentionConfigured scheduler queueWorker contentWorker \
+    livePicksWorker officialH2HWorker publicationConsistency mediaWorker; do
+    case "$field" in
+      status) value=$(grep -Eo '"status":"deploy_(not_ready|ready)"' <<<"$payload" | head -n 1 || true) ;;
+      deploySha) value=$(grep -Eo '"deploySha":"[0-9a-f]{40}"' <<<"$payload" | head -n 1 || true) ;;
+      *) value=$(grep -Eo "\"$field\":(true|false)" <<<"$payload" | head -n 1 || true) ;;
+    esac
+    if [ -n "$value" ]; then printf ' %s' "$value"; fi
+  done
+}
 
 deadline_reached() {
   [ "$SECONDS" -ge "$deadline_at" ]
@@ -83,8 +99,10 @@ core_deploy_payload_is_ready() {
 api_ready=false
 for attempt in $(seq 1 "$attempts"); do
   timeout=$(curl_timeout_with_deadline) || break
+  last_health_observed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
   if curl --fail --silent --show-error --max-time "$timeout" \
-    "$api_url/health/live" >/dev/null; then
+    "$api_url/health/live" >/dev/null 2>&1; then
+    last_health_failure='endpoint=/health/deploy unavailable=deadline'
     timeout=$(curl_timeout_with_deadline) || break
     deploy_probe_ok=false
     deploy_curl_flags=(--silent --show-error --max-time "$timeout")
@@ -92,19 +110,24 @@ for attempt in $(seq 1 "$attempts"); do
     # dependency is healthy while media is unavailable.  Every other mode,
     # including a probe without release identity, still requires HTTP success.
     if [ "$runtime_health_core_only" != true ] || [ -z "$expected_deploy_sha" ]; then
-      deploy_curl_flags+=(--fail)
+      deploy_curl_flags+=(--fail-with-body)
     fi
-    if curl "${deploy_curl_flags[@]}" "$api_url/health/deploy" >"$api_payload_file"; then
+    deploy_curl_exit=0
+    # Bound even a chunked/untrusted error body; pipefail preserves transport
+    # and HTTP failures. Suppress curl's free-text errors (which may contain URLs).
+    if curl "${deploy_curl_flags[@]}" --max-filesize 65536 "$api_url/health/deploy" 2>/dev/null |
+      head -c 65536 >"$api_payload_file"; then
       deploy_probe_ok=true
     else
-      : >"$api_payload_file"
+      deploy_curl_exit=$?
     fi
+    payload=$(tr -d '[:space:]' < "$api_payload_file")
+    last_health_failure="endpoint=/health/deploy $(summarize_deploy_failure "$deploy_curl_exit")"
     if [ "$deploy_probe_ok" = true ] && [ -z "$expected_deploy_sha" ]; then
       api_ready=true
       break
     fi
     if [ "$deploy_probe_ok" = true ] && [ -s "$api_payload_file" ]; then
-      payload=$(tr -d '[:space:]' < "$api_payload_file")
       if [ "$runtime_health_core_only" = true ]; then
         if core_deploy_payload_is_ready "$payload" "$expected_deploy_sha"; then
           api_ready=true
@@ -115,8 +138,9 @@ for attempt in $(seq 1 "$attempts"); do
         api_ready=true
         break
       fi
-      echo "runtime health: /health/deploy identity mismatch (expected=$expected_deploy_sha)" >&2
     fi
+  else
+    last_health_failure="endpoint=/health/live curl_exit=$? /health/deploy=not-attempted"
   fi
   if [ "$attempt" -lt "$attempts" ] && sleep_with_deadline; then
     continue
@@ -124,6 +148,7 @@ for attempt in $(seq 1 "$attempts"); do
 done
 
 if [ "$api_ready" != true ]; then
+  echo "runtime health: last health probe (observed_at=$last_health_observed_at expected=${expected_deploy_sha:-unspecified}): $last_health_failure" >&2
   compose ps
   compose logs --tail 100 api || true
   exit 1
