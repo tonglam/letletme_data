@@ -28,6 +28,7 @@ import {
   syncLiveClassicLeaguePublicationsV2,
   syncLiveH2HLeaguePublicationsV2,
 } from '../services/live-league-publication-v2.service';
+import { ensureLiveBootstrapReady } from '../services/live-lifecycle-orchestrator';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logDebug, logError, logInfo, logWarn } from '../utils/logger';
@@ -481,6 +482,35 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
           if (!deferred) throw new Error('Stale scheduler finalization preflight');
         } else {
           throw new Error(evidence.reason);
+        }
+        return { ...evidence, status: 'waiting-dependencies' as const };
+      }
+    }
+    if (job.data.bootstrapGateRequired === true) {
+      const bootstrap = await ensureLiveBootstrapReady(season, eventId, new Date());
+      if (bootstrap.status !== 'ready') {
+        const evidence = {
+          finalization: 'waiting-for-bootstrap',
+          reason:
+            bootstrap.status === 'unknown'
+              ? 'SOURCE_NOT_READY:BOOTSTRAP_PROBE_UNKNOWN'
+              : 'SOURCE_NOT_READY:BOOTSTRAP_HTTP_NOT_200',
+          bootstrapStatus: bootstrap.status,
+          bootstrapHttpStatus: bootstrap.httpStatus,
+          bootstrapCheckedAt: bootstrap.checkedAt,
+          bootstrapNextProbeAt: bootstrap.nextProbeAt,
+        };
+        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            dependencyWait: {
+              reasonCodes: [evidence.reason],
+            },
+            evidence,
+            db: databaseBudget?.writeDb,
+          });
+          if (!deferred) throw new Error('Stale scheduler bootstrap gate');
         }
         return { ...evidence, status: 'waiting-dependencies' as const };
       }

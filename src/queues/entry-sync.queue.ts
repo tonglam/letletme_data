@@ -52,6 +52,8 @@ export interface EntrySyncJobData {
   deduplicationId?: string;
   /** Propagated through continuation/retry chunks for deterministic daily jobs. */
   removeOnSettle?: boolean;
+  /** Post-deadline picks/transfers require the status-only bootstrap gate. */
+  bootstrapGateRequired?: boolean;
 }
 
 export const entrySyncQueue = new Queue<EntrySyncJobData>(entrySyncQueueName, {

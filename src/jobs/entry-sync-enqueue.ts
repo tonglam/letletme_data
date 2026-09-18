@@ -50,6 +50,8 @@ export interface EntrySyncJobOptions {
   lane?: EntrySyncLane;
   /** Internal intent; retries must re-audit instead of force-refreshing warm rows. */
   executionIntent?: EntrySyncExecutionIntent;
+  /** Require bootstrap HTTP 200 before provider work for one-shot event scans. */
+  bootstrapGateRequired?: boolean;
 }
 
 export function retainEntrySyncChainOptions(
@@ -66,6 +68,7 @@ export function retainEntrySyncChainOptions(
         | 'requestWatermark'
         | 'lane'
         | 'executionIntent'
+        | 'bootstrapGateRequired'
       >
     | undefined,
 ): Pick<
@@ -80,6 +83,7 @@ export function retainEntrySyncChainOptions(
   | 'requestWatermark'
   | 'lane'
   | 'executionIntent'
+  | 'bootstrapGateRequired'
 > {
   return {
     runId: options?.runId,
@@ -92,6 +96,7 @@ export function retainEntrySyncChainOptions(
     requestWatermark: options?.requestWatermark,
     lane: options?.lane,
     executionIntent: options?.executionIntent,
+    bootstrapGateRequired: options?.bootstrapGateRequired,
   };
 }
 
@@ -346,6 +351,7 @@ async function enqueueEntrySyncJobWithOutcome(
       queueKey: tableScanQueueKey,
       deduplicationId: explicitDeduplicationId,
       removeOnSettle,
+      bootstrapGateRequired: options.bootstrapGateRequired,
     };
 
     const chunkKey =

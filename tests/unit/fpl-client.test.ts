@@ -15,6 +15,27 @@ afterEach(() => {
 });
 
 describe('FPL bootstrap edge-cache control', () => {
+  test('bootstrap readiness probe uses only HTTP 200 and does not parse payload fields', async () => {
+    globalThis.fetch = mock(
+      async () => new Response('provider body is opaque', { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const result = await fplClient.probeBootstrap({ maxRetries: 0 });
+
+    expect(result.status).toBe(200);
+    expect(result.checkedAt).toBeInstanceOf(Date);
+  });
+
+  test('bootstrap readiness probe returns non-200 without retrying', async () => {
+    const fetchMock = mock(async () => new Response(null, { status: 503 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fplClient.probeBootstrap({ maxRetries: 0 });
+
+    expect(result.status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   test('adds an explicit caller cache bucket without changing the endpoint path', async () => {
     const payload = buildCoreSnapshotFixture({ playerCount: 1 }).bootstrap;
     let requestedUrl = '';

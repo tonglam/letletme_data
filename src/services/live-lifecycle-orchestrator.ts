@@ -25,7 +25,6 @@ import { logError, logInfo } from '../utils/logger';
 import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './entries.service';
 import { enqueueEntryPicksSyncJobWithOutcome } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
-import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { createEntryInfoRepository, entryInfoRepository } from '../repositories/entry-infos';
 import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
 import { entriesInCompetition } from '../db/schemas/index.schema';
@@ -97,6 +96,16 @@ export type LiveLifecycleDecision = {
   nextKickoffAt?: Date | null;
 };
 
+export type LiveBootstrapStatus = 'ready' | 'not-ready' | 'unknown';
+
+export type LiveBootstrapGate = Readonly<{
+  status: LiveBootstrapStatus;
+  httpStatus: number | null;
+  checkedAt: string | null;
+  readyAt: string | null;
+  nextProbeAt: string | null;
+}>;
+
 export type LiveLifecycleObservation = {
   /** The last content revision observed for this event, if any. */
   lastRevision?: number | string | null;
@@ -113,11 +122,13 @@ export function shouldRefreshOfficialH2H(
   decision: LiveLifecycleDecision,
   matchDayTime: boolean,
 ): boolean {
-  return (
-    decision.shouldFetchLive &&
-    decision.state !== 'FINALIZED' &&
-    (matchDayTime || decision.state === 'GW_REVIEW')
-  );
+  // Official H2H is a schedule/final-result mirror, not the live score feed.
+  // Live score revisions come from the event-live publication. Final and
+  // repair calls are explicit worker/cascade obligations and do not use this
+  // recurring predicate.
+  void decision;
+  void matchDayTime;
+  return false;
 }
 
 type PicksProbeState = {
@@ -137,11 +148,16 @@ type SharedPicksCoordinatorState = {
   failedCanaryEntryIds: number[];
 };
 
-type SharedLifecycleQuietState = {
+export type SharedLifecycleQuietState = {
   revision: number | string | null;
   unchangedSince: number;
   state?: LiveLifecycleState;
   expectedNextCheckAt?: string | null;
+  bootstrapStatus?: LiveBootstrapStatus;
+  bootstrapHttpStatus?: number | null;
+  bootstrapCheckedAt?: string | null;
+  bootstrapReadyAt?: string | null;
+  bootstrapNextProbeAt?: string | null;
 };
 
 const defaultPicksCoordinatorState = (): SharedPicksCoordinatorState => ({
@@ -234,10 +250,176 @@ export async function readLifecycleQuietState(
             Number.isFinite(Date.parse(value.expectedNextCheckAt))
           ? value.expectedNextCheckAt
           : undefined;
-    return { revision: value.revision, unchangedSince, expectedNextCheckAt };
+    const bootstrapStatus =
+      value.bootstrapStatus === 'ready' ||
+      value.bootstrapStatus === 'not-ready' ||
+      value.bootstrapStatus === 'unknown'
+        ? value.bootstrapStatus
+        : undefined;
+    const bootstrapHttpStatus =
+      value.bootstrapHttpStatus === null
+        ? null
+        : typeof value.bootstrapHttpStatus === 'number' &&
+            Number.isSafeInteger(value.bootstrapHttpStatus) &&
+            value.bootstrapHttpStatus >= 100 &&
+            value.bootstrapHttpStatus <= 599
+          ? value.bootstrapHttpStatus
+          : undefined;
+    const validTimestamp = (candidate: unknown): string | null | undefined =>
+      candidate === null
+        ? null
+        : typeof candidate === 'string' && Number.isFinite(Date.parse(candidate))
+          ? candidate
+          : undefined;
+    return {
+      revision: value.revision,
+      unchangedSince,
+      ...(value.state ? { state: value.state } : {}),
+      expectedNextCheckAt,
+      ...(bootstrapStatus ? { bootstrapStatus } : {}),
+      ...(bootstrapHttpStatus !== undefined ? { bootstrapHttpStatus } : {}),
+      ...(validTimestamp(value.bootstrapCheckedAt) !== undefined
+        ? { bootstrapCheckedAt: validTimestamp(value.bootstrapCheckedAt) }
+        : {}),
+      ...(validTimestamp(value.bootstrapReadyAt) !== undefined
+        ? { bootstrapReadyAt: validTimestamp(value.bootstrapReadyAt) }
+        : {}),
+      ...(validTimestamp(value.bootstrapNextProbeAt) !== undefined
+        ? { bootstrapNextProbeAt: validTimestamp(value.bootstrapNextProbeAt) }
+        : {}),
+    };
   } catch (error) {
     logError('Failed to read shared live lifecycle state', error, { seasonCode, eventId });
     return null;
+  }
+}
+
+const emptyLiveBootstrapGate = (): LiveBootstrapGate => ({
+  status: 'unknown',
+  httpStatus: null,
+  checkedAt: null,
+  readyAt: null,
+  nextProbeAt: null,
+});
+
+export async function readLiveBootstrapGate(
+  seasonCode: string,
+  eventId: number,
+): Promise<LiveBootstrapGate> {
+  const state = await readLifecycleQuietState(seasonCode, eventId);
+  if (!state?.bootstrapStatus) return emptyLiveBootstrapGate();
+  return {
+    status: state.bootstrapStatus,
+    httpStatus: state.bootstrapHttpStatus ?? null,
+    checkedAt: state.bootstrapCheckedAt ?? null,
+    readyAt: state.bootstrapReadyAt ?? null,
+    nextProbeAt: state.bootstrapNextProbeAt ?? null,
+  };
+}
+
+/**
+ * Admit post-deadline provider work only after bootstrap returns HTTP 200.
+ * This is a bounded status probe; it deliberately ignores the bootstrap
+ * payload and never consults `is_current`.
+ */
+export async function ensureLiveBootstrapReady(
+  season: FplSeasonRef,
+  eventId: number,
+  now = new Date(),
+): Promise<LiveBootstrapGate> {
+  const current = await readLifecycleQuietState(season.seasonCode, eventId);
+  const nextProbeAtMs = current?.bootstrapNextProbeAt
+    ? Date.parse(current.bootstrapNextProbeAt)
+    : Number.NaN;
+  if (
+    current?.bootstrapStatus === 'ready' &&
+    current.bootstrapReadyAt !== null &&
+    current.bootstrapReadyAt !== undefined
+  ) {
+    return {
+      status: 'ready',
+      httpStatus: current.bootstrapHttpStatus ?? 200,
+      checkedAt: current.bootstrapCheckedAt ?? current.bootstrapReadyAt,
+      readyAt: current.bootstrapReadyAt,
+      nextProbeAt: null,
+    };
+  }
+  if (Number.isFinite(nextProbeAtMs) && nextProbeAtMs > now.getTime()) {
+    return {
+      status: current?.bootstrapStatus ?? 'unknown',
+      httpStatus: current?.bootstrapHttpStatus ?? null,
+      checkedAt: current?.bootstrapCheckedAt ?? null,
+      readyAt: current?.bootstrapReadyAt ?? null,
+      nextProbeAt: current?.bootstrapNextProbeAt ?? null,
+    };
+  }
+
+  const baseState: SharedLifecycleQuietState = current ?? {
+    revision: null,
+    unchangedSince: now.getTime(),
+  };
+  try {
+    const probe = await fplClient.probeBootstrap({
+      priority: 'live',
+      maxRetries: 0,
+    });
+    const checkedAt = probe.checkedAt.toISOString();
+    if (probe.status === 200) {
+      const readyAt = checkedAt;
+      await writeLifecycleQuietState(season.seasonCode, eventId, {
+        ...baseState,
+        bootstrapStatus: 'ready',
+        bootstrapHttpStatus: 200,
+        bootstrapCheckedAt: checkedAt,
+        bootstrapReadyAt: readyAt,
+        bootstrapNextProbeAt: null,
+      });
+      return {
+        status: 'ready',
+        httpStatus: 200,
+        checkedAt,
+        readyAt,
+        nextProbeAt: null,
+      };
+    }
+    const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
+    await writeLifecycleQuietState(season.seasonCode, eventId, {
+      ...baseState,
+      bootstrapStatus: 'not-ready',
+      bootstrapHttpStatus: probe.status,
+      bootstrapCheckedAt: checkedAt,
+      bootstrapReadyAt: null,
+      bootstrapNextProbeAt: nextProbeAt,
+    });
+    return {
+      status: 'not-ready',
+      httpStatus: probe.status,
+      checkedAt,
+      readyAt: null,
+      nextProbeAt,
+    };
+  } catch (error) {
+    const checkedAt = now.toISOString();
+    const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
+    await writeLifecycleQuietState(season.seasonCode, eventId, {
+      ...baseState,
+      bootstrapStatus: 'unknown',
+      bootstrapHttpStatus: null,
+      bootstrapCheckedAt: checkedAt,
+      bootstrapReadyAt: null,
+      bootstrapNextProbeAt: nextProbeAt,
+    });
+    logError('Live bootstrap readiness probe failed', error, {
+      season: season.seasonCode,
+      eventId,
+    });
+    return {
+      status: 'unknown',
+      httpStatus: null,
+      checkedAt,
+      readyAt: null,
+      nextProbeAt,
+    };
   }
 }
 
@@ -560,13 +742,14 @@ export function decideLiveLifecycle(
       // not manufacture FINALIZED before the event is explicitly marked
       // finished and data-checked.
       state: 'GW_REVIEW',
-      // Keep the official event-live heartbeat alive until the event reaches
-      // its explicit finalized boundary. A time limit here would make every
-      // provisional manager and H2H score disappear during a delayed review.
-      shouldFetchLive: true,
+      // The active match window is over. A final Live Points refresh is owned
+      // by the explicit finalization checkpoint once the canonical event is
+      // data-checked; do not keep fetching event-live every few minutes while
+      // FPL is doing post-match settlement.
+      shouldFetchLive: false,
       shouldObserveMatches: true,
       shouldProbePicks: false,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -578,7 +761,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: false,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -594,7 +777,7 @@ export function decideLiveLifecycle(
         shouldFetchLive: true,
         shouldObserveMatches: true,
         shouldProbePicks: false,
-        shouldSyncPicks: true,
+        shouldSyncPicks: false,
         recoverStaleFixtures: false,
         finalizeEvent: false,
         nextRetryAt: null,
@@ -605,7 +788,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: false,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -640,10 +823,14 @@ export function decideLiveLifecycle(
   if (firstKickoffMs !== null && nowMs < firstKickoffMs) {
     return {
       state: 'PICKS_PROBE',
-      shouldFetchLive: false,
+      // The first Live Points publication is eligible after the complete
+      // picks/transfers cohort is ready; it must not wait for fixture.started.
+      // The scheduler/worker gate below prevents this flag from publishing a
+      // partial cohort.
+      shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: true,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -669,8 +856,8 @@ export function decideLiveLifecycle(
   }
   return {
     state: 'PICKS_SYNC',
-    shouldFetchLive: false,
-    shouldObserveMatches: false,
+    shouldFetchLive: true,
+    shouldObserveMatches: true,
     shouldProbePicks: true,
     shouldSyncPicks: true,
     recoverStaleFixtures: false,
@@ -973,6 +1160,8 @@ export async function runPicksProbeAndSync(
   outcome?: 'accepted-backoff';
   /** The source canary was accepted for this event window. */
   sourceReady: boolean;
+  /** Bounded reason when the source gate is not yet admitted. */
+  sourceReason?: 'BOOTSTRAP_HTTP_NOT_200' | 'BOOTSTRAP_PROBE_UNKNOWN';
   /** The complete eligible-entry sweep reached its semantic finalizer. */
   scanComplete: boolean;
   /** Exact aggregate evidence was persisted before a terminal completion. */
@@ -1019,6 +1208,39 @@ export async function runPicksProbeAndSync(
       return false;
     }
   };
+  const bootstrap = await ensureLiveBootstrapReady(season, eventId, now);
+  if (bootstrap.status !== 'ready') {
+    const sourceReason =
+      bootstrap.status === 'unknown'
+        ? ('BOOTSTRAP_PROBE_UNKNOWN' as const)
+        : ('BOOTSTRAP_HTTP_NOT_200' as const);
+    await recordLivePicksRoundEvidence({
+      eventId,
+      deadlineAt: coordinatorDeadlineAt,
+      phase: 'canary_probe',
+      cohortCount: null,
+      newEnqueueCount: 0,
+      dedupReusedCount: 0,
+      pendingCheckpointCount: null,
+      completedCount: null,
+      sourceReady: false,
+      scanComplete: false,
+    });
+    logInfo('Live picks admission is waiting for bootstrap HTTP 200', {
+      eventId,
+      bootstrapStatus: bootstrap.status,
+      bootstrapHttpStatus: bootstrap.httpStatus,
+      nextProbeAt: bootstrap.nextProbeAt,
+    });
+    return {
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: false,
+      sourceReason,
+      scanComplete: false,
+    };
+  }
   if (now.getTime() < state.nextProbeAt) {
     // The scheduler can resolve an obligation just before the coordinator
     // writes its next-probe fence. A fenced root whose source canary has
@@ -1454,7 +1676,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
     });
     return null;
   }
-  const { season, currentEvent, fixtures, decision, expectedNextCheckAt } = tick;
+  const { season, currentEvent, decision, expectedNextCheckAt } = tick;
 
   // The deadline canary and pre-start retry lane are the only coordinator
   // probes. Once the live publication is active, complete picks are immutable
@@ -1467,12 +1689,26 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       });
     });
   }
-  if (decision.shouldFetchLive || decision.shouldObserveMatches) {
+  let livePointsEligible = true;
+  if (decision.state === 'PICKS_PROBE' || decision.state === 'PICKS_SYNC') {
+    const bootstrap = await readLiveBootstrapGate(season.seasonCode, currentEvent.id);
+    if (bootstrap.status === 'ready') {
+      const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+        season,
+        currentEvent.id,
+      ).catch(() => null);
+      livePointsEligible = picksEvidence?.expectedCount === 0 || picksEvidence?.complete === true;
+    } else {
+      livePointsEligible = false;
+    }
+  }
+  const shouldFetchLiveNow = decision.shouldFetchLive && livePointsEligible;
+  if (shouldFetchLiveNow || decision.shouldObserveMatches) {
     const shouldEnqueueFinalization = decision.finalizeEvent
       ? (await eventRepository.findLiveSnapshotFinalizedAt(season, currentEvent.id)) === null
       : false;
     if (!decision.finalizeEvent || shouldEnqueueFinalization) {
-      if (decision.state === 'LIVE_ACTIVE') {
+      if (decision.state === 'LIVE_ACTIVE' && shouldFetchLiveNow) {
         await enqueueLiveActiveSnapshot(
           season,
           currentEvent.id,
@@ -1483,24 +1719,15 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       } else {
         await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
           finalizeEvent: decision.finalizeEvent,
-          matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
+          matchObservationOnly: decision.shouldObserveMatches && !shouldFetchLiveNow,
           lifecycleState: normalizeMatchLifecycleState(decision.state),
           expectedNextCheckAt,
           now,
-          ...(decision.shouldObserveMatches && !decision.shouldFetchLive
+          ...(decision.shouldObserveMatches && !shouldFetchLiveNow
             ? { promoteActiveEvent: decision.state !== 'PRE_DEADLINE' }
             : {}),
         });
       }
-    }
-    if (shouldRefreshOfficialH2H(decision, isMatchDayTime(currentEvent, fixtures, now))) {
-      await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {
-        jobId: `official-h2h-e${currentEvent.id}-${now.toISOString().slice(0, 16).replace(/\D/g, '')}`,
-      }).catch((error) => {
-        logError('Failed to enqueue live official H2H sync', error, {
-          eventId: currentEvent.id,
-        });
-      });
     }
   }
   await observeUpcomingMatchEventDirect(season, currentEvent.id, now).catch((error) => {

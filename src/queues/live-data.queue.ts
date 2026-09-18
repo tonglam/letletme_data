@@ -50,6 +50,8 @@ export interface LiveDataJobData {
   matchObservationOnly?: boolean;
   /** Whether this Match-only observation may advance the eventless pointer. */
   promoteActiveEvent?: boolean;
+  /** Post-deadline Live Points requires the status-only bootstrap gate. */
+  bootstrapGateRequired?: boolean;
   /** A checkpoint-only job never calls FPL; it consumes Redis publication data. */
   checkpointKind?: 'desk' | 'detail';
   checkpointPublicationId?: string;

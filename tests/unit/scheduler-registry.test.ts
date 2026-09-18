@@ -941,7 +941,7 @@ describe('standalone scheduler registry', () => {
     expect(schedulerSource).not.toContain('fplClient.getBootstrap');
   });
 
-  test('runs official H2H through the durable standalone scheduler during match windows', async () => {
+  test('does not schedule official H2H during live match windows', async () => {
     const event = {
       id: 1,
       name: 'GW1',
@@ -993,8 +993,7 @@ describe('standalone scheduler registry', () => {
         updatedAt: null,
       },
     ];
-    let officialJobPending = false;
-    let returnPendingRace = false;
+    const officialJobPending = false;
     const hasPending = mock(async () => officialJobPending);
     const enqueue = mock(async (..._args: unknown[]) => ({
       id: 'official-job',
@@ -1004,8 +1003,7 @@ describe('standalone scheduler registry', () => {
       findEvent: async () => event,
       findFixtures: async () => fixtures,
       hasPending,
-      enqueue: (async (...args: unknown[]) =>
-        returnPendingRace ? null : enqueue(...args)) as never,
+      enqueue: enqueue as never,
     });
     const context = {
       season: TEST_SEASON,
@@ -1021,59 +1019,9 @@ describe('standalone scheduler registry', () => {
       manualTrigger: false,
     });
     const plans = await definition.resolve(context);
-    expect(plans).toEqual([
-      expect.objectContaining({
-        scopeKey: '2627:event:1',
-        periodKey: 'official-h2h-1-202608231830',
-        dueAt: new Date('2026-08-23T18:30:00.000Z'),
-        eventId: 1,
-        source: 'reconcile',
-      }),
-    ]);
-    await definition.enqueue({
-      context,
-      plan: plans[0]!,
-      obligationId: 'official-obligation',
-      generation: 2,
-    });
-    expect(enqueue).toHaveBeenCalledWith(TEST_SEASON, 1, 'reconcile', {
-      jobId: 'scheduler-official-obligation-g2',
-      obligationId: 'official-obligation',
-      obligationGeneration: 2,
-    });
-    officialJobPending = true;
-    expect(
-      await definition.resolve({ ...context, now: new Date('2026-08-23T18:31:00.000Z') }),
-    ).toEqual([]);
-    expect(hasPending).toHaveBeenLastCalledWith(TEST_SEASON, 1);
-    officialJobPending = false;
-    returnPendingRace = true;
-    const racedPlans = await definition.resolve({
-      ...context,
-      now: new Date('2026-08-23T18:32:00.000Z'),
-    });
-    await expect(
-      definition.enqueue({
-        context,
-        plan: racedPlans[0]!,
-        obligationId: 'raced-official-obligation',
-        generation: 1,
-      }),
-    ).rejects.toThrow('Official H2H job became pending before enqueue');
-    expect(
-      await definition.resolve({ ...context, now: new Date('2026-08-24T01:00:00.000Z') }),
-    ).toEqual([]);
-
-    fixtures[0]!.finished = true;
-    expect(
-      await definition.resolve({ ...context, now: new Date('2026-08-24T01:01:00.000Z') }),
-    ).toEqual([
-      expect.objectContaining({
-        periodKey: 'official-h2h-1-202608240101',
-        eventId: 1,
-        evidence: { lifecycleState: 'GW_REVIEW' },
-      }),
-    ]);
+    expect(plans).toEqual([]);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(hasPending).not.toHaveBeenCalled();
   });
 
   test('catches up an hourly maintenance bucket after its scheduled minute', async () => {
@@ -1576,11 +1524,9 @@ describe('standalone scheduler registry', () => {
       transfers!.resolve(context),
     ]);
     expect(pickPlans).toEqual(transferPlans);
-    expect(pickPlans[0]).toMatchObject({
-      scopeKey: '2627:event:1',
-      periodKey: 'event-1',
-      eventId: 1,
-      source: 'catchup',
-    });
+    // The one-shot scans are admitted only after the live-picks root has
+    // recorded a bootstrap HTTP 200. The test Redis is intentionally absent,
+    // so a fail-closed empty plan is the expected result.
+    expect(pickPlans).toEqual([]);
   });
 });

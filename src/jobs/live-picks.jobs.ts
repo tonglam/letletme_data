@@ -5,7 +5,6 @@ import {
 } from '../services/live-lifecycle-orchestrator';
 import { livePicksQueue } from '../queues/live-picks.queue';
 import { logError, logInfo } from '../utils/logger';
-import { FPLClientError } from '../utils/errors';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type LivePicksRefreshResult = Readonly<{
@@ -15,6 +14,9 @@ export type LivePicksRefreshResult = Readonly<{
   /** The scheduler may settle this root as skipped after an accepted backoff. */
   outcome?: 'accepted-backoff';
   sourceReady: boolean;
+  /** The root was durably deferred until the shared bootstrap gate is ready. */
+  status?: 'waiting-dependencies';
+  sourceReason?: 'BOOTSTRAP_HTTP_NOT_200' | 'BOOTSTRAP_PROBE_UNKNOWN';
   scanComplete: boolean;
   freshnessEvidenceRecorded?: boolean;
 }>;
@@ -98,15 +100,10 @@ export async function runLivePicksRefreshJob(
       },
     );
     if (!result.sourceReady) {
-      // A Bull-completed root is not a successful obligation: the source
-      // canary was not accepted and no child finalizer can prove coverage.
-      // Raising a typed, bounded-retry error keeps the durable obligation
-      // pending/failed instead of allowing enqueue recovery to mark it green.
-      throw new FPLClientError(
-        'Live picks source canary is not ready; per-entry input publication remains pending',
-        409,
-        'SOURCE_NOT_READY',
-      );
+      // The worker owns the scheduler fence. Return a non-terminal result so
+      // it can defer the obligation instead of recording a Bull failure for a
+      // normal pre-bootstrap wait.
+      return { ...result, status: 'waiting-dependencies' as const };
     }
     return result;
   } catch (error) {

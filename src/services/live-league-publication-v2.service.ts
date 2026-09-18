@@ -799,6 +799,7 @@ type H2HMatchRow = {
   homeProfileSourceCheckedAt: Date | string | null;
   homeNetPoints: number | null;
   homeIsAverage: boolean;
+  averageEntryScore: number | null;
   awayEntryId: number | null;
   awayEntryName: string | null;
   awayPlayerName: string | null;
@@ -1148,6 +1149,7 @@ async function findOfficialH2HMatches(
       home_entry.profile_source_checked_at AS "homeProfileSourceCheckedAt",
       battle.home_net_points AS "homeNetPoints",
       battle.home_is_average AS "homeIsAverage",
+      event.average_entry_score AS "averageEntryScore",
       battle.away_entry_id AS "awayEntryId",
       away_entry.entry_name AS "awayEntryName",
       away_entry.player_name AS "awayPlayerName",
@@ -1187,6 +1189,7 @@ async function findOfficialH2HMatches(
       home_entry.profile_source_checked_at AS "homeProfileSourceCheckedAt",
       knockout.home_net_points AS "homeNetPoints",
       false AS "homeIsAverage",
+      event.average_entry_score AS "averageEntryScore",
       knockout.away_entry_id AS "awayEntryId",
       away_entry.entry_name AS "awayEntryName",
       away_entry.player_name AS "awayPlayerName",
@@ -1222,6 +1225,7 @@ async function findOfficialH2HMatches(
     awayEntryId: row.awayEntryId === null ? null : Number(row.awayEntryId),
     homeNetPoints: row.homeNetPoints === null ? null : Number(row.homeNetPoints),
     awayNetPoints: row.awayNetPoints === null ? null : Number(row.awayNetPoints),
+    averageEntryScore: row.averageEntryScore === null ? null : Number(row.averageEntryScore),
   }));
 }
 
@@ -1489,7 +1493,7 @@ function h2hRevisions(
   matches: readonly H2HPreparedMatch[],
   standings: readonly H2HStandingRow[],
 ): LeagueLiveRevisionVector {
-  const algorithm = contentHash('live-league-v2:h2h:1');
+  const algorithm = contentHash('live-league-v2:h2h:2:average-from-bootstrap');
   const roster = contentHash(
     matches
       .flatMap(({ payload }) => [payload.home.entryId, payload.away.entryId])
@@ -1684,22 +1688,29 @@ async function publishH2HMatch(
   const fallbackSource = global.publication.sourceCheckedAt;
   const homeRead = row.homeEntryId === null ? undefined : inputs.get(row.homeEntryId);
   const awayRead = row.awayEntryId === null ? undefined : inputs.get(row.awayEntryId);
+  const homeIsAverage = row.isBye && row.homeEntryId === null ? false : row.homeIsAverage;
+  const awayIsAverage = row.isBye && row.awayEntryId === null ? false : row.awayIsAverage;
+  // Average Team is a canonical event fact sourced from bootstrap/core. The
+  // official H2H mirror remains schedule/structure input; it must not be a
+  // second live-score source for this synthetic side.
+  const homeNetPoints = homeIsAverage ? row.averageEntryScore : row.homeNetPoints;
+  const awayNetPoints = awayIsAverage ? row.averageEntryScore : row.awayNetPoints;
   const home = h2hSide(
     row.homeEntryId,
     row.homeEntryName,
     row.homePlayerName,
-    row.homeIsAverage,
+    homeIsAverage,
     row.isBye,
-    row.homeNetPoints,
+    homeNetPoints,
     homeRead,
   );
   const away = h2hSide(
     row.awayEntryId,
     row.awayEntryName,
     row.awayPlayerName,
-    row.awayIsAverage,
+    awayIsAverage,
     row.isBye,
-    row.awayNetPoints,
+    awayNetPoints,
     awayRead,
   );
   const sideReady = (side: H2HMatchSide): boolean =>
@@ -1715,26 +1726,26 @@ async function publishH2HMatch(
       (isTimestampAtOrAfter(row.sourceCheckedAt, row.finalizationAt) &&
         finalInputAvailable(
           row.homeEntryId,
-          row.homeIsAverage,
+          homeIsAverage,
           homeRead,
           row.homeProfileSourceCheckedAt,
           row.finalizationAt,
         ) &&
         finalInputAvailable(
           row.awayEntryId,
-          row.awayIsAverage,
+          awayIsAverage,
           awayRead,
           row.awayProfileSourceCheckedAt,
           row.finalizationAt,
         ) &&
         hasCompleteH2HOfficialScores(
           row.homeEntryId,
-          row.homeNetPoints,
+          homeNetPoints,
           row.awayEntryId,
-          row.awayNetPoints,
+          awayNetPoints,
           row.isBye,
-          row.isBye && row.homeEntryId === null ? false : row.homeIsAverage,
-          row.isBye && row.awayEntryId === null ? false : row.awayIsAverage,
+          homeIsAverage,
+          awayIsAverage,
         )));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',

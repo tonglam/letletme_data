@@ -78,11 +78,13 @@ import {
   findMissingEntryLiveInputIds,
   markLivePicksEntryComplete,
   persistLivePicksDurableFreshnessEvidence,
+  ensureLiveBootstrapReady,
 } from '../services/live-lifecycle-orchestrator';
 import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
   completeSchedulerObligation,
   completeSchedulerObligationByBullJobId,
+  deferSchedulerObligationForWorker,
   failSchedulerObligation,
   failSchedulerObligationByBullJobId,
 } from '../services/scheduler-obligation-lifecycle.service';
@@ -539,6 +541,37 @@ export function createEntrySyncWorker(
     // A stale root must not write an older season merely because it takes the
     // dedicated branch before the ordinary entry path's guard.
     const season = await requireCurrentSeasonForJob(job.data);
+    if (
+      job.data.bootstrapGateRequired === true &&
+      (job.name === 'entry-picks' || job.name === 'entry-transfers') &&
+      typeof job.data.eventId === 'number'
+    ) {
+      const bootstrap = await ensureLiveBootstrapReady(season, job.data.eventId, new Date());
+      if (bootstrap.status !== 'ready') {
+        const evidence = {
+          reason:
+            bootstrap.status === 'unknown'
+              ? 'SOURCE_NOT_READY:BOOTSTRAP_PROBE_UNKNOWN'
+              : 'SOURCE_NOT_READY:BOOTSTRAP_HTTP_NOT_200',
+          bootstrapStatus: bootstrap.status,
+          bootstrapHttpStatus: bootstrap.httpStatus,
+          bootstrapCheckedAt: bootstrap.checkedAt,
+          bootstrapNextProbeAt: bootstrap.nextProbeAt,
+          eventId: job.data.eventId,
+        };
+        const fence = inspectSchedulerObligationFence(job.data);
+        if (fence.kind === 'complete') {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: fence.obligationId,
+            generation: fence.generation,
+            dependencyWait: { reasonCodes: [evidence.reason] },
+            evidence,
+          });
+          if (!deferred) throw new Error('Stale scheduler bootstrap gate');
+        }
+        return { ...evidence, status: 'waiting-dependencies' as const, scanComplete: false };
+      }
+    }
     // The dedicated live-picks lane carries one root canary job followed by
     // entry-picks child jobs. Both must share the same consumer so the root
     // cannot be accidentally treated as a normal entry payload (or marked
@@ -562,6 +595,32 @@ export function createEntrySyncWorker(
         () => runLivePicksRefreshJob(job.data as unknown as LivePicksRefreshJobData),
       );
       const fence = inspectSchedulerObligationFence(job.data);
+      if (result.status === 'waiting-dependencies') {
+        if (fence.kind === 'complete') {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: fence.obligationId,
+            generation: fence.generation,
+            dependencyWait: {
+              reasonCodes: [
+                result.sourceReason === 'BOOTSTRAP_PROBE_UNKNOWN'
+                  ? 'SOURCE_NOT_READY:BOOTSTRAP_PROBE_UNKNOWN'
+                  : 'SOURCE_NOT_READY:BOOTSTRAP_HTTP_NOT_200',
+              ],
+            },
+            evidence: {
+              queue: workerQueueName,
+              jobName: job.name,
+              eventId: job.data.eventId,
+              sourceReady: result.sourceReady,
+              sourceReason: result.sourceReason,
+              scanComplete: result.scanComplete,
+              finalizer: 'live-picks-bootstrap-gate',
+            },
+          });
+          if (!deferred) throw new Error('Stale scheduler bootstrap gate');
+        }
+        return result;
+      }
       if (result.outcome === 'accepted-backoff') {
         if (fence.kind === 'complete') {
           await completeSchedulerObligation({

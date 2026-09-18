@@ -630,6 +630,10 @@ export type FPLBootstrapRequestOptions = Readonly<{
   /** Non-blocking observer for the completed real HTTP attempts. */
   onAttempt?: (result: FPLRequestAttemptResult) => void;
 }>;
+export type FPLBootstrapProbeResult = Readonly<{
+  status: number;
+  checkedAt: Date;
+}>;
 export type FPLBootstrapArtifactResponse = Readonly<{
   bytes: Uint8Array;
   payload: FPLBootstrapResponse;
@@ -1005,6 +1009,33 @@ class FPLClient {
         error instanceof Error ? error : new Error(String(error)),
       );
     }
+  }
+
+  /**
+   * Check whether the bootstrap endpoint is serving an HTTP 200 response.
+   *
+   * This is intentionally a status-only boundary for the post-deadline
+   * admission gate. It must not parse `is_current` or any other bootstrap
+   * field: the scheduler only needs to know whether the source is available
+   * before it starts the one-shot picks/transfers fan-out.
+   */
+  async probeBootstrap(options: FPLBootstrapRequestOptions = {}): Promise<FPLBootstrapProbeResult> {
+    const requestUrl = new URL(`${this.baseUrl}/bootstrap-static/`);
+    const edgeCacheKey = options.edgeCacheKey?.trim();
+    if (edgeCacheKey) requestUrl.searchParams.set('letletme_cache_bucket', edgeCacheKey);
+
+    const response = await this.request(requestUrl.toString(), {
+      priority: options.priority ?? 'live',
+      deadlineMs: options.deadlineMs,
+      admissionTimeoutMs: options.admissionTimeoutMs,
+      attemptTimeoutMs: options.attemptTimeoutMs,
+      overallDeadlineMs: options.overallDeadlineMs,
+      // A cadence-driven gate must not turn a single 503 into an internal
+      // retry storm. The next scheduler/coordinator pass owns the retry.
+      maxRetries: options.maxRetries ?? 0,
+      onAttempt: options.onAttempt,
+    });
+    return { status: response.status, checkedAt: new Date() };
   }
 
   /**

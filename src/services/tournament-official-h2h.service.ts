@@ -32,6 +32,7 @@ import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
 import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
+import { eventRepository } from '../repositories/events';
 
 const MAX_H2H_PAGES = 100;
 
@@ -327,7 +328,12 @@ export function validatedOfficialH2HSyncOptions(
 export function suppressOfficialH2HActiveScores(
   snapshot: OfficialH2HSourceSnapshot,
   eventId: number,
+  averageEntryScore: number | null = null,
 ): OfficialH2HSourceSnapshot {
+  const canonicalAverageScore =
+    typeof averageEntryScore === 'number' && Number.isFinite(averageEntryScore)
+      ? averageEntryScore
+      : null;
   return {
     ...snapshot,
     matches: snapshot.matches.map((match) =>
@@ -335,8 +341,8 @@ export function suppressOfficialH2HActiveScores(
         ? match
         : {
             ...match,
-            entry_1_points: match.entry_1_entry === null ? match.entry_1_points : null,
-            entry_2_points: match.entry_2_entry === null ? match.entry_2_points : null,
+            entry_1_points: match.entry_1_entry === null ? canonicalAverageScore : null,
+            entry_2_points: match.entry_2_entry === null ? canonicalAverageScore : null,
             winner: null,
           },
     ),
@@ -345,16 +351,21 @@ export function suppressOfficialH2HActiveScores(
 
 /**
  * Overlay real manager sides with net scores from one coherent event-live
- * batch. FPL itself owns the synthetic Average Team side, so retain its score
- * from the same freshly fetched H2H snapshot. Reject the batch if that provider
- * score is absent; one odd-sized league must not suppress every real matchup.
+ * batch. The synthetic Average Team score is the canonical event fact
+ * persisted from bootstrap/core; the official H2H feed is not a live-score
+ * source for that side.
  */
 export function projectOfficialH2HEventLiveScores(
   snapshot: OfficialH2HSourceSnapshot,
   eventId: number,
   entryIds: ReadonlySet<number>,
   batch: EventLiveScoreBatch | null,
+  averageEntryScore: number | null = null,
 ): OfficialH2HSourceSnapshot | null {
+  const canonicalAverageScore =
+    typeof averageEntryScore === 'number' && Number.isFinite(averageEntryScore)
+      ? averageEntryScore
+      : null;
   if (
     !batch ||
     batch.eventId !== eventId ||
@@ -372,8 +383,8 @@ export function projectOfficialH2HEventLiveScores(
       (match) =>
         match.event === eventId &&
         match.is_bye !== true &&
-        ((match.entry_1_entry === null && typeof match.entry_1_points !== 'number') ||
-          (match.entry_2_entry === null && typeof match.entry_2_points !== 'number')),
+        ((match.entry_1_entry === null && canonicalAverageScore === null) ||
+          (match.entry_2_entry === null && canonicalAverageScore === null)),
     )
   ) {
     return null;
@@ -385,11 +396,11 @@ export function projectOfficialH2HEventLiveScores(
       if (match.event !== eventId) return match;
       const homePoints =
         match.entry_1_entry === null
-          ? match.entry_1_points
+          ? canonicalAverageScore
           : (batch.scores.get(match.entry_1_entry)?.netEventPoints ?? null);
       const awayPoints =
         match.entry_2_entry === null
-          ? match.entry_2_points
+          ? canonicalAverageScore
           : (batch.scores.get(match.entry_2_entry)?.netEventPoints ?? null);
       const winner =
         match.is_bye === true || homePoints === null || awayPoints === null
@@ -411,6 +422,31 @@ export function projectOfficialH2HEventLiveScores(
         winner,
       };
     }),
+  };
+}
+
+export function overlayOfficialH2HAverageScore(
+  snapshot: OfficialH2HSourceSnapshot,
+  eventId: number,
+  averageEntryScore: number | null,
+): OfficialH2HSourceSnapshot {
+  const canonicalAverageScore =
+    typeof averageEntryScore === 'number' && Number.isFinite(averageEntryScore)
+      ? averageEntryScore
+      : null;
+  return {
+    ...snapshot,
+    matches: snapshot.matches.map((match) =>
+      match.event !== eventId || match.is_bye === true
+        ? match
+        : {
+            ...match,
+            entry_1_points:
+              match.entry_1_entry === null ? canonicalAverageScore : match.entry_1_points,
+            entry_2_points:
+              match.entry_2_entry === null ? canonicalAverageScore : match.entry_2_points,
+          },
+    ),
   };
 }
 
@@ -1132,6 +1168,15 @@ export async function syncOfficialH2HTournament(
       pageManifests: manifests,
     };
   }
+  const averageScoreEventId = reconcileEventId ?? options.provisionalEventId ?? null;
+  const averageScoreEvent =
+    averageScoreEventId === null
+      ? null
+      : await eventRepository.findById(season, averageScoreEventId);
+  const averageEntryScore = averageScoreEvent?.averageEntryScore ?? null;
+  if (averageScoreEventId !== null) {
+    snapshot = overlayOfficialH2HAverageScore(snapshot, averageScoreEventId, averageEntryScore);
+  }
   const entryIds = await entryIdsPromise;
   const entryIdSet = new Set(entryIds);
   if (snapshot.standings.length > 0 && snapshot.standings.length !== entryIdSet.size) {
@@ -1171,12 +1216,13 @@ export async function syncOfficialH2HTournament(
           requestedProvisionalEventId,
           entryIdSet,
           eventLiveBatch,
+          averageEntryScore,
         );
   const scoringSnapshot =
     requestedProvisionalEventId === null
       ? snapshot
       : (eventLiveSnapshot ??
-        suppressOfficialH2HActiveScores(snapshot, requestedProvisionalEventId));
+        suppressOfficialH2HActiveScores(snapshot, requestedProvisionalEventId, averageEntryScore));
   const effectiveOptions =
     requestedProvisionalEventId === null
       ? validatedOfficialH2HSyncOptions(entryIdSet, scoringSnapshot.matches, options)

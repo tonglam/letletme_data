@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   fetchOfficialH2HSourceSnapshot,
+  overlayOfficialH2HAverageScore,
   projectOfficialH2HEventLiveScores,
   type OfficialH2HSourceSnapshot,
 } from '../../src/services/tournament-official-h2h.service';
@@ -115,5 +116,35 @@ describe('Official H2H Live Points V2 projection', () => {
         batch(new Map([[109967, { eventPoints: 37, netEventPoints: 37, transferCost: 0 }]])),
       ),
     ).toBeNull();
+  });
+
+  test('does not use an official-feed Average Team score as a fallback', () => {
+    const providerAverage = snapshot(null);
+    providerAverage.matches[0].entry_2_points = 99;
+
+    expect(
+      projectOfficialH2HEventLiveScores(
+        providerAverage,
+        1,
+        new Set([109967]),
+        batch(new Map([[109967, { eventPoints: 37, netEventPoints: 37, transferCost: 0 }]])),
+      ),
+    ).toBeNull();
+
+    const canonical = overlayOfficialH2HAverageScore(providerAverage, 1, 30);
+    expect(canonical.matches[0]).toMatchObject({ entry_2_points: 30 });
+    expect(
+      projectOfficialH2HEventLiveScores(
+        canonical,
+        1,
+        new Set([109967]),
+        batch(new Map([[109967, { eventPoints: 37, netEventPoints: 37, transferCost: 0 }]])),
+        30,
+      )?.matches[0],
+    ).toMatchObject({ entry_1_points: 37, entry_2_points: 30, winner: 109967 });
+
+    expect(overlayOfficialH2HAverageScore(providerAverage, 1, null).matches[0]).toMatchObject({
+      entry_2_points: null,
+    });
   });
 });

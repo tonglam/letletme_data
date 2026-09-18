@@ -361,7 +361,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'LIVE_ACTIVE',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
     });
   });
 
@@ -389,7 +389,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
     });
   });
 
@@ -422,7 +422,8 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldObserveMatches: true,
+      shouldSyncPicks: false,
     });
   });
 
@@ -465,11 +466,12 @@ describe('live lifecycle decisions', () => {
 
     expect(decision).toMatchObject({
       state: 'GW_REVIEW',
-      shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldFetchLive: false,
+      shouldObserveMatches: true,
+      shouldSyncPicks: false,
       finalizeEvent: false,
     });
-    expect(shouldRefreshOfficialH2H(decision, false)).toBe(true);
+    expect(shouldRefreshOfficialH2H(decision, false)).toBe(false);
     expect(
       resolveLiveLifecycleDelay(
         decision,
