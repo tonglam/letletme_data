@@ -387,9 +387,19 @@ for index, item in ipairs(candidate.items) do
   local key = ARGV[6 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
 end
+local function valid_epoch(raw)
+  if type(raw) ~= 'string' then return false end
+  local digits = string.match(raw, '^%d+$')
+  if not digits or (#raw > 1 and string.sub(raw, 1, 1) == '0') then return false end
+  local value = tonumber(raw)
+  return value ~= nil
+    and value >= 0
+    and value <= 9007199254740991
+    and math.floor(value) == value
+end
 local repair_type = redis.call('TYPE', KEYS[4])
 local repair_type_name = type(repair_type) == 'table' and repair_type['ok'] or repair_type
-if repair_type_name == 'string' and tonumber(redis.call('GET', KEYS[4])) == nil then
+if repair_type_name == 'string' and not valid_epoch(redis.call('GET', KEYS[4])) then
   redis.call('DEL', KEYS[4])
 elseif repair_type_name ~= 'none' and repair_type_name ~= 'string' then
   redis.call('DEL', KEYS[4])
@@ -427,9 +437,19 @@ for index, item in ipairs(candidate.items) do
   local key = ARGV[7 + ((index - 1) * 2)]
   if key ~= item.key then return {'conflict'} end
 end
+local function valid_epoch(raw)
+  if type(raw) ~= 'string' then return false end
+  local digits = string.match(raw, '^%d+$')
+  if not digits or (#raw > 1 and string.sub(raw, 1, 1) == '0') then return false end
+  local value = tonumber(raw)
+  return value ~= nil
+    and value >= 0
+    and value <= 9007199254740991
+    and math.floor(value) == value
+end
 local repair_type = redis.call('TYPE', KEYS[4])
 local repair_type_name = type(repair_type) == 'table' and repair_type['ok'] or repair_type
-if repair_type_name == 'string' and tonumber(redis.call('GET', KEYS[4])) == nil then
+if repair_type_name == 'string' and not valid_epoch(redis.call('GET', KEYS[4])) then
   redis.call('DEL', KEYS[4])
 elseif repair_type_name ~= 'none' and repair_type_name ~= 'string' then
   redis.call('DEL', KEYS[4])
@@ -455,37 +475,66 @@ return {'replaced', tostring(repair_epoch)}
 `;
 
 /**
- * Read all immutable payloads and advance the per-scope epoch in one Redis
- * transaction. A repair EVAL advances the same epoch immediately before it
- * writes items, so a failure can be ordered against the payload read by the
+ * Read all immutable payloads and observe the per-scope repair epoch in one
+ * Redis transaction. Only a repair EVAL advances the epoch immediately before
+ * it writes items, so a failure can be ordered against the payload read by the
  * Redis server rather than by caller wall-clock timestamps.
  */
 const READ_DATA_PUBLICATION_PAYLOADS_WITH_EPOCH_SCRIPT = `
+local function valid_epoch(raw)
+  if type(raw) ~= 'string' then return false end
+  local digits = string.match(raw, '^%d+$')
+  if not digits or (#raw > 1 and string.sub(raw, 1, 1) == '0') then return false end
+  local value = tonumber(raw)
+  return value ~= nil
+    and value >= 0
+    and value <= 9007199254740991
+    and math.floor(value) == value
+end
 local epoch_type = redis.call('TYPE', KEYS[1])
 local epoch_type_name = type(epoch_type) == 'table' and epoch_type['ok'] or epoch_type
-if epoch_type_name == 'string' and tonumber(redis.call('GET', KEYS[1])) == nil then
-  redis.call('DEL', KEYS[1])
-elseif epoch_type_name ~= 'none' and epoch_type_name ~= 'string' then
+local epoch = 0
+if epoch_type_name == 'string' then
+  local raw = redis.call('GET', KEYS[1])
+  if valid_epoch(raw) then
+    epoch = tonumber(raw)
+  else
+    redis.call('DEL', KEYS[1])
+  end
+elseif epoch_type_name ~= 'none' then
   redis.call('DEL', KEYS[1])
 end
-local epoch = redis.call('INCR', KEYS[1])
-redis.call('PERSIST', KEYS[1])
 local payloads = redis.call('MGET', unpack(ARGV, 1, #ARGV))
 table.insert(payloads, 1, tostring(epoch))
 return payloads
 `;
 
 const MARK_INTEGRITY_FAILURE_SCRIPT = `
+local function valid_epoch(raw)
+  if type(raw) ~= 'string' then return false end
+  local digits = string.match(raw, '^%d+$')
+  if not digits or (#raw > 1 and string.sub(raw, 1, 1) == '0') then return false end
+  local value = tonumber(raw)
+  return value ~= nil
+    and value >= 0
+    and value <= 9007199254740991
+    and math.floor(value) == value
+end
 local repair_at = 0
 local repair_type = redis.call('TYPE', KEYS[4])
 local repair_type_name = type(repair_type) == 'table' and repair_type['ok'] or repair_type
 if repair_type_name == 'string' then
-  repair_at = tonumber(redis.call('GET', KEYS[4])) or 0
+  local raw = redis.call('GET', KEYS[4])
+  if valid_epoch(raw) then
+    repair_at = tonumber(raw)
+  else
+    redis.call('DEL', KEYS[4])
+  end
 elseif repair_type_name ~= 'none' then
   redis.call('DEL', KEYS[4])
 end
 local observed_at = tonumber(ARGV[3]) or 0
-if observed_at <= repair_at then return -1 end
+if observed_at < repair_at then return -1 end
 local active_matches = false
 if ARGV[1] ~= '*' then
   local active_raw = redis.call('GET', KEYS[3])
@@ -615,12 +664,12 @@ function clearLocalIntegrityFailureAfterRepair(
   const expected = publicationIntegrityToken(manifest);
   const exactKey = localIntegrityFailureKey(prefix, expected);
   const exact = publicationIntegrityFailures.get(exactKey);
-  if (exact && (exact.observationDomain === 'wall-clock' || exact.observedAt <= repairEpoch)) {
+  if (exact && (exact.observationDomain === 'wall-clock' || exact.observedAt < repairEpoch)) {
     publicationIntegrityFailures.delete(exactKey);
   }
   // A full read records the Redis epoch at which it atomically captured the
   // immutable payload. A read ordered before this repair is stale evidence and
-  // may be cleared; a read ordered afterwards stays sticky for a new repair.
+  // may be cleared; a read at or after this repair stays sticky for a new repair.
 }
 
 async function getRedisForIntegrityMarker(
@@ -714,7 +763,7 @@ export async function markDataPublicationIntegrityFailure(
         if (
           current &&
           current.observationDomain === observationDomain &&
-          current.observedAt <= observedValue
+          current.observedAt < observedValue
         ) {
           publicationIntegrityFailures.delete(localKey);
         }
@@ -957,7 +1006,7 @@ async function readDataPublicationPayloadsWithEpoch(
     throw new Error('Publication payload epoch read returned an invalid result');
   }
   const observedEpoch = Number(raw[0]);
-  if (!Number.isSafeInteger(observedEpoch) || observedEpoch <= 0) {
+  if (!Number.isSafeInteger(observedEpoch) || observedEpoch < 0) {
     throw new Error('Publication payload epoch is invalid');
   }
   const payloads = raw.slice(1).map((payload) => (payload === false ? null : payload));
