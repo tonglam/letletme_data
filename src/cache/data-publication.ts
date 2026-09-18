@@ -568,6 +568,26 @@ table.insert(payloads, 1, 'ok')
 return payloads
 `;
 
+/**
+ * Check a proof only when the matching shared failure marker is absent. Keep
+ * both keys in one Redis script so a full reader cannot place the failure
+ * marker between the two ordinary GETs and have a stale proof accepted.
+ */
+const CHECK_DATA_PUBLICATION_INTEGRITY_PROOF_SCRIPT = `
+local failure_type = redis.call('TYPE', KEYS[1])
+local failure_type_name = type(failure_type) == 'table' and failure_type['ok'] or failure_type
+if failure_type_name == 'string' then
+  local failure = redis.call('GET', KEYS[1])
+  if failure == '*' or failure == ARGV[1] then return 0 end
+elseif failure_type_name ~= 'none' then
+  return 0
+end
+local proof_type = redis.call('TYPE', KEYS[2])
+local proof_type_name = type(proof_type) == 'table' and proof_type['ok'] or proof_type
+if proof_type_name ~= 'string' then return 0 end
+return redis.call('GET', KEYS[2]) == ARGV[2] and 1 or 0
+`;
+
 const MARK_INTEGRITY_FAILURE_SCRIPT = `
 local function valid_epoch(raw)
   if type(raw) ~= 'string' then return false end
@@ -894,7 +914,7 @@ export async function hasDataPublicationIntegrityFailure(
     // Do not perform a second proof lookup that cannot change the result; during
     // a Redis incident that redundant command would only add latency to every
     // control-path caller until the local marker expires.
-    return localMatches;
+    return localMatches || hasLocalDataPublicationIntegrityFailure(scope, manifest);
   } catch {
     // Redis is the cross-process source of integrity evidence. If its marker
     // cannot be read, absence of a local marker is not proof that another
@@ -998,7 +1018,35 @@ export async function hasDataPublicationIntegrityProof(
 ): Promise<boolean> {
   try {
     const redis = await getRedisForIntegrityMarker(redisClient);
-    return (await redis.get(integrityProofKey(scope))) === publicationIntegrityProofToken(manifest);
+    if (hasLocalDataPublicationIntegrityFailure(scope, manifest)) return false;
+    const expected = publicationIntegrityToken(manifest);
+    const proof = publicationIntegrityProofToken(manifest);
+    const evalMethod = (redis as unknown as { eval?: (...args: unknown[]) => Promise<unknown> })
+      .eval;
+    let matches: boolean;
+    if (typeof evalMethod === 'function') {
+      matches =
+        Number(
+          await evalMethod.call(
+            redis,
+            CHECK_DATA_PUBLICATION_INTEGRITY_PROOF_SCRIPT,
+            2,
+            integrityFailureKey(scope),
+            integrityProofKey(scope),
+            expected,
+            proof,
+          ),
+        ) === 1;
+    } else {
+      const failure = await redis.get(integrityFailureKey(scope));
+      matches =
+        failure !== '*' &&
+        failure !== expected &&
+        (await redis.get(integrityProofKey(scope))) === proof;
+    }
+    // A full reader can record process-local corruption while the shared
+    // proof/failure check is in flight. Recheck before accepting the proof.
+    return matches && !hasLocalDataPublicationIntegrityFailure(scope, manifest);
   } catch {
     return false;
   }
