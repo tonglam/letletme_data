@@ -1001,7 +1001,7 @@ case "$url" in
   */health/live) exit 0 ;;
   */health/deploy)
     printf '%s\n' '{"status":"deploy_not_ready"}'
-    if [[ " $* " == *' --fail '* ]]; then exit 22; fi
+    if [[ " $* " == *' --fail-with-body '* ]]; then exit 22; fi
     exit 0
     ;;
   *) exit 1 ;;
