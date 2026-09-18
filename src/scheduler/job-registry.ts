@@ -1275,6 +1275,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             matchObservationOnly,
             promoteActiveEvent: matchObservationOnly && decision.state !== 'PRE_DEADLINE',
             bootstrapGateRequired,
+            picksGateRequired: picksCompletionGateRequired,
           },
         },
       ];
@@ -1311,6 +1312,7 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
         matchObservationOnly: plan.evidence?.matchObservationOnly === true,
         ...(plan.evidence?.promoteActiveEvent === true ? { promoteActiveEvent: true } : {}),
         bootstrapGateRequired: plan.evidence?.bootstrapGateRequired === true,
+        picksGateRequired: plan.evidence?.picksGateRequired === true,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },
@@ -1589,6 +1591,7 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         reuseExisting: true,
         lifecycleState: 'FINALIZED',
         bootstrapGateRequired: true,
+        picksGateRequired: true,
         obligationId,
         obligationGeneration: generation,
         freshnessWindowId,

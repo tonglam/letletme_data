@@ -132,7 +132,14 @@ describe('Official H2H Live Points V2 projection', () => {
     ).toBeNull();
 
     const canonical = overlayOfficialH2HAverageScore(providerAverage, 1, 30);
-    expect(canonical.matches[0]).toMatchObject({ entry_2_points: 30 });
+    expect(canonical.matches[0]).toMatchObject({
+      entry_2_points: 30,
+      entry_1_total: 0,
+      entry_2_total: 3,
+      entry_1_win: 0,
+      entry_2_win: 1,
+      winner: null,
+    });
     expect(
       projectOfficialH2HEventLiveScores(
         canonical,
@@ -145,6 +152,10 @@ describe('Official H2H Live Points V2 projection', () => {
 
     expect(overlayOfficialH2HAverageScore(providerAverage, 1, null).matches[0]).toMatchObject({
       entry_2_points: null,
+      winner: null,
     });
+    expect(overlayOfficialH2HAverageScore(providerAverage, 1, null).matches[0].entry_1_total).toBe(
+      undefined,
+    );
   });
 });

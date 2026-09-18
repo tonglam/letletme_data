@@ -47,6 +47,8 @@ export async function runLiveSnapshot(now = new Date()): Promise<unknown | null>
     now,
     lifecycleState: 'LIVE_ACTIVE',
     expectedNextCheckAt: new Date(now.getTime() + LIVE_POLL_MS),
+    bootstrapGateRequired: true,
+    picksGateRequired: true,
   });
   if (job) {
     logInfo('Live snapshot job enqueued', {

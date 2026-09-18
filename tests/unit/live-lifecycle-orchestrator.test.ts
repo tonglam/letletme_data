@@ -228,6 +228,8 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain('PICKS_WAIT');
     const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
     expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect');
+    expect(lifecycleSource).toContain('readLiveBootstrapGate(seasonCode, eventId)');
+    expect(lifecycleSource).toContain('picksGateRequired: true');
     expect(lifecycleSource).toContain('matchObservationOnly: true');
     expect(lifecycleSource).toContain('if (!tick)');
     expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect(season, null, now)');

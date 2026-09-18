@@ -64,6 +64,7 @@ export async function enqueueLiveActiveSnapshot(
     lifecycleState,
     expectedNextCheckAt,
     bootstrapGateRequired: true,
+    picksGateRequired: true,
   });
 }
 

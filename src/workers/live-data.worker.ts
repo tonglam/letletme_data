@@ -514,6 +514,8 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
             db: databaseBudget?.writeDb,
           });
           if (!deferred) throw new Error('Stale scheduler bootstrap gate');
+        } else {
+          throw new Error(evidence.reason);
         }
         return { ...evidence, status: 'waiting-dependencies' as const };
       }

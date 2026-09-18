@@ -556,8 +556,15 @@ export async function isLivePicksProbeDue(
   eventId: number,
   now = new Date(),
 ): Promise<boolean> {
-  const state = await readPicksCoordinatorState(seasonCode, eventId);
-  return now.getTime() >= state.nextProbeAt;
+  const [state, bootstrap] = await Promise.all([
+    readPicksCoordinatorState(seasonCode, eventId),
+    readLiveBootstrapGate(seasonCode, eventId),
+  ]);
+  const bootstrapNextProbeAt = bootstrap.nextProbeAt ? Date.parse(bootstrap.nextProbeAt) : NaN;
+  return (
+    now.getTime() >= state.nextProbeAt &&
+    (!Number.isFinite(bootstrapNextProbeAt) || now.getTime() >= bootstrapNextProbeAt)
+  );
 }
 
 export function resolveLivePicksRefreshFanout(
@@ -1790,6 +1797,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
             ? { promoteActiveEvent: decision.state !== 'PRE_DEADLINE' }
             : {}),
           ...(shouldFetchLiveNow ? { bootstrapGateRequired: true } : {}),
+          ...(shouldFetchLiveNow ? { picksGateRequired: true } : {}),
         });
       }
     }

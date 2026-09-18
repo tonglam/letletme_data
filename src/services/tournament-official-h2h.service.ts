@@ -436,17 +436,88 @@ export function overlayOfficialH2HAverageScore(
       : null;
   return {
     ...snapshot,
-    matches: snapshot.matches.map((match) =>
-      match.event !== eventId || match.is_bye === true
-        ? match
-        : {
-            ...match,
-            entry_1_points:
-              match.entry_1_entry === null ? canonicalAverageScore : match.entry_1_points,
-            entry_2_points:
-              match.entry_2_entry === null ? canonicalAverageScore : match.entry_2_points,
-          },
-    ),
+    matches: snapshot.matches.map((match) => {
+      if (
+        match.event !== eventId ||
+        match.is_bye === true ||
+        (match.entry_1_entry !== null && match.entry_2_entry !== null)
+      ) {
+        return match;
+      }
+      const entry1Points =
+        match.entry_1_entry === null ? canonicalAverageScore : match.entry_1_points;
+      const entry2Points =
+        match.entry_2_entry === null ? canonicalAverageScore : match.entry_2_points;
+      const outcome = deriveOfficialH2HScoreOutcome(match, entry1Points, entry2Points);
+      return {
+        ...match,
+        entry_1_points: entry1Points,
+        entry_2_points: entry2Points,
+        ...outcome,
+      };
+    }),
+  };
+}
+
+function deriveOfficialH2HScoreOutcome(
+  match: RawFPLLeagueH2HMatch,
+  entry1Points: number | null,
+  entry2Points: number | null,
+): Pick<
+  RawFPLLeagueH2HMatch,
+  | 'entry_1_win'
+  | 'entry_1_draw'
+  | 'entry_1_loss'
+  | 'entry_1_total'
+  | 'entry_2_win'
+  | 'entry_2_draw'
+  | 'entry_2_loss'
+  | 'entry_2_total'
+  | 'winner'
+> {
+  if (typeof entry1Points !== 'number' || typeof entry2Points !== 'number') {
+    return {
+      entry_1_win: undefined,
+      entry_1_draw: undefined,
+      entry_1_loss: undefined,
+      entry_1_total: undefined,
+      entry_2_win: undefined,
+      entry_2_draw: undefined,
+      entry_2_loss: undefined,
+      entry_2_total: undefined,
+      winner: null,
+    };
+  }
+
+  const tied = entry1Points === entry2Points;
+  const knockoutWinner =
+    tied &&
+    isOfficialKnockoutMatch(match) &&
+    match.tiebreak !== null &&
+    match.tiebreak !== undefined &&
+    (match.winner === match.entry_1_entry || match.winner === match.entry_2_entry)
+      ? match.winner
+      : null;
+  const winner = tied
+    ? knockoutWinner
+    : entry1Points > entry2Points
+      ? match.entry_1_entry
+      : match.entry_2_entry;
+  const entry1Wins =
+    entry1Points > entry2Points || (tied && knockoutWinner === match.entry_1_entry);
+  const entry2Wins =
+    entry2Points > entry1Points || (tied && knockoutWinner === match.entry_2_entry);
+  const drawn = !entry1Wins && !entry2Wins;
+  return {
+    entry_1_win: entry1Wins ? 1 : 0,
+    entry_1_draw: drawn ? 1 : 0,
+    entry_1_loss: entry2Wins ? 1 : 0,
+    entry_1_total: entry1Wins ? 3 : drawn ? 1 : 0,
+    entry_2_win: entry2Wins ? 1 : 0,
+    entry_2_draw: drawn ? 1 : 0,
+    entry_2_loss: entry1Wins ? 1 : 0,
+    entry_2_total: entry2Wins ? 3 : drawn ? 1 : 0,
+    winner,
   };
 }
 
