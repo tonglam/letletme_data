@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readCoreSnapshotLifecycle } from '../cache/core-snapshot-cache';
 import { redisSingleton } from '../cache/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { eventRepository } from '../repositories/events';
 import { syncCoreSnapshot } from './core-snapshot.service';
 import type { LiveLifecycleState } from './live-lifecycle-orchestrator';
 import { logError, logInfo } from '../utils/logger';
@@ -16,6 +17,20 @@ export const LIVE_AVERAGE_REFRESH_INTERVAL_MS = 5 * 60_000;
 const LIVE_AVERAGE_REFRESH_LOCK_TTL_MS = 120_000;
 const LIVE_AVERAGE_FINAL_REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60;
 
+type FreshCoreSource = Readonly<{
+  fresh: boolean;
+  sourceCheckedAt: string | null;
+  revision: number | null;
+  publicationId: string | null;
+}>;
+
+type FinalAverageRefreshMarker = Readonly<{
+  finalizationAt: string;
+  coreRevision: number;
+  corePublicationId: string;
+  sourceCheckedAt: string;
+}>;
+
 export type LiveAverageRefreshResult = Readonly<{
   ready: boolean;
   refreshed: boolean;
@@ -26,7 +41,8 @@ export type LiveAverageRefreshResult = Readonly<{
     | 'final-refresh-complete'
     | 'refresh-in-flight'
     | 'core-unavailable'
-    | 'refresh-failed';
+    | 'refresh-failed'
+    | 'finalization-boundary-unavailable';
   sourceCheckedAt: string | null;
 }>;
 
@@ -63,16 +79,56 @@ return 0
   );
 }
 
-async function readFreshCoreSource(
-  seasonCode: string,
-  now: Date,
-): Promise<{ fresh: boolean; sourceCheckedAt: string | null }> {
+async function readFreshCoreSource(seasonCode: string, now: Date): Promise<FreshCoreSource> {
   const lifecycle = await readCoreSnapshotLifecycle(seasonCode);
   const sourceCheckedAt = lifecycle?.manifest.sourceCheckedAt ?? null;
   return {
     fresh: !shouldRefreshLiveAverage(sourceCheckedAt, now),
     sourceCheckedAt,
+    revision: lifecycle?.manifest.revision ?? null,
+    publicationId: lifecycle?.manifest.publicationId ?? null,
   };
+}
+
+function parseFinalAverageRefreshMarker(raw: string | null): FinalAverageRefreshMarker | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<FinalAverageRefreshMarker>;
+    if (
+      typeof value.finalizationAt !== 'string' ||
+      !Number.isFinite(Date.parse(value.finalizationAt)) ||
+      typeof value.coreRevision !== 'number' ||
+      !Number.isSafeInteger(value.coreRevision) ||
+      value.coreRevision <= 0 ||
+      typeof value.corePublicationId !== 'string' ||
+      value.corePublicationId.length === 0 ||
+      typeof value.sourceCheckedAt !== 'string' ||
+      !Number.isFinite(Date.parse(value.sourceCheckedAt))
+    ) {
+      return null;
+    }
+    return value as FinalAverageRefreshMarker;
+  } catch {
+    // Older marker values were plain timestamps. Treat them as legacy and
+    // force one revision-bound refresh rather than trusting them.
+    return null;
+  }
+}
+
+function finalAverageRefreshMarkerMatches(
+  raw: string | null,
+  current: FreshCoreSource,
+  finalizationAt: string | null,
+): boolean {
+  const marker = parseFinalAverageRefreshMarker(raw);
+  return Boolean(
+    marker &&
+      finalizationAt !== null &&
+      marker.finalizationAt === finalizationAt &&
+      marker.coreRevision === current.revision &&
+      marker.corePublicationId === current.publicationId &&
+      marker.sourceCheckedAt === current.sourceCheckedAt,
+  );
 }
 
 /**
@@ -103,13 +159,25 @@ export async function ensureLiveAverageReadyForPublication(
   }
 
   let redis: Awaited<ReturnType<typeof redisSingleton.getClient>>;
+  let finalizationAt: string | null = null;
   try {
+    if (finalRefresh) {
+      finalizationAt = await eventRepository.findDataCheckedAtExact(season, eventId);
+      if (finalizationAt === null) {
+        return {
+          ready: false,
+          refreshed: false,
+          reason: 'finalization-boundary-unavailable',
+          sourceCheckedAt: null,
+        };
+      }
+    }
     redis = await redisSingleton.getClient();
     if (finalRefresh) {
       const marker = await redis.get(finalRefreshKey(season.seasonCode, eventId));
       if (marker !== null) {
         const current = await readFreshCoreSource(season.seasonCode, now);
-        if (current.sourceCheckedAt !== null) {
+        if (finalAverageRefreshMarkerMatches(marker, current, finalizationAt)) {
           return {
             ready: true,
             refreshed: false,
@@ -132,7 +200,7 @@ export async function ensureLiveAverageReadyForPublication(
     };
   }
 
-  let current: { fresh: boolean; sourceCheckedAt: string | null };
+  let current: FreshCoreSource;
   try {
     current = await readFreshCoreSource(season.seasonCode, now);
   } catch (error) {
@@ -167,7 +235,10 @@ export async function ensureLiveAverageReadyForPublication(
       const finalMarker = finalRefresh
         ? await redis.get(finalRefreshKey(season.seasonCode, eventId))
         : null;
-      if (afterLock.fresh && (!finalRefresh || finalMarker !== null)) {
+      if (
+        afterLock.fresh &&
+        (!finalRefresh || finalAverageRefreshMarkerMatches(finalMarker, afterLock, finalizationAt))
+      ) {
         return {
           ready: true,
           refreshed: false,
@@ -204,9 +275,31 @@ export async function ensureLiveAverageReadyForPublication(
       };
     }
     if (finalRefresh) {
+      const markerFinalizationAt = finalizationAt;
+      const coreRevision = afterRefresh.revision;
+      const corePublicationId = afterRefresh.publicationId;
+      const sourceCheckedAt = afterRefresh.sourceCheckedAt;
+      if (
+        markerFinalizationAt === null ||
+        coreRevision === null ||
+        corePublicationId === null ||
+        sourceCheckedAt === null
+      ) {
+        return {
+          ready: false,
+          refreshed: true,
+          reason: 'refresh-failed',
+          sourceCheckedAt,
+        };
+      }
       await redis.set(
         finalRefreshKey(season.seasonCode, eventId),
-        afterRefresh.sourceCheckedAt ?? new Date().toISOString(),
+        JSON.stringify({
+          finalizationAt: markerFinalizationAt,
+          coreRevision,
+          corePublicationId,
+          sourceCheckedAt,
+        } satisfies FinalAverageRefreshMarker),
         'EX',
         String(LIVE_AVERAGE_FINAL_REFRESH_TTL_SECONDS),
       );

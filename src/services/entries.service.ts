@@ -310,6 +310,12 @@ export async function persistEntryEventPicksResponse(
     readonly historicalFinalBoundary?: Date | string;
     /** Preserve canonical deadline picks while taking reported facts from this provider response. */
     readonly preservedPicksBase?: RawFPLEntryEventPicksResponse;
+    /**
+     * The live-picks seed may precede the first Live Points publication. Keep
+     * the immutable picks/transfers input and defer only the mutable manager
+     * fact until an exact score revision exists.
+     */
+    readonly deferAssistantManagerPoints?: boolean;
   },
 ) {
   // Keep the source boundary at PostgreSQL precision when the caller has one;
@@ -321,6 +327,7 @@ export async function persistEntryEventPicksResponse(
       `Refusing entry picks for an unexpected event for entry ${entryId}, event ${eventId}`,
     );
   }
+  const existing = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
   let assistantManagerPoints: AssistantManagerPointsFact | undefined;
   const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
   if (managerChip) {
@@ -353,30 +360,42 @@ export async function persistEntryEventPicksResponse(
       }
     }
     if (
-      !currentObservation ||
-      (options?.liveObservation &&
-        !sameLiveScoreObservation(options.liveObservation, currentObservation))
+      !currentObservation &&
+      options?.deferAssistantManagerPoints === true &&
+      !options.historicalFinalBoundary
     ) {
-      throw new Error(
-        `Live observation changed while reading manager entry ${entryId}, event ${eventId}`,
+      // A seed snapshot is allowed to carry the complete roster/transfers
+      // base before the first Live Points publication. Preserve an already
+      // accepted fact if Redis is temporarily unavailable; never invent a new
+      // fact without its exact score revision.
+      assistantManagerPoints = existing?.input.picksBase.assistantManagerPoints;
+    } else {
+      if (
+        !currentObservation ||
+        (options?.liveObservation &&
+          !sameLiveScoreObservation(options.liveObservation, currentObservation))
+      ) {
+        throw new Error(
+          `Live observation changed while reading manager entry ${entryId}, event ${eventId}`,
+        );
+      }
+      if (!options?.providerEventLive) {
+        throw new Error(
+          `Manager points require a provider event-live observation for entry ${entryId}, event ${eventId}`,
+        );
+      }
+      const fact = assistantManagerPointsFactFromProviderObservation(
+        picks,
+        options.providerEventLive,
+        currentObservation,
       );
+      if (!fact) {
+        throw new Error(
+          `Manager points cannot be reconciled to the live observation for entry ${entryId}, event ${eventId}`,
+        );
+      }
+      assistantManagerPoints = fact;
     }
-    if (!options?.providerEventLive) {
-      throw new Error(
-        `Manager points require a provider event-live observation for entry ${entryId}, event ${eventId}`,
-      );
-    }
-    const fact = assistantManagerPointsFactFromProviderObservation(
-      picks,
-      options.providerEventLive,
-      currentObservation,
-    );
-    if (!fact) {
-      throw new Error(
-        `Manager points cannot be reconciled to the live observation for entry ${entryId}, event ${eventId}`,
-      );
-    }
-    assistantManagerPoints = fact;
   }
   const baseInput = entryLiveInputFromFplPicks(
     season,
@@ -386,7 +405,6 @@ export async function persistEntryEventPicksResponse(
     sourceCheckedAt,
     assistantManagerPoints,
   );
-  const existing = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
   // Previous totals are independent immutable evidence. Read them only for a
   // first publication; repeated source probes reuse the published value and
   // do not add a PostgreSQL read to the live provider lane.
@@ -591,7 +609,10 @@ export async function syncEntryEventPicks(
   season: FplSeasonRef,
   entryId: number,
   eventId: number,
-  options?: { readonly sourceCheckedAt?: Date | string },
+  options?: {
+    readonly sourceCheckedAt?: Date | string;
+    readonly deferAssistantManagerPoints?: boolean;
+  },
 ) {
   try {
     logInfo('Starting entry event picks sync', { entryId, eventId });
@@ -616,6 +637,7 @@ export async function syncEntryEventPicks(
     await persistEntryEventPicksResponse(season, entryId, eventId, picks, sourceCheckedAt, {
       liveObservation,
       providerEventLive,
+      deferAssistantManagerPoints: options?.deferAssistantManagerPoints === true,
     });
     logInfo('Entry event picks sync completed', { entryId, eventId });
     return { entryId, eventId };

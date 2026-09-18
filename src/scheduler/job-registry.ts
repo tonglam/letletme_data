@@ -1349,6 +1349,8 @@ function livePicksDefinition(): ScheduledJobDefinition {
         const picksEvidence = await readLivePicksDurableFreshnessEvidence(
           context.season,
           event.id,
+          undefined,
+          { includeManagerRepair: true },
         ).catch(() => null);
         // A failed proof read is fail-closed: the retry root can re-establish
         // the source gate and record the durable coverage evidence. An empty
@@ -1356,7 +1358,8 @@ function livePicksDefinition(): ScheduledJobDefinition {
         // does not create a perpetual repair loop.
         needsPicksRefresh =
           picksEvidence === null ||
-          (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true);
+          (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true) ||
+          picksEvidence.managerRepairRequired === true;
       }
       if (!needsPicksRefresh) return [];
       if (!(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))) return [];

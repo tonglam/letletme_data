@@ -802,6 +802,7 @@ export function createEntrySyncWorker(
               (entryId) =>
                 syncEntryEventPicks(season, entryId, targetEventId!, {
                   sourceCheckedAt: requestWatermark,
+                  deferAssistantManagerPoints: effectiveJobData?.lane === 'live-picks',
                 }),
               effectiveJobData,
               {

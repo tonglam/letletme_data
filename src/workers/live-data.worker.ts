@@ -708,6 +708,16 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
         reason: averageReady.reason,
         sourceCheckedAt: averageReady.sourceCheckedAt,
       });
+      if (job.data.finalizeEvent === true) {
+        const fence = inspectSchedulerObligationFence(job.data);
+        if (fence.kind !== 'complete') {
+          // The snapshot checkpoint above is durable, but a direct final job
+          // has no scheduler obligation that can be deferred. Fail delivery
+          // so BullMQ retries the official H2H/average dependency instead of
+          // permanently completing finalization with a missing publication.
+          throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${averageReady.reason}`);
+        }
+      }
     } else {
       try {
         h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(

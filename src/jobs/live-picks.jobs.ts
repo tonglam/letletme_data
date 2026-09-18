@@ -104,9 +104,22 @@ export async function runLivePicksRefreshJob(
       },
     );
     if (!result.sourceReady) {
-      // The worker owns the scheduler fence. Return a non-terminal result so
-      // it can defer the obligation instead of recording a Bull failure for a
-      // normal pre-bootstrap wait.
+      const schedulerFenced =
+        typeof job.obligationId === 'string' &&
+        job.obligationId.length > 0 &&
+        typeof job.obligationGeneration === 'number' &&
+        Number.isSafeInteger(job.obligationGeneration) &&
+        job.obligationGeneration >= 0;
+      if (!schedulerFenced) {
+        // A governance freshness repair has no scheduler obligation for the
+        // worker to defer. Throw so BullMQ retries after the shared probe
+        // backoff instead of marking the repair complete and losing the
+        // freshness window.
+        throw new Error(`SOURCE_NOT_READY:${result.sourceReason ?? 'PICKS_NOT_READY'}`);
+      }
+      // A fenced scheduler root is deferred by the worker, which preserves
+      // the durable obligation and avoids treating a normal pre-bootstrap
+      // wait as a failed delivery.
       return { ...result, status: 'waiting-dependencies' as const };
     }
     return result;

@@ -37,6 +37,7 @@ import {
   readEntryCheckpointDesiredV2,
   readLivePublicationV2,
   readEntryLiveInputV2,
+  readEntryLiveInputsV2,
   setEntryCheckpointDesiredV2,
 } from '../cache/live-publication-v2';
 import { redisSingleton } from '../cache/singleton';
@@ -124,12 +125,13 @@ export function shouldRunDirectLivePicksRepair(
   picksComplete: boolean,
   standaloneSchedulerEnabled: boolean,
   probeDue: boolean,
+  managerRepairRequired = false,
 ): boolean {
   return (
     !standaloneSchedulerEnabled &&
     !decision.shouldProbePicks &&
     shouldRequireLivePicksCompletionGate(decision.state) &&
-    !picksComplete &&
+    (!picksComplete || managerRepairRequired) &&
     probeDue
   );
 }
@@ -407,13 +409,16 @@ export async function ensureLiveBootstrapReady(
         bootstrapReadyAt: readyAt,
         bootstrapNextProbeAt: null,
       });
-      return {
-        status: 'ready',
-        httpStatus: 200,
-        checkedAt,
-        readyAt,
-        nextProbeAt: null,
-      };
+      const merged = await readLiveBootstrapGate(season.seasonCode, eventId);
+      return merged.status === 'ready'
+        ? merged
+        : {
+            status: 'ready',
+            httpStatus: 200,
+            checkedAt,
+            readyAt,
+            nextProbeAt: null,
+          };
     }
     const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
     await mergeLifecycleQuietState(season.seasonCode, eventId, {
@@ -423,13 +428,16 @@ export async function ensureLiveBootstrapReady(
       bootstrapReadyAt: null,
       bootstrapNextProbeAt: nextProbeAt,
     });
-    return {
-      status: 'not-ready',
-      httpStatus: probe.status,
-      checkedAt,
-      readyAt: null,
-      nextProbeAt,
-    };
+    const merged = await readLiveBootstrapGate(season.seasonCode, eventId);
+    return merged.status === 'ready'
+      ? merged
+      : {
+          status: 'not-ready',
+          httpStatus: probe.status,
+          checkedAt,
+          readyAt: null,
+          nextProbeAt,
+        };
   } catch (error) {
     const checkedAt = now.toISOString();
     const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
@@ -444,13 +452,16 @@ export async function ensureLiveBootstrapReady(
       season: season.seasonCode,
       eventId,
     });
-    return {
-      status: 'unknown',
-      httpStatus: null,
-      checkedAt,
-      readyAt: null,
-      nextProbeAt,
-    };
+    const merged = await readLiveBootstrapGate(season.seasonCode, eventId);
+    return merged.status === 'ready'
+      ? merged
+      : {
+          status: 'unknown',
+          httpStatus: null,
+          checkedAt,
+          readyAt: null,
+          nextProbeAt,
+        };
   }
 }
 
@@ -984,6 +995,7 @@ export async function readLivePicksDurableFreshnessEvidence(
   season: FplSeasonRef,
   eventId: number,
   db?: DbOrTransaction,
+  options: Readonly<{ includeManagerRepair?: boolean }> = {},
 ) {
   const expectedEntryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId, db);
   const heads = await createEntryEventPicksRepository(db).findHeadsByEventAndEntryIds(
@@ -1024,6 +1036,36 @@ export async function readLivePicksDurableFreshnessEvidence(
     (latest, head) => (!latest || head.checkpointedAt > latest ? head.checkpointedAt : latest),
     null,
   );
+  let managerRepairRequired = false;
+  if (options.includeManagerRepair === true && expectedEntryIds.length > 0) {
+    const liveObservation = await readLivePublicationV2({
+      season: season.seasonCode,
+      eventId,
+    });
+    if (liveObservation !== null) {
+      const inputReads = await readEntryLiveInputsV2(
+        expectedEntryIds.map((entryId) => ({
+          season: season.seasonCode,
+          eventId,
+          entryId,
+        })),
+      );
+      const livePublication = liveObservation.publication;
+      managerRepairRequired = expectedEntryIds.some((entryId) => {
+        const input = inputReads.get(entryId)?.input;
+        if (!input) return false;
+        const chip = input.picksBase.chip;
+        if (chip !== 'manager' && chip !== 'MANAGER') return false;
+        const managerFact = input.picksBase.assistantManagerPoints;
+        return (
+          managerFact === undefined ||
+          managerFact.livePublicationId !== livePublication.publicationId ||
+          managerFact.liveGeneration !== livePublication.generation ||
+          managerFact.liveScoreCoreRevision !== livePublication.revisions.scoreCore.revision
+        );
+      });
+    }
+  }
   return {
     revision,
     expectedCount: expectedEntryIds.length,
@@ -1033,6 +1075,10 @@ export async function readLivePicksDurableFreshnessEvidence(
     // An empty eligible cohort is not a completed publication. It is retired
     // as NOT_APPLICABLE by persistLivePicksDurableFreshnessEvidence instead.
     complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length,
+    // This mutable fact is intentionally separate from immutable picks
+    // coverage: it must not delay the first publication, but it does create a
+    // bounded repair root after a live score revision exists.
+    managerRepairRequired,
   } as const;
 }
 
@@ -1453,6 +1499,7 @@ export async function runPicksProbeAndSync(
       await persistEntryEventPicksResponse(season, entryId, eventId, payload, undefined, {
         liveObservation,
         providerEventLive,
+        deferAssistantManagerPoints: liveObservation === null,
       });
       return entryId;
     }),
@@ -1782,16 +1829,20 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   }
   let livePointsEligible = true;
   if (shouldRequireLivePicksCompletionGate(decision.state)) {
-    let picksEvidence = await readLivePicksDurableFreshnessEvidence(season, currentEvent.id).catch(
-      () => null,
-    );
+    let picksEvidence = await readLivePicksDurableFreshnessEvidence(
+      season,
+      currentEvent.id,
+      undefined,
+      { includeManagerRepair: true },
+    ).catch(() => null);
     const picksComplete = Boolean(
       picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
     );
+    const managerRepairRequired = picksEvidence?.managerRepairRequired === true;
     const directRepairProbeDue =
       !isStandaloneSchedulerEnabled() &&
       !decision.shouldProbePicks &&
-      !picksComplete &&
+      (!picksComplete || managerRepairRequired) &&
       (await isLivePicksProbeDue(season.seasonCode, currentEvent.id, now));
     if (
       shouldRunDirectLivePicksRepair(
@@ -1799,6 +1850,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         picksComplete,
         isStandaloneSchedulerEnabled(),
         directRepairProbeDue,
+        managerRepairRequired,
       )
     ) {
       await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {
@@ -1807,9 +1859,12 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
           state: decision.state,
         });
       });
-      picksEvidence = await readLivePicksDurableFreshnessEvidence(season, currentEvent.id).catch(
-        () => null,
-      );
+      picksEvidence = await readLivePicksDurableFreshnessEvidence(
+        season,
+        currentEvent.id,
+        undefined,
+        { includeManagerRepair: true },
+      ).catch(() => null);
     }
     // The durable picks cohort decides whether the full producer may be
     // planned. Bootstrap HTTP-200 admission belongs to the worker so a lost
