@@ -763,7 +763,7 @@ export async function markDataPublicationIntegrityFailure(
         if (
           current &&
           current.observationDomain === observationDomain &&
-          current.observedAt < observedValue
+          current.observedAt <= observedValue
         ) {
           publicationIntegrityFailures.delete(localKey);
         }
