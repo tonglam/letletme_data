@@ -56,6 +56,7 @@ import {
   getFinalizationAwarePostMatchResultsSlot,
 } from '../domain/post-match-results';
 import { eventRepository } from '../repositories/events';
+import { playerStatsRepository } from '../repositories/player-stats';
 import { fixtureRepository } from '../repositories/fixtures';
 import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
 import { getSchedulerObligationByIdentity } from '../repositories/scheduler-obligations';
@@ -1402,6 +1403,52 @@ export function officialH2HDefinition(
   };
 }
 
+function playerStatsDefinition(): ScheduledJobDefinition {
+  const daily = dailyDefinition({
+    name: 'player-stats',
+    hour: 9,
+    minute: 40,
+    cadence: 'daily',
+    catchUpPolicy: 'latest-authoritative',
+    criticality: 'normal',
+    queueName: 'data-sync',
+    successPredicate: 'current or latest event player stats persisted',
+    enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
+      const job = await enqueuePlayerStatsSyncJob(context.season, 'catchup', {
+        ...(plan.eventId === undefined ? {} : { eventId: plan.eventId }),
+        jobId: `scheduler-${obligationId}-g${generation}`,
+        removeOnSettle: false,
+        obligationId,
+        obligationGeneration: generation,
+        freshnessWindowId,
+      });
+      return { bullJobId: job.id, runId: job.data.runId };
+    },
+  });
+  return {
+    ...daily,
+    cadence: 'daily plus missing current-event initialization',
+    resolve: async (context) => {
+      const plans = await daily.resolve(context);
+      const event = context.events.find((item) => item.id === context.currentEventId);
+      if (!event?.deadlineTime || event.deadlineTime > context.now) return plans;
+      // A new current event must not wait for tomorrow's daily observer. The
+      // stable event identity uses existing durable deduplication and retries.
+      if (await playerStatsRepository.findPublication(context.season, event.id)) return plans;
+      return [
+        ...plans,
+        {
+          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+          periodKey: 'initial',
+          eventId: event.id,
+          dueAt: event.deadlineTime,
+          source: 'reconcile' as const,
+        },
+      ];
+    },
+  };
+}
+
 function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
   return {
     name: 'core-current-reconcile',
@@ -1626,26 +1673,7 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       },
     }),
     playerPricesDefinition(),
-    dailyDefinition({
-      name: 'player-stats',
-      hour: 9,
-      minute: 40,
-      cadence: 'daily',
-      catchUpPolicy: 'latest-authoritative',
-      criticality: 'normal',
-      queueName: 'data-sync',
-      successPredicate: 'current or latest event player stats persisted',
-      enqueue: async ({ context, obligationId, generation, freshnessWindowId }) => {
-        const job = await enqueuePlayerStatsSyncJob(context.season, 'catchup', {
-          jobId: `scheduler-${obligationId}-g${generation}`,
-          removeOnSettle: false,
-          obligationId,
-          obligationGeneration: generation,
-          freshnessWindowId,
-        });
-        return { bullJobId: job.id, runId: job.data.runId };
-      },
-    }),
+    playerStatsDefinition(),
     understatDailyDefinition({
       name: 'understat-team-incremental',
       hour: 11,

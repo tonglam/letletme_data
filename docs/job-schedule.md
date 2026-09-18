@@ -132,7 +132,7 @@ and dispatches durable obligations.
 | `market-daily` | 06:55 UTC+8 plus one-minute retries through 07:05 | Before GW1 only the 06:55 tick runs; for a current event, a complete no-change capture remains retryable through the final minute, while failed or unavailable upstream responses retry through the same obligation |
 | `player-market-freshness-watchdog` | 07:06 UTC+8 after the market window | Maintenance queue final-capture check: verifies current-day cardinality and end-of-window evidence; alerts without changing `/ready` |
 | `player-prices` | 07:10 UTC+8 after values capture | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
-| `player-stats` | daily plus active-event reconciliation | Refreshes the current event, or the next event only when no current event exists |
+| `player-stats` | 09:40 UTC+8 daily plus missing current-event initialization | Refreshes the current event, or the next event only when no current event exists; after deadline, a missing current-event publication receives its own durable initialization obligation |
 
 The standalone scheduler reserves one durable daily obligation before enqueueing
 the job. The data worker retries failures, while completed jobs remain for 24
@@ -151,6 +151,14 @@ and its watchdog, never synthesize an older date: missed historical periods are
 recorded explicitly as `irrecoverable` and only today's evidence is checked.
 
 Player statistics remain a low-priority observer during the live window. They
+initialize a newly current event independently of the daily checkpoint, using
+one stable season/event obligation and the existing queue retry mechanism.
+An existing publication suppresses this initialization; it does not suppress
+the daily refresh. Event-scoped sync rejects a bootstrap whose current event
+differs from the requested event, so a delayed job cannot relabel newer
+cumulative statistics as historical data. Publication read failures remain
+errors and do not trigger initialization as if the publication were missing.
+They
 do not perform a 1m/5m full-bootstrap replace and do not gate Live Points
 publication; their component hash is only recorded until the live-window
 cadence report establishes a durable SLO.

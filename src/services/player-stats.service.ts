@@ -306,6 +306,13 @@ export async function syncPlayerStatsForEvent(
   const sourceCheckedAt = new Date();
   const fplData = await fplClient.getBootstrap();
 
+  // Bootstrap contains mutable cumulative statistics. A delayed event-scoped
+  // job cannot reconstruct an older round from a newer current-event source.
+  const currentEvents = fplData.events.filter((event) => event.is_current);
+  if (currentEvents.length !== 1 || currentEvents[0]?.id !== eventId) {
+    throw new Error(`Player stats bootstrap does not match requested current event ${eventId}`);
+  }
+
   if (!Array.isArray(fplData.elements)) {
     throw new Error('Invalid player elements data from FPL API');
   }
