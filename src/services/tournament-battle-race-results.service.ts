@@ -72,6 +72,37 @@ async function getOfficialH2HSyncOptions(
   );
 }
 
+function isFinalOfficialH2HSync(
+  eventId: number,
+  options: Readonly<Pick<OfficialH2HSyncOptions, 'provisionalEventId' | 'finalizedThroughEventId'>>,
+): boolean {
+  return (
+    options.provisionalEventId === null &&
+    options.finalizedThroughEventId !== null &&
+    options.finalizedThroughEventId !== undefined &&
+    options.finalizedThroughEventId >= eventId
+  );
+}
+
+async function ensureOfficialH2HAverageReady(
+  season: FplSeasonRef,
+  eventId: number,
+  options: OfficialH2HSyncOptions,
+): Promise<void> {
+  if (!isFinalOfficialH2HSync(eventId, options)) return;
+  const averageReady = await ensureLiveAverageReadyForPublication(season, eventId, 'FINALIZED');
+  if (!averageReady.ready) {
+    throw new IncompleteDataSyncError(
+      'Official H2H waits for the canonical Average Team publication',
+      1,
+      0,
+      0,
+      1,
+      'LIVE_AVERAGE_NOT_READY',
+    );
+  }
+}
+
 export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {
   return error instanceof IncompleteDataSyncError
     ? (officialH2HRecoveryTargets.get(error) ?? [])
@@ -573,24 +604,7 @@ export async function syncOfficialH2HTournaments(
     );
   const scoreOptions =
     tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
-  const isFinalOfficialH2HSync =
-    scoreOptions.provisionalEventId === null &&
-    scoreOptions.finalizedThroughEventId !== null &&
-    scoreOptions.finalizedThroughEventId !== undefined &&
-    scoreOptions.finalizedThroughEventId >= eventId;
-  if (isFinalOfficialH2HSync) {
-    const averageReady = await ensureLiveAverageReadyForPublication(season, eventId, 'FINALIZED');
-    if (!averageReady.ready) {
-      throw new IncompleteDataSyncError(
-        'Official H2H waits for the canonical Average Team publication',
-        1,
-        0,
-        0,
-        1,
-        'LIVE_AVERAGE_NOT_READY',
-      );
-    }
-  }
+  await ensureOfficialH2HAverageReady(season, eventId, scoreOptions);
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
@@ -687,6 +701,8 @@ export async function syncTournamentBattleRaceResults(
   const officialH2HOptions = tournaments.some(isOfficialH2HTournament)
     ? await getOfficialH2HSyncOptions(season, eventId)
     : {};
+
+  await ensureOfficialH2HAverageReady(season, eventId, officialH2HOptions);
 
   let updatedGroups = 0;
   let updatedResults = 0;

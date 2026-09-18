@@ -14,6 +14,7 @@ import {
   shouldMarkLivePicksFreshnessNoSourceWork,
   shouldPersistLiveLifecycleStatus,
   shouldRequireLivePicksCompletionGate,
+  shouldRunDirectLivePicksRepair,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
@@ -27,6 +28,22 @@ describe('live lifecycle decisions', () => {
     expect(shouldRequireLivePicksCompletionGate('BETWEEN_FIXTURES')).toBe(true);
     expect(shouldRequireLivePicksCompletionGate('DAY_SETTLING')).toBe(true);
     expect(shouldRequireLivePicksCompletionGate('GW_REVIEW')).toBe(true);
+  });
+
+  test('repairs an incomplete picks cohort from the direct timer only when due', () => {
+    const decision = { state: 'LIVE_ACTIVE' as const, shouldProbePicks: false };
+    expect(shouldRunDirectLivePicksRepair(decision, false, false, true)).toBe(true);
+    expect(shouldRunDirectLivePicksRepair(decision, false, false, false)).toBe(false);
+    expect(shouldRunDirectLivePicksRepair(decision, true, false, true)).toBe(false);
+    expect(shouldRunDirectLivePicksRepair(decision, false, true, true)).toBe(false);
+    expect(
+      shouldRunDirectLivePicksRepair(
+        { state: 'PICKS_PROBE', shouldProbePicks: true },
+        false,
+        false,
+        true,
+      ),
+    ).toBe(false);
   });
 
   test('keeps live-picks round evidence bounded and explicit about missing timings', () => {

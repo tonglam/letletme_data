@@ -113,6 +113,27 @@ export function shouldRequireLivePicksCompletionGate(state: LiveLifecycleState):
   );
 }
 
+/**
+ * The API-owned direct timer has no scheduler registry obligation to fall
+ * back on after the event enters a live/settling state. Keep a durable
+ * incompleteness proof actionable there, but let the standalone scheduler
+ * remain the only root creator in production scheduler mode.
+ */
+export function shouldRunDirectLivePicksRepair(
+  decision: Pick<LiveLifecycleDecision, 'state' | 'shouldProbePicks'>,
+  picksComplete: boolean,
+  standaloneSchedulerEnabled: boolean,
+  probeDue: boolean,
+): boolean {
+  return (
+    !standaloneSchedulerEnabled &&
+    !decision.shouldProbePicks &&
+    shouldRequireLivePicksCompletionGate(decision.state) &&
+    !picksComplete &&
+    probeDue
+  );
+}
+
 export type LiveBootstrapStatus = 'ready' | 'not-ready' | 'unknown';
 
 export type LiveBootstrapGate = Readonly<{
@@ -1761,10 +1782,35 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   }
   let livePointsEligible = true;
   if (shouldRequireLivePicksCompletionGate(decision.state)) {
-    const picksEvidence = await readLivePicksDurableFreshnessEvidence(
-      season,
-      currentEvent.id,
-    ).catch(() => null);
+    let picksEvidence = await readLivePicksDurableFreshnessEvidence(season, currentEvent.id).catch(
+      () => null,
+    );
+    const picksComplete = Boolean(
+      picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
+    );
+    const directRepairProbeDue =
+      !isStandaloneSchedulerEnabled() &&
+      !decision.shouldProbePicks &&
+      !picksComplete &&
+      (await isLivePicksProbeDue(season.seasonCode, currentEvent.id, now));
+    if (
+      shouldRunDirectLivePicksRepair(
+        decision,
+        picksComplete,
+        isStandaloneSchedulerEnabled(),
+        directRepairProbeDue,
+      )
+    ) {
+      await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {
+        logError('Direct live picks repair failed', error, {
+          eventId: currentEvent.id,
+          state: decision.state,
+        });
+      });
+      picksEvidence = await readLivePicksDurableFreshnessEvidence(season, currentEvent.id).catch(
+        () => null,
+      );
+    }
     // The durable picks cohort decides whether the full producer may be
     // planned. Bootstrap HTTP-200 admission belongs to the worker so a lost
     // Redis projection cannot strand an otherwise recoverable live event.
