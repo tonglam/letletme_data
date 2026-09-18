@@ -117,7 +117,7 @@ compose() {
     printf 'STATUS:%s\n' "$queue_name" >>"$event_file"
     local owned=false
     [[ "$owner" = deployment || "$owner" = acquiring ]] && owned=true
-    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":%s,"owner":"%s","owned":%s,"released":false}\n' "$queue_name" "$paused" "$(printf '%s' "$owner" | tr '[:lower:]' '[:upper:]')" "$owned"
+    printf '{"contractVersion":"content-worker-consumer-v1","queueName":"%s","paused":%s,"owner":"%s","owned":%s,"released":false}\n' "$queue_name" "$paused" "$(printf '%s' "$owner" | sed 's/^foreign-//' | tr '[:lower:]' '[:upper:]')" "$owned"
     return 0
   fi
   if [[ "$args" == *"--consumer-mode PAUSE"* ]]; then
@@ -532,6 +532,61 @@ grep -F 'STOP:content-worker' "$event_file"
       expect(result.stderr?.toString()).toContain(
         `${queueName} final consumer ownership check failed`,
       );
+    },
+  );
+
+  test.each(
+    ['entry-sync', 'tournament-repair'].flatMap((queue) =>
+      ['deployment', 'acquiring', 'releasing'].map((owner) => [queue, owner]),
+    ),
+  )(
+    'rejects a foreign live %s pause owner %s at preflight and final acceptance',
+    (queue, owner) => {
+      const preflight = runConsumerControlShell(String.raw`
+touch "$pause_dir/${queue}"
+printf '%s\n' foreign-${owner} >"$owner_dir/${queue}"
+if pause_content_worker_consumers_for_deploy; then exit 1; fi
+if restore_content_deploy_controls; then exit 1; fi
+[[ -e "$pause_dir/${queue}" ]]
+[[ "$(<"$owner_dir/${queue}")" = foreign-${owner} ]]
+! grep -E '^(PAUSE|RESUME):${queue}$' "$event_file"
+! grep -F 'STOP:content-worker' "$event_file"
+`);
+      expect(preflight.exitCode, preflight.stderr?.toString()).toBe(0);
+      expect(preflight.stderr?.toString()).toContain('pause belongs to another deployment');
+
+      const final = runConsumerControlShell(String.raw`
+touch "$pause_dir/${queue}"
+printf '%s\n' operator >"$owner_dir/${queue}"
+pause_content_worker_consumers_for_deploy
+drain_content_worker_queues_for_deploy
+printf '%s\n' foreign-${owner} >"$owner_dir/${queue}"
+if restore_content_deploy_controls; then exit 1; fi
+[[ -e "$pause_dir/${queue}" ]]
+[[ "$(<"$owner_dir/${queue}")" = foreign-${owner} ]]
+! grep -E '^(PAUSE|RESUME):${queue}$' "$event_file"
+grep -F 'STOP:content-worker' "$event_file"
+! grep -F 'OPEN:' "$event_file"
+`);
+      expect(final.exitCode, final.stderr?.toString()).toBe(0);
+      expect(final.stderr?.toString()).toContain(`${queue} final consumer ownership check failed`);
+    },
+  );
+
+  test.each(['deployment', 'acquiring'])(
+    'restores an existing caller-owned %s pause before acceptance',
+    (owner) => {
+      const result = runConsumerControlShell(String.raw`
+touch "$pause_dir/entry-sync" "$pause_dir/tournament-repair"
+printf '%s\n' ${owner} >"$owner_dir/entry-sync"
+printf '%s\n' ${owner} >"$owner_dir/tournament-repair"
+pause_content_worker_consumers_for_deploy
+restore_content_deploy_controls
+[[ ! -e "$pause_dir/entry-sync" && ! -e "$pause_dir/tournament-repair" ]]
+grep -F 'RESUME:entry-sync' "$event_file"
+grep -F 'RESUME:tournament-repair' "$event_file"
+`);
+      expect(result.exitCode, result.stderr?.toString()).toBe(0);
     },
   );
 

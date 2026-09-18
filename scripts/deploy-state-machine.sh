@@ -395,6 +395,14 @@ assert_consumer_pause_has_owner() {
     echo "deploy admission: $queue_name consumer is paused without a recognized owner; explicit operator recovery is required" >&2
     return 1
   fi
+  # A live lease from another deployment is not recoverable by this caller.
+  # Only an explicit operator pause may survive acceptance without our token.
+  if printf '%s\n' "$status_output" | grep -F '"paused":true' >/dev/null &&
+    ! printf '%s\n' "$status_output" | grep -F '"owner":"OPERATOR"' >/dev/null &&
+    ! printf '%s\n' "$status_output" | grep -F '"owned":true' >/dev/null; then
+    echo "deploy admission: $queue_name consumer pause belongs to another deployment; explicit operator recovery is required" >&2
+    return 1
+  fi
 }
 
 reconcile_failed_content_worker_pause() {
