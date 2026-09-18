@@ -1209,24 +1209,28 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       if (!selected) return [];
       const { event, decision } = selected;
       const picksCompletionGateRequired = shouldRequireLivePicksCompletionGate(decision.state);
-      const bootstrapProbeMustBeReadyBeforePlan =
-        decision.state === 'PICKS_PROBE' || decision.state === 'PICKS_SYNC';
-      if (bootstrapProbeMustBeReadyBeforePlan) {
-        const bootstrap = await readLiveBootstrapGate(context.season.seasonCode, event.id);
-        if (bootstrap.status !== 'ready') return [];
-      }
+      let livePointsEligible = true;
       if (picksCompletionGateRequired) {
+        const bootstrap = await readLiveBootstrapGate(context.season.seasonCode, event.id);
         const picksEvidence = await readLivePicksDurableFreshnessEvidence(
           context.season,
           event.id,
         ).catch(() => null);
-        if (
-          !picksEvidence ||
-          (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true)
-        ) {
-          return [];
-        }
+        const picksComplete = Boolean(
+          picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
+        );
+        livePointsEligible = bootstrap.status === 'ready' && picksComplete;
       }
+      const matchObservationOnly =
+        decision.shouldObserveMatches && (!decision.shouldFetchLive || !livePointsEligible);
+      const bootstrapGateRequired =
+        !matchObservationOnly &&
+        (decision.state === 'PICKS_PROBE' ||
+          decision.state === 'PICKS_SYNC' ||
+          decision.state === 'LIVE_ACTIVE' ||
+          decision.state === 'BETWEEN_FIXTURES' ||
+          decision.state === 'DAY_SETTLING' ||
+          decision.state === 'GW_REVIEW');
       const quiet = await readLifecycleQuietState(context.season.seasonCode, event.id);
       // The permanent final checkpoint owns the finalized write. This lane
       // keeps the mutable official heartbeat alive for every unsettled state.
@@ -1251,7 +1255,9 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       return [
         {
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-${event.id}-${decision.state}-${pollIntervalMs}-${bucket}`,
+          periodKey: `live-${event.id}-${decision.state}-${pollIntervalMs}-${bucket}-${
+            matchObservationOnly ? 'match-only' : 'live'
+          }`,
           dueAt: new Date(bucket * pollIntervalMs),
           eventId: event.id,
           source: 'reconcile',
@@ -1264,15 +1270,9 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             // Match V3 can warm the fixture desk before Live Points is
             // eligible. Preserve that lane on the durable obligation so the
             // reconciler cannot accidentally run the all-in-one producer.
-            matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
-            promoteActiveEvent:
-              decision.shouldObserveMatches &&
-              !decision.shouldFetchLive &&
-              decision.state !== 'PRE_DEADLINE',
-            bootstrapGateRequired:
-              decision.state === 'PICKS_PROBE' ||
-              decision.state === 'PICKS_SYNC' ||
-              decision.state === 'LIVE_ACTIVE',
+            matchObservationOnly,
+            promoteActiveEvent: matchObservationOnly && decision.state !== 'PRE_DEADLINE',
+            bootstrapGateRequired,
           },
         },
       ];
@@ -1335,7 +1335,13 @@ function livePicksDefinition(): ScheduledJobDefinition {
       const fixtures = await loadSchedulerFixtures(context, event.id);
       const decision = decideLiveLifecycle(event, fixtures, context.now);
       let needsPicksRefresh = decision.shouldProbePicks || decision.shouldSyncPicks;
-      if (!needsPicksRefresh && decision.state === 'LIVE_ACTIVE') {
+      if (
+        !needsPicksRefresh &&
+        (decision.state === 'LIVE_ACTIVE' ||
+          decision.state === 'BETWEEN_FIXTURES' ||
+          decision.state === 'DAY_SETTLING' ||
+          decision.state === 'GW_REVIEW')
+      ) {
         const picksEvidence = await readLivePicksDurableFreshnessEvidence(
           context.season,
           event.id,

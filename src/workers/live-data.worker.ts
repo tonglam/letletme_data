@@ -26,6 +26,7 @@ import {
   syncLiveClassicLeaguePublicationsV2,
   syncLiveH2HLeaguePublicationsV2,
 } from '../services/live-league-publication-v2.service';
+import { ensureLiveAverageReadyForPublication } from '../services/live-average-refresh.service';
 import { ensureLiveBootstrapReady } from '../services/live-lifecycle-orchestrator';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
@@ -658,23 +659,37 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
       );
     }
     let h2hLeagueResult: Awaited<ReturnType<typeof syncLiveH2HLeaguePublicationsV2>> = null;
-    try {
-      h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
-        season,
-        eventId,
-        job.data.expectedNextCheckAt,
-        databaseBudget
-          ? {
-              databaseRead: databaseBudget.readDb,
-              databaseReadClient: databaseBudget.readClient,
-            }
-          : undefined,
-      );
-    } catch (error) {
-      logError('Live H2H league publication pass failed; global publication is retained', error, {
+    const averageReady = await ensureLiveAverageReadyForPublication(
+      season,
+      eventId,
+      job.data.lifecycleState ?? snapshot.state,
+    );
+    if (!averageReady.ready) {
+      logWarn('Live H2H publication is waiting for a fresh canonical Average Team score', {
         season: season.seasonCode,
         eventId,
+        reason: averageReady.reason,
+        sourceCheckedAt: averageReady.sourceCheckedAt,
       });
+    } else {
+      try {
+        h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
+          season,
+          eventId,
+          job.data.expectedNextCheckAt,
+          databaseBudget
+            ? {
+                databaseRead: databaseBudget.readDb,
+                databaseReadClient: databaseBudget.readClient,
+              }
+            : undefined,
+        );
+      } catch (error) {
+        logError('Live H2H league publication pass failed; global publication is retained', error, {
+          season: season.seasonCode,
+          eventId,
+        });
+      }
     }
     if (
       liveLaneIsCurrent &&

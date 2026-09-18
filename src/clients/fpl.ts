@@ -896,6 +896,11 @@ class FPLClient {
               if (!response.ok) {
                 requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
                 pendingBackoffMs = null;
+                if (options.responseMode === 'status') {
+                  discardResponseBody(response);
+                  attemptRecorded = true;
+                  return statusOnlyResponse(response);
+                }
                 return response;
               }
 

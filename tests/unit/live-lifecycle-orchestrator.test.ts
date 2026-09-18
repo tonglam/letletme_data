@@ -20,11 +20,13 @@ import {
 const quote = String.fromCharCode(39);
 
 describe('live lifecycle decisions', () => {
-  test('keeps the picks completeness gate through the first active fixture', () => {
+  test('keeps the picks completeness gate through post-match settlement', () => {
     expect(shouldRequireLivePicksCompletionGate('PICKS_PROBE')).toBe(true);
     expect(shouldRequireLivePicksCompletionGate('PICKS_SYNC')).toBe(true);
     expect(shouldRequireLivePicksCompletionGate('LIVE_ACTIVE')).toBe(true);
-    expect(shouldRequireLivePicksCompletionGate('BETWEEN_FIXTURES')).toBe(false);
+    expect(shouldRequireLivePicksCompletionGate('BETWEEN_FIXTURES')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('DAY_SETTLING')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('GW_REVIEW')).toBe(true);
   });
 
   test('keeps live-picks round evidence bounded and explicit about missing timings', () => {
@@ -136,6 +138,7 @@ describe('live lifecycle decisions', () => {
       synced: 0,
       pending: 0,
       sourceReady: false,
+      sourceReason: 'PICKS_PROBE_BACKOFF',
       scanComplete: false,
     });
     expect(resolveLivePicksProbeBackoffResult(false)).toEqual({
@@ -143,6 +146,7 @@ describe('live lifecycle decisions', () => {
       synced: 0,
       pending: 0,
       sourceReady: false,
+      sourceReason: 'PICKS_CANARY_NOT_READY',
       scanComplete: false,
     });
   });
@@ -214,7 +218,7 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain('FINALIZED');
     expect(registrySource).toContain('resolveLiveLifecycleDelay(');
     expect(registrySource).toContain(
-      'matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive',
+      'decision.shouldObserveMatches && (!decision.shouldFetchLive || !livePointsEligible)',
     );
     expect(registrySource).toContain(
       'matchObservationOnly: plan.evidence?.matchObservationOnly === true',

@@ -103,7 +103,14 @@ export type LiveLifecycleDecision = {
  * the entry fan-out has checkpointed every eligible entry.
  */
 export function shouldRequireLivePicksCompletionGate(state: LiveLifecycleState): boolean {
-  return state === 'PICKS_PROBE' || state === 'PICKS_SYNC' || state === 'LIVE_ACTIVE';
+  return (
+    state === 'PICKS_PROBE' ||
+    state === 'PICKS_SYNC' ||
+    state === 'LIVE_ACTIVE' ||
+    state === 'BETWEEN_FIXTURES' ||
+    state === 'DAY_SETTLING' ||
+    state === 'GW_REVIEW'
+  );
 }
 
 export type LiveBootstrapStatus = 'ready' | 'not-ready' | 'unknown';
@@ -364,10 +371,6 @@ export async function ensureLiveBootstrapReady(
     };
   }
 
-  const baseState: SharedLifecycleQuietState = current ?? {
-    revision: null,
-    unchangedSince: now.getTime(),
-  };
   try {
     const probe = await fplClient.probeBootstrap({
       priority: 'live',
@@ -376,8 +379,7 @@ export async function ensureLiveBootstrapReady(
     const checkedAt = probe.checkedAt.toISOString();
     if (probe.status === 200) {
       const readyAt = checkedAt;
-      await writeLifecycleQuietState(season.seasonCode, eventId, {
-        ...baseState,
+      await mergeLifecycleQuietState(season.seasonCode, eventId, {
         bootstrapStatus: 'ready',
         bootstrapHttpStatus: 200,
         bootstrapCheckedAt: checkedAt,
@@ -393,8 +395,7 @@ export async function ensureLiveBootstrapReady(
       };
     }
     const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
-    await writeLifecycleQuietState(season.seasonCode, eventId, {
-      ...baseState,
+    await mergeLifecycleQuietState(season.seasonCode, eventId, {
       bootstrapStatus: 'not-ready',
       bootstrapHttpStatus: probe.status,
       bootstrapCheckedAt: checkedAt,
@@ -411,8 +412,7 @@ export async function ensureLiveBootstrapReady(
   } catch (error) {
     const checkedAt = now.toISOString();
     const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
-    await writeLifecycleQuietState(season.seasonCode, eventId, {
-      ...baseState,
+    await mergeLifecycleQuietState(season.seasonCode, eventId, {
       bootstrapStatus: 'unknown',
       bootstrapHttpStatus: null,
       bootstrapCheckedAt: checkedAt,
@@ -438,16 +438,45 @@ async function writeLifecycleQuietState(
   eventId: number,
   state: SharedLifecycleQuietState,
 ): Promise<void> {
+  await mergeLifecycleQuietState(seasonCode, eventId, state);
+}
+
+/**
+ * Merge a bootstrap gate atomically with the shared lifecycle object. A slow
+ * 503/transport probe must never overwrite a concurrent HTTP-200 admission,
+ * and the merge must not discard a lifecycle revision written by Match V3 in
+ * the same window.
+ */
+async function mergeLifecycleQuietState(
+  seasonCode: string,
+  eventId: number,
+  patch: Readonly<Partial<SharedLifecycleQuietState>>,
+): Promise<void> {
+  const key = liveV2LifecycleKey({ season: seasonCode, eventId });
+  const script = `
+local currentRaw = redis.call('GET', KEYS[1])
+local current = currentRaw and cjson.decode(currentRaw) or {}
+local patch = cjson.decode(ARGV[1])
+local currentReady = current['bootstrapStatus'] == 'ready' and current['bootstrapReadyAt'] ~= cjson.null and current['bootstrapReadyAt'] ~= nil
+local patchReady = patch['bootstrapStatus'] == 'ready'
+if currentReady and not patchReady then
+  patch['bootstrapStatus'] = current['bootstrapStatus']
+  patch['bootstrapHttpStatus'] = current['bootstrapHttpStatus']
+  patch['bootstrapCheckedAt'] = current['bootstrapCheckedAt']
+  patch['bootstrapReadyAt'] = current['bootstrapReadyAt']
+  patch['bootstrapNextProbeAt'] = current['bootstrapNextProbeAt']
+end
+for key, value in pairs(patch) do
+  current[key] = value
+end
+redis.call('SET', KEYS[1], cjson.encode(current), 'EX', ARGV[2])
+return 1
+`;
   try {
     const redis = await redisSingleton.getClient();
-    await redis.set(
-      liveV2LifecycleKey({ season: seasonCode, eventId }),
-      JSON.stringify(state),
-      'EX',
-      String(COORDINATOR_STATE_TTL_SECONDS),
-    );
+    await redis.eval(script, 1, key, JSON.stringify(patch), String(COORDINATOR_STATE_TTL_SECONDS));
   } catch (error) {
-    logError('Failed to write shared live lifecycle state', error, { seasonCode, eventId });
+    logError('Failed to merge shared live lifecycle state', error, { seasonCode, eventId });
   }
 }
 
@@ -490,6 +519,13 @@ export function resolveLivePicksProbeBackoffResult(
     pending: 0,
     sourceReady,
     scanComplete: false,
+    ...(!sourceReady
+      ? {
+          sourceReason: canarySucceeded
+            ? ('PICKS_PROBE_BACKOFF' as const)
+            : ('PICKS_CANARY_NOT_READY' as const),
+        }
+      : {}),
     ...(acceptedBackoff ? { outcome: 'accepted-backoff' as const } : {}),
   } as const;
 }
@@ -1171,7 +1207,11 @@ export async function runPicksProbeAndSync(
   /** The source canary was accepted for this event window. */
   sourceReady: boolean;
   /** Bounded reason when the source gate is not yet admitted. */
-  sourceReason?: 'BOOTSTRAP_HTTP_NOT_200' | 'BOOTSTRAP_PROBE_UNKNOWN';
+  sourceReason?:
+    | 'BOOTSTRAP_HTTP_NOT_200'
+    | 'BOOTSTRAP_PROBE_UNKNOWN'
+    | 'PICKS_CANARY_NOT_READY'
+    | 'PICKS_PROBE_BACKOFF';
   /** The complete eligible-entry sweep reached its semantic finalizer. */
   scanComplete: boolean;
   /** Exact aggregate evidence was persisted before a terminal completion. */
@@ -1420,6 +1460,7 @@ export async function runPicksProbeAndSync(
       synced: 0,
       pending: pending.length,
       sourceReady: false,
+      sourceReason: 'PICKS_CANARY_NOT_READY',
       scanComplete: false,
       freshnessEvidenceRecorded,
     };

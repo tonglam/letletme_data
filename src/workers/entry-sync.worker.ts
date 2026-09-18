@@ -604,7 +604,11 @@ export function createEntrySyncWorker(
               reasonCodes: [
                 result.sourceReason === 'BOOTSTRAP_PROBE_UNKNOWN'
                   ? 'SOURCE_NOT_READY:BOOTSTRAP_PROBE_UNKNOWN'
-                  : 'SOURCE_NOT_READY:BOOTSTRAP_HTTP_NOT_200',
+                  : result.sourceReason === 'BOOTSTRAP_HTTP_NOT_200'
+                    ? 'SOURCE_NOT_READY:BOOTSTRAP_HTTP_NOT_200'
+                    : result.sourceReason === 'PICKS_PROBE_BACKOFF'
+                      ? 'SOURCE_NOT_READY:PICKS_PROBE_BACKOFF'
+                      : 'SOURCE_NOT_READY:PICKS_CANARY_NOT_READY',
               ],
             },
             evidence: {

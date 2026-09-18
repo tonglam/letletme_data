@@ -16,7 +16,11 @@ export type LivePicksRefreshResult = Readonly<{
   sourceReady: boolean;
   /** The root was durably deferred until the shared bootstrap gate is ready. */
   status?: 'waiting-dependencies';
-  sourceReason?: 'BOOTSTRAP_HTTP_NOT_200' | 'BOOTSTRAP_PROBE_UNKNOWN';
+  sourceReason?:
+    | 'BOOTSTRAP_HTTP_NOT_200'
+    | 'BOOTSTRAP_PROBE_UNKNOWN'
+    | 'PICKS_CANARY_NOT_READY'
+    | 'PICKS_PROBE_BACKOFF';
   scanComplete: boolean;
   freshnessEvidenceRecorded?: boolean;
 }>;
