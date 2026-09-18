@@ -854,7 +854,32 @@ class FPLClient {
             });
             attemptStatus = response.status;
 
-            if (isRetryableStatus(response.status)) {
+            if (options.responseMode === 'status') {
+              requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+              attemptRecorded = true;
+              const statusResponse = statusOnlyResponse(response);
+              discardResponseBody(response);
+
+              if (!isRetryableStatus(response.status)) {
+                lastRetryableResponse = null;
+                pendingBackoffMs = null;
+                return statusResponse;
+              }
+
+              // Retain status + Retry-After before consuming the body so a hung
+              // 429/5xx body still preserves status and honors the rate-limit delay.
+              lastRetryableResponse = statusResponse;
+              const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+              pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
+
+              if (attempt === maxRetries) {
+                pendingBackoffMs = null;
+                return statusResponse;
+              }
+
+              retryDelayMs = Math.min(pendingBackoffMs, remainingMs());
+              pendingBackoffMs = null;
+            } else if (isRetryableStatus(response.status)) {
               // Retain status + Retry-After before consuming the body so a hung
               // 429/5xx body still preserves status and honors the rate-limit delay.
               requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
@@ -863,44 +888,29 @@ class FPLClient {
               const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
               pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
 
-              if (options.responseMode === 'status') {
-                discardResponseBody(response);
-                if (attempt === maxRetries) {
-                  pendingBackoffMs = null;
-                  return lastRetryableResponse;
-                }
-                retryDelayMs = Math.min(pendingBackoffMs, remainingMs());
-                pendingBackoffMs = null;
-              } else {
-                const buffered = await bufferResponse(response);
-                lastRetryableResponse = buffered;
+              const buffered = await bufferResponse(response);
+              lastRetryableResponse = buffered;
 
-                if (attempt === maxRetries) {
-                  pendingBackoffMs = null;
-                  return buffered;
-                }
-
-                const delayMs = Math.min(pendingBackoffMs, remainingMs());
+              if (attempt === maxRetries) {
                 pendingBackoffMs = null;
-                logDebug('Retryable FPL response; backing off', {
-                  url,
-                  status: response.status,
-                  attempt,
-                  delayMs,
-                });
-                retryDelayMs = delayMs;
+                return buffered;
               }
+
+              const delayMs = Math.min(pendingBackoffMs, remainingMs());
+              pendingBackoffMs = null;
+              logDebug('Retryable FPL response; backing off', {
+                url,
+                status: response.status,
+                attempt,
+                delayMs,
+              });
+              retryDelayMs = delayMs;
             } else {
               // Non-retryable error (404, 400, …): return without buffering — hung 404
               // bodies must not flip cup lookups to UNKNOWN_ERROR.
               if (!response.ok) {
                 requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
                 pendingBackoffMs = null;
-                if (options.responseMode === 'status') {
-                  discardResponseBody(response);
-                  attemptRecorded = true;
-                  return statusOnlyResponse(response);
-                }
                 return response;
               }
 
@@ -908,12 +918,6 @@ class FPLClient {
               // surface a body-read failure, not a stale HTTP_ERROR from a prior attempt.
               lastRetryableResponse = null;
               pendingBackoffMs = null;
-              if (options.responseMode === 'status') {
-                discardResponseBody(response);
-                requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
-                attemptRecorded = true;
-                return statusOnlyResponse(response);
-              }
               const buffered = await bufferResponse(response);
               requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
               return buffered;
