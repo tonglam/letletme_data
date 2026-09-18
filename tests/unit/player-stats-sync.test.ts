@@ -1,12 +1,41 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { describe, expect, mock, spyOn, test } from 'bun:test';
+import { fplClient } from '../../src/clients/fpl';
+import * as teams from '../../src/utils/teams';
+import { playerStatsRepository } from '../../src/repositories/player-stats';
 
 import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 import { rawFPLElementsFixture } from '../fixtures/player-stats.fixtures';
 import type { PlayerStatsRepository } from '../../src/repositories/player-stats';
 
-const { syncCurrentPlayerStats } = await import('../../src/services/player-stats.service');
+const { syncCurrentPlayerStats, syncPlayerStatsForEvent } = await import(
+  '../../src/services/player-stats.service'
+);
 
 describe('player stats synchronization reporting', () => {
+  test('rejects a delayed GW5 job when bootstrap has advanced to GW6 before any write', async () => {
+    const bootstrap = spyOn(fplClient, 'getBootstrap').mockResolvedValue({
+      events: [
+        { id: 5, is_current: false },
+        { id: 6, is_current: true },
+      ],
+      elements: rawFPLElementsFixture,
+    } as never);
+    const loadTeams = spyOn(teams, 'loadTeamsBasicInfo').mockRejectedValue(
+      new Error('unexpected team read'),
+    );
+    const write = spyOn(playerStatsRepository, 'replaceBatch');
+    try {
+      await expect(syncPlayerStatsForEvent(TEST_SEASON, 5)).rejects.toThrow(
+        'Player stats bootstrap does not match requested current event 5',
+      );
+      expect(loadTeams).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      bootstrap.mockRestore();
+      loadTeams.mockRestore();
+      write.mockRestore();
+    }
+  });
   test('publishes the target before bootstrap failures', async () => {
     const resolvedEvents: number[] = [];
     const getBootstrap = mock(async () => {

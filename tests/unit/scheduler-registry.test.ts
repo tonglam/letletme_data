@@ -39,9 +39,129 @@ import {
 } from '../../src/domain/live-final-retention-policy';
 import { finalDependencyRetryDelayMs } from '../../src/domain/data-contracts';
 import { schedulerObligationAuthorityAt } from '../../src/repositories/scheduler-lanes';
+import { playerStatsRepository } from '../../src/repositories/player-stats';
+import * as dataSyncEnqueue from '../../src/jobs/data-sync-enqueue';
 
 describe('standalone scheduler registry', () => {
   const registry = createSchedulerRegistry();
+
+  test('does not initialize a future or absent current event', async () => {
+    const publication = spyOn(playerStatsRepository, 'findPublication').mockResolvedValue(null);
+    try {
+      const definition = registry.find((item) => item.name === 'player-stats')!;
+      for (const currentEventId of [undefined, 5]) {
+        const plans = await definition.resolve({
+          season: TEST_SEASON,
+          now: new Date('2026-09-18T17:00:00.000Z'),
+          currentEventId,
+          events: [{ id: 5, deadlineTime: new Date('2026-09-18T17:30:00.000Z') }],
+        });
+        expect(plans).toHaveLength(1);
+        expect(plans[0]?.eventId).toBeUndefined();
+      }
+      expect(publication).not.toHaveBeenCalled();
+    } finally {
+      publication.mockRestore();
+    }
+  });
+
+  test('does not interpret a publication read failure as missing data', async () => {
+    const publication = spyOn(playerStatsRepository, 'findPublication').mockRejectedValue(
+      new Error('read unavailable'),
+    );
+    try {
+      const definition = registry.find((item) => item.name === 'player-stats')!;
+      await expect(
+        definition.resolve({
+          season: TEST_SEASON,
+          now: new Date('2026-09-18T22:00:00.000Z'),
+          currentEventId: 5,
+          events: [{ id: 5, deadlineTime: new Date('2026-09-18T17:30:00.000Z') }],
+        }),
+      ).rejects.toThrow('read unavailable');
+    } finally {
+      publication.mockRestore();
+    }
+  });
+
+  test('binds initialization enqueue to the planned event and durable generation', async () => {
+    const enqueue = spyOn(dataSyncEnqueue, 'enqueuePlayerStatsSyncJob').mockRejectedValue(
+      new Error('queue unavailable'),
+    );
+    try {
+      const definition = registry.find((item) => item.name === 'player-stats')!;
+      await expect(
+        definition.enqueue({
+          context: { season: TEST_SEASON, now: new Date(), events: [], currentEventId: 6 },
+          plan: {
+            scopeKey: '2627:event:5',
+            periodKey: 'initial',
+            eventId: 5,
+            dueAt: new Date(),
+            source: 'reconcile',
+          },
+          obligationId: 'test-obligation',
+          generation: 2,
+          freshnessWindowId: 12,
+        }),
+      ).rejects.toThrow('queue unavailable');
+      expect(enqueue).toHaveBeenCalledWith(
+        TEST_SEASON,
+        'catchup',
+        expect.objectContaining({
+          eventId: 5,
+          obligationId: 'test-obligation',
+          obligationGeneration: 2,
+          freshnessWindowId: 12,
+          jobId: 'scheduler-test-obligation-g2',
+        }),
+      );
+    } finally {
+      enqueue.mockRestore();
+    }
+  });
+
+  test('bootstraps missing current-event player stats before the next daily checkpoint', async () => {
+    const publication = spyOn(playerStatsRepository, 'findPublication').mockResolvedValue(null);
+    try {
+      const definition = registry.find((item) => item.name === 'player-stats')!;
+      const context = {
+        season: TEST_SEASON,
+        now: new Date('2026-09-18T22:00:00.000Z'),
+        currentEventId: 5,
+        events: [{ id: 5, deadlineTime: new Date('2026-09-18T17:30:00.000Z') }],
+      };
+      const plans = await definition.resolve(context);
+      expect(plans).toContainEqual(expect.objectContaining({ periodKey: '20260918' }));
+      expect(plans).toContainEqual(
+        expect.objectContaining({
+          scopeKey: `${TEST_SEASON.seasonCode}:event:5`,
+          periodKey: 'initial',
+          eventId: 5,
+          dueAt: new Date('2026-09-18T17:30:00.000Z'),
+        }),
+      );
+      expect(await definition.resolve(context)).toEqual(plans);
+      publication.mockResolvedValue({
+        seasonId: TEST_SEASON.seasonId,
+        eventId: 5,
+        revision: 12379,
+        sourceCheckedAt: context.now,
+        publishedAt: context.now,
+        rowCount: 662,
+        expectedRowCount: 662,
+        contentSha256: 'a'.repeat(64),
+        baselineVerifiedAt: null,
+        createdAt: context.now,
+        updatedAt: context.now,
+      });
+      const afterPublication = await definition.resolve(context);
+      expect(afterPublication).toHaveLength(1);
+      expect(afterPublication[0]?.periodKey).toBe('20260918');
+    } finally {
+      publication.mockRestore();
+    }
+  });
 
   test('includes the next deadline event for pre-deadline Match observations', () => {
     const now = new Date('2026-08-23T12:00:00.000Z');

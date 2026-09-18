@@ -130,7 +130,10 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    findPublication: async (season: FplSeasonRef, eventId: number) => {
+    findPublication: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<typeof playerEventSnapshotPublicationsInFpl.$inferSelect | null> => {
       const db = await getDbInstance();
       const rows = await db
         .select()
