@@ -4,6 +4,7 @@ import {
   prepareDataPublication,
   publishDataRevision,
   readActiveDataPublication,
+  readActiveDataPublicationItemsWithBounds,
   type DataPublicationDeliveryItem,
   type DataPublicationManifest,
   type PublishDataRevisionOptions,
@@ -33,6 +34,19 @@ export interface CoreSnapshotCacheContents {
   readonly fixtures: Fixture[];
   readonly currentEventId: number | null;
   readonly selectionRules: SelectionRules | null;
+}
+
+/**
+ * The lifecycle reconciler needs only the event and fixture state that can
+ * trigger a core refresh. Keep this control projection separate from the
+ * complete core snapshot consumed by API/read paths so a 30-second scheduler
+ * pass cannot download players, teams, phases, or selection rules.
+ */
+export interface CoreSnapshotLifecycleContents {
+  readonly manifest: DataPublicationManifest;
+  readonly events: Event[];
+  readonly fixtures: Fixture[];
+  readonly currentEventId: number | null;
 }
 
 export interface CoreSnapshotCachePublishOptions
@@ -154,5 +168,41 @@ export async function readCoreSnapshotCache(
     fixtures: items.fixtures as Fixture[],
     currentEventId: items.currentEventId as number | null,
     selectionRules: (items.selectionRules ?? null) as SelectionRules | null,
+  };
+}
+
+/**
+ * Read only the lifecycle items required by the scheduler's core refresh
+ * decision. The manifest bounds check still verifies that every declared
+ * Redis sibling exists at its expected size; only these three small semantic
+ * items are downloaded and parsed.
+ */
+export async function readCoreSnapshotLifecycle(
+  seasonCode: string,
+  redis?: Redis,
+): Promise<CoreSnapshotLifecycleContents | null> {
+  const scope = { dataset: 'fpl:core' as const, seasonCode };
+  const selected = await readActiveDataPublicationItemsWithBounds(
+    scope,
+    ['events', 'fixtures', 'currentEventId'],
+    redis,
+  );
+  if (!selected) return null;
+
+  const eventItems = selected.items.events;
+  const fixtureItems = selected.items.fixtures;
+  const currentEventItem = selected.items.currentEventId;
+  if (
+    !Array.isArray(eventItems) ||
+    !Array.isArray(fixtureItems) ||
+    (currentEventItem !== null && !Number.isInteger(currentEventItem))
+  ) {
+    return null;
+  }
+  return {
+    manifest: selected.manifest,
+    events: eventItems as Event[],
+    fixtures: fixtureItems as Fixture[],
+    currentEventId: currentEventItem as number | null,
   };
 }

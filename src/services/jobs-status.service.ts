@@ -2,9 +2,12 @@ import { Queue } from 'bullmq';
 
 import {
   readActiveDataPublication,
+  readActiveDataPublicationManifestWithItemBoundsStatus,
   type DataPublicationDeliveryItem,
+  type DataPublicationManifestWithItemBoundsResult,
   type DataPublicationManifest,
   type DataPublicationReadResult,
+  type DataPublicationScope,
 } from '../cache/data-publication';
 import { loadActivePriceChangeContextForSchedule } from '../repositories/data-publication-outbox';
 import {
@@ -53,6 +56,7 @@ import { calculateBurnRate } from '../domain/freshness-slo';
 import { safePersistedDataErrorCode } from '../domain/error-classification';
 import { CLIENT_SIGNAL_WINDOW_MS, getClientSignalSummary } from './client-signals.service';
 import { resolveQueueHealthState } from './queue-governance.service';
+import { mapWithConcurrency } from '../utils/async';
 import {
   effectiveLiveFinalRetentionTtl,
   LIVE_FINAL_RETENTION_CRITICAL_TTL_MS,
@@ -699,12 +703,16 @@ function redisMatchesActivePublication(
 
 export function selectCanonicalPriceChangeContext(input: {
   dbActive: ActivePublication | null;
-  redisActive: DataPublicationReadResult | null;
+  redisActive: PublicationIdentityRead | null;
   dbDelivery: PublicationDelivery | DataPublicationReadResult | null;
 }): PriceChangeContextSelection {
-  if (redisMatchesActivePublication(input.dbActive, input.redisActive)) {
+  const redisContext =
+    input.redisActive && 'manifest' in input.redisActive
+      ? asContext(input.redisActive.items.context)
+      : null;
+  if (redisMatchesActivePublication(input.dbActive, input.redisActive) && redisContext) {
     return {
-      context: asContext(input.redisActive?.items.context),
+      context: redisContext,
       publicationId: input.dbActive?.publicationId ?? null,
       source: 'redis',
     };
@@ -734,9 +742,37 @@ export function selectCanonicalPriceChangeContext(input: {
 
 export type JobsStatusWindow = '15m' | '1h' | '6h' | '24h' | '3d' | '7d' | '28d';
 
+export type PublicationAuditDataset = 'fpl:core' | 'fpl:market' | typeof PRICE_CHANGE_DATASET;
+
+export type PublicationAuditRequest = Readonly<{
+  readonly scopes: readonly PublicationAuditDataset[];
+  readonly maxBytes: number;
+  readonly maxMs: number;
+  readonly maxConcurrency: number;
+}>;
+
+type PublicationStatusEntry = {
+  readonly dataset: PublicationAuditDataset;
+  readonly dbActive: Awaited<ReturnType<typeof syncOperationsRepository.findActivePublication>>;
+  readonly dbControlReadFailed: boolean;
+  readonly publicationScope: DataPublicationScope;
+  readonly redisControlManifest: DataPublicationManifest | null;
+  redisDelivery: PublicationIdentityRead | null;
+};
+
+type PublicationAuditCandidate = {
+  readonly entry: PublicationStatusEntry;
+};
+
+type PublicationAuditSkip = Readonly<{
+  readonly dataset: PublicationAuditDataset;
+  readonly reason: 'NO_MANIFEST' | 'BYTES_BUDGET' | 'TIME_BUDGET' | 'READ_FAILED';
+}>;
+
 export async function getJobsStatus(
   window: JobsStatusWindow = '1h',
   watchEntryId?: number,
+  publicationAudit?: PublicationAuditRequest,
 ): Promise<Record<string, unknown>> {
   const season = await seasonRepository.findCurrent();
   const windowMs: Record<JobsStatusWindow, number> = {
@@ -954,48 +990,244 @@ export async function getJobsStatus(
     { dataset: 'fpl:market' as const, eventId: undefined },
     { dataset: PRICE_CHANGE_DATASET, eventId: undefined },
   ];
-  let priceChangeDbActive: Awaited<
-    ReturnType<typeof syncOperationsRepository.findActivePublication>
-  > = null;
-  let priceChangeRedisActive: DataPublicationReadResult | null = null;
-  for (const scope of publicationScopes) {
-    const dbActive = await syncOperationsRepository.findActivePublication(
-      scope.dataset,
-      season,
-      scope.eventId,
-    );
+  const publicationAuditStartedAt = Date.now();
+  const publicationAuditDeadlineAt = publicationAudit
+    ? publicationAuditStartedAt + publicationAudit.maxMs
+    : null;
+  let publicationAuditBytes = 0;
+  const publicationAuditScopes = new Set(publicationAudit?.scopes ?? []);
+  const publicationAuditCompleted: PublicationAuditDataset[] = [];
+  const publicationAuditSkipped: PublicationAuditSkip[] = [];
+  const publicationAuditCandidates: PublicationAuditCandidate[] = [];
+  let publicationAuditConcurrencyUsed = 0;
+  const publicationEntries: PublicationStatusEntry[] = [];
+  const publicationScopeOrder = new Map(
+    publicationScopes.map((scope, index) => [scope.dataset, index] as const),
+  );
+  const setPublicationConsistency = (entry: PublicationStatusEntry): void => {
+    if (entry.dbControlReadFailed) {
+      publicationConsistency[entry.dataset] = false;
+      return;
+    }
+    const redisManifest = publicationManifest(entry.redisDelivery);
+    publicationConsistency[entry.dataset] =
+      Boolean(entry.dbActive) === Boolean(redisManifest) &&
+      (!entry.dbActive ||
+        !redisManifest ||
+        (entry.dbActive.publicationId === redisManifest.publicationId &&
+          entry.dbActive.revision === redisManifest.revision));
+  };
+
+  const readPublicationScope = async (
+    scope: (typeof publicationScopes)[number],
+    auditRequested: boolean,
+  ): Promise<void> => {
+    const dbControlReadAlreadyTimedOut =
+      auditRequested &&
+      publicationAuditDeadlineAt !== null &&
+      Date.now() >= publicationAuditDeadlineAt;
+    let dbActive: Awaited<ReturnType<typeof syncOperationsRepository.findActivePublication>> = null;
+    let dbControlReadFailed = false;
+    if (!dbControlReadAlreadyTimedOut) {
+      try {
+        dbActive = await syncOperationsRepository.findActivePublication(
+          scope.dataset,
+          season,
+          scope.eventId,
+          auditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
+        );
+      } catch (error) {
+        if (!auditRequested) throw error;
+        dbControlReadFailed = true;
+      }
+    }
     const publicationScope = {
       dataset: scope.dataset,
       seasonCode: season.seasonCode,
       ...(scope.eventId === undefined ? {} : { eventId: scope.eventId }),
     } as const;
-    // This is the explicit deep-governance endpoint. It may perform one
-    // bounded full consumer validation per dataset so parity cannot report a
-    // same-sized but corrupted Redis item as healthy. The frequent jobs
-    // control/status path remains identity-only.
-    const redisDelivery = await readActiveDataPublication(publicationScope);
-    const redisManifest = publicationManifest(redisDelivery);
-    if (scope.dataset === PRICE_CHANGE_DATASET) {
-      priceChangeDbActive = dbActive;
-      priceChangeRedisActive = redisDelivery;
+    // The default status projection is proof-only. A complete Redis payload
+    // read is allowed only for an explicitly requested scope and only after
+    // its declared byte and wall-clock budgets have been checked.
+    const controlReadBlocked =
+      dbControlReadAlreadyTimedOut ||
+      dbControlReadFailed ||
+      (auditRequested &&
+        publicationAuditDeadlineAt !== null &&
+        Date.now() >= publicationAuditDeadlineAt);
+    const redisControlResult: DataPublicationManifestWithItemBoundsResult = controlReadBlocked
+      ? { status: 'unavailable', manifest: null }
+      : await readActiveDataPublicationManifestWithItemBoundsStatus(
+          publicationScope,
+          undefined,
+          auditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
+        ).catch(() => ({ status: 'unavailable', manifest: null }) as const);
+    const redisControlManifest =
+      redisControlResult.status === 'valid' ? redisControlResult.manifest : null;
+    const controlReadTimedOut =
+      dbControlReadAlreadyTimedOut ||
+      (auditRequested &&
+        publicationAuditDeadlineAt !== null &&
+        Date.now() >= publicationAuditDeadlineAt);
+    const entry: PublicationStatusEntry = {
+      dataset: scope.dataset,
+      dbActive,
+      dbControlReadFailed,
+      publicationScope,
+      redisControlManifest,
+      redisDelivery: redisControlManifest,
+    };
+    publicationEntries.push(entry);
+    setPublicationConsistency(entry);
+    if (auditRequested) {
+      const declaredBytes =
+        redisControlManifest?.items.reduce((total, item) => total + item.bytes, 0) ?? 0;
+      if (controlReadTimedOut) {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
+      } else if (dbControlReadFailed) {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'READ_FAILED' });
+      } else if (redisControlResult.status === 'missing') {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'NO_MANIFEST' });
+      } else if (redisControlResult.status !== 'valid') {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'READ_FAILED' });
+      } else if (publicationAuditBytes + declaredBytes > publicationAudit!.maxBytes) {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'BYTES_BUDGET' });
+      } else if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
+        publicationAuditSkipped.push({ dataset: scope.dataset, reason: 'TIME_BUDGET' });
+      } else {
+        publicationAuditBytes += declaredBytes;
+        publicationAuditCandidates.push({ entry });
+      }
     }
-    const key = scope.eventId === undefined ? scope.dataset : `${scope.dataset}:e${scope.eventId}`;
-    publicationConsistency[key] =
-      Boolean(dbActive) === Boolean(redisManifest) &&
-      (!dbActive ||
-        !redisManifest ||
-        (dbActive.publicationId === redisManifest.publicationId &&
-          dbActive.revision === redisManifest.revision));
+  };
+
+  const requestedPublicationScopes = publicationScopes.filter((scope) =>
+    publicationAuditScopes.has(scope.dataset),
+  );
+  const unrequestedPublicationScopes = publicationScopes.filter(
+    (scope) => !publicationAuditScopes.has(scope.dataset),
+  );
+  const priceChangeAuditRequested = publicationAuditScopes.has(PRICE_CHANGE_DATASET);
+  // Requested control reads own the explicit audit deadline. When an audit is
+  // present, complete the already-admitted payload reads before touching an
+  // unrelated control scope, so a slow unrequested read cannot consume the
+  // requested evidence window.
+  for (const scope of publicationAudit ? requestedPublicationScopes : publicationScopes) {
+    await readPublicationScope(scope, publicationAuditScopes.has(scope.dataset));
   }
 
-  const priceChangeRedisMatches = redisMatchesActivePublication(
-    priceChangeDbActive,
-    priceChangeRedisActive,
+  if (publicationAudit && publicationAuditCandidates.length > 0) {
+    // Reserve the byte budget in deterministic scope order above. Only the
+    // already-admitted payload reads run in parallel, so maxConcurrency limits
+    // in-flight Redis downloads without letting concurrent starts overspend
+    // the audit budget.
+    publicationAuditConcurrencyUsed = Math.min(
+      publicationAudit.maxConcurrency,
+      publicationAuditCandidates.length,
+    );
+    const auditResults = await mapWithConcurrency(
+      publicationAuditCandidates,
+      publicationAuditConcurrencyUsed,
+      async ({ entry }) => {
+        if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
+          return { delivery: entry.redisControlManifest, reason: 'TIME_BUDGET' as const };
+        }
+        const delivery = await readActiveDataPublication(
+          entry.publicationScope,
+          undefined,
+          publicationAuditDeadlineAt ?? undefined,
+          entry.redisControlManifest ?? undefined,
+        ).catch(() => null);
+        if (publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt) {
+          return { delivery: entry.redisControlManifest, reason: 'TIME_BUDGET' as const };
+        }
+        return delivery
+          ? { delivery, reason: null }
+          : { delivery: null, reason: 'READ_FAILED' as const };
+      },
+    );
+    for (let index = 0; index < auditResults.length; index += 1) {
+      const result = auditResults[index]!;
+      const entry = publicationAuditCandidates[index]!.entry;
+      entry.redisDelivery = result.delivery;
+      if (result.reason === null) {
+        publicationAuditCompleted.push(entry.dataset);
+      } else {
+        publicationAuditSkipped.push({ dataset: entry.dataset, reason: result.reason });
+      }
+      setPublicationConsistency(entry);
+    }
+  }
+
+  let priceChangeDbDelivery: PublicationDelivery | DataPublicationReadResult | null = null;
+  let priceChangeAuditExpired = false;
+  // If price changes are the requested audit scope, resolve the durable
+  // fallback before running any unrelated control reads. Otherwise a slow
+  // core/market status read could consume the price audit's deadline and make
+  // an available PostgreSQL context appear unavailable.
+  if (publicationAudit && priceChangeAuditRequested) {
+    const priceChangeEntry = publicationEntries.find(
+      (entry) => entry.dataset === PRICE_CHANGE_DATASET,
+    );
+    const priceChangeDbActive = priceChangeEntry?.dbActive ?? null;
+    const priceChangeRedisActive = priceChangeEntry?.redisDelivery ?? null;
+    const priceChangeRedisContext =
+      priceChangeRedisActive && 'manifest' in priceChangeRedisActive
+        ? asContext(priceChangeRedisActive.items.context)
+        : null;
+    const priceChangeRedisUsable =
+      redisMatchesActivePublication(priceChangeDbActive, priceChangeRedisActive) &&
+      priceChangeRedisContext !== null;
+    priceChangeAuditExpired =
+      publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
+    if (priceChangeDbActive && !priceChangeRedisUsable && !priceChangeAuditExpired) {
+      priceChangeDbDelivery = await loadActivePriceChangeContextForSchedule(
+        season,
+        publicationAuditDeadlineAt ?? undefined,
+      ).catch(() => null);
+      priceChangeAuditExpired =
+        publicationAuditDeadlineAt !== null && Date.now() >= publicationAuditDeadlineAt;
+    }
+  }
+  // Stop the audit clock before running unrequested status projections. Those
+  // projections remain useful for the response, but they are outside the
+  // operator's explicitly budgeted evidence interval.
+  const publicationAuditCompletedAt = publicationAudit ? Date.now() : null;
+  if (publicationAudit) {
+    for (const scope of unrequestedPublicationScopes) {
+      await readPublicationScope(scope, false);
+    }
+  }
+  publicationEntries.sort(
+    (left, right) =>
+      publicationScopeOrder.get(left.dataset)! - publicationScopeOrder.get(right.dataset)!,
   );
-  const priceChangeDbDelivery =
-    priceChangeDbActive && !priceChangeRedisMatches
-      ? await loadActivePriceChangeContextForSchedule(season).catch(() => null)
+
+  const priceChangeEntry = publicationEntries.find(
+    (entry) => entry.dataset === PRICE_CHANGE_DATASET,
+  );
+  const priceChangeDbActive = priceChangeEntry?.dbActive ?? null;
+  const priceChangeRedisActive = priceChangeEntry?.redisDelivery ?? null;
+  const priceChangeRedisContext =
+    priceChangeRedisActive && 'manifest' in priceChangeRedisActive
+      ? asContext(priceChangeRedisActive.items.context)
       : null;
+  const priceChangeRedisUsable =
+    redisMatchesActivePublication(priceChangeDbActive, priceChangeRedisActive) &&
+    priceChangeRedisContext !== null;
+  if (!publicationAudit || !priceChangeAuditRequested) {
+    priceChangeAuditExpired =
+      priceChangeAuditRequested &&
+      publicationAuditDeadlineAt !== null &&
+      Date.now() >= publicationAuditDeadlineAt;
+    priceChangeDbDelivery =
+      priceChangeDbActive && !priceChangeRedisUsable && !priceChangeAuditExpired
+        ? await loadActivePriceChangeContextForSchedule(
+            season,
+            priceChangeAuditRequested ? (publicationAuditDeadlineAt ?? undefined) : undefined,
+          ).catch(() => null)
+        : null;
+  }
   const priceChangeSelection = selectCanonicalPriceChangeContext({
     dbActive: priceChangeDbActive,
     redisActive: priceChangeRedisActive,
@@ -1379,6 +1611,21 @@ export async function getJobsStatus(
     tournamentReviewV2,
     liveFinalRetention,
     publicationConsistency,
+    publicationAudit: {
+      enabled: Boolean(publicationAudit),
+      scopes: publicationAudit?.scopes ?? [],
+      maxBytes: publicationAudit?.maxBytes ?? null,
+      maxMs: publicationAudit?.maxMs ?? null,
+      maxConcurrency: publicationAudit?.maxConcurrency ?? null,
+      concurrencyUsed: publicationAudit ? publicationAuditConcurrencyUsed : 0,
+      declaredBytesRead: publicationAuditBytes,
+      completedScopes: publicationAuditCompleted,
+      skippedScopes: publicationAuditSkipped,
+      elapsedMs:
+        publicationAuditCompletedAt === null
+          ? 0
+          : publicationAuditCompletedAt - publicationAuditStartedAt,
+    },
     fplAdmission,
     priceChanges,
     schedulerLanes,

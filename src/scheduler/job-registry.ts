@@ -46,7 +46,7 @@ import { enqueueUnderstatPlayerSync, enqueueUnderstatTeamSync } from '../jobs/un
 import { enqueueUnderstatOrphanReconciler } from '../jobs/understat-recovery.jobs';
 import { getPlayerValuesSchedulerQueueJobId } from '../jobs/player-values-settlement';
 import { MAINTENANCE_JOBS } from '../queues/maintenance.queue';
-import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
+import { readCoreSnapshotLifecycle } from '../cache/core-snapshot-cache';
 import {
   coreLifecycleReconcilePeriodKey,
   coreSnapshotRefreshReason,
@@ -1417,7 +1417,7 @@ function coreLifecycleReconcileDefinition(): ScheduledJobDefinition {
         : null;
       if (!current) return [];
       const fixtures = await loadSchedulerFixtures(context, current.id);
-      const publication = await readCoreSnapshotCache(context.season.seasonCode);
+      const publication = await readCoreSnapshotLifecycle(context.season.seasonCode);
       const active = await syncOperationsRepository.findActivePublication(
         'fpl:core',
         context.season,

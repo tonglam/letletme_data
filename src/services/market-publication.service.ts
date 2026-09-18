@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  hasDataPublicationIntegrityProof,
   prepareDataPublication,
   readActiveDataPublication,
+  readActiveDataPublicationItemsWithBounds,
+  readActiveDataPublicationManifestWithItemBounds,
   type MarketSnapshotContextPayload,
 } from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
@@ -48,7 +51,7 @@ export type MarketPublicationOptions = Readonly<{
 
 async function recordUnchangedMarketEvidence(
   season: FplSeasonRef,
-  active: NonNullable<Awaited<ReturnType<typeof readActiveDataPublication>>>,
+  active: NonNullable<Awaited<ReturnType<typeof readActiveDataPublicationItemsWithBounds>>>,
   source: { capturedAt: Date },
   options: MarketPublicationOptions,
 ): Promise<void> {
@@ -79,16 +82,30 @@ async function ensureMarketPublicationDelivered(
     publicationId,
   });
   if (delivered.delivered === 1) return;
-
   // A retry may observe an already-delivered receipt (or a legacy active
   // publication created before the outbox migration).  Re-read the active
-  // pointer before reporting a delivery failure; DB and Redis parity is the
-  // success evidence, not whether this particular dispatch claimed a row.
-  const active = await readActiveDataPublication(marketScope(season));
-  if (active?.manifest.publicationId === publicationId && active.manifest.revision === revision) {
-    return;
+  // pointer before reporting a delivery failure; DB and Redis parity plus a
+  // current integrity proof is the success evidence, not whether this
+  // particular dispatch claimed a row.
+  const active = await readActiveDataPublicationManifestWithItemBounds(marketScope(season));
+  if (!active || active.publicationId !== publicationId || active.revision !== revision) {
+    throw new Error(
+      `Market publication ${publicationId} is canonical but Redis delivery is pending`,
+    );
   }
-  throw new Error(`Market publication ${publicationId} is canonical but Redis delivery is pending`);
+  // A newly delivered outbox row was validated while staging and activating
+  // its immutable payload. An already-delivered receipt must have a current
+  // proof, or pay one full read before the caller reports delivery success.
+  if (!(await hasDataPublicationIntegrityProof(marketScope(season), active))) {
+    const verified = await readActiveDataPublication(
+      marketScope(season),
+      undefined,
+      undefined,
+      active,
+    );
+    if (!verified)
+      throw new Error(`Market publication ${publicationId} failed integrity verification`);
+  }
 }
 
 export async function ensureMarketPublication(
@@ -107,7 +124,7 @@ export async function ensureMarketPublication(
     rowCount: source.rowCount,
     expectedRowCount: source.rowCount,
   };
-  const active = await readActiveDataPublication(marketScope(season));
+  const active = await readActiveDataPublicationItemsWithBounds(marketScope(season), ['context']);
   const opsActive = await syncOperationsRepository.findActivePublication('fpl:market', season);
   if (!opsActive && active && context.snapshotDate.replaceAll('-', '') !== formatCronDateKey()) {
     // A Redis-only publication for a past UTC+8 date is a ghost. Do not

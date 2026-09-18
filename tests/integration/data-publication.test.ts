@@ -11,6 +11,8 @@ import {
   DATA_PUBLICATION_STAGING_TTL_MS,
   dataPublicationItemKey,
   activateDataPublicationPointer,
+  hasDataPublicationIntegrityFailure,
+  markDataPublicationIntegrityFailure,
   prepareDataPublication,
   publishDataRevision,
   repairDataPublicationItems,
@@ -44,6 +46,7 @@ import { explicitSeasonRef } from '../../src/domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse } from '../../src/clients/fpl';
 
 const CORE_SCOPE = { dataset: 'fpl:core' as const, seasonCode: '9899' };
+const CORE_INTEGRITY_FAILURE_KEY = 'llm:data:fpl:core:9899:integrity-failure';
 const LIVE_SCOPE = {
   season: '9899',
   eventId: 38,
@@ -858,17 +861,28 @@ describe('immutable Redis publication', () => {
       DATA_PUBLICATION_STAGING_TTL_MS,
     );
     const prepared = prepareDataPublication(candidate);
+    await markDataPublicationIntegrityFailure(CORE_SCOPE, prepared.manifest, redis);
+    expect(await hasDataPublicationIntegrityFailure(CORE_SCOPE, prepared.manifest, redis)).toBe(
+      true,
+    );
+    await redis.del(CORE_INTEGRITY_FAILURE_KEY);
+    await redis.lpush(CORE_INTEGRITY_FAILURE_KEY, 'wrong-type-marker');
     await repairDataPublicationItems(prepared, prepared.manifest.publicationId, redis);
     await activateDataPublicationPointer(prepared.manifest, redis);
 
     expect((await readActiveDataPublication(CORE_SCOPE, redis))?.items.events).toEqual([{ id: 1 }]);
+    expect(await hasDataPublicationIntegrityFailure(CORE_SCOPE, prepared.manifest, redis)).toBe(
+      false,
+    );
     await expectPermanent(redis, events.key);
+    expect(await redis.exists(CORE_INTEGRITY_FAILURE_KEY)).toBe(0);
   });
 
   test('replaces a malformed active pointer with the canonical publication atomically', async () => {
     const candidate = input(1, PUBLICATION_IDS.one, '2026-08-09T01:00:00.000Z');
     const prepared = prepareDataPublication(candidate);
     await redis.set(activeDataPublicationKey(CORE_SCOPE), 'not-json');
+    await redis.lpush(CORE_INTEGRITY_FAILURE_KEY, 'wrong-type-marker');
     const observed = await readActiveDataPublicationPointerState(CORE_SCOPE, redis);
 
     await replaceMalformedActiveDataPublication(prepared, observed, redis);
@@ -877,6 +891,7 @@ describe('immutable Redis publication', () => {
       PUBLICATION_IDS.one,
     );
     for (const item of prepared.manifest.items) await expectPermanent(redis, item.key);
+    expect(await redis.exists(CORE_INTEGRITY_FAILURE_KEY)).toBe(0);
   });
 
   test('readers fail closed for missing, corrupted, or wrongly typed data', async () => {

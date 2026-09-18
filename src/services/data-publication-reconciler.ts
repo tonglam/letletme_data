@@ -1,9 +1,11 @@
 import {
   activateDataPublicationPointer,
   compareAndSwapDataPublicationPointer,
+  markDataPublicationIntegrityProof,
   repairDataPublicationItems,
-  readActiveDataPublication,
+  hasDataPublicationIntegrityFailure,
   readActiveDataPublicationManifest,
+  readActiveDataPublicationManifestWithItemBounds,
   readActiveDataPublicationPointerState,
   replaceMalformedActiveDataPublication,
   stageDataPublication,
@@ -56,11 +58,19 @@ export async function reconcileDataPublication(
     season,
     scope.eventId,
   );
-  // Reconciliation is the repair boundary, so it must detect same-length
-  // Redis corruption before declaring a publication matched. This validates
-  // the payload hashes/counts in Redis; it does not reread PostgreSQL data.
-  const redisActiveRead = await readActiveDataPublication(scope);
-  const redisActive = redisActiveRead?.manifest ?? null;
+  // Reconciliation is the repair boundary, so it must detect missing or
+  // truncated Redis siblings before declaring a publication matched. The
+  // bounded control read checks manifest identity plus EXISTS/STRLEN only; it
+  // never downloads or hashes item payloads on the normal path.
+  const redisActive = await readActiveDataPublicationManifestWithItemBounds(scope).catch(
+    () => null,
+  );
+  // The bounded reader already checked the shared failure marker on its
+  // healthy path. Avoid a second marker GET when it returned a usable
+  // manifest; only a null result needs the marker to distinguish a known
+  // corruption from a missing/invalid pointer.
+  const integrityRepairRequired =
+    redisActive === null ? await hasDataPublicationIntegrityFailure(scope, null) : false;
   const redisManifest =
     redisActive ?? (await readActiveDataPublicationManifest(scope).catch(() => null));
   const redisPointerState = redisManifest
@@ -212,6 +222,7 @@ export async function reconcileDataPublication(
     );
   }
   if (
+    !integrityRepairRequired &&
     redisActive?.publicationId === dbActive.publicationId &&
     redisActive.revision === dbActive.revision &&
     durableManifest?.publicationId === dbActive.publicationId &&
@@ -231,10 +242,12 @@ export async function reconcileDataPublication(
   // This is the normal crash-recovery path after Redis staging or CAS was
   // interrupted; the fallback below is only for legacy publications that have
   // no outbox row yet.
-  const outboxDelivery = await dispatchDataPublicationOutbox({
-    limit: 1,
-    publicationId: dbActive.publicationId,
-  });
+  const outboxDelivery = integrityRepairRequired
+    ? { delivered: 0 }
+    : await dispatchDataPublicationOutbox({
+        limit: 1,
+        publicationId: dbActive.publicationId,
+      });
   if (outboxDelivery.delivered === 1) {
     return {
       status: 'repaired',
@@ -288,6 +301,7 @@ export async function reconcileDataPublication(
   // otherwise readiness would remain stuck on a row that is already canonical
   // in both stores.
   await markDataPublicationOutboxReconciled({ publicationId: dbActive.publicationId });
+  await markDataPublicationIntegrityProof(canonical.manifest);
   logInfo('Repaired Redis data publication pointer from canonical DB', {
     dataset: scope.dataset,
     season: scope.seasonCode,

@@ -57,6 +57,10 @@ let lastKnownActiveSeasonCode: string | null = null;
 async function activeSeasonFromRedis(): Promise<string | null> {
   const redis = await redisSingleton.getClient();
   if (lastKnownActiveSeasonCode) {
+    // This path is reached only after PostgreSQL failed. Validate the complete
+    // Redis publication before using it as the season authority; a same-sized
+    // payload corruption must not make readiness admit traffic that consumers
+    // will later reject.
     const active = await readActiveDataPublication({
       dataset: 'fpl:core',
       seasonCode: lastKnownActiveSeasonCode,
