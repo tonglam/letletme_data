@@ -394,13 +394,18 @@ local function valid_epoch(raw)
   local value = tonumber(raw)
   return value ~= nil
     and value >= 0
-    and value < 9007199254740991
+    and value <= 9007199254740991
     and math.floor(value) == value
 end
 local repair_type = redis.call('TYPE', KEYS[4])
 local repair_type_name = type(repair_type) == 'table' and repair_type['ok'] or repair_type
-if repair_type_name == 'string' and not valid_epoch(redis.call('GET', KEYS[4])) then
-  redis.call('DEL', KEYS[4])
+if repair_type_name == 'string' then
+  local repair_raw = redis.call('GET', KEYS[4])
+  if not valid_epoch(repair_raw) then
+    redis.call('DEL', KEYS[4])
+  elseif tonumber(repair_raw) >= 9007199254740991 then
+    return {'epoch_exhausted'}
+  end
 elseif repair_type_name ~= 'none' and repair_type_name ~= 'string' then
   redis.call('DEL', KEYS[4])
 end
@@ -444,13 +449,18 @@ local function valid_epoch(raw)
   local value = tonumber(raw)
   return value ~= nil
     and value >= 0
-    and value < 9007199254740991
+    and value <= 9007199254740991
     and math.floor(value) == value
 end
 local repair_type = redis.call('TYPE', KEYS[4])
 local repair_type_name = type(repair_type) == 'table' and repair_type['ok'] or repair_type
-if repair_type_name == 'string' and not valid_epoch(redis.call('GET', KEYS[4])) then
-  redis.call('DEL', KEYS[4])
+if repair_type_name == 'string' then
+  local repair_raw = redis.call('GET', KEYS[4])
+  if not valid_epoch(repair_raw) then
+    redis.call('DEL', KEYS[4])
+  elseif tonumber(repair_raw) >= 9007199254740991 then
+    return {'epoch_exhausted'}
+  end
 elseif repair_type_name ~= 'none' and repair_type_name ~= 'string' then
   redis.call('DEL', KEYS[4])
 end
@@ -506,6 +516,55 @@ elseif epoch_type_name ~= 'none' then
 end
 local payloads = redis.call('MGET', unpack(ARGV, 1, #ARGV))
 table.insert(payloads, 1, tostring(epoch))
+return payloads
+`;
+
+/**
+ * Check the failure/proof fences and capture selected immutable payloads in
+ * one Redis transaction. This closes the window between a successful proof
+ * lookup and a later selected read: a concurrent corruption marker is either
+ * seen here or is ordered after this read and cannot invalidate its evidence.
+ */
+const READ_VERIFIED_DATA_PUBLICATION_PAYLOADS_SCRIPT = `
+local function valid_epoch(raw)
+  if type(raw) ~= 'string' then return false end
+  local digits = string.match(raw, '^%d+$')
+  if not digits or (#raw > 1 and string.sub(raw, 1, 1) == '0') then return false end
+  local value = tonumber(raw)
+  return value ~= nil
+    and value >= 0
+    and value <= 9007199254740991
+    and math.floor(value) == value
+end
+local failure_type = redis.call('TYPE', KEYS[2])
+local failure_type_name = type(failure_type) == 'table' and failure_type['ok'] or failure_type
+if failure_type_name == 'string' then
+  local failure = redis.call('GET', KEYS[2])
+  if failure == '*' or failure == ARGV[1] then return {'failure'} end
+elseif failure_type_name ~= 'none' then
+  return {'failure'}
+end
+local proof_type = redis.call('TYPE', KEYS[3])
+local proof_type_name = type(proof_type) == 'table' and proof_type['ok'] or proof_type
+if proof_type_name ~= 'string' or redis.call('GET', KEYS[3]) ~= ARGV[2] then
+  return {'proof_missing'}
+end
+local epoch = 0
+local epoch_type = redis.call('TYPE', KEYS[1])
+local epoch_type_name = type(epoch_type) == 'table' and epoch_type['ok'] or epoch_type
+if epoch_type_name == 'string' then
+  local raw = redis.call('GET', KEYS[1])
+  if valid_epoch(raw) then
+    epoch = tonumber(raw)
+  else
+    redis.call('DEL', KEYS[1])
+  end
+elseif epoch_type_name ~= 'none' then
+  redis.call('DEL', KEYS[1])
+end
+local payloads = redis.call('MGET', unpack(ARGV, 3, #ARGV))
+table.insert(payloads, 1, tostring(epoch))
+table.insert(payloads, 1, 'ok')
 return payloads
 `;
 
@@ -1014,6 +1073,71 @@ async function readDataPublicationPayloadsWithEpoch(
     throw new Error('Publication payload epoch read returned a non-string payload');
   }
   return { observedEpoch, payloads: payloads as Array<string | null> };
+}
+
+type VerifiedDataPublicationPayloads =
+  | Readonly<{ status: 'ok'; observedEpoch: number; payloads: Array<string | null> }>
+  | Readonly<{ status: 'failure' | 'proof_missing' }>;
+
+/**
+ * Check the integrity fences and read selected payloads in one Redis EVAL.
+ * Production uses ioredis EVAL; the command-by-command branch exists only for
+ * the in-memory Redis fakes used by unit tests.
+ */
+async function readVerifiedDataPublicationPayloads(
+  scope: DataPublicationScope,
+  manifest: DataPublicationManifest,
+  keys: readonly string[],
+  redis: Redis,
+): Promise<VerifiedDataPublicationPayloads> {
+  if (keys.length === 0) throw new Error('Publication payload keys are required');
+  const evalMethod = (redis as unknown as { eval?: (...args: unknown[]) => Promise<unknown> }).eval;
+  if (typeof evalMethod !== 'function') {
+    if (await hasDataPublicationIntegrityFailure(scope, manifest, redis)) {
+      return { status: 'failure' };
+    }
+    if (!(await hasDataPublicationIntegrityProof(scope, manifest, redis))) {
+      return { status: 'proof_missing' };
+    }
+    const mgetMethod = (
+      redis as unknown as {
+        mget?: (...args: string[]) => Promise<Array<string | null>>;
+      }
+    ).mget;
+    const payloads =
+      typeof mgetMethod === 'function'
+        ? await mgetMethod.call(redis, ...keys)
+        : await Promise.all(keys.map((key) => redis.get(key)));
+    return { status: 'ok', observedEpoch: Date.now(), payloads };
+  }
+  const raw = await evalMethod.call(
+    redis,
+    READ_VERIFIED_DATA_PUBLICATION_PAYLOADS_SCRIPT,
+    3,
+    integrityRepairKey(scope),
+    integrityFailureKey(scope),
+    integrityProofKey(scope),
+    publicationIntegrityToken(manifest),
+    publicationIntegrityProofToken(manifest),
+    ...keys,
+  );
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('Verified publication payload read returned an invalid result');
+  }
+  const status = raw[0];
+  if (status === 'failure' || status === 'proof_missing') return { status };
+  if (status !== 'ok' || raw.length !== keys.length + 2) {
+    throw new Error('Verified publication payload read returned an invalid result');
+  }
+  const observedEpoch = Number(raw[1]);
+  if (!Number.isSafeInteger(observedEpoch) || observedEpoch < 0) {
+    throw new Error('Verified publication payload epoch is invalid');
+  }
+  const payloads = raw.slice(2).map((payload) => (payload === false ? null : payload));
+  if (payloads.some((payload) => payload !== null && typeof payload !== 'string')) {
+    throw new Error('Verified publication payload read returned a non-string payload');
+  }
+  return { status: 'ok', observedEpoch, payloads: payloads as Array<string | null> };
 }
 
 export function activeDataPublicationKey(scope: DataPublicationScope): string {
@@ -1828,7 +1952,14 @@ export async function readActiveDataPublicationItemsWithBounds(
     if (selected.some((item): item is undefined => item === undefined)) return null;
     const selectedItems = selected as DataPublicationManifest['items'];
     const redis = redisClient ?? (await redisSingleton.getClient());
-    if (!(await hasDataPublicationIntegrityProof(scope, manifest, redis))) {
+    const verifiedRead = await readVerifiedDataPublicationPayloads(
+      scope,
+      manifest,
+      selectedItems.map((item) => item.key),
+      redis,
+    );
+    if (verifiedRead.status === 'failure') return null;
+    if (verifiedRead.status === 'proof_missing') {
       // Existing active publications may predate the shared proof marker. Pay
       // the complete validation cost once, then keep all steady-state control
       // reads bounded by the marker tied to this immutable identity. This also
@@ -1841,11 +1972,8 @@ export async function readActiveDataPublicationItemsWithBounds(
         items: Object.fromEntries(itemNames.map((name) => [name, full.items[name]])),
       };
     }
-    const { observedEpoch, payloads } = await readDataPublicationPayloadsWithEpoch(
-      scope,
-      selectedItems.map((item) => item.key),
-      redis,
-    );
+    if (verifiedRead.status !== 'ok') return null;
+    const { observedEpoch, payloads } = verifiedRead;
     if (payloads.length !== selectedItems.length) return null;
     const items: Record<string, unknown> = {};
     for (let index = 0; index < selectedItems.length; index += 1) {
