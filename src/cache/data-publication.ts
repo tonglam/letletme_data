@@ -394,7 +394,7 @@ local function valid_epoch(raw)
   local value = tonumber(raw)
   return value ~= nil
     and value >= 0
-    and value <= 9007199254740991
+    and value < 9007199254740991
     and math.floor(value) == value
 end
 local repair_type = redis.call('TYPE', KEYS[4])
@@ -444,7 +444,7 @@ local function valid_epoch(raw)
   local value = tonumber(raw)
   return value ~= nil
     and value >= 0
-    and value <= 9007199254740991
+    and value < 9007199254740991
     and math.floor(value) == value
 end
 local repair_type = redis.call('TYPE', KEYS[4])
