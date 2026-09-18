@@ -13,12 +13,20 @@ import {
   shouldMarkLivePicksFreshnessNotApplicable,
   shouldMarkLivePicksFreshnessNoSourceWork,
   shouldPersistLiveLifecycleStatus,
+  shouldRequireLivePicksCompletionGate,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
 const quote = String.fromCharCode(39);
 
 describe('live lifecycle decisions', () => {
+  test('keeps the picks completeness gate through the first active fixture', () => {
+    expect(shouldRequireLivePicksCompletionGate('PICKS_PROBE')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('PICKS_SYNC')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('LIVE_ACTIVE')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('BETWEEN_FIXTURES')).toBe(false);
+  });
+
   test('keeps live-picks round evidence bounded and explicit about missing timings', () => {
     expect(
       buildLivePicksRoundEvidence({
@@ -184,7 +192,8 @@ describe('live lifecycle decisions', () => {
     const liveWorkerSource = readFileSync('src/workers/live-data.worker.ts', 'utf8');
     expect(liveWorkerSource).toContain('expectedNextCheckAt: job.data.expectedNextCheckAt');
     expect(liveWorkerSource).toContain('if (result.checkpointed)');
-    expect(liveWorkerSource).toContain('randomUUID()');
+    expect(liveWorkerSource).toContain('scheduled official H2H refresh');
+    expect(liveWorkerSource).not.toContain('enqueueFinalOfficialH2HRefresh');
     expect(readFileSync('src/repositories/entry-event-picks.ts', 'utf8')).toContain(
       'preserveCheckpointedInput',
     );

@@ -68,6 +68,7 @@ import {
   readLiveBootstrapGate,
   readLivePicksDurableFreshnessEvidence,
   resolveLiveLifecycleDelay,
+  shouldRequireLivePicksCompletionGate,
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import {
@@ -443,13 +444,10 @@ function eventDefinition(input: {
           if (!event.deadlineTime) return [];
           const dueAt = new Date(event.deadlineTime.getTime() + 30 * 60_000);
           if (context.now < dueAt) return [];
-          if (input.bootstrapGated) {
-            // Redis is only a bounded admission projection. The live-picks
-            // root owns the provider probe; these one-shot scans must not make a
-            // second bootstrap request or use is_current as a readiness signal.
-            const gate = await readLiveBootstrapGate(context.season.seasonCode, event.id);
-            if (gate.status !== 'ready') return [];
-          }
+          // Reserve the durable checkpoint even when the Redis admission
+          // projection is absent or expired. The worker owns the status-only
+          // bootstrap probe and defers the obligation without losing this
+          // historical catch-up target.
           return [
             {
               scopeKey: `${context.season.seasonCode}:event:${event.id}`,
@@ -1210,11 +1208,14 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       }
       if (!selected) return [];
       const { event, decision } = selected;
-      const bootstrapGateRequired =
+      const picksCompletionGateRequired = shouldRequireLivePicksCompletionGate(decision.state);
+      const bootstrapProbeMustBeReadyBeforePlan =
         decision.state === 'PICKS_PROBE' || decision.state === 'PICKS_SYNC';
-      if (bootstrapGateRequired) {
+      if (bootstrapProbeMustBeReadyBeforePlan) {
         const bootstrap = await readLiveBootstrapGate(context.season.seasonCode, event.id);
         if (bootstrap.status !== 'ready') return [];
+      }
+      if (picksCompletionGateRequired) {
         const picksEvidence = await readLivePicksDurableFreshnessEvidence(
           context.season,
           event.id,
@@ -1268,7 +1269,10 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
               decision.shouldObserveMatches &&
               !decision.shouldFetchLive &&
               decision.state !== 'PRE_DEADLINE',
-            bootstrapGateRequired,
+            bootstrapGateRequired:
+              decision.state === 'PICKS_PROBE' ||
+              decision.state === 'PICKS_SYNC' ||
+              decision.state === 'LIVE_ACTIVE',
           },
         },
       ];
@@ -1330,7 +1334,21 @@ function livePicksDefinition(): ScheduledJobDefinition {
       if (!event) return [];
       const fixtures = await loadSchedulerFixtures(context, event.id);
       const decision = decideLiveLifecycle(event, fixtures, context.now);
-      if (!decision.shouldProbePicks && !decision.shouldSyncPicks) return [];
+      let needsPicksRefresh = decision.shouldProbePicks || decision.shouldSyncPicks;
+      if (!needsPicksRefresh && decision.state === 'LIVE_ACTIVE') {
+        const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+          context.season,
+          event.id,
+        ).catch(() => null);
+        // A failed proof read is fail-closed: the retry root can re-establish
+        // the source gate and record the durable coverage evidence. An empty
+        // eligible cohort is handled as a terminal N/A result by the root and
+        // does not create a perpetual repair loop.
+        needsPicksRefresh =
+          picksEvidence === null ||
+          (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true);
+      }
+      if (!needsPicksRefresh) return [];
       if (!(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))) return [];
       return [
         {
@@ -1385,11 +1403,30 @@ export function officialH2HDefinition(
     claimPriority: 15,
     successPredicate: 'official H2H match snapshot and standings publish atomically',
     manualTrigger: false,
-    resolve: async () => {
-      // The official H2H mirror is maintained by explicit finalization and
-      // repair jobs. The event-live publication already supplies the live
-      // score; a minute cadence here duplicates provider and DB work.
-      return [];
+    resolve: async (context) => {
+      // The official H2H mirror is not a live match-window feed. Its scheduler
+      // authority is the explicit event-finalization boundary: once FPL marks
+      // an event finished and data_checked, reserve one durable obligation so
+      // the final H2H publication receives its own freshness evidence. Manual
+      // repair/governance jobs remain the second explicit entry point.
+      return context.events
+        .filter((event) => event.finished === true && event.dataChecked === true)
+        .map((event) => {
+          const finalizationAt = event.dataCheckedAt ?? event.updatedAt ?? event.deadlineTime;
+          const periodSuffix = finalizationAt?.toISOString() ?? 'unknown';
+          return {
+            scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+            periodKey: `official-h2h-final-${event.id}-${periodSuffix}`,
+            dueAt: finalizationAt ?? context.now,
+            eventId: event.id,
+            source: 'reconcile' as const,
+            evidence: {
+              lifecycleState: 'FINALIZED',
+              trigger: 'event-data-checked',
+              ...(finalizationAt ? { freshAfter: finalizationAt.toISOString() } : {}),
+            },
+          };
+        });
     },
     enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
@@ -1403,6 +1440,9 @@ export function officialH2HDefinition(
           obligationId,
           obligationGeneration: generation,
           freshnessWindowId,
+          ...(typeof plan.evidence?.freshAfter === 'string'
+            ? { freshAfter: plan.evidence.freshAfter }
+            : {}),
         },
       );
       if (!job) throw new Error('Official H2H job became pending before enqueue');

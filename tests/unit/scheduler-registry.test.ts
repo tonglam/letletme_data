@@ -202,6 +202,29 @@ describe('standalone scheduler registry', () => {
     expect(transfers?.successPredicate).toContain('entry transfers checkpoint');
   });
 
+  test('reserves historical picks catch-up before the Redis bootstrap projection exists', async () => {
+    const picks = registry.find((definition) => definition.name === 'entry-picks');
+    const plans = await picks!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T13:00:00.000Z'),
+      events: [
+        {
+          id: 1,
+          deadlineTime: new Date('2026-08-23T12:00:00.000Z'),
+          finished: false,
+          dataChecked: false,
+        },
+      ],
+    });
+
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toMatchObject({
+      eventId: 1,
+      source: 'catchup',
+      scopeKey: `${TEST_SEASON.seasonCode}:event:1`,
+    });
+  });
+
   test('runs one distributed daily retention plan for every finalized current-season event', async () => {
     const retention = registry.find((definition) => definition.name === 'live-final-retention');
     expect(retention).toMatchObject({
@@ -1024,6 +1047,36 @@ describe('standalone scheduler registry', () => {
     expect(hasPending).not.toHaveBeenCalled();
   });
 
+  test('resolves one explicit official H2H refresh after event finalization', async () => {
+    const definition = officialH2HDefinition();
+    const plans = await definition.resolve({
+      season: TEST_SEASON,
+      currentEventId: 1,
+      now: new Date('2026-08-24T00:00:00.000Z'),
+      events: [
+        {
+          id: 1,
+          deadlineTime: new Date('2026-08-23T12:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: new Date('2026-08-23T19:00:00.000Z'),
+        },
+      ],
+    });
+
+    expect(plans).toMatchObject([
+      {
+        eventId: 1,
+        source: 'reconcile',
+        evidence: {
+          lifecycleState: 'FINALIZED',
+          trigger: 'event-data-checked',
+          freshAfter: '2026-08-23T19:00:00.000Z',
+        },
+      },
+    ]);
+  });
+
   test('catches up an hourly maintenance bucket after its scheduled minute', async () => {
     const summary = registry.find(
       (definition) => definition.name === 'player-season-summary-repair',
@@ -1524,9 +1577,14 @@ describe('standalone scheduler registry', () => {
       transfers!.resolve(context),
     ]);
     expect(pickPlans).toEqual(transferPlans);
-    // The one-shot scans are admitted only after the live-picks root has
-    // recorded a bootstrap HTTP 200. The test Redis is intentionally absent,
-    // so a fail-closed empty plan is the expected result.
-    expect(pickPlans).toEqual([]);
+    // Admission is enforced by the worker so the scheduler can preserve the
+    // durable catch-up obligation when Redis has no bootstrap projection.
+    expect(pickPlans).toMatchObject([
+      {
+        eventId: 1,
+        source: 'catchup',
+        scopeKey: `${TEST_SEASON.seasonCode}:event:1`,
+      },
+    ]);
   });
 });

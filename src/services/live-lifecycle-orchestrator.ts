@@ -96,6 +96,16 @@ export type LiveLifecycleDecision = {
   nextKickoffAt?: Date | null;
 };
 
+/**
+ * The first Live Points publication is not allowed to outrun the one-shot
+ * picks/transfers cohort. Keep the same fence while fixtures are already
+ * started: a provider response can move the fixture to LIVE_ACTIVE before
+ * the entry fan-out has checkpointed every eligible entry.
+ */
+export function shouldRequireLivePicksCompletionGate(state: LiveLifecycleState): boolean {
+  return state === 'PICKS_PROBE' || state === 'PICKS_SYNC' || state === 'LIVE_ACTIVE';
+}
+
 export type LiveBootstrapStatus = 'ready' | 'not-ready' | 'unknown';
 
 export type LiveBootstrapGate = Readonly<{
@@ -1690,14 +1700,20 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
     });
   }
   let livePointsEligible = true;
-  if (decision.state === 'PICKS_PROBE' || decision.state === 'PICKS_SYNC') {
+  if (shouldRequireLivePicksCompletionGate(decision.state)) {
     const bootstrap = await readLiveBootstrapGate(season.seasonCode, currentEvent.id);
-    if (bootstrap.status === 'ready') {
+    // LIVE_ACTIVE jobs carry the worker-side bootstrap gate. Only the
+    // pre-start states need the Redis projection to be ready before a plan is
+    // created; otherwise an expired projection could strand an active event.
+    const bootstrapReady = decision.state === 'LIVE_ACTIVE' || bootstrap.status === 'ready';
+    if (bootstrapReady) {
       const picksEvidence = await readLivePicksDurableFreshnessEvidence(
         season,
         currentEvent.id,
       ).catch(() => null);
-      livePointsEligible = picksEvidence?.expectedCount === 0 || picksEvidence?.complete === true;
+      livePointsEligible =
+        picksEvidence !== null &&
+        (picksEvidence.expectedCount === 0 || picksEvidence.complete === true);
     } else {
       livePointsEligible = false;
     }

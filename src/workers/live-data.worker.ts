@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { UnrecoverableError, Worker, Job, QueueEvents } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
@@ -9,7 +8,6 @@ import {
   liveDataQueueName,
 } from '../queues/live-data.queue';
 import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
-import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
 import {
@@ -33,7 +31,6 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logDebug, logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { createEventRepository, eventRepository } from '../repositories/events';
 import { createSeasonRepository } from '../repositories/seasons';
 import { runtimeReleaseRevision } from '../utils/runtime-heartbeat';
 import {
@@ -170,36 +167,6 @@ export function liveDataResultDeferredSchedulerObligation(
   if (jobName !== LIVE_JOBS.LIVE_SNAPSHOT) return false;
   if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
   return (result as Record<string, unknown>).status === 'waiting-dependencies';
-}
-
-async function enqueueFinalOfficialH2HRefresh(
-  season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
-  eventId: number,
-  obligationGeneration: number | undefined,
-  freshAfter: string | null,
-): Promise<void> {
-  try {
-    await enqueueTournamentOfficialH2H(season, eventId, 'reconcile', {
-      // A failed Bull job is retained for seven days.  Never reuse its ID on
-      // a later finalization pass or BullMQ will deduplicate the retry into the
-      // terminal failed job instead of dispatching a new refresh.
-      jobId: `live-final-official-h2h-e${eventId}-g${obligationGeneration ?? 'unknown'}-${randomUUID()}`,
-      ...(freshAfter ? { freshAfter } : {}),
-    });
-    logInfo('Enqueued official H2H refresh after live finalization', {
-      season: season.seasonCode,
-      eventId,
-      freshAfter,
-    });
-  } catch (error) {
-    // The durable live-finalization obligation remains pending and will retry
-    // this enqueue. Never acknowledge finalization based on a failed handoff.
-    logError('Failed to enqueue official H2H refresh after live finalization', error, {
-      season: season.seasonCode,
-      eventId,
-      freshAfter,
-    });
-  }
 }
 
 /**
@@ -839,15 +806,14 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
       snapshot.state === 'FINALIZED' &&
       (!h2hGlobalIdentityMatches || !h2hLeagueResult?.finalReady)
     ) {
-      const finalizationFreshAfter = await (
-        databaseBudget?.readDb ? createEventRepository(databaseBudget.readDb) : eventRepository
-      ).findDataCheckedAtExact(season, eventId);
-      await enqueueFinalOfficialH2HRefresh(
-        season,
+      // The official H2H final refresh is an explicit scheduler obligation
+      // keyed by the event's data_checked boundary. Keeping the enqueue there
+      // gives the H2H publication its own freshness window and avoids a
+      // live-snapshot worker side channel with no scheduler evidence.
+      logInfo('Finalized live publication is waiting for scheduled official H2H refresh', {
+        season: season.seasonCode,
         eventId,
-        job.data.obligationGeneration,
-        finalizationFreshAfter,
-      );
+      });
     }
 
     if (snapshot.state === 'FINALIZED') {

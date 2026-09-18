@@ -36,6 +36,29 @@ describe('FPL bootstrap edge-cache control', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  test('bootstrap readiness probe cancels the response body after reading headers', async () => {
+    let cancelled = false;
+    globalThis.fetch = mock(
+      async () =>
+        ({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          body: {
+            cancel: async () => {
+              cancelled = true;
+            },
+          },
+        }) as unknown as Response,
+    ) as unknown as typeof fetch;
+
+    await expect(fplClient.probeBootstrap({ maxRetries: 0 })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(cancelled).toBe(true);
+  });
+
   test('adds an explicit caller cache bucket without changing the endpoint path', async () => {
     const payload = buildCoreSnapshotFixture({ playerCount: 1 }).bootstrap;
     let requestedUrl = '';
