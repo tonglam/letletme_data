@@ -52,6 +52,8 @@ export interface LiveDataJobData {
   promoteActiveEvent?: boolean;
   /** Post-deadline Live Points requires the status-only bootstrap gate. */
   bootstrapGateRequired?: boolean;
+  /** Post-match full snapshots must not outrun the durable picks cohort. */
+  picksGateRequired?: boolean;
   /** A checkpoint-only job never calls FPL; it consumes Redis publication data. */
   checkpointKind?: 'desk' | 'detail';
   checkpointPublicationId?: string;

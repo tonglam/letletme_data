@@ -75,6 +75,7 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
     finalizeEvent: resultSlot.startsWith('final-'),
     lifecycleState: resultSlot.startsWith('final-') ? 'FINALIZED' : 'GW_REVIEW',
     bootstrapGateRequired: true,
+    picksGateRequired: true,
     jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
   });
   if (job) {

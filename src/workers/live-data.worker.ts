@@ -27,7 +27,10 @@ import {
   syncLiveH2HLeaguePublicationsV2,
 } from '../services/live-league-publication-v2.service';
 import { ensureLiveAverageReadyForPublication } from '../services/live-average-refresh.service';
-import { ensureLiveBootstrapReady } from '../services/live-lifecycle-orchestrator';
+import {
+  ensureLiveBootstrapReady,
+  readLivePicksDurableFreshnessEvidence,
+} from '../services/live-lifecycle-orchestrator';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logDebug, logError, logInfo, logWarn } from '../utils/logger';
@@ -452,6 +455,38 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
           throw new Error(evidence.reason);
         }
         return { ...evidence, status: 'waiting-dependencies' as const };
+      }
+    }
+    if (job.data.picksGateRequired === true) {
+      const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+        season,
+        eventId,
+        databaseBudget?.readDb,
+      ).catch(() => null);
+      const picksComplete = Boolean(
+        picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
+      );
+      if (!picksComplete) {
+        const evidence = {
+          finalization: 'waiting-for-entry-picks',
+          reason: 'DATA_INCOMPLETE:LIVE_PICKS_COHORT_INCOMPLETE',
+          expectedCount: picksEvidence?.expectedCount ?? null,
+          observedCount: picksEvidence?.observedCount ?? null,
+        };
+        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            dependencyWait: {
+              reasonCodes: [evidence.reason],
+            },
+            evidence,
+            db: databaseBudget?.writeDb,
+          });
+          if (!deferred) throw new Error('Stale scheduler picks gate');
+          return { ...evidence, status: 'waiting-dependencies' as const };
+        }
+        throw new Error(evidence.reason);
       }
     }
     if (job.data.bootstrapGateRequired === true) {
