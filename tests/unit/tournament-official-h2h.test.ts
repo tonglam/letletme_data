@@ -158,4 +158,17 @@ describe('Official H2H Live Points V2 projection', () => {
       undefined,
     );
   });
+
+  test('keeps a tied real entry versus Average Team as a draw', () => {
+    const tied = snapshot(null);
+    tied.matches[0]!.entry_1_points = 30;
+
+    expect(overlayOfficialH2HAverageScore(tied, 1, 30).matches[0]).toMatchObject({
+      entry_1_draw: 1,
+      entry_2_draw: 1,
+      entry_1_total: 1,
+      entry_2_total: 1,
+      winner: null,
+    });
+  });
 });

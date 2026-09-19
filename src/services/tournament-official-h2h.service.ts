@@ -504,9 +504,11 @@ function deriveOfficialH2HScoreOutcome(
       ? match.entry_1_entry
       : match.entry_2_entry;
   const entry1Wins =
-    entry1Points > entry2Points || (tied && knockoutWinner === match.entry_1_entry);
+    entry1Points > entry2Points ||
+    (tied && knockoutWinner !== null && knockoutWinner === match.entry_1_entry);
   const entry2Wins =
-    entry2Points > entry1Points || (tied && knockoutWinner === match.entry_2_entry);
+    entry2Points > entry1Points ||
+    (tied && knockoutWinner !== null && knockoutWinner === match.entry_2_entry);
   const drawn = !entry1Wins && !entry2Wins;
   return {
     entry_1_win: entry1Wins ? 1 : 0,
