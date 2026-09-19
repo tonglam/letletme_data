@@ -897,7 +897,7 @@ local advancing_final = correction_boundary ~= '' and correction_key ~= '' and c
 -- when the application has fenced the exact current publication identity.  A
 -- same-boundary candidate must not become a general FINAL overwrite escape.
 local same_boundary_rebind = ARGV[9] == '1' and correction_boundary ~= '' and correction_key ~= '' and
-  candidate.state == 'FINAL' and current and current_source_key ~= '' and candidate_source_key ~= '' and
+  candidate.state == 'FINAL' and current and current_state == 'FINAL' and current_source_key ~= '' and candidate_source_key ~= '' and
   current_source_key == correction_key and candidate_source_key == correction_key
 local replacing_final = advancing_final or same_boundary_rebind
 if current_state == 'FINAL' and current and not replacing_final then return {'stale', current_raw} end
