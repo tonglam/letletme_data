@@ -5,7 +5,6 @@ import {
 } from '../services/live-lifecycle-orchestrator';
 import { livePicksQueue } from '../queues/live-picks.queue';
 import { logError, logInfo } from '../utils/logger';
-import { FPLClientError } from '../utils/errors';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
 export type LivePicksRefreshResult = Readonly<{
@@ -15,6 +14,13 @@ export type LivePicksRefreshResult = Readonly<{
   /** The scheduler may settle this root as skipped after an accepted backoff. */
   outcome?: 'accepted-backoff';
   sourceReady: boolean;
+  /** The root was durably deferred until the shared bootstrap gate is ready. */
+  status?: 'waiting-dependencies';
+  sourceReason?:
+    | 'BOOTSTRAP_HTTP_NOT_200'
+    | 'BOOTSTRAP_PROBE_UNKNOWN'
+    | 'PICKS_CANARY_NOT_READY'
+    | 'PICKS_PROBE_BACKOFF';
   scanComplete: boolean;
   freshnessEvidenceRecorded?: boolean;
 }>;
@@ -84,6 +90,7 @@ export async function enqueueLivePicksRefresh(
 
 export async function runLivePicksRefreshJob(
   job: LivePicksRefreshJobData,
+  options: Readonly<{ forceLeagueRepair?: boolean }> = {},
 ): Promise<LivePicksRefreshResult> {
   try {
     const result = await runPicksProbeAndSync(
@@ -95,18 +102,27 @@ export async function runLivePicksRefreshJob(
         obligationGeneration: job.obligationGeneration,
         freshnessWindowId: job.freshnessWindowId,
         deadlineAt: job.deadlineAt ? new Date(job.deadlineAt) : undefined,
+        forceLeagueRepair: options.forceLeagueRepair,
       },
     );
     if (!result.sourceReady) {
-      // A Bull-completed root is not a successful obligation: the source
-      // canary was not accepted and no child finalizer can prove coverage.
-      // Raising a typed, bounded-retry error keeps the durable obligation
-      // pending/failed instead of allowing enqueue recovery to mark it green.
-      throw new FPLClientError(
-        'Live picks source canary is not ready; per-entry input publication remains pending',
-        409,
-        'SOURCE_NOT_READY',
-      );
+      const schedulerFenced =
+        typeof job.obligationId === 'string' &&
+        job.obligationId.length > 0 &&
+        typeof job.obligationGeneration === 'number' &&
+        Number.isSafeInteger(job.obligationGeneration) &&
+        job.obligationGeneration >= 0;
+      if (!schedulerFenced) {
+        // A governance freshness repair has no scheduler obligation for the
+        // worker to defer. Throw so BullMQ retries after the shared probe
+        // backoff instead of marking the repair complete and losing the
+        // freshness window.
+        throw new Error(`SOURCE_NOT_READY:${result.sourceReason ?? 'PICKS_NOT_READY'}`);
+      }
+      // A fenced scheduler root is deferred by the worker, which preserves
+      // the durable obligation and avoids treating a normal pre-bootstrap
+      // wait as a failed delivery.
+      return { ...result, status: 'waiting-dependencies' as const };
     }
     return result;
   } catch (error) {

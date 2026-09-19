@@ -27,11 +27,13 @@ import {
   type OfficialH2HPageManifest,
 } from '../domain/official-h2h-manifest';
 import { withMutationScopes } from '../utils/mutation-scopes';
-import { ConflictError, ValidationError } from '../utils/errors';
+import { ConflictError, IncompleteDataSyncError, ValidationError } from '../utils/errors';
 import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
 import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
+import { eventRepository } from '../repositories/events';
+import { ensureLiveAverageReadyForPublication } from './live-average-refresh.service';
 
 const MAX_H2H_PAGES = 100;
 
@@ -141,6 +143,24 @@ export function resolveFinalizedThroughEventId(
     requestedEventIsFinalized ? requestedEventId : 0,
   );
   return finalizedThroughEventId > 0 ? finalizedThroughEventId : null;
+}
+
+export function isOfficialH2HObservationStaleForFinalization(
+  sourceCheckedAt: Date,
+  event: Readonly<{
+    finished: boolean;
+    dataChecked: boolean;
+    dataCheckedAt: Date | null;
+  }>,
+): boolean {
+  if (!event.finished || !event.dataChecked || event.dataCheckedAt === null) return false;
+  const sourceCheckedAtMs = sourceCheckedAt.getTime();
+  const finalizationAtMs = event.dataCheckedAt.getTime();
+  return (
+    Number.isFinite(sourceCheckedAtMs) &&
+    Number.isFinite(finalizationAtMs) &&
+    finalizationAtMs > sourceCheckedAtMs
+  );
 }
 
 export function resolveOfficialH2HSyncOptionsFromEventState(
@@ -327,16 +347,23 @@ export function validatedOfficialH2HSyncOptions(
 export function suppressOfficialH2HActiveScores(
   snapshot: OfficialH2HSourceSnapshot,
   eventId: number,
+  averageEntryScore: number | null = null,
 ): OfficialH2HSourceSnapshot {
+  const canonicalAverageScore =
+    typeof averageEntryScore === 'number' && Number.isFinite(averageEntryScore)
+      ? averageEntryScore
+      : null;
   return {
     ...snapshot,
     matches: snapshot.matches.map((match) =>
-      match.event !== eventId
+      match.event !== eventId ||
+      match.is_bye === true ||
+      isOfficialKnockoutAveragePlaceholder(match)
         ? match
         : {
             ...match,
-            entry_1_points: match.entry_1_entry === null ? match.entry_1_points : null,
-            entry_2_points: match.entry_2_entry === null ? match.entry_2_points : null,
+            entry_1_points: match.entry_1_entry === null ? canonicalAverageScore : null,
+            entry_2_points: match.entry_2_entry === null ? canonicalAverageScore : null,
             winner: null,
           },
     ),
@@ -345,16 +372,21 @@ export function suppressOfficialH2HActiveScores(
 
 /**
  * Overlay real manager sides with net scores from one coherent event-live
- * batch. FPL itself owns the synthetic Average Team side, so retain its score
- * from the same freshly fetched H2H snapshot. Reject the batch if that provider
- * score is absent; one odd-sized league must not suppress every real matchup.
+ * batch. The synthetic Average Team score is the canonical event fact
+ * persisted from bootstrap/core; the official H2H feed is not a live-score
+ * source for that side.
  */
 export function projectOfficialH2HEventLiveScores(
   snapshot: OfficialH2HSourceSnapshot,
   eventId: number,
   entryIds: ReadonlySet<number>,
   batch: EventLiveScoreBatch | null,
+  averageEntryScore: number | null = null,
 ): OfficialH2HSourceSnapshot | null {
+  const canonicalAverageScore =
+    typeof averageEntryScore === 'number' && Number.isFinite(averageEntryScore)
+      ? averageEntryScore
+      : null;
   if (
     !batch ||
     batch.eventId !== eventId ||
@@ -372,8 +404,9 @@ export function projectOfficialH2HEventLiveScores(
       (match) =>
         match.event === eventId &&
         match.is_bye !== true &&
-        ((match.entry_1_entry === null && typeof match.entry_1_points !== 'number') ||
-          (match.entry_2_entry === null && typeof match.entry_2_points !== 'number')),
+        !isOfficialKnockoutAveragePlaceholder(match) &&
+        ((match.entry_1_entry === null && canonicalAverageScore === null) ||
+          (match.entry_2_entry === null && canonicalAverageScore === null)),
     )
   ) {
     return null;
@@ -382,17 +415,23 @@ export function projectOfficialH2HEventLiveScores(
   return {
     ...snapshot,
     matches: snapshot.matches.map((match) => {
-      if (match.event !== eventId) return match;
+      if (
+        match.event !== eventId ||
+        match.is_bye === true ||
+        isOfficialKnockoutAveragePlaceholder(match)
+      ) {
+        return match;
+      }
       const homePoints =
         match.entry_1_entry === null
-          ? match.entry_1_points
+          ? canonicalAverageScore
           : (batch.scores.get(match.entry_1_entry)?.netEventPoints ?? null);
       const awayPoints =
         match.entry_2_entry === null
-          ? match.entry_2_points
+          ? canonicalAverageScore
           : (batch.scores.get(match.entry_2_entry)?.netEventPoints ?? null);
       const winner =
-        match.is_bye === true || homePoints === null || awayPoints === null
+        homePoints === null || awayPoints === null
           ? null
           : homePoints === awayPoints
             ? isOfficialKnockoutMatch(match) &&
@@ -414,6 +453,116 @@ export function projectOfficialH2HEventLiveScores(
   };
 }
 
+export function overlayOfficialH2HAverageScore(
+  snapshot: OfficialH2HSourceSnapshot,
+  eventId: number,
+  averageEntryScore: number | null,
+): OfficialH2HSourceSnapshot {
+  const canonicalAverageScore =
+    typeof averageEntryScore === 'number' && Number.isFinite(averageEntryScore)
+      ? averageEntryScore
+      : null;
+  return {
+    ...snapshot,
+    matches: snapshot.matches.map((match) => {
+      if (
+        match.event !== eventId ||
+        match.is_bye === true ||
+        isOfficialKnockoutAveragePlaceholder(match) ||
+        (match.entry_1_entry !== null && match.entry_2_entry !== null)
+      ) {
+        return match;
+      }
+      const entry1Points =
+        match.entry_1_entry === null ? canonicalAverageScore : match.entry_1_points;
+      const entry2Points =
+        match.entry_2_entry === null ? canonicalAverageScore : match.entry_2_points;
+      const outcome = deriveOfficialH2HScoreOutcome(match, entry1Points, entry2Points);
+      return {
+        ...match,
+        entry_1_points: entry1Points,
+        entry_2_points: entry2Points,
+        ...outcome,
+      };
+    }),
+  };
+}
+
+export function overlayOfficialH2HAverageScores(
+  snapshot: OfficialH2HSourceSnapshot,
+  averageEntryScores: ReadonlyMap<number, number | null>,
+): OfficialH2HSourceSnapshot {
+  let overlaid = snapshot;
+  for (const [eventId, averageEntryScore] of averageEntryScores) {
+    overlaid = overlayOfficialH2HAverageScore(overlaid, eventId, averageEntryScore);
+  }
+  return overlaid;
+}
+
+function deriveOfficialH2HScoreOutcome(
+  match: RawFPLLeagueH2HMatch,
+  entry1Points: number | null,
+  entry2Points: number | null,
+): Pick<
+  RawFPLLeagueH2HMatch,
+  | 'entry_1_win'
+  | 'entry_1_draw'
+  | 'entry_1_loss'
+  | 'entry_1_total'
+  | 'entry_2_win'
+  | 'entry_2_draw'
+  | 'entry_2_loss'
+  | 'entry_2_total'
+  | 'winner'
+> {
+  if (typeof entry1Points !== 'number' || typeof entry2Points !== 'number') {
+    return {
+      entry_1_win: undefined,
+      entry_1_draw: undefined,
+      entry_1_loss: undefined,
+      entry_1_total: undefined,
+      entry_2_win: undefined,
+      entry_2_draw: undefined,
+      entry_2_loss: undefined,
+      entry_2_total: undefined,
+      winner: null,
+    };
+  }
+
+  const tied = entry1Points === entry2Points;
+  const knockoutWinner =
+    tied &&
+    isOfficialKnockoutMatch(match) &&
+    match.tiebreak !== null &&
+    match.tiebreak !== undefined &&
+    (match.winner === match.entry_1_entry || match.winner === match.entry_2_entry)
+      ? match.winner
+      : null;
+  const winner = tied
+    ? knockoutWinner
+    : entry1Points > entry2Points
+      ? match.entry_1_entry
+      : match.entry_2_entry;
+  const entry1Wins =
+    entry1Points > entry2Points ||
+    (tied && knockoutWinner !== null && knockoutWinner === match.entry_1_entry);
+  const entry2Wins =
+    entry2Points > entry1Points ||
+    (tied && knockoutWinner !== null && knockoutWinner === match.entry_2_entry);
+  const drawn = !entry1Wins && !entry2Wins;
+  return {
+    entry_1_win: entry1Wins ? 1 : 0,
+    entry_1_draw: drawn ? 1 : 0,
+    entry_1_loss: entry2Wins ? 1 : 0,
+    entry_1_total: entry1Wins ? 3 : drawn ? 1 : 0,
+    entry_2_win: entry2Wins ? 1 : 0,
+    entry_2_draw: drawn ? 1 : 0,
+    entry_2_loss: entry1Wins ? 1 : 0,
+    entry_2_total: entry2Wins ? 3 : drawn ? 1 : 0,
+    winner,
+  };
+}
+
 function serializeTiebreak(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   return typeof value === 'string' ? value : JSON.stringify(value);
@@ -425,6 +574,151 @@ function officialKnockoutName(match: RawFPLLeagueH2HMatch): string | null {
 
 function isOfficialKnockoutMatch(match: RawFPLLeagueH2HMatch): boolean {
   return officialKnockoutName(match) !== null || match.is_knockout === true;
+}
+
+function isOfficialKnockoutAveragePlaceholder(match: RawFPLLeagueH2HMatch): boolean {
+  return (
+    isOfficialKnockoutMatch(match) && (match.entry_1_entry === null || match.entry_2_entry === null)
+  );
+}
+
+function requiredAverageEventIds(snapshot: OfficialH2HSourceSnapshot): Set<number> {
+  return new Set(
+    snapshot.matches
+      .filter(
+        (match) =>
+          match.is_bye !== true &&
+          !isOfficialKnockoutAveragePlaceholder(match) &&
+          (match.entry_1_entry === null || match.entry_2_entry === null),
+      )
+      .map((match) => match.event),
+  );
+}
+
+function averageEventIdsToReconcile(
+  candidateEventIds: ReadonlySet<number>,
+  events: readonly {
+    id: number;
+    finished: boolean;
+    dataChecked: boolean;
+  }[],
+  explicitlyReconciledEventIds: ReadonlySet<number>,
+): Set<number> {
+  return new Set(
+    [...candidateEventIds].filter((eventId) => {
+      if (explicitlyReconciledEventIds.has(eventId)) return true;
+      const event = events.find((candidate) => candidate.id === eventId);
+      return event?.finished === true && event.dataChecked === true;
+    }),
+  );
+}
+
+function assertCanonicalAverageScore(
+  averageEventIds: ReadonlySet<number>,
+  eventId: number,
+  averageEntryScore: number | null | undefined,
+): void {
+  if (
+    averageEventIds.has(eventId) &&
+    (typeof averageEntryScore !== 'number' || !Number.isFinite(averageEntryScore))
+  ) {
+    // Do not let the null overlay erase an already accepted provider result.
+    // The caller's transaction/retry boundary will retain the previous durable
+    // schedule until the canonical bootstrap Average fact is available.
+    throw new IncompleteDataSyncError(
+      'Official H2H waits for canonical Average Team scores',
+      1,
+      0,
+      0,
+      1,
+      'LIVE_AVERAGE_NOT_READY',
+    );
+  }
+}
+
+async function ensureFullRepairAverageFreshness(
+  season: FplSeasonRef,
+  averageEventIds: ReadonlySet<number>,
+): Promise<void> {
+  if (averageEventIds.size === 0) return;
+  const events = await eventRepository.findAll(season);
+  const candidateEvents = [...averageEventIds]
+    .map((eventId) => events.find((event) => event.id === eventId) ?? null)
+    .filter((event): event is NonNullable<typeof event> => event !== null);
+  const refreshEvent =
+    [...candidateEvents]
+      .filter((event) => event.finished === true && event.dataChecked === true)
+      .sort((left, right) => right.id - left.id)[0] ??
+    candidateEvents.sort((left, right) => right.id - left.id)[0] ??
+    null;
+  const refreshEventId = refreshEvent?.id ?? [...averageEventIds][0];
+  const lifecycleState =
+    refreshEvent?.finished === true && refreshEvent.dataChecked === true
+      ? 'FINALIZED'
+      : 'LIVE_ACTIVE';
+  const averageReady = await ensureLiveAverageReadyForPublication(
+    season,
+    refreshEventId,
+    lifecycleState,
+  );
+  if (!averageReady.ready) {
+    throw new IncompleteDataSyncError(
+      'Official H2H waits for canonical Average Team scores',
+      1,
+      0,
+      0,
+      1,
+      'LIVE_AVERAGE_NOT_READY',
+    );
+  }
+}
+
+async function refreshOfficialH2HSyncOptionsAfterCoreRefresh(
+  season: FplSeasonRef,
+  reconcileEventId: number | undefined,
+  options: OfficialH2HSyncOptions,
+): Promise<OfficialH2HSyncOptions> {
+  const lifecycleEventId =
+    reconcileEventId ?? options.provisionalEventId ?? options.finalizedThroughEventId ?? null;
+  if (lifecycleEventId === null) return options;
+
+  const [event, currentEvent, latestFinalizedEvent] = await Promise.all([
+    eventRepository.findById(season, lifecycleEventId),
+    eventRepository.findCurrent(season),
+    eventRepository.findLatestFinalized(season),
+  ]);
+  const refreshed = resolveOfficialH2HSyncOptionsFromEventState(
+    lifecycleEventId,
+    event,
+    currentEvent,
+    latestFinalizedEvent,
+  );
+  return {
+    ...options,
+    finalizedThroughEventId: refreshed.finalizedThroughEventId,
+    provisionalEventId: refreshed.provisionalEventId,
+  };
+}
+
+async function assertOfficialH2HSnapshotFreshAfterCoreRefresh(
+  season: FplSeasonRef,
+  sourceCheckedAt: Date,
+  snapshot: Pick<OfficialH2HSourceSnapshot, 'matches'>,
+): Promise<void> {
+  const snapshotEventIds = new Set(snapshot.matches.map((match) => match.event));
+  if (snapshotEventIds.size === 0) return;
+  const events = await eventRepository.findAll(season);
+  const staleEvent = events.find(
+    (event) =>
+      snapshotEventIds.has(event.id) &&
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, event),
+  );
+  if (staleEvent) {
+    throw new ValidationError(
+      `Official H2H snapshot started before GW${staleEvent.id} finalization.`,
+      'TOURNAMENT_OFFICIAL_H2H_FRESHNESS_FENCE',
+    );
+  }
 }
 
 export async function fetchOfficialH2HSourceSnapshot(
@@ -1132,6 +1426,67 @@ export async function syncOfficialH2HTournament(
       pageManifests: manifests,
     };
   }
+  let syncOptions = options;
+  const candidateAverageEventIds = requiredAverageEventIds(snapshot);
+  const explicitlyReconciledEventIds = new Set(
+    [reconcileEventId, options.provisionalEventId].filter(
+      (eventId): eventId is number => eventId !== undefined && eventId !== null,
+    ),
+  );
+  let averageEventIds = averageEventIdsToReconcile(
+    candidateAverageEventIds,
+    candidateAverageEventIds.size > 0 ? await eventRepository.findAll(season) : [],
+    explicitlyReconciledEventIds,
+  );
+  if (options.forceFull === true) {
+    // A full/topology reconciliation can introduce an Average side that was
+    // absent from the old persisted schedule. Gate on the fetched candidate,
+    // not on the old rows, before rebuilding any durable H2H result.
+    await ensureFullRepairAverageFreshness(season, averageEventIds);
+    // The Average/core gate may finalize an event after this provider
+    // observation started. A response received later is still pre-final data;
+    // abort so the retry performs a fresh provider read after the boundary.
+    await assertOfficialH2HSnapshotFreshAfterCoreRefresh(season, sourceOrdering.date, snapshot);
+    syncOptions = await refreshOfficialH2HSyncOptionsAfterCoreRefresh(
+      season,
+      reconcileEventId,
+      options,
+    );
+    // The core refresh may finalize the current event or re-open its boundary.
+    // Re-read event state before deciding which Average rows are mandatory and
+    // before deriving the score/provisional lifecycle used below.
+    averageEventIds = averageEventIdsToReconcile(
+      candidateAverageEventIds,
+      candidateAverageEventIds.size > 0 ? await eventRepository.findAll(season) : [],
+      explicitlyReconciledEventIds,
+    );
+  }
+  const averageScoreEventId = reconcileEventId ?? syncOptions.provisionalEventId ?? null;
+  const averageScoreEvent =
+    averageScoreEventId === null
+      ? null
+      : await eventRepository.findById(season, averageScoreEventId);
+  const averageEntryScore = averageScoreEvent?.averageEntryScore ?? null;
+  if (syncOptions.forceFull === true || averageScoreEventId === null) {
+    if (averageEventIds.size > 0) {
+      // Read the canonical scores after any internal core refresh. Never mix
+      // pre-refresh event metadata with post-refresh Average values.
+      const events = await eventRepository.findAll(season);
+      const averageScores = new Map(
+        [...averageEventIds].map((eventId) => [
+          eventId,
+          events.find((event) => event.id === eventId)?.averageEntryScore ?? null,
+        ]),
+      );
+      for (const [eventId, averageScore] of averageScores) {
+        assertCanonicalAverageScore(averageEventIds, eventId, averageScore);
+      }
+      snapshot = overlayOfficialH2HAverageScores(snapshot, averageScores);
+    }
+  } else {
+    assertCanonicalAverageScore(averageEventIds, averageScoreEventId, averageEntryScore);
+    snapshot = overlayOfficialH2HAverageScore(snapshot, averageScoreEventId, averageEntryScore);
+  }
   const entryIds = await entryIdsPromise;
   const entryIdSet = new Set(entryIds);
   if (snapshot.standings.length > 0 && snapshot.standings.length !== entryIdSet.size) {
@@ -1149,7 +1504,7 @@ export async function syncOfficialH2HTournament(
     }
   }
 
-  const requestedProvisionalEventId = options.provisionalEventId ?? null;
+  const requestedProvisionalEventId = syncOptions.provisionalEventId ?? null;
   const eventLiveBatch =
     requestedProvisionalEventId === null
       ? null
@@ -1171,23 +1526,24 @@ export async function syncOfficialH2HTournament(
           requestedProvisionalEventId,
           entryIdSet,
           eventLiveBatch,
+          averageEntryScore,
         );
   const scoringSnapshot =
     requestedProvisionalEventId === null
       ? snapshot
       : (eventLiveSnapshot ??
-        suppressOfficialH2HActiveScores(snapshot, requestedProvisionalEventId));
+        suppressOfficialH2HActiveScores(snapshot, requestedProvisionalEventId, averageEntryScore));
   const effectiveOptions =
     requestedProvisionalEventId === null
-      ? validatedOfficialH2HSyncOptions(entryIdSet, scoringSnapshot.matches, options)
+      ? validatedOfficialH2HSyncOptions(entryIdSet, scoringSnapshot.matches, syncOptions)
       : eventLiveSnapshot
         ? {
-            finalizedThroughEventId: options.finalizedThroughEventId ?? null,
+            finalizedThroughEventId: syncOptions.finalizedThroughEventId ?? null,
             provisionalEventId: requestedProvisionalEventId,
             suppressedEventId: null,
           }
         : {
-            finalizedThroughEventId: options.finalizedThroughEventId ?? null,
+            finalizedThroughEventId: syncOptions.finalizedThroughEventId ?? null,
             provisionalEventId: null,
             suppressedEventId: requestedProvisionalEventId,
           };
@@ -1378,7 +1734,7 @@ export async function syncOfficialH2HTournament(
       groupRows,
       fetchedOfficialMatchIds: fetched.matches.map((match) => match.id),
       pageManifests: snapshot.pageManifests,
-      fullReconcile: options.forceFull === true,
+      fullReconcile: syncOptions.forceFull === true,
     });
   };
   const publicationScopes = [

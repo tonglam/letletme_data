@@ -63,6 +63,8 @@ export async function enqueueLiveActiveSnapshot(
     now,
     lifecycleState,
     expectedNextCheckAt,
+    bootstrapGateRequired: true,
+    picksGateRequired: true,
   });
 }
 
@@ -237,6 +239,10 @@ export async function enqueueLiveSnapshot(
     matchObservationOnly?: boolean;
     /** Explicit event-pointer intent preserved across Match lifecycle normalization. */
     promoteActiveEvent?: boolean;
+    /** Require bootstrap HTTP 200 before the worker calls event-live. */
+    bootstrapGateRequired?: boolean;
+    /** Require durable picks coverage before a post-match full snapshot. */
+    picksGateRequired?: boolean;
   } = {},
 ) {
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
@@ -336,6 +342,8 @@ export async function enqueueLiveSnapshot(
       ...(options.promoteActiveEvent !== undefined
         ? { promoteActiveEvent: options.promoteActiveEvent }
         : {}),
+      ...(options.bootstrapGateRequired === true ? { bootstrapGateRequired: true } : {}),
+      ...(options.picksGateRequired === true ? { picksGateRequired: true } : {}),
     };
     const suffix = options.matchObservationOnly === true ? 'v3' : 'v2';
     const generatedJobId =

@@ -160,6 +160,69 @@ function rawPicksFromEntryLiveInput(input: EntryLiveInputV2): RawFPLEntryEventPi
   };
 }
 
+type PreservedEntryPicksBase = Readonly<{
+  raw: RawFPLEntryEventPicksResponse;
+  input: EntryLiveInputV2;
+  publicationId: string;
+  generation: number;
+  finalizationCorrectionBoundary?: string;
+}>;
+
+/**
+ * Redis is a rebuildable serving layer.  A live-picks repair must therefore
+ * recover the deadline base from the durable V2 head when both Redis pointers
+ * have disappeared; using the provider response would allow post-deadline
+ * multipliers, substitutions, or transfers to replace the accepted base.
+ */
+async function readDurablePreservedEntryPicksBase(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+): Promise<PreservedEntryPicksBase | null> {
+  const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  // A first live-picks canary has no durable head yet.  Its validated provider
+  // response is the only available deadline base and must be admitted instead
+  // of being mistaken for a cache-repair failure.
+  if (!head) return null;
+  const rows = await entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
+    season,
+    eventId,
+    [entryId],
+  );
+  const input = head.inputPayload;
+  if (
+    head.state !== 'COMPLETE' ||
+    head.rowCount !== 15 ||
+    head.entryId !== entryId ||
+    !input ||
+    !validateEntryLiveInputV2(input, {
+      season: season.seasonCode,
+      eventId,
+      entryId,
+    }) ||
+    input.picksBase.revision !== head.picksBaseRevision ||
+    durableLiveInputContentHash(rows) !== head.contentSha256 ||
+    entryLivePicksBaseCheckpointHash(input) !== head.contentSha256 ||
+    !durableRowsMatchEntryLiveInput(rows, input)
+  ) {
+    throw new Error(
+      `DATA_INCOMPLETE:LIVE_PICKS_DURABLE_BASE_UNAVAILABLE:${season.seasonCode}:${eventId}:${entryId}`,
+    );
+  }
+  return {
+    raw: rawPicksFromEntryLiveInput(input),
+    input,
+    publicationId: head.publicationId,
+    generation: head.generation,
+    ...(input.finalResult !== null
+      ? {
+          finalizationCorrectionBoundary:
+            head.sourceCheckedAtExact ?? head.sourceCheckedAt.toISOString(),
+        }
+      : {}),
+  };
+}
+
 /**
  * Complete one Redis-first entry publication without going back to FPL.  The
  * desired checkpoint is a control-plane obligation, not a second publication;
@@ -187,9 +250,18 @@ export async function checkpointEntryLiveInputV2(
   // Treat that marker as an idempotent success instead of re-writing every
   // already durable entry (or reporting a false missing input).
   if (!desired && candidate.publication.checkpointedAt !== null) {
-    return (await isEntryPublicationActiveAndCheckpointedV2(candidate.publication, redisClient))
-      ? 'checkpointed'
-      : 'missing';
+    const durableHead = await entryEventPicksRepository.findHead(season, entryId, eventId);
+    const durableHeadMatchesCandidate =
+      durableHead !== null &&
+      durableHead.rowCount === 15 &&
+      durableHead.state === 'COMPLETE' &&
+      durableHead.publicationId === candidate.publication.publicationId &&
+      durableHead.generation === candidate.publication.generation;
+    if (durableHeadMatchesCandidate) {
+      return (await isEntryPublicationActiveAndCheckpointedV2(candidate.publication, redisClient))
+        ? 'checkpointed'
+        : 'missing';
+    }
   }
   // A provider write can publish before its asynchronous durable checkpoint
   // obligation is visible to this worker. Re-create the obligation from the
@@ -310,6 +382,17 @@ export async function persistEntryEventPicksResponse(
     readonly historicalFinalBoundary?: Date | string;
     /** Preserve canonical deadline picks while taking reported facts from this provider response. */
     readonly preservedPicksBase?: RawFPLEntryEventPicksResponse;
+    /**
+     * Live-picks repair may refresh the provider-bound Assistant Manager fact,
+     * but must retain the already accepted deadline-time picks base.
+     */
+    readonly preserveExistingPicksBase?: boolean;
+    /**
+     * The live-picks seed may precede the first Live Points publication. Keep
+     * the immutable picks/transfers input and defer only the mutable manager
+     * fact until an exact score revision exists.
+     */
+    readonly deferAssistantManagerPoints?: boolean;
   },
 ) {
   // Keep the source boundary at PostgreSQL precision when the caller has one;
@@ -321,6 +404,44 @@ export async function persistEntryEventPicksResponse(
       `Refusing entry picks for an unexpected event for entry ${entryId}, event ${eventId}`,
     );
   }
+  const observedExisting = await readEntryLiveInputV2({
+    season: season.seasonCode,
+    eventId,
+    entryId,
+  });
+  // REDIS_PREVIOUS is a coherent serving fallback, not the current durable
+  // candidate for a repair.  If the active pointer disappeared, recover from
+  // the validated PostgreSQL head instead of promoting an older generation
+  // above newer canonical data.
+  // Keep the observed active identity separate from the content-preservation
+  // candidate. A durable-head mismatch must discard Redis content as a base,
+  // but the exact active FINAL identity is still required to fence a safe
+  // same-boundary replacement in PROMOTE_ENTRY_SCRIPT.
+  const observedCurrent =
+    observedExisting?.servedFrom === 'REDIS_CURRENT' ? observedExisting : null;
+  let existing = observedCurrent;
+  const durablePreservedBase =
+    options?.preserveExistingPicksBase === true && options?.preservedPicksBase === undefined
+      ? await readDurablePreservedEntryPicksBase(season, entryId, eventId)
+      : null;
+  if (
+    existing !== null &&
+    durablePreservedBase !== null &&
+    (existing.publication.publicationId !== durablePreservedBase.publicationId ||
+      existing.publication.generation !== durablePreservedBase.generation)
+  ) {
+    // A valid Redis current publication can still be a rollback/orphan above
+    // the canonical PostgreSQL head.  It is readable, but it is not the
+    // preservation base for a repair; the durable identity fence wins.
+    existing = null;
+  }
+  const preservedInput = existing?.input ?? durablePreservedBase?.input ?? null;
+  const preservedPicksBase =
+    options?.preservedPicksBase ??
+    (existing ? rawPicksFromEntryLiveInput(existing.input) : durablePreservedBase?.raw);
+  const preservedFinalizationCorrectionBoundary = existing?.input.finalResult
+    ? existing.publication.sourceCheckedAt
+    : durablePreservedBase?.finalizationCorrectionBoundary;
   let assistantManagerPoints: AssistantManagerPointsFact | undefined;
   const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
   if (managerChip) {
@@ -353,44 +474,72 @@ export async function persistEntryEventPicksResponse(
       }
     }
     if (
-      !currentObservation ||
-      (options?.liveObservation &&
-        !sameLiveScoreObservation(options.liveObservation, currentObservation))
+      !currentObservation &&
+      options?.deferAssistantManagerPoints === true &&
+      !options.historicalFinalBoundary
     ) {
-      throw new Error(
-        `Live observation changed while reading manager entry ${entryId}, event ${eventId}`,
+      // A seed snapshot is allowed to carry the complete roster/transfers
+      // base before the first Live Points publication. Preserve an already
+      // accepted fact if Redis is temporarily unavailable; never invent a new
+      // fact without its exact score revision.
+      assistantManagerPoints = preservedInput?.picksBase.assistantManagerPoints;
+    } else {
+      if (
+        !currentObservation ||
+        (options?.liveObservation &&
+          !sameLiveScoreObservation(options.liveObservation, currentObservation))
+      ) {
+        throw new Error(
+          `Live observation changed while reading manager entry ${entryId}, event ${eventId}`,
+        );
+      }
+      if (!options?.providerEventLive) {
+        throw new Error(
+          `Manager points require a provider event-live observation for entry ${entryId}, event ${eventId}`,
+        );
+      }
+      const fact = assistantManagerPointsFactFromProviderObservation(
+        picks,
+        options.providerEventLive,
+        currentObservation,
       );
+      if (!fact) {
+        throw new Error(
+          `Manager points cannot be reconciled to the live observation for entry ${entryId}, event ${eventId}`,
+        );
+      }
+      assistantManagerPoints = fact;
     }
-    if (!options?.providerEventLive) {
-      throw new Error(
-        `Manager points require a provider event-live observation for entry ${entryId}, event ${eventId}`,
-      );
-    }
-    const fact = assistantManagerPointsFactFromProviderObservation(
-      picks,
-      options.providerEventLive,
-      currentObservation,
-    );
-    if (!fact) {
-      throw new Error(
-        `Manager points cannot be reconciled to the live observation for entry ${entryId}, event ${eventId}`,
-      );
-    }
-    assistantManagerPoints = fact;
   }
-  const baseInput = entryLiveInputFromFplPicks(
+  const rebuiltBaseInput = entryLiveInputFromFplPicks(
     season,
     eventId,
     entryId,
-    options?.preservedPicksBase ?? picks,
+    preservedPicksBase ?? picks,
     sourceCheckedAt,
-    assistantManagerPoints,
+    assistantManagerPoints ?? preservedInput?.picksBase.assistantManagerPoints,
   );
-  const existing = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+  // A durable FINAL input is already a complete semantic publication.  Reuse
+  // its final result, official adjustment, and previous totals while replacing
+  // only the base envelope needed for a verified manager-fact repair.
+  const baseInput =
+    options?.preserveExistingPicksBase === true &&
+    preservedInput !== null &&
+    preservedInput.finalResult !== null
+      ? {
+          ...preservedInput,
+          picksBase: {
+            ...rebuiltBaseInput.picksBase,
+            // A FINAL rebind changes only the explicitly repaired manager
+            // fact.  Keep the accepted deadline/base watermark immutable.
+            contentUpdatedAt: preservedInput.picksBase.contentUpdatedAt,
+          },
+        }
+      : rebuiltBaseInput;
   // Previous totals are independent immutable evidence. Read them only for a
   // first publication; repeated source probes reuse the published value and
   // do not add a PostgreSQL read to the live provider lane.
-  let previousTotals = existing?.input.previousTotals ?? null;
+  let previousTotals = preservedInput?.previousTotals ?? null;
   let firstScoringEvent = 1;
   if (eventId > 1) {
     try {
@@ -457,7 +606,9 @@ export async function persistEntryEventPicksResponse(
         ...inputWithCurrentTotals,
         picksBase: {
           ...inputWithCurrentTotals.picksBase,
-          contentUpdatedAt: existing.input.picksBase.contentUpdatedAt,
+          contentUpdatedAt:
+            existing?.input.picksBase.contentUpdatedAt ??
+            inputWithCurrentTotals.picksBase.contentUpdatedAt,
         },
       }
     : inputWithCurrentTotals;
@@ -565,14 +716,41 @@ export async function persistEntryEventPicksResponse(
       'LIVE_V2_ENTRY_GENERATION_FLOOR_UNAVAILABLE',
     );
   }
+  const finalizationCorrectionBoundary =
+    input.finalResult !== null
+      ? (options?.historicalFinalBoundary ?? preservedFinalizationCorrectionBoundary)
+      : undefined;
+  const currentFinalPublication =
+    observedCurrent !== null && observedCurrent.input.finalResult !== null
+      ? observedCurrent.publication
+      : null;
+  const sameFinalizationBoundary =
+    input.finalResult !== null &&
+    currentFinalPublication !== null &&
+    finalizationCorrectionBoundary !== undefined &&
+    exactTimestamp(finalizationCorrectionBoundary) === currentFinalPublication.sourceCheckedAt;
+  const publicationSourceCheckedAt = sameFinalizationBoundary
+    ? currentFinalPublication!.sourceCheckedAt
+    : sourceCheckedAt;
   const publication = await publishEntryLiveInputV2({
     season: season.seasonCode,
     eventId,
     entryId,
     input,
-    sourceCheckedAt,
+    sourceCheckedAt: publicationSourceCheckedAt,
     preserveSourceCheckedAtPrecision: true,
     generationFloor,
+    ...(finalizationCorrectionBoundary ? { finalizationCorrectionBoundary } : {}),
+    ...(sameFinalizationBoundary
+      ? {
+          allowFinalSameBoundaryRebind: true,
+          expectedCurrentPublication: {
+            publicationId: currentFinalPublication!.publicationId,
+            generation: currentFinalPublication!.generation,
+            contentSha256: currentFinalPublication!.item.sha256,
+          },
+        }
+      : {}),
   });
   if (!publication.published) {
     // A FINAL publication is fenced in Redis. Never checkpoint the provisional
@@ -591,7 +769,11 @@ export async function syncEntryEventPicks(
   season: FplSeasonRef,
   entryId: number,
   eventId: number,
-  options?: { readonly sourceCheckedAt?: Date | string },
+  options?: {
+    readonly sourceCheckedAt?: Date | string;
+    readonly deferAssistantManagerPoints?: boolean;
+    readonly preserveExistingPicksBase?: boolean;
+  },
 ) {
   try {
     logInfo('Starting entry event picks sync', { entryId, eventId });
@@ -616,6 +798,8 @@ export async function syncEntryEventPicks(
     await persistEntryEventPicksResponse(season, entryId, eventId, picks, sourceCheckedAt, {
       liveObservation,
       providerEventLive,
+      deferAssistantManagerPoints: options?.deferAssistantManagerPoints === true,
+      preserveExistingPicksBase: options?.preserveExistingPicksBase === true,
     });
     logInfo('Entry event picks sync completed', { entryId, eventId });
     return { entryId, eventId };

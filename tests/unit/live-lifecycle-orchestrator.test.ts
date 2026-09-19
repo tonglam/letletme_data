@@ -13,12 +13,41 @@ import {
   shouldMarkLivePicksFreshnessNotApplicable,
   shouldMarkLivePicksFreshnessNoSourceWork,
   shouldPersistLiveLifecycleStatus,
+  shouldRequireLivePicksCompletionGate,
+  shouldRunDirectLivePicksRepair,
   shouldRefreshOfficialH2H,
 } from '../../src/services/live-lifecycle-orchestrator';
 
 const quote = String.fromCharCode(39);
 
 describe('live lifecycle decisions', () => {
+  test('keeps the picks completeness gate through post-match settlement', () => {
+    expect(shouldRequireLivePicksCompletionGate('PICKS_PROBE')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('PICKS_SYNC')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('LIVE_ACTIVE')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('BETWEEN_FIXTURES')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('DAY_SETTLING')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('GW_REVIEW')).toBe(true);
+    expect(shouldRequireLivePicksCompletionGate('FINALIZED')).toBe(true);
+  });
+
+  test('repairs an incomplete picks cohort from the direct timer only when due', () => {
+    const decision = { state: 'LIVE_ACTIVE' as const, shouldProbePicks: false };
+    expect(shouldRunDirectLivePicksRepair(decision, false, false, true)).toBe(true);
+    expect(shouldRunDirectLivePicksRepair(decision, false, false, false)).toBe(false);
+    expect(shouldRunDirectLivePicksRepair(decision, true, false, true)).toBe(false);
+    expect(shouldRunDirectLivePicksRepair(decision, false, true, true)).toBe(false);
+    expect(shouldRunDirectLivePicksRepair(decision, true, false, true, true)).toBe(true);
+    expect(
+      shouldRunDirectLivePicksRepair(
+        { state: 'PICKS_PROBE', shouldProbePicks: true },
+        false,
+        false,
+        true,
+      ),
+    ).toBe(false);
+  });
+
   test('keeps live-picks round evidence bounded and explicit about missing timings', () => {
     expect(
       buildLivePicksRoundEvidence({
@@ -128,6 +157,7 @@ describe('live lifecycle decisions', () => {
       synced: 0,
       pending: 0,
       sourceReady: false,
+      sourceReason: 'PICKS_PROBE_BACKOFF',
       scanComplete: false,
     });
     expect(resolveLivePicksProbeBackoffResult(false)).toEqual({
@@ -135,6 +165,7 @@ describe('live lifecycle decisions', () => {
       synced: 0,
       pending: 0,
       sourceReady: false,
+      sourceReason: 'PICKS_CANARY_NOT_READY',
       scanComplete: false,
     });
   });
@@ -184,7 +215,8 @@ describe('live lifecycle decisions', () => {
     const liveWorkerSource = readFileSync('src/workers/live-data.worker.ts', 'utf8');
     expect(liveWorkerSource).toContain('expectedNextCheckAt: job.data.expectedNextCheckAt');
     expect(liveWorkerSource).toContain('if (result.checkpointed)');
-    expect(liveWorkerSource).toContain('randomUUID()');
+    expect(liveWorkerSource).toContain('scheduled official H2H refresh');
+    expect(liveWorkerSource).not.toContain('enqueueFinalOfficialH2HRefresh');
     expect(readFileSync('src/repositories/entry-event-picks.ts', 'utf8')).toContain(
       'preserveCheckpointedInput',
     );
@@ -205,7 +237,7 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain('FINALIZED');
     expect(registrySource).toContain('resolveLiveLifecycleDelay(');
     expect(registrySource).toContain(
-      'matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive',
+      'decision.shouldObserveMatches && (!decision.shouldFetchLive || !livePointsEligible)',
     );
     expect(registrySource).toContain(
       'matchObservationOnly: plan.evidence?.matchObservationOnly === true',
@@ -215,6 +247,8 @@ describe('live lifecycle decisions', () => {
     expect(registrySource).toContain('PICKS_WAIT');
     const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
     expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect');
+    expect(lifecycleSource).toContain('readLiveBootstrapGate(seasonCode, eventId)');
+    expect(lifecycleSource).toContain('picksGateRequired: true');
     expect(lifecycleSource).toContain('matchObservationOnly: true');
     expect(lifecycleSource).toContain('if (!tick)');
     expect(lifecycleSource).toContain('observeUpcomingMatchEventDirect(season, null, now)');
@@ -225,6 +259,53 @@ describe('live lifecycle decisions', () => {
     expect(liveWorkerSource).toContain('checkpointObligationFailed');
     expect(liveWorkerSource).toContain('if (snapshot.checkpointObligationFailed)');
     expect(liveWorkerSource).toContain('promoteActiveEvent: job.data.promoteActiveEvent === true');
+  });
+
+  test('gates Average refresh only when the current H2H scope consumes Average Team', () => {
+    const liveWorkerSource = readFileSync('src/workers/live-data.worker.ts', 'utf8');
+    const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    const leagueSource = readFileSync('src/services/live-league-publication-v2.service.ts', 'utf8');
+    const tournamentSyncSource = readFileSync(
+      'src/services/tournament-battle-race-results.service.ts',
+      'utf8',
+    );
+    const averageRefreshSource = readFileSync(
+      'src/services/live-average-refresh.service.ts',
+      'utf8',
+    );
+    const entryServiceSource = readFileSync('src/services/entries.service.ts', 'utf8');
+    const entrySyncWorkerSource = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
+    expect(liveWorkerSource).toContain('hasLiveH2HAverageScope(');
+    expect(leagueSource).toContain('battle.is_bye IS NOT TRUE');
+    expect(liveWorkerSource).toContain('if (h2hUsesAverage) {');
+    expect(lifecycleSource).toContain('hasLiveH2HAverageScope(season, eventId)');
+    expect(lifecycleSource).toContain('if (h2hUsesAverage) {');
+    expect(tournamentSyncSource).toContain('hasOfficialH2HAverageMatch(');
+    expect(tournamentSyncSource).toContain('requiresAverage');
+    expect(entrySyncWorkerSource).toContain('markLivePicksLeagueRepairRequired');
+    expect(entrySyncWorkerSource).toContain('isLivePicksLeagueRepairRequired');
+    expect(entrySyncWorkerSource).toContain('forceLeagueRepair: job.attemptsMade > 0');
+    expect(entryServiceSource).toContain('const durableHeadMatchesCandidate');
+    expect(lifecycleSource).toContain('!durableHead ||');
+    expect(lifecycleSource).toContain('checkpointResult = await checkpointEntryLiveInputV2');
+    expect(averageRefreshSource).toContain(
+      'if (!(await hasCanonicalAverageEntryScore(season, eventId)))',
+    );
+    expect(averageRefreshSource).toContain(
+      'const averageAvailable = await hasCanonicalAverageEntryScore',
+    );
+    expect(lifecycleSource).toContain('!state.leagueRepairRequired');
+    expect(lifecycleSource).toContain(
+      'obligation.forceLeagueRepair === true && state.canarySucceeded',
+    );
+    expect(lifecycleSource).toContain(
+      'isLivePicksLeagueRepairRequired(season.seasonCode, currentEvent.id)',
+    );
+    expect(lifecycleSource).toContain(
+      'const directRepairRequired = repairRequired || leagueRepairRequired;',
+    );
+    expect(leagueSource).toContain('active_group_phase_tournaments');
+    expect(leagueSource).toContain('AND NOT (\n            knockout_started_event_id IS NOT NULL');
   });
 
   test('carries a freshness window from the live-picks root into its child scan', () => {
@@ -361,7 +442,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'LIVE_ACTIVE',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
     });
   });
 
@@ -389,7 +470,7 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
     });
   });
 
@@ -422,7 +503,8 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'BETWEEN_FIXTURES',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldObserveMatches: true,
+      shouldSyncPicks: false,
     });
   });
 
@@ -466,10 +548,11 @@ describe('live lifecycle decisions', () => {
     expect(decision).toMatchObject({
       state: 'GW_REVIEW',
       shouldFetchLive: true,
-      shouldSyncPicks: true,
+      shouldObserveMatches: true,
+      shouldSyncPicks: false,
       finalizeEvent: false,
     });
-    expect(shouldRefreshOfficialH2H(decision, false)).toBe(true);
+    expect(shouldRefreshOfficialH2H(decision, false)).toBe(false);
     expect(
       resolveLiveLifecycleDelay(
         decision,
@@ -477,7 +560,7 @@ describe('live lifecycle decisions', () => {
         1,
         new Date('2026-08-17T12:00:01.000Z'),
       ),
-    ).toBe(10 * 60_000);
+    ).toBe(60 * 60_000);
   });
 
   test('uses an independent per-entry single-flight identity', () => {

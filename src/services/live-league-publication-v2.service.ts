@@ -334,6 +334,25 @@ export type ClassicPublicationContentV2 = Readonly<{
   counts: LeagueLiveManifest['counts'];
 }>;
 
+function liveInputMatchesGlobalPublication(
+  read: EntryLivePublicationRead | undefined,
+  global: LivePublicationV2,
+): boolean {
+  // A missing input is handled by the surrounding publication builder as a
+  // pending/retained scope. This predicate only answers the narrower question
+  // of whether an already-readable Assistant Manager fact is stale.
+  if (!read) return true;
+  const chip = read.input.picksBase.chip;
+  if (chip !== 'manager' && chip !== 'MANAGER') return true;
+  const managerFact = read.input.picksBase.assistantManagerPoints;
+  return Boolean(
+    managerFact &&
+      managerFact.livePublicationId === global.publicationId &&
+      managerFact.liveGeneration === global.generation &&
+      managerFact.liveScoreCoreRevision === global.revisions.scoreCore.revision,
+  );
+}
+
 /**
  * Build one Classic board only from an exact roster, one global publication,
  * and already-validated Redis entry inputs. This helper is deliberately pure:
@@ -367,6 +386,10 @@ export function buildClassicPublicationContentV2(
   for (const row of eligibleRows) {
     const read = inputs.get(row.entryId);
     if (!read) return null;
+    // Assistant Manager points are derived from the exact global live
+    // publication. Do not publish a sibling board against a newer global
+    // revision until the one-shot picks repair has rebound this mutable fact.
+    if (!liveInputMatchesGlobalPublication(read, global)) return null;
     if (
       global.state === 'FINALIZED' &&
       (read.input.finalResult === null ||
@@ -799,6 +822,7 @@ type H2HMatchRow = {
   homeProfileSourceCheckedAt: Date | string | null;
   homeNetPoints: number | null;
   homeIsAverage: boolean;
+  averageEntryScore: number | null;
   awayEntryId: number | null;
   awayEntryName: string | null;
   awayPlayerName: string | null;
@@ -955,6 +979,86 @@ async function findOfficialH2HTournaments(
           value.knockoutEndedEventId,
         ].every((event) => event === null || (Number.isSafeInteger(event) && event > 0)),
     );
+}
+
+/**
+ * Average Team is required only by a regular official H2H match that actually
+ * contains a synthetic Average side.  Keep this as a bounded EXISTS probe so
+ * Classic-only events and H2H schedules without an Average side do not wait
+ * on the unrelated bootstrap/core refresh gate.
+ */
+export async function hasLiveH2HAverageScope(
+  season: FplSeasonRef,
+  eventId: number,
+  databaseReadClient?: postgres.Sql,
+): Promise<boolean> {
+  const client = databaseReadClient ?? (await getDbClient());
+  const rows = await client<{ requiresAverage: boolean }[]>`
+    WITH active_tournaments AS (
+      SELECT
+        tournament_id,
+        group_started_event_id,
+        group_ended_event_id,
+        knockout_started_event_id,
+        knockout_ended_event_id
+      FROM competition.tournaments
+      WHERE season_id = ${season.seasonId}
+        AND state = 'active'
+        AND setup_status = 'ready'
+        AND league_type = 'h2h'
+        AND roster_mode = 'official_sync'
+        AND group_mode = 'battle_races'
+    ),
+    active_group_phase_tournaments AS (
+      SELECT tournament_id
+      FROM active_tournaments
+      WHERE (
+        (
+          group_started_event_id IS NULL
+          AND group_ended_event_id IS NULL
+          AND knockout_started_event_id IS NULL
+          AND knockout_ended_event_id IS NULL
+        )
+        OR (
+          (group_started_event_id IS NOT NULL OR group_ended_event_id IS NOT NULL)
+          AND (group_started_event_id IS NULL OR ${eventId} >= group_started_event_id)
+          AND (group_ended_event_id IS NULL OR ${eventId} <= group_ended_event_id)
+          AND NOT (
+            knockout_started_event_id IS NOT NULL
+            AND ${eventId} >= knockout_started_event_id
+            AND (knockout_ended_event_id IS NULL OR ${eventId} <= knockout_ended_event_id)
+          )
+        )
+      )
+    ),
+    event_schedule AS (
+      SELECT
+        battle.tournament_id,
+        BOOL_OR(TRUE) AS has_schedule,
+        BOOL_OR(
+          battle.official_match_id IS NOT NULL
+          AND battle.is_bye IS NOT TRUE
+          AND (battle.home_is_average IS TRUE OR battle.away_is_average IS TRUE)
+        ) AS has_average
+      FROM competition.tournament_battle_group_results AS battle
+      WHERE battle.season_id = ${season.seasonId}
+        AND battle.event_id = ${eventId}
+      GROUP BY battle.tournament_id
+    )
+    SELECT EXISTS (
+      SELECT 1
+      FROM active_group_phase_tournaments AS tournament
+      LEFT JOIN event_schedule AS schedule
+        ON schedule.tournament_id = tournament.tournament_id
+      WHERE schedule.tournament_id IS NULL
+         OR COALESCE(schedule.has_average, FALSE)
+    ) AS "requiresAverage"
+  `;
+  // Evaluate every active tournament independently. One tournament having a
+  // schedule must not hide another active tournament whose schedule is still
+  // unmaterialized, and a tournament outside its configured phase must not
+  // force an unrelated Average refresh.
+  return rows[0]?.requiresAverage === true;
 }
 
 function h2hScopeKeyPrefix(season: string, eventId: number): string {
@@ -1148,6 +1252,7 @@ async function findOfficialH2HMatches(
       home_entry.profile_source_checked_at AS "homeProfileSourceCheckedAt",
       battle.home_net_points AS "homeNetPoints",
       battle.home_is_average AS "homeIsAverage",
+      event.average_entry_score AS "averageEntryScore",
       battle.away_entry_id AS "awayEntryId",
       away_entry.entry_name AS "awayEntryName",
       away_entry.player_name AS "awayPlayerName",
@@ -1187,6 +1292,7 @@ async function findOfficialH2HMatches(
       home_entry.profile_source_checked_at AS "homeProfileSourceCheckedAt",
       knockout.home_net_points AS "homeNetPoints",
       false AS "homeIsAverage",
+      event.average_entry_score AS "averageEntryScore",
       knockout.away_entry_id AS "awayEntryId",
       away_entry.entry_name AS "awayEntryName",
       away_entry.player_name AS "awayPlayerName",
@@ -1222,6 +1328,7 @@ async function findOfficialH2HMatches(
     awayEntryId: row.awayEntryId === null ? null : Number(row.awayEntryId),
     homeNetPoints: row.homeNetPoints === null ? null : Number(row.homeNetPoints),
     awayNetPoints: row.awayNetPoints === null ? null : Number(row.awayNetPoints),
+    averageEntryScore: row.averageEntryScore === null ? null : Number(row.averageEntryScore),
   }));
 }
 
@@ -1489,7 +1596,7 @@ function h2hRevisions(
   matches: readonly H2HPreparedMatch[],
   standings: readonly H2HStandingRow[],
 ): LeagueLiveRevisionVector {
-  const algorithm = contentHash('live-league-v2:h2h:1');
+  const algorithm = contentHash('live-league-v2:h2h:2:average-from-bootstrap');
   const roster = contentHash(
     matches
       .flatMap(({ payload }) => [payload.home.entryId, payload.away.entryId])
@@ -1684,22 +1791,29 @@ async function publishH2HMatch(
   const fallbackSource = global.publication.sourceCheckedAt;
   const homeRead = row.homeEntryId === null ? undefined : inputs.get(row.homeEntryId);
   const awayRead = row.awayEntryId === null ? undefined : inputs.get(row.awayEntryId);
+  const homeIsAverage = row.isBye && row.homeEntryId === null ? false : row.homeIsAverage;
+  const awayIsAverage = row.isBye && row.awayEntryId === null ? false : row.awayIsAverage;
+  // Average Team is a canonical event fact sourced from bootstrap/core. The
+  // official H2H mirror remains schedule/structure input; it must not be a
+  // second live-score source for this synthetic side.
+  const homeNetPoints = homeIsAverage ? row.averageEntryScore : row.homeNetPoints;
+  const awayNetPoints = awayIsAverage ? row.averageEntryScore : row.awayNetPoints;
   const home = h2hSide(
     row.homeEntryId,
     row.homeEntryName,
     row.homePlayerName,
-    row.homeIsAverage,
+    homeIsAverage,
     row.isBye,
-    row.homeNetPoints,
+    homeNetPoints,
     homeRead,
   );
   const away = h2hSide(
     row.awayEntryId,
     row.awayEntryName,
     row.awayPlayerName,
-    row.awayIsAverage,
+    awayIsAverage,
     row.isBye,
-    row.awayNetPoints,
+    awayNetPoints,
     awayRead,
   );
   const sideReady = (side: H2HMatchSide): boolean =>
@@ -1715,26 +1829,26 @@ async function publishH2HMatch(
       (isTimestampAtOrAfter(row.sourceCheckedAt, row.finalizationAt) &&
         finalInputAvailable(
           row.homeEntryId,
-          row.homeIsAverage,
+          homeIsAverage,
           homeRead,
           row.homeProfileSourceCheckedAt,
           row.finalizationAt,
         ) &&
         finalInputAvailable(
           row.awayEntryId,
-          row.awayIsAverage,
+          awayIsAverage,
           awayRead,
           row.awayProfileSourceCheckedAt,
           row.finalizationAt,
         ) &&
         hasCompleteH2HOfficialScores(
           row.homeEntryId,
-          row.homeNetPoints,
+          homeNetPoints,
           row.awayEntryId,
-          row.awayNetPoints,
+          awayNetPoints,
           row.isBye,
-          row.isBye && row.homeEntryId === null ? false : row.homeIsAverage,
-          row.isBye && row.awayEntryId === null ? false : row.awayIsAverage,
+          homeIsAverage,
+          awayIsAverage,
         )));
   const candidate: H2HMatchPayload = {
     contractVersion: 'live-points-v2',
@@ -2109,6 +2223,23 @@ export async function syncLiveH2HLeaguePublicationsV2(
             entriesNeedingProfileRefresh,
           );
         }
+      }
+      const managerFactsReady = entryIds.every((entryId) =>
+        liveInputMatchesGlobalPublication(inputs.get(entryId), global.publication),
+      );
+      if (!managerFactsReady) {
+        totals.skipped += 1;
+        if (global.publication.state === 'FINALIZED' && phaseActive) {
+          finalReady = false;
+        }
+        logInfo('Live H2H publication retained until Assistant Manager facts catch up', {
+          season: season.seasonCode,
+          eventId,
+          tournamentId,
+          globalPublicationId: global.publication.publicationId,
+          globalGeneration: global.publication.generation,
+        });
+        continue;
       }
       const [existingHead, previousHead] = await Promise.all([
         readLiveLeaguePublicationV2Pointer(headScope, 'active', redis),

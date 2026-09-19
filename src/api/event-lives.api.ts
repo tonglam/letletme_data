@@ -21,7 +21,10 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
     '/sync/:eventId',
     async ({ params, set }) => {
       const season = await seasonRepository.findCurrent();
-      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual', {});
+      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual', {
+        bootstrapGateRequired: true,
+        picksGateRequired: true,
+      });
       if (!job) {
         throw new Error('Failed to enqueue Live Points V2 snapshot job');
       }
@@ -39,7 +42,10 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
     '/cache/:eventId',
     async ({ params, set }) => {
       const season = await seasonRepository.findCurrent();
-      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual');
+      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual', {
+        bootstrapGateRequired: true,
+        picksGateRequired: true,
+      });
       if (!job) {
         throw new Error('Failed to enqueue event live cache update job');
       }

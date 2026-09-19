@@ -2,6 +2,9 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   fetchOfficialH2HSourceSnapshot,
+  isOfficialH2HObservationStaleForFinalization,
+  overlayOfficialH2HAverageScore,
+  overlayOfficialH2HAverageScores,
   projectOfficialH2HEventLiveScores,
   type OfficialH2HSourceSnapshot,
 } from '../../src/services/tournament-official-h2h.service';
@@ -74,6 +77,31 @@ describe('Official H2H Live Points V2 projection', () => {
     expect(fetched.sourceCheckedAt!.getTime()).toBeLessThan(providerFinishedAt);
   });
 
+  test('rejects an observation that started before finalization', () => {
+    const sourceCheckedAt = new Date('2026-08-24T00:00:00.000Z');
+    expect(
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, {
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: new Date('2026-08-24T00:00:00.001Z'),
+      }),
+    ).toBe(true);
+    expect(
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, {
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: new Date('2026-08-23T23:59:59.999Z'),
+      }),
+    ).toBe(false);
+    expect(
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, {
+        finished: false,
+        dataChecked: false,
+        dataCheckedAt: null,
+      }),
+    ).toBe(false);
+  });
+
   test('overlays only complete same-event V2 scores', () => {
     const projected = projectOfficialH2HEventLiveScores(
       snapshot(),
@@ -89,6 +117,36 @@ describe('Official H2H Live Points V2 projection', () => {
     expect(projected?.matches[0]).toMatchObject({
       entry_1_points: 37,
       entry_2_points: 31,
+      winner: 109967,
+    });
+  });
+
+  test('continues projecting real-sided knockout matches', () => {
+    const knockout = snapshot();
+    knockout.matches[0] = {
+      ...knockout.matches[0]!,
+      entry_1_points: 10,
+      entry_2_points: 10,
+      is_knockout: true,
+      knockout_name: 'Final',
+      tiebreak: 'penalties',
+    };
+
+    const projected = projectOfficialH2HEventLiveScores(
+      knockout,
+      1,
+      new Set([109967, 34299]),
+      batch(
+        new Map([
+          [109967, { eventPoints: 30, netEventPoints: 30, transferCost: 0 }],
+          [34299, { eventPoints: 30, netEventPoints: 30, transferCost: 0 }],
+        ]),
+      ),
+    );
+
+    expect(projected?.matches[0]).toMatchObject({
+      entry_1_points: 30,
+      entry_2_points: 30,
       winner: 109967,
     });
   });
@@ -115,5 +173,109 @@ describe('Official H2H Live Points V2 projection', () => {
         batch(new Map([[109967, { eventPoints: 37, netEventPoints: 37, transferCost: 0 }]])),
       ),
     ).toBeNull();
+  });
+
+  test('does not use an official-feed Average Team score as a fallback', () => {
+    const providerAverage = snapshot(null);
+    providerAverage.matches[0].entry_2_points = 99;
+
+    expect(
+      projectOfficialH2HEventLiveScores(
+        providerAverage,
+        1,
+        new Set([109967]),
+        batch(new Map([[109967, { eventPoints: 37, netEventPoints: 37, transferCost: 0 }]])),
+      ),
+    ).toBeNull();
+
+    const canonical = overlayOfficialH2HAverageScore(providerAverage, 1, 30);
+    expect(canonical.matches[0]).toMatchObject({
+      entry_2_points: 30,
+      entry_1_total: 0,
+      entry_2_total: 3,
+      entry_1_win: 0,
+      entry_2_win: 1,
+      winner: null,
+    });
+    expect(
+      projectOfficialH2HEventLiveScores(
+        canonical,
+        1,
+        new Set([109967]),
+        batch(new Map([[109967, { eventPoints: 37, netEventPoints: 37, transferCost: 0 }]])),
+        30,
+      )?.matches[0],
+    ).toMatchObject({ entry_1_points: 37, entry_2_points: 30, winner: 109967 });
+
+    expect(overlayOfficialH2HAverageScore(providerAverage, 1, null).matches[0]).toMatchObject({
+      entry_2_points: null,
+      winner: null,
+    });
+    expect(overlayOfficialH2HAverageScore(providerAverage, 1, null).matches[0].entry_1_total).toBe(
+      undefined,
+    );
+  });
+
+  test('keeps a tied real entry versus Average Team as a draw', () => {
+    const tied = snapshot(null);
+    tied.matches[0]!.entry_1_points = 30;
+
+    expect(overlayOfficialH2HAverageScore(tied, 1, 30).matches[0]).toMatchObject({
+      entry_1_draw: 1,
+      entry_2_draw: 1,
+      entry_1_total: 1,
+      entry_2_total: 1,
+      winner: null,
+    });
+  });
+
+  test('overlays canonical Average Team scores across an eventless full repair', () => {
+    const full = snapshot(null);
+    full.matches.push({
+      id: 2071744,
+      event: 2,
+      entry_1_entry: null,
+      entry_1_points: 99,
+      entry_2_entry: 34299,
+      entry_2_points: 12,
+      winner: 34299,
+      knockout_name: null,
+      sourceOrder: 1,
+      is_bye: false,
+    });
+    full.matches.push({
+      id: 2071745,
+      event: 2,
+      entry_1_entry: null,
+      entry_1_points: 77,
+      entry_2_entry: null,
+      entry_2_points: 88,
+      winner: null,
+      knockout_name: 'Semi-final',
+      is_knockout: true,
+      sourceOrder: 2,
+      is_bye: false,
+    });
+
+    const repaired = overlayOfficialH2HAverageScores(
+      full,
+      new Map([
+        [1, 30],
+        [2, 45],
+      ]),
+    );
+
+    expect(repaired.matches[0]).toMatchObject({ entry_2_points: 30, winner: null });
+    expect(repaired.matches[1]).toMatchObject({
+      entry_1_points: 45,
+      entry_1_win: 1,
+      entry_2_loss: 1,
+      winner: null,
+    });
+    expect(repaired.matches[2]).toMatchObject({
+      entry_1_points: 77,
+      entry_2_points: 88,
+      winner: null,
+    });
   });
 });

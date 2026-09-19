@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { UnrecoverableError, Worker, Job, QueueEvents } from 'bullmq';
 
 import { requireCurrentSeasonForJob } from '../services/season-scoped-job.service';
@@ -9,7 +8,6 @@ import {
   liveDataQueueName,
 } from '../queues/live-data.queue';
 import { enqueueFinalLeagueResultsAfterLiveSync } from '../services/live-data-cascade.service';
-import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { enqueueRemainingLiveMatchCheckpoint } from '../jobs/live-data.jobs';
 import { syncLiveSnapshotV2 } from '../services/live-snapshot-v2.service';
 import {
@@ -25,14 +23,19 @@ import {
   hasFinalLiveMatchCheckpointsV3,
 } from '../services/live-match-v3-checkpoint.service';
 import {
+  hasLiveH2HAverageScope,
   syncLiveClassicLeaguePublicationsV2,
   syncLiveH2HLeaguePublicationsV2,
 } from '../services/live-league-publication-v2.service';
+import { ensureLiveAverageReadyForPublication } from '../services/live-average-refresh.service';
+import {
+  ensureLiveBootstrapReady,
+  readLivePicksDurableFreshnessEvidence,
+} from '../services/live-lifecycle-orchestrator';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logDebug, logError, logInfo, logWarn } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
-import { createEventRepository, eventRepository } from '../repositories/events';
 import { createSeasonRepository } from '../repositories/seasons';
 import { runtimeReleaseRevision } from '../utils/runtime-heartbeat';
 import {
@@ -169,36 +172,6 @@ export function liveDataResultDeferredSchedulerObligation(
   if (jobName !== LIVE_JOBS.LIVE_SNAPSHOT) return false;
   if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
   return (result as Record<string, unknown>).status === 'waiting-dependencies';
-}
-
-async function enqueueFinalOfficialH2HRefresh(
-  season: Awaited<ReturnType<typeof requireCurrentSeasonForJob>>,
-  eventId: number,
-  obligationGeneration: number | undefined,
-  freshAfter: string | null,
-): Promise<void> {
-  try {
-    await enqueueTournamentOfficialH2H(season, eventId, 'reconcile', {
-      // A failed Bull job is retained for seven days.  Never reuse its ID on
-      // a later finalization pass or BullMQ will deduplicate the retry into the
-      // terminal failed job instead of dispatching a new refresh.
-      jobId: `live-final-official-h2h-e${eventId}-g${obligationGeneration ?? 'unknown'}-${randomUUID()}`,
-      ...(freshAfter ? { freshAfter } : {}),
-    });
-    logInfo('Enqueued official H2H refresh after live finalization', {
-      season: season.seasonCode,
-      eventId,
-      freshAfter,
-    });
-  } catch (error) {
-    // The durable live-finalization obligation remains pending and will retry
-    // this enqueue. Never acknowledge finalization based on a failed handoff.
-    logError('Failed to enqueue official H2H refresh after live finalization', error, {
-      season: season.seasonCode,
-      eventId,
-      freshAfter,
-    });
-  }
 }
 
 /**
@@ -485,6 +458,70 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
         return { ...evidence, status: 'waiting-dependencies' as const };
       }
     }
+    if (job.data.picksGateRequired === true) {
+      const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+        season,
+        eventId,
+        databaseBudget?.readDb,
+        { includeManagerRepair: true },
+      ).catch(() => null);
+      const picksComplete = Boolean(
+        picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
+      );
+      if (!picksComplete) {
+        const evidence = {
+          finalization: 'waiting-for-entry-picks',
+          reason: 'DATA_INCOMPLETE:LIVE_PICKS_COHORT_INCOMPLETE',
+          expectedCount: picksEvidence?.expectedCount ?? null,
+          observedCount: picksEvidence?.observedCount ?? null,
+        };
+        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            dependencyWait: {
+              reasonCodes: [evidence.reason],
+            },
+            evidence,
+            db: databaseBudget?.writeDb,
+          });
+          if (!deferred) throw new Error('Stale scheduler picks gate');
+          return { ...evidence, status: 'waiting-dependencies' as const };
+        }
+        throw new Error(evidence.reason);
+      }
+    }
+    if (job.data.bootstrapGateRequired === true) {
+      const bootstrap = await ensureLiveBootstrapReady(season, eventId, new Date());
+      if (bootstrap.status !== 'ready') {
+        const evidence = {
+          finalization: 'waiting-for-bootstrap',
+          reason:
+            bootstrap.status === 'unknown'
+              ? 'SOURCE_NOT_READY:BOOTSTRAP_PROBE_UNKNOWN'
+              : 'SOURCE_NOT_READY:BOOTSTRAP_HTTP_NOT_200',
+          bootstrapStatus: bootstrap.status,
+          bootstrapHttpStatus: bootstrap.httpStatus,
+          bootstrapCheckedAt: bootstrap.checkedAt,
+          bootstrapNextProbeAt: bootstrap.nextProbeAt,
+        };
+        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+          const deferred = await deferSchedulerObligationForWorker({
+            obligationId: job.data.obligationId,
+            generation: job.data.obligationGeneration,
+            dependencyWait: {
+              reasonCodes: [evidence.reason],
+            },
+            evidence,
+            db: databaseBudget?.writeDb,
+          });
+          if (!deferred) throw new Error('Stale scheduler bootstrap gate');
+        } else {
+          throw new Error(evidence.reason);
+        }
+        return { ...evidence, status: 'waiting-dependencies' as const };
+      }
+    }
     const liveSnapshotStageStartedAt = Date.now();
     let snapshot: Awaited<ReturnType<typeof syncLiveSnapshotV2>>;
     try {
@@ -634,50 +671,147 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
         dispatchGeneration: laneIdentity?.dispatchGeneration,
       });
     }
-    // League boards are a sibling publication. A missing roster input or a
-    // transient Redis/DB read must retain the last complete board and must not
-    // turn a successful global live observation into a failed live job.
-    let classicLeagueResult: Awaited<ReturnType<typeof syncLiveClassicLeaguePublicationsV2>> = null;
-    try {
-      classicLeagueResult = await syncLiveClassicLeaguePublicationsV2(
-        season,
-        eventId,
-        job.data.expectedNextCheckAt,
-        databaseBudget
-          ? {
-              databaseRead: databaseBudget.readDb,
-              databaseReadClient: databaseBudget.readClient,
-            }
-          : undefined,
-      );
-    } catch (error) {
-      logError(
-        'Live Classic league publication pass failed; global publication is retained',
-        error,
-        {
-          season: season.seasonCode,
-          eventId,
-        },
-      );
-    }
-    let h2hLeagueResult: Awaited<ReturnType<typeof syncLiveH2HLeaguePublicationsV2>> = null;
-    try {
-      h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
-        season,
-        eventId,
-        job.data.expectedNextCheckAt,
-        databaseBudget
-          ? {
-              databaseRead: databaseBudget.readDb,
-              databaseReadClient: databaseBudget.readClient,
-            }
-          : undefined,
-      );
-    } catch (error) {
-      logError('Live H2H league publication pass failed; global publication is retained', error, {
+    // League boards are sibling publications. A missing roster input, a
+    // transient Redis/DB read, or an Assistant Manager fact still bound to the
+    // prior global revision must retain the last complete board and must not
+    // turn a successful global live observation into a failed live job. The
+    // final live-picks child republishes these scopes after its repair drains.
+    const leaguePicksEvidence = await readLivePicksDurableFreshnessEvidence(
+      season,
+      eventId,
+      databaseBudget?.readDb,
+      { includeManagerRepair: true },
+    ).catch((error) => {
+      logWarn('Live league publication gate could not read picks evidence', {
         season: season.seasonCode,
         eventId,
+        error: error instanceof Error ? error.message : String(error),
       });
+      return null;
+    });
+    const leaguePicksReady =
+      leaguePicksEvidence !== null &&
+      (leaguePicksEvidence.expectedCount === 0 ||
+        (leaguePicksEvidence.complete && !leaguePicksEvidence.repairRequired));
+    if (!leaguePicksReady && job.data.finalizeEvent === true) {
+      const fence = inspectSchedulerObligationFence(job.data);
+      if (fence.kind !== 'complete') {
+        // The final global publication is durable, but a direct final job has
+        // no obligation to defer. Fail delivery so the exact finalizer is
+        // retried after the manager-fact repair instead of completing with
+        // `liveSnapshotFinalizedAt` set and no downstream final cascade.
+        throw new Error(
+          `DATA_INCOMPLETE:LIVE_LEAGUE_PUBLICATION_WAITING:${
+            leaguePicksEvidence?.repairRequired === true
+              ? 'MANAGER_FACT_REPAIR_REQUIRED'
+              : 'PICKS_INCOMPLETE'
+          }`,
+        );
+      }
+    }
+    let classicLeagueResult: Awaited<ReturnType<typeof syncLiveClassicLeaguePublicationsV2>> = null;
+    if (!leaguePicksReady) {
+      logInfo('Live league publication retained until picks revision repair completes', {
+        season: season.seasonCode,
+        eventId,
+        expectedCount: leaguePicksEvidence?.expectedCount ?? null,
+        observedCount: leaguePicksEvidence?.observedCount ?? null,
+        repairRequired: leaguePicksEvidence?.repairRequired ?? null,
+      });
+    } else {
+      try {
+        classicLeagueResult = await syncLiveClassicLeaguePublicationsV2(
+          season,
+          eventId,
+          job.data.expectedNextCheckAt,
+          databaseBudget
+            ? {
+                databaseRead: databaseBudget.readDb,
+                databaseReadClient: databaseBudget.readClient,
+              }
+            : undefined,
+        );
+      } catch (error) {
+        logError(
+          'Live Classic league publication pass failed; global publication is retained',
+          error,
+          {
+            season: season.seasonCode,
+            eventId,
+          },
+        );
+      }
+    }
+    let h2hLeagueResult: Awaited<ReturnType<typeof syncLiveH2HLeaguePublicationsV2>> = null;
+    if (!leaguePicksReady) {
+      // The manager repair child will run this sibling pass after its input is
+      // checkpointed against the exact global publication revision.
+    } else {
+      const h2hUsesAverage = await hasLiveH2HAverageScope(
+        season,
+        eventId,
+        databaseBudget?.readClient,
+      ).catch((error) => {
+        // An unavailable scope probe must remain conservative: if an H2H
+        // Average side exists, the final gate still protects the publication.
+        logWarn('Live H2H Average scope probe failed; keeping the readiness gate', {
+          season: season.seasonCode,
+          eventId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return true;
+      });
+      let h2hReady = true;
+      if (h2hUsesAverage) {
+        const averageReady = await ensureLiveAverageReadyForPublication(
+          season,
+          eventId,
+          job.data.lifecycleState ?? snapshot.state,
+        );
+        h2hReady = averageReady.ready;
+        if (!averageReady.ready) {
+          logWarn('Live H2H publication is waiting for a fresh canonical Average Team score', {
+            season: season.seasonCode,
+            eventId,
+            reason: averageReady.reason,
+            sourceCheckedAt: averageReady.sourceCheckedAt,
+          });
+          if (job.data.finalizeEvent === true) {
+            const fence = inspectSchedulerObligationFence(job.data);
+            if (fence.kind !== 'complete') {
+              // The snapshot checkpoint above is durable, but a direct final job
+              // has no scheduler obligation that can be deferred. Fail delivery
+              // so BullMQ retries the official H2H/average dependency instead of
+              // permanently completing finalization with a missing publication.
+              throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${averageReady.reason}`);
+            }
+          }
+        }
+      }
+      if (h2hReady) {
+        try {
+          h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
+            season,
+            eventId,
+            job.data.expectedNextCheckAt,
+            databaseBudget
+              ? {
+                  databaseRead: databaseBudget.readDb,
+                  databaseReadClient: databaseBudget.readClient,
+                }
+              : undefined,
+          );
+        } catch (error) {
+          logError(
+            'Live H2H league publication pass failed; global publication is retained',
+            error,
+            {
+              season: season.seasonCode,
+              eventId,
+            },
+          );
+        }
+      }
     }
     if (
       liveLaneIsCurrent &&
@@ -809,15 +943,14 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
       snapshot.state === 'FINALIZED' &&
       (!h2hGlobalIdentityMatches || !h2hLeagueResult?.finalReady)
     ) {
-      const finalizationFreshAfter = await (
-        databaseBudget?.readDb ? createEventRepository(databaseBudget.readDb) : eventRepository
-      ).findDataCheckedAtExact(season, eventId);
-      await enqueueFinalOfficialH2HRefresh(
-        season,
+      // The official H2H final refresh is an explicit scheduler obligation
+      // keyed by the event's data_checked boundary. Keeping the enqueue there
+      // gives the H2H publication its own freshness window and avoids a
+      // live-snapshot worker side channel with no scheduler evidence.
+      logInfo('Finalized live publication is waiting for scheduled official H2H refresh', {
+        season: season.seasonCode,
         eventId,
-        job.data.obligationGeneration,
-        finalizationFreshAfter,
-      );
+      });
     }
 
     if (snapshot.state === 'FINALIZED') {
@@ -834,14 +967,33 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
           classicFinalReady: classicLeagueResult?.finalReady ?? false,
           h2hFinalReady: h2hLeagueResult?.finalReady ?? false,
         });
-        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+        const finalizationFence = inspectSchedulerObligationFence(job.data);
+        if (finalizationFence.kind === 'malformed') {
+          throw new Error(
+            `Malformed live finalization scheduler fence: ${finalizationFence.reason}`,
+          );
+        }
+        if (finalizationFence.kind === 'none') {
+          // Direct-mode finalization has already persisted the global marker,
+          // so returning waiting-dependencies would complete the Bull job and
+          // leave no scheduler obligation or future lifecycle enqueue to retry
+          // the missing H2H/Classic publication. Throw so BullMQ retries the
+          // exact finalizer with its bounded exponential backoff.
+          throw new Error(
+            `DATA_INCOMPLETE:LIVE_LEAGUE_FINAL_NOT_READY:${[
+              ...(classicLeagueResult?.finalReady === true ? [] : ['CLASSIC']),
+              ...(h2hLeagueResult?.finalReady === true ? [] : ['H2H']),
+            ].join(',')}`,
+          );
+        }
+        if (finalizationFence.kind === 'complete') {
           const dependencyReasonCodes = [
             ...(classicLeagueResult?.finalReady === true ? [] : ['CLASSIC_LEAGUE_FINAL_NOT_READY']),
             ...(h2hLeagueResult?.finalReady === true ? [] : ['H2H_LEAGUE_FINAL_NOT_READY']),
           ];
           const deferred = await deferSchedulerObligationForWorker({
-            obligationId: job.data.obligationId,
-            generation: job.data.obligationGeneration,
+            obligationId: finalizationFence.obligationId,
+            generation: finalizationFence.generation,
             dependencyWait: { reasonCodes: dependencyReasonCodes },
             evidence: {
               finalization: 'waiting-for-league-evidence',

@@ -21,13 +21,15 @@ import {
 } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { isMatchDayTime } from '../utils/conditions';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './entries.service';
 import { enqueueEntryPicksSyncJobWithOutcome } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
-import { enqueueTournamentOfficialH2H } from '../jobs/tournament-sync.jobs';
 import { createEntryInfoRepository, entryInfoRepository } from '../repositories/entry-infos';
-import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
+import {
+  createEntryEventPicksRepository,
+  entryEventPicksRepository,
+} from '../repositories/entry-event-picks';
 import { entriesInCompetition } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
@@ -38,6 +40,7 @@ import {
   readEntryCheckpointDesiredV2,
   readLivePublicationV2,
   readEntryLiveInputV2,
+  readEntryLiveInputsV2,
   setEntryCheckpointDesiredV2,
 } from '../cache/live-publication-v2';
 import { redisSingleton } from '../cache/singleton';
@@ -46,6 +49,10 @@ import { liveLifecycleStatusRepository } from '../repositories/live-window';
 import { getConfig } from '../utils/config';
 import { readFplAdmissionTelemetry } from '../utils/fpl-admission';
 import { normalizeMatchLifecycleState } from './live-match-v3';
+import {
+  checkpointLiveMatchScopeV3,
+  hasFinalLiveMatchCheckpointsV3,
+} from './live-match-v3-checkpoint.service';
 import {
   recordFreshnessObservation,
   retireLivePicksEmptyCohortFreshnessWindow,
@@ -97,6 +104,56 @@ export type LiveLifecycleDecision = {
   nextKickoffAt?: Date | null;
 };
 
+/**
+ * The first Live Points publication is not allowed to outrun the one-shot
+ * picks/transfers cohort. Keep the same fence while fixtures are already
+ * started: a provider response can move the fixture to LIVE_ACTIVE before
+ * the entry fan-out has checkpointed every eligible entry.
+ */
+export function shouldRequireLivePicksCompletionGate(state: LiveLifecycleState): boolean {
+  return (
+    state === 'PICKS_PROBE' ||
+    state === 'PICKS_SYNC' ||
+    state === 'LIVE_ACTIVE' ||
+    state === 'BETWEEN_FIXTURES' ||
+    state === 'DAY_SETTLING' ||
+    state === 'GW_REVIEW' ||
+    state === 'FINALIZED'
+  );
+}
+
+/**
+ * The API-owned direct timer has no scheduler registry obligation to fall
+ * back on after the event enters a live/settling state. Keep a durable
+ * incompleteness proof actionable there, but let the standalone scheduler
+ * remain the only root creator in production scheduler mode.
+ */
+export function shouldRunDirectLivePicksRepair(
+  decision: Pick<LiveLifecycleDecision, 'state' | 'shouldProbePicks'>,
+  picksComplete: boolean,
+  standaloneSchedulerEnabled: boolean,
+  probeDue: boolean,
+  repairRequired = false,
+): boolean {
+  return (
+    !standaloneSchedulerEnabled &&
+    !decision.shouldProbePicks &&
+    shouldRequireLivePicksCompletionGate(decision.state) &&
+    (!picksComplete || repairRequired) &&
+    probeDue
+  );
+}
+
+export type LiveBootstrapStatus = 'ready' | 'not-ready' | 'unknown';
+
+export type LiveBootstrapGate = Readonly<{
+  status: LiveBootstrapStatus;
+  httpStatus: number | null;
+  checkedAt: string | null;
+  readyAt: string | null;
+  nextProbeAt: string | null;
+}>;
+
 export type LiveLifecycleObservation = {
   /** The last content revision observed for this event, if any. */
   lastRevision?: number | string | null;
@@ -113,11 +170,13 @@ export function shouldRefreshOfficialH2H(
   decision: LiveLifecycleDecision,
   matchDayTime: boolean,
 ): boolean {
-  return (
-    decision.shouldFetchLive &&
-    decision.state !== 'FINALIZED' &&
-    (matchDayTime || decision.state === 'GW_REVIEW')
-  );
+  // Official H2H is a schedule/final-result mirror, not the live score feed.
+  // Live score revisions come from the event-live publication. Final and
+  // repair calls are explicit worker/cascade obligations and do not use this
+  // recurring predicate.
+  void decision;
+  void matchDayTime;
+  return false;
 }
 
 type PicksProbeState = {
@@ -125,6 +184,7 @@ type PicksProbeState = {
   nextProbeAt: number;
   canarySucceeded: boolean;
   failedCanaryEntryIds: Set<number>;
+  leagueRepairRequired: boolean;
 };
 
 const COORDINATOR_STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -135,13 +195,19 @@ type SharedPicksCoordinatorState = {
   nextProbeAt: number;
   canarySucceeded: boolean;
   failedCanaryEntryIds: number[];
+  leagueRepairRequired: boolean;
 };
 
-type SharedLifecycleQuietState = {
+export type SharedLifecycleQuietState = {
   revision: number | string | null;
   unchangedSince: number;
   state?: LiveLifecycleState;
   expectedNextCheckAt?: string | null;
+  bootstrapStatus?: LiveBootstrapStatus;
+  bootstrapHttpStatus?: number | null;
+  bootstrapCheckedAt?: string | null;
+  bootstrapReadyAt?: string | null;
+  bootstrapNextProbeAt?: string | null;
 };
 
 const defaultPicksCoordinatorState = (): SharedPicksCoordinatorState => ({
@@ -149,6 +215,7 @@ const defaultPicksCoordinatorState = (): SharedPicksCoordinatorState => ({
   nextProbeAt: 0,
   canarySucceeded: false,
   failedCanaryEntryIds: [],
+  leagueRepairRequired: false,
 });
 
 async function readPicksCoordinatorState(
@@ -178,6 +245,7 @@ async function readPicksCoordinatorState(
       nextProbeAt: Math.max(0, nextProbeAt),
       canarySucceeded: value.canarySucceeded,
       failedCanaryEntryIds: [...new Set(value.failedCanaryEntryIds)],
+      leagueRepairRequired: value.leagueRepairRequired === true,
     };
   } catch (error) {
     logError('Failed to read shared live picks coordinator state', error, { seasonCode, eventId });
@@ -189,6 +257,7 @@ async function writePicksCoordinatorState(
   seasonCode: string,
   eventId: number,
   state: SharedPicksCoordinatorState,
+  options: Readonly<{ throwOnError?: boolean }> = {},
 ): Promise<void> {
   try {
     const redis = await redisSingleton.getClient();
@@ -200,6 +269,7 @@ async function writePicksCoordinatorState(
     );
   } catch (error) {
     logError('Failed to write shared live picks coordinator state', error, { seasonCode, eventId });
+    if (options.throwOnError === true) throw error;
   }
 }
 
@@ -234,10 +304,178 @@ export async function readLifecycleQuietState(
             Number.isFinite(Date.parse(value.expectedNextCheckAt))
           ? value.expectedNextCheckAt
           : undefined;
-    return { revision: value.revision, unchangedSince, expectedNextCheckAt };
+    const bootstrapStatus =
+      value.bootstrapStatus === 'ready' ||
+      value.bootstrapStatus === 'not-ready' ||
+      value.bootstrapStatus === 'unknown'
+        ? value.bootstrapStatus
+        : undefined;
+    const bootstrapHttpStatus =
+      value.bootstrapHttpStatus === null
+        ? null
+        : typeof value.bootstrapHttpStatus === 'number' &&
+            Number.isSafeInteger(value.bootstrapHttpStatus) &&
+            value.bootstrapHttpStatus >= 100 &&
+            value.bootstrapHttpStatus <= 599
+          ? value.bootstrapHttpStatus
+          : undefined;
+    const validTimestamp = (candidate: unknown): string | null | undefined =>
+      candidate === null
+        ? null
+        : typeof candidate === 'string' && Number.isFinite(Date.parse(candidate))
+          ? candidate
+          : undefined;
+    return {
+      revision: value.revision,
+      unchangedSince,
+      ...(value.state ? { state: value.state } : {}),
+      expectedNextCheckAt,
+      ...(bootstrapStatus ? { bootstrapStatus } : {}),
+      ...(bootstrapHttpStatus !== undefined ? { bootstrapHttpStatus } : {}),
+      ...(validTimestamp(value.bootstrapCheckedAt) !== undefined
+        ? { bootstrapCheckedAt: validTimestamp(value.bootstrapCheckedAt) }
+        : {}),
+      ...(validTimestamp(value.bootstrapReadyAt) !== undefined
+        ? { bootstrapReadyAt: validTimestamp(value.bootstrapReadyAt) }
+        : {}),
+      ...(validTimestamp(value.bootstrapNextProbeAt) !== undefined
+        ? { bootstrapNextProbeAt: validTimestamp(value.bootstrapNextProbeAt) }
+        : {}),
+    };
   } catch (error) {
     logError('Failed to read shared live lifecycle state', error, { seasonCode, eventId });
     return null;
+  }
+}
+
+const emptyLiveBootstrapGate = (): LiveBootstrapGate => ({
+  status: 'unknown',
+  httpStatus: null,
+  checkedAt: null,
+  readyAt: null,
+  nextProbeAt: null,
+});
+
+export async function readLiveBootstrapGate(
+  seasonCode: string,
+  eventId: number,
+): Promise<LiveBootstrapGate> {
+  const state = await readLifecycleQuietState(seasonCode, eventId);
+  if (!state?.bootstrapStatus) return emptyLiveBootstrapGate();
+  return {
+    status: state.bootstrapStatus,
+    httpStatus: state.bootstrapHttpStatus ?? null,
+    checkedAt: state.bootstrapCheckedAt ?? null,
+    readyAt: state.bootstrapReadyAt ?? null,
+    nextProbeAt: state.bootstrapNextProbeAt ?? null,
+  };
+}
+
+/**
+ * Admit post-deadline provider work only after bootstrap returns HTTP 200.
+ * This is a bounded status probe; it deliberately ignores the bootstrap
+ * payload and never consults `is_current`.
+ */
+export async function ensureLiveBootstrapReady(
+  season: FplSeasonRef,
+  eventId: number,
+  now = new Date(),
+): Promise<LiveBootstrapGate> {
+  const current = await readLifecycleQuietState(season.seasonCode, eventId);
+  const nextProbeAtMs = current?.bootstrapNextProbeAt
+    ? Date.parse(current.bootstrapNextProbeAt)
+    : Number.NaN;
+  if (
+    current?.bootstrapStatus === 'ready' &&
+    current.bootstrapReadyAt !== null &&
+    current.bootstrapReadyAt !== undefined
+  ) {
+    return {
+      status: 'ready',
+      httpStatus: current.bootstrapHttpStatus ?? 200,
+      checkedAt: current.bootstrapCheckedAt ?? current.bootstrapReadyAt,
+      readyAt: current.bootstrapReadyAt,
+      nextProbeAt: null,
+    };
+  }
+  if (Number.isFinite(nextProbeAtMs) && nextProbeAtMs > now.getTime()) {
+    return {
+      status: current?.bootstrapStatus ?? 'unknown',
+      httpStatus: current?.bootstrapHttpStatus ?? null,
+      checkedAt: current?.bootstrapCheckedAt ?? null,
+      readyAt: current?.bootstrapReadyAt ?? null,
+      nextProbeAt: current?.bootstrapNextProbeAt ?? null,
+    };
+  }
+
+  try {
+    const probe = await fplClient.probeBootstrap({
+      priority: 'live',
+      maxRetries: 0,
+    });
+    const checkedAt = probe.checkedAt.toISOString();
+    if (probe.status === 200) {
+      const readyAt = checkedAt;
+      await mergeLifecycleQuietState(season.seasonCode, eventId, {
+        bootstrapStatus: 'ready',
+        bootstrapHttpStatus: 200,
+        bootstrapCheckedAt: checkedAt,
+        bootstrapReadyAt: readyAt,
+        bootstrapNextProbeAt: null,
+      });
+      const merged = await readLiveBootstrapGate(season.seasonCode, eventId);
+      return merged.status === 'ready'
+        ? merged
+        : {
+            status: 'ready',
+            httpStatus: 200,
+            checkedAt,
+            readyAt,
+            nextProbeAt: null,
+          };
+    }
+    const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
+    await mergeLifecycleQuietState(season.seasonCode, eventId, {
+      bootstrapStatus: 'not-ready',
+      bootstrapHttpStatus: probe.status,
+      bootstrapCheckedAt: checkedAt,
+      bootstrapReadyAt: null,
+      bootstrapNextProbeAt: nextProbeAt,
+    });
+    const merged = await readLiveBootstrapGate(season.seasonCode, eventId);
+    return merged.status === 'ready'
+      ? merged
+      : {
+          status: 'not-ready',
+          httpStatus: probe.status,
+          checkedAt,
+          readyAt: null,
+          nextProbeAt,
+        };
+  } catch (error) {
+    const checkedAt = now.toISOString();
+    const nextProbeAt = new Date(now.getTime() + PICKS_PROBE_POLL_MS).toISOString();
+    await mergeLifecycleQuietState(season.seasonCode, eventId, {
+      bootstrapStatus: 'unknown',
+      bootstrapHttpStatus: null,
+      bootstrapCheckedAt: checkedAt,
+      bootstrapReadyAt: null,
+      bootstrapNextProbeAt: nextProbeAt,
+    });
+    logError('Live bootstrap readiness probe failed', error, {
+      season: season.seasonCode,
+      eventId,
+    });
+    const merged = await readLiveBootstrapGate(season.seasonCode, eventId);
+    return merged.status === 'ready'
+      ? merged
+      : {
+          status: 'unknown',
+          httpStatus: null,
+          checkedAt,
+          readyAt: null,
+          nextProbeAt,
+        };
   }
 }
 
@@ -246,16 +484,72 @@ async function writeLifecycleQuietState(
   eventId: number,
   state: SharedLifecycleQuietState,
 ): Promise<void> {
+  await mergeLifecycleQuietState(seasonCode, eventId, state);
+}
+
+/**
+ * Merge a bootstrap gate atomically with the shared lifecycle object. A slow
+ * 503/transport probe must never overwrite a concurrent HTTP-200 admission,
+ * and the merge must not discard a lifecycle revision written by Match V3 in
+ * the same window.
+ */
+async function mergeLifecycleQuietState(
+  seasonCode: string,
+  eventId: number,
+  patch: Readonly<Partial<SharedLifecycleQuietState>>,
+): Promise<void> {
+  const key = liveV2LifecycleKey({ season: seasonCode, eventId });
+  const script = `
+local currentRaw = redis.call('GET', KEYS[1])
+local function isObject(value)
+  if type(value) ~= 'table' then return false end
+  for key, _ in pairs(value) do
+    if type(key) ~= 'string' then return false end
+  end
+  return true
+end
+local current = {}
+if currentRaw then
+  local currentOk, decoded = pcall(cjson.decode, currentRaw)
+  if currentOk and isObject(decoded) then
+    current = decoded
+  end
+end
+local patchOk, patch = pcall(cjson.decode, ARGV[1])
+if not patchOk or not isObject(patch) then return 0 end
+if type(current['revision']) ~= 'number' and type(current['revision']) ~= 'string' and current['revision'] ~= cjson.null then
+  current['revision'] = cjson.null
+end
+if type(current['unchangedSince']) ~= 'number' or current['unchangedSince'] <= 0 then
+  current['unchangedSince'] = tonumber(ARGV[3])
+end
+local currentReady = current['bootstrapStatus'] == 'ready' and current['bootstrapReadyAt'] ~= cjson.null and current['bootstrapReadyAt'] ~= nil
+local patchReady = patch['bootstrapStatus'] == 'ready'
+if currentReady and not patchReady then
+  patch['bootstrapStatus'] = current['bootstrapStatus']
+  patch['bootstrapHttpStatus'] = current['bootstrapHttpStatus']
+  patch['bootstrapCheckedAt'] = current['bootstrapCheckedAt']
+  patch['bootstrapReadyAt'] = current['bootstrapReadyAt']
+  patch['bootstrapNextProbeAt'] = current['bootstrapNextProbeAt']
+end
+for key, value in pairs(patch) do
+  current[key] = value
+end
+redis.call('SET', KEYS[1], cjson.encode(current), 'EX', ARGV[2])
+return 1
+`;
   try {
     const redis = await redisSingleton.getClient();
-    await redis.set(
-      liveV2LifecycleKey({ season: seasonCode, eventId }),
-      JSON.stringify(state),
-      'EX',
+    await redis.eval(
+      script,
+      1,
+      key,
+      JSON.stringify(patch),
       String(COORDINATOR_STATE_TTL_SECONDS),
+      String(Date.now()),
     );
   } catch (error) {
-    logError('Failed to write shared live lifecycle state', error, { seasonCode, eventId });
+    logError('Failed to merge shared live lifecycle state', error, { seasonCode, eventId });
   }
 }
 
@@ -298,6 +592,13 @@ export function resolveLivePicksProbeBackoffResult(
     pending: 0,
     sourceReady,
     scanComplete: false,
+    ...(!sourceReady
+      ? {
+          sourceReason: canarySucceeded
+            ? ('PICKS_PROBE_BACKOFF' as const)
+            : ('PICKS_CANARY_NOT_READY' as const),
+        }
+      : {}),
     ...(acceptedBackoff ? { outcome: 'accepted-backoff' as const } : {}),
   } as const;
 }
@@ -315,8 +616,54 @@ export async function isLivePicksProbeDue(
   eventId: number,
   now = new Date(),
 ): Promise<boolean> {
+  const [state, bootstrap] = await Promise.all([
+    readPicksCoordinatorState(seasonCode, eventId),
+    readLiveBootstrapGate(seasonCode, eventId),
+  ]);
+  const bootstrapNextProbeAt = bootstrap.nextProbeAt ? Date.parse(bootstrap.nextProbeAt) : NaN;
+  return (
+    now.getTime() >= state.nextProbeAt &&
+    (!Number.isFinite(bootstrapNextProbeAt) || now.getTime() >= bootstrapNextProbeAt)
+  );
+}
+
+export async function markLivePicksLeagueRepairRequired(
+  seasonCode: string,
+  eventId: number,
+): Promise<void> {
   const state = await readPicksCoordinatorState(seasonCode, eventId);
-  return now.getTime() >= state.nextProbeAt;
+  await writePicksCoordinatorState(
+    seasonCode,
+    eventId,
+    {
+      ...state,
+      // A league repair is independent of the provider probe cadence. Make the
+      // next Bull retry eligible immediately instead of letting it settle an
+      // obligation during the ordinary picks backoff window.
+      nextProbeAt: 0,
+      leagueRepairRequired: true,
+    },
+    { throwOnError: true },
+  );
+}
+
+export async function clearLivePicksLeagueRepairRequired(
+  seasonCode: string,
+  eventId: number,
+): Promise<void> {
+  const state = await readPicksCoordinatorState(seasonCode, eventId);
+  await writePicksCoordinatorState(seasonCode, eventId, {
+    ...state,
+    leagueRepairRequired: false,
+  });
+}
+
+export async function isLivePicksLeagueRepairRequired(
+  seasonCode: string,
+  eventId: number,
+): Promise<boolean> {
+  const state = await readPicksCoordinatorState(seasonCode, eventId);
+  return state.leagueRepairRequired === true;
 }
 
 export function resolveLivePicksRefreshFanout(
@@ -560,13 +907,13 @@ export function decideLiveLifecycle(
       // not manufacture FINALIZED before the event is explicitly marked
       // finished and data-checked.
       state: 'GW_REVIEW',
-      // Keep the official event-live heartbeat alive until the event reaches
-      // its explicit finalized boundary. A time limit here would make every
-      // provisional manager and H2H score disappear during a delayed review.
+      // Keep a lower-cadence full observation while FPL is settling late
+      // bonus/automatic-sub corrections. The final checkpoint remains the
+      // only terminal write once the event is data-checked.
       shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: false,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -578,7 +925,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: false,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -594,7 +941,7 @@ export function decideLiveLifecycle(
         shouldFetchLive: true,
         shouldObserveMatches: true,
         shouldProbePicks: false,
-        shouldSyncPicks: true,
+        shouldSyncPicks: false,
         recoverStaleFixtures: false,
         finalizeEvent: false,
         nextRetryAt: null,
@@ -605,7 +952,7 @@ export function decideLiveLifecycle(
       shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: false,
-      shouldSyncPicks: true,
+      shouldSyncPicks: false,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -640,10 +987,14 @@ export function decideLiveLifecycle(
   if (firstKickoffMs !== null && nowMs < firstKickoffMs) {
     return {
       state: 'PICKS_PROBE',
-      shouldFetchLive: false,
+      // The first Live Points publication is eligible after the complete
+      // picks/transfers cohort is ready; it must not wait for fixture.started.
+      // The scheduler/worker gate below prevents this flag from publishing a
+      // partial cohort.
+      shouldFetchLive: true,
       shouldObserveMatches: true,
       shouldProbePicks: true,
-      shouldSyncPicks: false,
+      shouldSyncPicks: true,
       recoverStaleFixtures: false,
       finalizeEvent: false,
       nextRetryAt: null,
@@ -669,8 +1020,8 @@ export function decideLiveLifecycle(
   }
   return {
     state: 'PICKS_SYNC',
-    shouldFetchLive: false,
-    shouldObserveMatches: false,
+    shouldFetchLive: true,
+    shouldObserveMatches: true,
     shouldProbePicks: true,
     shouldSyncPicks: true,
     recoverStaleFixtures: false,
@@ -711,6 +1062,7 @@ export async function readLivePicksDurableFreshnessEvidence(
   season: FplSeasonRef,
   eventId: number,
   db?: DbOrTransaction,
+  options: Readonly<{ includeManagerRepair?: boolean }> = {},
 ) {
   const expectedEntryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId, db);
   const heads = await createEntryEventPicksRepository(db).findHeadsByEventAndEntryIds(
@@ -751,6 +1103,56 @@ export async function readLivePicksDurableFreshnessEvidence(
     (latest, head) => (!latest || head.checkpointedAt > latest ? head.checkpointedAt : latest),
     null,
   );
+  let repairRequired = false;
+  if (options.includeManagerRepair === true && expectedEntryIds.length > 0) {
+    const liveObservation = await readLivePublicationV2({
+      season: season.seasonCode,
+      eventId,
+    });
+    const inputReads = await readEntryLiveInputsV2(
+      expectedEntryIds.map((entryId) => ({
+        season: season.seasonCode,
+        eventId,
+        entryId,
+      })),
+    );
+    // A complete fallback read is still a cache-repair signal. The freshness
+    // gate must not wait for a Manager chip or a missing entry before the
+    // scheduler reaches findMissingEntryLiveInputIds.
+    repairRequired =
+      inputReads.size !== expectedEntryIds.length ||
+      expectedEntryIds.some((entryId) => {
+        const inputRead = inputReads.get(entryId);
+        const durableHead = headsByEntryId.get(entryId);
+        return (
+          !inputRead ||
+          inputRead.servedFrom !== 'REDIS_CURRENT' ||
+          !durableHead ||
+          durableHead.state !== 'COMPLETE' ||
+          durableHead.rowCount !== 15 ||
+          durableHead.publicationId !== inputRead.publication.publicationId ||
+          durableHead.generation !== inputRead.publication.generation
+        );
+      });
+    if (liveObservation !== null) {
+      const livePublication = liveObservation.publication;
+      repairRequired =
+        repairRequired ||
+        expectedEntryIds.some((entryId) => {
+          const input = inputReads.get(entryId)?.input;
+          if (!input) return true;
+          const chip = input.picksBase.chip;
+          if (chip !== 'manager' && chip !== 'MANAGER') return false;
+          const managerFact = input.picksBase.assistantManagerPoints;
+          return (
+            managerFact === undefined ||
+            managerFact.livePublicationId !== livePublication.publicationId ||
+            managerFact.liveGeneration !== livePublication.generation ||
+            managerFact.liveScoreCoreRevision !== livePublication.revisions.scoreCore.revision
+          );
+        });
+    }
+  }
   return {
     revision,
     expectedCount: expectedEntryIds.length,
@@ -760,6 +1162,10 @@ export async function readLivePicksDurableFreshnessEvidence(
     // An empty eligible cohort is not a completed publication. It is retired
     // as NOT_APPLICABLE by persistLivePicksDurableFreshnessEvidence instead.
     complete: expectedEntryIds.length > 0 && completeHeads.length === expectedEntryIds.length,
+    // Redis input loss/corruption and the mutable manager fact are separate
+    // from immutable PostgreSQL picks coverage: neither can delay the first
+    // publication, but either creates a bounded repair root.
+    repairRequired,
   } as const;
 }
 
@@ -888,6 +1294,12 @@ export async function findMissingEntryLiveInputIds(
     season: season.seasonCode,
     eventId,
   }).catch(() => null);
+  const durableHeads = await entryEventPicksRepository.findPublicationHeadsByEventAndEntryIds(
+    season,
+    eventId,
+    entryIds,
+  );
+  const durableHeadsByEntryId = new Map(durableHeads.map((head) => [head.entryId, head]));
   const results = await mapWithConcurrency(entryIds, 32, async (entryId) => {
     const scope = {
       season: season.seasonCode,
@@ -899,6 +1311,64 @@ export async function findMissingEntryLiveInputIds(
       readEntryCheckpointDesiredV2(scope),
     ]);
     if (input) {
+      const durableHead = durableHeadsByEntryId.get(entryId);
+      const checkpointPending = input.publication.checkpointedAt === null || desired !== null;
+      const durableHeadNeedsRepair =
+        !durableHead ||
+        durableHead.state !== 'COMPLETE' ||
+        durableHead.rowCount !== 15 ||
+        durableHead.publicationId !== input.publication.publicationId ||
+        durableHead.generation !== input.publication.generation;
+      const redisBaseNeedsRepair = input.servedFrom !== 'REDIS_CURRENT' || durableHeadNeedsRepair;
+      // A readable fallback/current pointer is not enough to prove that the
+      // input is the durable base once its Redis-first checkpoint has settled.
+      // While desired/checkpointedAt is pending, let the checkpoint-only path
+      // advance that legitimate new publication before classifying its
+      // temporary identity gap as a cache rollback.
+      if (checkpointPending) {
+        // PostgreSQL may already contain the exact head while Redis still
+        // carries an unfinished checkpoint marker. Treat both marker states
+        // as repair evidence; otherwise a crash between the SQL commit and
+        // marker cleanup makes the cohort look complete forever.
+        try {
+          if (!desired && input.publication.checkpointedAt === null) {
+            await setEntryCheckpointDesiredV2(input.publication);
+          }
+          const checkpointResult = await checkpointEntryLiveInputV2(season, eventId, entryId);
+          if (checkpointResult === 'checkpointed') {
+            await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+            return null;
+          }
+        } catch (error) {
+          logError('Entry live V2 pending checkpoint repair failed', error, { entryId, eventId });
+        }
+        return entryId;
+      }
+      if (redisBaseNeedsRepair) {
+        // A checkpointed current input with a missing or mismatched durable
+        // head must not enter the provider lane: an unchanged provider
+        // response takes the sameInput fast path and can be marked complete
+        // without recreating PostgreSQL. Rebind the exact Redis publication
+        // through the checkpoint fence first, even for the provider-only
+        // live-picks selector (repairCheckpoint=false).
+        if (
+          input.servedFrom === 'REDIS_CURRENT' &&
+          !desired &&
+          input.publication.checkpointedAt !== null &&
+          durableHeadNeedsRepair
+        ) {
+          try {
+            const checkpointResult = await checkpointEntryLiveInputV2(season, eventId, entryId);
+            if (checkpointResult === 'checkpointed') {
+              await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+              return null;
+            }
+          } catch (error) {
+            logError('Entry live V2 durable head repair failed', error, { entryId, eventId });
+          }
+        }
+        return entryId;
+      }
       const chip = input.input.picksBase.chip;
       const managerFact = input.input.picksBase.assistantManagerPoints;
       const managerObservationChanged =
@@ -939,6 +1409,145 @@ export async function findMissingEntryLiveInputIds(
   return results.filter((entryId): entryId is number => entryId !== null);
 }
 
+export type LivePicksLeagueRepairResult = Readonly<{
+  status: 'published' | 'not-required' | 'waiting';
+  reason?:
+    | 'NO_GLOBAL_PUBLICATION'
+    | 'PICKS_INCOMPLETE'
+    | 'MANAGER_FACT_REPAIR_REQUIRED'
+    | 'GLOBAL_REVISION_ADVANCED'
+    | 'CLASSIC_LEAGUE_FINAL_NOT_READY'
+    | 'H2H_LEAGUE_FINAL_NOT_READY'
+    | 'MATCH_CHECKPOINTS_INCOMPLETE';
+}>;
+
+/**
+ * Reconcile sibling league scopes after the final live-picks child has
+ * published its input. The global Live Points publication is intentionally
+ * independent: manager facts cannot be bound before that publication exists.
+ * Once it does exist, however, league scopes must not remain on the preceding
+ * global revision. This path is read/Redis-only apart from the normal sibling
+ * publication/checkpoint writes and never refetches picks.
+ */
+export async function republishLiveLeagueScopesAfterPicksRepair(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<LivePicksLeagueRepairResult> {
+  const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId, undefined, {
+    includeManagerRepair: true,
+  });
+  const picksComplete = evidence.expectedCount === 0 || evidence.complete;
+  if (!picksComplete) return { status: 'waiting', reason: 'PICKS_INCOMPLETE' };
+  if (evidence.repairRequired) {
+    return { status: 'waiting', reason: 'MANAGER_FACT_REPAIR_REQUIRED' };
+  }
+
+  const redis = await redisSingleton.getClient();
+  const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  if (!global) return { status: 'not-required', reason: 'NO_GLOBAL_PUBLICATION' };
+
+  const {
+    hasLiveH2HAverageScope,
+    syncLiveClassicLeaguePublicationsV2,
+    syncLiveH2HLeaguePublicationsV2,
+  } = await import('./live-league-publication-v2.service');
+  const sameGlobalIdentity = (
+    publication: { globalPublicationId: string; globalGeneration: number } | null,
+  ): boolean =>
+    publication !== null &&
+    publication.globalPublicationId === global.publication.publicationId &&
+    publication.globalGeneration === global.publication.generation;
+  const classic = await syncLiveClassicLeaguePublicationsV2(season, eventId);
+  if (!sameGlobalIdentity(classic)) {
+    return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
+  }
+  if (global.publication.state === 'FINALIZED' && classic?.finalReady !== true) {
+    return { status: 'waiting', reason: 'CLASSIC_LEAGUE_FINAL_NOT_READY' };
+  }
+  const h2hUsesAverage = await hasLiveH2HAverageScope(season, eventId).catch((error) => {
+    // Keep repair conservative when the scope probe is unavailable; an
+    // existing Average side must not bypass its canonical readiness gate.
+    logWarn('Live H2H Average scope probe failed during picks repair', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  });
+  if (h2hUsesAverage) {
+    const { ensureLiveAverageReadyForPublication } = await import('./live-average-refresh.service');
+    const average = await ensureLiveAverageReadyForPublication(
+      season,
+      eventId,
+      global.publication.state === 'FINALIZED' ? 'FINALIZED' : 'LIVE_ACTIVE',
+    );
+    if (!average.ready) {
+      throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${average.reason}`);
+    }
+  }
+  const h2h = await syncLiveH2HLeaguePublicationsV2(season, eventId);
+  if (!sameGlobalIdentity(h2h)) {
+    return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
+  }
+  if (global.publication.state === 'FINALIZED' && h2h?.finalReady !== true) {
+    return { status: 'waiting', reason: 'H2H_LEAGUE_FINAL_NOT_READY' };
+  }
+  const latestGlobal = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  if (
+    !latestGlobal ||
+    latestGlobal.publication.publicationId !== global.publication.publicationId ||
+    latestGlobal.publication.generation !== global.publication.generation
+  ) {
+    return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
+  }
+  if (global.publication.state === 'FINALIZED') {
+    // A live-picks repair can finish after the Match V3 jobs were enqueued but
+    // before either checkpoint committed.  Keep this recovery path behind the
+    // same durable desk/detail fence as the normal finalizer; publication
+    // identity alone is not proof that the two Match scopes are persisted.
+    for (const kind of ['desk', 'detail'] as const) {
+      await checkpointLiveMatchScopeV3({
+        season,
+        eventId,
+        kind,
+        allowFinalReplacement: false,
+      });
+    }
+    if (!(await hasFinalLiveMatchCheckpointsV3(season, eventId))) {
+      return { status: 'waiting', reason: 'MATCH_CHECKPOINTS_INCOMPLETE' };
+    }
+    const { enqueueFinalLeagueResultsAfterLiveSync } = await import('./live-data-cascade.service');
+    await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
+  }
+  return { status: 'published' };
+}
+
+async function runDirectPicksProbeAndFinalize(
+  season: FplSeasonRef,
+  eventId: number,
+  now: Date,
+): Promise<Awaited<ReturnType<typeof runPicksProbeAndSync>>> {
+  const result = await runPicksProbeAndSync(season, eventId, now);
+  if (isStandaloneSchedulerEnabled() || !result.scanComplete) return result;
+
+  try {
+    const finalizer = await republishLiveLeagueScopesAfterPicksRepair(season, eventId);
+    if (finalizer.status === 'waiting') {
+      await markLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+      logInfo('Direct live picks repair completed; league finalizer is waiting', {
+        eventId,
+        reason: finalizer.reason ?? 'UNKNOWN',
+      });
+    } else {
+      await clearLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+    }
+  } catch (error) {
+    await markLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+    throw error;
+  }
+  return result;
+}
+
 export async function findPendingEntryLiveCheckpointIds(
   season: FplSeasonRef,
   eventId: number,
@@ -964,6 +1573,7 @@ export async function runPicksProbeAndSync(
     obligationGeneration?: number;
     freshnessWindowId?: number;
     deadlineAt?: Date | null;
+    forceLeagueRepair?: boolean;
   }> = {},
 ): Promise<{
   canaryCount: number;
@@ -973,6 +1583,12 @@ export async function runPicksProbeAndSync(
   outcome?: 'accepted-backoff';
   /** The source canary was accepted for this event window. */
   sourceReady: boolean;
+  /** Bounded reason when the source gate is not yet admitted. */
+  sourceReason?:
+    | 'BOOTSTRAP_HTTP_NOT_200'
+    | 'BOOTSTRAP_PROBE_UNKNOWN'
+    | 'PICKS_CANARY_NOT_READY'
+    | 'PICKS_PROBE_BACKOFF';
   /** The complete eligible-entry sweep reached its semantic finalizer. */
   scanComplete: boolean;
   /** Exact aggregate evidence was persisted before a terminal completion. */
@@ -989,6 +1605,7 @@ export async function runPicksProbeAndSync(
     nextProbeAt: sharedState.nextProbeAt,
     canarySucceeded: sharedState.canarySucceeded,
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
+    leagueRepairRequired: sharedState.leagueRepairRequired,
   };
   const recordDurableFreshness = async (
     scanComplete: boolean,
@@ -1019,7 +1636,44 @@ export async function runPicksProbeAndSync(
       return false;
     }
   };
-  if (now.getTime() < state.nextProbeAt) {
+  const bootstrap = await ensureLiveBootstrapReady(season, eventId, now);
+  if (bootstrap.status !== 'ready') {
+    const sourceReason =
+      bootstrap.status === 'unknown'
+        ? ('BOOTSTRAP_PROBE_UNKNOWN' as const)
+        : ('BOOTSTRAP_HTTP_NOT_200' as const);
+    await recordLivePicksRoundEvidence({
+      eventId,
+      deadlineAt: coordinatorDeadlineAt,
+      phase: 'canary_probe',
+      cohortCount: null,
+      newEnqueueCount: 0,
+      dedupReusedCount: 0,
+      pendingCheckpointCount: null,
+      completedCount: null,
+      sourceReady: false,
+      scanComplete: false,
+    });
+    logInfo('Live picks admission is waiting for bootstrap HTTP 200', {
+      eventId,
+      bootstrapStatus: bootstrap.status,
+      bootstrapHttpStatus: bootstrap.httpStatus,
+      nextProbeAt: bootstrap.nextProbeAt,
+    });
+    return {
+      canaryCount: 0,
+      synced: 0,
+      pending: 0,
+      sourceReady: false,
+      sourceReason,
+      scanComplete: false,
+    };
+  }
+  if (
+    now.getTime() < state.nextProbeAt &&
+    !state.leagueRepairRequired &&
+    !(obligation.forceLeagueRepair === true && state.canarySucceeded)
+  ) {
     // The scheduler can resolve an obligation just before the coordinator
     // writes its next-probe fence. A fenced root whose source canary has
     // already been accepted is a successful no-op; an unfenced freshness
@@ -1090,6 +1744,7 @@ export async function runPicksProbeAndSync(
       nextProbeAt,
       canarySucceeded: true,
       failedCanaryEntryIds: [],
+      leagueRepairRequired: state.leagueRepairRequired,
     });
     const scanComplete = pendingCheckpoints.length === 0;
     const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete, false);
@@ -1141,6 +1796,8 @@ export async function runPicksProbeAndSync(
       await persistEntryEventPicksResponse(season, entryId, eventId, payload, undefined, {
         liveObservation,
         providerEventLive,
+        deferAssistantManagerPoints: liveObservation === null,
+        preserveExistingPicksBase: true,
       });
       return entryId;
     }),
@@ -1164,6 +1821,7 @@ export async function runPicksProbeAndSync(
       nextProbeAt: state.nextProbeAt,
       canarySucceeded: state.canarySucceeded,
       failedCanaryEntryIds: [...state.failedCanaryEntryIds].sort((left, right) => left - right),
+      leagueRepairRequired: state.leagueRepairRequired,
     });
     logInfo('Live picks canary is not ready; fan-out remains paused', {
       eventId,
@@ -1188,6 +1846,7 @@ export async function runPicksProbeAndSync(
       synced: 0,
       pending: pending.length,
       sourceReady: false,
+      sourceReason: 'PICKS_CANARY_NOT_READY',
       scanComplete: false,
       freshnessEvidenceRecorded,
     };
@@ -1212,6 +1871,20 @@ export async function runPicksProbeAndSync(
     season.seasonCode,
     eventId,
     uniqueNumbers([...remaining, ...successfulCanaryIds]),
+  );
+  // The canary provider pass happens before the cohort pending set exists.
+  // Complete its exact Redis-first checkpoint before draining the cohort
+  // marker; persistEntryEventPicksResponse only creates the desired pointer,
+  // so markLivePicksEntryComplete alone cannot settle a successful canary.
+  await Promise.all(
+    successfulCanaryIds.map(async (entryId) => {
+      try {
+        await checkpointEntryLiveInputV2(season, eventId, entryId);
+        await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+      } catch (error) {
+        logError('Live picks canary checkpoint failed', error, { eventId, entryId });
+      }
+    }),
   );
   let completedEntryIds: boolean[] = [];
   let newEnqueueCount = 0;
@@ -1273,6 +1946,7 @@ export async function runPicksProbeAndSync(
     nextProbeAt: state.nextProbeAt,
     canarySucceeded: state.canarySucceeded,
     failedCanaryEntryIds: [...state.failedCanaryEntryIds].sort((left, right) => left - right),
+    leagueRepairRequired: state.leagueRepairRequired,
   });
   logInfo('Live picks sync accepted after canary', {
     eventId,
@@ -1454,25 +2128,80 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
     });
     return null;
   }
-  const { season, currentEvent, fixtures, decision, expectedNextCheckAt } = tick;
+  const { season, currentEvent, decision, expectedNextCheckAt } = tick;
 
   // The deadline canary and pre-start retry lane are the only coordinator
   // probes. Once the live publication is active, complete picks are immutable
   // base input; new entries arrive through their own onboarding/repair job.
   if (decision.shouldProbePicks) {
-    await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {
+    await runDirectPicksProbeAndFinalize(season, currentEvent.id, now).catch((error) => {
       logError('Live picks probe/sync failed', error, {
         eventId: currentEvent.id,
         state: decision.state,
       });
     });
   }
-  if (decision.shouldFetchLive || decision.shouldObserveMatches) {
+  let livePointsEligible = true;
+  if (shouldRequireLivePicksCompletionGate(decision.state)) {
+    let picksEvidence = await readLivePicksDurableFreshnessEvidence(
+      season,
+      currentEvent.id,
+      undefined,
+      { includeManagerRepair: true },
+    ).catch(() => null);
+    const picksComplete = Boolean(
+      picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
+    );
+    const repairRequired = picksEvidence?.repairRequired === true;
+    // A completed picks cohort can still leave the league finalizer waiting on
+    // match checkpoints or Average. That waiting state is durable in the
+    // shared coordinator and must independently wake the direct retry lane;
+    // otherwise a complete cohort suppresses every later finalizer attempt.
+    const leagueRepairRequired =
+      !isStandaloneSchedulerEnabled() &&
+      (await isLivePicksLeagueRepairRequired(season.seasonCode, currentEvent.id));
+    const directRepairRequired = repairRequired || leagueRepairRequired;
+    const directRepairProbeDue =
+      !isStandaloneSchedulerEnabled() &&
+      !decision.shouldProbePicks &&
+      (!picksComplete || directRepairRequired) &&
+      (await isLivePicksProbeDue(season.seasonCode, currentEvent.id, now));
+    if (
+      shouldRunDirectLivePicksRepair(
+        decision,
+        picksComplete,
+        isStandaloneSchedulerEnabled(),
+        directRepairProbeDue,
+        directRepairRequired,
+      )
+    ) {
+      await runDirectPicksProbeAndFinalize(season, currentEvent.id, now).catch((error) => {
+        logError('Direct live picks repair failed', error, {
+          eventId: currentEvent.id,
+          state: decision.state,
+        });
+      });
+      picksEvidence = await readLivePicksDurableFreshnessEvidence(
+        season,
+        currentEvent.id,
+        undefined,
+        { includeManagerRepair: true },
+      ).catch(() => null);
+    }
+    // The durable picks cohort decides whether the full producer may be
+    // planned. Bootstrap HTTP-200 admission belongs to the worker so a lost
+    // Redis projection cannot strand an otherwise recoverable live event.
+    livePointsEligible =
+      picksEvidence !== null &&
+      (picksEvidence.expectedCount === 0 || picksEvidence.complete === true);
+  }
+  const shouldFetchLiveNow = decision.shouldFetchLive && livePointsEligible;
+  if (shouldFetchLiveNow || decision.shouldObserveMatches) {
     const shouldEnqueueFinalization = decision.finalizeEvent
       ? (await eventRepository.findLiveSnapshotFinalizedAt(season, currentEvent.id)) === null
       : false;
     if (!decision.finalizeEvent || shouldEnqueueFinalization) {
-      if (decision.state === 'LIVE_ACTIVE') {
+      if (decision.state === 'LIVE_ACTIVE' && shouldFetchLiveNow) {
         await enqueueLiveActiveSnapshot(
           season,
           currentEvent.id,
@@ -1483,24 +2212,17 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       } else {
         await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
           finalizeEvent: decision.finalizeEvent,
-          matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
+          matchObservationOnly: decision.shouldObserveMatches && !shouldFetchLiveNow,
           lifecycleState: normalizeMatchLifecycleState(decision.state),
           expectedNextCheckAt,
           now,
-          ...(decision.shouldObserveMatches && !decision.shouldFetchLive
+          ...(decision.shouldObserveMatches && !shouldFetchLiveNow
             ? { promoteActiveEvent: decision.state !== 'PRE_DEADLINE' }
             : {}),
+          ...(shouldFetchLiveNow ? { bootstrapGateRequired: true } : {}),
+          ...(shouldFetchLiveNow ? { picksGateRequired: true } : {}),
         });
       }
-    }
-    if (shouldRefreshOfficialH2H(decision, isMatchDayTime(currentEvent, fixtures, now))) {
-      await enqueueTournamentOfficialH2H(season, currentEvent.id, 'cron', {
-        jobId: `official-h2h-e${currentEvent.id}-${now.toISOString().slice(0, 16).replace(/\D/g, '')}`,
-      }).catch((error) => {
-        logError('Failed to enqueue live official H2H sync', error, {
-          eventId: currentEvent.id,
-        });
-      });
     }
   }
   await observeUpcomingMatchEventDirect(season, currentEvent.id, now).catch((error) => {

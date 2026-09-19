@@ -28,6 +28,22 @@ llm:data:fpl:core:<season>:<revision>:<item>
 Core items are exactly `events`, `teams`, `players`, `phases`, `fixtures`, and
 `currentEventId`.
 
+Average Team live-publication coordination uses the core namespace but is not a
+business payload or an alternate score source:
+
+```text
+llm:data:v2:fpl:core:<season>:live-average-refresh
+llm:data:v2:fpl:core:<season>:live-average-final:<event>
+```
+
+The refresh key is a single-flight lock with a 120-second TTL and is deleted by
+the owner after the refresh attempt; expiry is the bounded recovery path. The
+final marker is a seven-day marker for one `(season, event, dataCheckedAt,
+core-revision, core-publication)` tuple. It is rewritten only after a complete
+canonical core refresh and expires after seven days. Both keys are Data-owned
+coordination state on `CACHE_REDIS_*`; PostgreSQL `fpl.events.average_entry_score`
+and the complete core publication remain authoritative.
+
 Live Points V2 keys:
 
 ```text

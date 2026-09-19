@@ -26,6 +26,7 @@ import {
   resolveOfficialH2HSyncOptionsFromEventState,
   type OfficialH2HSyncOptions,
 } from './tournament-official-h2h.service';
+import { ensureLiveAverageReadyForPublication } from './live-average-refresh.service';
 
 const officialH2HRecoveryTargets = new WeakMap<IncompleteDataSyncError, number[]>();
 export type OfficialH2HFullReconcileTarget = Readonly<{
@@ -69,6 +70,73 @@ async function getOfficialH2HSyncOptions(
     currentEvent,
     latestFinalizedEvent,
   );
+}
+
+function officialH2HAverageLifecycleState(
+  eventId: number,
+  options: Readonly<Pick<OfficialH2HSyncOptions, 'provisionalEventId' | 'finalizedThroughEventId'>>,
+): 'FINALIZED' | 'LIVE_ACTIVE' | null {
+  if (
+    options.provisionalEventId === null &&
+    options.finalizedThroughEventId !== null &&
+    options.finalizedThroughEventId !== undefined &&
+    options.finalizedThroughEventId >= eventId
+  ) {
+    return 'FINALIZED';
+  }
+  if (options.provisionalEventId === eventId) return 'LIVE_ACTIVE';
+  return null;
+}
+
+async function ensureOfficialH2HAverageReady(
+  season: FplSeasonRef,
+  eventId: number,
+  options: OfficialH2HSyncOptions,
+  requiresAverage: boolean,
+): Promise<void> {
+  const lifecycleState = officialH2HAverageLifecycleState(eventId, options);
+  if (lifecycleState === null || !requiresAverage) return;
+  const averageReady = await ensureLiveAverageReadyForPublication(season, eventId, lifecycleState);
+  if (!averageReady.ready) {
+    throw new IncompleteDataSyncError(
+      'Official H2H waits for the canonical Average Team publication',
+      1,
+      0,
+      0,
+      1,
+      'LIVE_AVERAGE_NOT_READY',
+    );
+  }
+}
+
+async function hasOfficialH2HAverageMatch(
+  season: FplSeasonRef,
+  eventId: number,
+  tournamentIds: readonly number[],
+): Promise<boolean> {
+  const uniqueTournamentIds = [...new Set(tournamentIds)].filter(
+    (tournamentId) => Number.isSafeInteger(tournamentId) && tournamentId > 0,
+  );
+  const results = await mapWithConcurrency(uniqueTournamentIds, 8, async (tournamentId) => {
+    const rows = await tournamentBattleGroupResultsRepository.findByTournamentAndEvent(
+      season,
+      tournamentId,
+      eventId,
+    );
+    return {
+      hasSchedule: rows.length > 0,
+      hasAverage: rows.some(
+        (row) =>
+          row.officialMatchId !== null &&
+          row.isBye !== true &&
+          (row.homeIsAverage === true || row.awayIsAverage === true),
+      ),
+    };
+  });
+  // No row for a selected official tournament is incomplete schedule evidence:
+  // the first provider sync may only materialize the Average side after this
+  // probe. Fail closed and refresh core before allowing final H2H persistence.
+  return results.some((result) => result.hasAverage || !result.hasSchedule);
 }
 
 export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {
@@ -570,8 +638,17 @@ export async function syncOfficialH2HTournaments(
       (tournament) =>
         syncOptions.tournamentId === undefined || tournament.id === syncOptions.tournamentId,
     );
-  const scoreOptions =
-    tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
+  let scoreOptions = tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
+  const requiresAverage = await hasOfficialH2HAverageMatch(
+    season,
+    eventId,
+    tournaments.map((tournament) => tournament.id),
+  );
+  await ensureOfficialH2HAverageReady(season, eventId, scoreOptions, requiresAverage);
+  // The canonical core refresh may reopen or finalize the event while this
+  // call is in flight. Re-read lifecycle options after the refresh fence so
+  // H2H scores are not persisted with a stale finalizedThroughEventId.
+  scoreOptions = tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
@@ -665,7 +742,7 @@ export async function syncTournamentBattleRaceResults(
     return { eventId, updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
 
-  const officialH2HOptions = tournaments.some(isOfficialH2HTournament)
+  let officialH2HOptions = tournaments.some(isOfficialH2HTournament)
     ? await getOfficialH2HSyncOptions(season, eventId)
     : {};
 
@@ -673,23 +750,40 @@ export async function syncTournamentBattleRaceResults(
   let updatedResults = 0;
   let skipped = 0;
   const failedTournamentIds: number[] = [];
+  let officialAveragePromise: Promise<void> | null = null;
+  const officialTournamentIds = tournaments
+    .filter(isOfficialH2HTournament)
+    .map((tournament) => tournament.id);
+  const requiresAverage = await hasOfficialH2HAverageMatch(season, eventId, officialTournamentIds);
+  const ensureOfficialAverage = () => {
+    officialAveragePromise ??= (async () => {
+      await ensureOfficialH2HAverageReady(season, eventId, officialH2HOptions, requiresAverage);
+      // The canonical core refresh may reopen or finalize the event while the
+      // average gate is running. Re-read options before the H2H strategy uses
+      // them so a stale finalizedThroughEventId cannot leak into persistence.
+      officialH2HOptions = await getOfficialH2HSyncOptions(season, eventId);
+    })();
+    return officialAveragePromise;
+  };
   const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
     try {
-      return isOfficialH2HTournament(tournament)
-        ? await OfficialH2HStrategy.sync(season, tournament, eventId, officialH2HOptions)
-        : await withMutationScopes(
-            {
-              queueName: 'tournament-sync',
-              jobName: 'tournament-battle-race',
-              tournamentId: tournament.id,
-              scopes: resolveMutationScopes({
-                queueName: 'tournament-sync',
-                jobName: 'tournament-battle-race',
-                eventId,
-              }),
-            },
-            () => LocalBattleStrategy.sync(season, tournament, eventId),
-          );
+      if (isOfficialH2HTournament(tournament)) {
+        await ensureOfficialAverage();
+        return await OfficialH2HStrategy.sync(season, tournament, eventId, officialH2HOptions);
+      }
+      return await withMutationScopes(
+        {
+          queueName: 'tournament-sync',
+          jobName: 'tournament-battle-race',
+          tournamentId: tournament.id,
+          scopes: resolveMutationScopes({
+            queueName: 'tournament-sync',
+            jobName: 'tournament-battle-race',
+            eventId,
+          }),
+        },
+        () => LocalBattleStrategy.sync(season, tournament, eventId),
+      );
     } catch (error) {
       logError('Failed to sync battle race results', error, {
         tournamentId: tournament.id,

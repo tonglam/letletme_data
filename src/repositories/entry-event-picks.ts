@@ -76,6 +76,18 @@ export type EntryEventPickHeadMetadata = {
   readonly state: string;
 };
 
+/**
+ * The small durable identity projection used to reconcile Redis input
+ * pointers without loading every retained JSON input payload.
+ */
+export type EntryEventPicksPublicationHeadMetadata = Readonly<{
+  readonly entryId: number;
+  readonly publicationId: string;
+  readonly generation: number;
+  readonly rowCount: number;
+  readonly state: string;
+}>;
+
 function normalizedPickContent(picks: RawFPLEntryEventPicksResponse) {
   return {
     picks: picks.picks
@@ -720,6 +732,50 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         throw new DatabaseError(
           'Failed to retrieve entry event picks head',
           'ENTRY_EVENT_PICKS_HEAD_FIND_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    findPublicationHeadsByEventAndEntryIds: async (
+      season: FplSeasonRef,
+      eventId: number,
+      entryIds: readonly number[],
+    ): Promise<EntryEventPicksPublicationHeadMetadata[]> => {
+      if (entryIds.length === 0) return [];
+      try {
+        const db = await getDbInstance();
+        const rows: EntryEventPicksPublicationHeadMetadata[] = [];
+        for (const chunk of chunkArray(Array.from(new Set(entryIds)), 1000)) {
+          rows.push(
+            ...(await db
+              .select({
+                entryId: entryEventPickHeadsInCompetition.entryId,
+                publicationId: entryEventPickHeadsInCompetition.publicationId,
+                generation: entryEventPickHeadsInCompetition.generation,
+                rowCount: entryEventPickHeadsInCompetition.rowCount,
+                state: entryEventPickHeadsInCompetition.state,
+              })
+              .from(entryEventPickHeadsInCompetition)
+              .where(
+                and(
+                  eq(entryEventPickHeadsInCompetition.seasonId, season.seasonId),
+                  eq(entryEventPickHeadsInCompetition.eventId, eventId),
+                  inArray(entryEventPickHeadsInCompetition.entryId, chunk),
+                ),
+              )),
+          );
+        }
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve durable live input publication heads', error, {
+          season: season.seasonCode,
+          eventId,
+          entries: entryIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve durable live input publication heads',
+          'ENTRY_EVENT_PICKS_PUBLICATION_HEAD_FIND_ERROR',
           error instanceof Error ? error : undefined,
         );
       }

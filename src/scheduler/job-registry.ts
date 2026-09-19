@@ -61,13 +61,13 @@ import { fixtureRepository } from '../repositories/fixtures';
 import { loadDataPublicationDeliveryManifest } from '../repositories/data-publication-outbox';
 import { getSchedulerObligationByIdentity } from '../repositories/scheduler-obligations';
 import { syncOperationsRepository } from '../repositories/sync-operations';
-import { isMatchDayTime } from '../utils/conditions';
 import {
   decideLiveLifecycle,
   isLivePicksProbeDue,
   readLifecycleQuietState,
+  readLivePicksDurableFreshnessEvidence,
   resolveLiveLifecycleDelay,
-  shouldRefreshOfficialH2H,
+  shouldRequireLivePicksCompletionGate,
 } from '../services/live-lifecycle-orchestrator';
 import { normalizeMatchLifecycleState } from '../services/live-match-v3';
 import {
@@ -130,6 +130,8 @@ export type SchedulerContext = Readonly<{
   events: readonly {
     id: number;
     deadlineTime: Date | null;
+    /** Canonical bootstrap Average Team fact consumed by official H2H. */
+    averageEntryScore?: number | null;
     finished?: boolean;
     dataChecked?: boolean;
     dataCheckedAt?: Date | null;
@@ -425,6 +427,8 @@ function eventDefinition(input: {
   recoveryCompletionMode?: ScheduledJobDefinition['recoveryCompletionMode'];
   /** Checkpoint jobs must reconcile every due event, not just the current one. */
   allDueEvents?: boolean;
+  /** Post-deadline provider work waits for the status-only bootstrap gate. */
+  bootstrapGated?: boolean;
   enqueue: ScheduledJobDefinition['enqueue'];
 }): ScheduledJobDefinition {
   return {
@@ -436,20 +440,27 @@ function eventDefinition(input: {
         : context.currentEventId && context.currentEventDeadline
           ? [{ id: context.currentEventId, deadlineTime: context.currentEventDeadline }]
           : [];
-      return candidates.flatMap((event) => {
-        if (!event.deadlineTime) return [];
-        const dueAt = new Date(event.deadlineTime.getTime() + 30 * 60_000);
-        if (context.now < dueAt) return [];
-        return [
-          {
-            scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-            periodKey: `event-${event.id}`,
-            dueAt,
-            eventId: event.id,
-            source: 'catchup' as const,
-          },
-        ];
-      });
+      const plans = await Promise.all(
+        candidates.map(async (event) => {
+          if (!event.deadlineTime) return [];
+          const dueAt = new Date(event.deadlineTime.getTime() + 30 * 60_000);
+          if (context.now < dueAt) return [];
+          // Reserve the durable checkpoint even when the Redis admission
+          // projection is absent or expired. The worker owns the status-only
+          // bootstrap probe and defers the obligation without losing this
+          // historical catch-up target.
+          return [
+            {
+              scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+              periodKey: `event-${event.id}`,
+              dueAt,
+              eventId: event.id,
+              source: 'catchup' as const,
+            },
+          ];
+        }),
+      );
+      return plans.flat();
     },
   };
 }
@@ -1198,6 +1209,32 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       }
       if (!selected) return [];
       const { event, decision } = selected;
+      const picksCompletionGateRequired = shouldRequireLivePicksCompletionGate(decision.state);
+      let livePointsEligible = true;
+      if (picksCompletionGateRequired) {
+        const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+          context.season,
+          event.id,
+        ).catch(() => null);
+        const picksComplete = Boolean(
+          picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
+        );
+        // Redis bootstrap state is an admission optimization, not scheduler
+        // authority. Keep the durable plan alive when that projection is
+        // missing; the worker performs the status-only HTTP-200 gate and
+        // defers the obligation if the provider is not ready.
+        livePointsEligible = picksComplete;
+      }
+      const matchObservationOnly =
+        decision.shouldObserveMatches && (!decision.shouldFetchLive || !livePointsEligible);
+      const bootstrapGateRequired =
+        !matchObservationOnly &&
+        (decision.state === 'PICKS_PROBE' ||
+          decision.state === 'PICKS_SYNC' ||
+          decision.state === 'LIVE_ACTIVE' ||
+          decision.state === 'BETWEEN_FIXTURES' ||
+          decision.state === 'DAY_SETTLING' ||
+          decision.state === 'GW_REVIEW');
       const quiet = await readLifecycleQuietState(context.season.seasonCode, event.id);
       // The permanent final checkpoint owns the finalized write. This lane
       // keeps the mutable official heartbeat alive for every unsettled state.
@@ -1222,7 +1259,9 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
       return [
         {
           scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-${event.id}-${decision.state}-${pollIntervalMs}-${bucket}`,
+          periodKey: `live-${event.id}-${decision.state}-${pollIntervalMs}-${bucket}-${
+            matchObservationOnly ? 'match-only' : 'live'
+          }`,
           dueAt: new Date(bucket * pollIntervalMs),
           eventId: event.id,
           source: 'reconcile',
@@ -1235,11 +1274,10 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             // Match V3 can warm the fixture desk before Live Points is
             // eligible. Preserve that lane on the durable obligation so the
             // reconciler cannot accidentally run the all-in-one producer.
-            matchObservationOnly: decision.shouldObserveMatches && !decision.shouldFetchLive,
-            promoteActiveEvent:
-              decision.shouldObserveMatches &&
-              !decision.shouldFetchLive &&
-              decision.state !== 'PRE_DEADLINE',
+            matchObservationOnly,
+            promoteActiveEvent: matchObservationOnly && decision.state !== 'PRE_DEADLINE',
+            bootstrapGateRequired,
+            picksGateRequired: picksCompletionGateRequired,
           },
         },
       ];
@@ -1275,6 +1313,8 @@ function liveSnapshotDefinition(): ScheduledJobDefinition {
             : null,
         matchObservationOnly: plan.evidence?.matchObservationOnly === true,
         ...(plan.evidence?.promoteActiveEvent === true ? { promoteActiveEvent: true } : {}),
+        bootstrapGateRequired: plan.evidence?.bootstrapGateRequired === true,
+        picksGateRequired: plan.evidence?.picksGateRequired === true,
       });
       return { bullJobId: job?.id, runId: job?.data?.runId };
     },
@@ -1295,27 +1335,110 @@ function livePicksDefinition(): ScheduledJobDefinition {
     recoveryCompletionMode: 'live-picks-finalizer',
     manualTrigger: false,
     resolve: async (context) => {
-      if (!context.currentEventId) return [];
-      const event = await loadSchedulerEvent(context, context.currentEventId);
-      if (!event) return [];
-      const fixtures = await loadSchedulerFixtures(context, event.id);
-      const decision = decideLiveLifecycle(event, fixtures, context.now);
-      if (!decision.shouldProbePicks && !decision.shouldSyncPicks) return [];
-      if (!(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))) return [];
-      return [
-        {
-          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-picks-${event.id}-${Math.floor(context.now.getTime() / 30_000)}`,
-          dueAt: context.now,
-          eventId: event.id,
-          source: 'reconcile' as const,
-          evidence: {
-            lifecycleState: decision.state,
-            probe: decision.shouldProbePicks ? 'deadline-or-pre-start' : 'missing-input-repair',
-            deadlineAt: event.deadlineTime ?? null,
-          },
-        },
-      ];
+      const plans: SchedulerObligationPlan[] = [];
+      const currentEvent = context.currentEventId
+        ? await loadSchedulerEvent(context, context.currentEventId)
+        : null;
+
+      if (currentEvent) {
+        const fixtures = await loadSchedulerFixtures(context, currentEvent.id);
+        const decision = decideLiveLifecycle(currentEvent, fixtures, context.now);
+        let needsPicksRefresh = decision.shouldProbePicks || decision.shouldSyncPicks;
+        if (
+          !needsPicksRefresh &&
+          (decision.state === 'LIVE_ACTIVE' ||
+            decision.state === 'BETWEEN_FIXTURES' ||
+            decision.state === 'DAY_SETTLING' ||
+            decision.state === 'GW_REVIEW' ||
+            decision.state === 'FINALIZED')
+        ) {
+          const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+            context.season,
+            currentEvent.id,
+            undefined,
+            { includeManagerRepair: true },
+          ).catch(() => null);
+          // A failed proof read is fail-closed: the retry root can re-establish
+          // the source gate and record the durable coverage evidence. An empty
+          // eligible cohort is handled as a terminal N/A result by the root and
+          // does not create a perpetual repair loop.
+          needsPicksRefresh =
+            picksEvidence === null ||
+            (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true) ||
+            picksEvidence.repairRequired === true;
+        }
+        if (
+          needsPicksRefresh &&
+          (await isLivePicksProbeDue(context.season.seasonCode, currentEvent.id, context.now))
+        ) {
+          plans.push({
+            scopeKey: `${context.season.seasonCode}:event:${currentEvent.id}`,
+            periodKey: `live-picks-${currentEvent.id}-${Math.floor(context.now.getTime() / 30_000)}`,
+            dueAt: context.now,
+            eventId: currentEvent.id,
+            source: 'reconcile',
+            evidence: {
+              lifecycleState: decision.state,
+              probe: decision.shouldProbePicks ? 'deadline-or-pre-start' : 'missing-input-repair',
+              deadlineAt: currentEvent.deadlineTime ?? null,
+            },
+          });
+        }
+      }
+
+      // The current event pointer advances before every historical finalization
+      // obligation necessarily reaches a durable repair checkpoint. Keep
+      // finalized targets discoverable independently of that pointer so a
+      // manager-fact/input repair cannot silently disappear after GW rollover.
+      const finalizationTargets = new Set(
+        await findLivePublicationV2FinalizationTargets(context.season),
+      );
+      const historicalFinalized = context.events.filter(
+        (event) =>
+          event.id !== context.currentEventId &&
+          finalizationTargets.has(event.id) &&
+          event.finished === true &&
+          event.dataChecked === true &&
+          event.dataCheckedAt instanceof Date &&
+          Number.isFinite(event.dataCheckedAt.getTime()),
+      );
+      const historicalRepairPlans: Array<SchedulerObligationPlan | null> = await Promise.all(
+        historicalFinalized.map(async (event) => {
+          const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+            context.season,
+            event.id,
+            undefined,
+            { includeManagerRepair: true },
+          ).catch(() => null);
+          const needsRepair =
+            picksEvidence === null ||
+            (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true) ||
+            picksEvidence.repairRequired === true;
+          if (
+            !needsRepair ||
+            !(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))
+          ) {
+            return null;
+          }
+          return {
+            scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+            periodKey: `live-picks-finalized-repair-${event.id}-${Math.floor(context.now.getTime() / 30_000)}`,
+            dueAt: context.now,
+            eventId: event.id,
+            source: 'reconcile' as const,
+            evidence: {
+              lifecycleState: 'FINALIZED' as const,
+              probe: 'finalized-event-repair',
+              deadlineAt: event.deadlineTime ?? null,
+              dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
+            },
+          } satisfies SchedulerObligationPlan;
+        }),
+      );
+      plans.push(
+        ...historicalRepairPlans.filter((plan): plan is SchedulerObligationPlan => plan !== null),
+      );
+      return plans;
     },
     enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
@@ -1346,7 +1469,7 @@ export function officialH2HDefinition(
 ): ScheduledJobDefinition {
   return {
     name: 'tournament-official-h2h-live',
-    cadence: 'one-minute official H2H match-window sync',
+    cadence: 'explicit final/repair only; no live match-window polling',
     timezone: 'UTC',
     catchUpPolicy: 'latest-authoritative',
     criticality: 'critical',
@@ -1356,32 +1479,40 @@ export function officialH2HDefinition(
     successPredicate: 'official H2H match snapshot and standings publish atomically',
     manualTrigger: false,
     resolve: async (context) => {
-      if (!context.currentEventId) return [];
-      const event = dependencies
-        ? await dependencies.findEvent(context.season, context.currentEventId)
-        : await loadSchedulerEvent(context, context.currentEventId);
-      if (!event) return [];
-      const fixtures = dependencies
-        ? await dependencies.findFixtures(context.season, event.id)
-        : await loadSchedulerFixtures(context, event.id);
-      const matchDayTime = isMatchDayTime(event, fixtures, context.now);
-      const decision = decideLiveLifecycle(event, fixtures, context.now, { matchDayTime });
-      if (!shouldRefreshOfficialH2H(decision, matchDayTime)) return [];
-      if (await (dependencies?.hasPending ?? hasPendingOfficialH2HJob)(context.season, event.id)) {
-        return [];
-      }
-      const minuteStart = new Date(Math.floor(context.now.getTime() / 60_000) * 60_000);
-      const minuteKey = minuteStart.toISOString().slice(0, 16).replace(/\D/g, '');
-      return [
-        {
-          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `official-h2h-${event.id}-${minuteKey}`,
-          dueAt: minuteStart,
-          eventId: event.id,
-          source: 'reconcile',
-          evidence: { lifecycleState: decision.state },
-        },
-      ];
+      // The official H2H mirror is not a live match-window feed. Its scheduler
+      // authority is the explicit event-finalization boundary: once FPL marks
+      // an event finished and data_checked, reserve one durable obligation so
+      // the final H2H publication receives its own freshness evidence. Manual
+      // repair/governance jobs remain the second explicit entry point.
+      return context.events.flatMap((event) => {
+        // `finished` and `data_checked` are provisional until FPL supplies the
+        // ordering timestamp. Do not create a one-shot final obligation from
+        // updated_at/deadline: that would bless a provider snapshot which
+        // predates the authoritative finalization boundary.
+        if (event.finished !== true || event.dataChecked !== true || event.dataCheckedAt == null) {
+          return [];
+        }
+        const finalizationAt = event.dataCheckedAt;
+        const averageRevision =
+          typeof event.averageEntryScore === 'number' && Number.isFinite(event.averageEntryScore)
+            ? String(event.averageEntryScore)
+            : 'unknown';
+        return [
+          {
+            scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+            periodKey: `official-h2h-final-${event.id}-${finalizationAt.toISOString()}-average-${averageRevision}`,
+            dueAt: finalizationAt,
+            eventId: event.id,
+            source: 'reconcile' as const,
+            evidence: {
+              lifecycleState: 'FINALIZED',
+              trigger: 'event-data-checked',
+              freshAfter: finalizationAt.toISOString(),
+              averageEntryScore: event.averageEntryScore ?? null,
+            },
+          },
+        ];
+      });
     },
     enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;
@@ -1395,6 +1526,9 @@ export function officialH2HDefinition(
           obligationId,
           obligationGeneration: generation,
           freshnessWindowId,
+          ...(typeof plan.evidence?.freshAfter === 'string'
+            ? { freshAfter: plan.evidence.freshAfter }
+            : {}),
         },
       );
       if (!job) throw new Error('Official H2H job became pending before enqueue');
@@ -1525,6 +1659,9 @@ function liveFinalizationDefinition(): ScheduledJobDefinition {
         jobId: `scheduler-${obligationId}-g${generation}`,
         finalizeEvent: true,
         reuseExisting: true,
+        lifecycleState: 'FINALIZED',
+        bootstrapGateRequired: true,
+        picksGateRequired: true,
         obligationId,
         obligationGeneration: generation,
         freshnessWindowId,
@@ -1943,11 +2080,13 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       successPredicate: 'entry picks checkpoint covers known entries for event',
       recoveryCompletionMode: 'entry-scan-finalizer',
       allDueEvents: true,
+      bootstrapGated: true,
       enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Entry picks obligation has no event checkpoint');
         const job = await enqueueEntryPicksSyncJob(context.season, 'catchup', {
           eventId,
+          bootstrapGateRequired: true,
           jobId: `scheduler-${obligationId}-g${generation}`,
           removeOnSettle: false,
           obligationId,
@@ -1966,12 +2105,14 @@ export function createSchedulerRegistry(): readonly ScheduledJobDefinition[] {
       successPredicate: 'entry transfers checkpoint covers known entries for event',
       recoveryCompletionMode: 'entry-scan-finalizer',
       allDueEvents: true,
+      bootstrapGated: true,
       enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
         const eventId = plan.eventId ?? context.currentEventId;
         if (!eventId) throw new Error('Entry transfers obligation has no event checkpoint');
         const event = context.events.find((candidate) => candidate.id === eventId);
         const job = await enqueueEntryTransfersSyncJob(context.season, 'catchup', {
           eventId,
+          bootstrapGateRequired: true,
           // A transfer scan can run before FPL marks the event final. When the
           // finalization fence is already present, carry it into the existing
           // rate-limited job so a pre-fence checkpoint cannot satisfy the
@@ -2186,6 +2327,7 @@ export async function resolveSchedulerContext(
     .map((event) => ({
       id: event.id,
       deadlineTime: event.deadlineTime ? new Date(event.deadlineTime) : null,
+      averageEntryScore: event.averageEntryScore,
       finished: event.finished,
       dataChecked: event.dataChecked,
       dataCheckedAt: event.dataCheckedAt,

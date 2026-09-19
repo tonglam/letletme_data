@@ -15,6 +15,73 @@ afterEach(() => {
 });
 
 describe('FPL bootstrap edge-cache control', () => {
+  test('bootstrap readiness probe uses only HTTP 200 and does not parse payload fields', async () => {
+    globalThis.fetch = mock(
+      async () => new Response('provider body is opaque', { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const result = await fplClient.probeBootstrap({ maxRetries: 0 });
+
+    expect(result.status).toBe(200);
+    expect(result.checkedAt).toBeInstanceOf(Date);
+  });
+
+  test('bootstrap readiness probe returns non-200 without retrying', async () => {
+    const fetchMock = mock(async () => new Response(null, { status: 503 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fplClient.probeBootstrap({ maxRetries: 0 });
+
+    expect(result.status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('bootstrap readiness probe cancels the response body after reading headers', async () => {
+    let cancelled = false;
+    globalThis.fetch = mock(
+      async () =>
+        ({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          body: {
+            cancel: async () => {
+              cancelled = true;
+            },
+          },
+        }) as unknown as Response,
+    ) as unknown as typeof fetch;
+
+    await expect(fplClient.probeBootstrap({ maxRetries: 0 })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  test('bootstrap readiness probe cancels a non-retryable response body too', async () => {
+    let cancelled = false;
+    globalThis.fetch = mock(
+      async () =>
+        ({
+          ok: false,
+          status: 404,
+          statusText: 'Not Found',
+          headers: new Headers(),
+          body: {
+            cancel: async () => {
+              cancelled = true;
+            },
+          },
+        }) as unknown as Response,
+    ) as unknown as typeof fetch;
+
+    await expect(fplClient.probeBootstrap({ maxRetries: 0 })).resolves.toMatchObject({
+      status: 404,
+    });
+    expect(cancelled).toBe(true);
+  });
+
   test('adds an explicit caller cache bucket without changing the endpoint path', async () => {
     const payload = buildCoreSnapshotFixture({ playerCount: 1 }).bootstrap;
     let requestedUrl = '';

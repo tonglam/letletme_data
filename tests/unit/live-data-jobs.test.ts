@@ -15,6 +15,7 @@ const waitingJobs: Array<{
     finalizeEvent?: boolean;
     matchObservationOnly?: boolean;
     promoteActiveEvent?: boolean;
+    picksGateRequired?: boolean;
     checkpointKind?: 'desk' | 'detail';
     source?: string;
     obligationId?: string;
@@ -206,6 +207,21 @@ describe('Live Points V2 snapshot enqueue', () => {
     expect(job?.id).toBe('live-snapshot-2627-e12-20260809123430-v2');
     expect(addCalls[0]?.data).not.toHaveProperty('persistEventLives');
     expect(addCalls[0]?.data.expectedNextCheckAt).toBe('2026-08-09T12:35:26.000Z');
+  });
+
+  test('carries the post-match picks gate through the worker payload', async () => {
+    await enqueueLiveSnapshot(TEST_SEASON, 12, 'cascade', {
+      lifecycleState: 'GW_REVIEW',
+      bootstrapGateRequired: true,
+      picksGateRequired: true,
+      jobId: 'post-match-picks-gate',
+    });
+
+    expect(addCalls[0]?.data).toMatchObject({
+      lifecycleState: 'GW_REVIEW',
+      bootstrapGateRequired: true,
+      picksGateRequired: true,
+    });
   });
 
   test('uses one deterministic daily final-retention bucket and preserves scheduler evidence', async () => {

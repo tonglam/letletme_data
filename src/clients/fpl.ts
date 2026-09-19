@@ -630,6 +630,10 @@ export type FPLBootstrapRequestOptions = Readonly<{
   /** Non-blocking observer for the completed real HTTP attempts. */
   onAttempt?: (result: FPLRequestAttemptResult) => void;
 }>;
+export type FPLBootstrapProbeResult = Readonly<{
+  status: number;
+  checkedAt: Date;
+}>;
 export type FPLBootstrapArtifactResponse = Readonly<{
   bytes: Uint8Array;
   payload: FPLBootstrapResponse;
@@ -703,6 +707,8 @@ export type FPLRequestOptions = Readonly<{
   maxRetries?: number;
   /** Optional admission class override for the endpoint. */
   priority?: FplRequestPriority;
+  /** Return after the HTTP status is received without buffering the body. */
+  responseMode?: 'buffer' | 'status';
   beforeAttempt?: (attempt: number, context: FPLRequestAttemptContext) => void | Promise<void>;
   /** Non-blocking observer for the completed real HTTP attempts. */
   onAttempt?: (result: FPLRequestAttemptResult) => void;
@@ -718,7 +724,8 @@ class FPLClient {
    * and a descriptive User-Agent.
    *
    * Body handling inside the retry loop:
-   * - 2xx: buffer fully so hung/truncated bodies after a 200 header are retried
+   * - 2xx: buffer fully so hung/truncated bodies after a 200 header are retried,
+   *   unless the caller explicitly requests status-only mode
    * - 429/5xx: retain status first, then buffer (status preserved if body stalls)
    * - other non-ok (e.g. 404): return immediately without buffering so hung 404
    *   bodies do not flip cup lookups to UNKNOWN_ERROR
@@ -757,6 +764,15 @@ class FPLClient {
           statusText: response.statusText,
           headers: response.headers,
         });
+
+      const discardResponseBody = (response: Response): void => {
+        try {
+          void response.body?.cancel().catch(() => undefined);
+        } catch {
+          // A status-only probe must not become a failed request because the
+          // runtime cannot cancel an already-detached response body.
+        }
+      };
 
       const bufferResponse = async (response: Response): Promise<Response> => {
         const body = await response.arrayBuffer();
@@ -838,7 +854,32 @@ class FPLClient {
             });
             attemptStatus = response.status;
 
-            if (isRetryableStatus(response.status)) {
+            if (options.responseMode === 'status') {
+              requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+              attemptRecorded = true;
+              const statusResponse = statusOnlyResponse(response);
+              discardResponseBody(response);
+
+              if (!isRetryableStatus(response.status)) {
+                lastRetryableResponse = null;
+                pendingBackoffMs = null;
+                return statusResponse;
+              }
+
+              // Retain status + Retry-After before consuming the body so a hung
+              // 429/5xx body still preserves status and honors the rate-limit delay.
+              lastRetryableResponse = statusResponse;
+              const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+              pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
+
+              if (attempt === maxRetries) {
+                pendingBackoffMs = null;
+                return statusResponse;
+              }
+
+              retryDelayMs = Math.min(pendingBackoffMs, remainingMs());
+              pendingBackoffMs = null;
+            } else if (isRetryableStatus(response.status)) {
               // Retain status + Retry-After before consuming the body so a hung
               // 429/5xx body still preserves status and honors the rate-limit delay.
               requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
@@ -1005,6 +1046,34 @@ class FPLClient {
         error instanceof Error ? error : new Error(String(error)),
       );
     }
+  }
+
+  /**
+   * Check whether the bootstrap endpoint is serving an HTTP 200 response.
+   *
+   * This is intentionally a status-only boundary for the post-deadline
+   * admission gate. It must not parse `is_current` or any other bootstrap
+   * field: the scheduler only needs to know whether the source is available
+   * before it starts the one-shot picks/transfers fan-out.
+   */
+  async probeBootstrap(options: FPLBootstrapRequestOptions = {}): Promise<FPLBootstrapProbeResult> {
+    const requestUrl = new URL(`${this.baseUrl}/bootstrap-static/`);
+    const edgeCacheKey = options.edgeCacheKey?.trim();
+    if (edgeCacheKey) requestUrl.searchParams.set('letletme_cache_bucket', edgeCacheKey);
+
+    const response = await this.request(requestUrl.toString(), {
+      priority: options.priority ?? 'live',
+      responseMode: 'status',
+      deadlineMs: options.deadlineMs,
+      admissionTimeoutMs: options.admissionTimeoutMs,
+      attemptTimeoutMs: options.attemptTimeoutMs,
+      overallDeadlineMs: options.overallDeadlineMs,
+      // A cadence-driven gate must not turn a single 503 into an internal
+      // retry storm. The next scheduler/coordinator pass owns the retry.
+      maxRetries: options.maxRetries ?? 0,
+      onAttempt: options.onAttempt,
+    });
+    return { status: response.status, checkedAt: new Date() };
   }
 
   /**

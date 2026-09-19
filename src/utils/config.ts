@@ -186,8 +186,11 @@ const EnvSchema = z.object({
   PRE_DEADLINE_SLOW_POLL_MS: boundedIntegerEnv(15 * 60_000, 1_000, 24 * 60 * 60_000),
   PRE_DEADLINE_WARM_POLL_MS: boundedIntegerEnv(2 * 60_000, 1_000, 24 * 60 * 60_000),
   PRE_DEADLINE_NEAR_POLL_MS: boundedIntegerEnv(30_000, 1_000, 24 * 60 * 60_000),
-  GW_REVIEW_POLL_MS: boundedIntegerEnv(10 * 60_000, 1_000, 24 * 60 * 60_000),
-  GW_REVIEW_FINALIZATION_POLL_MS: boundedIntegerEnv(2 * 60_000, 1_000, 24 * 60 * 60_000),
+  // Post-match correction polling is deliberately hourly-scale. High
+  // frequency belongs only to LIVE_ACTIVE; finalization has its own durable
+  // checkpoint and does not require a minute-level hot loop.
+  GW_REVIEW_POLL_MS: boundedIntegerEnv(60 * 60_000, 1_000, 24 * 60 * 60_000),
+  GW_REVIEW_FINALIZATION_POLL_MS: boundedIntegerEnv(15 * 60_000, 1_000, 24 * 60 * 60_000),
   FINALIZED_POLL_MS: boundedIntegerEnv(5 * 60_000, 1_000, 24 * 60 * 60_000),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),

@@ -9,6 +9,8 @@ ownership, and cleanup guardrails are in [redis-contract.md](redis-contract.md).
 | --- | --- | ---: |
 | Core active manifest | `llm:data:fpl:core:{season}:active` | no expiry |
 | Core active items | `llm:data:fpl:core:{season}:{revision}:*` | no expiry |
+| Live Average Team refresh lock | `llm:data:v2:fpl:core:{season}:live-average-refresh` | 120 seconds; owner deletes on exit |
+| Live Average Team final marker | `llm:data:v2:fpl:core:{season}:live-average-final:{event}` | 7 days; revision-bound finalization marker |
 | Live V2 current manifest | `llm:data:v2:fpl:live:{season}:{event}:active` | event validity + rolling 14-day final lease |
 | Live V2 previous manifest | `llm:data:v2:fpl:live:{season}:{event}:previous` | 24 hours |
 | Live V2 immutable items | `llm:data:v2:fpl:live:{season}:{event}:{generation}:*` | active lifetime; 24h after replacement |

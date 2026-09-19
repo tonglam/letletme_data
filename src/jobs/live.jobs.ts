@@ -47,6 +47,8 @@ export async function runLiveSnapshot(now = new Date()): Promise<unknown | null>
     now,
     lifecycleState: 'LIVE_ACTIVE',
     expectedNextCheckAt: new Date(now.getTime() + LIVE_POLL_MS),
+    bootstrapGateRequired: true,
+    picksGateRequired: true,
   });
   if (job) {
     logInfo('Live snapshot job enqueued', {
@@ -74,6 +76,8 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
     // asked to publish a final event checkpoint until FPL marks data checked.
     finalizeEvent: resultSlot.startsWith('final-'),
     lifecycleState: resultSlot.startsWith('final-') ? 'FINALIZED' : 'GW_REVIEW',
+    bootstrapGateRequired: true,
+    picksGateRequired: true,
     jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
   });
   if (job) {

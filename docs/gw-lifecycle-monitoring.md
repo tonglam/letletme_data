@@ -48,19 +48,20 @@ silently omitted.
 | 4. Checkpoint convergence | Row coverage and retries | Known eligible entry IDs have complete picks and transfer coverage; failed units are retried or explicitly evidenced |  |  |
 | 5. Picks canary | `live-picks-refresh` / `PICKS_PROBE` | First probe at `deadline + 60m`; up to two canaries; only after accepted canary does remaining fan-out proceed |  |  |
 | 6. Picks fan-out | Live picks child work | Remaining eligible entries are enqueued on the live-picks lane and converge to the same canonical entry-picks rows/publication contract |  |  |
-| 7. Match-day prewarm | Official H2H, if eligible | From five minutes before a scheduled kickoff, official H2H is eligible only when lifecycle and match-window policy allow it |  |  |
+| 7. Match-day prewarm | Live Matches V3, if eligible | From five minutes before a scheduled kickoff, Match V3 desk/detail observation may warm the fixture view; official H2H is not a live match-window source |  |  |
 | 8. First kickoff | Live snapshot and live picks sync | At/after first kickoff, probe `/event/{eventId}/live/` plus event fixtures; a scheduled kickoff alone is not proof that FPL marks a fixture `started` |  |  |
-| 9. Active match window | Live facts, player stats, H2H | `LIVE_ACTIVE` while authoritative fixtures show an unfinished started match; 30-second V3 live-match observation, one-minute H2H when eligible, and a low-priority player-stat observer that does not gate the live publication |  |  |
+| 9. Active match window | Live facts, player stats, H2H | `LIVE_ACTIVE` while authoritative fixtures show an unfinished started match; 30-second Live Points/Match V3 observation, canonical Average Team core refresh at most every five minutes, and no official-H2H provider polling |  |  |
 | 10. Between fixtures | Settling and next fixture | `DAY_SETTLING`/`BETWEEN_FIXTURES`; retain the live publication and use the lower cadence until the next authoritative change |  |  |
-| 11. Final review | `entry-results` / entry event results | After the post-match result boundary, fetch final picks plus event live for each eligible entry, persist `competition.entry_event_results` (and canonical picks/transfers as required), then pass the entry result checkpoint |  |  |
-| 11. Final review | `league-event-results` | After the same post-match checkpoint, reconcile every active league/tournament entry against canonical entry results and complete the league result checkpoint |  |  |
-| 11. Final review | `tournament-event-results` base report | After the final fixture's expected end (`latest kickoff + 2h`), fetch/reuse final source data, persist tournament event result inputs, and only then open the cascade |  |  |
-| 11. Final review | Tournament result/report cascade | `points-race`, `battle-race`, `knockout`, `transfers-post`, and `cup-results` all succeed; `transfers-post` enqueues `selection-stats`; the six-role barrier then permits materialized-view refresh |  |  |
-| 11. Final review | Tournament report read models | Refresh `reporting.tournament_entry_event_summaries` and `reporting.tournament_selection_stats` where applicable; verify `reporting.tournament_event_results` exposes the expected points/battle/knockout rows |  |  |
-| 11. Final review | My FPL provisional snapshot | Daily/review orchestration produces a complete provisional snapshot; verify active manifest, outbox delivery, and consumer visibility |  |  |
-| 12. Finalization | Event and publication boundary | `finished=true`, `data_checked=true`, all fixtures complete, final rows/publications/consumer probes pass; lifecycle becomes `FINALIZED` |  |  |
-| 12. Finalization | My FPL final snapshot | Finalization reconciles the provisional scope against final event data; final manifest/outbox and consumer read must match the final boundary |  |  |
-| 13. Handoff | Next-GW readiness | Current event, next event, core publication, source checkpoints, active pointers, and scheduler obligations are internally consistent |  |  |
+| 11. Gameweek review | Late score corrections | `GW_REVIEW` keeps a low-frequency full Live Points observation until `data_checked`; Average Team is refreshed from the canonical core publication, while the final checkpoint remains the terminal write |  |  |
+| 12. Final review | `entry-results` / entry event results | After the post-match result boundary, fetch final picks plus event live for each eligible entry, persist `competition.entry_event_results` (and canonical picks/transfers as required), then pass the entry result checkpoint |  |  |
+| 12. Final review | `league-event-results` | After the same post-match checkpoint, reconcile every active league/tournament entry against canonical entry results and complete the league result checkpoint |  |  |
+| 12. Final review | `tournament-event-results` base report | After the final fixture's expected end (`latest kickoff + 2h`), fetch/reuse final source data, persist tournament event result inputs, and only then open the cascade |  |  |
+| 12. Final review | Tournament result/report cascade | `points-race`, `battle-race`, `knockout`, `transfers-post`, and `cup-results` all succeed; `transfers-post` enqueues `selection-stats`; the six-role barrier then permits materialized-view refresh |  |  |
+| 12. Final review | Tournament report read models | Refresh `reporting.tournament_entry_event_summaries` and `reporting.tournament_selection_stats` where applicable; verify `reporting.tournament_event_results` exposes the expected points/battle/knockout rows |  |  |
+| 12. Final review | My FPL provisional snapshot | Daily/review orchestration produces a complete provisional snapshot; verify active manifest, outbox delivery, and consumer visibility |  |  |
+| 13. Finalization | Event and publication boundary | `finished=true`, `data_checked=true`, all fixtures complete, final rows/publications/consumer probes pass; lifecycle becomes `FINALIZED` |  |  |
+| 13. Finalization | My FPL final snapshot | Finalization reconciles the provisional scope against final event data; final manifest/outbox and consumer read must match the final boundary |  |  |
+| 14. Handoff | Next-GW readiness | Current event, next event, core publication, source checkpoints, active pointers, and scheduler obligations are internally consistent |  |  |
 
 ## Source and artifact mapping
 
@@ -79,7 +80,7 @@ rows when possible.
 | Tournament transfers pre | `/entry/{entryId}/transfers/` | Canonical transfer rows with `checkpointThroughEventId = eventId - 1` | Transfer history is captured after deadline without treating the current event as finalized |
 | Live picks | `/entry/{entryId}/event/{eventId}/picks/` through canary then child scans | Canonical picks rows and live-picks publication contract | Canary is complete before fan-out; remaining units converge |
 | Live snapshot | `/event/{eventId}/live/` and `fixtures/?event={eventId}` | Live publication, event-live/player-gameweek facts | Exact source revision is atomically published and readable |
-| Official H2H | Official H2H standings/matches endpoints for eligible tournaments | Official H2H snapshot/publication | Match-window snapshot and standings publish atomically |
+| Official H2H | Official H2H standings/matches endpoints for eligible tournaments | Official H2H snapshot/publication | No normal live match-window polling; publish at event finalization or an explicit bounded repair |
 | Entry event results | Event picks plus event live, after post-match authority permits | `competition.entry_event_results`, canonical picks/transfers, entry result checkpoint | Every eligible entry has a fresh result row and the checkpoint succeeds |
 | League event results | Canonical entry results and active league/tournament membership | League result rows/checkpoint | Every active scope converges; missing required units fail the checkpoint |
 | Tournament event results | Event picks, event live, and transfer history for eligible tournament entries | Tournament points/battle/knockout result tables and result checkpoint | Base tournament inputs converge before any derived report is published |

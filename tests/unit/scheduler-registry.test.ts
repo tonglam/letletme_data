@@ -202,6 +202,29 @@ describe('standalone scheduler registry', () => {
     expect(transfers?.successPredicate).toContain('entry transfers checkpoint');
   });
 
+  test('reserves historical picks catch-up before the Redis bootstrap projection exists', async () => {
+    const picks = registry.find((definition) => definition.name === 'entry-picks');
+    const plans = await picks!.resolve({
+      season: TEST_SEASON,
+      now: new Date('2026-08-23T13:00:00.000Z'),
+      events: [
+        {
+          id: 1,
+          deadlineTime: new Date('2026-08-23T12:00:00.000Z'),
+          finished: false,
+          dataChecked: false,
+        },
+      ],
+    });
+
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toMatchObject({
+      eventId: 1,
+      source: 'catchup',
+      scopeKey: `${TEST_SEASON.seasonCode}:event:1`,
+    });
+  });
+
   test('runs one distributed daily retention plan for every finalized current-season event', async () => {
     const retention = registry.find((definition) => definition.name === 'live-final-retention');
     expect(retention).toMatchObject({
@@ -941,7 +964,7 @@ describe('standalone scheduler registry', () => {
     expect(schedulerSource).not.toContain('fplClient.getBootstrap');
   });
 
-  test('runs official H2H through the durable standalone scheduler during match windows', async () => {
+  test('does not schedule official H2H during live match windows', async () => {
     const event = {
       id: 1,
       name: 'GW1',
@@ -993,8 +1016,7 @@ describe('standalone scheduler registry', () => {
         updatedAt: null,
       },
     ];
-    let officialJobPending = false;
-    let returnPendingRace = false;
+    const officialJobPending = false;
     const hasPending = mock(async () => officialJobPending);
     const enqueue = mock(async (..._args: unknown[]) => ({
       id: 'official-job',
@@ -1004,8 +1026,7 @@ describe('standalone scheduler registry', () => {
       findEvent: async () => event,
       findFixtures: async () => fixtures,
       hasPending,
-      enqueue: (async (...args: unknown[]) =>
-        returnPendingRace ? null : enqueue(...args)) as never,
+      enqueue: enqueue as never,
     });
     const context = {
       season: TEST_SEASON,
@@ -1021,59 +1042,66 @@ describe('standalone scheduler registry', () => {
       manualTrigger: false,
     });
     const plans = await definition.resolve(context);
-    expect(plans).toEqual([
-      expect.objectContaining({
-        scopeKey: '2627:event:1',
-        periodKey: 'official-h2h-1-202608231830',
-        dueAt: new Date('2026-08-23T18:30:00.000Z'),
+    expect(plans).toEqual([]);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(hasPending).not.toHaveBeenCalled();
+  });
+
+  test('resolves one explicit official H2H refresh after event finalization', async () => {
+    const definition = officialH2HDefinition();
+    const plans = await definition.resolve({
+      season: TEST_SEASON,
+      currentEventId: 1,
+      now: new Date('2026-08-24T00:00:00.000Z'),
+      events: [
+        {
+          id: 1,
+          deadlineTime: new Date('2026-08-23T12:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: new Date('2026-08-23T19:00:00.000Z'),
+        },
+        {
+          id: 2,
+          deadlineTime: new Date('2026-08-23T13:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: null,
+        },
+      ],
+    });
+
+    expect(plans).toMatchObject([
+      {
         eventId: 1,
         source: 'reconcile',
-      }),
+        evidence: {
+          lifecycleState: 'FINALIZED',
+          trigger: 'event-data-checked',
+          freshAfter: '2026-08-23T19:00:00.000Z',
+        },
+      },
     ]);
-    await definition.enqueue({
-      context,
-      plan: plans[0]!,
-      obligationId: 'official-obligation',
-      generation: 2,
-    });
-    expect(enqueue).toHaveBeenCalledWith(TEST_SEASON, 1, 'reconcile', {
-      jobId: 'scheduler-official-obligation-g2',
-      obligationId: 'official-obligation',
-      obligationGeneration: 2,
-    });
-    officialJobPending = true;
-    expect(
-      await definition.resolve({ ...context, now: new Date('2026-08-23T18:31:00.000Z') }),
-    ).toEqual([]);
-    expect(hasPending).toHaveBeenLastCalledWith(TEST_SEASON, 1);
-    officialJobPending = false;
-    returnPendingRace = true;
-    const racedPlans = await definition.resolve({
-      ...context,
-      now: new Date('2026-08-23T18:32:00.000Z'),
-    });
-    await expect(
-      definition.enqueue({
-        context,
-        plan: racedPlans[0]!,
-        obligationId: 'raced-official-obligation',
-        generation: 1,
-      }),
-    ).rejects.toThrow('Official H2H job became pending before enqueue');
-    expect(
-      await definition.resolve({ ...context, now: new Date('2026-08-24T01:00:00.000Z') }),
-    ).toEqual([]);
+  });
 
-    fixtures[0]!.finished = true;
-    expect(
-      await definition.resolve({ ...context, now: new Date('2026-08-24T01:01:00.000Z') }),
-    ).toEqual([
-      expect.objectContaining({
-        periodKey: 'official-h2h-1-202608240101',
-        eventId: 1,
-        evidence: { lifecycleState: 'GW_REVIEW' },
-      }),
-    ]);
+  test('does not schedule final official H2H without dataCheckedAt', async () => {
+    const definition = officialH2HDefinition();
+    const plans = await definition.resolve({
+      season: TEST_SEASON,
+      currentEventId: 2,
+      now: new Date('2026-08-24T00:00:00.000Z'),
+      events: [
+        {
+          id: 2,
+          deadlineTime: new Date('2026-08-23T12:00:00.000Z'),
+          finished: true,
+          dataChecked: true,
+          dataCheckedAt: null,
+        },
+      ],
+    });
+
+    expect(plans).toEqual([]);
   });
 
   test('catches up an hourly maintenance bucket after its scheduled minute', async () => {
@@ -1576,11 +1604,14 @@ describe('standalone scheduler registry', () => {
       transfers!.resolve(context),
     ]);
     expect(pickPlans).toEqual(transferPlans);
-    expect(pickPlans[0]).toMatchObject({
-      scopeKey: '2627:event:1',
-      periodKey: 'event-1',
-      eventId: 1,
-      source: 'catchup',
-    });
+    // Admission is enforced by the worker so the scheduler can preserve the
+    // durable catch-up obligation when Redis has no bootstrap projection.
+    expect(pickPlans).toMatchObject([
+      {
+        eventId: 1,
+        source: 'catchup',
+        scopeKey: `${TEST_SEASON.seasonCode}:event:1`,
+      },
+    ]);
   });
 });

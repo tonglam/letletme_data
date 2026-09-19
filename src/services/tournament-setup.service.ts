@@ -372,6 +372,7 @@ export async function setupTournamentStructure(
       // score fallback without allowing live points to become results.
       await syncOfficialH2HTournament(season, tournament, undefined, {
         finalizedThroughEventId: finalizedEvent?.id ?? null,
+        forceFull: true,
         setupExecution: execution,
       });
     }

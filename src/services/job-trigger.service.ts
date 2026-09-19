@@ -498,7 +498,10 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueLiveSnapshot(season, currentEvent.id, 'manual');
+      return enqueueLiveSnapshot(season, currentEvent.id, 'manual', {
+        bootstrapGateRequired: true,
+        picksGateRequired: true,
+      });
     },
     'live-final-retention': async () => {
       const season = await seasonRepository.findCurrent();
