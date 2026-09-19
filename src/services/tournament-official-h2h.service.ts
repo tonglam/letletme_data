@@ -27,7 +27,7 @@ import {
   type OfficialH2HPageManifest,
 } from '../domain/official-h2h-manifest';
 import { withMutationScopes } from '../utils/mutation-scopes';
-import { ConflictError, ValidationError } from '../utils/errors';
+import { ConflictError, IncompleteDataSyncError, ValidationError } from '../utils/errors';
 import { getConfig } from '../utils/config';
 import { logInfo, logWarn } from '../utils/logger';
 import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
@@ -561,6 +561,42 @@ function isOfficialKnockoutAveragePlaceholder(match: RawFPLLeagueH2HMatch): bool
   return (
     isOfficialKnockoutMatch(match) && (match.entry_1_entry === null || match.entry_2_entry === null)
   );
+}
+
+function requiredAverageEventIds(snapshot: OfficialH2HSourceSnapshot): Set<number> {
+  return new Set(
+    snapshot.matches
+      .filter(
+        (match) =>
+          match.is_bye !== true &&
+          !isOfficialKnockoutAveragePlaceholder(match) &&
+          (match.entry_1_entry === null || match.entry_2_entry === null),
+      )
+      .map((match) => match.event),
+  );
+}
+
+function assertCanonicalAverageScore(
+  averageEventIds: ReadonlySet<number>,
+  eventId: number,
+  averageEntryScore: number | null | undefined,
+): void {
+  if (
+    averageEventIds.has(eventId) &&
+    (typeof averageEntryScore !== 'number' || !Number.isFinite(averageEntryScore))
+  ) {
+    // Do not let the null overlay erase an already accepted provider result.
+    // The caller's transaction/retry boundary will retain the previous durable
+    // schedule until the canonical bootstrap Average fact is available.
+    throw new IncompleteDataSyncError(
+      'Official H2H waits for canonical Average Team scores',
+      1,
+      0,
+      0,
+      1,
+      'LIVE_AVERAGE_NOT_READY',
+    );
+  }
 }
 
 export async function fetchOfficialH2HSourceSnapshot(
@@ -1274,19 +1310,11 @@ export async function syncOfficialH2HTournament(
       ? null
       : await eventRepository.findById(season, averageScoreEventId);
   const averageEntryScore = averageScoreEvent?.averageEntryScore ?? null;
+  const averageEventIds = requiredAverageEventIds(snapshot);
   if (averageScoreEventId !== null) {
+    assertCanonicalAverageScore(averageEventIds, averageScoreEventId, averageEntryScore);
     snapshot = overlayOfficialH2HAverageScore(snapshot, averageScoreEventId, averageEntryScore);
   } else {
-    const averageEventIds = new Set(
-      snapshot.matches
-        .filter(
-          (match) =>
-            match.is_bye !== true &&
-            !isOfficialKnockoutAveragePlaceholder(match) &&
-            (match.entry_1_entry === null || match.entry_2_entry === null),
-        )
-        .map((match) => match.event),
-    );
     if (averageEventIds.size > 0) {
       const events = await eventRepository.findAll(season);
       const averageScores = new Map(
@@ -1295,6 +1323,9 @@ export async function syncOfficialH2HTournament(
           events.find((event) => event.id === eventId)?.averageEntryScore ?? null,
         ]),
       );
+      for (const [eventId, averageScore] of averageScores) {
+        assertCanonicalAverageScore(averageEventIds, eventId, averageScore);
+      }
       snapshot = overlayOfficialH2HAverageScores(snapshot, averageScores);
     }
   }
