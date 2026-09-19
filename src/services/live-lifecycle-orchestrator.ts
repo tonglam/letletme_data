@@ -21,7 +21,7 @@ import {
 } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { isMatchDayTime } from '../utils/conditions';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './entries.service';
 import { enqueueEntryPicksSyncJobWithOutcome } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
@@ -1359,9 +1359,11 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return { status: 'not-required', reason: 'NO_GLOBAL_PUBLICATION' };
 
-  const { syncLiveClassicLeaguePublicationsV2, syncLiveH2HLeaguePublicationsV2 } = await import(
-    './live-league-publication-v2.service'
-  );
+  const {
+    hasLiveH2HAverageScope,
+    syncLiveClassicLeaguePublicationsV2,
+    syncLiveH2HLeaguePublicationsV2,
+  } = await import('./live-league-publication-v2.service');
   const sameGlobalIdentity = (
     publication: { globalPublicationId: string; globalGeneration: number } | null,
   ): boolean =>
@@ -1375,14 +1377,26 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
   if (global.publication.state === 'FINALIZED' && classic?.finalReady !== true) {
     return { status: 'waiting', reason: 'CLASSIC_LEAGUE_FINAL_NOT_READY' };
   }
-  const { ensureLiveAverageReadyForPublication } = await import('./live-average-refresh.service');
-  const average = await ensureLiveAverageReadyForPublication(
-    season,
-    eventId,
-    global.publication.state === 'FINALIZED' ? 'FINALIZED' : 'LIVE_ACTIVE',
-  );
-  if (!average.ready) {
-    throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${average.reason}`);
+  const h2hUsesAverage = await hasLiveH2HAverageScope(season, eventId).catch((error) => {
+    // Keep repair conservative when the scope probe is unavailable; an
+    // existing Average side must not bypass its canonical readiness gate.
+    logWarn('Live H2H Average scope probe failed during picks repair', {
+      season: season.seasonCode,
+      eventId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  });
+  if (h2hUsesAverage) {
+    const { ensureLiveAverageReadyForPublication } = await import('./live-average-refresh.service');
+    const average = await ensureLiveAverageReadyForPublication(
+      season,
+      eventId,
+      global.publication.state === 'FINALIZED' ? 'FINALIZED' : 'LIVE_ACTIVE',
+    );
+    if (!average.ready) {
+      throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${average.reason}`);
+    }
   }
   const h2h = await syncLiveH2HLeaguePublicationsV2(season, eventId);
   if (!sameGlobalIdentity(h2h)) {

@@ -23,6 +23,7 @@ import {
   hasFinalLiveMatchCheckpointsV3,
 } from '../services/live-match-v3-checkpoint.service';
 import {
+  hasLiveH2HAverageScope,
   syncLiveClassicLeaguePublicationsV2,
   syncLiveH2HLeaguePublicationsV2,
 } from '../services/live-league-publication-v2.service';
@@ -746,29 +747,48 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
       // The manager repair child will run this sibling pass after its input is
       // checkpointed against the exact global publication revision.
     } else {
-      const averageReady = await ensureLiveAverageReadyForPublication(
+      const h2hUsesAverage = await hasLiveH2HAverageScope(
         season,
         eventId,
-        job.data.lifecycleState ?? snapshot.state,
-      );
-      if (!averageReady.ready) {
-        logWarn('Live H2H publication is waiting for a fresh canonical Average Team score', {
+        databaseBudget?.readClient,
+      ).catch((error) => {
+        // An unavailable scope probe must remain conservative: if an H2H
+        // Average side exists, the final gate still protects the publication.
+        logWarn('Live H2H Average scope probe failed; keeping the readiness gate', {
           season: season.seasonCode,
           eventId,
-          reason: averageReady.reason,
-          sourceCheckedAt: averageReady.sourceCheckedAt,
+          error: error instanceof Error ? error.message : String(error),
         });
-        if (job.data.finalizeEvent === true) {
-          const fence = inspectSchedulerObligationFence(job.data);
-          if (fence.kind !== 'complete') {
-            // The snapshot checkpoint above is durable, but a direct final job
-            // has no scheduler obligation that can be deferred. Fail delivery
-            // so BullMQ retries the official H2H/average dependency instead of
-            // permanently completing finalization with a missing publication.
-            throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${averageReady.reason}`);
+        return true;
+      });
+      let h2hReady = true;
+      if (h2hUsesAverage) {
+        const averageReady = await ensureLiveAverageReadyForPublication(
+          season,
+          eventId,
+          job.data.lifecycleState ?? snapshot.state,
+        );
+        h2hReady = averageReady.ready;
+        if (!averageReady.ready) {
+          logWarn('Live H2H publication is waiting for a fresh canonical Average Team score', {
+            season: season.seasonCode,
+            eventId,
+            reason: averageReady.reason,
+            sourceCheckedAt: averageReady.sourceCheckedAt,
+          });
+          if (job.data.finalizeEvent === true) {
+            const fence = inspectSchedulerObligationFence(job.data);
+            if (fence.kind !== 'complete') {
+              // The snapshot checkpoint above is durable, but a direct final job
+              // has no scheduler obligation that can be deferred. Fail delivery
+              // so BullMQ retries the official H2H/average dependency instead of
+              // permanently completing finalization with a missing publication.
+              throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${averageReady.reason}`);
+            }
           }
         }
-      } else {
+      }
+      if (h2hReady) {
         try {
           h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
             season,

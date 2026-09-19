@@ -981,6 +981,39 @@ async function findOfficialH2HTournaments(
     );
 }
 
+/**
+ * Average Team is required only by a regular official H2H match that actually
+ * contains a synthetic Average side.  Keep this as a bounded EXISTS probe so
+ * Classic-only events and H2H schedules without an Average side do not wait
+ * on the unrelated bootstrap/core refresh gate.
+ */
+export async function hasLiveH2HAverageScope(
+  season: FplSeasonRef,
+  eventId: number,
+  databaseReadClient?: postgres.Sql,
+): Promise<boolean> {
+  const client = databaseReadClient ?? (await getDbClient());
+  const rows = await client<{ hasAverage: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM competition.tournaments AS tournament
+      INNER JOIN competition.tournament_battle_group_results AS battle
+        ON battle.season_id = tournament.season_id
+       AND battle.tournament_id = tournament.tournament_id
+      WHERE tournament.season_id = ${season.seasonId}
+        AND tournament.state = 'active'
+        AND tournament.setup_status = 'ready'
+        AND tournament.league_type = 'h2h'
+        AND tournament.roster_mode = 'official_sync'
+        AND tournament.group_mode = 'battle_races'
+        AND battle.event_id = ${eventId}
+        AND battle.official_match_id IS NOT NULL
+        AND (battle.home_is_average IS TRUE OR battle.away_is_average IS TRUE)
+    ) AS "hasAverage"
+  `;
+  return rows[0]?.hasAverage === true;
+}
+
 function h2hScopeKeyPrefix(season: string, eventId: number): string {
   return `llm:data:v2:fpl:league-live:${season}:${eventId}`;
 }

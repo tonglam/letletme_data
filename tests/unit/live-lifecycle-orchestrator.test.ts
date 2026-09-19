@@ -261,6 +261,15 @@ describe('live lifecycle decisions', () => {
     expect(liveWorkerSource).toContain('promoteActiveEvent: job.data.promoteActiveEvent === true');
   });
 
+  test('gates Average refresh only when the current H2H scope consumes Average Team', () => {
+    const liveWorkerSource = readFileSync('src/workers/live-data.worker.ts', 'utf8');
+    const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    expect(liveWorkerSource).toContain('hasLiveH2HAverageScope(');
+    expect(liveWorkerSource).toContain('if (h2hUsesAverage) {');
+    expect(lifecycleSource).toContain('hasLiveH2HAverageScope(season, eventId)');
+    expect(lifecycleSource).toContain('if (h2hUsesAverage) {');
+  });
+
   test('carries a freshness window from the live-picks root into its child scan', () => {
     const jobSource = readFileSync('src/jobs/live-picks.jobs.ts', 'utf8');
     const enqueueSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
