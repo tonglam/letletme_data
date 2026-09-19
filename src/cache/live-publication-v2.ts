@@ -893,7 +893,14 @@ local candidate_source_key = timestamp_key(candidate.sourceCheckedAt)
 local advancing_final = correction_boundary ~= '' and correction_key ~= '' and candidate.state == 'FINAL' and current and
   current_source_key ~= '' and candidate_source_key ~= '' and current_source_key < correction_key and
   candidate_source_key >= correction_key
-if current_state == 'FINAL' and current and not advancing_final then return {'stale', current_raw} end
+-- A manager-fact repair can rebind the exact same finalized boundary, but only
+-- when the application has fenced the exact current publication identity.  A
+-- same-boundary candidate must not become a general FINAL overwrite escape.
+local same_boundary_rebind = ARGV[9] == '1' and correction_boundary ~= '' and correction_key ~= '' and
+  candidate.state == 'FINAL' and current and current_source_key ~= '' and candidate_source_key ~= '' and
+  current_source_key == correction_key and candidate_source_key == correction_key
+local replacing_final = advancing_final or same_boundary_rebind
+if current_state == 'FINAL' and current and not replacing_final then return {'stale', current_raw} end
 local item = candidate.item
 local candidate_payload = ARGV[7] or ''
 if redis.call('EXISTS', item.key) ~= 1 then return {'missing_stage', item.key} end
@@ -903,7 +910,7 @@ if actual_type ~= 'string' or redis.call('STRLEN', item.key) ~= item.bytes or re
 if current then
   if current.season ~= candidate.season or current.eventId ~= candidate.eventId or current.entryId ~= candidate.entryId then return {'scope_mismatch'} end
   if current.generation >= candidate.generation then return {'stale', current_raw} end
-  if advancing_final then
+  if replacing_final then
     -- A corrected FINAL supersedes the old boundary. Keep the corrected
     -- candidate as the only fallback so a rejected pre-boundary FINAL can
     -- never be served after the active pointer or its item is lost.
@@ -2282,6 +2289,8 @@ export async function publishEntryLiveInputV2(input: {
     readonly generation: number;
     readonly contentSha256: string;
   };
+  /** Allow only an exact, identity-fenced rebind at the existing FINAL boundary. */
+  readonly allowFinalSameBoundaryRebind?: boolean;
   readonly redis?: Redis;
 }): Promise<{
   readonly publication: EntryLivePublicationV2;
@@ -2296,6 +2305,17 @@ export async function publishEntryLiveInputV2(input: {
     throw new CacheError(
       'Entry V2 publication requires a durable generation floor',
       'LIVE_V2_ENTRY_GENERATION_FLOOR_REQUIRED',
+    );
+  }
+  if (
+    input.allowFinalSameBoundaryRebind === true &&
+    (input.input.finalResult === null ||
+      input.finalizationCorrectionBoundary === undefined ||
+      input.expectedCurrentPublication === undefined)
+  ) {
+    throw new CacheError(
+      'Same-boundary FINAL rebind requires a finalized input, correction boundary, and current publication fence',
+      'LIVE_V2_ENTRY_SAME_BOUNDARY_REBIND_INVALID',
     );
   }
   const redis = input.redis ?? (await redisSingleton.getClient());
@@ -2358,6 +2378,7 @@ export async function publishEntryLiveInputV2(input: {
       input.finalizationCorrectionBoundary
         ? exactTimestamp(input.finalizationCorrectionBoundary)
         : '',
+      input.allowFinalSameBoundaryRebind === true ? '1' : '0',
     ),
   );
   if (status === 'stale') {

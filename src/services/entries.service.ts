@@ -391,10 +391,19 @@ export async function persistEntryEventPicksResponse(
       `Refusing entry picks for an unexpected event for entry ${entryId}, event ${eventId}`,
     );
   }
-  const existing = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+  const observedExisting = await readEntryLiveInputV2({
+    season: season.seasonCode,
+    eventId,
+    entryId,
+  });
+  // REDIS_PREVIOUS is a coherent serving fallback, not the current durable
+  // candidate for a repair.  If the active pointer disappeared, recover from
+  // the validated PostgreSQL head instead of promoting an older generation
+  // above newer canonical data.
+  const existing = observedExisting?.servedFrom === 'REDIS_CURRENT' ? observedExisting : null;
   const durablePreservedBase =
-    !existing &&
     options?.preserveExistingPicksBase === true &&
+    existing === null &&
     options?.preservedPicksBase === undefined
       ? await readDurablePreservedEntryPicksBase(season, entryId, eventId)
       : null;
@@ -489,7 +498,15 @@ export async function persistEntryEventPicksResponse(
     options?.preserveExistingPicksBase === true &&
     preservedInput !== null &&
     preservedInput.finalResult !== null
-      ? { ...preservedInput, picksBase: rebuiltBaseInput.picksBase }
+      ? {
+          ...preservedInput,
+          picksBase: {
+            ...rebuiltBaseInput.picksBase,
+            // A FINAL rebind changes only the explicitly repaired manager
+            // fact.  Keep the accepted deadline/base watermark immutable.
+            contentUpdatedAt: preservedInput.picksBase.contentUpdatedAt,
+          },
+        }
       : rebuiltBaseInput;
   // Previous totals are independent immutable evidence. Read them only for a
   // first publication; repeated source probes reuse the published value and
@@ -673,15 +690,35 @@ export async function persistEntryEventPicksResponse(
     input.finalResult !== null
       ? (options?.historicalFinalBoundary ?? preservedFinalizationCorrectionBoundary)
       : undefined;
+  const currentFinalPublication =
+    existing !== null && existing.input.finalResult !== null ? existing.publication : null;
+  const sameFinalizationBoundary =
+    input.finalResult !== null &&
+    currentFinalPublication !== null &&
+    finalizationCorrectionBoundary !== undefined &&
+    exactTimestamp(finalizationCorrectionBoundary) === currentFinalPublication.sourceCheckedAt;
+  const publicationSourceCheckedAt = sameFinalizationBoundary
+    ? currentFinalPublication!.sourceCheckedAt
+    : sourceCheckedAt;
   const publication = await publishEntryLiveInputV2({
     season: season.seasonCode,
     eventId,
     entryId,
     input,
-    sourceCheckedAt,
+    sourceCheckedAt: publicationSourceCheckedAt,
     preserveSourceCheckedAtPrecision: true,
     generationFloor,
     ...(finalizationCorrectionBoundary ? { finalizationCorrectionBoundary } : {}),
+    ...(sameFinalizationBoundary
+      ? {
+          allowFinalSameBoundaryRebind: true,
+          expectedCurrentPublication: {
+            publicationId: currentFinalPublication!.publicationId,
+            generation: currentFinalPublication!.generation,
+            contentSha256: currentFinalPublication!.item.sha256,
+          },
+        }
+      : {}),
   });
   if (!publication.published) {
     // A FINAL publication is fenced in Redis. Never checkpoint the provisional
