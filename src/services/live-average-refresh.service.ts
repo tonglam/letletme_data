@@ -41,6 +41,7 @@ export type LiveAverageRefreshResult = Readonly<{
     | 'final-refresh-complete'
     | 'refresh-in-flight'
     | 'core-unavailable'
+    | 'average-unavailable'
     | 'refresh-failed'
     | 'finalization-boundary-unavailable';
   sourceCheckedAt: string | null;
@@ -131,6 +132,14 @@ function finalAverageRefreshMarkerMatches(
   );
 }
 
+async function hasCanonicalAverageEntryScore(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<boolean> {
+  const event = await eventRepository.findById(season, eventId);
+  return event?.averageEntryScore !== null && Number.isFinite(event?.averageEntryScore);
+}
+
 /**
  * Establish a fresh canonical average before the live H2H mirror reads
  * `fpl.events.average_entry_score`. This function owns no alternate score
@@ -177,7 +186,10 @@ export async function ensureLiveAverageReadyForPublication(
       const marker = await redis.get(finalRefreshKey(season.seasonCode, eventId));
       if (marker !== null) {
         const current = await readFreshCoreSource(season.seasonCode, now);
-        if (finalAverageRefreshMarkerMatches(marker, current, finalizationAt)) {
+        if (
+          finalAverageRefreshMarkerMatches(marker, current, finalizationAt) &&
+          (await hasCanonicalAverageEntryScore(season, eventId))
+        ) {
           return {
             ready: true,
             refreshed: false,
@@ -271,6 +283,14 @@ export async function ensureLiveAverageReadyForPublication(
         ready: false,
         refreshed: true,
         reason: 'refresh-failed',
+        sourceCheckedAt: afterRefresh.sourceCheckedAt,
+      };
+    }
+    if (!(await hasCanonicalAverageEntryScore(season, eventId))) {
+      return {
+        ready: false,
+        refreshed: true,
+        reason: 'average-unavailable',
         sourceCheckedAt: afterRefresh.sourceCheckedAt,
       };
     }

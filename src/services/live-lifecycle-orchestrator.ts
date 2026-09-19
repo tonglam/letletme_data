@@ -1721,13 +1721,18 @@ export async function runPicksProbeAndSync(
     uniqueNumbers([...remaining, ...successfulCanaryIds]),
   );
   // The canary provider pass happens before the cohort pending set exists.
-  // Drain any canary whose Redis input was already durably checkpointed now;
-  // otherwise the set would retain a successfully completed canary forever
-  // and no child would be able to settle the cohort obligation.
+  // Complete its exact Redis-first checkpoint before draining the cohort
+  // marker; persistEntryEventPicksResponse only creates the desired pointer,
+  // so markLivePicksEntryComplete alone cannot settle a successful canary.
   await Promise.all(
-    successfulCanaryIds.map((entryId) =>
-      markLivePicksEntryComplete(season.seasonCode, eventId, entryId),
-    ),
+    successfulCanaryIds.map(async (entryId) => {
+      try {
+        await checkpointEntryLiveInputV2(season, eventId, entryId);
+        await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+      } catch (error) {
+        logError('Live picks canary checkpoint failed', error, { eventId, entryId });
+      }
+    }),
   );
   let completedEntryIds: boolean[] = [];
   let newEnqueueCount = 0;

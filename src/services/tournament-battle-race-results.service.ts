@@ -607,9 +607,12 @@ export async function syncOfficialH2HTournaments(
       (tournament) =>
         syncOptions.tournamentId === undefined || tournament.id === syncOptions.tournamentId,
     );
-  const scoreOptions =
-    tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
+  let scoreOptions = tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
   await ensureOfficialH2HAverageReady(season, eventId, scoreOptions);
+  // The canonical core refresh may reopen or finalize the event while this
+  // call is in flight. Re-read lifecycle options after the refresh fence so
+  // H2H scores are not persisted with a stale finalizedThroughEventId.
+  scoreOptions = tournaments.length > 0 ? await getOfficialH2HSyncOptions(season, eventId) : {};
   let updatedGroups = 0;
   let updatedResults = 0;
   const failures: number[] = [];
@@ -703,7 +706,7 @@ export async function syncTournamentBattleRaceResults(
     return { eventId, updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
 
-  const officialH2HOptions = tournaments.some(isOfficialH2HTournament)
+  let officialH2HOptions = tournaments.some(isOfficialH2HTournament)
     ? await getOfficialH2HSyncOptions(season, eventId)
     : {};
 
@@ -713,7 +716,13 @@ export async function syncTournamentBattleRaceResults(
   const failedTournamentIds: number[] = [];
   let officialAveragePromise: Promise<void> | null = null;
   const ensureOfficialAverage = () => {
-    officialAveragePromise ??= ensureOfficialH2HAverageReady(season, eventId, officialH2HOptions);
+    officialAveragePromise ??= (async () => {
+      await ensureOfficialH2HAverageReady(season, eventId, officialH2HOptions);
+      // The canonical core refresh may reopen or finalize the event while the
+      // average gate is running. Re-read options before the H2H strategy uses
+      // them so a stale finalizedThroughEventId cannot leak into persistence.
+      officialH2HOptions = await getOfficialH2HSyncOptions(season, eventId);
+    })();
     return officialAveragePromise;
   };
   const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
