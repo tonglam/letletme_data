@@ -130,6 +130,8 @@ export type SchedulerContext = Readonly<{
   events: readonly {
     id: number;
     deadlineTime: Date | null;
+    /** Canonical bootstrap Average Team fact consumed by official H2H. */
+    averageEntryScore?: number | null;
     finished?: boolean;
     dataChecked?: boolean;
     dataCheckedAt?: Date | null;
@@ -1491,10 +1493,14 @@ export function officialH2HDefinition(
           return [];
         }
         const finalizationAt = event.dataCheckedAt;
+        const averageRevision =
+          typeof event.averageEntryScore === 'number' && Number.isFinite(event.averageEntryScore)
+            ? String(event.averageEntryScore)
+            : 'unknown';
         return [
           {
             scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-            periodKey: `official-h2h-final-${event.id}-${finalizationAt.toISOString()}`,
+            periodKey: `official-h2h-final-${event.id}-${finalizationAt.toISOString()}-average-${averageRevision}`,
             dueAt: finalizationAt,
             eventId: event.id,
             source: 'reconcile' as const,
@@ -1502,6 +1508,7 @@ export function officialH2HDefinition(
               lifecycleState: 'FINALIZED',
               trigger: 'event-data-checked',
               freshAfter: finalizationAt.toISOString(),
+              averageEntryScore: event.averageEntryScore ?? null,
             },
           },
         ];
@@ -2320,6 +2327,7 @@ export async function resolveSchedulerContext(
     .map((event) => ({
       id: event.id,
       deadlineTime: event.deadlineTime ? new Date(event.deadlineTime) : null,
+      averageEntryScore: event.averageEntryScore,
       finished: event.finished,
       dataChecked: event.dataChecked,
       dataCheckedAt: event.dataCheckedAt,

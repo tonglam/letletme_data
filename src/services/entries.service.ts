@@ -163,6 +163,8 @@ function rawPicksFromEntryLiveInput(input: EntryLiveInputV2): RawFPLEntryEventPi
 type PreservedEntryPicksBase = Readonly<{
   raw: RawFPLEntryEventPicksResponse;
   input: EntryLiveInputV2;
+  publicationId: string;
+  generation: number;
   finalizationCorrectionBoundary?: string;
 }>;
 
@@ -210,6 +212,8 @@ async function readDurablePreservedEntryPicksBase(
   return {
     raw: rawPicksFromEntryLiveInput(input),
     input,
+    publicationId: head.publicationId,
+    generation: head.generation,
     ...(input.finalResult !== null
       ? {
           finalizationCorrectionBoundary:
@@ -400,13 +404,22 @@ export async function persistEntryEventPicksResponse(
   // candidate for a repair.  If the active pointer disappeared, recover from
   // the validated PostgreSQL head instead of promoting an older generation
   // above newer canonical data.
-  const existing = observedExisting?.servedFrom === 'REDIS_CURRENT' ? observedExisting : null;
+  let existing = observedExisting?.servedFrom === 'REDIS_CURRENT' ? observedExisting : null;
   const durablePreservedBase =
-    options?.preserveExistingPicksBase === true &&
-    existing === null &&
-    options?.preservedPicksBase === undefined
+    options?.preserveExistingPicksBase === true && options?.preservedPicksBase === undefined
       ? await readDurablePreservedEntryPicksBase(season, entryId, eventId)
       : null;
+  if (
+    existing !== null &&
+    durablePreservedBase !== null &&
+    (existing.publication.publicationId !== durablePreservedBase.publicationId ||
+      existing.publication.generation !== durablePreservedBase.generation)
+  ) {
+    // A valid Redis current publication can still be a rollback/orphan above
+    // the canonical PostgreSQL head.  It is readable, but it is not the
+    // preservation base for a repair; the durable identity fence wins.
+    existing = null;
+  }
   const preservedInput = existing?.input ?? durablePreservedBase?.input ?? null;
   const preservedPicksBase =
     options?.preservedPicksBase ??
@@ -578,7 +591,9 @@ export async function persistEntryEventPicksResponse(
         ...inputWithCurrentTotals,
         picksBase: {
           ...inputWithCurrentTotals.picksBase,
-          contentUpdatedAt: existing.input.picksBase.contentUpdatedAt,
+          contentUpdatedAt:
+            existing?.input.picksBase.contentUpdatedAt ??
+            inputWithCurrentTotals.picksBase.contentUpdatedAt,
         },
       }
     : inputWithCurrentTotals;

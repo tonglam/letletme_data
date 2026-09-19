@@ -947,14 +947,33 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
           classicFinalReady: classicLeagueResult?.finalReady ?? false,
           h2hFinalReady: h2hLeagueResult?.finalReady ?? false,
         });
-        if (job.data.obligationId !== undefined && job.data.obligationGeneration !== undefined) {
+        const finalizationFence = inspectSchedulerObligationFence(job.data);
+        if (finalizationFence.kind === 'malformed') {
+          throw new Error(
+            `Malformed live finalization scheduler fence: ${finalizationFence.reason}`,
+          );
+        }
+        if (finalizationFence.kind === 'none') {
+          // Direct-mode finalization has already persisted the global marker,
+          // so returning waiting-dependencies would complete the Bull job and
+          // leave no scheduler obligation or future lifecycle enqueue to retry
+          // the missing H2H/Classic publication. Throw so BullMQ retries the
+          // exact finalizer with its bounded exponential backoff.
+          throw new Error(
+            `DATA_INCOMPLETE:LIVE_LEAGUE_FINAL_NOT_READY:${[
+              ...(classicLeagueResult?.finalReady === true ? [] : ['CLASSIC']),
+              ...(h2hLeagueResult?.finalReady === true ? [] : ['H2H']),
+            ].join(',')}`,
+          );
+        }
+        if (finalizationFence.kind === 'complete') {
           const dependencyReasonCodes = [
             ...(classicLeagueResult?.finalReady === true ? [] : ['CLASSIC_LEAGUE_FINAL_NOT_READY']),
             ...(h2hLeagueResult?.finalReady === true ? [] : ['H2H_LEAGUE_FINAL_NOT_READY']),
           ];
           const deferred = await deferSchedulerObligationForWorker({
-            obligationId: job.data.obligationId,
-            generation: job.data.obligationGeneration,
+            obligationId: finalizationFence.obligationId,
+            generation: finalizationFence.generation,
             dependencyWait: { reasonCodes: dependencyReasonCodes },
             evidence: {
               finalization: 'waiting-for-league-evidence',
