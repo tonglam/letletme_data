@@ -404,7 +404,13 @@ export async function persistEntryEventPicksResponse(
   // candidate for a repair.  If the active pointer disappeared, recover from
   // the validated PostgreSQL head instead of promoting an older generation
   // above newer canonical data.
-  let existing = observedExisting?.servedFrom === 'REDIS_CURRENT' ? observedExisting : null;
+  // Keep the observed active identity separate from the content-preservation
+  // candidate. A durable-head mismatch must discard Redis content as a base,
+  // but the exact active FINAL identity is still required to fence a safe
+  // same-boundary replacement in PROMOTE_ENTRY_SCRIPT.
+  const observedCurrent =
+    observedExisting?.servedFrom === 'REDIS_CURRENT' ? observedExisting : null;
+  let existing = observedCurrent;
   const durablePreservedBase =
     options?.preserveExistingPicksBase === true && options?.preservedPicksBase === undefined
       ? await readDurablePreservedEntryPicksBase(season, entryId, eventId)
@@ -706,7 +712,9 @@ export async function persistEntryEventPicksResponse(
       ? (options?.historicalFinalBoundary ?? preservedFinalizationCorrectionBoundary)
       : undefined;
   const currentFinalPublication =
-    existing !== null && existing.input.finalResult !== null ? existing.publication : null;
+    observedCurrent !== null && observedCurrent.input.finalResult !== null
+      ? observedCurrent.publication
+      : null;
   const sameFinalizationBoundary =
     input.finalResult !== null &&
     currentFinalPublication !== null &&
