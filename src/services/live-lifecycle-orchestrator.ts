@@ -47,6 +47,10 @@ import { getConfig } from '../utils/config';
 import { readFplAdmissionTelemetry } from '../utils/fpl-admission';
 import { normalizeMatchLifecycleState } from './live-match-v3';
 import {
+  checkpointLiveMatchScopeV3,
+  hasFinalLiveMatchCheckpointsV3,
+} from './live-match-v3-checkpoint.service';
+import {
   recordFreshnessObservation,
   retireLivePicksEmptyCohortFreshnessWindow,
   settleLivePicksNoSourceWorkFreshnessWindow,
@@ -488,8 +492,22 @@ async function mergeLifecycleQuietState(
   const key = liveV2LifecycleKey({ season: seasonCode, eventId });
   const script = `
 local currentRaw = redis.call('GET', KEYS[1])
-local current = currentRaw and cjson.decode(currentRaw) or {}
-local patch = cjson.decode(ARGV[1])
+local function isObject(value)
+  if type(value) ~= 'table' then return false end
+  for key, _ in pairs(value) do
+    if type(key) ~= 'string' then return false end
+  end
+  return true
+end
+local current = {}
+if currentRaw then
+  local currentOk, decoded = pcall(cjson.decode, currentRaw)
+  if currentOk and isObject(decoded) then
+    current = decoded
+  end
+end
+local patchOk, patch = pcall(cjson.decode, ARGV[1])
+if not patchOk or not isObject(patch) then return 0 end
 if type(current['revision']) ~= 'number' and type(current['revision']) ~= 'string' and current['revision'] ~= cjson.null then
   current['revision'] = cjson.null
 end
@@ -1268,7 +1286,10 @@ export type LivePicksLeagueRepairResult = Readonly<{
     | 'NO_GLOBAL_PUBLICATION'
     | 'PICKS_INCOMPLETE'
     | 'MANAGER_FACT_REPAIR_REQUIRED'
-    | 'GLOBAL_REVISION_ADVANCED';
+    | 'GLOBAL_REVISION_ADVANCED'
+    | 'CLASSIC_LEAGUE_FINAL_NOT_READY'
+    | 'H2H_LEAGUE_FINAL_NOT_READY'
+    | 'MATCH_CHECKPOINTS_INCOMPLETE';
 }>;
 
 /**
@@ -1309,6 +1330,9 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
   if (!sameGlobalIdentity(classic)) {
     return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
   }
+  if (global.publication.state === 'FINALIZED' && classic?.finalReady !== true) {
+    return { status: 'waiting', reason: 'CLASSIC_LEAGUE_FINAL_NOT_READY' };
+  }
   const { ensureLiveAverageReadyForPublication } = await import('./live-average-refresh.service');
   const average = await ensureLiveAverageReadyForPublication(
     season,
@@ -1322,6 +1346,9 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
   if (!sameGlobalIdentity(h2h)) {
     return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
   }
+  if (global.publication.state === 'FINALIZED' && h2h?.finalReady !== true) {
+    return { status: 'waiting', reason: 'H2H_LEAGUE_FINAL_NOT_READY' };
+  }
   const latestGlobal = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (
     !latestGlobal ||
@@ -1331,6 +1358,21 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
     return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
   }
   if (global.publication.state === 'FINALIZED') {
+    // A live-picks repair can finish after the Match V3 jobs were enqueued but
+    // before either checkpoint committed.  Keep this recovery path behind the
+    // same durable desk/detail fence as the normal finalizer; publication
+    // identity alone is not proof that the two Match scopes are persisted.
+    for (const kind of ['desk', 'detail'] as const) {
+      await checkpointLiveMatchScopeV3({
+        season,
+        eventId,
+        kind,
+        allowFinalReplacement: false,
+      });
+    }
+    if (!(await hasFinalLiveMatchCheckpointsV3(season, eventId))) {
+      return { status: 'waiting', reason: 'MATCH_CHECKPOINTS_INCOMPLETE' };
+    }
     const { enqueueFinalLeagueResultsAfterLiveSync } = await import('./live-data-cascade.service');
     await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
   }

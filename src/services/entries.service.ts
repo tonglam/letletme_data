@@ -160,6 +160,52 @@ function rawPicksFromEntryLiveInput(input: EntryLiveInputV2): RawFPLEntryEventPi
   };
 }
 
+type PreservedEntryPicksBase = Readonly<{
+  raw: RawFPLEntryEventPicksResponse;
+  input: EntryLiveInputV2;
+}>;
+
+/**
+ * Redis is a rebuildable serving layer.  A live-picks repair must therefore
+ * recover the deadline base from the durable V2 head when both Redis pointers
+ * have disappeared; using the provider response would allow post-deadline
+ * multipliers, substitutions, or transfers to replace the accepted base.
+ */
+async function readDurablePreservedEntryPicksBase(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+): Promise<PreservedEntryPicksBase> {
+  const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  const rows = await entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
+    season,
+    eventId,
+    [entryId],
+  );
+  const input = head?.inputPayload;
+  if (
+    !head ||
+    head.state !== 'COMPLETE' ||
+    head.rowCount !== 15 ||
+    head.entryId !== entryId ||
+    !input ||
+    !validateEntryLiveInputV2(input, {
+      season: season.seasonCode,
+      eventId,
+      entryId,
+    }) ||
+    input.picksBase.revision !== head.picksBaseRevision ||
+    durableLiveInputContentHash(rows) !== head.contentSha256 ||
+    entryLivePicksBaseCheckpointHash(input) !== head.contentSha256 ||
+    !durableRowsMatchEntryLiveInput(rows, input)
+  ) {
+    throw new Error(
+      `DATA_INCOMPLETE:LIVE_PICKS_DURABLE_BASE_UNAVAILABLE:${season.seasonCode}:${eventId}:${entryId}`,
+    );
+  }
+  return { raw: rawPicksFromEntryLiveInput(input), input };
+}
+
 /**
  * Complete one Redis-first entry publication without going back to FPL.  The
  * desired checkpoint is a control-plane obligation, not a second publication;
@@ -333,6 +379,16 @@ export async function persistEntryEventPicksResponse(
     );
   }
   const existing = await readEntryLiveInputV2({ season: season.seasonCode, eventId, entryId });
+  const durablePreservedBase =
+    !existing &&
+    options?.preserveExistingPicksBase === true &&
+    options?.preservedPicksBase === undefined
+      ? await readDurablePreservedEntryPicksBase(season, entryId, eventId)
+      : null;
+  const preservedInput = existing?.input ?? durablePreservedBase?.input ?? null;
+  const preservedPicksBase =
+    options?.preservedPicksBase ??
+    (existing ? rawPicksFromEntryLiveInput(existing.input) : durablePreservedBase?.raw);
   let assistantManagerPoints: AssistantManagerPointsFact | undefined;
   const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
   if (managerChip) {
@@ -373,7 +429,7 @@ export async function persistEntryEventPicksResponse(
       // base before the first Live Points publication. Preserve an already
       // accepted fact if Redis is temporarily unavailable; never invent a new
       // fact without its exact score revision.
-      assistantManagerPoints = existing?.input.picksBase.assistantManagerPoints;
+      assistantManagerPoints = preservedInput?.picksBase.assistantManagerPoints;
     } else {
       if (
         !currentObservation ||
@@ -406,10 +462,7 @@ export async function persistEntryEventPicksResponse(
     season,
     eventId,
     entryId,
-    options?.preservedPicksBase ??
-      (options?.preserveExistingPicksBase && existing
-        ? rawPicksFromEntryLiveInput(existing.input)
-        : picks),
+    preservedPicksBase ?? picks,
     sourceCheckedAt,
     assistantManagerPoints,
   );
