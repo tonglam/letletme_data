@@ -33,6 +33,7 @@ import { logInfo, logWarn } from '../utils/logger';
 import { eventLiveV2ScoreService, type EventLiveScoreBatch } from './event-live-v2-score.service';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { eventRepository } from '../repositories/events';
+import { ensureLiveAverageReadyForPublication } from './live-average-refresh.service';
 
 const MAX_H2H_PAGES = 100;
 
@@ -588,6 +589,41 @@ function assertCanonicalAverageScore(
     // Do not let the null overlay erase an already accepted provider result.
     // The caller's transaction/retry boundary will retain the previous durable
     // schedule until the canonical bootstrap Average fact is available.
+    throw new IncompleteDataSyncError(
+      'Official H2H waits for canonical Average Team scores',
+      1,
+      0,
+      0,
+      1,
+      'LIVE_AVERAGE_NOT_READY',
+    );
+  }
+}
+
+async function ensureFullRepairAverageFreshness(
+  season: FplSeasonRef,
+  averageEventIds: ReadonlySet<number>,
+): Promise<void> {
+  if (averageEventIds.size === 0) return;
+  const events = await eventRepository.findAll(season);
+  const candidateEvents = [...averageEventIds]
+    .map((eventId) => events.find((event) => event.id === eventId) ?? null)
+    .filter((event): event is NonNullable<typeof event> => event !== null);
+  const refreshEvent =
+    candidateEvents.find((event) => event.finished === true && event.dataChecked === true) ??
+    candidateEvents[0] ??
+    null;
+  const refreshEventId = refreshEvent?.id ?? [...averageEventIds][0];
+  const lifecycleState =
+    refreshEvent?.finished === true && refreshEvent.dataChecked === true
+      ? 'FINALIZED'
+      : 'LIVE_ACTIVE';
+  const averageReady = await ensureLiveAverageReadyForPublication(
+    season,
+    refreshEventId,
+    lifecycleState,
+  );
+  if (!averageReady.ready) {
     throw new IncompleteDataSyncError(
       'Official H2H waits for canonical Average Team scores',
       1,
@@ -1305,12 +1341,18 @@ export async function syncOfficialH2HTournament(
     };
   }
   const averageScoreEventId = reconcileEventId ?? options.provisionalEventId ?? null;
+  const averageEventIds = requiredAverageEventIds(snapshot);
+  if (options.forceFull === true) {
+    // A full/topology reconciliation can introduce an Average side that was
+    // absent from the old persisted schedule. Gate on the fetched candidate,
+    // not on the old rows, before rebuilding any durable H2H result.
+    await ensureFullRepairAverageFreshness(season, averageEventIds);
+  }
   const averageScoreEvent =
     averageScoreEventId === null
       ? null
       : await eventRepository.findById(season, averageScoreEventId);
   const averageEntryScore = averageScoreEvent?.averageEntryScore ?? null;
-  const averageEventIds = requiredAverageEventIds(snapshot);
   if (averageScoreEventId !== null) {
     assertCanonicalAverageScore(averageEventIds, averageScoreEventId, averageEntryScore);
     snapshot = overlayOfficialH2HAverageScore(snapshot, averageScoreEventId, averageEntryScore);
