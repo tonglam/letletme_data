@@ -1313,20 +1313,44 @@ export async function findMissingEntryLiveInputIds(
     if (input) {
       const durableHead = durableHeadsByEntryId.get(entryId);
       const checkpointPending = input.publication.checkpointedAt === null || desired !== null;
+      const durableHeadNeedsRepair =
+        !durableHead ||
+        durableHead.state !== 'COMPLETE' ||
+        durableHead.rowCount !== 15 ||
+        durableHead.publicationId !== input.publication.publicationId ||
+        durableHead.generation !== input.publication.generation;
       const redisBaseNeedsRepair =
-        !checkpointPending &&
-        (input.servedFrom !== 'REDIS_CURRENT' ||
-          !durableHead ||
-          durableHead.state !== 'COMPLETE' ||
-          durableHead.rowCount !== 15 ||
-          durableHead.publicationId !== input.publication.publicationId ||
-          durableHead.generation !== input.publication.generation);
+        !checkpointPending && (input.servedFrom !== 'REDIS_CURRENT' || durableHeadNeedsRepair);
       // A readable fallback/current pointer is not enough to prove that the
       // input is the durable base once its Redis-first checkpoint has settled.
       // While desired/checkpointedAt is pending, let the checkpoint-only path
       // advance that legitimate new publication before classifying its
       // temporary identity gap as a cache rollback.
-      if (redisBaseNeedsRepair) return entryId;
+      if (redisBaseNeedsRepair) {
+        // A checkpointed current input with a missing or mismatched durable
+        // head must not enter the provider lane: an unchanged provider
+        // response takes the sameInput fast path and can be marked complete
+        // without recreating PostgreSQL. Rebind the exact Redis publication
+        // through the checkpoint fence first, even for the provider-only
+        // live-picks selector (repairCheckpoint=false).
+        if (
+          input.servedFrom === 'REDIS_CURRENT' &&
+          !desired &&
+          input.publication.checkpointedAt !== null &&
+          durableHeadNeedsRepair
+        ) {
+          try {
+            const checkpointResult = await checkpointEntryLiveInputV2(season, eventId, entryId);
+            if (checkpointResult === 'checkpointed') {
+              await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+              return null;
+            }
+          } catch (error) {
+            logError('Entry live V2 durable head repair failed', error, { entryId, eventId });
+          }
+        }
+        return entryId;
+      }
       const chip = input.input.picksBase.chip;
       const managerFact = input.input.picksBase.assistantManagerPoints;
       const managerObservationChanged =

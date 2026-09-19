@@ -269,6 +269,10 @@ describe('live lifecycle decisions', () => {
       'src/services/tournament-battle-race-results.service.ts',
       'utf8',
     );
+    const averageRefreshSource = readFileSync(
+      'src/services/live-average-refresh.service.ts',
+      'utf8',
+    );
     const entryServiceSource = readFileSync('src/services/entries.service.ts', 'utf8');
     const entrySyncWorkerSource = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
     expect(liveWorkerSource).toContain('hasLiveH2HAverageScope(');
@@ -283,6 +287,13 @@ describe('live lifecycle decisions', () => {
     expect(entrySyncWorkerSource).toContain('forceLeagueRepair: job.attemptsMade > 0');
     expect(entryServiceSource).toContain('const durableHeadMatchesCandidate');
     expect(lifecycleSource).toContain('!durableHead ||');
+    expect(lifecycleSource).toContain('checkpointResult = await checkpointEntryLiveInputV2');
+    expect(averageRefreshSource).toContain(
+      'if (!(await hasCanonicalAverageEntryScore(season, eventId)))',
+    );
+    expect(averageRefreshSource).toContain(
+      'const averageAvailable = await hasCanonicalAverageEntryScore',
+    );
     expect(lifecycleSource).toContain('!state.leagueRepairRequired');
     expect(lifecycleSource).toContain(
       'obligation.forceLeagueRepair === true && state.canarySucceeded',

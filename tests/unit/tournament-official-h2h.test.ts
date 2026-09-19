@@ -187,6 +187,19 @@ describe('Official H2H Live Points V2 projection', () => {
       sourceOrder: 1,
       is_bye: false,
     });
+    full.matches.push({
+      id: 2071745,
+      event: 2,
+      entry_1_entry: null,
+      entry_1_points: 77,
+      entry_2_entry: null,
+      entry_2_points: 88,
+      winner: null,
+      knockout_name: 'Semi-final',
+      is_knockout: true,
+      sourceOrder: 2,
+      is_bye: false,
+    });
 
     const repaired = overlayOfficialH2HAverageScores(
       full,
@@ -201,6 +214,11 @@ describe('Official H2H Live Points V2 projection', () => {
       entry_1_points: 45,
       entry_1_win: 1,
       entry_2_loss: 1,
+      winner: null,
+    });
+    expect(repaired.matches[2]).toMatchObject({
+      entry_1_points: 77,
+      entry_2_points: 88,
       winner: null,
     });
   });

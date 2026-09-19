@@ -337,7 +337,7 @@ export function suppressOfficialH2HActiveScores(
   return {
     ...snapshot,
     matches: snapshot.matches.map((match) =>
-      match.event !== eventId
+      match.event !== eventId || match.is_bye === true || isOfficialKnockoutMatch(match)
         ? match
         : {
             ...match,
@@ -383,6 +383,7 @@ export function projectOfficialH2HEventLiveScores(
       (match) =>
         match.event === eventId &&
         match.is_bye !== true &&
+        !isOfficialKnockoutMatch(match) &&
         ((match.entry_1_entry === null && canonicalAverageScore === null) ||
           (match.entry_2_entry === null && canonicalAverageScore === null)),
     )
@@ -393,7 +394,9 @@ export function projectOfficialH2HEventLiveScores(
   return {
     ...snapshot,
     matches: snapshot.matches.map((match) => {
-      if (match.event !== eventId) return match;
+      if (match.event !== eventId || match.is_bye === true || isOfficialKnockoutMatch(match)) {
+        return match;
+      }
       const homePoints =
         match.entry_1_entry === null
           ? canonicalAverageScore
@@ -403,15 +406,10 @@ export function projectOfficialH2HEventLiveScores(
           ? canonicalAverageScore
           : (batch.scores.get(match.entry_2_entry)?.netEventPoints ?? null);
       const winner =
-        match.is_bye === true || homePoints === null || awayPoints === null
+        homePoints === null || awayPoints === null
           ? null
           : homePoints === awayPoints
-            ? isOfficialKnockoutMatch(match) &&
-              match.tiebreak !== null &&
-              match.tiebreak !== undefined &&
-              (match.winner === match.entry_1_entry || match.winner === match.entry_2_entry)
-              ? match.winner
-              : null
+            ? null
             : homePoints > awayPoints
               ? match.entry_1_entry
               : match.entry_2_entry;
@@ -440,6 +438,7 @@ export function overlayOfficialH2HAverageScore(
       if (
         match.event !== eventId ||
         match.is_bye === true ||
+        isOfficialKnockoutMatch(match) ||
         (match.entry_1_entry !== null && match.entry_2_entry !== null)
       ) {
         return match;
@@ -1265,7 +1264,9 @@ export async function syncOfficialH2HTournament(
       snapshot.matches
         .filter(
           (match) =>
-            match.is_bye !== true && (match.entry_1_entry === null || match.entry_2_entry === null),
+            match.is_bye !== true &&
+            !isOfficialKnockoutMatch(match) &&
+            (match.entry_1_entry === null || match.entry_2_entry === null),
         )
         .map((match) => match.event),
     );

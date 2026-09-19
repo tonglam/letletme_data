@@ -228,6 +228,14 @@ export async function ensureLiveAverageReadyForPublication(
     };
   }
   if (!finalRefresh && current.fresh) {
+    if (!(await hasCanonicalAverageEntryScore(season, eventId))) {
+      return {
+        ready: false,
+        refreshed: false,
+        reason: 'average-unavailable',
+        sourceCheckedAt: current.sourceCheckedAt,
+      };
+    }
     return {
       ready: true,
       refreshed: false,
@@ -247,8 +255,18 @@ export async function ensureLiveAverageReadyForPublication(
       const finalMarker = finalRefresh
         ? await redis.get(finalRefreshKey(season.seasonCode, eventId))
         : null;
+      const averageAvailable = await hasCanonicalAverageEntryScore(season, eventId);
+      if (afterLock.fresh && !averageAvailable) {
+        return {
+          ready: false,
+          refreshed: false,
+          reason: 'average-unavailable',
+          sourceCheckedAt: afterLock.sourceCheckedAt,
+        };
+      }
       if (
         afterLock.fresh &&
+        averageAvailable &&
         (!finalRefresh || finalAverageRefreshMarkerMatches(finalMarker, afterLock, finalizationAt))
       ) {
         return {
