@@ -298,6 +298,14 @@ describe('live lifecycle decisions', () => {
     expect(lifecycleSource).toContain(
       'obligation.forceLeagueRepair === true && state.canarySucceeded',
     );
+    expect(lifecycleSource).toContain(
+      'isLivePicksLeagueRepairRequired(season.seasonCode, currentEvent.id)',
+    );
+    expect(lifecycleSource).toContain(
+      'const directRepairRequired = repairRequired || leagueRepairRequired;',
+    );
+    expect(leagueSource).toContain('active_group_phase_tournaments');
+    expect(leagueSource).toContain('AND NOT (\n            knockout_started_event_id IS NOT NULL');
   });
 
   test('carries a freshness window from the live-picks root into its child scan', () => {

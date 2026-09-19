@@ -2153,10 +2153,18 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
       picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
     );
     const repairRequired = picksEvidence?.repairRequired === true;
+    // A completed picks cohort can still leave the league finalizer waiting on
+    // match checkpoints or Average. That waiting state is durable in the
+    // shared coordinator and must independently wake the direct retry lane;
+    // otherwise a complete cohort suppresses every later finalizer attempt.
+    const leagueRepairRequired =
+      !isStandaloneSchedulerEnabled() &&
+      (await isLivePicksLeagueRepairRequired(season.seasonCode, currentEvent.id));
+    const directRepairRequired = repairRequired || leagueRepairRequired;
     const directRepairProbeDue =
       !isStandaloneSchedulerEnabled() &&
       !decision.shouldProbePicks &&
-      (!picksComplete || repairRequired) &&
+      (!picksComplete || directRepairRequired) &&
       (await isLivePicksProbeDue(season.seasonCode, currentEvent.id, now));
     if (
       shouldRunDirectLivePicksRepair(
@@ -2164,7 +2172,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         picksComplete,
         isStandaloneSchedulerEnabled(),
         directRepairProbeDue,
-        repairRequired,
+        directRepairRequired,
       )
     ) {
       await runDirectPicksProbeAndFinalize(season, currentEvent.id, now).catch((error) => {

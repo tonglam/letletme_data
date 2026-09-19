@@ -1009,7 +1009,7 @@ export async function hasLiveH2HAverageScope(
         AND roster_mode = 'official_sync'
         AND group_mode = 'battle_races'
     ),
-    active_phase_tournaments AS (
+    active_group_phase_tournaments AS (
       SELECT tournament_id
       FROM active_tournaments
       WHERE (
@@ -1020,24 +1020,14 @@ export async function hasLiveH2HAverageScope(
           AND knockout_ended_event_id IS NULL
         )
         OR (
-          group_started_event_id IS NOT NULL
-          AND ${eventId} >= group_started_event_id
+          (group_started_event_id IS NOT NULL OR group_ended_event_id IS NOT NULL)
+          AND (group_started_event_id IS NULL OR ${eventId} >= group_started_event_id)
           AND (group_ended_event_id IS NULL OR ${eventId} <= group_ended_event_id)
-        )
-        OR (
-          group_started_event_id IS NULL
-          AND group_ended_event_id IS NOT NULL
-          AND ${eventId} <= group_ended_event_id
-        )
-        OR (
-          knockout_started_event_id IS NOT NULL
-          AND ${eventId} >= knockout_started_event_id
-          AND (knockout_ended_event_id IS NULL OR ${eventId} <= knockout_ended_event_id)
-        )
-        OR (
-          knockout_started_event_id IS NULL
-          AND knockout_ended_event_id IS NOT NULL
-          AND ${eventId} <= knockout_ended_event_id
+          AND NOT (
+            knockout_started_event_id IS NOT NULL
+            AND ${eventId} >= knockout_started_event_id
+            AND (knockout_ended_event_id IS NULL OR ${eventId} <= knockout_ended_event_id)
+          )
         )
       )
     ),
@@ -1057,7 +1047,7 @@ export async function hasLiveH2HAverageScope(
     )
     SELECT EXISTS (
       SELECT 1
-      FROM active_phase_tournaments AS tournament
+      FROM active_group_phase_tournaments AS tournament
       LEFT JOIN event_schedule AS schedule
         ON schedule.tournament_id = tournament.tournament_id
       WHERE schedule.tournament_id IS NULL
