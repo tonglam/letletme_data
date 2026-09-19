@@ -1071,12 +1071,6 @@ export async function readLivePicksDurableFreshnessEvidence(
         entryId,
       })),
     );
-    const durableHeads = await entryEventPicksRepository.findPublicationHeadsByEventAndEntryIds(
-      season,
-      eventId,
-      expectedEntryIds,
-    );
-    const durableHeadsByEntryId = new Map(durableHeads.map((head) => [head.entryId, head]));
     // A complete fallback read is still a cache-repair signal. The freshness
     // gate must not wait for a Manager chip or a missing entry before the
     // scheduler reaches findMissingEntryLiveInputIds.
@@ -1084,7 +1078,7 @@ export async function readLivePicksDurableFreshnessEvidence(
       inputReads.size !== expectedEntryIds.length ||
       expectedEntryIds.some((entryId) => {
         const inputRead = inputReads.get(entryId);
-        const durableHead = durableHeadsByEntryId.get(entryId);
+        const durableHead = headsByEntryId.get(entryId);
         return (
           !inputRead ||
           inputRead.servedFrom !== 'REDIS_CURRENT' ||
