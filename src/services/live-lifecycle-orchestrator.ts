@@ -1250,18 +1250,20 @@ export async function findMissingEntryLiveInputIds(
     ]);
     if (input) {
       const durableHead = durableHeadsByEntryId.get(entryId);
+      const checkpointPending = input.publication.checkpointedAt === null || desired !== null;
       const redisBaseNeedsRepair =
-        input.servedFrom !== 'REDIS_CURRENT' ||
-        (durableHead !== undefined &&
-          (durableHead.state !== 'COMPLETE' ||
-            durableHead.rowCount !== 15 ||
-            durableHead.publicationId !== input.publication.publicationId ||
-            durableHead.generation !== input.publication.generation));
+        !checkpointPending &&
+        (input.servedFrom !== 'REDIS_CURRENT' ||
+          (durableHead !== undefined &&
+            (durableHead.state !== 'COMPLETE' ||
+              durableHead.rowCount !== 15 ||
+              durableHead.publicationId !== input.publication.publicationId ||
+              durableHead.generation !== input.publication.generation)));
       // A readable fallback/current pointer is not enough to prove that the
-      // input is the durable base. Force the live repair lane to re-enter
-      // persistEntryEventPicksResponse, where the validated PostgreSQL input
-      // can replace an orphaned or stale Redis candidate without a second
-      // source of truth.
+      // input is the durable base once its Redis-first checkpoint has settled.
+      // While desired/checkpointedAt is pending, let the checkpoint-only path
+      // advance that legitimate new publication before classifying its
+      // temporary identity gap as a cache rollback.
       if (redisBaseNeedsRepair) return entryId;
       const chip = input.input.picksBase.chip;
       const managerFact = input.input.picksBase.assistantManagerPoints;
