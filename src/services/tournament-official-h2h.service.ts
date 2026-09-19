@@ -145,6 +145,24 @@ export function resolveFinalizedThroughEventId(
   return finalizedThroughEventId > 0 ? finalizedThroughEventId : null;
 }
 
+export function isOfficialH2HObservationStaleForFinalization(
+  sourceCheckedAt: Date,
+  event: Readonly<{
+    finished: boolean;
+    dataChecked: boolean;
+    dataCheckedAt: Date | null;
+  }>,
+): boolean {
+  if (!event.finished || !event.dataChecked || event.dataCheckedAt === null) return false;
+  const sourceCheckedAtMs = sourceCheckedAt.getTime();
+  const finalizationAtMs = event.dataCheckedAt.getTime();
+  return (
+    Number.isFinite(sourceCheckedAtMs) &&
+    Number.isFinite(finalizationAtMs) &&
+    finalizationAtMs > sourceCheckedAtMs
+  );
+}
+
 export function resolveOfficialH2HSyncOptionsFromEventState(
   eventId: number,
   event: { finished: boolean; dataChecked: boolean; isCurrent: boolean } | null,
@@ -680,6 +698,27 @@ async function refreshOfficialH2HSyncOptionsAfterCoreRefresh(
     finalizedThroughEventId: refreshed.finalizedThroughEventId,
     provisionalEventId: refreshed.provisionalEventId,
   };
+}
+
+async function assertOfficialH2HSnapshotFreshAfterCoreRefresh(
+  season: FplSeasonRef,
+  sourceCheckedAt: Date,
+  snapshot: Pick<OfficialH2HSourceSnapshot, 'matches'>,
+): Promise<void> {
+  const snapshotEventIds = new Set(snapshot.matches.map((match) => match.event));
+  if (snapshotEventIds.size === 0) return;
+  const events = await eventRepository.findAll(season);
+  const staleEvent = events.find(
+    (event) =>
+      snapshotEventIds.has(event.id) &&
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, event),
+  );
+  if (staleEvent) {
+    throw new ValidationError(
+      `Official H2H snapshot started before GW${staleEvent.id} finalization.`,
+      'TOURNAMENT_OFFICIAL_H2H_FRESHNESS_FENCE',
+    );
+  }
 }
 
 export async function fetchOfficialH2HSourceSnapshot(
@@ -1404,6 +1443,10 @@ export async function syncOfficialH2HTournament(
     // absent from the old persisted schedule. Gate on the fetched candidate,
     // not on the old rows, before rebuilding any durable H2H result.
     await ensureFullRepairAverageFreshness(season, averageEventIds);
+    // The Average/core gate may finalize an event after this provider
+    // observation started. A response received later is still pre-final data;
+    // abort so the retry performs a fresh provider read after the boundary.
+    await assertOfficialH2HSnapshotFreshAfterCoreRefresh(season, sourceOrdering.date, snapshot);
     syncOptions = await refreshOfficialH2HSyncOptionsAfterCoreRefresh(
       season,
       reconcileEventId,

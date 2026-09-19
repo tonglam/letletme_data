@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   fetchOfficialH2HSourceSnapshot,
+  isOfficialH2HObservationStaleForFinalization,
   overlayOfficialH2HAverageScore,
   overlayOfficialH2HAverageScores,
   projectOfficialH2HEventLiveScores,
@@ -74,6 +75,31 @@ describe('Official H2H Live Points V2 projection', () => {
 
     expect(fetched.sourceCheckedAt).toBeDefined();
     expect(fetched.sourceCheckedAt!.getTime()).toBeLessThan(providerFinishedAt);
+  });
+
+  test('rejects an observation that started before finalization', () => {
+    const sourceCheckedAt = new Date('2026-08-24T00:00:00.000Z');
+    expect(
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, {
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: new Date('2026-08-24T00:00:00.001Z'),
+      }),
+    ).toBe(true);
+    expect(
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, {
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: new Date('2026-08-23T23:59:59.999Z'),
+      }),
+    ).toBe(false);
+    expect(
+      isOfficialH2HObservationStaleForFinalization(sourceCheckedAt, {
+        finished: false,
+        dataChecked: false,
+        dataCheckedAt: null,
+      }),
+    ).toBe(false);
   });
 
   test('overlays only complete same-event V2 scores', () => {
