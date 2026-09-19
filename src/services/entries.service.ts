@@ -163,6 +163,7 @@ function rawPicksFromEntryLiveInput(input: EntryLiveInputV2): RawFPLEntryEventPi
 type PreservedEntryPicksBase = Readonly<{
   raw: RawFPLEntryEventPicksResponse;
   input: EntryLiveInputV2;
+  finalizationCorrectionBoundary?: string;
 }>;
 
 /**
@@ -175,16 +176,19 @@ async function readDurablePreservedEntryPicksBase(
   season: FplSeasonRef,
   entryId: number,
   eventId: number,
-): Promise<PreservedEntryPicksBase> {
+): Promise<PreservedEntryPicksBase | null> {
   const head = await entryEventPicksRepository.findHead(season, entryId, eventId);
+  // A first live-picks canary has no durable head yet.  Its validated provider
+  // response is the only available deadline base and must be admitted instead
+  // of being mistaken for a cache-repair failure.
+  if (!head) return null;
   const rows = await entryEventPicksRepository.findLiveInputPickRowsByEventAndEntryIds(
     season,
     eventId,
     [entryId],
   );
-  const input = head?.inputPayload;
+  const input = head.inputPayload;
   if (
-    !head ||
     head.state !== 'COMPLETE' ||
     head.rowCount !== 15 ||
     head.entryId !== entryId ||
@@ -203,7 +207,16 @@ async function readDurablePreservedEntryPicksBase(
       `DATA_INCOMPLETE:LIVE_PICKS_DURABLE_BASE_UNAVAILABLE:${season.seasonCode}:${eventId}:${entryId}`,
     );
   }
-  return { raw: rawPicksFromEntryLiveInput(input), input };
+  return {
+    raw: rawPicksFromEntryLiveInput(input),
+    input,
+    ...(input.finalResult !== null
+      ? {
+          finalizationCorrectionBoundary:
+            head.sourceCheckedAtExact ?? head.sourceCheckedAt.toISOString(),
+        }
+      : {}),
+  };
 }
 
 /**
@@ -389,6 +402,9 @@ export async function persistEntryEventPicksResponse(
   const preservedPicksBase =
     options?.preservedPicksBase ??
     (existing ? rawPicksFromEntryLiveInput(existing.input) : durablePreservedBase?.raw);
+  const preservedFinalizationCorrectionBoundary = existing?.input.finalResult
+    ? existing.publication.sourceCheckedAt
+    : durablePreservedBase?.finalizationCorrectionBoundary;
   let assistantManagerPoints: AssistantManagerPointsFact | undefined;
   const managerChip = picks.active_chip === 'manager' || picks.active_chip === 'MANAGER';
   if (managerChip) {
@@ -458,18 +474,27 @@ export async function persistEntryEventPicksResponse(
       assistantManagerPoints = fact;
     }
   }
-  const baseInput = entryLiveInputFromFplPicks(
+  const rebuiltBaseInput = entryLiveInputFromFplPicks(
     season,
     eventId,
     entryId,
     preservedPicksBase ?? picks,
     sourceCheckedAt,
-    assistantManagerPoints,
+    assistantManagerPoints ?? preservedInput?.picksBase.assistantManagerPoints,
   );
+  // A durable FINAL input is already a complete semantic publication.  Reuse
+  // its final result, official adjustment, and previous totals while replacing
+  // only the base envelope needed for a verified manager-fact repair.
+  const baseInput =
+    options?.preserveExistingPicksBase === true &&
+    preservedInput !== null &&
+    preservedInput.finalResult !== null
+      ? { ...preservedInput, picksBase: rebuiltBaseInput.picksBase }
+      : rebuiltBaseInput;
   // Previous totals are independent immutable evidence. Read them only for a
   // first publication; repeated source probes reuse the published value and
   // do not add a PostgreSQL read to the live provider lane.
-  let previousTotals = existing?.input.previousTotals ?? null;
+  let previousTotals = preservedInput?.previousTotals ?? null;
   let firstScoringEvent = 1;
   if (eventId > 1) {
     try {
@@ -644,6 +669,10 @@ export async function persistEntryEventPicksResponse(
       'LIVE_V2_ENTRY_GENERATION_FLOOR_UNAVAILABLE',
     );
   }
+  const finalizationCorrectionBoundary =
+    input.finalResult !== null
+      ? (options?.historicalFinalBoundary ?? preservedFinalizationCorrectionBoundary)
+      : undefined;
   const publication = await publishEntryLiveInputV2({
     season: season.seasonCode,
     eventId,
@@ -652,6 +681,7 @@ export async function persistEntryEventPicksResponse(
     sourceCheckedAt,
     preserveSourceCheckedAtPrecision: true,
     generationFloor,
+    ...(finalizationCorrectionBoundary ? { finalizationCorrectionBoundary } : {}),
   });
   if (!publication.published) {
     // A FINAL publication is fenced in Redis. Never checkpoint the provisional
