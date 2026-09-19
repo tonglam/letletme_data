@@ -123,14 +123,20 @@ async function hasOfficialH2HAverageMatch(
       tournamentId,
       eventId,
     );
-    return rows.some(
-      (row) =>
-        row.officialMatchId !== null &&
-        row.isBye !== true &&
-        (row.homeIsAverage === true || row.awayIsAverage === true),
-    );
+    return {
+      hasSchedule: rows.length > 0,
+      hasAverage: rows.some(
+        (row) =>
+          row.officialMatchId !== null &&
+          row.isBye !== true &&
+          (row.homeIsAverage === true || row.awayIsAverage === true),
+      ),
+    };
   });
-  return results.some(Boolean);
+  // No row for a selected official tournament is incomplete schedule evidence:
+  // the first provider sync may only materialize the Average side after this
+  // probe. Fail closed and refresh core before allowing final H2H persistence.
+  return results.some((result) => result.hasAverage || !result.hasSchedule);
 }
 
 export function getOfficialH2HRecoveryTargets(error: unknown): readonly number[] {

@@ -1319,13 +1319,31 @@ export async function findMissingEntryLiveInputIds(
         durableHead.rowCount !== 15 ||
         durableHead.publicationId !== input.publication.publicationId ||
         durableHead.generation !== input.publication.generation;
-      const redisBaseNeedsRepair =
-        !checkpointPending && (input.servedFrom !== 'REDIS_CURRENT' || durableHeadNeedsRepair);
+      const redisBaseNeedsRepair = input.servedFrom !== 'REDIS_CURRENT' || durableHeadNeedsRepair;
       // A readable fallback/current pointer is not enough to prove that the
       // input is the durable base once its Redis-first checkpoint has settled.
       // While desired/checkpointedAt is pending, let the checkpoint-only path
       // advance that legitimate new publication before classifying its
       // temporary identity gap as a cache rollback.
+      if (checkpointPending) {
+        // PostgreSQL may already contain the exact head while Redis still
+        // carries an unfinished checkpoint marker. Treat both marker states
+        // as repair evidence; otherwise a crash between the SQL commit and
+        // marker cleanup makes the cohort look complete forever.
+        try {
+          if (!desired && input.publication.checkpointedAt === null) {
+            await setEntryCheckpointDesiredV2(input.publication);
+          }
+          const checkpointResult = await checkpointEntryLiveInputV2(season, eventId, entryId);
+          if (checkpointResult === 'checkpointed') {
+            await markLivePicksEntryComplete(season.seasonCode, eventId, entryId);
+            return null;
+          }
+        } catch (error) {
+          logError('Entry live V2 pending checkpoint repair failed', error, { entryId, eventId });
+        }
+        return entryId;
+      }
       if (redisBaseNeedsRepair) {
         // A checkpointed current input with a missing or mismatched durable
         // head must not enter the provider lane: an unchanged provider

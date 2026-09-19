@@ -295,6 +295,21 @@ export async function ensureLiveAverageReadyForPublication(
       trigger: 'queue',
       sourceRunId: randomUUID(),
     });
+    if (finalRefresh) {
+      // Core refresh can change an event from finalized back to provisional
+      // while the provider is still settling. The boundary captured before
+      // the refresh is no longer evidence for the publication we are about
+      // to mark final; re-read it before creating the final marker.
+      const refreshedFinalizationAt = await eventRepository.findDataCheckedAtExact(season, eventId);
+      if (refreshedFinalizationAt !== finalizationAt) {
+        return {
+          ready: false,
+          refreshed: true,
+          reason: 'finalization-boundary-unavailable',
+          sourceCheckedAt: null,
+        };
+      }
+    }
     const afterRefresh = await readFreshCoreSource(season.seasonCode, new Date());
     if (!afterRefresh.fresh) {
       return {
