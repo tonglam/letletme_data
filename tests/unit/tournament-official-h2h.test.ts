@@ -95,6 +95,36 @@ describe('Official H2H Live Points V2 projection', () => {
     });
   });
 
+  test('continues projecting real-sided knockout matches', () => {
+    const knockout = snapshot();
+    knockout.matches[0] = {
+      ...knockout.matches[0]!,
+      entry_1_points: 10,
+      entry_2_points: 10,
+      is_knockout: true,
+      knockout_name: 'Final',
+      tiebreak: 'penalties',
+    };
+
+    const projected = projectOfficialH2HEventLiveScores(
+      knockout,
+      1,
+      new Set([109967, 34299]),
+      batch(
+        new Map([
+          [109967, { eventPoints: 30, netEventPoints: 30, transferCost: 0 }],
+          [34299, { eventPoints: 30, netEventPoints: 30, transferCost: 0 }],
+        ]),
+      ),
+    );
+
+    expect(projected?.matches[0]).toMatchObject({
+      entry_1_points: 30,
+      entry_2_points: 30,
+      winner: 109967,
+    });
+  });
+
   test('fails closed for an incomplete roster or all-zero placeholder', () => {
     expect(
       projectOfficialH2HEventLiveScores(

@@ -337,7 +337,9 @@ export function suppressOfficialH2HActiveScores(
   return {
     ...snapshot,
     matches: snapshot.matches.map((match) =>
-      match.event !== eventId || match.is_bye === true || isOfficialKnockoutMatch(match)
+      match.event !== eventId ||
+      match.is_bye === true ||
+      isOfficialKnockoutAveragePlaceholder(match)
         ? match
         : {
             ...match,
@@ -383,7 +385,7 @@ export function projectOfficialH2HEventLiveScores(
       (match) =>
         match.event === eventId &&
         match.is_bye !== true &&
-        !isOfficialKnockoutMatch(match) &&
+        !isOfficialKnockoutAveragePlaceholder(match) &&
         ((match.entry_1_entry === null && canonicalAverageScore === null) ||
           (match.entry_2_entry === null && canonicalAverageScore === null)),
     )
@@ -394,7 +396,11 @@ export function projectOfficialH2HEventLiveScores(
   return {
     ...snapshot,
     matches: snapshot.matches.map((match) => {
-      if (match.event !== eventId || match.is_bye === true || isOfficialKnockoutMatch(match)) {
+      if (
+        match.event !== eventId ||
+        match.is_bye === true ||
+        isOfficialKnockoutAveragePlaceholder(match)
+      ) {
         return match;
       }
       const homePoints =
@@ -409,7 +415,12 @@ export function projectOfficialH2HEventLiveScores(
         homePoints === null || awayPoints === null
           ? null
           : homePoints === awayPoints
-            ? null
+            ? isOfficialKnockoutMatch(match) &&
+              match.tiebreak !== null &&
+              match.tiebreak !== undefined &&
+              (match.winner === match.entry_1_entry || match.winner === match.entry_2_entry)
+              ? match.winner
+              : null
             : homePoints > awayPoints
               ? match.entry_1_entry
               : match.entry_2_entry;
@@ -438,7 +449,7 @@ export function overlayOfficialH2HAverageScore(
       if (
         match.event !== eventId ||
         match.is_bye === true ||
-        isOfficialKnockoutMatch(match) ||
+        isOfficialKnockoutAveragePlaceholder(match) ||
         (match.entry_1_entry !== null && match.entry_2_entry !== null)
       ) {
         return match;
@@ -544,6 +555,12 @@ function officialKnockoutName(match: RawFPLLeagueH2HMatch): string | null {
 
 function isOfficialKnockoutMatch(match: RawFPLLeagueH2HMatch): boolean {
   return officialKnockoutName(match) !== null || match.is_knockout === true;
+}
+
+function isOfficialKnockoutAveragePlaceholder(match: RawFPLLeagueH2HMatch): boolean {
+  return (
+    isOfficialKnockoutMatch(match) && (match.entry_1_entry === null || match.entry_2_entry === null)
+  );
 }
 
 export async function fetchOfficialH2HSourceSnapshot(
@@ -1265,7 +1282,7 @@ export async function syncOfficialH2HTournament(
         .filter(
           (match) =>
             match.is_bye !== true &&
-            !isOfficialKnockoutMatch(match) &&
+            !isOfficialKnockoutAveragePlaceholder(match) &&
             (match.entry_1_entry === null || match.entry_2_entry === null),
         )
         .map((match) => match.event),
