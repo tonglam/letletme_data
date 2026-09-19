@@ -35,6 +35,29 @@ describe('entry event picks repository', () => {
     expect(projection?.entryId).toBe(entryEventPickHeadsInCompetition.entryId);
   });
 
+  test('findPublicationHeadsByEventAndEntryIds keeps the reconciliation projection lean', async () => {
+    const row = {
+      entryId: 777,
+      publicationId: '00000000-0000-4000-8000-000000000777',
+      generation: 5,
+      rowCount: 15,
+      state: 'COMPLETE',
+    };
+    const where = mock(async () => [row]);
+    const from = mock(() => ({ where }));
+    const select = mock((_projection: Record<string, unknown>) => ({ from }));
+    const db = { select } as unknown as DbHandle;
+
+    const repository = createEntryEventPicksRepository(db);
+    await expect(
+      repository.findPublicationHeadsByEventAndEntryIds(TEST_SEASON, 2, [777]),
+    ).resolves.toEqual([row]);
+
+    const projection = select.mock.calls[0]?.[0];
+    expect(projection?.entryId).toBe(entryEventPickHeadsInCompetition.entryId);
+    expect(projection).not.toHaveProperty('inputPayload');
+  });
+
   test('does not rewrite an existing head for an identical replay', async () => {
     const syncedAt = new Date('2026-09-04T08:00:00.000Z');
     const existing = Array.from({ length: 15 }, (_, index) => ({

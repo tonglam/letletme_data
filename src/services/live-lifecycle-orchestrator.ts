@@ -26,7 +26,10 @@ import { checkpointEntryLiveInputV2, persistEntryEventPicksResponse } from './en
 import { enqueueEntryPicksSyncJobWithOutcome } from '../jobs/entry-sync-enqueue';
 import { enqueueLiveActiveSnapshot, enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { createEntryInfoRepository, entryInfoRepository } from '../repositories/entry-infos';
-import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
+import {
+  createEntryEventPicksRepository,
+  entryEventPicksRepository,
+} from '../repositories/entry-event-picks';
 import { entriesInCompetition } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
@@ -1229,6 +1232,12 @@ export async function findMissingEntryLiveInputIds(
     season: season.seasonCode,
     eventId,
   }).catch(() => null);
+  const durableHeads = await entryEventPicksRepository.findPublicationHeadsByEventAndEntryIds(
+    season,
+    eventId,
+    entryIds,
+  );
+  const durableHeadsByEntryId = new Map(durableHeads.map((head) => [head.entryId, head]));
   const results = await mapWithConcurrency(entryIds, 32, async (entryId) => {
     const scope = {
       season: season.seasonCode,
@@ -1240,6 +1249,20 @@ export async function findMissingEntryLiveInputIds(
       readEntryCheckpointDesiredV2(scope),
     ]);
     if (input) {
+      const durableHead = durableHeadsByEntryId.get(entryId);
+      const redisBaseNeedsRepair =
+        input.servedFrom !== 'REDIS_CURRENT' ||
+        (durableHead !== undefined &&
+          (durableHead.state !== 'COMPLETE' ||
+            durableHead.rowCount !== 15 ||
+            durableHead.publicationId !== input.publication.publicationId ||
+            durableHead.generation !== input.publication.generation));
+      // A readable fallback/current pointer is not enough to prove that the
+      // input is the durable base. Force the live repair lane to re-enter
+      // persistEntryEventPicksResponse, where the validated PostgreSQL input
+      // can replace an orphaned or stale Redis candidate without a second
+      // source of truth.
+      if (redisBaseNeedsRepair) return entryId;
       const chip = input.input.picksBase.chip;
       const managerFact = input.input.picksBase.assistantManagerPoints;
       const managerObservationChanged =
