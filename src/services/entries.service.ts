@@ -250,9 +250,18 @@ export async function checkpointEntryLiveInputV2(
   // Treat that marker as an idempotent success instead of re-writing every
   // already durable entry (or reporting a false missing input).
   if (!desired && candidate.publication.checkpointedAt !== null) {
-    return (await isEntryPublicationActiveAndCheckpointedV2(candidate.publication, redisClient))
-      ? 'checkpointed'
-      : 'missing';
+    const durableHead = await entryEventPicksRepository.findHead(season, entryId, eventId);
+    const durableHeadMatchesCandidate =
+      durableHead !== null &&
+      durableHead.rowCount === 15 &&
+      durableHead.state === 'COMPLETE' &&
+      durableHead.publicationId === candidate.publication.publicationId &&
+      durableHead.generation === candidate.publication.generation;
+    if (durableHeadMatchesCandidate) {
+      return (await isEntryPublicationActiveAndCheckpointedV2(candidate.publication, redisClient))
+        ? 'checkpointed'
+        : 'missing';
+    }
   }
   // A provider write can publish before its asynchronous durable checkpoint
   // obligation is visible to this worker. Re-create the obligation from the

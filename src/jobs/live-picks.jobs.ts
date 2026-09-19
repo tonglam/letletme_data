@@ -90,6 +90,7 @@ export async function enqueueLivePicksRefresh(
 
 export async function runLivePicksRefreshJob(
   job: LivePicksRefreshJobData,
+  options: Readonly<{ forceLeagueRepair?: boolean }> = {},
 ): Promise<LivePicksRefreshResult> {
   try {
     const result = await runPicksProbeAndSync(
@@ -101,6 +102,7 @@ export async function runLivePicksRefreshJob(
         obligationGeneration: job.obligationGeneration,
         freshnessWindowId: job.freshnessWindowId,
         deadlineAt: job.deadlineAt ? new Date(job.deadlineAt) : undefined,
+        forceLeagueRepair: options.forceLeagueRepair,
       },
     );
     if (!result.sourceReady) {

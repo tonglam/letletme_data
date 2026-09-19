@@ -269,6 +269,7 @@ describe('live lifecycle decisions', () => {
       'src/services/tournament-battle-race-results.service.ts',
       'utf8',
     );
+    const entryServiceSource = readFileSync('src/services/entries.service.ts', 'utf8');
     const entrySyncWorkerSource = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
     expect(liveWorkerSource).toContain('hasLiveH2HAverageScope(');
     expect(leagueSource).toContain('battle.is_bye IS NOT TRUE');
@@ -279,8 +280,12 @@ describe('live lifecycle decisions', () => {
     expect(tournamentSyncSource).toContain('requiresAverage');
     expect(entrySyncWorkerSource).toContain('markLivePicksLeagueRepairRequired');
     expect(entrySyncWorkerSource).toContain('isLivePicksLeagueRepairRequired');
+    expect(entrySyncWorkerSource).toContain('forceLeagueRepair: job.attemptsMade > 0');
+    expect(entryServiceSource).toContain('const durableHeadMatchesCandidate');
+    expect(lifecycleSource).toContain('!durableHead ||');
+    expect(lifecycleSource).toContain('!state.leagueRepairRequired');
     expect(lifecycleSource).toContain(
-      'now.getTime() < state.nextProbeAt && !state.leagueRepairRequired',
+      'obligation.forceLeagueRepair === true && state.canarySucceeded',
     );
   });
 

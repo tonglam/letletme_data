@@ -618,7 +618,12 @@ export function createEntrySyncWorker(
           eventId: job.data.eventId,
           attempt: job.attemptsMade,
         },
-        () => runLivePicksRefreshJob(job.data as unknown as LivePicksRefreshJobData),
+        () =>
+          runLivePicksRefreshJob(job.data as unknown as LivePicksRefreshJobData, {
+            // A retry after a completed picks scan must revisit league repair
+            // even when the Redis marker could not be written during an outage.
+            forceLeagueRepair: job.attemptsMade > 0,
+          }),
       );
       const fence = inspectSchedulerObligationFence(job.data);
       if (result.status === 'waiting-dependencies') {
@@ -1153,7 +1158,7 @@ export function createEntrySyncWorker(
             !livePicksCoverageComplete && job.attemptsMade > 0
               ? await isLivePicksLeagueRepairRequired(season.seasonCode, targetEventId)
               : false;
-          if (livePicksCoverageComplete || leagueRepairRequired) {
+          if (livePicksCoverageComplete || leagueRepairRequired || job.attemptsMade > 0) {
             await republishLiveLeagueScopesOrThrow(season, targetEventId);
           }
         }

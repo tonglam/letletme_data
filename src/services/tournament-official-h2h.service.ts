@@ -459,6 +459,17 @@ export function overlayOfficialH2HAverageScore(
   };
 }
 
+export function overlayOfficialH2HAverageScores(
+  snapshot: OfficialH2HSourceSnapshot,
+  averageEntryScores: ReadonlyMap<number, number | null>,
+): OfficialH2HSourceSnapshot {
+  let overlaid = snapshot;
+  for (const [eventId, averageEntryScore] of averageEntryScores) {
+    overlaid = overlayOfficialH2HAverageScore(overlaid, eventId, averageEntryScore);
+  }
+  return overlaid;
+}
+
 function deriveOfficialH2HScoreOutcome(
   match: RawFPLLeagueH2HMatch,
   entry1Points: number | null,
@@ -1249,6 +1260,25 @@ export async function syncOfficialH2HTournament(
   const averageEntryScore = averageScoreEvent?.averageEntryScore ?? null;
   if (averageScoreEventId !== null) {
     snapshot = overlayOfficialH2HAverageScore(snapshot, averageScoreEventId, averageEntryScore);
+  } else {
+    const averageEventIds = new Set(
+      snapshot.matches
+        .filter(
+          (match) =>
+            match.is_bye !== true && (match.entry_1_entry === null || match.entry_2_entry === null),
+        )
+        .map((match) => match.event),
+    );
+    if (averageEventIds.size > 0) {
+      const events = await eventRepository.findAll(season);
+      const averageScores = new Map(
+        [...averageEventIds].map((eventId) => [
+          eventId,
+          events.find((event) => event.id === eventId)?.averageEntryScore ?? null,
+        ]),
+      );
+      snapshot = overlayOfficialH2HAverageScores(snapshot, averageScores);
+    }
   }
   const entryIds = await entryIdsPromise;
   const entryIdSet = new Set(entryIds);

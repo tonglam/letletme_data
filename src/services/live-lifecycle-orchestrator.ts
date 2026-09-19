@@ -257,6 +257,7 @@ async function writePicksCoordinatorState(
   seasonCode: string,
   eventId: number,
   state: SharedPicksCoordinatorState,
+  options: Readonly<{ throwOnError?: boolean }> = {},
 ): Promise<void> {
   try {
     const redis = await redisSingleton.getClient();
@@ -268,6 +269,7 @@ async function writePicksCoordinatorState(
     );
   } catch (error) {
     logError('Failed to write shared live picks coordinator state', error, { seasonCode, eventId });
+    if (options.throwOnError === true) throw error;
   }
 }
 
@@ -630,14 +632,19 @@ export async function markLivePicksLeagueRepairRequired(
   eventId: number,
 ): Promise<void> {
   const state = await readPicksCoordinatorState(seasonCode, eventId);
-  await writePicksCoordinatorState(seasonCode, eventId, {
-    ...state,
-    // A league repair is independent of the provider probe cadence. Make the
-    // next Bull retry eligible immediately instead of letting it settle an
-    // obligation during the ordinary picks backoff window.
-    nextProbeAt: 0,
-    leagueRepairRequired: true,
-  });
+  await writePicksCoordinatorState(
+    seasonCode,
+    eventId,
+    {
+      ...state,
+      // A league repair is independent of the provider probe cadence. Make the
+      // next Bull retry eligible immediately instead of letting it settle an
+      // obligation during the ordinary picks backoff window.
+      nextProbeAt: 0,
+      leagueRepairRequired: true,
+    },
+    { throwOnError: true },
+  );
 }
 
 export async function clearLivePicksLeagueRepairRequired(
@@ -1309,11 +1316,11 @@ export async function findMissingEntryLiveInputIds(
       const redisBaseNeedsRepair =
         !checkpointPending &&
         (input.servedFrom !== 'REDIS_CURRENT' ||
-          (durableHead !== undefined &&
-            (durableHead.state !== 'COMPLETE' ||
-              durableHead.rowCount !== 15 ||
-              durableHead.publicationId !== input.publication.publicationId ||
-              durableHead.generation !== input.publication.generation)));
+          !durableHead ||
+          durableHead.state !== 'COMPLETE' ||
+          durableHead.rowCount !== 15 ||
+          durableHead.publicationId !== input.publication.publicationId ||
+          durableHead.generation !== input.publication.generation);
       // A readable fallback/current pointer is not enough to prove that the
       // input is the durable base once its Redis-first checkpoint has settled.
       // While desired/checkpointedAt is pending, let the checkpoint-only path
@@ -1498,6 +1505,7 @@ export async function runPicksProbeAndSync(
     obligationGeneration?: number;
     freshnessWindowId?: number;
     deadlineAt?: Date | null;
+    forceLeagueRepair?: boolean;
   }> = {},
 ): Promise<{
   canaryCount: number;
@@ -1593,7 +1601,11 @@ export async function runPicksProbeAndSync(
       scanComplete: false,
     };
   }
-  if (now.getTime() < state.nextProbeAt && !state.leagueRepairRequired) {
+  if (
+    now.getTime() < state.nextProbeAt &&
+    !state.leagueRepairRequired &&
+    !(obligation.forceLeagueRepair === true && state.canarySucceeded)
+  ) {
     // The scheduler can resolve an obligation just before the coordinator
     // writes its next-probe fence. A fenced root whose source canary has
     // already been accepted is a successful no-op; an unfenced freshness

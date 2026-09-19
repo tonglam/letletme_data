@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   fetchOfficialH2HSourceSnapshot,
   overlayOfficialH2HAverageScore,
+  overlayOfficialH2HAverageScores,
   projectOfficialH2HEventLiveScores,
   type OfficialH2HSourceSnapshot,
 } from '../../src/services/tournament-official-h2h.service';
@@ -168,6 +169,38 @@ describe('Official H2H Live Points V2 projection', () => {
       entry_2_draw: 1,
       entry_1_total: 1,
       entry_2_total: 1,
+      winner: null,
+    });
+  });
+
+  test('overlays canonical Average Team scores across an eventless full repair', () => {
+    const full = snapshot(null);
+    full.matches.push({
+      id: 2071744,
+      event: 2,
+      entry_1_entry: null,
+      entry_1_points: 99,
+      entry_2_entry: 34299,
+      entry_2_points: 12,
+      winner: 34299,
+      knockout_name: null,
+      sourceOrder: 1,
+      is_bye: false,
+    });
+
+    const repaired = overlayOfficialH2HAverageScores(
+      full,
+      new Map([
+        [1, 30],
+        [2, 45],
+      ]),
+    );
+
+    expect(repaired.matches[0]).toMatchObject({ entry_2_points: 30, winner: null });
+    expect(repaired.matches[1]).toMatchObject({
+      entry_1_points: 45,
+      entry_1_win: 1,
+      entry_2_loss: 1,
       winner: null,
     });
   });
