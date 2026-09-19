@@ -1522,6 +1522,32 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
   return { status: 'published' };
 }
 
+async function runDirectPicksProbeAndFinalize(
+  season: FplSeasonRef,
+  eventId: number,
+  now: Date,
+): Promise<Awaited<ReturnType<typeof runPicksProbeAndSync>>> {
+  const result = await runPicksProbeAndSync(season, eventId, now);
+  if (isStandaloneSchedulerEnabled() || !result.scanComplete) return result;
+
+  try {
+    const finalizer = await republishLiveLeagueScopesAfterPicksRepair(season, eventId);
+    if (finalizer.status === 'waiting') {
+      await markLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+      logInfo('Direct live picks repair completed; league finalizer is waiting', {
+        eventId,
+        reason: finalizer.reason ?? 'UNKNOWN',
+      });
+    } else {
+      await clearLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+    }
+  } catch (error) {
+    await markLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+    throw error;
+  }
+  return result;
+}
+
 export async function findPendingEntryLiveCheckpointIds(
   season: FplSeasonRef,
   eventId: number,
@@ -2108,7 +2134,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
   // probes. Once the live publication is active, complete picks are immutable
   // base input; new entries arrive through their own onboarding/repair job.
   if (decision.shouldProbePicks) {
-    await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {
+    await runDirectPicksProbeAndFinalize(season, currentEvent.id, now).catch((error) => {
       logError('Live picks probe/sync failed', error, {
         eventId: currentEvent.id,
         state: decision.state,
@@ -2141,7 +2167,7 @@ export async function runLiveLifecycle(now = new Date()): Promise<LiveLifecycleD
         repairRequired,
       )
     ) {
-      await runPicksProbeAndSync(season, currentEvent.id, now).catch((error) => {
+      await runDirectPicksProbeAndFinalize(season, currentEvent.id, now).catch((error) => {
         logError('Direct live picks repair failed', error, {
           eventId: currentEvent.id,
           state: decision.state,

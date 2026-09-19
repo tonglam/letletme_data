@@ -993,58 +993,82 @@ export async function hasLiveH2HAverageScope(
   databaseReadClient?: postgres.Sql,
 ): Promise<boolean> {
   const client = databaseReadClient ?? (await getDbClient());
-  const rows = await client<
-    { hasAverage: boolean; hasSchedule: boolean; hasTournament: boolean }[]
-  >`
-    SELECT
-      EXISTS (
-        SELECT 1
-        FROM competition.tournaments AS tournament
-        WHERE tournament.season_id = ${season.seasonId}
-          AND tournament.state = 'active'
-          AND tournament.setup_status = 'ready'
-          AND tournament.league_type = 'h2h'
-          AND tournament.roster_mode = 'official_sync'
-          AND tournament.group_mode = 'battle_races'
-      ) AS "hasTournament",
-      EXISTS (
-        SELECT 1
-        FROM competition.tournaments AS tournament
-        INNER JOIN competition.tournament_battle_group_results AS battle
-          ON battle.season_id = tournament.season_id
-         AND battle.tournament_id = tournament.tournament_id
-        WHERE tournament.season_id = ${season.seasonId}
-          AND tournament.state = 'active'
-          AND tournament.setup_status = 'ready'
-          AND tournament.league_type = 'h2h'
-          AND tournament.roster_mode = 'official_sync'
-          AND tournament.group_mode = 'battle_races'
-          AND battle.event_id = ${eventId}
-      ) AS "hasSchedule",
-      EXISTS (
-        SELECT 1
-        FROM competition.tournaments AS tournament
-        INNER JOIN competition.tournament_battle_group_results AS battle
-          ON battle.season_id = tournament.season_id
-         AND battle.tournament_id = tournament.tournament_id
-        WHERE tournament.season_id = ${season.seasonId}
-          AND tournament.state = 'active'
-          AND tournament.setup_status = 'ready'
-          AND tournament.league_type = 'h2h'
-          AND tournament.roster_mode = 'official_sync'
-          AND tournament.group_mode = 'battle_races'
-          AND battle.event_id = ${eventId}
-          AND battle.official_match_id IS NOT NULL
+  const rows = await client<{ requiresAverage: boolean }[]>`
+    WITH active_tournaments AS (
+      SELECT
+        tournament_id,
+        group_started_event_id,
+        group_ended_event_id,
+        knockout_started_event_id,
+        knockout_ended_event_id
+      FROM competition.tournaments
+      WHERE season_id = ${season.seasonId}
+        AND state = 'active'
+        AND setup_status = 'ready'
+        AND league_type = 'h2h'
+        AND roster_mode = 'official_sync'
+        AND group_mode = 'battle_races'
+    ),
+    active_phase_tournaments AS (
+      SELECT tournament_id
+      FROM active_tournaments
+      WHERE (
+        (
+          group_started_event_id IS NULL
+          AND group_ended_event_id IS NULL
+          AND knockout_started_event_id IS NULL
+          AND knockout_ended_event_id IS NULL
+        )
+        OR (
+          group_started_event_id IS NOT NULL
+          AND ${eventId} >= group_started_event_id
+          AND (group_ended_event_id IS NULL OR ${eventId} <= group_ended_event_id)
+        )
+        OR (
+          group_started_event_id IS NULL
+          AND group_ended_event_id IS NOT NULL
+          AND ${eventId} <= group_ended_event_id
+        )
+        OR (
+          knockout_started_event_id IS NOT NULL
+          AND ${eventId} >= knockout_started_event_id
+          AND (knockout_ended_event_id IS NULL OR ${eventId} <= knockout_ended_event_id)
+        )
+        OR (
+          knockout_started_event_id IS NULL
+          AND knockout_ended_event_id IS NOT NULL
+          AND ${eventId} <= knockout_ended_event_id
+        )
+      )
+    ),
+    event_schedule AS (
+      SELECT
+        battle.tournament_id,
+        BOOL_OR(TRUE) AS has_schedule,
+        BOOL_OR(
+          battle.official_match_id IS NOT NULL
           AND battle.is_bye IS NOT TRUE
           AND (battle.home_is_average IS TRUE OR battle.away_is_average IS TRUE)
-      ) AS "hasAverage"
+        ) AS has_average
+      FROM competition.tournament_battle_group_results AS battle
+      WHERE battle.season_id = ${season.seasonId}
+        AND battle.event_id = ${eventId}
+      GROUP BY battle.tournament_id
+    )
+    SELECT EXISTS (
+      SELECT 1
+      FROM active_phase_tournaments AS tournament
+      LEFT JOIN event_schedule AS schedule
+        ON schedule.tournament_id = tournament.tournament_id
+      WHERE schedule.tournament_id IS NULL
+         OR COALESCE(schedule.has_average, FALSE)
+    ) AS "requiresAverage"
   `;
-  const row = rows[0];
-  // An official H2H tournament with no materialized schedule for this event
-  // is an unknown schedule, not proof that Average is unused. The provider
-  // sync may fetch and persist the first schedule later in the same operation;
-  // keep the canonical Average refresh gate closed until that evidence exists.
-  return row?.hasAverage === true || (row?.hasTournament === true && row.hasSchedule !== true);
+  // Evaluate every active tournament independently. One tournament having a
+  // schedule must not hide another active tournament whose schedule is still
+  // unmaterialized, and a tournament outside its configured phase must not
+  // force an unrelated Average refresh.
+  return rows[0]?.requiresAverage === true;
 }
 
 function h2hScopeKeyPrefix(season: string, eventId: number): string {
