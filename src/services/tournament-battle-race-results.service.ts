@@ -72,16 +72,20 @@ async function getOfficialH2HSyncOptions(
   );
 }
 
-function isFinalOfficialH2HSync(
+function officialH2HAverageLifecycleState(
   eventId: number,
   options: Readonly<Pick<OfficialH2HSyncOptions, 'provisionalEventId' | 'finalizedThroughEventId'>>,
-): boolean {
-  return (
+): 'FINALIZED' | 'LIVE_ACTIVE' | null {
+  if (
     options.provisionalEventId === null &&
     options.finalizedThroughEventId !== null &&
     options.finalizedThroughEventId !== undefined &&
     options.finalizedThroughEventId >= eventId
-  );
+  ) {
+    return 'FINALIZED';
+  }
+  if (options.provisionalEventId === eventId) return 'LIVE_ACTIVE';
+  return null;
 }
 
 async function ensureOfficialH2HAverageReady(
@@ -89,8 +93,9 @@ async function ensureOfficialH2HAverageReady(
   eventId: number,
   options: OfficialH2HSyncOptions,
 ): Promise<void> {
-  if (!isFinalOfficialH2HSync(eventId, options)) return;
-  const averageReady = await ensureLiveAverageReadyForPublication(season, eventId, 'FINALIZED');
+  const lifecycleState = officialH2HAverageLifecycleState(eventId, options);
+  if (lifecycleState === null) return;
+  const averageReady = await ensureLiveAverageReadyForPublication(season, eventId, lifecycleState);
   if (!averageReady.ready) {
     throw new IncompleteDataSyncError(
       'Official H2H waits for the canonical Average Team publication',

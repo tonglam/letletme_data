@@ -905,6 +905,64 @@ describe('Live League V2 Classic finalized roster successor fence', () => {
 });
 
 describe('Live League V2 Classic final-retention checkpoint recovery', () => {
+  test('retains a board until Assistant Manager facts match the global revision', () => {
+    const fixture = classicRetentionFixture();
+    const current = fixture.inputs.values().next().value as EntryLivePublicationRead | undefined;
+    if (!current) throw new Error('Classic retention fixture is missing its input');
+    const baseInput = current.input;
+    const managerInput = {
+      ...baseInput,
+      picksBase: {
+        ...baseInput.picksBase,
+        chip: 'manager' as const,
+        assistantManagerPoints: {
+          points: 1,
+          livePublicationId: '00000000-0000-4000-8000-000000000099',
+          liveGeneration: fixture.global.generation,
+          liveScoreCoreRevision: fixture.global.revisions.scoreCore.revision,
+        },
+      },
+    };
+    const managerInputs = new Map([
+      [baseInput.entryId, { ...current, input: managerInput } as EntryLivePublicationRead],
+    ]);
+    expect(
+      buildClassicPublicationContentV2(
+        scope.eventId,
+        fixture.global,
+        fixture.roster,
+        managerInputs,
+      ),
+    ).toBeNull();
+
+    const currentManagerInputs = new Map([
+      [
+        baseInput.entryId,
+        {
+          ...current,
+          input: {
+            ...managerInput,
+            picksBase: {
+              ...managerInput.picksBase,
+              assistantManagerPoints: {
+                ...managerInput.picksBase.assistantManagerPoints,
+                livePublicationId: fixture.global.publicationId,
+              },
+            },
+          },
+        } as EntryLivePublicationRead,
+      ],
+    ]);
+    expect(
+      buildClassicPublicationContentV2(
+        scope.eventId,
+        fixture.global,
+        fixture.roster,
+        currentManagerInputs,
+      ),
+    ).not.toBeNull();
+  });
+
   test('preserves the ordinary provisional publisher acceptance rules', () => {
     const fixture = classicRetentionFixture();
     const provisionalGlobal = { ...fixture.global, state: 'LIVE_ACTIVE' as const };

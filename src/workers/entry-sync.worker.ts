@@ -79,6 +79,7 @@ import {
   markLivePicksEntryComplete,
   persistLivePicksDurableFreshnessEvidence,
   ensureLiveBootstrapReady,
+  republishLiveLeagueScopesAfterPicksRepair,
 } from '../services/live-lifecycle-orchestrator';
 import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
 import {
@@ -644,6 +645,18 @@ export function createEntrySyncWorker(
         return result;
       }
       if (result.scanComplete) {
+        if (job.data.eventId === undefined) {
+          throw new Error('Live Picks root completed without an event id');
+        }
+        const leagueRepair = await republishLiveLeagueScopesAfterPicksRepair(
+          season,
+          job.data.eventId,
+        );
+        if (leagueRepair.status === 'waiting') {
+          throw new Error(
+            `DATA_INCOMPLETE:LIVE_LEAGUE_PUBLICATION_WAITING:${leagueRepair.reason ?? 'UNKNOWN'}`,
+          );
+        }
         if (job.data.freshnessWindowId !== undefined && result.freshnessEvidenceRecorded !== true) {
           throw new Error('Live Picks root completed without durable freshness evidence');
         }
@@ -1117,6 +1130,17 @@ export function createEntrySyncWorker(
               true,
             );
             livePicksFreshnessEvidenceRecorded = true;
+          }
+          if (livePicksCoverageComplete) {
+            const leagueRepair = await republishLiveLeagueScopesAfterPicksRepair(
+              season,
+              targetEventId,
+            );
+            if (leagueRepair.status === 'waiting') {
+              throw new Error(
+                `DATA_INCOMPLETE:LIVE_LEAGUE_PUBLICATION_WAITING:${leagueRepair.reason ?? 'UNKNOWN'}`,
+              );
+            }
           }
         }
         if (

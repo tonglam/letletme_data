@@ -462,6 +462,7 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
         season,
         eventId,
         databaseBudget?.readDb,
+        { includeManagerRepair: true },
       ).catch(() => null);
       const picksComplete = Boolean(
         picksEvidence && (picksEvidence.expectedCount === 0 || picksEvidence.complete === true),
@@ -669,58 +670,40 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
         dispatchGeneration: laneIdentity?.dispatchGeneration,
       });
     }
-    // League boards are a sibling publication. A missing roster input or a
-    // transient Redis/DB read must retain the last complete board and must not
-    // turn a successful global live observation into a failed live job.
-    let classicLeagueResult: Awaited<ReturnType<typeof syncLiveClassicLeaguePublicationsV2>> = null;
-    try {
-      classicLeagueResult = await syncLiveClassicLeaguePublicationsV2(
-        season,
-        eventId,
-        job.data.expectedNextCheckAt,
-        databaseBudget
-          ? {
-              databaseRead: databaseBudget.readDb,
-              databaseReadClient: databaseBudget.readClient,
-            }
-          : undefined,
-      );
-    } catch (error) {
-      logError(
-        'Live Classic league publication pass failed; global publication is retained',
-        error,
-        {
-          season: season.seasonCode,
-          eventId,
-        },
-      );
-    }
-    let h2hLeagueResult: Awaited<ReturnType<typeof syncLiveH2HLeaguePublicationsV2>> = null;
-    const averageReady = await ensureLiveAverageReadyForPublication(
+    // League boards are sibling publications. A missing roster input, a
+    // transient Redis/DB read, or an Assistant Manager fact still bound to the
+    // prior global revision must retain the last complete board and must not
+    // turn a successful global live observation into a failed live job. The
+    // final live-picks child republishes these scopes after its repair drains.
+    const leaguePicksEvidence = await readLivePicksDurableFreshnessEvidence(
       season,
       eventId,
-      job.data.lifecycleState ?? snapshot.state,
-    );
-    if (!averageReady.ready) {
-      logWarn('Live H2H publication is waiting for a fresh canonical Average Team score', {
+      databaseBudget?.readDb,
+      { includeManagerRepair: true },
+    ).catch((error) => {
+      logWarn('Live league publication gate could not read picks evidence', {
         season: season.seasonCode,
         eventId,
-        reason: averageReady.reason,
-        sourceCheckedAt: averageReady.sourceCheckedAt,
+        error: error instanceof Error ? error.message : String(error),
       });
-      if (job.data.finalizeEvent === true) {
-        const fence = inspectSchedulerObligationFence(job.data);
-        if (fence.kind !== 'complete') {
-          // The snapshot checkpoint above is durable, but a direct final job
-          // has no scheduler obligation that can be deferred. Fail delivery
-          // so BullMQ retries the official H2H/average dependency instead of
-          // permanently completing finalization with a missing publication.
-          throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${averageReady.reason}`);
-        }
-      }
+      return null;
+    });
+    const leaguePicksReady =
+      leaguePicksEvidence !== null &&
+      (leaguePicksEvidence.expectedCount === 0 ||
+        (leaguePicksEvidence.complete && !leaguePicksEvidence.repairRequired));
+    let classicLeagueResult: Awaited<ReturnType<typeof syncLiveClassicLeaguePublicationsV2>> = null;
+    if (!leaguePicksReady) {
+      logInfo('Live league publication retained until picks revision repair completes', {
+        season: season.seasonCode,
+        eventId,
+        expectedCount: leaguePicksEvidence?.expectedCount ?? null,
+        observedCount: leaguePicksEvidence?.observedCount ?? null,
+        repairRequired: leaguePicksEvidence?.repairRequired ?? null,
+      });
     } else {
       try {
-        h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
+        classicLeagueResult = await syncLiveClassicLeaguePublicationsV2(
           season,
           eventId,
           job.data.expectedNextCheckAt,
@@ -732,10 +715,66 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
             : undefined,
         );
       } catch (error) {
-        logError('Live H2H league publication pass failed; global publication is retained', error, {
+        logError(
+          'Live Classic league publication pass failed; global publication is retained',
+          error,
+          {
+            season: season.seasonCode,
+            eventId,
+          },
+        );
+      }
+    }
+    let h2hLeagueResult: Awaited<ReturnType<typeof syncLiveH2HLeaguePublicationsV2>> = null;
+    if (!leaguePicksReady) {
+      // The manager repair child will run this sibling pass after its input is
+      // checkpointed against the exact global publication revision.
+    } else {
+      const averageReady = await ensureLiveAverageReadyForPublication(
+        season,
+        eventId,
+        job.data.lifecycleState ?? snapshot.state,
+      );
+      if (!averageReady.ready) {
+        logWarn('Live H2H publication is waiting for a fresh canonical Average Team score', {
           season: season.seasonCode,
           eventId,
+          reason: averageReady.reason,
+          sourceCheckedAt: averageReady.sourceCheckedAt,
         });
+        if (job.data.finalizeEvent === true) {
+          const fence = inspectSchedulerObligationFence(job.data);
+          if (fence.kind !== 'complete') {
+            // The snapshot checkpoint above is durable, but a direct final job
+            // has no scheduler obligation that can be deferred. Fail delivery
+            // so BullMQ retries the official H2H/average dependency instead of
+            // permanently completing finalization with a missing publication.
+            throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${averageReady.reason}`);
+          }
+        }
+      } else {
+        try {
+          h2hLeagueResult = await syncLiveH2HLeaguePublicationsV2(
+            season,
+            eventId,
+            job.data.expectedNextCheckAt,
+            databaseBudget
+              ? {
+                  databaseRead: databaseBudget.readDb,
+                  databaseReadClient: databaseBudget.readClient,
+                }
+              : undefined,
+          );
+        } catch (error) {
+          logError(
+            'Live H2H league publication pass failed; global publication is retained',
+            error,
+            {
+              season: season.seasonCode,
+              eventId,
+            },
+          );
+        }
       }
     }
     if (

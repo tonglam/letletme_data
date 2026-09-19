@@ -1262,6 +1262,53 @@ export async function findMissingEntryLiveInputIds(
   return results.filter((entryId): entryId is number => entryId !== null);
 }
 
+export type LivePicksLeagueRepairResult = Readonly<{
+  status: 'published' | 'not-required' | 'waiting';
+  reason?: 'NO_GLOBAL_PUBLICATION' | 'PICKS_INCOMPLETE' | 'MANAGER_FACT_REPAIR_REQUIRED';
+}>;
+
+/**
+ * Reconcile sibling league scopes after the final live-picks child has
+ * published its input. The global Live Points publication is intentionally
+ * independent: manager facts cannot be bound before that publication exists.
+ * Once it does exist, however, league scopes must not remain on the preceding
+ * global revision. This path is read/Redis-only apart from the normal sibling
+ * publication/checkpoint writes and never refetches picks.
+ */
+export async function republishLiveLeagueScopesAfterPicksRepair(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<LivePicksLeagueRepairResult> {
+  const evidence = await readLivePicksDurableFreshnessEvidence(season, eventId, undefined, {
+    includeManagerRepair: true,
+  });
+  const picksComplete = evidence.expectedCount === 0 || evidence.complete;
+  if (!picksComplete) return { status: 'waiting', reason: 'PICKS_INCOMPLETE' };
+  if (evidence.repairRequired) {
+    return { status: 'waiting', reason: 'MANAGER_FACT_REPAIR_REQUIRED' };
+  }
+
+  const redis = await redisSingleton.getClient();
+  const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  if (!global) return { status: 'not-required', reason: 'NO_GLOBAL_PUBLICATION' };
+
+  const { syncLiveClassicLeaguePublicationsV2, syncLiveH2HLeaguePublicationsV2 } = await import(
+    './live-league-publication-v2.service'
+  );
+  await syncLiveClassicLeaguePublicationsV2(season, eventId);
+  const { ensureLiveAverageReadyForPublication } = await import('./live-average-refresh.service');
+  const average = await ensureLiveAverageReadyForPublication(
+    season,
+    eventId,
+    global.publication.state === 'FINALIZED' ? 'FINALIZED' : 'LIVE_ACTIVE',
+  );
+  if (!average.ready) {
+    throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${average.reason}`);
+  }
+  await syncLiveH2HLeaguePublicationsV2(season, eventId);
+  return { status: 'published' };
+}
+
 export async function findPendingEntryLiveCheckpointIds(
   season: FplSeasonRef,
   eventId: number,

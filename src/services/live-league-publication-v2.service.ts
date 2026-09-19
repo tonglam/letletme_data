@@ -334,6 +334,25 @@ export type ClassicPublicationContentV2 = Readonly<{
   counts: LeagueLiveManifest['counts'];
 }>;
 
+function liveInputMatchesGlobalPublication(
+  read: EntryLivePublicationRead | undefined,
+  global: LivePublicationV2,
+): boolean {
+  // A missing input is handled by the surrounding publication builder as a
+  // pending/retained scope. This predicate only answers the narrower question
+  // of whether an already-readable Assistant Manager fact is stale.
+  if (!read) return true;
+  const chip = read.input.picksBase.chip;
+  if (chip !== 'manager' && chip !== 'MANAGER') return true;
+  const managerFact = read.input.picksBase.assistantManagerPoints;
+  return Boolean(
+    managerFact &&
+      managerFact.livePublicationId === global.publicationId &&
+      managerFact.liveGeneration === global.generation &&
+      managerFact.liveScoreCoreRevision === global.revisions.scoreCore.revision,
+  );
+}
+
 /**
  * Build one Classic board only from an exact roster, one global publication,
  * and already-validated Redis entry inputs. This helper is deliberately pure:
@@ -367,6 +386,10 @@ export function buildClassicPublicationContentV2(
   for (const row of eligibleRows) {
     const read = inputs.get(row.entryId);
     if (!read) return null;
+    // Assistant Manager points are derived from the exact global live
+    // publication. Do not publish a sibling board against a newer global
+    // revision until the one-shot picks repair has rebound this mutable fact.
+    if (!liveInputMatchesGlobalPublication(read, global)) return null;
     if (
       global.state === 'FINALIZED' &&
       (read.input.finalResult === null ||
@@ -2120,6 +2143,23 @@ export async function syncLiveH2HLeaguePublicationsV2(
             entriesNeedingProfileRefresh,
           );
         }
+      }
+      const managerFactsReady = entryIds.every((entryId) =>
+        liveInputMatchesGlobalPublication(inputs.get(entryId), global.publication),
+      );
+      if (!managerFactsReady) {
+        totals.skipped += 1;
+        if (global.publication.state === 'FINALIZED' && phaseActive) {
+          finalReady = false;
+        }
+        logInfo('Live H2H publication retained until Assistant Manager facts catch up', {
+          season: season.seasonCode,
+          eventId,
+          tournamentId,
+          globalPublicationId: global.publication.publicationId,
+          globalGeneration: global.publication.generation,
+        });
+        continue;
       }
       const [existingHead, previousHead] = await Promise.all([
         readLiveLeaguePublicationV2Pointer(headScope, 'active', redis),
