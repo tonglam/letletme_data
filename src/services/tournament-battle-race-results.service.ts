@@ -707,29 +707,34 @@ export async function syncTournamentBattleRaceResults(
     ? await getOfficialH2HSyncOptions(season, eventId)
     : {};
 
-  await ensureOfficialH2HAverageReady(season, eventId, officialH2HOptions);
-
   let updatedGroups = 0;
   let updatedResults = 0;
   let skipped = 0;
   const failedTournamentIds: number[] = [];
+  let officialAveragePromise: Promise<void> | null = null;
+  const ensureOfficialAverage = () => {
+    officialAveragePromise ??= ensureOfficialH2HAverageReady(season, eventId, officialH2HOptions);
+    return officialAveragePromise;
+  };
   const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
     try {
-      return isOfficialH2HTournament(tournament)
-        ? await OfficialH2HStrategy.sync(season, tournament, eventId, officialH2HOptions)
-        : await withMutationScopes(
-            {
-              queueName: 'tournament-sync',
-              jobName: 'tournament-battle-race',
-              tournamentId: tournament.id,
-              scopes: resolveMutationScopes({
-                queueName: 'tournament-sync',
-                jobName: 'tournament-battle-race',
-                eventId,
-              }),
-            },
-            () => LocalBattleStrategy.sync(season, tournament, eventId),
-          );
+      if (isOfficialH2HTournament(tournament)) {
+        await ensureOfficialAverage();
+        return await OfficialH2HStrategy.sync(season, tournament, eventId, officialH2HOptions);
+      }
+      return await withMutationScopes(
+        {
+          queueName: 'tournament-sync',
+          jobName: 'tournament-battle-race',
+          tournamentId: tournament.id,
+          scopes: resolveMutationScopes({
+            queueName: 'tournament-sync',
+            jobName: 'tournament-battle-race',
+            eventId,
+          }),
+        },
+        () => LocalBattleStrategy.sync(season, tournament, eventId),
+      );
     } catch (error) {
       logError('Failed to sync battle race results', error, {
         tournamentId: tournament.id,

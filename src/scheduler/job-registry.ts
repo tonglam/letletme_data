@@ -1333,51 +1333,110 @@ function livePicksDefinition(): ScheduledJobDefinition {
     recoveryCompletionMode: 'live-picks-finalizer',
     manualTrigger: false,
     resolve: async (context) => {
-      if (!context.currentEventId) return [];
-      const event = await loadSchedulerEvent(context, context.currentEventId);
-      if (!event) return [];
-      const fixtures = await loadSchedulerFixtures(context, event.id);
-      const decision = decideLiveLifecycle(event, fixtures, context.now);
-      let needsPicksRefresh = decision.shouldProbePicks || decision.shouldSyncPicks;
-      if (
-        !needsPicksRefresh &&
-        (decision.state === 'LIVE_ACTIVE' ||
-          decision.state === 'BETWEEN_FIXTURES' ||
-          decision.state === 'DAY_SETTLING' ||
-          decision.state === 'GW_REVIEW' ||
-          decision.state === 'FINALIZED')
-      ) {
-        const picksEvidence = await readLivePicksDurableFreshnessEvidence(
-          context.season,
-          event.id,
-          undefined,
-          { includeManagerRepair: true },
-        ).catch(() => null);
-        // A failed proof read is fail-closed: the retry root can re-establish
-        // the source gate and record the durable coverage evidence. An empty
-        // eligible cohort is handled as a terminal N/A result by the root and
-        // does not create a perpetual repair loop.
-        needsPicksRefresh =
-          picksEvidence === null ||
-          (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true) ||
-          picksEvidence.repairRequired === true;
+      const plans: SchedulerObligationPlan[] = [];
+      const currentEvent = context.currentEventId
+        ? await loadSchedulerEvent(context, context.currentEventId)
+        : null;
+
+      if (currentEvent) {
+        const fixtures = await loadSchedulerFixtures(context, currentEvent.id);
+        const decision = decideLiveLifecycle(currentEvent, fixtures, context.now);
+        let needsPicksRefresh = decision.shouldProbePicks || decision.shouldSyncPicks;
+        if (
+          !needsPicksRefresh &&
+          (decision.state === 'LIVE_ACTIVE' ||
+            decision.state === 'BETWEEN_FIXTURES' ||
+            decision.state === 'DAY_SETTLING' ||
+            decision.state === 'GW_REVIEW' ||
+            decision.state === 'FINALIZED')
+        ) {
+          const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+            context.season,
+            currentEvent.id,
+            undefined,
+            { includeManagerRepair: true },
+          ).catch(() => null);
+          // A failed proof read is fail-closed: the retry root can re-establish
+          // the source gate and record the durable coverage evidence. An empty
+          // eligible cohort is handled as a terminal N/A result by the root and
+          // does not create a perpetual repair loop.
+          needsPicksRefresh =
+            picksEvidence === null ||
+            (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true) ||
+            picksEvidence.repairRequired === true;
+        }
+        if (
+          needsPicksRefresh &&
+          (await isLivePicksProbeDue(context.season.seasonCode, currentEvent.id, context.now))
+        ) {
+          plans.push({
+            scopeKey: `${context.season.seasonCode}:event:${currentEvent.id}`,
+            periodKey: `live-picks-${currentEvent.id}-${Math.floor(context.now.getTime() / 30_000)}`,
+            dueAt: context.now,
+            eventId: currentEvent.id,
+            source: 'reconcile',
+            evidence: {
+              lifecycleState: decision.state,
+              probe: decision.shouldProbePicks ? 'deadline-or-pre-start' : 'missing-input-repair',
+              deadlineAt: currentEvent.deadlineTime ?? null,
+            },
+          });
+        }
       }
-      if (!needsPicksRefresh) return [];
-      if (!(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))) return [];
-      return [
-        {
-          scopeKey: `${context.season.seasonCode}:event:${event.id}`,
-          periodKey: `live-picks-${event.id}-${Math.floor(context.now.getTime() / 30_000)}`,
-          dueAt: context.now,
-          eventId: event.id,
-          source: 'reconcile' as const,
-          evidence: {
-            lifecycleState: decision.state,
-            probe: decision.shouldProbePicks ? 'deadline-or-pre-start' : 'missing-input-repair',
-            deadlineAt: event.deadlineTime ?? null,
-          },
-        },
-      ];
+
+      // The current event pointer advances before every historical finalization
+      // obligation necessarily reaches a durable repair checkpoint. Keep
+      // finalized targets discoverable independently of that pointer so a
+      // manager-fact/input repair cannot silently disappear after GW rollover.
+      const finalizationTargets = new Set(
+        await findLivePublicationV2FinalizationTargets(context.season),
+      );
+      const historicalFinalized = context.events.filter(
+        (event) =>
+          event.id !== context.currentEventId &&
+          finalizationTargets.has(event.id) &&
+          event.finished === true &&
+          event.dataChecked === true &&
+          event.dataCheckedAt instanceof Date &&
+          Number.isFinite(event.dataCheckedAt.getTime()),
+      );
+      const historicalRepairPlans: Array<SchedulerObligationPlan | null> = await Promise.all(
+        historicalFinalized.map(async (event) => {
+          const picksEvidence = await readLivePicksDurableFreshnessEvidence(
+            context.season,
+            event.id,
+            undefined,
+            { includeManagerRepair: true },
+          ).catch(() => null);
+          const needsRepair =
+            picksEvidence === null ||
+            (picksEvidence.expectedCount > 0 && picksEvidence.complete !== true) ||
+            picksEvidence.repairRequired === true;
+          if (
+            !needsRepair ||
+            !(await isLivePicksProbeDue(context.season.seasonCode, event.id, context.now))
+          ) {
+            return null;
+          }
+          return {
+            scopeKey: `${context.season.seasonCode}:event:${event.id}`,
+            periodKey: `live-picks-finalized-repair-${event.id}-${Math.floor(context.now.getTime() / 30_000)}`,
+            dueAt: context.now,
+            eventId: event.id,
+            source: 'reconcile' as const,
+            evidence: {
+              lifecycleState: 'FINALIZED' as const,
+              probe: 'finalized-event-repair',
+              deadlineAt: event.deadlineTime ?? null,
+              dataCheckedAt: event.dataCheckedAt?.toISOString() ?? null,
+            },
+          } satisfies SchedulerObligationPlan;
+        }),
+      );
+      plans.push(
+        ...historicalRepairPlans.filter((plan): plan is SchedulerObligationPlan => plan !== null),
+      );
+      return plans;
     },
     enqueue: async ({ context, plan, obligationId, generation, freshnessWindowId }) => {
       const eventId = plan.eventId ?? context.currentEventId;

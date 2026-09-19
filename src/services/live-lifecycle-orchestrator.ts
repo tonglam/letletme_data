@@ -1264,7 +1264,11 @@ export async function findMissingEntryLiveInputIds(
 
 export type LivePicksLeagueRepairResult = Readonly<{
   status: 'published' | 'not-required' | 'waiting';
-  reason?: 'NO_GLOBAL_PUBLICATION' | 'PICKS_INCOMPLETE' | 'MANAGER_FACT_REPAIR_REQUIRED';
+  reason?:
+    | 'NO_GLOBAL_PUBLICATION'
+    | 'PICKS_INCOMPLETE'
+    | 'MANAGER_FACT_REPAIR_REQUIRED'
+    | 'GLOBAL_REVISION_ADVANCED';
 }>;
 
 /**
@@ -1295,7 +1299,16 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
   const { syncLiveClassicLeaguePublicationsV2, syncLiveH2HLeaguePublicationsV2 } = await import(
     './live-league-publication-v2.service'
   );
-  await syncLiveClassicLeaguePublicationsV2(season, eventId);
+  const sameGlobalIdentity = (
+    publication: { globalPublicationId: string; globalGeneration: number } | null,
+  ): boolean =>
+    publication !== null &&
+    publication.globalPublicationId === global.publication.publicationId &&
+    publication.globalGeneration === global.publication.generation;
+  const classic = await syncLiveClassicLeaguePublicationsV2(season, eventId);
+  if (!sameGlobalIdentity(classic)) {
+    return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
+  }
   const { ensureLiveAverageReadyForPublication } = await import('./live-average-refresh.service');
   const average = await ensureLiveAverageReadyForPublication(
     season,
@@ -1305,7 +1318,22 @@ export async function republishLiveLeagueScopesAfterPicksRepair(
   if (!average.ready) {
     throw new Error(`SOURCE_NOT_READY:LIVE_AVERAGE_NOT_READY:${average.reason}`);
   }
-  await syncLiveH2HLeaguePublicationsV2(season, eventId);
+  const h2h = await syncLiveH2HLeaguePublicationsV2(season, eventId);
+  if (!sameGlobalIdentity(h2h)) {
+    return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
+  }
+  const latestGlobal = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  if (
+    !latestGlobal ||
+    latestGlobal.publication.publicationId !== global.publication.publicationId ||
+    latestGlobal.publication.generation !== global.publication.generation
+  ) {
+    return { status: 'waiting', reason: 'GLOBAL_REVISION_ADVANCED' };
+  }
+  if (global.publication.state === 'FINALIZED') {
+    const { enqueueFinalLeagueResultsAfterLiveSync } = await import('./live-data-cascade.service');
+    await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
+  }
   return { status: 'published' };
 }
 

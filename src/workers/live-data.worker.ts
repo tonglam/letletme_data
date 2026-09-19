@@ -692,6 +692,22 @@ async function processLiveDataJobInternal(job: Job<LiveDataJobData>) {
       leaguePicksEvidence !== null &&
       (leaguePicksEvidence.expectedCount === 0 ||
         (leaguePicksEvidence.complete && !leaguePicksEvidence.repairRequired));
+    if (!leaguePicksReady && job.data.finalizeEvent === true) {
+      const fence = inspectSchedulerObligationFence(job.data);
+      if (fence.kind !== 'complete') {
+        // The final global publication is durable, but a direct final job has
+        // no obligation to defer. Fail delivery so the exact finalizer is
+        // retried after the manager-fact repair instead of completing with
+        // `liveSnapshotFinalizedAt` set and no downstream final cascade.
+        throw new Error(
+          `DATA_INCOMPLETE:LIVE_LEAGUE_PUBLICATION_WAITING:${
+            leaguePicksEvidence?.repairRequired === true
+              ? 'MANAGER_FACT_REPAIR_REQUIRED'
+              : 'PICKS_INCOMPLETE'
+          }`,
+        );
+      }
+    }
     let classicLeagueResult: Awaited<ReturnType<typeof syncLiveClassicLeaguePublicationsV2>> = null;
     if (!leaguePicksReady) {
       logInfo('Live league publication retained until picks revision repair completes', {
