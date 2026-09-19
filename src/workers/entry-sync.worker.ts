@@ -816,6 +816,7 @@ export function createEntrySyncWorker(
                 syncEntryEventPicks(season, entryId, targetEventId!, {
                   sourceCheckedAt: requestWatermark,
                   deferAssistantManagerPoints: effectiveJobData?.lane === 'live-picks',
+                  preserveExistingPicksBase: effectiveJobData?.lane === 'live-picks',
                 }),
               effectiveJobData,
               {

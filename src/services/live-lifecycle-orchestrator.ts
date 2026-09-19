@@ -1579,6 +1579,7 @@ export async function runPicksProbeAndSync(
         liveObservation,
         providerEventLive,
         deferAssistantManagerPoints: liveObservation === null,
+        preserveExistingPicksBase: true,
       });
       return entryId;
     }),

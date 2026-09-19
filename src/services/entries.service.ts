@@ -311,6 +311,11 @@ export async function persistEntryEventPicksResponse(
     /** Preserve canonical deadline picks while taking reported facts from this provider response. */
     readonly preservedPicksBase?: RawFPLEntryEventPicksResponse;
     /**
+     * Live-picks repair may refresh the provider-bound Assistant Manager fact,
+     * but must retain the already accepted deadline-time picks base.
+     */
+    readonly preserveExistingPicksBase?: boolean;
+    /**
      * The live-picks seed may precede the first Live Points publication. Keep
      * the immutable picks/transfers input and defer only the mutable manager
      * fact until an exact score revision exists.
@@ -401,7 +406,10 @@ export async function persistEntryEventPicksResponse(
     season,
     eventId,
     entryId,
-    options?.preservedPicksBase ?? picks,
+    options?.preservedPicksBase ??
+      (options?.preserveExistingPicksBase && existing
+        ? rawPicksFromEntryLiveInput(existing.input)
+        : picks),
     sourceCheckedAt,
     assistantManagerPoints,
   );
@@ -612,6 +620,7 @@ export async function syncEntryEventPicks(
   options?: {
     readonly sourceCheckedAt?: Date | string;
     readonly deferAssistantManagerPoints?: boolean;
+    readonly preserveExistingPicksBase?: boolean;
   },
 ) {
   try {
@@ -638,6 +647,7 @@ export async function syncEntryEventPicks(
       liveObservation,
       providerEventLive,
       deferAssistantManagerPoints: options?.deferAssistantManagerPoints === true,
+      preserveExistingPicksBase: options?.preserveExistingPicksBase === true,
     });
     logInfo('Entry event picks sync completed', { entryId, eventId });
     return { entryId, eventId };
