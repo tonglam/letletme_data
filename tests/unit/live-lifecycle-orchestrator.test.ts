@@ -264,10 +264,24 @@ describe('live lifecycle decisions', () => {
   test('gates Average refresh only when the current H2H scope consumes Average Team', () => {
     const liveWorkerSource = readFileSync('src/workers/live-data.worker.ts', 'utf8');
     const lifecycleSource = readFileSync('src/services/live-lifecycle-orchestrator.ts', 'utf8');
+    const leagueSource = readFileSync('src/services/live-league-publication-v2.service.ts', 'utf8');
+    const tournamentSyncSource = readFileSync(
+      'src/services/tournament-battle-race-results.service.ts',
+      'utf8',
+    );
+    const entrySyncWorkerSource = readFileSync('src/workers/entry-sync.worker.ts', 'utf8');
     expect(liveWorkerSource).toContain('hasLiveH2HAverageScope(');
+    expect(leagueSource).toContain('battle.is_bye IS NOT TRUE');
     expect(liveWorkerSource).toContain('if (h2hUsesAverage) {');
     expect(lifecycleSource).toContain('hasLiveH2HAverageScope(season, eventId)');
     expect(lifecycleSource).toContain('if (h2hUsesAverage) {');
+    expect(tournamentSyncSource).toContain('hasOfficialH2HAverageMatch(');
+    expect(tournamentSyncSource).toContain('requiresAverage');
+    expect(entrySyncWorkerSource).toContain('markLivePicksLeagueRepairRequired');
+    expect(entrySyncWorkerSource).toContain('isLivePicksLeagueRepairRequired');
+    expect(lifecycleSource).toContain(
+      'now.getTime() < state.nextProbeAt && !state.leagueRepairRequired',
+    );
   });
 
   test('carries a freshness window from the live-picks root into its child scan', () => {

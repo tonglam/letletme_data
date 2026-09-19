@@ -184,6 +184,7 @@ type PicksProbeState = {
   nextProbeAt: number;
   canarySucceeded: boolean;
   failedCanaryEntryIds: Set<number>;
+  leagueRepairRequired: boolean;
 };
 
 const COORDINATOR_STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -194,6 +195,7 @@ type SharedPicksCoordinatorState = {
   nextProbeAt: number;
   canarySucceeded: boolean;
   failedCanaryEntryIds: number[];
+  leagueRepairRequired: boolean;
 };
 
 export type SharedLifecycleQuietState = {
@@ -213,6 +215,7 @@ const defaultPicksCoordinatorState = (): SharedPicksCoordinatorState => ({
   nextProbeAt: 0,
   canarySucceeded: false,
   failedCanaryEntryIds: [],
+  leagueRepairRequired: false,
 });
 
 async function readPicksCoordinatorState(
@@ -242,6 +245,7 @@ async function readPicksCoordinatorState(
       nextProbeAt: Math.max(0, nextProbeAt),
       canarySucceeded: value.canarySucceeded,
       failedCanaryEntryIds: [...new Set(value.failedCanaryEntryIds)],
+      leagueRepairRequired: value.leagueRepairRequired === true,
     };
   } catch (error) {
     logError('Failed to read shared live picks coordinator state', error, { seasonCode, eventId });
@@ -619,6 +623,40 @@ export async function isLivePicksProbeDue(
     now.getTime() >= state.nextProbeAt &&
     (!Number.isFinite(bootstrapNextProbeAt) || now.getTime() >= bootstrapNextProbeAt)
   );
+}
+
+export async function markLivePicksLeagueRepairRequired(
+  seasonCode: string,
+  eventId: number,
+): Promise<void> {
+  const state = await readPicksCoordinatorState(seasonCode, eventId);
+  await writePicksCoordinatorState(seasonCode, eventId, {
+    ...state,
+    // A league repair is independent of the provider probe cadence. Make the
+    // next Bull retry eligible immediately instead of letting it settle an
+    // obligation during the ordinary picks backoff window.
+    nextProbeAt: 0,
+    leagueRepairRequired: true,
+  });
+}
+
+export async function clearLivePicksLeagueRepairRequired(
+  seasonCode: string,
+  eventId: number,
+): Promise<void> {
+  const state = await readPicksCoordinatorState(seasonCode, eventId);
+  await writePicksCoordinatorState(seasonCode, eventId, {
+    ...state,
+    leagueRepairRequired: false,
+  });
+}
+
+export async function isLivePicksLeagueRepairRequired(
+  seasonCode: string,
+  eventId: number,
+): Promise<boolean> {
+  const state = await readPicksCoordinatorState(seasonCode, eventId);
+  return state.leagueRepairRequired === true;
 }
 
 export function resolveLivePicksRefreshFanout(
@@ -1491,6 +1529,7 @@ export async function runPicksProbeAndSync(
     nextProbeAt: sharedState.nextProbeAt,
     canarySucceeded: sharedState.canarySucceeded,
     failedCanaryEntryIds: new Set(sharedState.failedCanaryEntryIds),
+    leagueRepairRequired: sharedState.leagueRepairRequired,
   };
   const recordDurableFreshness = async (
     scanComplete: boolean,
@@ -1554,7 +1593,7 @@ export async function runPicksProbeAndSync(
       scanComplete: false,
     };
   }
-  if (now.getTime() < state.nextProbeAt) {
+  if (now.getTime() < state.nextProbeAt && !state.leagueRepairRequired) {
     // The scheduler can resolve an obligation just before the coordinator
     // writes its next-probe fence. A fenced root whose source canary has
     // already been accepted is a successful no-op; an unfenced freshness
@@ -1625,6 +1664,7 @@ export async function runPicksProbeAndSync(
       nextProbeAt,
       canarySucceeded: true,
       failedCanaryEntryIds: [],
+      leagueRepairRequired: state.leagueRepairRequired,
     });
     const scanComplete = pendingCheckpoints.length === 0;
     const freshnessEvidenceRecorded = await recordDurableFreshness(scanComplete, false);
@@ -1701,6 +1741,7 @@ export async function runPicksProbeAndSync(
       nextProbeAt: state.nextProbeAt,
       canarySucceeded: state.canarySucceeded,
       failedCanaryEntryIds: [...state.failedCanaryEntryIds].sort((left, right) => left - right),
+      leagueRepairRequired: state.leagueRepairRequired,
     });
     logInfo('Live picks canary is not ready; fan-out remains paused', {
       eventId,
@@ -1825,6 +1866,7 @@ export async function runPicksProbeAndSync(
     nextProbeAt: state.nextProbeAt,
     canarySucceeded: state.canarySucceeded,
     failedCanaryEntryIds: [...state.failedCanaryEntryIds].sort((left, right) => left - right),
+    leagueRepairRequired: state.leagueRepairRequired,
   });
   logInfo('Live picks sync accepted after canary', {
     eventId,

@@ -1008,6 +1008,7 @@ export async function hasLiveH2HAverageScope(
         AND tournament.group_mode = 'battle_races'
         AND battle.event_id = ${eventId}
         AND battle.official_match_id IS NOT NULL
+        AND battle.is_bye IS NOT TRUE
         AND (battle.home_is_average IS TRUE OR battle.away_is_average IS TRUE)
     ) AS "hasAverage"
   `;

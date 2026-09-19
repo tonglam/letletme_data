@@ -79,6 +79,9 @@ import {
   markLivePicksEntryComplete,
   persistLivePicksDurableFreshnessEvidence,
   ensureLiveBootstrapReady,
+  clearLivePicksLeagueRepairRequired,
+  isLivePicksLeagueRepairRequired,
+  markLivePicksLeagueRepairRequired,
   republishLiveLeagueScopesAfterPicksRepair,
 } from '../services/live-lifecycle-orchestrator';
 import { renewSchedulerObligation } from '../repositories/scheduler-obligations';
@@ -114,6 +117,28 @@ interface SyncEntriesOptions {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function republishLiveLeagueScopesOrThrow(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<void> {
+  try {
+    const result = await republishLiveLeagueScopesAfterPicksRepair(season, eventId);
+    if (result.status === 'waiting') {
+      throw new Error(
+        `DATA_INCOMPLETE:LIVE_LEAGUE_PUBLICATION_WAITING:${result.reason ?? 'UNKNOWN'}`,
+      );
+    }
+    await clearLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+  } catch (error) {
+    // Keep the coordinator retryable even when the picks probe has its own
+    // nextProbeAt backoff. Without this durable marker a Bull retry can be
+    // accepted as a harmless picks backoff and skip the outstanding league
+    // repair/cascade.
+    await markLivePicksLeagueRepairRequired(season.seasonCode, eventId);
+    throw error;
+  }
+}
 
 function resolveRetryDelayMs(retryCount: number): number {
   const delayMultiplier = Math.max(retryCount, 1);
@@ -648,15 +673,7 @@ export function createEntrySyncWorker(
         if (job.data.eventId === undefined) {
           throw new Error('Live Picks root completed without an event id');
         }
-        const leagueRepair = await republishLiveLeagueScopesAfterPicksRepair(
-          season,
-          job.data.eventId,
-        );
-        if (leagueRepair.status === 'waiting') {
-          throw new Error(
-            `DATA_INCOMPLETE:LIVE_LEAGUE_PUBLICATION_WAITING:${leagueRepair.reason ?? 'UNKNOWN'}`,
-          );
-        }
+        await republishLiveLeagueScopesOrThrow(season, job.data.eventId);
         if (job.data.freshnessWindowId !== undefined && result.freshnessEvidenceRecorded !== true) {
           throw new Error('Live Picks root completed without durable freshness evidence');
         }
@@ -1132,16 +1149,12 @@ export function createEntrySyncWorker(
             );
             livePicksFreshnessEvidenceRecorded = true;
           }
-          if (livePicksCoverageComplete) {
-            const leagueRepair = await republishLiveLeagueScopesAfterPicksRepair(
-              season,
-              targetEventId,
-            );
-            if (leagueRepair.status === 'waiting') {
-              throw new Error(
-                `DATA_INCOMPLETE:LIVE_LEAGUE_PUBLICATION_WAITING:${leagueRepair.reason ?? 'UNKNOWN'}`,
-              );
-            }
+          const leagueRepairRequired =
+            !livePicksCoverageComplete && job.attemptsMade > 0
+              ? await isLivePicksLeagueRepairRequired(season.seasonCode, targetEventId)
+              : false;
+          if (livePicksCoverageComplete || leagueRepairRequired) {
+            await republishLiveLeagueScopesOrThrow(season, targetEventId);
           }
         }
         if (
