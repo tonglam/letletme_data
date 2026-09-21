@@ -23,6 +23,7 @@ import {
   rankTournamentReviewPointsGroups,
   resolveTournamentPointsRaceSourceUpdatedAt,
 } from '../../src/services/tournament-points-race-results.service';
+import { shouldRescheduleDelayedTournamentRepair } from '../../src/jobs/tournament-repair.jobs';
 
 const publicationSource = readFileSync(
   'src/services/tournament-review-publication.service.ts',
@@ -36,6 +37,12 @@ const hardCutMigration = readFileSync(
 );
 
 describe('My Tournament Review V2 format and retry policy', () => {
+  test('reschedules an old delayed repair when the current due time is earlier', () => {
+    expect(shouldRescheduleDelayedTournamentRepair(24 * 60 * 60_000, 15 * 60_000)).toBe(true);
+    expect(shouldRescheduleDelayedTournamentRepair(15 * 60_000, 24 * 60 * 60_000)).toBe(false);
+    expect(shouldRescheduleDelayedTournamentRepair(0, 0)).toBe(false);
+  });
+
   test('routes stale points projections to result repair while retaining topology repair', () => {
     const obligation = { event_id: 3 } as Parameters<typeof reviewRepairIssue>[0];
     for (const message of [

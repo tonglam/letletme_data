@@ -7,6 +7,13 @@ import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentSetupIssueRecord } from '../domain/tournament-setup-issue';
 import { isQueueDrainOnly, QueueDrainOnlyError } from '../services/queue-governance.service';
 
+export function shouldRescheduleDelayedTournamentRepair(
+  existingDelayMs: number,
+  requestedDelayMs: number,
+): boolean {
+  return existingDelayMs > requestedDelayMs;
+}
+
 export async function enqueueTournamentRepair(
   season: FplSeasonRef,
   issue: TournamentSetupIssueRecord,
@@ -24,10 +31,21 @@ export async function enqueueTournamentRepair(
     source,
   };
   const jobId = tournamentRepairJobId(season.seasonCode, issue.tournamentId, issue.issueId);
+  const delay = issue.nextRepairAt ? Math.max(0, issue.nextRepairAt.getTime() - Date.now()) : 0;
   const existing = await tournamentRepairQueue.getJob(jobId);
   if (existing) {
     const state = await existing.getState();
-    if (['waiting', 'waiting-children', 'delayed', 'active', 'paused'].includes(state)) {
+    if (state === 'delayed') {
+      // A deterministic job ID can outlive the issue occurrence that created
+      // it.  Do not let an old long delay hide a newly requested earlier
+      // repair; BullMQ's changeDelay is relative to now and preserves the ID.
+      if (shouldRescheduleDelayedTournamentRepair(existing.delay, delay)) {
+        await existing.updateData(data);
+        await existing.changeDelay(delay);
+      }
+      return existing;
+    }
+    if (['waiting', 'waiting-children', 'active', 'paused'].includes(state)) {
       return existing;
     }
     // The deterministic issue job ID is intentionally reused. Remove an old
@@ -38,7 +56,7 @@ export async function enqueueTournamentRepair(
   }
   return tournamentRepairQueue.add('tournament-repair', data, {
     jobId,
-    delay: issue.nextRepairAt ? Math.max(0, issue.nextRepairAt.getTime() - Date.now()) : 0,
+    delay,
   });
 }
 
