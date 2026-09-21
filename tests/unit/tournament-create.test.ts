@@ -12,6 +12,52 @@ afterEach(() => {
 });
 
 describe('tournament league membership import', () => {
+  test('accepts H2H league metadata without a knockout phase', async () => {
+    globalThis.fetch = mock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            league: {
+              id: 351627,
+              name: 'H2H League',
+              start_event: 1,
+              scoring: 'h',
+              ko_rounds: null,
+            },
+            standings: {
+              page: 1,
+              has_next: false,
+              results: [
+                {
+                  entry: 132892,
+                  entry_name: 'Ars7X',
+                  player_name: 'Ars7X Young',
+                  rank: 1,
+                  total: 12,
+                },
+              ],
+            },
+            new_entries: { page: 1, has_next: false, results: [] },
+          }),
+          { status: 200 },
+        ),
+    ) as unknown as typeof fetch;
+
+    const result = await fetchLeagueParticipants(
+      'https://fantasy.premierleague.com/en/leagues/351627/standings/h',
+    );
+
+    expect(result.leagueType).toBe('h2h');
+    expect(result.knockoutRounds).toBe(0);
+    expect(result.participants).toMatchObject([
+      {
+        id: '132892',
+        team: 'Ars7X',
+        manager: 'Ars7X Young',
+      },
+    ]);
+  });
+
   test('combines ranked standings with every preseason new-entry page', async () => {
     const requestedUrls: string[] = [];
     globalThis.fetch = mock(async (request: string | URL | Request) => {
