@@ -487,7 +487,7 @@ const StandingsLeagueSchema = z
     start_event: z.number().int().min(1).max(38).optional(),
     scoring: z.string().optional(),
     admin_entry: z.number().int().positive().optional(),
-    ko_rounds: z.number().int().min(0).max(5).optional(),
+    ko_rounds: z.number().int().min(0).max(5).nullable().optional(),
   })
   .passthrough();
 export const LeagueStandingsSchema = z
