@@ -30,7 +30,10 @@ export function resolveTournamentPointsRaceSourceUpdatedAt(
   eventResults: ReadonlyArray<{ richSyncedAt: Date | null; updatedAt: Date }>,
 ): Date {
   return eventResults.reduce((latest, result) => {
-    const candidate = result.richSyncedAt ?? result.updatedAt;
+    const candidate =
+      result.richSyncedAt && result.richSyncedAt.getTime() > result.updatedAt.getTime()
+        ? result.richSyncedAt
+        : result.updatedAt;
     return candidate.getTime() > latest.getTime() ? candidate : latest;
   }, new Date(0));
 }

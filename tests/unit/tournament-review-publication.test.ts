@@ -21,6 +21,7 @@ import {
 import {
   effectiveTournamentReviewEntryStartEventId,
   rankTournamentReviewPointsGroups,
+  resolveTournamentPointsRaceSourceUpdatedAt,
 } from '../../src/services/tournament-points-race-results.service';
 
 const publicationSource = readFileSync(
@@ -317,6 +318,20 @@ describe('My Tournament Review V2 format and retry policy', () => {
     ]);
     expect(ranks.get('100-10')).toBe(1);
     expect(ranks.get('80-30')).toBe(3);
+  });
+
+  test('uses the newest durable result or rich-sync watermark', () => {
+    const durableUpdatedAt = new Date('2026-09-21T14:12:28.773Z');
+    const richSyncedAt = new Date('2026-09-21T14:06:29.488Z');
+
+    expect(
+      resolveTournamentPointsRaceSourceUpdatedAt([{ updatedAt: durableUpdatedAt, richSyncedAt }]),
+    ).toBe(durableUpdatedAt);
+    expect(
+      resolveTournamentPointsRaceSourceUpdatedAt([
+        { updatedAt: richSyncedAt, richSyncedAt: durableUpdatedAt },
+      ]),
+    ).toBe(durableUpdatedAt);
   });
 
   test('clamps points cumulative totals to each entry start event', () => {
