@@ -73,6 +73,7 @@ import {
 import {
   restoreFinalClassicCheckpointForRetentionV2,
   restoreFinalH2HMatchScopesForRetentionV2,
+  syncLiveH2HLeaguePublicationsV2,
 } from './live-league-publication-v2.service';
 import {
   isLiveMatchDetailCompatibleWithDesk,
@@ -1312,6 +1313,45 @@ export async function runLiveFinalRetentionV2(
     scope,
     checkpoint: await readLiveLeagueCheckpointV2(scope),
   }));
+  const missingH2HTournamentIds = [
+    ...new Set(
+      leagueCheckpoints
+        .filter(
+          (item) =>
+            !item.checkpoint &&
+            (item.scope.scope === 'H2H_HEAD' || item.scope.scope === 'H2H_STANDINGS'),
+        )
+        .map((item) => item.scope.tournamentId),
+    ),
+  ];
+  if (global && missingH2HTournamentIds.length > 0) {
+    await mapWithConcurrency(missingH2HTournamentIds, 1, async (tournamentId) => {
+      try {
+        // A tournament created after an earlier finalized event has no live
+        // worker pass for that historical event. Rebuild only the missing
+        // exact tournament from canonical battle/standings rows and FINAL
+        // entry inputs; the publisher owns Redis CAS and PostgreSQL checkpoints.
+        await syncLiveH2HLeaguePublicationsV2(season, eventId, undefined, {
+          tournamentIds: [tournamentId],
+        });
+      } catch (error) {
+        logError('Live final retention H2H checkpoint recovery failed', error, {
+          season: season.seasonCode,
+          eventId,
+          tournamentId,
+        });
+      }
+    });
+    for (const item of leagueCheckpoints) {
+      if (
+        item.checkpoint ||
+        (item.scope.scope !== 'H2H_HEAD' && item.scope.scope !== 'H2H_STANDINGS')
+      ) {
+        continue;
+      }
+      item.checkpoint = await readLiveLeagueCheckpointV2(item.scope);
+    }
+  }
   const restoredClassicScopes = new Set<number>();
   for (const item of leagueCheckpoints) {
     if (item.checkpoint || item.scope.scope !== 'CLASSIC' || !global) continue;

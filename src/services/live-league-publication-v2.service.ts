@@ -54,6 +54,8 @@ const MAX_RETIREMENT_KEYS = 10_000;
 export type LiveLeagueDatabaseOptions = Readonly<{
   databaseRead?: DbOrTransaction;
   databaseReadClient?: postgres.Sql;
+  /** Exact H2H tournament targets for bounded historical retention recovery. */
+  tournamentIds?: readonly number[];
 }>;
 
 export type ClassicRosterRow = {
@@ -2125,11 +2127,19 @@ export async function syncLiveH2HLeaguePublicationsV2(
   const redis = await redisSingleton.getClient();
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
-  const tournaments = await findOfficialH2HTournaments(season, databaseOptions.databaseReadClient);
+  const allTournaments = await findOfficialH2HTournaments(
+    season,
+    databaseOptions.databaseReadClient,
+  );
+  const tournamentFilter =
+    databaseOptions.tournamentIds === undefined ? null : new Set(databaseOptions.tournamentIds);
+  const tournaments = allTournaments.filter(
+    (tournament) => tournamentFilter === null || tournamentFilter.has(tournament.tournamentId),
+  );
   await retireInactiveH2HPublications(
     season,
     eventId,
-    new Set(tournaments.map(({ tournamentId }) => tournamentId)),
+    new Set(allTournaments.map(({ tournamentId }) => tournamentId)),
     redis,
   );
   const totals = { matches: 0, published: 0, retained: 0, pending: 0, skipped: 0 };
