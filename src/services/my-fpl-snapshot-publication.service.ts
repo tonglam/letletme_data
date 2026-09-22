@@ -316,11 +316,12 @@ export function isAuthoritativeUnrankedFirstEventResult(
 
 /**
  * FPL keeps deleted entries in the current-season feed. The entry summary can
- * retain a non-negative cumulative score, while the finalized history row
- * reports zero cumulative points and zero ranks. The entry identity is the
- * durable discriminator available to us (`Deleted` / `Deleted Player`). Treat
- * that exact source shape as the rank-zero sentinel without accepting a null
- * or negative identity total. Ordinary entries with a missing rank remain
+ * retain a non-negative cumulative score, while the finalized history row can
+ * retain a non-negative event total with a nullable event rank and zero
+ * overall rank. The entry identity is the durable discriminator available to
+ * us (`Deleted` / `Deleted Player`). Accept that exact source shape, along
+ * with the normalized zero-rank sentinel, without accepting a null or
+ * negative identity total. Ordinary entries with a missing rank remain
  * ineligible for FINAL.
  */
 export function isAuthoritativeUnrankedDeletedEntryResult(
@@ -339,9 +340,10 @@ export function isAuthoritativeUnrankedDeletedEntryResult(
     input.playerName.trim() === 'Deleted Player' &&
     isNonNegativeSafeInteger(input.identityOverallPoints) &&
     input.identityOverallRank === 0 &&
-    input.resultOverallPoints === 0 &&
-    input.eventRank === 0 &&
-    input.overallRank === 0
+    isNonNegativeSafeInteger(input.resultOverallPoints) &&
+    input.overallRank === 0 &&
+    ((input.resultOverallPoints === 0 && input.eventRank === 0) ||
+      (input.resultOverallPoints >= 0 && input.eventRank === null))
   );
 }
 
@@ -2685,11 +2687,11 @@ export async function assessMyFplFinalizationReadiness(
       overallRank: row.overall_rank,
     });
     const ranksComplete =
-      isNonNegativeSafeInteger(row.event_rank) &&
-      isNonNegativeSafeInteger(row.overall_rank) &&
-      ((row.event_rank > 0 && row.overall_rank > 0) ||
-        (unrankedFirstEvent && row.event_rank === 0 && row.overall_rank === 0) ||
-        deletedEntryUnranked);
+      (isNonNegativeSafeInteger(row.event_rank) &&
+        isNonNegativeSafeInteger(row.overall_rank) &&
+        ((row.event_rank > 0 && row.overall_rank > 0) ||
+          (unrankedFirstEvent && row.event_rank === 0 && row.overall_rank === 0))) ||
+      deletedEntryUnranked;
     const pastSeasonsComplete =
       row.past_seasons_checked_at !== null &&
       row.past_seasons_count !== null &&
@@ -3880,14 +3882,6 @@ async function captureMyFplSnapshotOnce(
             `Entry ${entry.entry_id} final result is missing team value or bank for event ${eventId}`,
           );
         }
-        if (
-          !isNonNegativeSafeInteger(current.event_rank) ||
-          !isNonNegativeSafeInteger(current.overall_rank)
-        ) {
-          throw new MyFplSnapshotIncompleteError(
-            `Entry ${entry.entry_id} final result is missing a safe event/overall rank for event ${eventId}`,
-          );
-        }
         const firstScoringEvent = Math.max(1, entry.started_event ?? 1);
         if (
           !current.source_result_id ||
@@ -3927,8 +3921,18 @@ async function captureMyFplSnapshotOnce(
           overallRank: current.overall_rank,
         });
         if (
+          (!isNonNegativeSafeInteger(current.event_rank) && !acceptsDeletedEntryUnranked) ||
+          !isNonNegativeSafeInteger(current.overall_rank)
+        ) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entry.entry_id} final result is missing a safe event/overall rank for event ${eventId}`,
+          );
+        }
+        if (
           !(
-            (current.event_rank > 0 && current.overall_rank > 0) ||
+            (isNonNegativeSafeInteger(current.event_rank) &&
+              current.event_rank > 0 &&
+              current.overall_rank > 0) ||
             (acceptsUnrankedFirstEvent && current.event_rank === 0 && current.overall_rank === 0) ||
             acceptsDeletedEntryUnranked
           )
