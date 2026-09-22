@@ -40,6 +40,39 @@ export function normalizeAuthoritativeUnrankedEventRank(input: {
   return input.sourceTotalPoints === 0 && input.overallRank === 0 ? 0 : null;
 }
 
+/**
+ * FPL keeps deleted entries in the current-season feed. The entry summary can
+ * retain a non-negative cumulative score, while the finalized history row
+ * reports either the normalized zero-total/zero-rank sentinel or a non-zero
+ * cumulative total with a nullable event rank. The entry identity is the
+ * durable discriminator available to us (`Deleted` / `Deleted Player`).
+ */
+export function isAuthoritativeUnrankedDeletedEntryResult(
+  input: Readonly<{
+    entryName: string;
+    playerName: string;
+    identityOverallPoints: number | null;
+    identityOverallRank: number | null;
+    resultOverallPoints: number | null;
+    eventRank: number | null;
+    overallRank: number | null;
+  }>,
+): boolean {
+  const nonNegativeSafeInteger = (value: number | null): value is number =>
+    value !== null && Number.isSafeInteger(value) && value >= 0;
+
+  return (
+    input.entryName.trim() === 'Deleted' &&
+    input.playerName.trim() === 'Deleted Player' &&
+    nonNegativeSafeInteger(input.identityOverallPoints) &&
+    input.identityOverallRank === 0 &&
+    nonNegativeSafeInteger(input.resultOverallPoints) &&
+    input.overallRank === 0 &&
+    ((input.resultOverallPoints === 0 && input.eventRank === 0) ||
+      (input.resultOverallPoints > 0 && input.eventRank === null))
+  );
+}
+
 export function resolveEntryScoreBaseline(input: EntryScoreBaselineInput): EntryScoreBaseline {
   const sourcePreviousOverallPoints =
     input.sourceTotalPoints - (input.sourceEventPoints - input.eventTransfersCost);
