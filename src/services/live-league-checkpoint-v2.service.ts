@@ -429,6 +429,11 @@ export type LiveLeagueCheckpointOptions = Readonly<{
   onInfrastructureFailure?: (error: unknown) => void;
 }>;
 
+export type LiveLeagueCheckpointReconcileOptions = Readonly<{
+  /** Observe database failures without changing the boolean reconciliation contract. */
+  onInfrastructureFailure?: (error: unknown) => void;
+}>;
+
 export async function checkpointLiveLeaguePublicationV2(
   read: LeagueLiveRead,
   dbInstance?: DbOrTransaction,
@@ -721,6 +726,7 @@ export async function checkpointLiveLeaguePublicationV2(
 export async function reconcileLiveLeagueCheckpointV2(
   scope: LeagueLiveScope,
   redisClient?: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  options: LiveLeagueCheckpointReconcileOptions = {},
 ): Promise<boolean> {
   const redis = redisClient ?? (await redisSingleton.getClient());
   const desired = await readLiveLeagueCheckpointDesiredV2(scope, redis);
@@ -728,7 +734,7 @@ export async function reconcileLiveLeagueCheckpointV2(
   const read = await readLiveLeaguePublicationV2(scope, redis);
   if (!read || read.publication.publicationId !== desired.publicationId) return false;
   if (!liveLeagueCheckpointIsDue(read, desired.force, desired.notBefore)) return false;
-  const checkpointed = await checkpointLiveLeaguePublicationV2(read);
+  const checkpointed = await checkpointLiveLeaguePublicationV2(read, undefined, options);
   if (!checkpointed) return false;
   const marked = await markLiveLeaguePublicationCheckpointedV2(read.publication, new Date(), redis);
   if (!marked) return false;

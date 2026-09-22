@@ -1230,7 +1230,7 @@ describe('Live League V2 H2H match retention', () => {
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(source).toContain('reconcileLiveLeagueCheckpointV2(scope, redis)');
+    expect(source).toContain('reconcileLiveLeagueCheckpointV2(scope, redis, {');
   });
 
   test('reports targeted H2H infrastructure failures to retention callers', () => {
@@ -1244,6 +1244,8 @@ describe('Live League V2 H2H match retention', () => {
     expect(end).toBeGreaterThan(start);
     expect(source).toContain('classifyDataError(error)');
     expect(source).toContain('infrastructureFailed');
+    expect(source).toContain('propagateInfrastructureFailure: true');
+    expect(checkpointServiceSource).toContain('onInfrastructureFailure');
   });
 });
 

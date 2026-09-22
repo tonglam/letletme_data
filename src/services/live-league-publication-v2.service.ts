@@ -127,11 +127,17 @@ function checkpointNotBefore(
   return new Date(checkpointedAt + LIVE_LEAGUE_CHECKPOINT_INTERVAL_MS).toISOString();
 }
 
+type ScheduleLeagueCheckpointOptions = Readonly<{
+  /** Re-throw database checkpoint failures to a bounded H2H recovery caller. */
+  propagateInfrastructureFailure?: boolean;
+}>;
+
 async function scheduleLeagueCheckpoint(
   publication: LeagueLiveManifest,
   previous: LeagueLiveManifest | null | undefined,
   scope: Parameters<typeof liveLeagueV2Key>[0],
   redis: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  options: ScheduleLeagueCheckpointOptions = {},
 ): Promise<void> {
   const force = publication.state === 'FINALIZED';
   await setLiveLeagueCheckpointDesiredV2(publication, new Date(), {
@@ -139,7 +145,17 @@ async function scheduleLeagueCheckpoint(
     notBefore: checkpointNotBefore(previous, force),
     redis,
   });
-  await reconcileLiveLeagueCheckpointV2(scope, redis);
+  let infrastructureFailureObserved = false;
+  let infrastructureFailure: unknown;
+  await reconcileLiveLeagueCheckpointV2(scope, redis, {
+    onInfrastructureFailure: (error) => {
+      infrastructureFailureObserved = true;
+      infrastructureFailure = error;
+    },
+  });
+  if (options.propagateInfrastructureFailure && infrastructureFailureObserved) {
+    throw infrastructureFailure;
+  }
 }
 
 function maxIso(values: readonly string[]): string {
@@ -874,6 +890,7 @@ type H2HPreparedMatch = {
   readonly index: H2HMatchIndexRow;
   readonly payload: H2HMatchPayload;
   readonly finalReady: boolean;
+  readonly infrastructureFailed: boolean;
 };
 
 type OfficialH2HTournament = {
@@ -1885,6 +1902,7 @@ async function publishH2HMatch(
       : finalReadyInput;
   const activePayload = readH2HMatchPayload(active, row.officialMatchId);
   const previousPayload = readH2HMatchPayload(previous, row.officialMatchId);
+  let infrastructureFailed = false;
   let selected = canPublish
     ? candidate
     : selectRetainedH2HMatchPayload(activePayload, previousPayload, candidate);
@@ -1894,6 +1912,7 @@ async function publishH2HMatch(
       index: h2hMatchIndexFromPayload(candidate),
       payload: candidate,
       finalReady: finalReadyInput,
+      infrastructureFailed: false,
     };
     const revisions = h2hRevisions(global, [preparedCandidate], []);
     try {
@@ -1943,6 +1962,7 @@ async function publishH2HMatch(
         ...candidate,
         state: 'ERROR',
       });
+      infrastructureFailed = classifyDataError(error) !== 'DATA_INCOMPLETE';
     }
   }
 
@@ -1959,6 +1979,7 @@ async function publishH2HMatch(
     index: h2hMatchIndexFromPayload(selected),
     payload: selected,
     finalReady: selectedFinalReady,
+    infrastructureFailed,
   };
 }
 
@@ -2295,6 +2316,9 @@ export async function syncLiveH2HLeaguePublicationsV2(
         );
       });
       totals.matches += prepared.length;
+      totals.infrastructureFailed += prepared.filter(
+        ({ infrastructureFailed }) => infrastructureFailed,
+      ).length;
       for (const match of prepared) {
         if (match.payload.state === 'READY') totals.published += 1;
         else if (match.payload.state === 'PENDING') totals.pending += 1;
@@ -2369,6 +2393,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
             headResult.previous,
             headScope,
             redis,
+            { propagateInfrastructureFailure: true },
           );
         }
         if (global.publication.state === 'FINALIZED') {
@@ -2460,6 +2485,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
             standingsResult.previous,
             standingsScope,
             redis,
+            { propagateInfrastructureFailure: true },
           );
         }
       } else if (standingsIsFinalized && standingsFreshForFinal && standings.length > 0) {
@@ -2517,6 +2543,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
             standingsResult.previous,
             standingsScope,
             redis,
+            { propagateInfrastructureFailure: true },
           );
         }
         const activeStandings = await readLiveLeaguePublicationV2Pointer(
