@@ -10,6 +10,7 @@ import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import { deriveEventLiveManagerScore } from '../domain/event-live-manager-score';
 import {
+  isAuthoritativeUnrankedDeletedEntryResult,
   normalizeAuthoritativeUnrankedEventRank,
   resolveEntryScoreBaseline,
 } from '../domain/entry-score';
@@ -554,9 +555,14 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         });
         // Keep the provider's unranked total paired with its rank sentinel.
         // Reconstructing a cumulative score here makes deleted entries fail
-        // FINAL's zero-total/zero-rank contract indefinitely.
+        // FINAL's source-total contract indefinitely.
         let authoritativeUnrankedDeleted = false;
-        if (eventRank === 0 && entryHistory.overall_rank === 0 && entryHistory.total_points === 0) {
+        if (
+          entryHistory.overall_rank === 0 &&
+          Number.isSafeInteger(entryHistory.total_points) &&
+          entryHistory.total_points >= 0 &&
+          (entryHistory.rank === null || eventRank === 0)
+        ) {
           const [identity] = await db
             .select({
               entryName: entriesInCompetition.entryName,
@@ -574,12 +580,15 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
             .limit(1);
           authoritativeUnrankedDeleted = Boolean(
             identity &&
-              identity.entryName.trim() === 'Deleted' &&
-              identity.playerName.trim() === 'Deleted Player' &&
-              identity.overallPoints !== null &&
-              Number.isSafeInteger(identity.overallPoints) &&
-              identity.overallPoints >= 0 &&
-              identity.overallRank === 0,
+              isAuthoritativeUnrankedDeletedEntryResult({
+                entryName: identity.entryName,
+                playerName: identity.playerName,
+                identityOverallPoints: identity.overallPoints,
+                identityOverallRank: identity.overallRank,
+                resultOverallPoints: entryHistory.total_points,
+                eventRank,
+                overallRank: entryHistory.overall_rank,
+              }),
           );
         }
         const captainPick = resolveScoringCaptainPick(picks.picks);

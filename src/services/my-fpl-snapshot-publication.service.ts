@@ -4,6 +4,7 @@ import type postgres from 'postgres';
 import { redisSingleton } from '../cache/singleton';
 import { countEntryEligibility, isEntryEligibleForEvent } from '../domain/entry-eligibility';
 import { MY_FPL_FINALIZATION_TOTAL_SLA_MS } from '../domain/data-contracts';
+import { isAuthoritativeUnrankedDeletedEntryResult } from '../domain/entry-score';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { myFplSnapshotEventLockScope, myFplSnapshotSeasonLockScope } from '../domain/my-fpl-locks';
@@ -27,6 +28,8 @@ import type {
   EventLiveManagerPickRow,
   RevisionedEventLiveScore,
 } from './event-live-v2-score.service';
+
+export { isAuthoritativeUnrankedDeletedEntryResult } from '../domain/entry-score';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -311,39 +314,6 @@ export function isAuthoritativeUnrankedFirstEventResult(
     !input.hasPreviousResult &&
     input.overallPoints === 0 &&
     input.overallRank === 0
-  );
-}
-
-/**
- * FPL keeps deleted entries in the current-season feed. The entry summary can
- * retain a non-negative cumulative score, while the finalized history row can
- * retain a non-negative event total with a nullable event rank and zero
- * overall rank. The entry identity is the durable discriminator available to
- * us (`Deleted` / `Deleted Player`). Accept that exact source shape, along
- * with the normalized zero-rank sentinel, without accepting a null or
- * negative identity total. Ordinary entries with a missing rank remain
- * ineligible for FINAL.
- */
-export function isAuthoritativeUnrankedDeletedEntryResult(
-  input: Readonly<{
-    entryName: string;
-    playerName: string;
-    identityOverallPoints: number | null;
-    identityOverallRank: number | null;
-    resultOverallPoints: number | null;
-    eventRank: number | null;
-    overallRank: number | null;
-  }>,
-): boolean {
-  return (
-    input.entryName.trim() === 'Deleted' &&
-    input.playerName.trim() === 'Deleted Player' &&
-    isNonNegativeSafeInteger(input.identityOverallPoints) &&
-    input.identityOverallRank === 0 &&
-    isNonNegativeSafeInteger(input.resultOverallPoints) &&
-    input.overallRank === 0 &&
-    ((input.resultOverallPoints === 0 && input.eventRank === 0) ||
-      (input.resultOverallPoints >= 0 && input.eventRank === null))
   );
 }
 

@@ -759,6 +759,15 @@ persistenceTest(
               zeroTotal: false,
               deleted: false,
             },
+            {
+              rank: null,
+              overall_rank: 0,
+              total_points: 1,
+              expectedRank: null,
+              expectedOverallPoints: 1,
+              zeroTotal: false,
+              deleted: true,
+            },
           ];
           cases.push(
             {
@@ -810,8 +819,13 @@ persistenceTest(
             const [result] = await repository.findByEventAndEntryIds(season, 2, [entryIds[0]]);
             expect(result?.eventRank).toBe(edge.expectedRank);
             expect(result?.eventPoints).toBeGreaterThan(0);
-            if (edge.zeroTotal) expect(result?.overallPoints).toBe(0);
-            else expect(result?.overallPoints).toBeGreaterThan(0);
+            if (edge.expectedOverallPoints !== undefined) {
+              expect(result?.overallPoints).toBe(edge.expectedOverallPoints);
+            } else if (edge.zeroTotal) {
+              expect(result?.overallPoints).toBe(0);
+            } else {
+              expect(result?.overallPoints).toBeGreaterThan(0);
+            }
           }
           throw edgeCasesDone;
         }),
