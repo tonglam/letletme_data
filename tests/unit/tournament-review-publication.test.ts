@@ -23,6 +23,10 @@ import {
   rankTournamentReviewPointsGroups,
   resolveTournamentPointsRaceSourceUpdatedAt,
 } from '../../src/services/tournament-points-race-results.service';
+import {
+  shouldPreserveBullmqRetryDelay,
+  shouldRescheduleDelayedTournamentRepair,
+} from '../../src/jobs/tournament-repair.jobs';
 
 const publicationSource = readFileSync(
   'src/services/tournament-review-publication.service.ts',
@@ -36,6 +40,23 @@ const hardCutMigration = readFileSync(
 );
 
 describe('My Tournament Review V2 format and retry policy', () => {
+  test('reschedules an old delayed repair when the current due time is earlier', () => {
+    const now = Date.parse('2026-09-22T00:00:00.000Z');
+    expect(shouldRescheduleDelayedTournamentRepair(now + 24 * 60 * 60_000, now + 15 * 60_000)).toBe(
+      true,
+    );
+    expect(shouldRescheduleDelayedTournamentRepair(now + 15 * 60_000, now + 24 * 60 * 60_000)).toBe(
+      false,
+    );
+    expect(shouldRescheduleDelayedTournamentRepair(now, now)).toBe(false);
+  });
+
+  test('preserves BullMQ retry backoff for a previously attempted delayed repair', () => {
+    expect(shouldPreserveBullmqRetryDelay(1, 1)).toBe(true);
+    expect(shouldPreserveBullmqRetryDelay(0, 1)).toBe(true);
+    expect(shouldPreserveBullmqRetryDelay(0, 0)).toBe(false);
+  });
+
   test('routes stale points projections to result repair while retaining topology repair', () => {
     const obligation = { event_id: 3 } as Parameters<typeof reviewRepairIssue>[0];
     for (const message of [
