@@ -23,7 +23,10 @@ import {
   rankTournamentReviewPointsGroups,
   resolveTournamentPointsRaceSourceUpdatedAt,
 } from '../../src/services/tournament-points-race-results.service';
-import { shouldRescheduleDelayedTournamentRepair } from '../../src/jobs/tournament-repair.jobs';
+import {
+  shouldPreserveBullmqRetryDelay,
+  shouldRescheduleDelayedTournamentRepair,
+} from '../../src/jobs/tournament-repair.jobs';
 
 const publicationSource = readFileSync(
   'src/services/tournament-review-publication.service.ts',
@@ -46,6 +49,12 @@ describe('My Tournament Review V2 format and retry policy', () => {
       false,
     );
     expect(shouldRescheduleDelayedTournamentRepair(now, now)).toBe(false);
+  });
+
+  test('preserves BullMQ retry backoff for a previously attempted delayed repair', () => {
+    expect(shouldPreserveBullmqRetryDelay(1, 1)).toBe(true);
+    expect(shouldPreserveBullmqRetryDelay(0, 1)).toBe(true);
+    expect(shouldPreserveBullmqRetryDelay(0, 0)).toBe(false);
   });
 
   test('routes stale points projections to result repair while retaining topology repair', () => {
