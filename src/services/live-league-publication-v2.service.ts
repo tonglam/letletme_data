@@ -190,6 +190,7 @@ async function enqueueFinalizationProfileRefresh(
   eventId: number,
   tournamentId: number,
   entryIds: readonly number[],
+  options: Readonly<{ propagateInfrastructureFailure?: boolean }> = {},
 ): Promise<void> {
   const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
   if (uniqueEntryIds.length === 0) return;
@@ -211,6 +212,7 @@ async function enqueueFinalizationProfileRefresh(
       tournamentId,
       entries: uniqueEntryIds.length,
     });
+    if (options.propagateInfrastructureFailure) throw error;
   }
 }
 
@@ -2160,6 +2162,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
   );
   const tournamentFilter =
     databaseOptions.tournamentIds === undefined ? null : new Set(databaseOptions.tournamentIds);
+  const propagateInfrastructureFailure = databaseOptions.tournamentIds !== undefined;
   const tournaments = allTournaments.filter(
     (tournament) => tournamentFilter === null || tournamentFilter.has(tournament.tournamentId),
   );
@@ -2265,6 +2268,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
             eventId,
             tournamentId,
             entriesNeedingProfileRefresh,
+            { propagateInfrastructureFailure },
           );
         }
       }
@@ -2393,7 +2397,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
             headResult.previous,
             headScope,
             redis,
-            { propagateInfrastructureFailure: true },
+            { propagateInfrastructureFailure },
           );
         }
         if (global.publication.state === 'FINALIZED') {
@@ -2485,7 +2489,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
             standingsResult.previous,
             standingsScope,
             redis,
-            { propagateInfrastructureFailure: true },
+            { propagateInfrastructureFailure },
           );
         }
       } else if (standingsIsFinalized && standingsFreshForFinal && standings.length > 0) {
@@ -2543,7 +2547,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
             standingsResult.previous,
             standingsScope,
             redis,
-            { propagateInfrastructureFailure: true },
+            { propagateInfrastructureFailure },
           );
         }
         const activeStandings = await readLiveLeaguePublicationV2Pointer(

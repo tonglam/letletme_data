@@ -1244,7 +1244,8 @@ describe('Live League V2 H2H match retention', () => {
     expect(end).toBeGreaterThan(start);
     expect(source).toContain('classifyDataError(error)');
     expect(source).toContain('infrastructureFailed');
-    expect(source).toContain('propagateInfrastructureFailure: true');
+    expect(source).toContain('databaseOptions.tournamentIds !== undefined');
+    expect(source).toContain('{ propagateInfrastructureFailure }');
     expect(checkpointServiceSource).toContain('onInfrastructureFailure');
   });
 });
