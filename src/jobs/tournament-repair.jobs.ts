@@ -131,6 +131,13 @@ export async function enqueueTournamentRepair(
   }
   const jobId = tournamentRepairJobId(season.seasonCode, issue.tournamentId, issue.issueId);
   return withTournamentRepairEnqueueLease(jobId, async (assertLease) => {
+    const assertQueueAdmission = async (): Promise<void> => {
+      await assertLease();
+      if (await isQueueDrainOnly(tournamentRepairQueue.name)) {
+        throw new QueueDrainOnlyError(tournamentRepairQueue.name);
+      }
+      await assertLease();
+    };
     const now = Date.now();
     const requestedDueAt = Math.max(issue.nextRepairAt?.getTime() ?? now, now);
     const delay = requestedDueAt - now;
@@ -148,8 +155,13 @@ export async function enqueueTournamentRepair(
     if (existing) {
       const state = await existing.getState();
       if (state === 'delayed') {
-        if (shouldPreserveBullmqRetryDelay(existing.attemptsMade, existing.attemptsStarted)) {
-          return existing;
+        await assertLease();
+        const delayedJob = await tournamentRepairQueue.getJob(jobId);
+        if (!delayedJob) return existing;
+        await assertLease();
+        if ((await delayedJob.getState()) !== 'delayed') return delayedJob;
+        if (shouldPreserveBullmqRetryDelay(delayedJob.attemptsMade, delayedJob.attemptsStarted)) {
+          return delayedJob;
         }
         const existingDueAt = await readDelayedTournamentRepairDueAt(jobId);
         await assertLease();
@@ -161,12 +173,12 @@ export async function enqueueTournamentRepair(
           existingDueAt !== null &&
           shouldRescheduleDelayedTournamentRepair(existingDueAt, requestedDueAt)
         ) {
-          await assertLease();
-          await existing.updateData(data);
-          await assertLease();
-          await existing.changeDelay(delay);
+          await assertQueueAdmission();
+          await delayedJob.updateData(data);
+          await assertQueueAdmission();
+          await delayedJob.changeDelay(delay);
         }
-        return existing;
+        return delayedJob;
       }
       if (['waiting', 'waiting-children', 'active', 'paused'].includes(state)) {
         return existing;
@@ -175,10 +187,10 @@ export async function enqueueTournamentRepair(
       // completed/failed record before the watchdog schedules the next repair;
       // otherwise BullMQ would treat the retained history row as a duplicate
       // forever (the queue retains completed jobs for up to 24 hours).
-      await assertLease();
+      await assertQueueAdmission();
       await existing.remove();
     }
-    await assertLease();
+    await assertQueueAdmission();
     return tournamentRepairQueue.add('tournament-repair', data, { jobId, delay });
   });
 }
