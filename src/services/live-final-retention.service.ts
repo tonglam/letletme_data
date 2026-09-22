@@ -17,6 +17,7 @@ import {
   validateEntryLiveInputV2,
   type EntryLiveInputV2,
   type EntryLivePublicationV2,
+  type LivePublicationRead,
   type LivePublicationV2,
 } from '../cache/live-publication-v2';
 import {
@@ -404,7 +405,7 @@ async function processGlobal(
   eventId: number,
   redis: Redis,
   family: MutableFamilyStats,
-): Promise<LivePublicationV2 | null> {
+): Promise<LivePublicationRead | null> {
   family.checked += 1;
   const checkpoint = await readLivePublicationV2Checkpoint(season, eventId);
   if (!checkpoint || checkpoint.publication.state !== 'FINALIZED') {
@@ -440,7 +441,7 @@ async function processGlobal(
     ]);
     if (ttl !== null && ttl > LIVE_FINAL_RETENTION_THRESHOLD_MS) {
       updateMinimum(family, ttl);
-      return active.publication;
+      return active;
     }
     const renewed = await renewLivePublicationV2FinalLease({
       publication: active.publication,
@@ -454,7 +455,7 @@ async function processGlobal(
     }
     family.renewed += 1;
     updateMinimum(family, renewed.ttlMs);
-    return active.publication;
+    return active;
   }
   try {
     await restoreLivePublicationV2Checkpoint({ checkpoint, redis });
@@ -479,7 +480,7 @@ async function processGlobal(
         `${restored.publication.items.fixtures.key}:meta`,
       ]),
     );
-    return restored.publication;
+    return restored;
   } catch (error) {
     if (classifyDataError(error) !== 'DATA_INCOMPLETE')
       family.infrastructureFailed = (family.infrastructureFailed ?? 0) + 1;
@@ -1255,7 +1256,8 @@ export async function runLiveFinalRetentionV2(
     league: emptyFamily(),
   };
 
-  const global = await processGlobal(season, eventId, redis, families.global);
+  const globalRead = await processGlobal(season, eventId, redis, families.global);
+  const global = globalRead?.publication ?? null;
   try {
     if (await restoreEquivalentFinalMatchPairForRetentionV2(season, eventId, redis)) {
       families.matchDesk.restored += 1;
@@ -1336,6 +1338,7 @@ export async function runLiveFinalRetentionV2(
         // entry inputs; the publisher owns Redis CAS and PostgreSQL checkpoints.
         const recovery = await syncLiveH2HLeaguePublicationsV2(season, eventId, undefined, {
           redis,
+          globalRead,
           tournamentIds: [tournamentId],
           h2hScopes: [...(missingH2HScopesByTournament.get(tournamentId) ?? [])],
         });

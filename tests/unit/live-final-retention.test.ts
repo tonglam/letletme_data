@@ -599,6 +599,10 @@ describe('Live final retention league scope completeness', () => {
     expect(retentionServiceSource).toContain('onInfrastructureFailure');
   });
 
+  test('reuses the validated global publication during targeted H2H recovery', () => {
+    expect(retentionServiceSource).toContain('globalRead,');
+  });
+
   test('requires missing active Classic and in-phase official H2H checkpoints', () => {
     const tournament = {
       rosterMode: 'snapshot',

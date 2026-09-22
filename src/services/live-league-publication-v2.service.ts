@@ -2,6 +2,7 @@ import {
   readEntryLiveInputsV2,
   readLivePublicationV2,
   type EntryLivePublicationRead,
+  type LivePublicationRead,
   type LivePublicationV2,
 } from '../cache/live-publication-v2';
 import {
@@ -56,6 +57,8 @@ export type LiveLeagueDatabaseOptions = Readonly<{
   redis?: Awaited<ReturnType<typeof redisSingleton.getClient>>;
   databaseRead?: DbOrTransaction;
   databaseReadClient?: postgres.Sql;
+  /** Reuse a validated global publication read during bounded retention recovery. */
+  globalRead?: LivePublicationRead | null;
   /** Exact H2H tournament targets for bounded historical retention recovery. */
   tournamentIds?: readonly number[];
   /** Exact H2H scopes to recover for the bounded tournament targets. */
@@ -2174,7 +2177,9 @@ export async function syncLiveH2HLeaguePublicationsV2(
   databaseOptions: LiveLeagueDatabaseOptions = {},
 ): Promise<LiveH2HLeaguePublicationSyncResult | null> {
   const redis = databaseOptions.redis ?? (await redisSingleton.getClient());
-  const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  const global =
+    databaseOptions.globalRead ??
+    (await readLivePublicationV2({ season: season.seasonCode, eventId }, redis));
   if (!global) return null;
   const allTournaments = await findOfficialH2HTournaments(
     season,
