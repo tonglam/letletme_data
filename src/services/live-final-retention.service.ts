@@ -1313,17 +1313,19 @@ export async function runLiveFinalRetentionV2(
     scope,
     checkpoint: await readLiveLeagueCheckpointV2(scope),
   }));
-  const missingH2HTournamentIds = [
-    ...new Set(
-      leagueCheckpoints
-        .filter(
-          (item) =>
-            !item.checkpoint &&
-            (item.scope.scope === 'H2H_HEAD' || item.scope.scope === 'H2H_STANDINGS'),
-        )
-        .map((item) => item.scope.tournamentId),
-    ),
-  ];
+  const missingH2HScopesByTournament = new Map<number, Set<'H2H_HEAD' | 'H2H_STANDINGS'>>();
+  for (const item of leagueCheckpoints) {
+    if (
+      item.checkpoint ||
+      (item.scope.scope !== 'H2H_HEAD' && item.scope.scope !== 'H2H_STANDINGS')
+    ) {
+      continue;
+    }
+    const scopes = missingH2HScopesByTournament.get(item.scope.tournamentId) ?? new Set();
+    scopes.add(item.scope.scope);
+    missingH2HScopesByTournament.set(item.scope.tournamentId, scopes);
+  }
+  const missingH2HTournamentIds = [...missingH2HScopesByTournament.keys()];
   if (global && missingH2HTournamentIds.length > 0) {
     const recoveredH2HTournamentIds = new Set(missingH2HTournamentIds);
     await mapWithConcurrency(missingH2HTournamentIds, 1, async (tournamentId) => {
@@ -1335,6 +1337,7 @@ export async function runLiveFinalRetentionV2(
         const recovery = await syncLiveH2HLeaguePublicationsV2(season, eventId, undefined, {
           redis,
           tournamentIds: [tournamentId],
+          h2hScopes: [...(missingH2HScopesByTournament.get(tournamentId) ?? [])],
         });
         if (recovery && recovery.infrastructureFailed > 0) {
           families.league.infrastructureFailed =
