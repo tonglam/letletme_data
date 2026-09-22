@@ -1332,10 +1332,14 @@ export async function runLiveFinalRetentionV2(
         // worker pass for that historical event. Rebuild only the missing
         // exact tournament from canonical battle/standings rows and FINAL
         // entry inputs; the publisher owns Redis CAS and PostgreSQL checkpoints.
-        await syncLiveH2HLeaguePublicationsV2(season, eventId, undefined, {
+        const recovery = await syncLiveH2HLeaguePublicationsV2(season, eventId, undefined, {
           redis,
           tournamentIds: [tournamentId],
         });
+        if (recovery && recovery.infrastructureFailed > 0) {
+          families.league.infrastructureFailed =
+            (families.league.infrastructureFailed ?? 0) + recovery.infrastructureFailed;
+        }
       } catch (error) {
         if (classifyDataError(error) !== 'DATA_INCOMPLETE')
           families.league.infrastructureFailed = (families.league.infrastructureFailed ?? 0) + 1;

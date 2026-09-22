@@ -1222,6 +1222,29 @@ describe('Live League V2 H2H match retention', () => {
     expect(source).not.toContain('enqueue');
     expect(source).not.toContain('refreshLiveLeagueProfiles');
   });
+
+  test('keeps targeted H2H recovery on the caller Redis client through checkpointing', () => {
+    const start = publicationServiceSource.indexOf('async function scheduleLeagueCheckpoint');
+    const end = publicationServiceSource.indexOf('\nfunction maxIso', start);
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('reconcileLiveLeagueCheckpointV2(scope, redis)');
+  });
+
+  test('reports targeted H2H infrastructure failures to retention callers', () => {
+    const start = publicationServiceSource.indexOf(
+      'export async function syncLiveH2HLeaguePublicationsV2',
+    );
+    const end = publicationServiceSource.length;
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('classifyDataError(error)');
+    expect(source).toContain('infrastructureFailed');
+  });
 });
 
 describe('Live League V2 standings finalization helpers', () => {

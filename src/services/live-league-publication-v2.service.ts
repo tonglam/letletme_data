@@ -32,6 +32,7 @@ import type postgres from 'postgres';
 import type { DbOrTransaction } from '../db/singleton';
 import { getDbClient } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
+import { classifyDataError } from '../domain/error-classification';
 import {
   isH2HTournamentPhaseActive,
   liveLeagueCheckpointIsDue,
@@ -138,7 +139,7 @@ async function scheduleLeagueCheckpoint(
     notBefore: checkpointNotBefore(previous, force),
     redis,
   });
-  await reconcileLiveLeagueCheckpointV2(scope);
+  await reconcileLiveLeagueCheckpointV2(scope, redis);
 }
 
 function maxIso(values: readonly string[]): string {
@@ -2113,6 +2114,7 @@ export type LiveH2HLeaguePublicationSyncResult = {
   readonly retained: number;
   readonly pending: number;
   readonly skipped: number;
+  readonly infrastructureFailed: number;
   readonly finalReady: boolean;
 };
 
@@ -2146,7 +2148,14 @@ export async function syncLiveH2HLeaguePublicationsV2(
     new Set(allTournaments.map(({ tournamentId }) => tournamentId)),
     redis,
   );
-  const totals = { matches: 0, published: 0, retained: 0, pending: 0, skipped: 0 };
+  const totals = {
+    matches: 0,
+    published: 0,
+    retained: 0,
+    pending: 0,
+    skipped: 0,
+    infrastructureFailed: 0,
+  };
   let finalReady = true;
   for (const tournament of tournaments) {
     const tournamentId = tournament.tournamentId;
@@ -2527,6 +2536,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
       }
     } catch (error) {
       totals.skipped += 1;
+      if (classifyDataError(error) !== 'DATA_INCOMPLETE') totals.infrastructureFailed += 1;
       if (global.publication.state === 'FINALIZED' && phaseActive) finalReady = false;
       logError('Live H2H league publication failed; retaining match/head snapshots', error, {
         season: season.seasonCode,
