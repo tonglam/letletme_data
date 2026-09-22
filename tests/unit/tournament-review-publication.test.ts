@@ -38,9 +38,14 @@ const hardCutMigration = readFileSync(
 
 describe('My Tournament Review V2 format and retry policy', () => {
   test('reschedules an old delayed repair when the current due time is earlier', () => {
-    expect(shouldRescheduleDelayedTournamentRepair(24 * 60 * 60_000, 15 * 60_000)).toBe(true);
-    expect(shouldRescheduleDelayedTournamentRepair(15 * 60_000, 24 * 60 * 60_000)).toBe(false);
-    expect(shouldRescheduleDelayedTournamentRepair(0, 0)).toBe(false);
+    const now = Date.parse('2026-09-22T00:00:00.000Z');
+    expect(shouldRescheduleDelayedTournamentRepair(now + 24 * 60 * 60_000, now + 15 * 60_000)).toBe(
+      true,
+    );
+    expect(shouldRescheduleDelayedTournamentRepair(now + 15 * 60_000, now + 24 * 60 * 60_000)).toBe(
+      false,
+    );
+    expect(shouldRescheduleDelayedTournamentRepair(now, now)).toBe(false);
   });
 
   test('routes stale points projections to result repair while retaining topology repair', () => {
