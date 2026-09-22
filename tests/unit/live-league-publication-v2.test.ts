@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import type Redis from 'ioredis';
 
 import {
   liveLeagueV2ItemKey,
@@ -10,6 +11,7 @@ import {
   listLiveLeagueCheckpointDesiredScopesV2,
   parseLiveLeagueCheckpointScopeV2,
   parseLiveLeaguePublicationV2Manifest,
+  readLiveLeaguePublicationV2,
   readLiveLeagueCheckpointDesiredScanCursorV2,
   validateLiveLeaguePublicationV2Checkpoint,
   validateLiveLeaguePublicationV2Payload,
@@ -644,6 +646,91 @@ describe('Live League V2 manifest contract', () => {
     ).toBe(false);
   });
 
+  test('accepts finalized group-stage standings coverage during knockout', () => {
+    const standingsScope: LeagueLiveScope = {
+      season: scope.season,
+      eventId: 13,
+      tournamentId: scope.tournamentId,
+      scope: 'H2H_STANDINGS',
+    };
+    const base = h2hManifest();
+    const standingsManifest: LeagueLiveManifest = {
+      ...base,
+      eventId: standingsScope.eventId,
+      scope: standingsScope.scope,
+      state: 'FINALIZED',
+      verifiedStandingsCoverageEventId: 10,
+      counts: { expected: 1, published: 1, ready: 1, noPicks: 0 },
+      items: {
+        index: {
+          ...base.items.index,
+          key: liveLeagueV2ItemKey(standingsScope, 1, 'index'),
+        },
+        payload: {
+          ...base.items.payload,
+          key: liveLeagueV2ItemKey(standingsScope, 1, 'payload'),
+        },
+      },
+    };
+    const index = [{ entryId: 101, availability: 'READY' as const }];
+    const payload = {
+      standings: {
+        contractVersion: 'live-points-v2' as const,
+        season: standingsScope.season,
+        eventId: standingsScope.eventId,
+        tournamentId: standingsScope.tournamentId,
+        throughEventId: 10,
+        state: 'READY' as const,
+        sourceCheckedAt: '2026-08-30T00:00:00.000Z',
+        rows: [
+          {
+            entryId: 101,
+            entryName: 'Entry 101',
+            playerName: 'Player 101',
+            rank: 1,
+            matchPoints: 3,
+            played: 1,
+            won: 1,
+            drawn: 0,
+            lost: 0,
+            pointsFor: 50,
+          },
+        ],
+      },
+    };
+
+    expect(
+      validateLiveLeaguePublicationV2Payload(standingsScope, standingsManifest, index, payload),
+    ).toBe(true);
+
+    const unverifiedManifest = { ...standingsManifest };
+    delete unverifiedManifest.verifiedStandingsCoverageEventId;
+    expect(
+      validateLiveLeaguePublicationV2Payload(standingsScope, unverifiedManifest, index, payload),
+    ).toBe(false);
+  });
+
+  test('reports Redis read failures to bounded callers', async () => {
+    const error = new Error('redis read failed');
+    let getCalls = 0;
+    const failures: unknown[] = [];
+    const redis = {
+      get: async () => {
+        getCalls += 1;
+        if (getCalls === 1) throw error;
+        return null;
+      },
+    } as unknown as Redis;
+
+    await expect(
+      readLiveLeaguePublicationV2(scope, redis, {
+        onInfrastructureFailure: (observed) => failures.push(observed),
+      }),
+    ).resolves.toBeNull();
+    expect(getCalls).toBe(2);
+    expect(failures).toEqual([error]);
+  });
+
   test('does not compare timestamps owned by different clocks', () => {
     const fixture = completeClassicCheckpointFixture();
     const skewedManifest = {
@@ -1222,6 +1309,35 @@ describe('Live League V2 H2H match retention', () => {
     expect(source).not.toContain('enqueue');
     expect(source).not.toContain('refreshLiveLeagueProfiles');
   });
+
+  test('keeps targeted H2H recovery on the caller Redis client through checkpointing', () => {
+    const start = publicationServiceSource.indexOf('async function scheduleLeagueCheckpoint');
+    const end = publicationServiceSource.indexOf('\nfunction maxIso', start);
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('reconcileLiveLeagueCheckpointV2(scope, redis, {');
+  });
+
+  test('reports targeted H2H infrastructure failures to retention callers', () => {
+    const start = publicationServiceSource.indexOf(
+      'export async function syncLiveH2HLeaguePublicationsV2',
+    );
+    const end = publicationServiceSource.length;
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('classifyDataError(error)');
+    expect(source).toContain('infrastructureFailed');
+    expect(source).toContain('databaseOptions.tournamentIds !== undefined');
+    expect(source).toContain('{ propagateInfrastructureFailure }');
+    expect(source).toContain('h2hScopes');
+    expect(source).toContain('preservedHeadCheckpoint');
+    expect(source).toContain('onInfrastructureFailure');
+    expect(checkpointServiceSource).toContain('onInfrastructureFailure');
+  });
 });
 
 describe('Live League V2 standings finalization helpers', () => {
@@ -1283,6 +1399,17 @@ describe('Live League V2 standings finalization helpers', () => {
         boundary,
       ),
     ).toBe(false);
+  });
+
+  test('projects current-event freshness through the standings query coverage', () => {
+    const start = publicationServiceSource.indexOf('async function findOfficialH2HStandings');
+    const end = publicationServiceSource.indexOf('\nfunction isoOrFallback', start);
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('match_coverage."currentEventOldestCompleteSourceCheckedAt"');
+    expect(source).toContain('coverage."currentEventOldestCompleteSourceCheckedAt"');
   });
 });
 

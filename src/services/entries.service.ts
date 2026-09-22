@@ -1601,6 +1601,7 @@ export async function rebuildFinalEntryLiveInputsV2(
   redis?: Redis,
   finalizationCorrectionBoundary?: Date | string,
   databaseRead?: DbOrTransaction,
+  options: Readonly<{ onInfrastructureFailure?: (error: unknown) => void }> = {},
 ): Promise<number> {
   const uniqueEntryIds = [...new Set(entryIds)].filter(
     (entryId) => Number.isSafeInteger(entryId) && entryId > 0,
@@ -1691,6 +1692,7 @@ export async function rebuildFinalEntryLiveInputsV2(
         rebuilt += 1;
       }
     } catch (error) {
+      options.onInfrastructureFailure?.(error);
       logError('Failed to rebuild final V2 entry input from checkpoint', error, {
         season: season.seasonCode,
         eventId,

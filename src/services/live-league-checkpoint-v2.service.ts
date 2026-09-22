@@ -277,6 +277,7 @@ function sameFinalizedPublicationContent(
     tournamentId: manifest.tournamentId,
     scope: manifest.scope,
     matchId: manifest.matchId,
+    verifiedStandingsCoverageEventId: manifest.verifiedStandingsCoverageEventId,
     state: manifest.state,
     globalRef: manifest.globalRef,
     revisions: manifest.revisions,
@@ -426,6 +427,11 @@ export function isSafeFinalizedClassicRosterExpansion(
 /** Persist one self-contained latest publication without blocking its Redis promotion. */
 export type LiveLeagueCheckpointOptions = Readonly<{
   /** Observe database failures so callers can preserve retryable classification. */
+  onInfrastructureFailure?: (error: unknown) => void;
+}>;
+
+export type LiveLeagueCheckpointReconcileOptions = Readonly<{
+  /** Observe infrastructure failures without changing the boolean reconciliation contract. */
   onInfrastructureFailure?: (error: unknown) => void;
 }>;
 
@@ -721,14 +727,17 @@ export async function checkpointLiveLeaguePublicationV2(
 export async function reconcileLiveLeagueCheckpointV2(
   scope: LeagueLiveScope,
   redisClient?: Awaited<ReturnType<typeof redisSingleton.getClient>>,
+  options: LiveLeagueCheckpointReconcileOptions = {},
 ): Promise<boolean> {
   const redis = redisClient ?? (await redisSingleton.getClient());
   const desired = await readLiveLeagueCheckpointDesiredV2(scope, redis);
   if (!desired) return false;
-  const read = await readLiveLeaguePublicationV2(scope, redis);
+  const read = await readLiveLeaguePublicationV2(scope, redis, {
+    onInfrastructureFailure: options.onInfrastructureFailure,
+  });
   if (!read || read.publication.publicationId !== desired.publicationId) return false;
   if (!liveLeagueCheckpointIsDue(read, desired.force, desired.notBefore)) return false;
-  const checkpointed = await checkpointLiveLeaguePublicationV2(read);
+  const checkpointed = await checkpointLiveLeaguePublicationV2(read, undefined, options);
   if (!checkpointed) return false;
   const marked = await markLiveLeaguePublicationCheckpointedV2(read.publication, new Date(), redis);
   if (!marked) return false;

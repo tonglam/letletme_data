@@ -158,6 +158,8 @@ export type LeagueLiveManifest = {
   readonly eventId: number;
   readonly tournamentId: number;
   readonly scope: LeagueLiveScopeKind;
+  /** Set only after a FINALIZED standings source passes its phase-coverage fence. */
+  readonly verifiedStandingsCoverageEventId?: number;
   readonly matchId?: number;
   readonly state: LivePublicationState;
   readonly globalRef: {
@@ -201,6 +203,11 @@ export type LeagueLiveRead = {
   readonly payload: LeagueLivePayload;
   readonly servedFrom: 'REDIS_CURRENT' | 'REDIS_PREVIOUS' | 'POSTGRES_CHECKPOINT';
 };
+
+export type LiveLeaguePublicationReadOptions = Readonly<{
+  /** Preserve Redis transport failures for bounded recovery callers. */
+  onInfrastructureFailure?: (error: unknown) => void;
+}>;
 
 export type LeagueLivePointerReadV2 = {
   readonly raw: string;
@@ -509,6 +516,13 @@ function parseManifest(raw: string | null, scope: LeagueLiveScope): LeagueLiveMa
       !Number.isSafeInteger(value.globalRef.generation) ||
       value.globalRef.generation <= 0 ||
       !validRevisionVector(value.revisions) ||
+      (value.verifiedStandingsCoverageEventId !== undefined &&
+        (scope.scope !== 'H2H_STANDINGS' ||
+          value.state !== 'FINALIZED' ||
+          typeof value.verifiedStandingsCoverageEventId !== 'number' ||
+          !Number.isSafeInteger(value.verifiedStandingsCoverageEventId) ||
+          value.verifiedStandingsCoverageEventId < 0 ||
+          value.verifiedStandingsCoverageEventId > scope.eventId)) ||
       !isRecord(value.times) ||
       !validIso(value.times.sourceCheckedAt) ||
       !validIso(value.times.contentUpdatedAt) ||
@@ -844,6 +858,15 @@ function validH2HStandingsPayload(
   if (!isRecord(value) || !isRecord(value.standings)) return false;
   const standings = value.standings;
   if (
+    manifest.verifiedStandingsCoverageEventId !== undefined &&
+    (manifest.state !== 'FINALIZED' ||
+      !Number.isSafeInteger(manifest.verifiedStandingsCoverageEventId) ||
+      manifest.verifiedStandingsCoverageEventId < 0 ||
+      manifest.verifiedStandingsCoverageEventId > manifest.eventId)
+  )
+    return false;
+  const expectedReadyThroughEventId = manifest.verifiedStandingsCoverageEventId ?? manifest.eventId;
+  if (
     standings.contractVersion !== LIVE_LEAGUE_CONTRACT_VERSION ||
     standings.season !== manifest.season ||
     standings.eventId !== manifest.eventId ||
@@ -852,7 +875,7 @@ function validH2HStandingsPayload(
     !Number.isSafeInteger(standings.throughEventId) ||
     standings.throughEventId < 0 ||
     standings.throughEventId > manifest.eventId ||
-    (standings.state === 'READY' && standings.throughEventId !== manifest.eventId) ||
+    (standings.state === 'READY' && standings.throughEventId !== expectedReadyThroughEventId) ||
     (standings.state !== 'READY' &&
       standings.state !== 'UPDATING' &&
       standings.state !== 'UNAVAILABLE') ||
@@ -1705,6 +1728,8 @@ function sourceDate(value: Date | string): string {
 
 type LiveLeaguePublicationInput = {
   readonly scope: LeagueLiveScope;
+  /** Set only after a FINALIZED standings source passes its phase-coverage fence. */
+  readonly verifiedStandingsCoverageEventId?: number;
   readonly state: LivePublicationState;
   readonly sourceCheckedAt: Date | string;
   readonly contentUpdatedAt?: Date | string;
@@ -1736,6 +1761,9 @@ function validationManifest(input: LiveLeaguePublicationInput): LeagueLiveManife
     eventId: input.scope.eventId,
     tournamentId: input.scope.tournamentId,
     scope: input.scope.scope,
+    ...(input.verifiedStandingsCoverageEventId === undefined
+      ? {}
+      : { verifiedStandingsCoverageEventId: input.verifiedStandingsCoverageEventId }),
     ...(input.scope.matchId === undefined ? {} : { matchId: input.scope.matchId }),
     state: input.state,
     globalRef: input.globalRef,
@@ -1849,6 +1877,7 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
     current.globalRef.publicationId === input.globalRef.publicationId &&
     current.globalRef.generation === input.globalRef.generation &&
     current.state === input.state &&
+    current.verifiedStandingsCoverageEventId === input.verifiedStandingsCoverageEventId &&
     current.counts.expected === input.counts.expected
   ) {
     const next: LeagueLiveManifest = {
@@ -1905,6 +1934,9 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
     eventId: input.scope.eventId,
     tournamentId: input.scope.tournamentId,
     scope: input.scope.scope,
+    ...(input.verifiedStandingsCoverageEventId === undefined
+      ? {}
+      : { verifiedStandingsCoverageEventId: input.verifiedStandingsCoverageEventId }),
     ...(input.scope.matchId === undefined ? {} : { matchId: input.scope.matchId }),
     state: input.state,
     globalRef: input.globalRef,
@@ -2055,21 +2087,30 @@ async function readPointer(
   redis: Redis,
   scope: LeagueLiveScope,
   pointer: 'active' | 'previous',
+  options: LiveLeaguePublicationReadOptions = {},
 ): Promise<LeagueLiveRead | null> {
+  let raw: string | null;
   try {
-    const raw = await redis.get(liveLeagueV2Key(scope, pointer));
-    const publication = parseManifest(raw, scope);
-    if (!publication) return null;
-    const values = await redis.mget(
+    raw = await redis.get(liveLeagueV2Key(scope, pointer));
+  } catch (error) {
+    options.onInfrastructureFailure?.(error);
+    return null;
+  }
+  const publication = parseManifest(raw, scope);
+  if (!publication) return null;
+  let values: (string | null)[];
+  try {
+    values = await redis.mget(
       publication.items.index.key,
       metadataKey(publication.items.index.key),
       publication.items.payload.key,
       metadataKey(publication.items.payload.key),
     );
-    return decodePointerRead(scope, pointer, raw, values);
-  } catch {
+  } catch (error) {
+    options.onInfrastructureFailure?.(error);
     return null;
   }
+  return decodePointerRead(scope, pointer, raw, values);
 }
 
 /**
@@ -2126,11 +2167,13 @@ export async function readLiveLeaguePublicationV2PointersV2(
 export async function readLiveLeaguePublicationV2(
   scope: LeagueLiveScope,
   redisClient?: Redis,
+  options: LiveLeaguePublicationReadOptions = {},
 ): Promise<LeagueLiveRead | null> {
   assertScope(scope);
   const redis = redisClient ?? (await redisSingleton.getClient());
   return (
-    (await readPointer(redis, scope, 'active')) ?? (await readPointer(redis, scope, 'previous'))
+    (await readPointer(redis, scope, 'active', options)) ??
+    (await readPointer(redis, scope, 'previous', options))
   );
 }
 
@@ -2138,10 +2181,11 @@ export async function readLiveLeaguePublicationV2Pointer(
   scope: LeagueLiveScope,
   pointer: 'active' | 'previous',
   redisClient?: Redis,
+  options: LiveLeaguePublicationReadOptions = {},
 ): Promise<LeagueLiveRead | null> {
   assertScope(scope);
   const redis = redisClient ?? (await redisSingleton.getClient());
-  return readPointer(redis, scope, pointer);
+  return readPointer(redis, scope, pointer, options);
 }
 
 export type LiveLeagueFinalLeaseResult = Readonly<{
