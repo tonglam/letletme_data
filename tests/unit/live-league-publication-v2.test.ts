@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import type Redis from 'ioredis';
 
 import {
   liveLeagueV2ItemKey,
@@ -10,6 +11,7 @@ import {
   listLiveLeagueCheckpointDesiredScopesV2,
   parseLiveLeagueCheckpointScopeV2,
   parseLiveLeaguePublicationV2Manifest,
+  readLiveLeaguePublicationV2,
   readLiveLeagueCheckpointDesiredScanCursorV2,
   validateLiveLeaguePublicationV2Checkpoint,
   validateLiveLeaguePublicationV2Payload,
@@ -657,6 +659,7 @@ describe('Live League V2 manifest contract', () => {
       eventId: standingsScope.eventId,
       scope: standingsScope.scope,
       state: 'FINALIZED',
+      verifiedStandingsCoverageEventId: 10,
       counts: { expected: 1, published: 1, ready: 1, noPicks: 0 },
       items: {
         index: {
@@ -699,6 +702,33 @@ describe('Live League V2 manifest contract', () => {
     expect(
       validateLiveLeaguePublicationV2Payload(standingsScope, standingsManifest, index, payload),
     ).toBe(true);
+
+    const unverifiedManifest = { ...standingsManifest };
+    delete unverifiedManifest.verifiedStandingsCoverageEventId;
+    expect(
+      validateLiveLeaguePublicationV2Payload(standingsScope, unverifiedManifest, index, payload),
+    ).toBe(false);
+  });
+
+  test('reports Redis read failures to bounded callers', async () => {
+    const error = new Error('redis read failed');
+    let getCalls = 0;
+    const failures: unknown[] = [];
+    const redis = {
+      get: async () => {
+        getCalls += 1;
+        if (getCalls === 1) throw error;
+        return null;
+      },
+    } as unknown as Redis;
+
+    await expect(
+      readLiveLeaguePublicationV2(scope, redis, {
+        onInfrastructureFailure: (observed) => failures.push(observed),
+      }),
+    ).resolves.toBeNull();
+    expect(getCalls).toBe(2);
+    expect(failures).toEqual([error]);
   });
 
   test('does not compare timestamps owned by different clocks', () => {

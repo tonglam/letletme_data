@@ -277,6 +277,7 @@ function sameFinalizedPublicationContent(
     tournamentId: manifest.tournamentId,
     scope: manifest.scope,
     matchId: manifest.matchId,
+    verifiedStandingsCoverageEventId: manifest.verifiedStandingsCoverageEventId,
     state: manifest.state,
     globalRef: manifest.globalRef,
     revisions: manifest.revisions,
@@ -430,7 +431,7 @@ export type LiveLeagueCheckpointOptions = Readonly<{
 }>;
 
 export type LiveLeagueCheckpointReconcileOptions = Readonly<{
-  /** Observe database failures without changing the boolean reconciliation contract. */
+  /** Observe infrastructure failures without changing the boolean reconciliation contract. */
   onInfrastructureFailure?: (error: unknown) => void;
 }>;
 
@@ -731,7 +732,9 @@ export async function reconcileLiveLeagueCheckpointV2(
   const redis = redisClient ?? (await redisSingleton.getClient());
   const desired = await readLiveLeagueCheckpointDesiredV2(scope, redis);
   if (!desired) return false;
-  const read = await readLiveLeaguePublicationV2(scope, redis);
+  const read = await readLiveLeaguePublicationV2(scope, redis, {
+    onInfrastructureFailure: options.onInfrastructureFailure,
+  });
   if (!read || read.publication.publicationId !== desired.publicationId) return false;
   if (!liveLeagueCheckpointIsDue(read, desired.force, desired.notBefore)) return false;
   const checkpointed = await checkpointLiveLeaguePublicationV2(read, undefined, options);

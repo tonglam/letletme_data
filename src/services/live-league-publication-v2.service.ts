@@ -2488,6 +2488,10 @@ export async function syncLiveH2HLeaguePublicationsV2(
         tournament,
         finalizationAt,
       );
+      const verifiedStandingsCoverageEventId =
+        standingsIsFinalized && standingsFreshForFinal
+          ? standingsCoverageEventId(tournament, eventId)
+          : undefined;
       const liveStandingsPayload =
         !standingsIsFinalized && standings.length > 0
           ? standingsPayload(
@@ -2577,6 +2581,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
         }));
         const standingsResult = await publishLiveLeaguePublicationV2({
           scope: standingsScope,
+          verifiedStandingsCoverageEventId,
           state: global.publication.state,
           sourceCheckedAt: standingsSourceCheckedAt,
           contentUpdatedAt: standingsSourceCheckedAt,
