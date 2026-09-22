@@ -644,6 +644,63 @@ describe('Live League V2 manifest contract', () => {
     ).toBe(false);
   });
 
+  test('accepts finalized group-stage standings coverage during knockout', () => {
+    const standingsScope: LeagueLiveScope = {
+      season: scope.season,
+      eventId: 13,
+      tournamentId: scope.tournamentId,
+      scope: 'H2H_STANDINGS',
+    };
+    const base = h2hManifest();
+    const standingsManifest: LeagueLiveManifest = {
+      ...base,
+      eventId: standingsScope.eventId,
+      scope: standingsScope.scope,
+      state: 'FINALIZED',
+      counts: { expected: 1, published: 1, ready: 1, noPicks: 0 },
+      items: {
+        index: {
+          ...base.items.index,
+          key: liveLeagueV2ItemKey(standingsScope, 1, 'index'),
+        },
+        payload: {
+          ...base.items.payload,
+          key: liveLeagueV2ItemKey(standingsScope, 1, 'payload'),
+        },
+      },
+    };
+    const index = [{ entryId: 101, availability: 'READY' as const }];
+    const payload = {
+      standings: {
+        contractVersion: 'live-points-v2' as const,
+        season: standingsScope.season,
+        eventId: standingsScope.eventId,
+        tournamentId: standingsScope.tournamentId,
+        throughEventId: 10,
+        state: 'READY' as const,
+        sourceCheckedAt: '2026-08-30T00:00:00.000Z',
+        rows: [
+          {
+            entryId: 101,
+            entryName: 'Entry 101',
+            playerName: 'Player 101',
+            rank: 1,
+            matchPoints: 3,
+            played: 1,
+            won: 1,
+            drawn: 0,
+            lost: 0,
+            pointsFor: 50,
+          },
+        ],
+      },
+    };
+
+    expect(
+      validateLiveLeaguePublicationV2Payload(standingsScope, standingsManifest, index, payload),
+    ).toBe(true);
+  });
+
   test('does not compare timestamps owned by different clocks', () => {
     const fixture = completeClassicCheckpointFixture();
     const skewedManifest = {

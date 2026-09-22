@@ -843,6 +843,8 @@ function validH2HStandingsPayload(
 ): value is { standings: H2HStandingsPayload } {
   if (!isRecord(value) || !isRecord(value.standings)) return false;
   const standings = value.standings;
+  // A finalized knockout event may legitimately publish complete group-stage
+  // standings; phase-specific coverage is enforced before this contract check.
   if (
     standings.contractVersion !== LIVE_LEAGUE_CONTRACT_VERSION ||
     standings.season !== manifest.season ||
@@ -852,7 +854,6 @@ function validH2HStandingsPayload(
     !Number.isSafeInteger(standings.throughEventId) ||
     standings.throughEventId < 0 ||
     standings.throughEventId > manifest.eventId ||
-    (standings.state === 'READY' && standings.throughEventId !== manifest.eventId) ||
     (standings.state !== 'READY' &&
       standings.state !== 'UPDATING' &&
       standings.state !== 'UNAVAILABLE') ||
