@@ -37,13 +37,84 @@ const RENEW_TOURNAMENT_REPAIR_ENQUEUE_LEASE = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('PEXPIRE', KEYS[1], ARGV[2])
 `;
+// Keep the retry-state read, lease fence, delayed-score comparison, and
+// reschedule mutation in one Redis operation. A BullMQ worker may move the
+// job between delayed and active/retry state while JavaScript is awaiting a
+// read, so separate calls could either erase retry backoff or let an expired
+// enqueue lease mutate the job.
+const RESCHEDULE_TOURNAMENT_REPAIR_LUA = `
+local rcall = redis.call
+
+if rcall('GET', KEYS[1]) ~= ARGV[1] then return {-2} end
+if rcall('EXISTS', KEYS[2]) ~= 1 then return {-1} end
+
+local delayedScore = rcall('ZSCORE', KEYS[3], ARGV[2])
+if not delayedScore then return {-3} end
+
+local attemptsMade = tonumber(rcall('HGET', KEYS[2], 'atm') or '0') or 0
+local attemptsStarted = tonumber(rcall('HGET', KEYS[2], 'ats') or '0') or 0
+if attemptsMade > 0 or attemptsStarted > 0 then return {0} end
+
+local requestedDueAt = tonumber(ARGV[3])
+if not requestedDueAt then return {-4} end
+local existingDueAt = math.floor(tonumber(delayedScore) / 0x1000)
+if existingDueAt <= requestedDueAt then return {0, existingDueAt} end
+
+local time = rcall('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local delay = math.max(0, requestedDueAt - now)
+local delayedTimestamp = (delay > 0 and (now + delay)) or now
+local minScore = delayedTimestamp * 0x1000
+local maxScore = (delayedTimestamp + 1) * 0x1000 - 1
+local current = rcall('ZREVRANGEBYSCORE', KEYS[3], maxScore, minScore, 'WITHSCORES', 'LIMIT', 0, 1)
+local score = minScore
+if #current then
+  local currentMaxScore = tonumber(current[2])
+  if currentMaxScore ~= nil then
+    if currentMaxScore >= maxScore then
+      score = maxScore
+    else
+      score = currentMaxScore + 1
+    end
+  end
+end
+
+local removed = rcall('ZREM', KEYS[3], ARGV[2])
+if removed < 1 then return {-3} end
+rcall('HSET', KEYS[2], 'data', ARGV[4], 'delay', delay)
+rcall('ZADD', KEYS[3], score, ARGV[2])
+
+local maxEvents = rcall('HGET', KEYS[5], 'opts.maxLenEvents')
+if not maxEvents then
+  maxEvents = 10000
+  rcall('HSET', KEYS[5], 'opts.maxLenEvents', maxEvents)
+end
+rcall('XADD', KEYS[6], 'MAXLEN', '~', maxEvents, '*', 'event', 'delayed', 'jobId', ARGV[2], 'delay', delayedTimestamp)
+
+local nextDelayed = rcall('ZRANGE', KEYS[3], 0, 0, 'WITHSCORES')
+if #nextDelayed then
+  local nextTimestamp = tonumber(nextDelayed[2])
+  if nextTimestamp ~= nil then
+    rcall('ZADD', KEYS[4], nextTimestamp / 0x1000, '1')
+  end
+end
+
+return {1, delay}
+`;
+
+type TournamentRepairEnqueueLease = {
+  redis: Awaited<ReturnType<typeof queueRedisSingleton.getClient>>;
+  key: string;
+  token: string;
+  assertLease: () => Promise<void>;
+};
 
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function withTournamentRepairEnqueueLease<T>(
   jobId: string,
-  operation: (assertLease: () => Promise<void>) => Promise<T>,
+  operation: (lease: TournamentRepairEnqueueLease) => Promise<T>,
 ): Promise<T> {
   const redis = await queueRedisSingleton.getClient();
   const key = `${TOURNAMENT_REPAIR_ENQUEUE_LEASE_PREFIX}:${jobId}`;
@@ -98,7 +169,7 @@ async function withTournamentRepairEnqueueLease<T>(
       renewalTimer.unref?.();
       try {
         await assertLease();
-        return await operation(assertLease);
+        return await operation({ redis, key, token, assertLease });
       } finally {
         clearInterval(renewalTimer);
         await redis
@@ -112,15 +183,6 @@ async function withTournamentRepairEnqueueLease<T>(
   throw new Error(`Tournament repair enqueue coordination lease timed out for ${jobId}`);
 }
 
-async function readDelayedTournamentRepairDueAt(jobId: string): Promise<number | null> {
-  const redis = await tournamentRepairQueue.client;
-  const score = await redis.zscore(tournamentRepairQueue.keys.delayed, jobId);
-  if (score === null) return null;
-  const delayedScore = Number(score);
-  if (!Number.isFinite(delayedScore)) return null;
-  return Math.floor(delayedScore / 0x1000);
-}
-
 export async function enqueueTournamentRepair(
   season: FplSeasonRef,
   issue: TournamentSetupIssueRecord,
@@ -130,7 +192,8 @@ export async function enqueueTournamentRepair(
     throw new QueueDrainOnlyError(tournamentRepairQueue.name);
   }
   const jobId = tournamentRepairJobId(season.seasonCode, issue.tournamentId, issue.issueId);
-  return withTournamentRepairEnqueueLease(jobId, async (assertLease) => {
+  return withTournamentRepairEnqueueLease(jobId, async (lease) => {
+    const { assertLease } = lease;
     const assertQueueAdmission = async (): Promise<void> => {
       await assertLease();
       if (await isQueueDrainOnly(tournamentRepairQueue.name)) {
@@ -155,30 +218,34 @@ export async function enqueueTournamentRepair(
     if (existing) {
       const state = await existing.getState();
       if (state === 'delayed') {
-        await assertLease();
-        const delayedJob = await tournamentRepairQueue.getJob(jobId);
-        if (!delayedJob) return existing;
-        await assertLease();
-        if ((await delayedJob.getState()) !== 'delayed') return delayedJob;
-        if (shouldPreserveBullmqRetryDelay(delayedJob.attemptsMade, delayedJob.attemptsStarted)) {
-          return delayedJob;
+        if (shouldPreserveBullmqRetryDelay(existing.attemptsMade, existing.attemptsStarted)) {
+          return existing;
         }
-        const existingDueAt = await readDelayedTournamentRepairDueAt(jobId);
-        await assertLease();
-        // The lease serializes enqueue decisions for this deterministic job.
-        // Read the delayed-set score because Job.delay is only the last
-        // relative delay and no longer identifies the current due timestamp
-        // after BullMQ changeDelay has been used.
-        if (
-          existingDueAt !== null &&
-          shouldRescheduleDelayedTournamentRepair(existingDueAt, requestedDueAt)
-        ) {
-          await assertQueueAdmission();
-          await delayedJob.updateData(data);
-          await assertQueueAdmission();
-          await delayedJob.changeDelay(delay);
+        await assertQueueAdmission();
+        const result = (await lease.redis.eval(
+          RESCHEDULE_TOURNAMENT_REPAIR_LUA,
+          6,
+          lease.key,
+          tournamentRepairQueue.toKey(jobId),
+          tournamentRepairQueue.keys.delayed,
+          tournamentRepairQueue.keys.marker,
+          tournamentRepairQueue.keys.meta,
+          tournamentRepairQueue.keys.events,
+          lease.token,
+          jobId,
+          String(requestedDueAt),
+          JSON.stringify(data),
+        )) as Array<string | number>;
+        const resultCode = Number(result[0]);
+        if (resultCode === -2) {
+          await assertLease();
+          throw new Error(`Tournament repair reschedule was fenced for ${jobId}`);
         }
-        return delayedJob;
+        if (resultCode === 1) {
+          existing.data = data;
+          existing.delay = Number(result[1]);
+        }
+        return existing;
       }
       if (['waiting', 'waiting-children', 'active', 'paused'].includes(state)) {
         return existing;
