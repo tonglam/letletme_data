@@ -52,6 +52,7 @@ const MAX_RETIREMENT_KEYS = 10_000;
 
 /** Bounded database handles supplied by the live worker for tagged-SQL reads. */
 export type LiveLeagueDatabaseOptions = Readonly<{
+  redis?: Awaited<ReturnType<typeof redisSingleton.getClient>>;
   databaseRead?: DbOrTransaction;
   databaseReadClient?: postgres.Sql;
   /** Exact H2H tournament targets for bounded historical retention recovery. */
@@ -1464,14 +1465,16 @@ async function findOfficialH2HStandings(
         match_coverage."expectedMatchCount",
         match_coverage."completeMatchCount",
         match_coverage."completeMissingSourceCount",
-        match_coverage."oldestCompleteSourceCheckedAt"
+        match_coverage."oldestCompleteSourceCheckedAt",
+        match_coverage."currentEventOldestCompleteSourceCheckedAt"
       FROM match_coverage
       LEFT JOIN official_sides ON true
       GROUP BY
         match_coverage."expectedMatchCount",
         match_coverage."completeMatchCount",
         match_coverage."completeMissingSourceCount",
-        match_coverage."oldestCompleteSourceCheckedAt"
+        match_coverage."oldestCompleteSourceCheckedAt",
+        match_coverage."currentEventOldestCompleteSourceCheckedAt"
     )
     SELECT
       ranked."entryId",
@@ -1490,6 +1493,7 @@ async function findOfficialH2HStandings(
       coverage."completeMatchCount",
       coverage."completeMissingSourceCount",
       coverage."oldestCompleteSourceCheckedAt",
+      coverage."currentEventOldestCompleteSourceCheckedAt",
       event.data_checked_at AS "finalizationAt"
     FROM ranked
     CROSS JOIN coverage
@@ -2124,7 +2128,7 @@ export async function syncLiveH2HLeaguePublicationsV2(
   expectedNextCheckAtValue?: Date | string | null,
   databaseOptions: LiveLeagueDatabaseOptions = {},
 ): Promise<LiveH2HLeaguePublicationSyncResult | null> {
-  const redis = await redisSingleton.getClient();
+  const redis = databaseOptions.redis ?? (await redisSingleton.getClient());
   const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
   if (!global) return null;
   const allTournaments = await findOfficialH2HTournaments(

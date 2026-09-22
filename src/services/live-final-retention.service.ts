@@ -1325,6 +1325,7 @@ export async function runLiveFinalRetentionV2(
     ),
   ];
   if (global && missingH2HTournamentIds.length > 0) {
+    const recoveredH2HTournamentIds = new Set(missingH2HTournamentIds);
     await mapWithConcurrency(missingH2HTournamentIds, 1, async (tournamentId) => {
       try {
         // A tournament created after an earlier finalized event has no live
@@ -1332,9 +1333,12 @@ export async function runLiveFinalRetentionV2(
         // exact tournament from canonical battle/standings rows and FINAL
         // entry inputs; the publisher owns Redis CAS and PostgreSQL checkpoints.
         await syncLiveH2HLeaguePublicationsV2(season, eventId, undefined, {
+          redis,
           tournamentIds: [tournamentId],
         });
       } catch (error) {
+        if (classifyDataError(error) !== 'DATA_INCOMPLETE')
+          families.league.infrastructureFailed = (families.league.infrastructureFailed ?? 0) + 1;
         logError('Live final retention H2H checkpoint recovery failed', error, {
           season: season.seasonCode,
           eventId,
@@ -1344,7 +1348,7 @@ export async function runLiveFinalRetentionV2(
     });
     for (const item of leagueCheckpoints) {
       if (
-        item.checkpoint ||
+        !recoveredH2HTournamentIds.has(item.scope.tournamentId) ||
         (item.scope.scope !== 'H2H_HEAD' && item.scope.scope !== 'H2H_STANDINGS')
       ) {
         continue;

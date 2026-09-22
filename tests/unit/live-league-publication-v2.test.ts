@@ -1284,6 +1284,17 @@ describe('Live League V2 standings finalization helpers', () => {
       ),
     ).toBe(false);
   });
+
+  test('projects current-event freshness through the standings query coverage', () => {
+    const start = publicationServiceSource.indexOf('async function findOfficialH2HStandings');
+    const end = publicationServiceSource.indexOf('\nfunction isoOrFallback', start);
+    const source = publicationServiceSource.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('match_coverage."currentEventOldestCompleteSourceCheckedAt"');
+    expect(source).toContain('coverage."currentEventOldestCompleteSourceCheckedAt"');
+  });
 });
 
 describe('Live League V2 regular bye normalization', () => {
