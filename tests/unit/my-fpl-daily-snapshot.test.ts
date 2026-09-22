@@ -488,7 +488,29 @@ describe('My FPL daily snapshot publication contract', () => {
       isAuthoritativeUnrankedDeletedEntryResult({
         entryName: 'Deleted',
         playerName: 'Deleted Player',
+        identityOverallPoints: 82,
+        identityOverallRank: 0,
+        resultOverallPoints: 96,
+        eventRank: null,
+        overallRank: 0,
+      }),
+    ).toBe(true);
+    expect(
+      isAuthoritativeUnrankedDeletedEntryResult({
+        entryName: 'Deleted',
+        playerName: 'Deleted Player',
         identityOverallPoints: 0,
+        identityOverallRank: 0,
+        resultOverallPoints: 56,
+        eventRank: null,
+        overallRank: 0,
+      }),
+    ).toBe(true);
+    expect(
+      isAuthoritativeUnrankedDeletedEntryResult({
+        entryName: 'Deleted',
+        playerName: 'Deleted Player',
+        identityOverallPoints: 102,
         identityOverallRank: 0,
         resultOverallPoints: 56,
         eventRank: 0,

@@ -4,6 +4,7 @@ import type postgres from 'postgres';
 import { redisSingleton } from '../cache/singleton';
 import { countEntryEligibility, isEntryEligibleForEvent } from '../domain/entry-eligibility';
 import { MY_FPL_FINALIZATION_TOTAL_SLA_MS } from '../domain/data-contracts';
+import { isAuthoritativeUnrankedDeletedEntryResult } from '../domain/entry-score';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { myFplSnapshotEventLockScope, myFplSnapshotSeasonLockScope } from '../domain/my-fpl-locks';
@@ -27,6 +28,8 @@ import type {
   EventLiveManagerPickRow,
   RevisionedEventLiveScore,
 } from './event-live-v2-score.service';
+
+export { isAuthoritativeUnrankedDeletedEntryResult } from '../domain/entry-score';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -310,37 +313,6 @@ export function isAuthoritativeUnrankedFirstEventResult(
     input.firstScoringEvent === input.eventId &&
     !input.hasPreviousResult &&
     input.overallPoints === 0 &&
-    input.overallRank === 0
-  );
-}
-
-/**
- * FPL keeps deleted entries in the current-season feed. The entry summary can
- * retain a non-negative cumulative score, while the finalized history row
- * reports zero cumulative points and zero ranks. The entry identity is the
- * durable discriminator available to us (`Deleted` / `Deleted Player`). Treat
- * that exact source shape as the rank-zero sentinel without accepting a null
- * or negative identity total. Ordinary entries with a missing rank remain
- * ineligible for FINAL.
- */
-export function isAuthoritativeUnrankedDeletedEntryResult(
-  input: Readonly<{
-    entryName: string;
-    playerName: string;
-    identityOverallPoints: number | null;
-    identityOverallRank: number | null;
-    resultOverallPoints: number | null;
-    eventRank: number | null;
-    overallRank: number | null;
-  }>,
-): boolean {
-  return (
-    input.entryName.trim() === 'Deleted' &&
-    input.playerName.trim() === 'Deleted Player' &&
-    isNonNegativeSafeInteger(input.identityOverallPoints) &&
-    input.identityOverallRank === 0 &&
-    input.resultOverallPoints === 0 &&
-    input.eventRank === 0 &&
     input.overallRank === 0
   );
 }
@@ -2685,11 +2657,11 @@ export async function assessMyFplFinalizationReadiness(
       overallRank: row.overall_rank,
     });
     const ranksComplete =
-      isNonNegativeSafeInteger(row.event_rank) &&
-      isNonNegativeSafeInteger(row.overall_rank) &&
-      ((row.event_rank > 0 && row.overall_rank > 0) ||
-        (unrankedFirstEvent && row.event_rank === 0 && row.overall_rank === 0) ||
-        deletedEntryUnranked);
+      (isNonNegativeSafeInteger(row.event_rank) &&
+        isNonNegativeSafeInteger(row.overall_rank) &&
+        ((row.event_rank > 0 && row.overall_rank > 0) ||
+          (unrankedFirstEvent && row.event_rank === 0 && row.overall_rank === 0))) ||
+      deletedEntryUnranked;
     const pastSeasonsComplete =
       row.past_seasons_checked_at !== null &&
       row.past_seasons_count !== null &&
@@ -3880,14 +3852,6 @@ async function captureMyFplSnapshotOnce(
             `Entry ${entry.entry_id} final result is missing team value or bank for event ${eventId}`,
           );
         }
-        if (
-          !isNonNegativeSafeInteger(current.event_rank) ||
-          !isNonNegativeSafeInteger(current.overall_rank)
-        ) {
-          throw new MyFplSnapshotIncompleteError(
-            `Entry ${entry.entry_id} final result is missing a safe event/overall rank for event ${eventId}`,
-          );
-        }
         const firstScoringEvent = Math.max(1, entry.started_event ?? 1);
         if (
           !current.source_result_id ||
@@ -3927,8 +3891,18 @@ async function captureMyFplSnapshotOnce(
           overallRank: current.overall_rank,
         });
         if (
+          (!isNonNegativeSafeInteger(current.event_rank) && !acceptsDeletedEntryUnranked) ||
+          !isNonNegativeSafeInteger(current.overall_rank)
+        ) {
+          throw new MyFplSnapshotIncompleteError(
+            `Entry ${entry.entry_id} final result is missing a safe event/overall rank for event ${eventId}`,
+          );
+        }
+        if (
           !(
-            (current.event_rank > 0 && current.overall_rank > 0) ||
+            (isNonNegativeSafeInteger(current.event_rank) &&
+              current.event_rank > 0 &&
+              current.overall_rank > 0) ||
             (acceptsUnrankedFirstEvent && current.event_rank === 0 && current.overall_rank === 0) ||
             acceptsDeletedEntryUnranked
           )
