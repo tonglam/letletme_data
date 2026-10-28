@@ -35,7 +35,11 @@ describe('public tournament error contract', () => {
   });
 
   test('keeps schema failures as safe 400 responses', () => {
-    const error = z.object({ name: z.string().min(3) }).safeParse({ name: '' });
+    const error = z
+      .object({
+        name: z.string().min(3, { message: 'String must contain at least 3 character(s)' }),
+      })
+      .safeParse({ name: '' });
     if (error.success) throw new Error('fixture should fail');
 
     expect(mapTournamentErrorToResponse(error.error)).toMatchObject({
