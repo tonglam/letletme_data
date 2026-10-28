@@ -44,10 +44,10 @@ const PlayerValueBaseSchema = z.object({
   elementId: z.number().int().positive('Element ID must be a positive integer'),
   webName: z.string().min(1, 'Web name is required').max(30, 'Web name too long'),
   elementType: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)], {
-    errorMap: () => ({ message: 'Element type must be 1-4 (GKP=1, DEF=2, MID=3, FWD=4)' }),
+    error: () => ({ message: 'Element type must be 1-4 (GKP=1, DEF=2, MID=3, FWD=4)' }),
   }),
   elementTypeName: z.enum(['GKP', 'DEF', 'MID', 'FWD'], {
-    errorMap: () => ({ message: 'Element type name must be GKP, DEF, MID, or FWD' }),
+    error: () => ({ message: 'Element type name must be GKP, DEF, MID, or FWD' }),
   }),
   eventId: z.number().int().positive('Event ID must be a positive integer'),
   teamId: z.number().int().positive('Team ID must be a positive integer'),
@@ -63,7 +63,7 @@ const PlayerValueBaseSchema = z.object({
     .max(200, 'Value cannot exceed 20.0m'),
   changeDate: z.string().regex(/^\d{8}$/, 'Change date must use YYYYMMDD format'),
   changeType: z.enum(['Start', 'Rise', 'Faller'], {
-    errorMap: () => ({ message: 'Change type must be Start, Rise, or Faller' }),
+    error: () => ({ message: 'Change type must be Start, Rise, or Faller' }),
   }),
   lastValue: z
     .number()

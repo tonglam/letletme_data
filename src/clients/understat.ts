@@ -144,7 +144,7 @@ export const UnderstatPlayerSummarySchema = z
 export const UnderstatLeagueResponseSchema = z
   .object({
     dates: z.array(UnderstatMatchDateSchema),
-    teams: z.record(UnderstatLeagueTeamSchema),
+    teams: z.record(z.string(), UnderstatLeagueTeamSchema),
     players: z.array(UnderstatPlayerSummarySchema),
   })
   .passthrough();
@@ -166,7 +166,7 @@ const UnderstatSplitValueSchema = z
   })
   .passthrough();
 
-const UnderstatSplitRecordSchema = z.record(UnderstatSplitValueSchema);
+const UnderstatSplitRecordSchema = z.record(z.string(), UnderstatSplitValueSchema);
 
 const UnderstatTeamStatisticsObjectSchema = z
   .object({
@@ -252,14 +252,14 @@ export const UnderstatShotSchema = z
 export const UnderstatMatchResponseSchema = z
   .object({
     rosters: z.object({
-      h: z.record(UnderstatRosterEntrySchema),
-      a: z.record(UnderstatRosterEntrySchema),
+      h: z.record(z.string(), UnderstatRosterEntrySchema),
+      a: z.record(z.string(), UnderstatRosterEntrySchema),
     }),
     shots: z.object({
       h: z.array(UnderstatShotSchema),
       a: z.array(UnderstatShotSchema),
     }),
-    tmpl: z.record(z.unknown()),
+    tmpl: z.record(z.string(), z.unknown()),
   })
   .passthrough();
 

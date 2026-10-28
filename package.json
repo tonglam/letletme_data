@@ -104,18 +104,19 @@
     "postgres": "^3.4.9",
     "tus-js-client": "4.3.1",
     "yaml": "^2.9.0",
-    "zod": "^3.24.3"
+    "zod": "4.6.6"
   },
   "overrides": {
     "@eslint/plugin-kit": "0.3.4",
     "ajv": "6.14.0",
-    "brace-expansion": "5.0.9",
+    "brace-expansion": "5.0.12",
     "esbuild": "0.25.12",
     "file-type": "21.3.3",
     "flatted": "3.4.2",
     "js-yaml": "4.3.2",
     "minimatch": "10.2.5",
     "picomatch": "4.0.4",
-    "uuid": "11.1.1"
+    "uuid": "11.1.1",
+    "fast-copy": "3.1.0"
   }
 }

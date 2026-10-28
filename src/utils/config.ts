@@ -40,7 +40,7 @@ function integerEnv(
   defaultValue: number,
   minimum = Number.MIN_SAFE_INTEGER,
   maximum = Number.MAX_SAFE_INTEGER,
-): z.ZodType<number, z.ZodTypeDef, unknown> {
+): z.ZodType<number, unknown> {
   const schema = z
     .number()
     .finite()
@@ -64,11 +64,13 @@ function boundedIntegerEnv(defaultValue: number, minimum: number, maximum: numbe
 
 /** dotenv turns `KEY=` into `""`; treat that as unset for optional secrets/URLs. */
 function optionalEnv(schema: z.ZodType<string | undefined>) {
-  return z.preprocess((value) => {
-    if (typeof value !== 'string') return value;
-    const trimmed = value.trim();
-    return trimmed.length === 0 ? undefined : trimmed;
-  }, schema);
+  return z
+    .preprocess((value) => {
+      if (typeof value !== 'string') return value;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, schema)
+    .optional();
 }
 
 const EnvSchema = z.object({

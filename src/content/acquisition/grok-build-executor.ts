@@ -274,10 +274,12 @@ class OutputSchemaError extends Error {
   }
 }
 
-function outputIssuePath(path: readonly (string | number)[]): string {
+function outputIssuePath(path: readonly PropertyKey[]): string {
   return path
     .slice(0, 8)
-    .map((part) => (typeof part === 'number' ? `[${part}]` : part.replace(/[^A-Za-z0-9_.-]/g, '_')))
+    .map((part) =>
+      typeof part === 'number' ? `[${part}]` : String(part).replace(/[^A-Za-z0-9_.-]/g, '_'),
+    )
     .join('.')
     .replace(/\.\[/g, '[')
     .slice(0, 160);

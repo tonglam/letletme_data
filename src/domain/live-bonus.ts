@@ -10,7 +10,10 @@ export interface LiveBonusCachePayload {
   readonly byTeam: LiveBonusByTeam;
 }
 
-export const LiveBonusByTeamSchema = z.record(z.record(z.number().int().min(0)));
+export const LiveBonusByTeamSchema = z.record(
+  z.string(),
+  z.record(z.string(), z.number().int().min(0)),
+);
 
 export const LiveBonusCachePayloadSchema = z.object({
   eventId: z.number().int().positive(),
