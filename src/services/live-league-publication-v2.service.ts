@@ -819,10 +819,12 @@ export async function correctFinalClassicLeagueRanksV2(
   await scheduleLeagueCheckpoint(result.publication, result.previous, scope, redis, {
     propagateInfrastructureFailure: true,
   });
-  if (!(await reconcileLiveLeagueCheckpointV2(scope, redis)))
-    throw new Error('Classic rank correction checkpoint is pending');
   const checkpoint = await readLiveLeagueCheckpointV2(scope);
-  if (!checkpoint || checkpoint.publication.publicationId !== result.publication.publicationId) {
+  if (
+    !checkpoint ||
+    checkpoint.publication.publicationId !== result.publication.publicationId ||
+    checkpoint.publication.generation !== result.publication.generation
+  ) {
     throw new Error('Classic rank correction checkpoint does not match Redis');
   }
   logInfo('Classic FINAL ranks corrected from canonical gameweek results', {
