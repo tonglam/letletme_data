@@ -1368,8 +1368,9 @@ const parseCanonicalEventPicks = (value: unknown): CanonicalEventPick[] | null =
  * from the result payload. FPL can reorder positions when it applies an
  * automatic substitution, so the stable join key is the complete element set,
  * not the deadline-time position. Any lineup delta must exactly match the
- * canonical automatic-substitution rows; element or substitution mismatches
- * fail closed instead of combining two different team revisions.
+ * canonical automatic-substitution rows. Position-only reordering within the
+ * unchanged starting lineup or bench requires no substitutions. Element or
+ * substitution mismatches fail closed instead of combining different team revisions.
  */
 type FinalPickOverlayDisplayRow = Pick<
   PickRow,
@@ -1428,11 +1429,7 @@ export const overlayFinalResultPicks = <T extends FinalPickOverlayDisplayRow>(
     const declaredOutgoing = new Set(substitutions.map((substitution) => substitution.elementOut));
     const sameSet = (left: ReadonlySet<number>, right: ReadonlySet<number>) =>
       left.size === right.size && [...left].every((element) => right.has(element));
-    if (
-      substitutions.length === 0 ||
-      !sameSet(enteredLineup, declaredIncoming) ||
-      !sameSet(leftLineup, declaredOutgoing)
-    ) {
+    if (!sameSet(enteredLineup, declaredIncoming) || !sameSet(leftLineup, declaredOutgoing)) {
       return null;
     }
   }
