@@ -1150,6 +1150,33 @@ describe('Live League V2 Classic final-retention checkpoint recovery', () => {
     expect(final?.revisions.officialRank).not.toBe(live?.revisions.officialRank);
   });
 
+  test('keeps a settled pre-entry row unranked instead of publishing its backfill sentinel', () => {
+    const fixture = classicRetentionFixture();
+    const roster: ClassicRoster = {
+      ...fixture.roster,
+      rows: fixture.roster.rows.map((row) =>
+        row.entryId === 202 ? { ...row, overallRank: 500, eventOverallRank: 2_147_483_647 } : row,
+      ),
+    };
+    const final = buildClassicPublicationContentV2(
+      scope.eventId,
+      fixture.global,
+      roster,
+      fixture.inputs,
+    );
+    const provisional = buildClassicPublicationContentV2(
+      scope.eventId,
+      { ...fixture.global, state: 'LIVE_ACTIVE' },
+      roster,
+      fixture.inputs,
+    );
+    expect(final?.index.find((row) => row.entryId === 202)).toMatchObject({
+      availability: 'NO_PICKS',
+      overallRank: null,
+    });
+    expect(provisional?.index.find((row) => row.entryId === 202)?.overallRank).toBe(500);
+  });
+
   test('does not substitute a current profile rank for an unranked settled result', () => {
     const fixture = classicRetentionFixture();
     const roster: ClassicRoster = {

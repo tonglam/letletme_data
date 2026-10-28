@@ -446,7 +446,7 @@ export function buildClassicPublicationContentV2(
         region: row.region,
         startedEvent: row.startedEvent,
         overallPoints: row.overallPoints,
-        overallRank: global.state === 'FINALIZED' ? row.eventOverallRank : row.overallRank,
+        overallRank: global.state === 'FINALIZED' ? null : row.overallRank,
         bank: row.bank,
         teamValue: row.teamValue,
         totalTransfers: row.totalTransfers,
