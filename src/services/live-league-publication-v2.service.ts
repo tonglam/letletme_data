@@ -75,6 +75,7 @@ export type ClassicRosterRow = {
   startedEvent: number | null;
   overallPoints: number | null;
   overallRank: number | null;
+  eventOverallRank: number | null;
   bank: number | null;
   teamValue: number | null;
   totalTransfers: number | null;
@@ -243,6 +244,7 @@ async function findClassicRosters(
       -- FPL uses zero as the no-rank sentinel.  The V2 public contract
       -- represents an unranked entry as null, never as a non-positive rank.
       NULLIF(entry.overall_rank, 0) AS "overallRank",
+      NULLIF(result.overall_rank, 0) AS "eventOverallRank",
       entry.bank,
       entry.team_value AS "teamValue",
       entry.total_transfers AS "totalTransfers",
@@ -265,6 +267,10 @@ async function findClassicRosters(
     LEFT JOIN competition.entries AS entry
       ON entry.season_id = roster.season_id
      AND entry.entry_id = roster.entry_id
+    LEFT JOIN competition.entry_event_results AS result
+      ON result.season_id = roster.season_id
+     AND result.entry_id = roster.entry_id
+     AND result.event_id = event.event_id
     WHERE tournament.season_id = ${season.seasonId}
       AND tournament.league_type = 'classic'
       AND tournament.state = 'active'
@@ -438,7 +444,7 @@ export function buildClassicPublicationContentV2(
         region: row.region,
         startedEvent: row.startedEvent,
         overallPoints: row.overallPoints,
-        overallRank: row.overallRank,
+        overallRank: global.state === 'FINALIZED' ? row.eventOverallRank : row.overallRank,
         bank: row.bank,
         teamValue: row.teamValue,
         totalTransfers: row.totalTransfers,
@@ -466,7 +472,8 @@ export function buildClassicPublicationContentV2(
         global.state === 'FINALIZED'
           ? (read.input.finalResult?.score.totalPoints ?? null)
           : row.overallPoints,
-      overallRank: row.overallRank,
+      // A settled board must use the same gameweek as its FINAL score.
+      overallRank: global.state === 'FINALIZED' ? row.eventOverallRank : row.overallRank,
       bank: row.bank,
       teamValue: row.teamValue,
       totalTransfers: row.totalTransfers,

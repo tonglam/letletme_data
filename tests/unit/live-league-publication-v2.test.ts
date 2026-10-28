@@ -248,6 +248,7 @@ function classicRetentionFixture() {
         startedEvent: null,
         overallPoints: 100,
         overallRank: 10,
+        eventOverallRank: 10,
         bank: 0,
         teamValue: 1000,
         totalTransfers: 0,
@@ -269,6 +270,7 @@ function classicRetentionFixture() {
         startedEvent: 2,
         overallPoints: 0,
         overallRank: null,
+        eventOverallRank: null,
         bank: 0,
         teamValue: 1000,
         totalTransfers: 0,
@@ -1048,6 +1050,48 @@ describe('Live League V2 Classic final-retention checkpoint recovery', () => {
         currentManagerInputs,
       ),
     ).not.toBeNull();
+  });
+
+  test('binds settled ranks to the scored gameweek and keeps live profile ranks provisional', () => {
+    const fixture = classicRetentionFixture();
+    const roster: ClassicRoster = {
+      ...fixture.roster,
+      rows: fixture.roster.rows.map((row) =>
+        row.entryId === 101 ? { ...row, overallRank: 2251202, eventOverallRank: 2251219 } : row,
+      ),
+    };
+    const final = buildClassicPublicationContentV2(
+      scope.eventId,
+      fixture.global,
+      roster,
+      fixture.inputs,
+    );
+    const live = buildClassicPublicationContentV2(
+      scope.eventId,
+      { ...fixture.global, state: 'LIVE_ACTIVE' },
+      roster,
+      fixture.inputs,
+    );
+    expect(final?.index.find((row) => row.entryId === 101)?.overallRank).toBe(2251219);
+    expect(live?.index.find((row) => row.entryId === 101)?.overallRank).toBe(2251202);
+    expect(final?.revisions.officialRank).not.toBe(live?.revisions.officialRank);
+  });
+
+  test('does not substitute a current profile rank for an unranked settled result', () => {
+    const fixture = classicRetentionFixture();
+    const roster: ClassicRoster = {
+      ...fixture.roster,
+      rows: fixture.roster.rows.map((row) =>
+        row.entryId === 101 ? { ...row, overallRank: 10, eventOverallRank: null } : row,
+      ),
+    };
+    const content = buildClassicPublicationContentV2(
+      scope.eventId,
+      fixture.global,
+      roster,
+      fixture.inputs,
+    );
+    expect(content?.index.find((row) => row.entryId === 101)?.overallRank).toBeNull();
   });
 
   test('preserves the ordinary provisional publisher acceptance rules', () => {
