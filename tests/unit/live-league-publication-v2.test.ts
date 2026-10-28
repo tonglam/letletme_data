@@ -4,6 +4,7 @@ import type Redis from 'ioredis';
 
 import {
   liveLeagueV2ItemKey,
+  isSafeFinalizedClassicRankCorrection,
   LIVE_LEAGUE_MAX_ENTRIES,
   LIVE_LEAGUE_MAX_INDEX_BYTES,
   LIVE_LEAGUE_MAX_PAYLOAD_BYTES,
@@ -248,6 +249,7 @@ function classicRetentionFixture() {
         startedEvent: null,
         overallPoints: 100,
         overallRank: 10,
+        eventOverallRank: 10,
         bank: 0,
         teamValue: 1000,
         totalTransfers: 0,
@@ -269,6 +271,7 @@ function classicRetentionFixture() {
         startedEvent: 2,
         overallPoints: 0,
         overallRank: null,
+        eventOverallRank: null,
         bank: 0,
         teamValue: 1000,
         totalTransfers: 0,
@@ -840,7 +843,7 @@ describe('Live League V2 checkpoint transaction contract', () => {
     expect(checkpointServiceSource).toContain('isLiveLeagueCheckpointGenerationCompatible');
     expect(checkpointServiceSource).toContain('sameFinalizedPublicationContent');
     expect(checkpointServiceSource).toContain('isSafeFinalizedClassicRosterExpansion');
-    expect(checkpointServiceSource).toContain('allowFinalizedRosterExpansion');
+    expect(checkpointServiceSource).toContain('allowFinalizedClassicSuccessor');
     expect(checkpointServiceSource).toContain(
       'current.publicationId === read.publication.publicationId',
     );
@@ -878,6 +881,78 @@ describe('Live League V2 checkpoint generation fence', () => {
         candidate,
       ),
     ).toBe(true);
+  });
+});
+
+describe('Live League V2 finalized Classic rank correction fence', () => {
+  test('permits only ranks to change inside the exact finalized score and roster unit', () => {
+    const fixture = classicRetentionFixture();
+    const persisted = {
+      state: 'FINALIZED',
+      manifest: fixture.active.publication,
+      rowCount: fixture.active.index.length,
+      indexPayload: fixture.active.index,
+      payload: fixture.active.payload,
+    };
+    const read: LeagueLiveRead = {
+      ...fixture.active,
+      index: fixture.active.index.map((row) =>
+        'overallRank' in row && row.entryId === 101 ? { ...row, overallRank: 11 } : row,
+      ),
+    };
+    expect(isSafeFinalizedClassicRankCorrection(read, persisted)).toBe(true);
+    expect(isSafeFinalizedClassicRankCorrection(fixture.active, persisted)).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        { ...read, index: [...read.index, read.index[0]] },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        {
+          ...read,
+          index: read.index.map((row) => ('teamValue' in row ? { ...row, teamValue: 9999 } : row)),
+        },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        { ...read, payload: { ...read.payload, '101': { changed: true } } },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        { ...read, publication: { ...read.publication, state: 'LIVE_ACTIVE' } },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        {
+          ...read,
+          publication: {
+            ...read.publication,
+            globalRef: { ...read.publication.globalRef, generation: 999 },
+          },
+        },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        {
+          ...read,
+          publication: {
+            ...read.publication,
+            revisions: { ...read.publication.revisions, scoreCore: '0'.repeat(64) },
+          },
+        },
+        persisted,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -1048,6 +1123,75 @@ describe('Live League V2 Classic final-retention checkpoint recovery', () => {
         currentManagerInputs,
       ),
     ).not.toBeNull();
+  });
+
+  test('binds settled ranks to the scored gameweek and keeps live profile ranks provisional', () => {
+    const fixture = classicRetentionFixture();
+    const roster: ClassicRoster = {
+      ...fixture.roster,
+      rows: fixture.roster.rows.map((row) =>
+        row.entryId === 101 ? { ...row, overallRank: 2251202, eventOverallRank: 2251219 } : row,
+      ),
+    };
+    const final = buildClassicPublicationContentV2(
+      scope.eventId,
+      fixture.global,
+      roster,
+      fixture.inputs,
+    );
+    const live = buildClassicPublicationContentV2(
+      scope.eventId,
+      { ...fixture.global, state: 'LIVE_ACTIVE' },
+      roster,
+      fixture.inputs,
+    );
+    expect(final?.index.find((row) => row.entryId === 101)?.overallRank).toBe(2251219);
+    expect(live?.index.find((row) => row.entryId === 101)?.overallRank).toBe(2251202);
+    expect(final?.revisions.officialRank).not.toBe(live?.revisions.officialRank);
+  });
+
+  test('keeps a settled pre-entry row unranked instead of publishing its backfill sentinel', () => {
+    const fixture = classicRetentionFixture();
+    const roster: ClassicRoster = {
+      ...fixture.roster,
+      rows: fixture.roster.rows.map((row) =>
+        row.entryId === 202 ? { ...row, overallRank: 500, eventOverallRank: 2_147_483_647 } : row,
+      ),
+    };
+    const final = buildClassicPublicationContentV2(
+      scope.eventId,
+      fixture.global,
+      roster,
+      fixture.inputs,
+    );
+    const provisional = buildClassicPublicationContentV2(
+      scope.eventId,
+      { ...fixture.global, state: 'LIVE_ACTIVE' },
+      roster,
+      fixture.inputs,
+    );
+    expect(final?.index.find((row) => row.entryId === 202)).toMatchObject({
+      availability: 'NO_PICKS',
+      overallRank: null,
+    });
+    expect(provisional?.index.find((row) => row.entryId === 202)?.overallRank).toBe(500);
+  });
+
+  test('does not substitute a current profile rank for an unranked settled result', () => {
+    const fixture = classicRetentionFixture();
+    const roster: ClassicRoster = {
+      ...fixture.roster,
+      rows: fixture.roster.rows.map((row) =>
+        row.entryId === 101 ? { ...row, overallRank: 10, eventOverallRank: null } : row,
+      ),
+    };
+    const content = buildClassicPublicationContentV2(
+      scope.eventId,
+      fixture.global,
+      roster,
+      fixture.inputs,
+    );
+    expect(content?.index.find((row) => row.entryId === 101)?.overallRank).toBeNull();
   });
 
   test('preserves the ordinary provisional publisher acceptance rules', () => {
