@@ -7,6 +7,8 @@ import Redis from 'ioredis';
 
 import {
   LIVE_LEAGUE_CONTRACT_VERSION,
+  leagueEntryInputRevision,
+  readLiveLeaguePublicationV2,
   liveLeagueV2Key,
   liveLeagueV2ItemKey,
   parseLiveLeaguePublicationV2Manifest,
@@ -185,6 +187,93 @@ describe('Live League V2 checkpoint desired marker', () => {
       generation: publication.generation,
       scope: publication.scope,
     });
+  });
+
+  test('promotes only a rank correction over a healthy Classic FINAL and retains the previous version', async () => {
+    await redis.del(...promotionKeys);
+    const picks = Array.from({ length: 15 }, (_, i) => ({
+      element: i + 1,
+      position: i + 1,
+      multiplier: i === 0 ? 2 : i < 11 ? 1 : 0,
+      isCaptain: i === 0,
+      isViceCaptain: i === 1,
+    }));
+    const input = {
+      contractVersion: 'live-points-v2',
+      season: promotionScope.season,
+      eventId: promotionScope.eventId,
+      entryId: 101,
+      picksBase: {
+        revision: 'a'.repeat(64),
+        contentUpdatedAt: '2026-08-30T00:00:00.000Z',
+        picks,
+        chip: null,
+        transferCount: 0,
+        transferCost: 0,
+      },
+      previousTotals: null,
+      officialAdjustment: null,
+      finalResult: {
+        revision: 'b'.repeat(64),
+        score: { eventPoints: 42, totalPoints: 142 },
+        picks,
+        automaticSubs: [],
+      },
+    } as unknown as Parameters<typeof leagueEntryInputRevision>[0];
+    const index = [
+      {
+        entryId: 101,
+        availability: 'READY' as const,
+        entryName: 'Entry 101',
+        playerName: 'Player 101',
+        region: null,
+        startedEvent: 1,
+        overallPoints: 142,
+        overallRank: 10,
+        bank: 0,
+        teamValue: 1000,
+        totalTransfers: 0,
+        lastEventId: null,
+        lastOverallPoints: null,
+        lastOverallRank: null,
+        lastTeamValue: null,
+        lastBank: null,
+        inputPublicationId: '00000000-0000-4000-8000-000000000013',
+        inputGeneration: 1,
+        inputRevision: leagueEntryInputRevision(input),
+        inputContentUpdatedAt: input.picksBase.contentUpdatedAt,
+      },
+    ];
+    const base = {
+      ...promotionInput('FINALIZED', '1'.repeat(64), '01'),
+      index,
+      payload: { '101': input },
+      counts: { expected: 1, published: 1, ready: 1, noPicks: 0 },
+    };
+    const first = await publishLiveLeaguePublicationV2(base);
+    const correction = {
+      ...base,
+      index: [{ ...index[0], overallRank: 11 }],
+      revisions: {
+        ...base.revisions,
+        identity: '2'.repeat(64),
+        officialRank: '3'.repeat(64),
+        content: '4'.repeat(64),
+      },
+    };
+    const second = await publishLiveLeaguePublicationV2(correction);
+    expect(second.published).toBe(true);
+    expect(second.publication.generation).toBeGreaterThan(first.publication.generation);
+    const active = await readLiveLeaguePublicationV2(promotionScope, redis);
+    expect(active?.index).toMatchObject([{ entryId: 101, overallRank: 11 }]);
+    expect(second.previous?.publicationId).toBe(first.publication.publicationId);
+    const rejected = await publishLiveLeaguePublicationV2({
+      ...correction,
+      index: [{ ...correction.index[0], teamValue: 9999 }],
+      revisions: { ...correction.revisions, content: '5'.repeat(64) },
+    });
+    expect(rejected.published).toBe(false);
+    expect(rejected.publication.publicationId).toBe(second.publication.publicationId);
   });
 
   test('keeps a finalized pointer as a fence when its immutable items are damaged', async () => {

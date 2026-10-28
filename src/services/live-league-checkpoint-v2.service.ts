@@ -7,6 +7,7 @@ import {
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import {
   clearLiveLeagueCheckpointDesiredV2,
+  isSafeFinalizedClassicRankCorrection,
   listLiveLeagueCheckpointDesiredScopesV2,
   markLiveLeaguePublicationCheckpointedV2,
   parseLiveLeaguePublicationV2Manifest,
@@ -498,7 +499,7 @@ export async function checkpointLiveLeaguePublicationV2(
         .for('update');
       const current = existing[0];
       let currentIsInvalidFinalized = false;
-      let allowFinalizedRosterExpansion = false;
+      let allowFinalizedClassicSuccessor = false;
       const loadCurrentPayload = async () => {
         const rows = await tx
           .select({
@@ -589,10 +590,12 @@ export async function checkpointLiveLeaguePublicationV2(
         }
         if (currentIsValidFinalized && !sameFinalizedPublicationContent(read, current)) {
           const currentPayload = await loadCurrentPayload();
-          allowFinalizedRosterExpansion = Boolean(
-            currentPayload && isSafeFinalizedClassicRosterExpansion(read, currentPayload),
+          allowFinalizedClassicSuccessor = Boolean(
+            currentPayload &&
+              (isSafeFinalizedClassicRosterExpansion(read, currentPayload) ||
+                isSafeFinalizedClassicRankCorrection(read, currentPayload)),
           );
-          if (!allowFinalizedRosterExpansion) return false;
+          if (!allowFinalizedClassicSuccessor) return false;
         }
         if (!currentIsValidFinalized) {
           // A corrupt FINALIZED row may be repaired by the same validated
@@ -696,7 +699,7 @@ export async function checkpointLiveLeaguePublicationV2(
               AND ${liveLeagueCheckpointsInCompetition.manifest}->'counts' = excluded.manifest->'counts'
             )
             OR (
-              ${allowFinalizedRosterExpansion}
+              ${allowFinalizedClassicSuccessor}
               AND ${liveLeagueCheckpointsInCompetition.state} = 'FINALIZED'
               AND excluded.state = 'FINALIZED'
               AND ${liveLeagueCheckpointsInCompetition.generation} < excluded.generation

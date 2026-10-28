@@ -1340,7 +1340,7 @@ if currentRaw ~= '' then
   if ok and validPointer(decoded) then current = decoded end
 end
 if current and current.generation >= candidate.generation then return {'stale', currentRaw} end
-if current and current.state == 'FINALIZED' then return {'stale', currentRaw} end
+if current and current.state == 'FINALIZED' and ARGV[11] ~= '1' then return {'stale', currentRaw} end
 local currentItemsHealthy = current ~= nil and currentHealthy and type(current.items) == 'table'
 if currentItemsHealthy then
   for _, name in ipairs({'index', 'payload'}) do
@@ -1797,6 +1797,75 @@ function validationManifest(input: LiveLeaguePublicationInput): LeagueLiveManife
   };
 }
 
+/** Permit only a rank correction inside an otherwise identical Classic FINAL. */
+export function isSafeFinalizedClassicRankCorrection(
+  read: Pick<LeagueLiveRead, 'publication' | 'index' | 'payload'>,
+  persisted: {
+    state: string;
+    manifest: unknown;
+    rowCount: number;
+    indexPayload: unknown;
+    payload: unknown;
+  },
+): boolean {
+  if (
+    read.publication.scope !== 'CLASSIC' ||
+    read.publication.state !== 'FINALIZED' ||
+    persisted.state !== 'FINALIZED' ||
+    !isRecord(persisted.manifest) ||
+    !Array.isArray(persisted.indexPayload) ||
+    !isRecord(persisted.payload) ||
+    persisted.rowCount !== read.index.length ||
+    persisted.indexPayload.length !== read.index.length
+  )
+    return false;
+  const previous = persisted.manifest;
+  if (previous.state !== 'FINALIZED') return false;
+  for (const field of [
+    'contractVersion',
+    'season',
+    'eventId',
+    'tournamentId',
+    'scope',
+    'globalRef',
+    'counts',
+  ] as const) {
+    if (canonicalJson(previous[field]) !== canonicalJson(read.publication[field])) return false;
+  }
+  if (!isRecord(previous.revisions)) return false;
+  const stableRevisions = (value: Record<string, unknown>) => {
+    const { officialRank: _rank, identity: _identity, content: _content, ...stable } = value;
+    return stable;
+  };
+  if (
+    canonicalJson(stableRevisions(previous.revisions)) !==
+    canonicalJson(stableRevisions(read.publication.revisions))
+  )
+    return false;
+  if (canonicalJson(persisted.payload) !== canonicalJson(read.payload)) return false;
+  const candidates = new Map(read.index.map((row) => ['entryId' in row ? row.entryId : null, row]));
+  if (candidates.has(null) || candidates.size !== read.index.length) return false;
+  const seen = new Set<number>();
+  let changed = false;
+  for (const oldRow of persisted.indexPayload) {
+    if (!isRecord(oldRow) || typeof oldRow.entryId !== 'number' || seen.has(oldRow.entryId))
+      return false;
+    seen.add(oldRow.entryId);
+    const row = candidates.get(oldRow.entryId);
+    if (!row || !('overallRank' in row)) return false;
+    if (
+      row.overallRank !== null &&
+      (!Number.isSafeInteger(row.overallRank) || row.overallRank <= 0)
+    )
+      return false;
+    const { overallRank: oldRank, ...oldStable } = oldRow;
+    const { overallRank: rank, ...stable } = row;
+    if (canonicalJson(oldStable) !== canonicalJson(stable)) return false;
+    changed ||= oldRank !== rank;
+  }
+  return changed;
+}
+
 export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicationInput): Promise<{
   readonly publication: LeagueLiveManifest;
   readonly previous: LeagueLiveManifest | null;
@@ -1969,6 +2038,19 @@ export async function publishLiveLeaguePublicationV2(input: LiveLeaguePublicatio
     String(input.scope.tournamentId),
     input.scope.scope,
     input.scope.matchId === undefined ? '' : String(input.scope.matchId),
+    currentRead &&
+      isSafeFinalizedClassicRankCorrection(
+        { publication: manifest, index: input.index, payload: input.payload },
+        {
+          state: currentRead.publication.state,
+          manifest: currentRead.publication,
+          rowCount: currentRead.index.length,
+          indexPayload: currentRead.index,
+          payload: currentRead.payload,
+        },
+      )
+      ? '1'
+      : '0',
   )) as unknown;
   if (!Array.isArray(result) || typeof result[0] !== 'string')
     throw new CacheError('Invalid live league promotion result', 'LIVE_LEAGUE_PROMOTE_FAILED');

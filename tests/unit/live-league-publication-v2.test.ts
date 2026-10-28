@@ -4,6 +4,7 @@ import type Redis from 'ioredis';
 
 import {
   liveLeagueV2ItemKey,
+  isSafeFinalizedClassicRankCorrection,
   LIVE_LEAGUE_MAX_ENTRIES,
   LIVE_LEAGUE_MAX_INDEX_BYTES,
   LIVE_LEAGUE_MAX_PAYLOAD_BYTES,
@@ -842,7 +843,7 @@ describe('Live League V2 checkpoint transaction contract', () => {
     expect(checkpointServiceSource).toContain('isLiveLeagueCheckpointGenerationCompatible');
     expect(checkpointServiceSource).toContain('sameFinalizedPublicationContent');
     expect(checkpointServiceSource).toContain('isSafeFinalizedClassicRosterExpansion');
-    expect(checkpointServiceSource).toContain('allowFinalizedRosterExpansion');
+    expect(checkpointServiceSource).toContain('allowFinalizedClassicSuccessor');
     expect(checkpointServiceSource).toContain(
       'current.publicationId === read.publication.publicationId',
     );
@@ -880,6 +881,78 @@ describe('Live League V2 checkpoint generation fence', () => {
         candidate,
       ),
     ).toBe(true);
+  });
+});
+
+describe('Live League V2 finalized Classic rank correction fence', () => {
+  test('permits only ranks to change inside the exact finalized score and roster unit', () => {
+    const fixture = classicRetentionFixture();
+    const persisted = {
+      state: 'FINALIZED',
+      manifest: fixture.active.publication,
+      rowCount: fixture.active.index.length,
+      indexPayload: fixture.active.index,
+      payload: fixture.active.payload,
+    };
+    const read: LeagueLiveRead = {
+      ...fixture.active,
+      index: fixture.active.index.map((row) =>
+        'overallRank' in row && row.entryId === 101 ? { ...row, overallRank: 11 } : row,
+      ),
+    };
+    expect(isSafeFinalizedClassicRankCorrection(read, persisted)).toBe(true);
+    expect(isSafeFinalizedClassicRankCorrection(fixture.active, persisted)).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        { ...read, index: [...read.index, read.index[0]] },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        {
+          ...read,
+          index: read.index.map((row) => ('teamValue' in row ? { ...row, teamValue: 9999 } : row)),
+        },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        { ...read, payload: { ...read.payload, '101': { changed: true } } },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        { ...read, publication: { ...read.publication, state: 'LIVE_ACTIVE' } },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        {
+          ...read,
+          publication: {
+            ...read.publication,
+            globalRef: { ...read.publication.globalRef, generation: 999 },
+          },
+        },
+        persisted,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeFinalizedClassicRankCorrection(
+        {
+          ...read,
+          publication: {
+            ...read.publication,
+            revisions: { ...read.publication.revisions, scoreCore: '0'.repeat(64) },
+          },
+        },
+        persisted,
+      ),
+    ).toBe(false);
   });
 });
 

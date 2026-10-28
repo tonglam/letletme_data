@@ -2,6 +2,7 @@ import {
   readEntryLiveInputsV2,
   readLivePublicationV2,
   type EntryLivePublicationRead,
+  type EntryLiveInputV2,
   type LivePublicationRead,
   type LivePublicationV2,
 } from '../cache/live-publication-v2';
@@ -336,6 +337,7 @@ function buildRevisions(
           tournamentId: _tournamentId,
           profileSourceCheckedAt: _profileSourceCheckedAt,
           finalizationAt: _finalizationAt,
+          eventOverallRank: _eventOverallRank,
           ...row
         }) => row,
       ),
@@ -729,6 +731,108 @@ export async function restoreFinalClassicCheckpointForRetentionV2(
     checkpoint.publication.generation === active.publication.generation
     ? checkpoint
     : null;
+}
+
+/** Correct one settled board's rank metadata without changing its roster or scored inputs. */
+export async function correctFinalClassicLeagueRanksV2(
+  season: FplSeasonRef,
+  eventId: number,
+  tournamentId: number,
+): Promise<LeagueLiveRead> {
+  const redis = await redisSingleton.getClient();
+  const scope = { season: season.seasonCode, eventId, tournamentId, scope: 'CLASSIC' as const };
+  const global = await readLivePublicationV2({ season: season.seasonCode, eventId }, redis);
+  const active = await readLiveLeaguePublicationV2Pointer(scope, 'active', redis);
+  if (
+    !global ||
+    !active ||
+    global.publication.state !== 'FINALIZED' ||
+    active.publication.state !== 'FINALIZED' ||
+    active.publication.globalRef.publicationId !== global.publication.publicationId ||
+    active.publication.globalRef.generation !== global.publication.generation
+  ) {
+    throw new Error('A coherent active Classic FINAL is required for rank correction');
+  }
+  const roster = (await findClassicRosters(season, eventId, tournamentId))[0];
+  if (
+    !roster ||
+    roster.rows.length !== active.index.length ||
+    roster.expectedEntryCount !== active.index.length
+  ) {
+    throw new Error('Classic rank correction cannot change the roster');
+  }
+  const rows = new Map(roster.rows.map((row) => [row.entryId, row]));
+  const results = await (await getDbClient())<
+    {
+      entry_id: number;
+      event_points: number;
+      overall_points: number;
+      overall_rank: number | null;
+    }[]
+  >`
+    SELECT entry_id, event_points, overall_points, NULLIF(overall_rank, 0) AS overall_rank
+    FROM competition.entry_event_results
+    WHERE season_id = ${season.seasonId} AND event_id = ${eventId}
+      AND entry_id = ANY(${roster.rows.map((row) => row.entryId)}::integer[])
+  `;
+  const resultsByEntry = new Map(results.map((row) => [row.entry_id, row]));
+  const index: LeagueLiveIndexRow[] = active.index.map((row) => {
+    if (!('overallRank' in row) || !rows.has(row.entryId))
+      throw new Error('Classic rank correction roster mismatch');
+    if (row.availability === 'NO_PICKS') return { ...row, overallRank: null };
+    const result = resultsByEntry.get(row.entryId);
+    const input = active.payload[String(row.entryId)] as EntryLiveInputV2 | null;
+    if (
+      !result ||
+      !input?.finalResult ||
+      result.event_points !== input.finalResult.score.eventPoints ||
+      result.overall_points !== input.finalResult.score.totalPoints
+    ) {
+      throw new Error('Classic rank correction cannot change or omit a FINAL score');
+    }
+    return { ...row, overallRank: result.overall_rank };
+  });
+  const unchanged = index.every(
+    (row, position) =>
+      row.overallRank === (active.index[position] as LeagueLiveIndexRow).overallRank,
+  );
+  const revisions = {
+    ...buildRevisions(roster, global.publication, index, active.payload),
+    roster: active.publication.revisions.roster,
+  };
+  const result = unchanged
+    ? { publication: active.publication, previous: null, published: false }
+    : await publishLiveLeaguePublicationV2({
+        scope,
+        state: 'FINALIZED',
+        sourceCheckedAt: active.publication.times.sourceCheckedAt,
+        contentUpdatedAt: new Date(),
+        expectedNextCheckAt: null,
+        globalRef: active.publication.globalRef,
+        revisions,
+        counts: active.publication.counts,
+        index,
+        payload: active.payload,
+        redis,
+      });
+  if (!unchanged && !result.published) throw new Error('Classic rank correction was not promoted');
+  await scheduleLeagueCheckpoint(result.publication, result.previous, scope, redis, {
+    propagateInfrastructureFailure: true,
+  });
+  if (!(await reconcileLiveLeagueCheckpointV2(scope, redis)))
+    throw new Error('Classic rank correction checkpoint is pending');
+  const checkpoint = await readLiveLeagueCheckpointV2(scope);
+  if (!checkpoint || checkpoint.publication.publicationId !== result.publication.publicationId) {
+    throw new Error('Classic rank correction checkpoint does not match Redis');
+  }
+  logInfo('Classic FINAL ranks corrected from canonical gameweek results', {
+    eventId,
+    tournamentId,
+    previousPublicationId: active.publication.publicationId,
+    publicationId: result.publication.publicationId,
+    generation: result.publication.generation,
+  });
+  return checkpoint;
 }
 
 /**

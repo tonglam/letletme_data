@@ -93,6 +93,14 @@ publication is retained in the scope's `checkpoint-desired` key. GraphQL is
 read-only and must select one coherent current/previous/checkpoint publication;
 it never builds a league board by reading entry inputs one at a time.
 
+Classic FINAL overall ranks come from the same gameweek result as the final
+score. A rank correction may publish a successor only when the roster, global
+reference, all entry inputs, scores, and every non-rank index field are identical.
+Redis promotion and PostgreSQL checkpointing apply the same rank-only fence;
+ordinary FINAL content changes remain rejected. The targeted
+`correctFinalClassicLeagueRanksV2` owner path verifies canonical final scores
+and waits for the corrected Redis publication to be durably checkpointed.
+
 Live Matches V3 uses an independent namespace. It is fed by the same coherent
 fixtures/event-live observation as Live Points, but desk and player detail are
 separate publications so a detail failure cannot remove an available score
