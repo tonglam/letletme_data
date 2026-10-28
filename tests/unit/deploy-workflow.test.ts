@@ -594,7 +594,7 @@ if parse_source_media_schema_state $'present\nabsent\n' >/dev/null 2>&1; then ex
     expect(ciWorkflow).toContain(`bun-version: [${quote}1.3.14${quote}]`);
     expect(dockerfile).not.toContain('apk upgrade');
     expect(
-      dockerfile.match(/apk add --no-cache libcrypto3=3\.5\.8-r0 libssl3=3\.5\.8-r0/g),
+      dockerfile.match(/apk add --no-cache libcrypto3=3\.5\.9-r0 libssl3=3\.5\.9-r0/g),
     ).toHaveLength(2);
     expect(ciWorkflow).toContain('test -x /app/letletme-grok-runner');
     expect(ciWorkflow).toContain('getent group letletme-grok-bridge');
