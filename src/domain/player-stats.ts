@@ -71,10 +71,10 @@ export const PlayerStatSchema = z.object({
   elementId: z.number().int().positive('Element ID must be a positive integer'),
   webName: z.string().min(1, 'Web name is required').max(30, 'Web name too long'),
   elementType: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)], {
-    errorMap: () => ({ message: 'Element type must be 1-4 (GKP=1, DEF=2, MID=3, FWD=4)' }),
+    error: () => ({ message: 'Element type must be 1-4 (GKP=1, DEF=2, MID=3, FWD=4)' }),
   }),
   elementTypeName: z.enum(['GKP', 'DEF', 'MID', 'FWD'], {
-    errorMap: () => ({ message: 'Element type name must be GKP, DEF, MID, or FWD' }),
+    error: () => ({ message: 'Element type name must be GKP, DEF, MID, or FWD' }),
   }),
   teamId: z.number().int().positive('Team ID must be a positive integer'),
   teamName: z.string().min(1, 'Team name is required').max(50, 'Team name too long'),

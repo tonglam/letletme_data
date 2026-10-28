@@ -58,6 +58,7 @@ export const LiveFixtureDataSchema = z.object({
 export const LiveFixturesCachePayloadSchema = z.object({
   eventId: z.number().int().positive(),
   byTeam: z.record(
+    z.string(),
     z.object({
       Playing: z.array(LiveFixtureDataSchema),
       Not_Start: z.array(LiveFixtureDataSchema),

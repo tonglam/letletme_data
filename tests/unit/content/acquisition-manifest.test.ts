@@ -120,7 +120,9 @@ describe('Briefing acquisition manifest', () => {
       'adapterKind: X_ACCOUNT',
       'adapterKind: INSTAGRAM',
     );
-    expect(() => parseBriefingManifest({ ...input, sourcesYaml })).toThrow(/Invalid enum value/);
+    expect(() => parseBriefingManifest({ ...input, sourcesYaml })).toThrow(
+      /endpoints\.0\.adapterKind: Invalid option/,
+    );
   });
 
   test('locks profile bootstrap limits in versioned code', () => {

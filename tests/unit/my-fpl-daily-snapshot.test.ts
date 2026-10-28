@@ -766,6 +766,87 @@ describe('My FPL daily snapshot publication contract', () => {
     ).toBeNull();
   });
 
+  test('accepts official position reordering within an unchanged lineup and bench', () => {
+    const displayRows = Array.from({ length: 15 }, (_, index) => ({
+      element: 101 + index,
+      position: index + 1,
+      active_chip: index === 0 ? 'wildcard' : null,
+      transfers: index === 0 ? 2 : null,
+      transfers_cost: index === 0 ? 4 : null,
+      display: `player-${101 + index}`,
+    }));
+    const finalElements = [
+      102,
+      101,
+      ...displayRows.slice(2, 11).map((row) => row.element),
+      113,
+      112,
+      114,
+      115,
+    ];
+    const eventPicks = finalElements.map((element, index) => ({
+      element,
+      position: index + 1,
+      multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+      is_captain: index === 0,
+      is_vice_captain: index === 1,
+    }));
+    const overlaid = overlayFinalResultPicks(
+      { event_picks: eventPicks, automatic_substitutions: [] },
+      displayRows,
+    );
+    expect(overlaid?.map((row) => row.element)).toEqual(finalElements);
+    expect(overlaid?.[0]).toMatchObject({
+      element: 102,
+      position: 1,
+      multiplier: 2,
+      is_captain: true,
+      display: 'player-102',
+      active_chip: 'wildcard',
+      transfers: 2,
+      transfers_cost: 4,
+    });
+    expect(overlaid?.[1]).toMatchObject({
+      element: 101,
+      position: 2,
+      is_vice_captain: true,
+      active_chip: null,
+      transfers: null,
+      transfers_cost: null,
+    });
+  });
+
+  test('rejects an undeclared change to starting-lineup membership', () => {
+    const displayRows = Array.from({ length: 15 }, (_, index) => ({
+      element: 101 + index,
+      position: index + 1,
+      active_chip: null,
+      transfers: null,
+      transfers_cost: null,
+    }));
+    const finalElements = [
+      112,
+      ...displayRows.slice(1, 11).map((row) => row.element),
+      101,
+      113,
+      114,
+      115,
+    ];
+    const eventPicks = finalElements.map((element, index) => ({
+      element,
+      position: index + 1,
+      multiplier: index < 11 ? 1 : 0,
+      is_captain: index === 1,
+      is_vice_captain: index === 2,
+    }));
+    expect(
+      overlayFinalResultPicks(
+        { event_picks: eventPicks, automatic_substitutions: [] },
+        displayRows,
+      ),
+    ).toBeNull();
+  });
+
   test('rejects a same-team reorder without matching official substitutions', () => {
     const deadlineRows = Array.from({ length: 15 }, (_, index) => ({
       element: 101 + index,

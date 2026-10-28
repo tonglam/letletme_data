@@ -198,7 +198,7 @@ function parseYamlDocument(value: string, label: string): unknown {
   }
 }
 
-function zodIssues(label: string, result: z.SafeParseReturnType<unknown, unknown>): string[] {
+function zodIssues(label: string, result: z.ZodSafeParseResult<unknown>): string[] {
   if (result.success) return [];
   return result.error.issues.map(
     (issue) => `${label}.${issue.path.join('.') || '<root>'}: ${issue.message}`,

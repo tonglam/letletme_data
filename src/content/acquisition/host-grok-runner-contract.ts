@@ -37,7 +37,7 @@ export const hostGrokFailureEvidenceV1Schema = z
 const executionResultSchema = z
   .object({
     toolName: z.enum(['x_keyword_search', 'x_semantic_search', 'x_user_search', 'x_thread_fetch']),
-    toolInput: z.record(z.union([z.string(), z.number().finite()])),
+    toolInput: z.record(z.string(), z.union([z.string(), z.number().finite()])),
     posts: z.array(grokBuildXPostV1Schema).max(100).readonly(),
     users: z.array(grokBuildXUserV1Schema).max(20).readonly(),
     requestMetadataHash: sha256Schema,

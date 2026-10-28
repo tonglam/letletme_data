@@ -84,6 +84,10 @@ export type EntryEventPicksPublicationHeadMetadata = Readonly<{
   readonly entryId: number;
   readonly publicationId: string;
   readonly generation: number;
+  readonly picksBaseRevision: string;
+  readonly contentSha256: string;
+  readonly sourceCheckedAt: Date;
+  readonly checkpointedAt: Date;
   readonly rowCount: number;
   readonly state: string;
 }>;
@@ -753,6 +757,10 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
                 entryId: entryEventPickHeadsInCompetition.entryId,
                 publicationId: entryEventPickHeadsInCompetition.publicationId,
                 generation: entryEventPickHeadsInCompetition.generation,
+                picksBaseRevision: entryEventPickHeadsInCompetition.picksBaseRevision,
+                contentSha256: entryEventPickHeadsInCompetition.contentSha256,
+                sourceCheckedAt: entryEventPickHeadsInCompetition.sourceCheckedAt,
+                checkpointedAt: entryEventPickHeadsInCompetition.checkpointedAt,
                 rowCount: entryEventPickHeadsInCompetition.rowCount,
                 state: entryEventPickHeadsInCompetition.state,
               })
