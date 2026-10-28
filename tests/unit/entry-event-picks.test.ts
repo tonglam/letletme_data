@@ -40,6 +40,10 @@ describe('entry event picks repository', () => {
       entryId: 777,
       publicationId: '00000000-0000-4000-8000-000000000777',
       generation: 5,
+      picksBaseRevision: 'revision-5',
+      contentSha256: 'a'.repeat(64),
+      sourceCheckedAt: new Date('2026-09-04T08:00:00.000Z'),
+      checkpointedAt: new Date('2026-09-04T08:00:01.000Z'),
       rowCount: 15,
       state: 'COMPLETE',
     };
@@ -55,6 +59,10 @@ describe('entry event picks repository', () => {
 
     const projection = select.mock.calls[0]?.[0];
     expect(projection?.entryId).toBe(entryEventPickHeadsInCompetition.entryId);
+    expect(projection?.contentSha256).toBe(entryEventPickHeadsInCompetition.contentSha256);
+    expect(projection?.checkpointedAt).toBe(entryEventPickHeadsInCompetition.checkpointedAt);
+    expect(projection?.picksBaseRevision).toBe(entryEventPickHeadsInCompetition.picksBaseRevision);
+    expect(projection?.sourceCheckedAt).toBe(entryEventPickHeadsInCompetition.sourceCheckedAt);
     expect(projection).not.toHaveProperty('inputPayload');
   });
 

@@ -1065,7 +1065,7 @@ export async function readLivePicksDurableFreshnessEvidence(
   options: Readonly<{ includeManagerRepair?: boolean }> = {},
 ) {
   const expectedEntryIds = await resolveUniqueActiveTournamentEntryIds(season, eventId, db);
-  const heads = await createEntryEventPicksRepository(db).findHeadsByEventAndEntryIds(
+  const heads = await createEntryEventPicksRepository(db).findPublicationHeadsByEventAndEntryIds(
     season,
     eventId,
     expectedEntryIds,
